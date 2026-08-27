@@ -411,7 +411,8 @@ def squeue_state(job_id, declared_at=None, bound_at=None):
     return found
 
 
-def slurm_state(job_id, declared_at=None, bound_at=None):
+def slurm_state(job_id, declared_at=None, bound_at=None,
+                newest_evidence_mtime=None):
     """Terminal state of OUR job from sacct, or None when unavailable.
 
     Ownership is applied to EVERY row and the last OWNED one wins. Taking
@@ -424,7 +425,7 @@ def slurm_state(job_id, declared_at=None, bound_at=None):
     first.
     """
     rc, out = run(["sacct", "-n", "-X", "-P", "-j", str(job_id),
-                   "-o", "State,ExitCode,Submit"])
+                   "-o", "State,ExitCode,Submit,End"])
     if rc != 0 or not out:
         return None
     chosen, last_why, saw_any = None, None, False
@@ -436,9 +437,22 @@ def slurm_state(job_id, declared_at=None, bound_at=None):
         state = f[0].split()[0] if f and f[0].strip() else None
         code = f[1] if len(f) > 1 else ""
         submit = parse_iso_ts(f[2].strip()) if len(f) > 2 else None
+        end = parse_iso_ts(f[3].strip()) if len(f) > 3 else None
         ours, why = sacct_row_is_ours(submit, declared_at, bound_at)
         if not ours:
             last_why = why
+            continue
+        # The ordering rule applies to a SCHEDULER terminal row exactly as it
+        # does to a local termination record, and for eight rounds it applied
+        # only to the latter: a job that COMPLETED at T=10 certified metrics
+        # written at T=20, so running training locally in a bound run directory
+        # borrowed the Slurm job's success (kimi, CRITICAL). A job writes its
+        # metrics and then ends, so End >= newest evidence is the honest order.
+        if state in SLURM_OK_END and not terminal_record_postdates(
+                end, newest_evidence_mtime):
+            last_why = ("the scheduler row ended before the metrics or "
+                        "checkpoint it would certify, so that job is not the "
+                        "run which produced them")
             continue
         chosen = (state, code)
     if chosen is None:
@@ -1775,7 +1789,8 @@ def cmd_check(args):
             # attempt while the job is running again, and a stale terminal row
             # must not outrank a live one.
             qstate = squeue_state(jid, declared_at, bound_at)
-            sstate = slurm_state(jid, declared_at, bound_at)
+            sstate = slurm_state(jid, declared_at, bound_at,
+                                 newest_evidence)
             if qstate:
                 # ANY squeue state means the job is still in the system --
                 # enumerating live states missed real ones such as STAGE_OUT.
@@ -1939,7 +1954,8 @@ def cmd_check(args):
                        "it, but this cannot establish convergence")
 
     if state == "RUNNING" and contract.get("preemptible"):
-        sstate = slurm_state(jid, declared_at, bound_at) if jid else None
+        sstate = (slurm_state(jid, declared_at, bound_at, newest_evidence)
+                  if jid else None)
         if sstate in ("PREEMPTED", "REQUEUED", "SUSPENDED"):
             state = "PREEMPTED"
             reasons.append(f"scheduler reports {sstate} for job {jid}; "

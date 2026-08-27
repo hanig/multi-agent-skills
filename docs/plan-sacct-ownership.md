@@ -158,6 +158,18 @@ as predating a declaration made later in the same second).
   is the success case. Blocking on it turned ten tests red, all of them
   legitimate. The receipt carries `unchanged_outputs` so a human can judge; if
   your pipeline is not deterministic, that note means the file was not rewritten.
+- **A terminal record must post-date the evidence it certifies** — both a local
+  `record` and an sacct terminal row, via one shared helper. Without it, reusing
+  a run directory let an earlier run's record certify later artifacts, and a
+  Slurm job that COMPLETED at T=10 certified metrics written at T=20 (kimi,
+  CRITICAL, and its sibling in the same round). Ordering gates only whether a
+  row can CERTIFY, never whether it can condemn: a FAILED job is bad news
+  whenever it ended. Where sacct does not populate End there is nothing to
+  order against, and refusing on that would break honest clusters, so it passes.
+- **The metrics-file caps are limits too.** A file over MAX_METRICS_BYTES,
+  MAX_METRICS_LINES, or MAX_METRICS_LINE_BYTES is read partially, and a partial
+  series cannot certify convergence, so an honest run with a very large metrics
+  file reports INCOMPLETE_EVIDENCE (deepseek). Split the file or raise the caps.
 - **A DST fold can displace an offset-free sacct Submit by an hour.** In the
   ambiguous hour, an offset-free local timestamp has two valid readings and
   libc picks one; an honest row can land outside the interval and be refused

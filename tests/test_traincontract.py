@@ -2833,5 +2833,94 @@ class TestTerminalSqueueRowIsNotActivity(Base):
         r = self._check(self._bin("REQUEUED"))
         self.assertNotEqual(r.returncode, CONVERGED, r.stdout)
 
+class TestSchedulerRowMustPostdateItsEvidence(Base):
+    """kimi, CRITICAL, and the SIBLING of the finding it gave in the same round:
+    the ordering rule (a terminal record must post-date the evidence it
+    certifies) was applied to the local termination record and never to the
+    sacct terminal row. So a Slurm job that COMPLETED at T=10 certified metrics
+    and checkpoints written at T=20 -- run training locally in a bound run
+    directory and it borrowed the Slurm job's success.
+
+    Fifteenth instance of a rule reaching one path and not its twin, and the
+    second where the twin was named in the same review."""
+
+    def _bin(self, submit_off, end_off):
+        b = self.tmp / f"eb{abs(hash((submit_off, end_off)))}"
+        b.mkdir()
+        base = self._contract_time()
+        sub = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(base + submit_off))
+        end = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(base + end_off))
+        (b / "sacct").write_text(
+            f'#!/bin/sh\necho "COMPLETED|0:0|{sub}|{end}"\n')
+        (b / "squeue").write_text("#!/bin/sh\nexit 0\n")
+        for n in ("sacct", "squeue"):
+            (b / n).chmod(0o755)
+        return dict(os.environ, PATH=f"{b}:{os.environ['PATH']}")
+
+    def _age_artifacts(self, offset):
+        when = self._contract_time() + offset
+        for f in [self.metrics, *self.ckpt.glob("*")]:
+            os.utime(f, (when, when))
+
+    def setUpBound(self):
+        self.write_metrics(PLATEAU_ROWS)
+        self.add_checkpoint()
+        self.init(record=False, stamp=False)
+        self.assertEqual(tc("bind", str(self.run_dir), "--job-id", "55"
+                            ).returncode, 0)
+
+    def _check(self, env):
+        return subprocess.run([sys.executable, str(SCRIPT), "check",
+                               str(self.run_dir)], capture_output=True,
+                              text=True, env=env)
+
+    def test_a_job_that_ended_before_the_metrics_cannot_certify_them(self):
+        self.setUpBound()
+        self._age_artifacts(20)
+        r = self._check(self._bin(submit_off=0, end_off=10))
+        self.assertNotEqual(r.returncode, CONVERGED, r.stdout)
+        self.assertIn("ended before", r.stdout)
+
+    def test_the_honest_order_converges(self):
+        """A job writes its metrics and then ends."""
+        self.setUpBound()
+        self._age_artifacts(10)
+        r = self._check(self._bin(submit_off=0, end_off=20))
+        self.assertEqual(r.returncode, CONVERGED, r.stdout + r.stderr)
+
+    def test_an_absent_end_column_does_not_refuse_an_honest_run(self):
+        """Not every sacct build populates End. Absent, there is nothing to
+        order against, and refusing on that would break honest clusters."""
+        self.setUpBound()
+        self._age_artifacts(10)
+        b = self.tmp / "noend"
+        b.mkdir()
+        sub = time.strftime("%Y-%m-%dT%H:%M:%S",
+                            time.localtime(self._contract_time()))
+        (b / "sacct").write_text(f'#!/bin/sh\necho "COMPLETED|0:0|{sub}"\n')
+        (b / "squeue").write_text("#!/bin/sh\nexit 0\n")
+        for n in ("sacct", "squeue"):
+            (b / n).chmod(0o755)
+        env = dict(os.environ, PATH=f"{b}:{os.environ['PATH']}")
+        r = self._check(env)
+        self.assertEqual(r.returncode, CONVERGED, r.stdout + r.stderr)
+
+    def test_a_failed_row_is_not_subject_to_the_ordering_rule(self):
+        """A FAILED job is bad news whenever it ended: ordering only gates
+        whether a row can CERTIFY, never whether it can condemn."""
+        self.setUpBound()
+        self._age_artifacts(20)
+        b = self.tmp / "failed"
+        b.mkdir()
+        base = self._contract_time()
+        sub = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(base))
+        end = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(base + 10))
+        (b / "sacct").write_text(f'#!/bin/sh\necho "FAILED|1:0|{sub}|{end}"\n')
+        (b / "squeue").write_text("#!/bin/sh\nexit 0\n")
+        for n in ("sacct", "squeue"):
+            (b / n).chmod(0o755)
+        r = self._check(dict(os.environ, PATH=f"{b}:{os.environ['PATH']}"))
+        self.assertEqual(r.returncode, VIOLATED, r.stdout + r.stderr)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

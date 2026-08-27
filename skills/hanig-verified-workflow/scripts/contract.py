@@ -547,6 +547,38 @@ def sacct_row_is_ours(sacct_submit, declared_at, bound_at=None):
 MAX_DIR_ENTRIES_SCANNED = 20_000
 
 
+def newest_declared_mtime(contract, base_dir):
+    """Newest mtime among the declared outputs and predicate paths, or None.
+
+    Its own pass, because the scheduler block needs it and the predicate walk
+    runs after that block. Directories are walked, bounded the same way.
+    """
+    specs = list(contract.get("declared_outputs") or [])
+    for pred in (contract.get("predicates") or []):
+        if isinstance(pred, dict) and isinstance(pred.get("path"), str):
+            specs.append(pred["path"])
+    newest = None
+    for spec in specs:
+        if not isinstance(spec, str) or not spec:
+            continue
+        pth = Path(spec)
+        if not pth.is_absolute():
+            pth = Path(base_dir) / pth
+        try:
+            if pth.is_dir():
+                _f, _s, _t, dnew = directory_freshness(pth, None, None)
+                cand = dnew
+            elif pth.exists():
+                cand = pth.stat().st_mtime
+            else:
+                cand = None
+        except OSError:
+            cand = None
+        if cand is not None:
+            newest = cand if newest is None else max(newest, cand)
+    return newest
+
+
 def directory_freshness(path, declared_at, declared_epoch):
     """(has_fresh_file, scanned, truncated, newest_mtime) for a directory.
 
@@ -730,7 +762,8 @@ def exit_code_is_clean(code):
         return False
 
 
-def sacct_state(job_id, declared_at=None, bound_at=None):
+def sacct_state(job_id, declared_at=None, bound_at=None,
+                newest_evidence_mtime=None):
     """Terminal state of OUR job from Slurm accounting.
 
     Returns (state, exit_code, submit, why_not). An all-None state is absent
@@ -750,7 +783,7 @@ def sacct_state(job_id, declared_at=None, bound_at=None):
     if not shutil.which("sacct"):
         return None, None, None, None
     rc, out, _ = run(["sacct", "-n", "-X", "-P", "-j", str(job_id),
-                      "-o", "State,ExitCode,Submit"])
+                      "-o", "State,ExitCode,Submit,End"])
     if rc != 0 or not out:
         return None, None, None, None
     chosen, last_why, saw = None, None, None
@@ -765,9 +798,18 @@ def sacct_state(job_id, declared_at=None, bound_at=None):
         if not ours:
             last_why = why
             continue
-        chosen = (f[0].strip().split()[0] if f[0].strip() else None,
-                  f[1].strip() if len(f) > 1 else None,
-                  submit)
+        state = f[0].strip().split()[0] if f[0].strip() else None
+        end = parse_iso_ts(f[3].strip()) if len(f) > 3 else None
+        # Same ordering rule as a local record, which had it and this did not:
+        # a job that ended before the outputs it certifies is not the run that
+        # produced them (kimi, on the sibling in traincontract.py).
+        if state in SLURM_OK and not terminal_record_postdates(
+                end, newest_evidence_mtime):
+            last_why = ("the scheduler row ended before the declared output(s) "
+                        "it would certify, so that job is not the run which "
+                        "produced them")
+            continue
+        chosen = (state, f[1].strip() if len(f) > 1 else None, submit)
     if chosen is None:
         return None, None, saw, last_why
     return chosen[0], chosen[1], chosen[2], None
@@ -1152,6 +1194,12 @@ def cmd_check(args):
     if reasons_stale:
         reasons.append(reasons_stale)
 
+    # The newest declared artifact, needed BEFORE the scheduler block: a
+    # terminal row that ended before the outputs it certifies is not the run
+    # that produced them, and section 2's walk happens too late to say so.
+    base_dir = contract.get("cwd") or str(run_dir)
+    newest_output_mtime = newest_declared_mtime(contract, base_dir)
+
     # 1. Scheduler evidence, when a job was submitted through us. Absence of
     #    accounting is missing evidence, never a failure verdict.
     #
@@ -1185,7 +1233,8 @@ def cmd_check(args):
             # unattributable row never becomes state in the first place.
             sstate, scode, ssubmit, why_not = sacct_state(
                 job_id, declared_at,
-                parse_iso_ts(binding.get("submitted_at")))
+                parse_iso_ts(binding.get("submitted_at")),
+                newest_output_mtime)
             evidence["scheduler"] = {"state": sstate, "exit_code": scode,
                                      "submit": ssubmit}
             if sstate is None and why_not:
@@ -1209,7 +1258,6 @@ def cmd_check(args):
 
     # 2. Contract violations: did inputs drift under a re-run?
     drifted = []
-    base_dir = contract.get("cwd") or str(run_dir)
     for rec in (contract.get("inputs") or []):
         if not isinstance(rec, dict):
             drifted.append(f"malformed input record: {rec!r}")
@@ -1262,7 +1310,6 @@ def cmd_check(args):
         # about artifact provenance can be established from it.
         command_only = True
     unchanged_outputs = []
-    newest_output_mtime = None
     for spec in checked_paths:
         if not isinstance(spec, str) or not spec:
             continue
@@ -1280,10 +1327,6 @@ def cmd_check(args):
                 # A directory output must feed the ordering guard too: it did
                 # not, so terminal_record_postdates saw None and a record from
                 # before the run certified a directory written after it (kimi).
-                if dir_newest is not None:
-                    newest_output_mtime = (
-                        dir_newest if newest_output_mtime is None
-                        else max(newest_output_mtime, dir_newest))
                 if not fresh:
                     if truncated:
                         entry = (f"{spec} (no file from this run found in the "
@@ -1309,10 +1352,8 @@ def cmd_check(args):
                     # real and this is the honest limit of the signal, so it is
                     # said out loud rather than acted on.
                     unchanged_outputs.append(spec)
-                _m = op.stat().st_mtime
-                newest_output_mtime = (_m if newest_output_mtime is None
-                                       else max(newest_output_mtime, _m))
-                if not artifact_is_fresh(_m, declared_at, declared_epoch):
+                if not artifact_is_fresh(op.stat().st_mtime, declared_at,
+                                         declared_epoch):
                     entry = f"{spec} (mtime predates the contract)"
                     if entry not in stale_outputs:
                         stale_outputs.append(entry)
