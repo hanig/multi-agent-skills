@@ -1,0 +1,187 @@
+#!/bin/sh
+# install.sh — install personal skills into a Claude Code skills directory.
+#
+# Copy-based by default: installs an immutable snapshot rather than a symlink
+# into a live checkout. A symlinked checkout breaks when it sits under a synced
+# folder, when a branch switch silently mutates every installed skill, or when
+# the checkout is mid-update. Use --mode link only for skill development.
+#
+# Usage:
+#   ./install.sh [options]
+#     --prefix DIR     install root (default: $HOME/.claude/skills)
+#     --mode copy|link copy (default) or symlink for development
+#     --only NAME      install just this skill; repeatable
+#     --dry-run        print what would happen, change nothing
+#     --force          replace a directory even without our ownership marker
+#     --uninstall      remove skills this repo installed, then exit
+#
+# POSIX sh. Works with git 2.23 (macOS) and 2.34+ (clusters). No GNU-only flags.
+
+set -eu
+
+REPO=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PREFIX="${HOME}/.claude/skills"
+MODE=copy
+DRY=0
+FORCE=0
+UNINSTALL=0
+ONLY=""
+MARKER=".installed-by-multi-agent-skills"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --prefix)    PREFIX="$2"; shift 2 ;;
+    --mode)      MODE="$2"; shift 2 ;;
+    --only)      ONLY="$ONLY $2"; shift 2 ;;
+    --dry-run)   DRY=1; shift ;;
+    --force)     FORCE=1; shift ;;
+    --uninstall) UNINSTALL=1; shift ;;
+    -h|--help)   sed -n '2,20p' "$0"; exit 0 ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
+  esac
+done
+
+case "$MODE" in copy|link) ;; *) echo "--mode must be copy or link" >&2; exit 2 ;; esac
+
+umask 077
+
+say()  { printf '%s\n' "$*"; }
+step() { [ "$DRY" -eq 1 ] && printf 'would: %s\n' "$*" || printf '%s\n' "$*"; }
+
+# --- source version ---------------------------------------------------------
+
+VERSION="unknown"
+if command -v git >/dev/null 2>&1 && [ -d "$REPO/.git" ]; then
+  VERSION=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)
+  if [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]; then
+    VERSION="${VERSION}-dirty"
+  fi
+fi
+
+# --- uninstall --------------------------------------------------------------
+
+if [ "$UNINSTALL" -eq 1 ]; then
+  [ -d "$PREFIX" ] || { say "nothing installed at $PREFIX"; exit 0; }
+  removed=0
+  for d in "$PREFIX"/*; do
+    [ -e "$d" ] || continue
+    if [ -L "$d" ] || [ -f "$d/$MARKER" ]; then
+      step "remove $d"
+      [ "$DRY" -eq 1 ] || rm -rf "$d"
+      removed=$((removed + 1))
+    fi
+  done
+  say "removed $removed skill(s) from $PREFIX"
+  exit 0
+fi
+
+# --- validate before touching the destination -------------------------------
+
+[ -d "$REPO/skills" ] || { echo "error: no skills/ in $REPO" >&2; exit 1; }
+
+problems=""
+for src in "$REPO"/skills/*; do
+  [ -d "$src" ] || continue
+  name=$(basename "$src")
+  case "$name" in .*|*.bak|*.bak.*)
+    problems="$problems\n  $name: not a valid skill directory name"; continue ;;
+  esac
+  [ -f "$src/SKILL.md" ] || problems="$problems\n  $name: missing SKILL.md"
+  head -n 1 "$src/SKILL.md" 2>/dev/null | grep -q '^---$' \
+    || problems="$problems\n  $name: SKILL.md lacks YAML frontmatter"
+  grep -q '^name:' "$src/SKILL.md" 2>/dev/null \
+    || problems="$problems\n  $name: SKILL.md has no name: field"
+  # Scripts must parse with the interpreter that will run them.
+  for py in "$src"/scripts/*.py; do
+    [ -f "$py" ] || continue
+    python3 -m py_compile "$py" 2>/dev/null \
+      || problems="$problems\n  $name: $(basename "$py") fails to compile"
+  done
+  for sh_ in "$src"/scripts/*.sh; do
+    [ -f "$sh_" ] || continue
+    sh -n "$sh_" 2>/dev/null \
+      || problems="$problems\n  $name: $(basename "$sh_") has a syntax error"
+  done
+done
+
+if [ -n "$problems" ]; then
+  printf 'error: refusing to install:%b\n' "$problems" >&2
+  exit 1
+fi
+
+# --- collision check against an org-managed skill store ----------------------
+# Personal skills are prefixed hanig-* precisely so this never fires, but a
+# clash would shadow an Arc skill in a way that depends on loader precedence.
+
+for orgdir in "$HOME"/.claude-science/orgs/*/skills; do
+  [ -d "$orgdir" ] || continue
+  for src in "$REPO"/skills/*; do
+    [ -d "$src" ] || continue
+    name=$(basename "$src")
+    if [ -e "$orgdir/$name" ]; then
+      echo "error: '$name' collides with an org-managed skill at $orgdir" >&2
+      echo "       rename it; precedence between stores is not guaranteed." >&2
+      exit 1
+    fi
+  done
+done
+
+# --- install ----------------------------------------------------------------
+
+step "mkdir -p $PREFIX"
+[ "$DRY" -eq 1 ] || mkdir -p "$PREFIX"
+
+installed=0
+skipped=0
+for src in "$REPO"/skills/*; do
+  [ -d "$src" ] || continue
+  name=$(basename "$src")
+  case "$name" in .*|*.bak|*.bak.*) continue ;; esac
+
+  if [ -n "$ONLY" ]; then
+    case " $ONLY " in *" $name "*) ;; *) continue ;; esac
+  fi
+
+  dest="$PREFIX/$name"
+
+  # Never clobber something we did not put there.
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    if [ -L "$dest" ] || [ -f "$dest/$MARKER" ] || [ "$FORCE" -eq 1 ]; then
+      step "replace $dest"
+      [ "$DRY" -eq 1 ] || rm -rf "$dest"
+    else
+      say "skip $name: $dest exists and was not installed by this repo (--force to override)"
+      skipped=$((skipped + 1))
+      continue
+    fi
+  fi
+
+  if [ "$MODE" = "link" ]; then
+    step "link $dest -> $src"
+    [ "$DRY" -eq 1 ] || ln -s "$src" "$dest"
+  else
+    # Stage on the destination filesystem, then move into place, so a failed
+    # copy never leaves a half-installed skill behind.
+    tmp="$PREFIX/.tmp-$name-$$"
+    [ "$DRY" -eq 1 ] || {
+      rm -rf "$tmp"
+      cp -R "$src" "$tmp"
+      printf 'repo=multi-agent-skills\nversion=%s\ninstalled_at=%s\n' \
+        "$VERSION" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp/$MARKER"
+      find "$tmp" -name '*.py' -exec chmod +x {} + 2>/dev/null || true
+      find "$tmp" -name '*.sh' -exec chmod +x {} + 2>/dev/null || true
+      mv "$tmp" "$dest"
+    }
+    step "install $dest (copy, $VERSION)"
+  fi
+  installed=$((installed + 1))
+done
+
+say ""
+say "installed $installed skill(s) to $PREFIX  [mode=$MODE version=$VERSION]"
+[ "$skipped" -gt 0 ] && say "skipped $skipped (pre-existing, not ours)"
+[ "$DRY" -eq 1 ] && say "(dry run — nothing changed)"
+
+say ""
+say "verify with: sh $REPO/bin/doctor"
+exit 0

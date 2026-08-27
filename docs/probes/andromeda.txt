@@ -1,0 +1,76 @@
+
+=== IDENTITY ===
+  hostname: ac-gefion-login-0
+  user: hgoodarzi
+  uname: Linux 6.8.0-107-generic x86_64
+  os: Ubuntu 22.04.5 LTS
+  shell: /bin/bash
+  home: /mnt/weka/home/hgoodarzi
+
+=== TOOLCHAIN (portability constraints) ===
+  python3: Python 3.10.12
+  git: git version 2.34.1
+  node: ABSENT
+  npm: ABSENT
+  curl: curl 7.81.0 (x86_64-pc-linux-gnu) libcurl/7.81.0 OpenSSL/3.0.2 zlib/1.2.11 brotli/1.0.9 zstd/1.4.8 libidn2/2.3.2 libpsl/0.21.0 (+libidn2/2.3.2) libssh/0.9.6/openssl/zlib nghttp2/1.43.0 librtmp/2.3 OpenLDAP/2.5.19
+  rsync: rsync  version 3.2.7  protocol version 31
+  tar: tar (GNU tar) 1.34
+  git init -b supported: yes
+  sed flavor: GNU
+  readlink -f: supported
+
+=== CLAUDE CODE + SKILL STORES ===
+  node: /mnt/weka/home/hgoodarzi/micromamba/bin/node [login shell only] — v26.6.0
+  npm: /mnt/weka/home/hgoodarzi/micromamba/bin/npm [login shell only] — 11.18.0
+  claude: /mnt/weka/home/hgoodarzi/.local/bin/claude [login shell only] — 2.1.227 (Claude Code)
+  ~/.claude: present (16 entries) — /mnt/weka/home/hgoodarzi/.claude
+  ~/.claude/skills: absent — /mnt/weka/home/hgoodarzi/.claude/skills
+  ~/.claude/plugins: present (2 entries) — /mnt/weka/home/hgoodarzi/.claude/plugins
+  ~/.claude-science: absent — /mnt/weka/home/hgoodarzi/.claude-science
+  ~/.agents/skills: absent — /mnt/weka/home/hgoodarzi/.agents/skills
+  >>> ORG SKILLS NOT PRESENT on this host.
+  >>> Personal hanig-* skills must be self-sufficient here.
+
+=== SCHEDULER ===
+  flavor: Slurm
+  sbatch: slurm 24.11.5
+  partitions (name/avail/timelimit/nodes):
+    all* up infinite 32
+    h100-reserved up infinite 29
+    large_batch up infinite 32
+    preemptible up infinite 32
+    standard up infinite 3
+  accounts: root
+  sacct queryable: yes
+  >>> Kubernetes-backed host detected (no+kubectl) — likely SUNK.
+  >>> Verify $HOME persistence across restarts; prefer shared-FS install.
+
+=== WORKFLOW ENGINES ===
+  nextflow: ABSENT
+  snakemake: ABSENT
+
+=== CONTAINERS ===
+  apptainer: ABSENT
+  singularity: ABSENT
+  docker: ABSENT
+
+=== STORAGE ===
+  /mnt/weka/home/hgoodarzi: 2.9T free of 80T (97% used) [default]
+  /mnt/weka: 2.9T free of 80T (97% used) [default]
+  /mnt/r2-cold-storage-pvc: 1.0P free of 1.0P (0% used) [arc-andromeda-cold-storage]
+
+=== NETWORK EGRESS ===
+  github: reachable (HTTP 200)
+  anthropic: reachable (HTTP 404)
+  pypi: reachable (HTTP 200)
+  proxy: none
+
+=== HOME FILESYSTEM ===
+  device: default
+  type: wekafs
+  >>> networked home: one install likely covers all login nodes.
+  symlinks: supported
+
+=== DEPLOYMENT VERDICT ===
+  No blockers detected — Claude Code and copy-mode skill install viable.
+  Personal skills must be SELF-SUFFICIENT (no Arc org store here).

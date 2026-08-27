@@ -1,0 +1,91 @@
+
+=== IDENTITY ===
+  hostname: chimera-login
+  user: hani
+  uname: Linux 5.15.0-185-generic x86_64
+  os: Ubuntu 22.04.5 LTS
+  shell: /bin/bash
+  home: /home/hani
+
+=== TOOLCHAIN (portability constraints) ===
+  python3: Python 3.10.12
+  git: git version 2.34.1
+  node: ABSENT
+  npm: ABSENT
+  curl: curl 7.81.0 (x86_64-pc-linux-gnu) libcurl/7.81.0 OpenSSL/3.0.2 zlib/1.2.11 brotli/1.0.9 zstd/1.4.8 libidn2/2.3.2 libpsl/0.21.0 (+libidn2/2.3.2) libssh/0.9.6/openssl/zlib nghttp2/1.43.0 librtmp/2.3 OpenLDAP/2.5.20
+  rsync: rsync  version 3.2.7  protocol version 31
+  tar: tar (GNU tar) 1.34
+  git init -b supported: yes
+  sed flavor: GNU
+  readlink -f: supported
+
+=== CLAUDE CODE + SKILL STORES ===
+  node: /home/hani/miniforge3/envs/workbook/bin/node [login shell only] — v24.9.0
+  npm: /home/hani/miniforge3/envs/workbook/bin/npm [login shell only] — 11.6.0
+  claude: /home/hani/.local/bin/claude [login shell only] — 2.1.241 (Claude Code)
+  ~/.claude: present (32 entries) — /home/hani/.claude
+  ~/.claude/skills: present (3 entries) — /home/hani/.claude/skills
+  ~/.claude/plugins: present (7 entries) — /home/hani/.claude/plugins
+  ~/.claude-science: absent — /home/hani/.claude-science
+  ~/.agents/skills: present (1 entries) — /home/hani/.agents/skills
+  >>> ORG SKILLS NOT PRESENT on this host.
+  >>> Personal hanig-* skills must be self-sufficient here.
+
+=== SCHEDULER ===
+  flavor: Slurm
+  sbatch: slurm 25.11.0
+  partitions (name/avail/timelimit/nodes):
+    gpu up 1-00:00:00 10
+    gpu_batch up 14-00:00:00 10
+    gpu_cpu up 3-00:00:00 2
+    cpu* up 5-00:00:00 10
+    cpu_batch up 14-00:00:00 10
+    gpu_high_mem up 14-00:00:00 5
+    gpu_batch_high_mem up 14-00:00:00 5
+    cpu_high_mem up 14-00:00:00 9
+    cpu_batch_high_mem up 14-00:00:00 9
+    cpu_preemptible up 14-00:00:00 29
+    preemptible up 14-00:00:00 25
+    quick_preemptible up 2:00:00 25
+    ctc_gpu_priority up 14-00:00:00 6
+    ctc_cpu_priority up 14-00:00:00 8
+    ctc_agent_priority up infinite 2
+    vci_gpu_priority up 14-00:00:00 2
+    evo_gpu_priority up 14-00:00:00 2
+    goodarzilab_gpu_priority up 14-00:00:00 4
+    cell_reason_gpu_priority up 14-00:00:00 2
+    hsu_gpu_priority up 14-00:00:00 4
+  accounts: ctc,goodarzilab
+  sacct queryable: yes
+
+=== WORKFLOW ENGINES ===
+  nextflow: ABSENT
+  snakemake: ABSENT
+
+=== CONTAINERS ===
+  apptainer: ABSENT
+  singularity: ABSENT
+  docker: ABSENT
+
+=== STORAGE ===
+  /home/hani: 753G free of 932G (20% used) [172.18.140.212:/home]
+  /large_storage: 532T free of 2.3P (77% used) [172.18.140.210:/large_storage]
+  /scratch: 24T free of 164T (86% used) [172.18.140.211:/scratch]
+  /common_datasets: 13T free of 55T (77% used) [172.18.140.210:/common_datasets]
+  /processed_datasets: 27T free of 273T (91% used) [172.18.140.210:/processed_datasets]
+
+=== NETWORK EGRESS ===
+  github: reachable (HTTP 200)
+  anthropic: reachable (HTTP 404)
+  pypi: reachable (HTTP 200)
+  proxy: none
+
+=== HOME FILESYSTEM ===
+  device: 172.18.140.212:/home
+  type: nfs4
+  >>> networked home: one install likely covers all login nodes.
+  symlinks: supported
+
+=== DEPLOYMENT VERDICT ===
+  No blockers detected — Claude Code and copy-mode skill install viable.
+  Personal skills must be SELF-SUFFICIENT (no Arc org store here).

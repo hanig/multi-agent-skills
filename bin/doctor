@@ -1,0 +1,106 @@
+#!/bin/sh
+# doctor — what is installed here, where it came from, and whether it still works.
+#
+# First thing to run on a new host, and the answer to "why isn't my skill
+# loading?". Read-only.
+
+set -u
+
+PREFIX="${1:-$HOME/.claude/skills}"
+MARKER=".installed-by-multi-agent-skills"
+REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+
+printf '\n=== HOST ===\n'
+printf '  hostname: %s\n' "$(hostname 2>/dev/null || echo unknown)"
+printf '  user: %s\n' "${USER:-${LOGNAME:-unknown}}"
+printf '  home: %s\n' "$HOME"
+printf '  python3: %s\n' "$(python3 --version 2>&1 || echo ABSENT)"
+printf '  git: %s\n' "$(git --version 2>&1 || echo ABSENT)"
+
+# claude usually lives behind a conda/micromamba prefix loaded by .bashrc, so a
+# non-interactive shell will not see it. Check an interactive login shell too.
+cl=$(command -v claude 2>/dev/null)
+if [ -z "$cl" ]; then
+  cl=$(bash -lic 'command -v claude' 2>/dev/null | grep -v '^bash:' | head -n 1)
+  [ -n "$cl" ] && cl="$cl (login shell only)"
+fi
+printf '  claude: %s\n' "${cl:-ABSENT}"
+
+printf '\n=== SKILL STORES ===\n'
+printf '  personal prefix: %s' "$PREFIX"
+if [ -d "$PREFIX" ]; then
+  printf ' (%s entries)\n' "$(ls -1 "$PREFIX" 2>/dev/null | wc -l | tr -d ' ')"
+else
+  printf ' — ABSENT\n'
+fi
+
+org=0
+for d in "$HOME"/.claude-science/orgs/*/skills; do
+  [ -d "$d" ] || continue
+  n=$(ls -1 "$d" 2>/dev/null | wc -l | tr -d ' ')
+  org=$((org + n))
+done
+if [ "$org" -gt 0 ]; then
+  printf '  org store: %s skills\n' "$org"
+else
+  printf '  org store: not present — personal skills must be self-sufficient here\n'
+fi
+
+printf '\n=== INSTALLED SKILLS ===\n'
+if [ ! -d "$PREFIX" ]; then
+  printf '  (nothing — run install.sh)\n'
+else
+  found=0
+  for d in "$PREFIX"/*; do
+    [ -e "$d" ] || continue
+    name=$(basename "$d")
+    found=$((found + 1))
+    if [ -L "$d" ]; then
+      printf '  %-32s link -> %s\n' "$name" "$(readlink "$d")"
+    elif [ -f "$d/$MARKER" ]; then
+      v=$(sed -n 's/^version=//p' "$d/$MARKER" 2>/dev/null)
+      printf '  %-32s ours (version %s)\n' "$name" "${v:-?}"
+    else
+      printf '  %-32s foreign (not installed by this repo)\n' "$name"
+    fi
+    case "$name" in
+      *.bak|*.bak.*)
+        printf '      WARNING: a .bak directory here is parsed as a skill — remove it\n' ;;
+    esac
+    if [ -d "$d" ] && [ ! -f "$d/SKILL.md" ]; then
+      printf '      WARNING: no SKILL.md — will not load\n'
+    fi
+  done
+  [ "$found" -eq 0 ] && printf '  (empty)\n'
+fi
+
+printf '\n=== SCRIPT HEALTH ===\n'
+bad=0
+for d in "$PREFIX"/*; do
+  [ -d "$d" ] || continue
+  for py in "$d"/scripts/*.py; do
+    [ -f "$py" ] || continue
+    if python3 -m py_compile "$py" 2>/dev/null; then
+      printf '  ok    %s/%s\n' "$(basename "$d")" "$(basename "$py")"
+    else
+      printf '  FAIL  %s/%s does not compile\n' "$(basename "$d")" "$(basename "$py")"
+      bad=$((bad + 1))
+    fi
+  done
+done
+[ "$bad" -eq 0 ] && printf '  (no problems)\n'
+
+printf '\n=== SOURCE ===\n'
+printf '  repo: %s\n' "$REPO"
+if [ -d "$REPO/.git" ] && command -v git >/dev/null 2>&1; then
+  printf '  commit: %s\n' "$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  if [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]; then
+    printf '  worktree: DIRTY\n'
+  else
+    printf '  worktree: clean\n'
+  fi
+fi
+
+printf '\n'
+[ "$bad" -eq 0 ] || exit 1
+exit 0

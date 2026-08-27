@@ -1,0 +1,39 @@
+#!/bin/sh
+# make-release — build a release archive for hosts without git access.
+#
+# The archive path is the primary install mechanism, not a fallback: at least
+# one target cluster may restrict outbound git, and copy-mode installs want an
+# immutable snapshot anyway.
+#
+#   ./bin/make-release [outfile]     default: /tmp/multi-agent-skills-<rev>.tgz
+#
+# Then, on the target:
+#   tar xzf multi-agent-skills-<rev>.tgz && cd multi-agent-skills && ./install.sh
+
+set -eu
+
+REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+REV=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo nogit)
+OUT="${1:-/tmp/multi-agent-skills-${REV}.tgz}"
+
+if [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]; then
+  printf 'warning: worktree is dirty; archive will not match commit %s\n' "$REV" >&2
+fi
+
+# COPYFILE_DISABLE and --no-xattrs stop macOS bsdtar from embedding
+# LIBARCHIVE.xattr.* headers, which GNU tar on the clusters warns about for
+# every single file.
+COPYFILE_DISABLE=1 tar czf "$OUT" \
+  --no-xattrs \
+  --exclude '.git' \
+  --exclude '__pycache__' \
+  --exclude '*.pyc' \
+  --exclude '.DS_Store' \
+  -C "$(dirname "$REPO")" "$(basename "$REPO")" 2>/dev/null \
+  || COPYFILE_DISABLE=1 tar czf "$OUT" \
+       --exclude '.git' --exclude '__pycache__' --exclude '*.pyc' \
+       --exclude '.DS_Store' \
+       -C "$(dirname "$REPO")" "$(basename "$REPO")"
+
+printf '%s\n' "$OUT"
+printf '  %s bytes, revision %s\n' "$(wc -c < "$OUT" | tr -d ' ')" "$REV"
