@@ -1,4 +1,4 @@
-# Plan v3 — hanig-reproducible-result
+# Plan v4 — hanig-reproducible-result
 
 Regenerate and verify figures, tables, benchmark results and exports with
 input-to-output provenance.
@@ -13,7 +13,8 @@ input-to-output provenance.
 | 3 | `STALE` | outputs predate their declared inputs |
 | 4 | `NONDETERMINISTIC` | a second render differs where determinism was declared |
 | 5 | `FAILED` | the build command failed |
-| 6 | `INCOMPLETE_EVIDENCE` | cannot judge — a check could not run |
+| 6 | `INCOMPLETE_EVIDENCE` | cannot judge — a check could not run, or determinism was declared and never tested |
+| 7 | `CONTRACT_DRIFTED` | the build consumed inputs that differ from the declared ones |
 
 ## Evaluation order, stated
 
@@ -23,14 +24,41 @@ inputs later changed still exited 0, and the review survived the change it was
 supposed to be invalidated by (kimi, CRITICAL):
 
 ```
+DISQUALIFIERS, most serious first:
 1. FAILED               the build command failed
-2. INCOMPLETE_EVIDENCE  a declared check could not run
+2. INCOMPLETE_EVIDENCE  a declared check could not run, OR the contract
+                        declared deterministic: true and no double render was
+                        ever recorded, OR the attempt does not name this
+                        contract instance
 3. NONDETERMINISTIC     a recorded double render differed
-4. STALE                an output predates a declared input
-5. GENERATED            outputs exist but a declared check did not pass
-6. VALIDATED            every declared check passed
-7. REVIEWED             and a named person accepted THESE digests
+4. CONTRACT_DRIFTED     the attempt's consumed inputs differ from the declared
+5. STALE                the attempt's consumed inputs differ from the inputs now
+
+ACHIEVEMENT, highest reached:
+6. GENERATED            outputs exist
+7. VALIDATED            and every declared check passed
+8. REVIEWED             and a named person accepted THESE digests
 ```
+
+**The exit code carries the most serious DISQUALIFIER, or the highest
+ACHIEVEMENT when there is none.** v3 said "the most serious finding" over a
+single list, and since `REVIEWED`'s condition logically contains `VALIDATED`'s,
+both held for a reviewed result and the rule picked `VALIDATED` -- exit 1 for
+something fully reviewed, breaking the "0 means done" contract (kimi-k3). One
+sentence, because the alternative is that semantics gets baked into tests and
+consumers before anyone notices.
+
+`deterministic: true` with no recorded double render is `INCOMPLETE_EVIDENCE`,
+not a pass. v3 made the double render not-a-check, so the fail-closed rule for
+checks did not reach it and a genuinely nondeterministic pipeline could be
+reviewed with determinism never tested -- the only trace being
+`double_render.ran: false` inside a receipt nobody reads (kimi-k3).
+
+**`check` verifies the ATTEMPT names this contract instance** before trusting
+its rc, its consumed digests or its double-render record. The receipt-binding
+rule reached receipts and reviews and not attempts, so a build from a previous
+contract could satisfy a re-declared one with no build ever run for it
+(glm-5.1). Fifth place this same rule has had to be applied.
 
 **These conditions OVERLAP, so this is a priority rule and not mutual
 exclusivity**, which v1 claimed and could not deliver: a build can succeed and
@@ -52,8 +80,32 @@ a PDF opened.
 
 These are not speculative. Each cost real rounds in the two verifiers:
 
-- **A timestamp supports an inference, never an attribution.** So `STALE` is
-  decided by comparing **input DIGESTS** recorded at declare time against the
+- **A timestamp supports an inference, never an attribution.** And a
+  DECLARE-TIME digest is an attribution too, which v3 missed: using it as
+  evidence of "what the build consumed" is the same error one level deeper, and
+  a fresh review panel found it independently on both sides (kimi-k3, glm-5.1).
+  It fails in both directions. False alarm: declare D0, build, the data is
+  legitimately updated to D1, rebuild honestly -- `check` compares declared D0
+  against current D1 and reports STALE forever, and no rebuild clears it.
+  False pass: declare D0, build, edit the input to D1, build again so the
+  outputs reflect D1, then `git checkout` the input back to D0 -- declared and
+  current now agree, so the outputs pass as current although they were built
+  from data that no longer exists.
+
+  **So `build` records the digest of every input it actually consumed, in the
+  attempt.** Two different questions, two different comparisons:
+
+  | question | comparison | state |
+  |---|---|---|
+  | are the outputs from the current inputs? | attempt's consumed vs current | `STALE` |
+  | was the build run against what was declared? | declared vs attempt's consumed | `CONTRACT_DRIFTED` |
+
+  This is the fifth appearance of one lesson in this repo, and the first time it
+  appeared as a digest standing in for an attribution rather than a timestamp.
+  Cheap now, expensive once the attempt schema ships.
+
+- **Old:** `STALE` was decided by comparing input digests recorded at declare
+  time against the
   inputs as they stand now -- not by mtime. v2 specified the weaker signal while
   the stronger one was already being recorded two sections away, and it would
   have called an honest result stale whenever `git checkout` refreshed an input's
@@ -194,8 +246,11 @@ this is stated rather than pretended away:
 9. Every refusal names an action.
 10. The receipt names the contract instance and the digests it judged, and
    carries an `action` string on every finding.
-11. `STALE` is decided by input digests, never by mtime. mtime is reported and
-   decides nothing.
+11. `STALE` is decided by the digests the BUILD recorded as consumed,
+   compared against the inputs as they stand now. Never by mtime, and
+   never by the declared digests: a declare-time digest standing in for
+   what the build used is an attribution, and it false-alarms an honest
+   rebuild while false-passing an edit-build-revert.
 12. A review names the `contract_id` it accepted, and a review for another
    instance is ignored with a stated reason.
 13. The double-render outcome lives in the attempt record under a named field
@@ -205,6 +260,17 @@ this is stated rather than pretended away:
 15. No test fixture generates a timestamp at check time.
 16. Helpers copied from a sibling are byte-identical and exercised by
     `tests/test_symmetry.py`.
+17. `build` records the digest of every input it consumed, in the attempt.
+18. Declared-versus-consumed disagreement is `CONTRACT_DRIFTED`, its own state,
+   because the action is "re-declare, or restore the inputs" and not "rebuild".
+19. `deterministic: true` with no recorded double render is
+   `INCOMPLETE_EVIDENCE`, never a pass.
+20. `check` refuses to trust an attempt that does not name this contract
+   instance -- its rc, its consumed digests and its double-render record alike.
+21. The exit code carries the most serious DISQUALIFIER, or the highest
+   ACHIEVEMENT when there is none. Achievements are never compared against
+   disqualifiers, because `REVIEWED` logically contains `VALIDATED` and a single
+   ranking made a fully reviewed result exit 1.
 
 ## Out of scope
 Visual design, narrative, plot aesthetics. Rendering engines. Anything needing

@@ -74,13 +74,27 @@
       "model": "moonshotai/kimi-k3",
       "effort": null,
       "profiles": [
+        "standard",
         "deep"
       ],
-      "enabled": false,
+      "enabled": true,
       "_cost": {
         "in": 3.0,
         "out": 15.0
-      }
+      },
+      "_note": "$3/$15 per M, the dearest reviewer here. Enabled at Hani's direction while both OpenAI reviewers are out of credits: a 1M context window and a different lab is worth the cost when the deep tier is otherwise empty."
+    },
+    {
+      "name": "glm-5.1",
+      "provider": "openrouter",
+      "model": "z-ai/glm-5.1",
+      "effort": null,
+      "profiles": [
+        "standard",
+        "deep"
+      ],
+      "enabled": true,
+      "_note": "Asked for as GLM 5.3, which OpenRouter does not carry: the line ends at 5.1, and 5.2 is published only as :free. 5.1 is the newest stable paid build, 204k context, $1.26/$3.96 per M. Verified against the live models list rather than guessed, because a wrong model id fails as an unavailable reviewer and that misread cost a whole session once already."
     }
   ]
 }
