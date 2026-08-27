@@ -51,6 +51,10 @@ STATES = {"REVIEW_PASS": 0, "REVIEW_FAIL": 1, "REVIEW_UNAVAILABLE": 2,
 HERE = Path(__file__).resolve().parent
 CONFIG = HERE.parent / "reviewers.json"
 DEFAULT_PROFILE = "standard"
+# Bound on rounds for ONE change. Five rounds on one change in a single session
+# produced rounds 3, 4 and 5 each finding a defect in the previous round's fix.
+# That is the signal to step back to root cause, not to review again.
+MAX_ROUNDS = 3
 
 # Keep payloads bounded; an oversized diff silently truncated is a lie about
 # what was reviewed, so truncation is always reported in the output.
@@ -698,7 +702,9 @@ def load_reviewers():
         config_error(f"{CONFIG} has no 'reviewers' list")
     for r in revs:
         if not isinstance(r, dict):
-            config_error(f"reviewer entry is not an object: {r!r}")
+            config_error(f"reviewer entry is not an object: {r!r}. Each entry "
+                         f"in reviewers.json must be a JSON object with at "
+                         f"least name, provider and model. Fix that entry.")
         for field in ("name", "provider", "model"):
             val = r.get(field)
             if not isinstance(val, str) or not val.strip():
@@ -1064,6 +1070,15 @@ def main():
                          "the reviewers the previous tier did not run, so a "
                          "failure costs one cheap tier instead of the whole "
                          "panel. Strongly preferred over --profile deep.")
+    ap.add_argument("--plan", action="store_true",
+                    help="plan review: TWO contrasting models, never "
+                         "escalated. For acceptance criteria and designs, "
+                         "before code exists. A third reviewer adds agreement, "
+                         "not insight.")
+    ap.add_argument("--round", type=int, default=None, metavar="N",
+                    help="which round this is for the change under review. "
+                         "Past MAX_ROUNDS the gate refuses: more rounds on one "
+                         "change means the framing is wrong, not the code.")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--list", action="store_true", help="show reviewers and availability")
     args = ap.parse_args()
@@ -1072,6 +1087,34 @@ def main():
                  else max(1800, args.timeout * 3))
 
     reviewers = load_reviewers()
+    # --- the protocol, enforced rather than remembered ---------------------
+    # Every rule below was already written down, and drifted from anyway,
+    # because prose in a memory file is not a constraint. See PROTOCOL.md.
+    if args.plan:
+        if args.escalate:
+            config_error("--plan and --escalate are contradictory: a plan "
+                         "review is TWO contrasting models and stops there. "
+                         "Drop --escalate, or drop --plan if this is an "
+                         "implementation.")
+        if args.profile and args.profile != "plan":
+            config_error(f"--plan fixes the profile at 'plan'; remove "
+                         f"--profile {args.profile}.")
+        args.profile = "plan"
+        if args.quorum > 2:
+            config_error(f"--plan runs two reviewers, so quorum {args.quorum} "
+                         f"can never be met. Pass --quorum 2, or drop --plan.")
+    if args.round is not None:
+        if args.round < 1:
+            config_error(f"--round must be 1 or more, got {args.round}.")
+        if args.round > MAX_ROUNDS:
+            config_error(
+                f"round {args.round} exceeds the bound of {MAX_ROUNDS} for one "
+                f"change. Past this, more rounds have not converged -- they "
+                f"have been finding defects in the previous round's fixes. "
+                f"Step back to root cause: state what keeps recurring, fix "
+                f"THAT, declare new acceptance criteria, and start again at "
+                f"--round 1. Override only if you have done that and the "
+                f"change is genuinely new.")
     profile = args.profile or DEFAULT_PROFILE
     if not args.only and not args.escalate:
         # A reviewer with no declared profiles is in every profile.
@@ -1103,7 +1146,10 @@ def main():
         sys.exit(cmd_list(reviewers, probe=not args.no_probe))
 
     if args.escalate and args.only:
-        config_error("--escalate and --only are mutually exclusive")
+        config_error("--escalate and --only are mutually exclusive: the "
+                     "ladder picks the panel per tier, and --only fixes it. "
+                     "Drop --only to let the ladder choose, or drop "
+                     "--escalate to review with exactly the named reviewers.")
     if args.quorum < 1:
         config_error(f"--quorum must be at least 1, got {args.quorum}")
     if not (args.diff or args.staged or args.range or args.file):

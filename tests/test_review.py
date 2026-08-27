@@ -595,6 +595,11 @@ class TestRound13Regressions(unittest.TestCase):
         tiers = set()
         for r in cfg["reviewers"]:
             tiers.update(r.get("profiles") or [])
+        # `plan` is deliberately NOT a ladder tier: a plan review is two
+        # contrasting models and is never escalated, so it must not appear in
+        # the cheapest-first cascade. Exempted by name rather than by
+        # loosening the check, which is what keeps a typo'd tier detectable.
+        tiers -= {"plan"}
         self.assertTrue(tiers.issubset(set(review.LADDER)),
                         f"reviewers.json uses tiers outside LADDER: "
                         f"{tiers - set(review.LADDER)}")
@@ -1409,6 +1414,61 @@ class TestSolIsBothDeepReviewerAndTieBreaker(unittest.TestCase):
         self.assertNotIn("sol", self.ran(completed),
                          "a finding with quorum behind it should be fixed, not "
                          "escalated to the dearest reviewer")
+
+
+class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
+    """Every rule here was already written down in a memory file and drifted
+    from anyway, in the same session that wrote it. Prose is not a constraint.
+    See skills/hanig-review-gate/PROTOCOL.md."""
+
+    def test_the_plan_panel_is_exactly_two_contrasting_models(self):
+        revs = review.load_reviewers()
+        panel = [r for r in revs if "plan" in (r.get("profiles") or [])
+                 and r.get("enabled", True)]
+        self.assertEqual(
+            len(panel), 2,
+            f"a plan review is two contrasting models; found {len(panel)}. "
+            f"A third adds agreement, not insight.")
+        self.assertEqual(
+            len({r["provider"] for r in panel}), 2,
+            "the two plan reviewers share a provider, so they can share a "
+            "failure mode; contrasting means different provider and family")
+
+    def test_the_round_bound_exists_and_is_three(self):
+        self.assertEqual(review.MAX_ROUNDS, 3)
+
+    def test_plan_and_escalate_are_refused_together(self):
+        src = (REPO / "skills" / "hanig-review-gate" / "scripts"
+               / "review.py").read_text()
+        self.assertIn("--plan and --escalate are contradictory", src)
+
+    def test_every_protocol_refusal_names_an_action(self):
+        """The rule the gate itself was exempt from for five rounds."""
+        import ast
+        src = (REPO / "skills" / "hanig-review-gate" / "scripts"
+               / "review.py").read_text()
+        tree = ast.parse(src)
+        actionable = ("Drop ", "drop ", "Pass ", "pass ", "remove ", "Step "
+                      "back", "Override", "must be", "Available:")
+        checked = 0
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            f = node.func
+            if not (isinstance(f, ast.Name) and f.id == "config_error"):
+                continue
+            text = " ".join(
+                n.value for n in ast.walk(node)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str))
+            if len(text.strip()) < 30:
+                continue
+            checked += 1
+            self.assertTrue(
+                any(a in text for a in actionable),
+                f"a config_error names no action: {text[:130]}")
+        self.assertGreater(checked, 3,
+                           "recovered too few config_error messages to be "
+                           "measuring anything")
 
 
 if __name__ == "__main__":
