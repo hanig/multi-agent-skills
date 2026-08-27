@@ -1048,7 +1048,9 @@ def main():
                          "tokens a reasoning model can still be streaming at "
                          "600s, and a cut-off reviewer is REVIEW_PARTIAL, not "
                          "a pass)")
-    ap.add_argument("--only", action="append", default=[], help="run only these reviewers")
+    ap.add_argument("--only", action="append", default=[],
+                    help="run only these reviewers; repeatable, and also "
+                         "accepts a comma-separated list")
     ap.add_argument("--profile", default=None,
                     help="reviewer panel: fast | standard | deep "
                          "(default from reviewers.json). --only overrides it.")
@@ -1080,9 +1082,21 @@ def main():
     # --escalate deliberately keeps the full roster: the ladder filters per
     # tier itself, and pre-filtering here made the deep tier unreachable.
     if args.only:
-        reviewers = [r for r in reviewers if r["name"] in args.only]
+        # Accept both `--only a --only b` and `--only a,b`. The second form is
+        # the one a person actually types, and rejecting it cost a full review
+        # round to a usage error.
+        wanted = [n.strip() for spec in args.only for n in spec.split(",")
+                  if n.strip()]
+        reviewers = [r for r in reviewers if r["name"] in wanted]
         if not reviewers:
-            config_error(f"no reviewer matches {args.only}")
+            # Name an action, and name the available reviewers: this refusal
+            # said only what was wrong. The rule "every refusal names an
+            # action" had been applied to the two verifiers and never to this
+            # tool, which is the sibling-miss class it exists to catch.
+            have = ", ".join(sorted(r["name"] for r in load_reviewers()))
+            config_error(f"no reviewer matches {wanted}. Available: {have}. "
+                         f"Pass one of those, or drop --only to use the "
+                         f"profile.")
     if args.list:
         print(f"profile: {profile}"
               + ("  (--only overrides profile filtering)" if args.only else ""))
