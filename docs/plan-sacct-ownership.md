@@ -44,11 +44,14 @@ as predating a declaration made later in the same second).
   12:00:00.999 records 12:00:00 while sacct rounds Submit to 12:00:01, and an
   exact comparison refused that honest row (deepseek).
 
-  Better than the interval, and preferred when available: `submit` and `bind`
-  ask the scheduler for the job's OWN Submit at the moment they record the id,
-  and store it. Ownership is then an equality, which excludes a reuse in both
-  time directions and removes the window -- including a reuse landing between
-  our submission and our binding, which the interval accepts (luna).
+  An attempt to remove the interval was made and REVERTED. `submit` and `bind`
+  asked the scheduler for the job's own Submit when they recorded the id and
+  compared against that, making ownership an equality. sol showed it was
+  unsound: if the id had already been reused before that query ran, the query
+  returns the OTHER job's row, which then becomes the anchor, and the reused row
+  matches itself and certifies the run. The anchor was drawn from the very
+  source it was meant to validate. There is no way to establish after the fact
+  which row is ours, so the interval is the honest maximum.
 
 ## The change
 
@@ -94,11 +97,18 @@ as predating a declaration made later in the same second).
 
 ## Known limits, stated rather than papered over
 
-- A reuse within one second of our own submission is indistinguishable from it:
-  sacct emits whole seconds and the slack is a second wide. Without a recorded
-  `sacct_submit` the ambiguous window widens to declaration-through-binding,
-  which is why `submit` and `bind` record it whenever sacct answers, and why
-  they say so when it does not. Accepted
+- **A reuse landing inside the ownership interval is indistinguishable from our
+  own submission.** The window is exactly the gap between submitting and
+  binding, so **bind promptly**: `contract.py submit` closes it to
+  milliseconds because it runs sbatch itself, while `traincontract.py bind` is
+  as wide as the delay before you run it. A reuse within one second of our
+  submission is indistinguishable regardless, because sacct emits whole seconds
+  and the slack is a second wide.
+- **A DST fold can displace an offset-free sacct Submit by an hour.** In the
+  ambiguous hour, an offset-free local timestamp has two valid readings and
+  libc picks one; an honest row can land outside the interval and be refused
+  (sol). One hour a year, fail-closed, and fixable only by making sacct emit
+  offsets (`SLURM_TIME_FORMAT`). Accepted
   deliberately, because refusing it would reject every job submitted in its
   contract's second.
 - A job queued before its contract was declared — `init` running inside a job

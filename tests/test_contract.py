@@ -1263,32 +1263,41 @@ class TestOwnershipWindowAndExactSubmit(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("earlier job", why)
 
-    def test_exact_submit_excludes_a_reuse_inside_the_window(self):
-        """luna: a reuse landing between our submission and our binding sits
-        inside the interval. Recording the scheduler's own Submit at submit
-        time turns ownership into an equality and removes the window."""
-        m = self.module()
-        self.assertFalse(m.sacct_row_is_ours(105, 100, 110, 101)[0],
-                         "a row 4s from our recorded submit is another job")
-        self.assertTrue(m.sacct_row_is_ours(101, 100, 110, 101)[0],
-                        "our own row must still be ours")
+    def test_the_unsound_exact_anchor_is_gone(self):
+        """A version of this asked sacct for the job's own Submit when the id
+        was recorded and compared against that, to remove the interval. sol
+        showed it was UNSOUND: if the id had already been reused before the
+        query ran, the query returns the OTHER job's row, that becomes the
+        anchor, and the reused row then matches itself and certifies the run.
+        The anchor was drawn from the source it was meant to validate.
 
-    def test_exact_submit_keeps_the_truncation_slack(self):
+        Asserted as an absence, because the appeal of the idea is exactly why
+        it should not come back without this note attached."""
+        src = SCRIPT.read_text()
+        self.assertNotIn("sacct_submit", src.split("def sacct_row_is_ours")[0],
+                         "no anchor may be captured from sacct at submit time")
         m = self.module()
-        self.assertTrue(m.sacct_row_is_ours(102, 100, 110, 101)[0])
-        self.assertFalse(m.sacct_row_is_ours(103, 100, 110, 101)[0])
+        import inspect
+        sig = inspect.signature(m.sacct_row_is_ours)
+        self.assertEqual(list(sig.parameters), ["sacct_submit", "declared_at",
+                                                "bound_at"])
 
-    def test_an_unparseable_submit_still_fails_closed_with_exact_recorded(self):
+    def test_an_unparseable_submit_fails_closed(self):
         m = self.module()
-        ok, why = m.sacct_row_is_ours(None, 100, 110, 101)
+        ok, why = m.sacct_row_is_ours(None, 100, 110)
         self.assertFalse(ok)
         self.assertIn("Submit", why)
 
-    def test_submit_records_the_scheduler_submit_field(self):
-        """The attempt record must carry it, or check has nothing to compare."""
-        src = SCRIPT.read_text()
-        self.assertIn('"sacct_submit": exact', src)
-        self.assertIn('"-o", "Submit"', src)
+    def test_a_reuse_inside_the_interval_is_a_documented_limit(self):
+        """Not a defect to be fixed by a cleverer threshold: with only sacct's
+        whole-second Submit there is no evidence separating a reuse inside the
+        window from our own submission. Pinned so the behaviour is deliberate
+        and the docs stay honest about it."""
+        m = self.module()
+        self.assertTrue(m.sacct_row_is_ours(105, 100, 110)[0],
+                        "accepted, and documented as the limit it is")
+        limits = (REPO / "docs" / "plan-sacct-ownership.md").read_text()
+        self.assertIn("bind promptly", limits)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

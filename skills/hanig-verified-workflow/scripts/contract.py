@@ -454,17 +454,10 @@ def criteria_digest(contract):
 OWNERSHIP_SLACK_S = 1
 
 
-def sacct_row_is_ours(sacct_submit, declared_at, bound_at=None,
-                      exact_submit=None):
+def sacct_row_is_ours(sacct_submit, declared_at, bound_at=None):
     """Whether an sacct row can be evidence about the job WE submitted.
 
-    Returns (ok, why_not).
-
-    Best case, `exact_submit`: the scheduler's OWN Submit for this job id,
-    recorded when the id was bound. Then ownership is an equality, and a reuse
-    is excluded in both time directions with no window at all.
-
-    Otherwise an interval, which is all the evidence available:
+    Returns (ok, why_not). An INTERVAL, which is all the evidence there is:
 
         declared_at - slack  <=  Submit  <=  bound_at + slack
 
@@ -475,11 +468,21 @@ def sacct_row_is_ours(sacct_submit, declared_at, bound_at=None,
     `sbatch`, so the honest Submit is always earlier than the moment we
     recorded, and every real submission was discarded.
 
-    KNOWN LIMIT, when exact_submit is absent: a reuse landing between our
-    submission and our binding falls inside the interval (luna). It needs the
-    scheduler's id counter to wrap into that window, but it is real. Recording
-    the scheduler's Submit at bind time is what removes it, which is why
-    `exact_submit` exists and why `bind` populates it whenever sacct answers.
+    A previous version tried to remove the interval by asking sacct for the
+    job's own Submit when the id was recorded, and comparing against that. It
+    was UNSOUND and sol found it: if the id had already been reused before that
+    query ran, the query returns the OTHER job's row and it becomes the
+    "exact" anchor, after which the reused row matches itself and certifies the
+    run. The anchor was drawn from the very source it was meant to validate.
+    There is no way to establish after the fact which row is ours, so the
+    interval is the honest maximum and its limits are documented rather than
+    papered over.
+
+    KNOWN LIMITS: a reuse landing inside the interval is indistinguishable
+    from our own submission (luna), so bind promptly -- the window is exactly
+    the gap between submitting and binding. And a reuse within one second of
+    our submission is indistinguishable regardless, because sacct emits whole
+    seconds and the slack is a second wide.
     """
     if declared_at is None:
         return False, ("the contract carries no usable declaration time, so an "
@@ -490,13 +493,6 @@ def sacct_row_is_ours(sacct_submit, declared_at, bound_at=None,
         return False, ("sacct reported no usable Submit time, so its row "
                        "cannot be confirmed to describe this contract's job "
                        "rather than another job reusing the id")
-    if exact_submit is not None:
-        if abs(int(sacct_submit) - int(exact_submit)) > OWNERSHIP_SLACK_S:
-            return False, ("this row's submit time differs from the one the "
-                           "scheduler reported for this job id when it was "
-                           "bound, so the id has been reused and the row "
-                           "describes a different job")
-        return True, None
     if int(sacct_submit) < int(declared_at) - OWNERSHIP_SLACK_S:
         return False, ("the sacct row was submitted before this contract was "
                        "declared, so the job id has been reused and the row "
@@ -729,23 +725,11 @@ def cmd_submit(args):
         sys.exit(f"error: sbatch failed: {err or out}")
     job_id = out.split(";")[0].strip()
 
-    # The scheduler's OWN submit time for the id it just gave us. Recorded,
-    # ownership at check time is an equality rather than a window, so a reuse
-    # is excluded in both time directions.
-    exact = None
-    if shutil.which("sacct"):
-        rc, out, _ = run(["sacct", "-n", "-X", "-P", "-j", job_id, "-o", "Submit"])
-        if rc == 0 and out:
-            rows = [ln.strip() for ln in out.splitlines() if ln.strip()]
-            if len(rows) == 1 and parse_iso_ts(rows[0]) is not None:
-                exact = rows[0]
-
     attempt = {
         "contract_id": contract.get("contract_id"),
         "attempt": _next_attempt(run_dir),
         "job_id": job_id,
         "submitted_at": now_iso(),
-        "sacct_submit": exact,
         "sbatch_args": list(args.sbatch_arg),
         "host": os.uname().nodename,
     }
@@ -983,8 +967,7 @@ def cmd_check(args):
             # compares against the declaration. See sacct_row_is_ours.
             ours, why_not = sacct_row_is_ours(
                 parse_iso_ts(ssubmit), declared_at,
-                parse_iso_ts(attempts[-1].get("submitted_at")),
-                parse_iso_ts(attempts[-1].get("sacct_submit")))
+                parse_iso_ts(attempts[-1].get("submitted_at")))
             if sstate is not None and not ours:
                 reasons.append(f"sacct row for job {job_id} discarded: "
                                f"{why_not}")
