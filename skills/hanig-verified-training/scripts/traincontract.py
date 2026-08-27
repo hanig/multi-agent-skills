@@ -250,7 +250,11 @@ def sacct_row_is_ours(sacct_submit, declared_at, bound_at=None):
         # old COMPLETED row for a reused id certify a new run.
         return False, ("sacct reported no usable Submit time, so its row "
                        "cannot be confirmed to describe this contract's job "
-                       "rather than another job reusing the id")
+                       "rather than another job reusing the id. This fails "
+                       "CLOSED on purpose, and it does refuse an honest run "
+                       "whose sacct build omits Submit: declare the outcome "
+                       "with `record` instead, or set SLURM_TIME_FORMAT so "
+                       "Submit is populated")
     if int(sacct_submit) < int(declared_at) - OWNERSHIP_SLACK_S:
         return False, ("the sacct row was submitted before this contract was "
                        "declared, so the job id has been reused and the row "

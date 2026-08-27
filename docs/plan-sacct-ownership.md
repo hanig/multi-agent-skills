@@ -182,6 +182,14 @@ as predating a declaration made later in the same second).
 
   Ordering still gates nothing in the condemning direction either way: a FAILED
   job is bad news whenever it ended.
+- **An sacct row with no Submit time is refused, which can refuse an honest
+  run.** Ownership fails closed when Submit will not parse, because skipping the
+  check let an old row for a reused id certify a new run. The cost is that a
+  cluster whose sacct build omits Submit gets INCOMPLETE_EVIDENCE for a
+  perfectly good run (kimi). This was the right tradeoff and the wrong
+  omission: it was undocumented and the message named no remedy. Both fixed --
+  use `record` to declare the outcome, or set SLURM_TIME_FORMAT so Submit is
+  populated.
 - **The metrics-file caps are limits too.** A file over MAX_METRICS_BYTES,
   MAX_METRICS_LINES, or MAX_METRICS_LINE_BYTES is read partially, and a partial
   series cannot certify convergence, so an honest run with a very large metrics

@@ -1831,5 +1831,38 @@ class TestDirectoryOutputFeedsTheOrderingGuard(unittest.TestCase):
         self.assertFalse(truncated)
         self.assertEqual(newest, 2000)
 
+class TestAbsentSubmitNamesItsRemedy(unittest.TestCase):
+    """kimi: ownership fails closed when sacct omits Submit, which refuses an
+    honest successful run. Failing closed is right -- skipping the check let an
+    old row for a reused id certify a new run -- but it was undocumented and
+    the message named no way out. A refusal a user cannot act on is a defect
+    even when the refusal is correct."""
+
+    def module(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("cm_rem", SCRIPT)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m
+
+    def test_the_reason_names_both_remedies(self):
+        m = self.module()
+        ok, why = m.sacct_row_is_ours(None, 1000, 2000)
+        self.assertFalse(ok)
+        self.assertIn("record", why)
+        self.assertIn("SLURM_TIME_FORMAT", why)
+
+    def test_it_still_fails_closed(self):
+        """The tradeoff is unchanged: an unattributable row cannot certify."""
+        m = self.module()
+        self.assertFalse(m.sacct_row_is_ours(None, 1000, 2000)[0])
+
+    def test_the_limit_is_written_down(self):
+        doc = REPO / "docs" / "plan-sacct-ownership.md"
+        if not doc.exists():
+            self.skipTest("docs/ not deployed here")
+        text = doc.read_text()
+        self.assertIn("no Submit time is refused", text)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
