@@ -703,6 +703,52 @@ def availability(rev):
     return None
 
 
+def probe_liveness(rev, timeout=30):
+    """Actually ASK the provider whether this reviewer can run. None if it can.
+
+    `availability()` only checks that the key VARIABLE is set, so `--list`
+    printed "ready" for reviewers whose account had no credits left and the
+    real call then failed with HTTP 429. The skill claimed availability was
+    "resolved live, never asserted"; it was asserted. One tiny request per
+    reviewer makes the claim true, and it only runs for `--list`.
+
+    The reply is discarded: this asks whether the provider ANSWERS, not whether
+    it answers well.
+    """
+    why = availability(rev)
+    if why:
+        return why
+    try:
+        _text, err = PROVIDERS[rev["provider"]](rev, "ping", timeout)
+    except Exception as e:                      # never let --list traceback
+        return redact(f"{type(e).__name__}: {e}")
+    if err:
+        return redact(_short_error(err))
+    return None
+
+
+def _short_error(err):
+    """One readable line from a provider error, whose body is usually JSON.
+
+    Taking the first line gave "HTTP 429: {" -- technically the first line,
+    and useless. The message field is the part a human needs."""
+    s = str(err).strip()
+    prefix = s.split(":", 1)[0][:40] if ":" in s[:20] else ""
+    brace = s.find("{")
+    if brace != -1:
+        try:
+            body = json.loads(s[brace:])
+            msg = body.get("error")
+            if isinstance(msg, dict):
+                msg = msg.get("message")
+            if isinstance(msg, str) and msg.strip():
+                out = f"{prefix}: {msg.strip()}" if prefix else msg.strip()
+                return out[:150]
+        except (ValueError, TypeError):
+            pass
+    return " ".join(s.split())[:150]
+
+
 def run_one(rev, prompt, timeout, require_claims=0, asserted=None):
     """Never raises: one malformed provider response must degrade that reviewer,
     not take the whole panel down with a traceback."""
@@ -773,15 +819,25 @@ def _run_one(rev, prompt, timeout, require_claims=0, asserted=None):
 
 # --- commands ---------------------------------------------------------------
 
-def cmd_list(reviewers):
+def cmd_list(reviewers, probe=True):
+    """Reviewer table. STATUS is MEASURED by default, not inferred from whether
+    a key variable happens to be set: that printed "ready" for an account with
+    no credits left, and the real call then failed with HTTP 429. `--no-probe`
+    skips the calls and says so."""
     print(f"{'REVIEWER':<20} {'PROVIDER':<12} {'MODEL':<30} {'EFFORT':<8} STATUS")
+    ready = 0
     for rev in reviewers:
-        why = availability(rev)
-        status = "ready" if why is None else f"UNAVAILABLE ({why})"
+        why = probe_liveness(rev) if probe else availability(rev)
+        if why is None:
+            ready += 1
+            status = "ready" if probe else "key set (UNVERIFIED)"
+        else:
+            status = f"UNAVAILABLE ({why})"
         print(f"{rev['name']:<20} {rev['provider']:<12} {rev['model']:<30} "
               f"{str(rev.get('effort') or '-'):<8} {status}")
-    ready = sum(1 for r in reviewers if availability(r) is None)
-    print(f"\n{ready} of {len(reviewers)} reviewers ready")
+    print(f"\n{ready} of {len(reviewers)} reviewers "
+          + ("answered a live probe" if probe
+             else "have a key set -- NOT probed, so this is not availability"))
     if ready == 0:
         print("No reviewer can run. The gate will report REVIEW_UNAVAILABLE, "
               "which is not a pass.")
@@ -930,6 +986,9 @@ def main():
     ap.add_argument("--claim", action="append", default=[],
                     help="a claim to be checked against the code; repeatable")
     ap.add_argument("--context", default="", help="what this change is for")
+    ap.add_argument("--no-probe", action="store_true",
+                    help="with --list, skip the live probe and report only "
+                         "whether a key is set (which is not availability)")
     ap.add_argument("--threat-model", default=None,
                     help="what the code does and does not defend against; a "
                          "finding whose preconditions fall outside it is "
@@ -975,7 +1034,7 @@ def main():
     if args.list:
         print(f"profile: {profile}"
               + ("  (--only overrides profile filtering)" if args.only else ""))
-        sys.exit(cmd_list(reviewers))
+        sys.exit(cmd_list(reviewers, probe=not args.no_probe))
 
     if args.escalate and args.only:
         config_error("--escalate and --only are mutually exclusive")

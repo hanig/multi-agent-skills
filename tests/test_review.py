@@ -1079,5 +1079,104 @@ class TestOutOfScopeCannotBuyAPass(unittest.TestCase):
                                  n_out_of_scope_critical=1)
         self.assertEqual(st, "REVIEW_FAIL")
 
+class TestListMeasuresAvailability(unittest.TestCase):
+    """`--list` printed "ready" for reviewers whose account had no credits, and
+    the real call then failed with HTTP 429. SKILL.md claimed availability was
+    "resolved live by review.py --list, never asserted"; it was asserted, from
+    nothing more than whether an environment variable was set. Found by using
+    the gate, not by reviewing it."""
+
+    def test_availability_only_checks_the_key_variable(self):
+        """Kept as the low bar it is, and named so, because probe_liveness is
+        the one that answers the question."""
+        rev = {"name": "x", "provider": "openai", "model": "m",
+               "enabled": True}
+        old = os.environ.get("OPENAI_API_KEY")
+        try:
+            os.environ["OPENAI_API_KEY"] = "sk-not-a-real-key"
+            self.assertIsNone(review.availability(rev))
+            os.environ.pop("OPENAI_API_KEY")
+            self.assertIn("OPENAI_API_KEY", review.availability(rev))
+        finally:
+            if old is not None:
+                os.environ["OPENAI_API_KEY"] = old
+            else:
+                os.environ.pop("OPENAI_API_KEY", None)
+
+    def test_probe_reports_a_provider_error_instead_of_ready(self):
+        """No network: substitute a provider that fails the way a spent
+        account does."""
+        rev = {"name": "x", "provider": "openai", "model": "m",
+               "enabled": True}
+        old_p = review.PROVIDERS.get("openai")
+        old_k = os.environ.get("OPENAI_API_KEY")
+        try:
+            os.environ["OPENAI_API_KEY"] = "sk-present-but-spent"
+            review.PROVIDERS["openai"] = lambda r, p, t, **kw: (
+                None, 'HTTP 429: {"error": {"message": "You have no credits '
+                      'remaining."}}')
+            why = review.probe_liveness(rev)
+            self.assertIsNotNone(why, "a 429 must not read as ready")
+            self.assertIn("no credits", why)
+        finally:
+            if old_p is not None:
+                review.PROVIDERS["openai"] = old_p
+            if old_k is not None:
+                os.environ["OPENAI_API_KEY"] = old_k
+            else:
+                os.environ.pop("OPENAI_API_KEY", None)
+
+    def test_probe_reports_ready_when_the_provider_answers(self):
+        rev = {"name": "x", "provider": "openai", "model": "m",
+               "enabled": True}
+        old_p = review.PROVIDERS.get("openai")
+        old_k = os.environ.get("OPENAI_API_KEY")
+        try:
+            os.environ["OPENAI_API_KEY"] = "sk-works"
+            review.PROVIDERS["openai"] = lambda r, p, t, **kw: ("x", None)
+            self.assertIsNone(review.probe_liveness(rev))
+        finally:
+            if old_p is not None:
+                review.PROVIDERS["openai"] = old_p
+            if old_k is not None:
+                os.environ["OPENAI_API_KEY"] = old_k
+            else:
+                os.environ.pop("OPENAI_API_KEY", None)
+
+    def test_a_crashing_provider_does_not_traceback_out_of_list(self):
+        rev = {"name": "x", "provider": "openai", "model": "m",
+               "enabled": True}
+        old_p = review.PROVIDERS.get("openai")
+        old_k = os.environ.get("OPENAI_API_KEY")
+        try:
+            os.environ["OPENAI_API_KEY"] = "sk-works"
+            def boom(*a, **k):
+                raise RuntimeError("socket exploded")
+            review.PROVIDERS["openai"] = boom
+            why = review.probe_liveness(rev)
+            self.assertIn("RuntimeError", why)
+        finally:
+            if old_p is not None:
+                review.PROVIDERS["openai"] = old_p
+            if old_k is not None:
+                os.environ["OPENAI_API_KEY"] = old_k
+            else:
+                os.environ.pop("OPENAI_API_KEY", None)
+
+    def test_short_error_pulls_the_message_out_of_a_json_body(self):
+        """It reported "HTTP 429: {" -- the first line, and useless."""
+        got = review._short_error(
+            'HTTP 429: {"error": {"message": "You have no credits remaining."}}')
+        self.assertIn("no credits remaining", got)
+        self.assertNotEqual(got.strip().endswith("{"), True)
+
+    def test_short_error_survives_a_non_json_body(self):
+        self.assertIn("gateway", review._short_error("HTTP 502: bad gateway"))
+
+    def test_no_probe_labels_its_answer_as_unverified(self):
+        src = SCRIPT.read_text()
+        self.assertIn("UNVERIFIED", src)
+        self.assertIn("--no-probe", src)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1,5 +1,5 @@
 {
-  "_comment": "Routing config only — endpoint, model id, reasoning effort, profile membership. Carries NO quality scores: a stale ranking is worse than none. Availability is resolved live by `review.py --list`, never asserted here. Prices in _cost are per million tokens as listed 2026-08-25 and are a budgeting hint, not a routing input.",
+  "_comment": "Routing config only — endpoint, model id, reasoning effort, profile membership. Carries NO quality scores: a stale ranking is worse than none. Availability is MEASURED by `review.py --list`, which probes each provider live; a key being set is not availability. Prices in _cost are per million tokens as listed 2026-08-25 and are a budgeting hint, not a routing input.",
 
   "default_profile": "standard",
 
