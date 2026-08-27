@@ -920,6 +920,11 @@ def criteria_digest(contract):
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
+CONVERGE_KEYS = frozenset({"metric", "mode", "threshold",
+                           "rel_improvement_below", "over_evals", "min_steps"})
+DIVERGE_KEYS = frozenset({"metric", "above", "below"})
+
+
 def criterion_problem(crit):
     """Why a convergence criterion cannot be evaluated, or None.
 
@@ -947,6 +952,16 @@ def criterion_problem(crit):
         n, err = nonneg_int(crit.get("over_evals", 5))
         if err or n < 1:
             return "'over_evals' must be a whole number of at least 1"
+    # Enumerate the keys this criterion is READ with. Every known key above was
+    # validated, but an unknown one was silently ignored, so a typo
+    # (`min_step` for `min_steps`) left the real criterion WEAKER than the
+    # declared one with no warning. Same defect found in contract.py's
+    # predicates by real use on lambda; fixed in both.
+    unknown = sorted(set(crit) - CONVERGE_KEYS)
+    if unknown:
+        return (f"unrecognised key(s) {', '.join(unknown)}; this criterion "
+                f"reads only {', '.join(sorted(CONVERGE_KEYS))}. A typo here "
+                f"would silently weaken the criterion.")
     return None
 
 
@@ -1312,6 +1327,12 @@ def cmd_init(args):
                 _, err = finite_number(rule[k])
                 if err:
                     sys.exit(f"error: divergence rule {i} '{k}' {err}")
+        extra = sorted(set(rule) - DIVERGE_KEYS)
+        if extra:
+            sys.exit(f"error: divergence rule {i} has unrecognised key(s) "
+                     f"{', '.join(extra)}; it reads only "
+                     f"{', '.join(sorted(DIVERGE_KEYS))}. A typo here would "
+                     f"silently weaken the rule.")
 
     if not args.checkpoint_dir and not args.retrospective:
         print("NOTE: no --checkpoint-dir given; a CONVERGED verdict will be "

@@ -350,8 +350,50 @@ def repo_state(cwd):
 # to count. Kept deliberately small: a few structural checks plus an escape
 # hatch to a shell command for anything domain-specific.
 
+# Every predicate kind and the exact keys it reads. Enumerated, not inferred:
+# an unrecognised key used to be silently ignored, so a typo'd criterion
+# (`{"kind":"min_lines","min":3}` -- the reader is `lines`) fell back to the
+# default of 1 and the declared criterion became WEAKER than declared with no
+# warning. Found by real use on lambda. The residual (unknown key) must be the
+# refusal, never the lenient default.
+PREDICATE_SCHEMA = {
+    "exists":      {"required": ("path",),            "optional": ()},
+    "min_size":    {"required": ("path",),            "optional": ("bytes",)},
+    "min_lines":   {"required": ("path",),            "optional": ("lines",)},
+    "log_matches": {"required": ("path", "pattern"),  "optional": ("expect",)},
+    "command":     {"required": ("run",),             "optional": ("timeout",)},
+}
+
+
+def predicate_fault(pred):
+    """Return a human-readable fault string, or None if the predicate is
+    interpretable. Names the allowed keys so the refusal carries the fix."""
+    if not isinstance(pred, dict):
+        return f"predicate is not an object: {pred!r}"
+    kind = pred.get("kind")
+    spec = PREDICATE_SCHEMA.get(kind)
+    if spec is None:
+        return (f"unknown predicate kind {kind!r}; "
+                f"allowed: {', '.join(sorted(PREDICATE_SCHEMA))}")
+    allowed = {"kind", *spec["required"], *spec["optional"]}
+    missing = [k for k in spec["required"] if k not in pred]
+    if missing:
+        return (f"{kind} predicate is missing required key(s) "
+                f"{', '.join(missing)}")
+    unknown = sorted(set(pred) - allowed)
+    if unknown:
+        return (f"{kind} predicate has unrecognised key(s) "
+                f"{', '.join(unknown)}; it reads only "
+                f"{', '.join(sorted(allowed - {'kind'}))}. "
+                f"A typo here would silently weaken the criterion.")
+    return None
+
+
 def check_predicate(pred, base_dir):
     """Return (ok, detail). Never raises -- enforced by the wrapper above."""
+    fault = predicate_fault(pred)
+    if fault:
+        return False, fault
     kind = pred.get("kind")
     target = pred.get("path", "")
     # Resolve against the contract's cwd so the verdict does not depend on
@@ -893,9 +935,16 @@ def cmd_init(args):
         predicates.append({"kind": "min_size", "path": spec, "bytes": 1})
     for spec in args.predicate:
         try:
-            predicates.append(json.loads(spec))
+            pred = json.loads(spec)
         except json.JSONDecodeError as e:
             sys.exit(f"error: --predicate is not valid JSON: {e}\n  {spec}")
+        # Refuse at declare time. A malformed predicate caught only at check
+        # time has already let the run proceed under a criterion that is not
+        # the one the user wrote.
+        fault = predicate_fault(pred)
+        if fault:
+            sys.exit(f"error: {fault}\n  {spec}")
+        predicates.append(pred)
 
     if not predicates:
         sys.exit("error: a contract with no predicates cannot verify anything; "
@@ -1438,7 +1487,24 @@ def cmd_check(args):
     if state not in ("RUNNING", "PREEMPTED", "CONTRACT_VIOLATED"):
         for pred in (contract.get("predicates") or []):
             ok, detail = evaluate_predicate(pred, contract.get("cwd") or str(run_dir))
+            # Prefix the kind. `--output X` synthesises exists+min_size, so a
+            # missing X yielded several byte-identical FAIL lines and the
+            # receipt could not say which criterion each one judged.
+            kind = pred.get("kind") if isinstance(pred, dict) else None
+            if kind and not detail.startswith(f"{kind}:"):
+                detail = f"{kind}: {detail}"
             results.append({"ok": ok, "detail": detail, "predicate": pred})
+        # A predicate the verifier cannot interpret makes the contract
+        # unevaluable; reporting it as a plain unmet criterion would read as
+        # "the job did not produce this" when the real cause is the criterion
+        # itself. init rejects these, so reaching here means a hand-edited or
+        # foreign contract.
+        pred_faults = [f for f in (predicate_fault(r["predicate"])
+                                   for r in results) if f]
+        if pred_faults and state not in ("FAILED",):
+            state = "CONTRACT_VIOLATED"
+            for f in pred_faults:
+                reasons.append(f"uninterpretable predicate: {f}")
         failed = [r for r in results if not r["ok"]]
         if state == "FAILED":
             pass  # scheduler failure already decided it

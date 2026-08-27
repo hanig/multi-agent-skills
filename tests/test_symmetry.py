@@ -198,6 +198,45 @@ class TestVerifierSymmetry(unittest.TestCase):
                     f"{path.name}: a refusal names no action the user can "
                     f"take: {text[:120]}")
 
+    def test_both_tools_refuse_an_unrecognised_criterion_key(self):
+        """The 17th instance. Both tools validated every key they KNEW and
+        silently ignored any they did not, so a typo left the declared
+        criterion weaker than written with no warning. Found in contract.py by
+        real use on lambda ({"kind":"min_lines","min":3} -> the reader is
+        `lines`, so the criterion became >=1 line). Both must enumerate the
+        keys they read and refuse the residual.
+
+        Behavioural, not textual: each tool is actually asked to accept a
+        criterion with a bogus key, and must not."""
+        import subprocess, sys as _s, tempfile, json as _j, os
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            out = td / "o.tsv"
+            r = subprocess.run(
+                [_s.executable, str(WORKFLOW), "init", str(td / "w"),
+                 "--command", "x", "--predicate",
+                 _j.dumps({"kind": "min_lines", "path": str(out), "min": 3})],
+                capture_output=True, text=True)
+            self.assertNotEqual(
+                r.returncode, 0,
+                "contract.py accepted a predicate with an unread key; the "
+                "declared criterion would be silently weakened")
+
+            metrics = td / "m.jsonl"
+            metrics.write_text("")
+            r = subprocess.run(
+                [_s.executable, str(TRAINING), "init", str(td / "t"),
+                 "--metrics", str(metrics), "--checkpoint-dir", str(td / "ck"),
+                 "--converge",
+                 _j.dumps({"metric": "val_loss", "mode": "min",
+                           "threshold": 0.5, "min_step": 10000})],
+                capture_output=True, text=True)
+            self.assertNotEqual(
+                r.returncode, 0,
+                "traincontract.py accepted a convergence criterion with an "
+                "unread key (min_step for min_steps); min_steps would default "
+                "and the criterion would be silently weakened")
+
     def test_a_later_local_retry_decides_in_both_verifiers(self):
         """The tie-break -- the latest attempt decides, and a matching local
         record is later than the bound job -- was applied to contract.py and

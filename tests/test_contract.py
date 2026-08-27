@@ -368,6 +368,21 @@ class TestMalformedPredicates(Base):
     second time -- the wrapper caught OSError/KeyError/TypeError/ValueError but
     a predicate that is not a dict raises AttributeError from pred.get()."""
 
+    # init now REFUSES an uninterpretable predicate instead of accepting it and
+    # deferring to check. Both halves still have to hold, so both are tested:
+    # init must refuse, and a hand-written contract.json must not crash check.
+    def test_init_refuses_a_non_dict_predicate(self):
+        for bad in ('"oops"', "[1]", "null", "42"):
+            with self.subTest(predicate=bad):
+                run_dir = self.tmp / f"i{abs(hash(bad))}"
+                out = self.tmp / "o.tsv"
+                out.write_text("x\n")
+                r = contract("init", str(run_dir), "--command", "x",
+                             "--output", str(out), "--predicate", bad)
+                self.assertNotEqual(r.returncode, 0,
+                                    f"init accepted {bad}: {r.stdout}")
+                self.assertIn("predicate", r.stderr.lower())
+
     def test_non_dict_predicates_do_not_crash(self):
         for bad in ('"oops"', "[1]", "null", "42"):
             with self.subTest(predicate=bad):
@@ -375,15 +390,35 @@ class TestMalformedPredicates(Base):
                 out = self.tmp / "o.tsv"
                 out.write_text("x\n")
                 r = contract("init", str(run_dir), "--command", "x",
-                             "--output", str(out), "--predicate", bad)
+                             "--output", str(out))
                 self.assertEqual(r.returncode, 0, r.stderr)
+                # Inject past init, the way a hand-edited contract arrives.
+                cpath = run_dir / "contract.json"
+                c = json.loads(cpath.read_text())
+                c["predicates"].append(json.loads(bad))
+                cpath.write_text(json.dumps(c))
                 self.record_attempt(run_dir)
                 r = contract("check", str(run_dir))
                 self.assertNotIn("Traceback", r.stderr,
                                  f"predicate {bad} crashed the verifier")
                 self.assertTrue((run_dir / "verification.json").exists(),
                                 f"predicate {bad} left no receipt")
-                self.assertIn(r.returncode, range(7))
+                self.assertIn(r.returncode, range(8))
+
+    def test_a_typod_key_is_refused_rather_than_silently_weakened(self):
+        """Found by real use on lambda: {"kind":"min_lines","min":3} was
+        accepted, `min` ignored, and the criterion fell back to >=1 line. The
+        declared criterion must never be quietly replaced by a weaker one."""
+        out = self.tmp / "typo.tsv"
+        r = contract("init", str(self.tmp / "rt"), "--command", "x",
+                     "--predicate",
+                     json.dumps({"kind": "min_lines", "path": str(out),
+                                 "min": 3}))
+        self.assertNotEqual(r.returncode, 0,
+                            "a typo'd predicate key was accepted")
+        self.assertIn("min", r.stderr)
+        self.assertIn("lines", r.stderr,
+                      "the refusal must name the key it actually reads")
 
 
 class TestExecutionEvidence(Base):
