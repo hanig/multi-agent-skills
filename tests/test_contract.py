@@ -1397,5 +1397,109 @@ class TestDeclaredDirectoryFreshness(unittest.TestCase):
         contract("record", str(self.run_dir), "--exit-code", "0")
         self.assertEqual(contract("check", str(self.run_dir)).returncode, PASS)
 
+class TestEverySacctRowIsOwnershipTested(unittest.TestCase):
+    """kimi: sacct_state took rows[-1] and ownership-tested only that row, so a
+    later job reusing the id displaced our honest COMPLETED row and a successful
+    run reported INCOMPLETE_EVIDENCE. The squeue path had been fixed to scan
+    every row one commit earlier; this one had not. Twelfth instance in this
+    repo of a rule landing in one place and not its twin."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.run_dir = self.tmp / "run"
+        self.out = self.tmp / "o.tsv"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def build(self, record=True):
+        r = contract("init", str(self.run_dir), "--command", "echo hi",
+                     "--output", str(self.out))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        decl = json.loads(
+            (self.run_dir / "contract.json").read_text())["created_at_epoch"]
+        self.out.write_text("result\n")
+        os.utime(self.out, (decl + 2, decl + 2))
+        if record:
+            contract("record", str(self.run_dir), "--exit-code", "0")
+        return decl
+
+    def env(self, decl, *rows):
+        b = self.tmp / f"b{abs(hash(rows))}"
+        b.mkdir()
+        body = "\n".join(
+            'echo "{}|{}"'.format(
+                sc, time.strftime("%Y-%m-%dT%H:%M:%S",
+                                  time.localtime(decl + off)))
+            for sc, off in rows)
+        (b / "sacct").write_text(f"#!/bin/sh\n{body}\n")
+        (b / "squeue").write_text("#!/bin/sh\nexit 0\n")
+        for n in ("sacct", "squeue"):
+            (b / n).chmod(0o755)
+        return dict(os.environ, PATH=f"{b}:{os.environ['PATH']}")
+
+    def check(self, env):
+        return subprocess.run([sys.executable, str(SCRIPT), "check",
+                               str(self.run_dir)], capture_output=True,
+                              text=True, env=env)
+
+    def test_our_row_first_and_a_later_reuse_second_still_passes(self):
+        decl = self.build()
+        r = self.check(self.env(decl, ("COMPLETED|0:0", 0),
+                                      ("FAILED|1:0", 7200)))
+        self.assertEqual(r.returncode, PASS, r.stdout + r.stderr)
+
+    def test_a_reuse_before_us_does_not_hide_our_row(self):
+        decl = self.build()
+        r = self.check(self.env(decl, ("FAILED|1:0", -7200),
+                                      ("COMPLETED|0:0", 0)))
+        self.assertEqual(r.returncode, PASS, r.stdout + r.stderr)
+
+    def test_a_requeue_still_takes_the_LAST_owned_row(self):
+        """Both rows are ours; the later attempt is the real outcome. Reading
+        the first pinned a requeued job at PREEMPTED permanently."""
+        decl = self.build()
+        r = self.check(self.env(decl, ("PREEMPTED|0:0", 0),
+                                      ("COMPLETED|0:0", 1)))
+        self.assertEqual(r.returncode, PASS, r.stdout + r.stderr)
+
+    def test_no_owned_row_is_absent_evidence_not_success(self):
+        """record=False: with a local termination recorded the verdict rests on
+        THAT, quite correctly, and says nothing about the sacct rows. The
+        question here is what happens when sacct is the only evidence."""
+        decl = self.build(record=False)
+        r = self.check(self.env(decl, ("COMPLETED|0:0", -7200),
+                                      ("COMPLETED|0:0", 7200)))
+        # Not a pass, which is the invariant. The REASON is that no attempt was
+        # ever recorded, so the sacct path is not even reached: without `submit`
+        # or `record` there is no job id to attribute rows to. Asserting the
+        # "discarded" wording here would be asserting a code path this
+        # scenario does not enter.
+        self.assertEqual(r.returncode, INCOMPLETE, r.stdout + r.stderr)
+        self.assertNotIn("all 2 predicates hold", r.stdout.split("[PASS]")[0])
+
+    def test_only_unattributable_rows_with_an_attempt_present(self):
+        """The sacct path IS entered here: an attempt exists, and every sacct
+        row belongs to some other job."""
+        decl = self.build(record=True)
+        r = self.check(self.env(decl, ("COMPLETED|0:0", -7200),
+                                      ("COMPLETED|0:0", 7200)))
+        self.assertIn("discarded", r.stdout)
+
+    def test_a_discarded_row_still_lets_a_local_record_decide(self):
+        """The other half: `record` is independent evidence and an
+        unattributable sacct row must not veto it."""
+        decl = self.build(record=True)
+        r = self.check(self.env(decl, ("COMPLETED|0:0", 7200)))
+        self.assertEqual(r.returncode, PASS, r.stdout + r.stderr)
+
+    def test_an_unattributable_row_never_becomes_recorded_state(self):
+        """terminal_confirmed reads the receipt, so a discarded row must not
+        appear there as a state -- an earlier fix had to null it out by hand."""
+        decl = self.build()
+        self.check(self.env(decl, ("COMPLETED|0:0", 7200)))
+        ev = json.loads((self.run_dir / "verification.json").read_text())
+        self.assertIsNone(ev["evidence"]["scheduler"]["state"])
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

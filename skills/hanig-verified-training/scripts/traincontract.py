@@ -322,26 +322,38 @@ def squeue_state(job_id, declared_at=None, bound_at=None):
 
 
 def slurm_state(job_id, declared_at=None, bound_at=None):
-    """Latest sacct row for a job, or None when accounting is unavailable.
-    Takes the LAST row: a requeued job has one per attempt, oldest first."""
+    """Terminal state of OUR job from sacct, or None when unavailable.
+
+    Ownership is applied to EVERY row and the last OWNED one wins. Taking
+    rows[-1] and testing only that discarded an honest converged run's row
+    whenever a later job reused the id, because the reuse's row sorts last and
+    fails the test (kimi). The squeue path was fixed to scan every row one
+    commit earlier and this one was not.
+
+    Last-owned, not first-owned: a requeued job has one row per attempt, oldest
+    first.
+    """
     rc, out = run(["sacct", "-n", "-X", "-P", "-j", str(job_id),
                    "-o", "State,ExitCode,Submit"])
     if rc != 0 or not out:
         return None
-    rows = [ln.strip() for ln in out.splitlines() if ln.strip()]
-    if not rows:
-        return None
-    fields = rows[-1].split("|")
-    state = fields[0].split()[0] if fields and fields[0] else None
-    code = fields[1] if len(fields) > 1 else ""
-    submit = parse_iso_ts(fields[2].strip()) if len(fields) > 2 else None
-    ours, _why = sacct_row_is_ours(submit, declared_at, bound_at)
-    if not ours:
-        # Slurm resets and reuses job ids; a row we cannot attribute to our own
-        # submission says nothing about this contract's run. Carry WHY: an
-        # absent Submit and a genuinely older row are different diagnoses, and
-        # reporting one fixed sentence for both misdescribed the second.
-        return f"STALE_ROW:{_why}"
+    chosen, last_why, saw_any = None, None, False
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        saw_any = True
+        f = line.split("|")
+        state = f[0].split()[0] if f and f[0].strip() else None
+        code = f[1] if len(f) > 1 else ""
+        submit = parse_iso_ts(f[2].strip()) if len(f) > 2 else None
+        ours, why = sacct_row_is_ours(submit, declared_at, bound_at)
+        if not ours:
+            last_why = why
+            continue
+        chosen = (state, code)
+    if chosen is None:
+        return f"STALE_ROW:{last_why}" if saw_any and last_why else None
+    state, code = chosen
     if state in SLURM_OK_END and not exit_code_is_clean(code):
         # COMPLETED beside a non-zero exit code is not a clean finish; the code
         # was previously not even fetched.

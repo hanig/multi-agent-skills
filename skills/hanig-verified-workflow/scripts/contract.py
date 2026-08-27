@@ -640,26 +640,47 @@ def exit_code_is_clean(code):
         return False
 
 
-def sacct_state(job_id):
-    """Terminal state from Slurm accounting. Returns (state, exit_code) or
-    (None, None) when accounting is unavailable -- which must not be treated as
-    failure, only as absent evidence."""
+def sacct_state(job_id, declared_at=None, bound_at=None):
+    """Terminal state of OUR job from Slurm accounting.
+
+    Returns (state, exit_code, submit, why_not). An all-None state is absent
+    evidence, never failure.
+
+    Ownership is applied to EVERY row and the last OWNED one wins. Taking
+    rows[-1] and testing only that discarded an honest COMPLETED row whenever a
+    later job reused the id, because the reuse's row sorts last and fails the
+    test, so a successful run reported INCOMPLETE_EVIDENCE (kimi). The squeue
+    path was fixed to scan every row one commit earlier and this one was not,
+    which is the twelfth time in this repo a rule landed in one place and not
+    its twin.
+
+    Last-owned rather than first-owned: a requeued job has one row per attempt,
+    oldest first, and reading the first pinned it at PREEMPTED permanently.
+    """
     if not shutil.which("sacct"):
-        return None, None, None
+        return None, None, None, None
     rc, out, _ = run(["sacct", "-n", "-X", "-P", "-j", str(job_id),
                       "-o", "State,ExitCode,Submit"])
     if rc != 0 or not out:
-        return None, None, None
-    # A requeued job has one row per attempt, oldest first. Take the LAST row:
-    # reading the first pinned a requeued job at PREEMPTED permanently.
-    rows = [ln for ln in out.splitlines() if ln.strip()]
-    if not rows:
-        return None, None, None
-    last = rows[-1].split("|")
-    state = last[0].strip().split()[0] if last and last[0].strip() else None
-    code = last[1].strip() if len(last) > 1 else None
-    submit = last[2].strip() if len(last) > 2 else ""
-    return state, code, submit
+        return None, None, None, None
+    chosen, last_why, saw = None, None, None
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        f = line.split("|")
+        submit = f[2].strip() if len(f) > 2 else ""
+        saw = submit
+        ours, why = sacct_row_is_ours(parse_iso_ts(submit), declared_at,
+                                      bound_at)
+        if not ours:
+            last_why = why
+            continue
+        chosen = (f[0].strip().split()[0] if f[0].strip() else None,
+                  f[1].strip() if len(f) > 1 else None,
+                  submit)
+    if chosen is None:
+        return None, None, saw, last_why
+    return chosen[0], chosen[1], chosen[2], None
 
 
 def squeue_active(job_id, declared_at=None, bound_at=None):
@@ -1025,24 +1046,18 @@ def cmd_check(args):
             state = "RUNNING"
             reasons.append(f"job {job_id} still in the queue")
         else:
-            sstate, scode, ssubmit = sacct_state(job_id)
+            # sacct_state applies ownership to EVERY row and returns the last
+            # OWNED one, so there is nothing left to null out here: an
+            # unattributable row never becomes state in the first place.
+            sstate, scode, ssubmit, why_not = sacct_state(
+                job_id, declared_at,
+                parse_iso_ts(attempts[-1].get("submitted_at")))
             evidence["scheduler"] = {"state": sstate, "exit_code": scode,
                                      "submit": ssubmit}
-            # The attempt log already established that this job id is ours;
-            # this only rules out a row from a PRIOR job reusing the id, so it
-            # compares against the declaration. See sacct_row_is_ours.
-            ours, why_not = sacct_row_is_ours(
-                parse_iso_ts(ssubmit), declared_at,
-                parse_iso_ts(attempts[-1].get("submitted_at")))
-            if sstate is not None and not ours:
-                reasons.append(f"sacct row for job {job_id} discarded: "
+            if sstate is None and why_not:
+                reasons.append(f"sacct row(s) for job {job_id} discarded: "
                                f"{why_not}")
-                sstate, scode = None, None
-                # Clear the RECORDED state too: terminal_confirmed reads
-                # evidence["scheduler"], so nulling only the locals left the
-                # stale COMPLETED row still counting as success.
-                evidence["scheduler"] = {"state": None, "exit_code": None,
-                                         "submit": ssubmit, "stale": True}
+                evidence["scheduler"]["stale"] = True
             if sstate is None:
                 reasons.append("no Slurm accounting data (sacct unavailable "
                                "or job too old); relying on artifacts alone")
