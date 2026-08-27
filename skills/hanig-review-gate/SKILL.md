@@ -15,16 +15,85 @@ description: >-
 My claim that code works is exactly as inadmissible as a scheduler's
 `COMPLETED`. Same principle as `hanig-verified-workflow`, turned on the author.
 
-So before anything is reported complete, the diff **and the specific claims made
+So before anything is reported complete, the work **and the specific claims made
 about it** go to models that did not write the code, each prompted to **refute**.
 A reviewer that cannot decide is instructed to refute, because a false "looks
 good" costs far more than one more look.
+
+## Review against a declared plan, never against perfection
+
+**This is the rule that keeps the process finite, and the one this repo learned
+the hard way.** A first version of this skill asked reviewers "can you refute
+any claim about this code," which is unbounded by construction: with reviewers
+instructed to refute when uncertain, it can never terminate. It ran 28 rounds.
+
+The fix is the skill's own thesis, turned on itself. `hanig-verified-workflow`
+exists to say *declare the criteria before you execute, then check against
+them*. Apply that here:
+
+1. **Declare what the change is supposed to do, before writing it.** Goal,
+   acceptance criteria, constraints, what is explicitly out of scope.
+2. **Implement.**
+3. **Review the implementation AGAINST THAT PLAN** — "flag drift and missing
+   pieces" — not against an ideal.
+
+"Does this meet the declared criteria" is a finite question with an answer.
+"Can you find any flaw" is not.
+
+## Always assert the counter-claim
+
+Every round must assert **"this change cannot make an honest run fail."**
+Without it, each round tightens the screws with no counter-pressure, and the
+verifier drifts toward refusing legitimate work. The first round that asserted
+this caught a real regression that two reviewers found independently. A verifier
+that cries wolf gets switched off, which costs more than the defect it prevents.
+
+## Bound the loop, and know when to step back
+
+Open-ended loops are how runaways happen, so every review cycle is bounded:
+
+- **Max 3 rounds per change.** Not per session: per change.
+- **If round N+1 finds a defect in round N's fix, stop patching.** That is the
+  signal that the problem is upstream of the symptom. Convene a step-back
+  committee (below) with the full history rather than shipping another patch.
+- **After 3 rounds without convergence, start fresh** — new reviewers, full
+  history of what was tried. The current context has drifted too far to help.
+
+## The step-back committee
+
+When stuck, looping, or patching symptoms, stop reviewing and convene two
+reviewers from contrasting providers with one question:
+
+> Here is what keeps happening across rounds: <history>. Do root cause analysis.
+> Ask why three levels deep. Am I patching a symptom or removing the problem?
+> Propose the change that makes this class of defect impossible, not the next
+> individual fix. Analysis only — do not write code.
+
+The purpose is to step back, not double down. The committee may well say the
+design is wrong, which is the point of asking.
+
+## Argue with findings; do not silently filter them
+
+Reviewers produce findings that do not reproduce — one model here retracted its
+own conclusion inside the finding text more than a dozen times. The instinct is
+to add a severity filter and move on. **Reproduce the finding first.** If it
+does not reproduce, say so explicitly in the next round's context rather than
+quietly dropping it, and if a reviewer keeps asserting it, that disagreement is
+itself information.
+
+## Convergence
+
+Review is done when the findings still arriving are **out of scope, minor, or
+matters of taste**. It is never done when the findings list is empty; that will
+not happen, and waiting for it is the loop.
 
 ## The rule
 
 **Do not report work as complete, and do not assert that code works, until the
 gate has run and passed.** If it cannot run, say the work is unreviewed — do not
 substitute your own confidence for the review.
+
+**Whether to run another round is the user's call, not the agent's.**
 
 ```bash
 R=~/.claude/skills/hanig-review-gate/scripts/review.py
@@ -155,27 +224,25 @@ Findings keep arriving across rounds. That is normal for adversarial review and
 not by itself evidence the code is bad — but the first round finding a false
 pass is exactly why "my tests pass" is not a completion criterion.
 
-### Why rounds stop converging, and what to do about it
+### What made the rounds stop converging
 
-Three failure modes, all in how the gate is *driven*, not in the reviewers:
+Two failure modes beyond the unbounded question, both in how the gate was
+*driven* rather than in the reviewers:
 
 **Reviewing against an adversary the code never claimed to stop.** This repo's
 own threat model says `contract.json` is trusted input, yet six of fourteen
 findings across three rounds required hand-editing it. Pass `--threat-model` so
 those are reported and marked rather than counted. Absent it, everything gates.
 
-**Asserting universal claims.** "No path through check() can exit 0 when
-evidence is missing" asks a reviewer to prove a program correct, and they are
-told to refute when uncertain, so the gate fails by construction. Assert what
-*changed this round*, in terms that a specific input could falsify.
-
 **Asserting claims about taste.** "The three scripts agree on shared concepts"
 is a design judgment; two tools solving different problems will always differ
 somewhere, and any refuted claim is a `REVIEW_FAIL`. Reserve claims for
 behaviour.
 
-The signal that review is done is not an empty findings list. It is that the
-findings still arriving are out of scope, minor, or matters of taste.
+Ultimately the process was modelled on a committee that plans, implements, then
+reviews *against the plan*, with bounded iterations and a step-back rule when
+it stalls. The version here that ran 28 rounds had no plan to check against, no
+bound, and no step-back.
 
 ## Known limitation: `command` predicates are unsandboxed
 
