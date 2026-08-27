@@ -1862,13 +1862,32 @@ def cmd_check(args):
                                    f"relying on the recorded local "
                                    f"termination (exit 0)")
             elif sstate in SLURM_BAD_END:
-                # A failed job's partial metrics cannot certify convergence.
-                state = "CONTRACT_VIOLATED"
-                reasons.append(f"scheduler reports {sstate} for job {jid}; the "
-                               f"job did not end successfully, so its metrics "
-                               f"cannot certify convergence. Fix the run and "
-                               f"train again under a contract declared with "
-                               f"`init --force`")
+                # A LATER local retry decides, exactly as it does in
+                # contract.py: `record` is run by hand after a run finishes, so
+                # a matching record is a later attempt than the bound job. The
+                # tie-break is in the plan doc -- falsifying a record needs
+                # shell access as the user, which is out of scope, while
+                # refusing an honest retry is a live false negative. This
+                # branch ignored the record entirely, which is the sibling of
+                # the rule contract.py already had (kimi).
+                retry = read_termination(run_dir)
+                if (retry is not None
+                        and not termination_problem(retry, contract, None)
+                        and retry.get("exit_code") == 0):
+                    reasons.append(
+                        f"scheduler reports {sstate} for job {jid}, but a "
+                        f"later local run was recorded with exit 0 and decides "
+                        f"the outcome; the failed job's accounting is not this "
+                        f"attempt's")
+                else:
+                    # A failed job's partial metrics cannot certify convergence.
+                    state = "CONTRACT_VIOLATED"
+                    reasons.append(
+                        f"scheduler reports {sstate} for job {jid}; the job did "
+                        f"not end successfully, so its metrics cannot certify "
+                        f"convergence. Fix the run and train again, then "
+                        f"`record --exit-code 0` for a local retry or "
+                        f"`init --force` to declare a new contract instance")
             elif sstate is None:
                 # A recorded job id with no scheduler record either way is not
                 # evidence of anything. Accept an explicit local termination,
@@ -1942,14 +1961,20 @@ def cmd_check(args):
                     f"the newest checkpoint ({newest.get('name')}) predates "
                     f"this contract, so no artifact from this run supports the "
                     f"verdict; a reused checkpoint directory cannot certify a "
-                    f"new run")
+                    f"new run. Train again so a checkpoint is written, or "
+                    f"`init --force` to declare a contract for the run that "
+                    f"will. On a filesystem with whole-second mtimes a run "
+                    f"finishing inside the declaration second looks like this "
+                    f"too -- see the Known limits")
             else:
                 reasons.append(
                     f"the checkpoint selected ({newest.get('name')}) needs "
                     f"{len(stale_members)} file(s) that predate this contract "
                     f"({', '.join(stale_members[:3])}), so it is a mixture of "
                     f"this run's output and a previous run's; that is not a "
-                    f"loadable model from this run")
+                    f"loadable model from this run. Clear the checkpoint "
+                    f"directory, or point --checkpoint-dir at a fresh one, and "
+                    f"train again")
         elif not ckpt.get("exists"):
             state = "INCOMPLETE_EVIDENCE"
             reasons.append(

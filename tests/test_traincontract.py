@@ -2940,5 +2940,67 @@ class TestSchedulerRowMustPostdateItsEvidence(Base):
         r = self._check(dict(os.environ, PATH=f"{b}:{os.environ['PATH']}"))
         self.assertEqual(r.returncode, VIOLATED, r.stdout + r.stderr)
 
+class TestLaterLocalRetryDecidesHereToo(Base):
+    """kimi: the SLURM_BAD_END branch set CONTRACT_VIOLATED and ignored a
+    matching local termination record entirely, so an honest local retry after
+    a failed batch job could never recover. contract.py already had the rule
+    that the latest attempt decides; this was its sibling, unapplied.
+
+    Sixteenth instance of a rule reaching one verifier and not the other."""
+
+    def _sacct(self, row):
+        b = self.tmp / f"lr{abs(hash(row))}"
+        b.mkdir(exist_ok=True)      # the same row is used twice in one test
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S",
+                              time.localtime(self._contract_time()))
+        (b / "sacct").write_text(f'#!/bin/sh\necho "{row}|{stamp}|{stamp}"\n')
+        (b / "squeue").write_text("#!/bin/sh\nexit 0\n")
+        for n in ("sacct", "squeue"):
+            (b / n).chmod(0o755)
+        return dict(os.environ, PATH=f"{b}:{os.environ['PATH']}")
+
+    def _check(self, env):
+        return subprocess.run([sys.executable, str(SCRIPT), "check",
+                               str(self.run_dir)], capture_output=True,
+                              text=True, env=env)
+
+    def setUpBound(self, record=False):
+        self.write_metrics(PLATEAU_ROWS)
+        self.add_checkpoint()
+        self.init(record=record)
+        self.assertEqual(tc("bind", str(self.run_dir), "--job-id", "91"
+                            ).returncode, 0)
+
+    def test_a_failed_job_alone_still_violates(self):
+        self.setUpBound(record=False)
+        r = self._check(self._sacct("FAILED|1:0"))
+        self.assertEqual(r.returncode, VIOLATED, r.stdout + r.stderr)
+        self.assertIn("record --exit-code 0", r.stdout)
+
+    def test_a_later_local_retry_recovers(self):
+        self.setUpBound(record=False)
+        self.assertEqual(self._check(self._sacct("FAILED|1:0")).returncode,
+                         VIOLATED)
+        self.record_terminal()
+        r = self._check(self._sacct("FAILED|1:0"))
+        self.assertEqual(r.returncode, CONVERGED, r.stdout + r.stderr)
+        self.assertIn("later local run was recorded", r.stdout)
+
+    def test_a_failed_local_retry_does_not_recover(self):
+        self.setUpBound(record=False)
+        self.record_terminal(exit_code=3)
+        r = self._check(self._sacct("FAILED|1:0"))
+        self.assertNotEqual(r.returncode, CONVERGED, r.stdout)
+
+    def test_a_record_for_another_contract_does_not_recover(self):
+        self.setUpBound(record=False)
+        self.record_terminal()
+        tpath = self.run_dir / "training-termination.json"
+        rec = json.loads(tpath.read_text())
+        rec["contract_id"] = "0123456789abcdef"
+        tpath.write_text(json.dumps(rec))
+        r = self._check(self._sacct("FAILED|1:0"))
+        self.assertEqual(r.returncode, VIOLATED, r.stdout + r.stderr)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

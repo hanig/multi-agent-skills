@@ -197,6 +197,25 @@ class TestVerifierSymmetry(unittest.TestCase):
                     f"{path.name}: a refusal names no action the user can "
                     f"take: {text[:120]}")
 
+    def test_a_later_local_retry_decides_in_both_verifiers(self):
+        """The tie-break -- the latest attempt decides, and a matching local
+        record is later than the bound job -- was applied to contract.py and
+        not to traincontract.py, so a failed batch job there could never be
+        recovered by an honest local retry (kimi). Sixteenth instance of a rule
+        reaching one verifier and not the other, which is why this file
+        exists."""
+        for path in (WORKFLOW, TRAINING):
+            src = code_only(path)
+            self.assertIn(
+                "read_termination" if path is TRAINING else "last_is_local",
+                src, f"{path.name}: no local-retry path at all")
+        # the training verifier's BAD_END branch must consult the record
+        tsrc = TRAINING.read_text()
+        i = tsrc.index("SLURM_BAD_END:")
+        window = tsrc[i:i + 1200]
+        self.assertIn("read_termination", window,
+                      "the BAD_END branch must consider a later local retry")
+
     def test_the_shared_helpers_really_are_identical(self):
         """Copies drift. Where a helper exists in both files under the same
         name, its CODE must match -- a fix applied to one copy and not the
