@@ -1507,7 +1507,7 @@ class TestFailClosedRound2(Base):
         # real sacct emits all three, and the missing Submit meant this test
         # stopped at the ownership check instead of reaching the state check.
         (bindir / "sacct").write_text(
-            '#!/bin/sh\necho "SPECIAL_EXIT|0:0|$(date -u +%Y-%m-%dT%H:%M:%S)"\n')
+            '#!/bin/sh\necho "SPECIAL_EXIT|0:0|$(date +%Y-%m-%dT%H:%M:%S)"\n')
         (bindir / "squeue").write_text("#!/bin/sh\nexit 0\n")
         for n in ("sacct", "squeue"):
             (bindir / n).chmod(0o755)
@@ -1659,7 +1659,7 @@ class TestVerdictLogicRound(Base):
         """
         b = self.tmp / f"sb{abs(hash((state_line, submit)))}"
         b.mkdir()
-        col = ('$(date -u +%Y-%m-%dT%H:%M:%S)' if submit == "now"
+        col = ('$(date +%Y-%m-%dT%H:%M:%S)' if submit == "now"
                else submit)
         (b / "sacct").write_text(
             f'#!/bin/sh\necho "{state_line}|{col}"\n')
@@ -2357,6 +2357,68 @@ class TestPartialCheckpointCase(Base):
                 r = tc("check", str(self.run_dir))
                 self.assertNotEqual(r.returncode, CONVERGED,
                                     f"{name}: {r.stdout}")
+
+class TestTimestampsUnderForeignTimezones(Base):
+    """A TZ sweep, because the nine-hour offset bug was invisible on a host
+    whose local time matched what the fixtures emitted. Half-hour offsets are
+    included deliberately: Adelaide is +0930, and an implementation that
+    assumes whole-hour offsets passes every other case."""
+
+    ZONES = ("UTC", "Asia/Tokyo", "America/New_York", "Australia/Adelaide",
+             "Asia/Kolkata", "Pacific/Chatham")
+
+    def helper(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("tc_tzsweep", SCRIPT)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m
+
+    def test_one_instant_parses_the_same_in_every_zone(self):
+        old = os.environ.get("TZ")
+        try:
+            results = {}
+            for z in self.ZONES:
+                os.environ["TZ"] = z
+                time.tzset()
+                m = self.helper()
+                results[z] = m.parse_iso_ts("2024-08-12T15:05:00+0000")
+            want = float(calendar.timegm(
+                time.strptime("2024-08-12T15:05:00", "%Y-%m-%dT%H:%M:%S")))
+            for z, got in results.items():
+                self.assertEqual(got, want,
+                                 f"{z}: an explicit offset must not depend on "
+                                 f"the host zone")
+        finally:
+            if old is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old
+            time.tzset()
+
+    def test_a_naive_stamp_tracks_the_host_zone_in_every_zone(self):
+        """The other half: naive means local, so it MUST move with TZ. If this
+        ever stops being true, the fixtures and sacct disagree again."""
+        old = os.environ.get("TZ")
+        try:
+            seen = set()
+            for z in self.ZONES:
+                os.environ["TZ"] = z
+                time.tzset()
+                m = self.helper()
+                v = m.parse_iso_ts("2024-08-12T15:05:00")
+                self.assertEqual(
+                    v, time.mktime(time.strptime("2024-08-12T15:05:00",
+                                                 "%Y-%m-%dT%H:%M:%S")), z)
+                seen.add(v)
+            self.assertGreater(len(seen), 1,
+                               "a naive stamp should differ between zones")
+        finally:
+            if old is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old
+            time.tzset()
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

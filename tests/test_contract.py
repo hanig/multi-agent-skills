@@ -10,6 +10,7 @@ No cluster, no network, no Slurm required.
     python3 tests/test_contract.py
 """
 
+import calendar
 import json
 import os
 import re
@@ -1164,6 +1165,43 @@ class TestCorruptedEpochDoesNotRejectHonestRuns(Base):
         c = re.sub(r'"created_at_epoch": [^,\n]+',
                    f'"created_at_epoch": {literal}', cpath.read_text())
         cpath.write_text(c)
+
+class TestEveryOffsetRenderingSacctCanEmit(unittest.TestCase):
+    """deepseek asserted %z matches only +HHMM, so colon offsets and Z would
+    return None and discard honest rows. It does not reproduce: %z has accepted
+    +HH:MM and Z since Python 3.7, which is this repo's floor. Pinned here so
+    the claim is settled by a test rather than re-argued, and so a future
+    hand-rolled offset parser cannot regress it."""
+
+    def module(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("cm_off", SCRIPT)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m
+
+    def test_all_renderings_of_one_instant_agree(self):
+        m = self.module()
+        want = float(calendar.timegm(
+            time.strptime("2024-08-12T15:05:00", "%Y-%m-%dT%H:%M:%S")))
+        for form in ("2024-08-12T15:05:00+0000",
+                     "2024-08-12T15:05:00+00:00",
+                     "2024-08-12T15:05:00Z",
+                     "2024-08-12T20:35:00+05:30",      # half-hour offset
+                     "2024-08-12T15:05:00.123456+00:00",
+                     "2024-08-12 15:05:00+0000"):      # space separator
+            with self.subTest(form=form):
+                self.assertEqual(m.parse_iso_ts(form), want)
+
+    def test_python_floor_supports_what_this_relies_on(self):
+        self.assertGreaterEqual(sys.version_info[:2], (3, 7),
+                                "%z colon/Z support needs 3.7+")
+
+    def test_garbage_still_returns_none(self):
+        m = self.module()
+        for bad in ("not-a-timestamp", "", "   ", "2024-13-45T99:99:99",
+                    None, 12345):
+            self.assertIsNone(m.parse_iso_ts(bad), repr(bad))
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
