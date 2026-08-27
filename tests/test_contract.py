@@ -1225,5 +1225,70 @@ class TestEveryOffsetRenderingSacctCanEmit(unittest.TestCase):
                     None, 12345):
             self.assertIsNone(m.parse_iso_ts(bad), repr(bad))
 
+class TestOwnershipWindowAndExactSubmit(unittest.TestCase):
+    """Round 7. Both bounds, the truncation slack, and the exact-submit path
+    that removes the window entirely."""
+
+    def module(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("cm_own", SCRIPT)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m
+
+    def test_truncation_does_not_refuse_an_honest_row(self):
+        """deepseek: sbatch at 12:00:00.999 records 12:00:00 while sacct rounds
+        Submit to 12:00:01, so an exact upper bound refused the honest row.
+        Both sides are whole seconds; one second of slack each way."""
+        m = self.module()
+        ok, why = m.sacct_row_is_ours(1735732801, 1735732700, 1735732800)
+        self.assertTrue(ok, why)
+
+    def test_slack_is_one_second_not_more(self):
+        m = self.module()
+        self.assertEqual(m.OWNERSHIP_SLACK_S, 1)
+        self.assertFalse(m.sacct_row_is_ours(1735732802, 1735732700,
+                                             1735732800)[0])
+
+    def test_a_later_reuse_is_refused(self):
+        """sol's false pass."""
+        m = self.module()
+        ok, why = m.sacct_row_is_ours(3700, 100, 110)
+        self.assertFalse(ok)
+        self.assertIn("later job", why)
+
+    def test_an_earlier_reuse_is_refused(self):
+        m = self.module()
+        ok, why = m.sacct_row_is_ours(50, 100, 110)
+        self.assertFalse(ok)
+        self.assertIn("earlier job", why)
+
+    def test_exact_submit_excludes_a_reuse_inside_the_window(self):
+        """luna: a reuse landing between our submission and our binding sits
+        inside the interval. Recording the scheduler's own Submit at submit
+        time turns ownership into an equality and removes the window."""
+        m = self.module()
+        self.assertFalse(m.sacct_row_is_ours(105, 100, 110, 101)[0],
+                         "a row 4s from our recorded submit is another job")
+        self.assertTrue(m.sacct_row_is_ours(101, 100, 110, 101)[0],
+                        "our own row must still be ours")
+
+    def test_exact_submit_keeps_the_truncation_slack(self):
+        m = self.module()
+        self.assertTrue(m.sacct_row_is_ours(102, 100, 110, 101)[0])
+        self.assertFalse(m.sacct_row_is_ours(103, 100, 110, 101)[0])
+
+    def test_an_unparseable_submit_still_fails_closed_with_exact_recorded(self):
+        m = self.module()
+        ok, why = m.sacct_row_is_ours(None, 100, 110, 101)
+        self.assertFalse(ok)
+        self.assertIn("Submit", why)
+
+    def test_submit_records_the_scheduler_submit_field(self):
+        """The attempt record must carry it, or check has nothing to compare."""
+        src = SCRIPT.read_text()
+        self.assertIn('"sacct_submit": exact', src)
+        self.assertIn('"-o", "Submit"', src)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1908,9 +1908,9 @@ class TestValidators(unittest.TestCase):
 
 class TestPortability(unittest.TestCase):
     def test_stdlib_only(self):
-        allowed = {"argparse", "fnmatch", "calendar", "hashlib", "json", "math", "os", "re",
-                   "signal", "stat", "subprocess", "sys", "tempfile", "time",
-                   "pathlib"}
+        allowed = {"argparse", "fnmatch", "calendar", "hashlib", "json",
+                   "math", "os", "re", "shutil", "signal", "stat",
+                   "subprocess", "sys", "tempfile", "time", "pathlib"}
         for line in SCRIPT.read_text().splitlines():
             s = line.strip()
             if s.startswith("import ") and not s.startswith("import ("):

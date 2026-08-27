@@ -39,7 +39,16 @@ as predating a declaration made later in the same second).
   Upper only: `bind` runs after `sbatch`, so the honest Submit is always
   earlier than the moment we recorded, and every real submission was discarded.
   `bound_at` is recorded after the scheduler returned the id, so our Submit
-  cannot be later than it.
+  cannot be later than it. One second of slack each way, because both sides are
+  whole seconds and each can sit up to a second off the real instant: sbatch at
+  12:00:00.999 records 12:00:00 while sacct rounds Submit to 12:00:01, and an
+  exact comparison refused that honest row (deepseek).
+
+  Better than the interval, and preferred when available: `submit` and `bind`
+  ask the scheduler for the job's OWN Submit at the moment they record the id,
+  and store it. Ownership is then an equality, which excludes a reuse in both
+  time directions and removes the window -- including a reuse landing between
+  our submission and our binding, which the interval accepts (luna).
 
 ## The change
 
@@ -85,8 +94,11 @@ as predating a declaration made later in the same second).
 
 ## Known limits, stated rather than papered over
 
-- A reuse INSIDE the declaration second, or inside the binding second, is
-  indistinguishable from an honest submission: sacct emits no finer precision. Accepted
+- A reuse within one second of our own submission is indistinguishable from it:
+  sacct emits whole seconds and the slack is a second wide. Without a recorded
+  `sacct_submit` the ambiguous window widens to declaration-through-binding,
+  which is why `submit` and `bind` record it whenever sacct answers, and why
+  they say so when it does not. Accepted
   deliberately, because refusing it would reject every job submitted in its
   contract's second.
 - A job queued before its contract was declared — `init` running inside a job

@@ -447,34 +447,39 @@ def criteria_digest(contract):
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
-def sacct_row_is_ours(sacct_submit, declared_at, bound_at=None):
+# Both our ISO stamps and sacct's Submit are whole seconds, so each can sit up
+# to a second either side of the real instant. Comparing them exactly refused
+# honest rows: sbatch at 12:00:00.999 records 12:00:00 while sacct rounds Submit
+# to 12:00:01 (deepseek). One second of slack on each bound, no more.
+OWNERSHIP_SLACK_S = 1
+
+
+def sacct_row_is_ours(sacct_submit, declared_at, bound_at=None,
+                      exact_submit=None):
     """Whether an sacct row can be evidence about the job WE submitted.
 
-    Returns (ok, why_not). The row's Submit must fall inside the window in
-    which our submission demonstrably happened:
+    Returns (ok, why_not).
 
-        declared_at  <=  Submit  <=  bound_at
+    Best case, `exact_submit`: the scheduler's OWN Submit for this job id,
+    recorded when the id was bound. Then ownership is an equality, and a reuse
+    is excluded in both time directions with no window at all.
 
-    Both bounds are needed, and using one without the other failed in opposite
-    directions:
+    Otherwise an interval, which is all the evidence available:
 
-      Lower only (declared_at): a row from a LATER reuse of the same job id
-      also post-dates the declaration, so it was attributed to us. Sol found
-      both consequences: a later FAILED row made an honest successful run
-      report FAILED, and a later COMPLETED row certified a training run that
-      had actually exited non-zero. The second is a false pass.
+        declared_at - slack  <=  Submit  <=  bound_at + slack
 
-      Upper only (bound_at): `bind` runs after `sbatch`, so the honest Submit
-      is always EARLIER than the moment we recorded, and every real submission
-      was discarded. That was the previous implementation.
+    Both bounds are load-bearing and each alone failed in the opposite
+    direction. Lower only: a row from a LATER reuse also post-dates the
+    declaration, which let a later clean COMPLETED row certify a run that had
+    exited non-zero (sol; a false pass). Upper only: `bind` runs after
+    `sbatch`, so the honest Submit is always earlier than the moment we
+    recorded, and every real submission was discarded.
 
-    bound_at is recorded after the scheduler returned the id, so our Submit
-    cannot be later than it. Second resolution on both sides, because sacct
-    renders Submit as whole seconds and demanding more would reject every row.
-
-    KNOWN LIMIT: a reuse inside the declaration second is indistinguishable
-    from an honest same-second submission, and so is one inside the binding
-    second. sacct emits no finer precision.
+    KNOWN LIMIT, when exact_submit is absent: a reuse landing between our
+    submission and our binding falls inside the interval (luna). It needs the
+    scheduler's id counter to wrap into that window, but it is real. Recording
+    the scheduler's Submit at bind time is what removes it, which is why
+    `exact_submit` exists and why `bind` populates it whenever sacct answers.
     """
     if declared_at is None:
         return False, ("the contract carries no usable declaration time, so an "
@@ -485,11 +490,19 @@ def sacct_row_is_ours(sacct_submit, declared_at, bound_at=None):
         return False, ("sacct reported no usable Submit time, so its row "
                        "cannot be confirmed to describe this contract's job "
                        "rather than another job reusing the id")
-    if int(sacct_submit) < int(declared_at):
+    if exact_submit is not None:
+        if abs(int(sacct_submit) - int(exact_submit)) > OWNERSHIP_SLACK_S:
+            return False, ("this row's submit time differs from the one the "
+                           "scheduler reported for this job id when it was "
+                           "bound, so the id has been reused and the row "
+                           "describes a different job")
+        return True, None
+    if int(sacct_submit) < int(declared_at) - OWNERSHIP_SLACK_S:
         return False, ("the sacct row was submitted before this contract was "
                        "declared, so the job id has been reused and the row "
                        "describes an earlier job")
-    if bound_at is not None and int(sacct_submit) > int(bound_at):
+    if (bound_at is not None
+            and int(sacct_submit) > int(bound_at) + OWNERSHIP_SLACK_S):
         return False, ("the sacct row was submitted after this contract's job "
                        "id was recorded, so the id has been reused and the row "
                        "describes a later job")
@@ -716,11 +729,23 @@ def cmd_submit(args):
         sys.exit(f"error: sbatch failed: {err or out}")
     job_id = out.split(";")[0].strip()
 
+    # The scheduler's OWN submit time for the id it just gave us. Recorded,
+    # ownership at check time is an equality rather than a window, so a reuse
+    # is excluded in both time directions.
+    exact = None
+    if shutil.which("sacct"):
+        rc, out, _ = run(["sacct", "-n", "-X", "-P", "-j", job_id, "-o", "Submit"])
+        if rc == 0 and out:
+            rows = [ln.strip() for ln in out.splitlines() if ln.strip()]
+            if len(rows) == 1 and parse_iso_ts(rows[0]) is not None:
+                exact = rows[0]
+
     attempt = {
         "contract_id": contract.get("contract_id"),
         "attempt": _next_attempt(run_dir),
         "job_id": job_id,
         "submitted_at": now_iso(),
+        "sacct_submit": exact,
         "sbatch_args": list(args.sbatch_arg),
         "host": os.uname().nodename,
     }
@@ -958,7 +983,8 @@ def cmd_check(args):
             # compares against the declaration. See sacct_row_is_ours.
             ours, why_not = sacct_row_is_ours(
                 parse_iso_ts(ssubmit), declared_at,
-                parse_iso_ts(attempts[-1].get("submitted_at")))
+                parse_iso_ts(attempts[-1].get("submitted_at")),
+                parse_iso_ts(attempts[-1].get("sacct_submit")))
             if sstate is not None and not ours:
                 reasons.append(f"sacct row for job {job_id} discarded: "
                                f"{why_not}")

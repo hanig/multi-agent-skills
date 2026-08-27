@@ -44,6 +44,7 @@ import json
 import math
 import os
 import re
+import shutil
 import signal
 import stat
 import subprocess
@@ -167,34 +168,39 @@ SLURM_BAD_END = ("FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY",
 SLURM_OK_END = ("COMPLETED",)
 
 
-def sacct_row_is_ours(sacct_submit, declared_at, bound_at=None):
+# Both our ISO stamps and sacct's Submit are whole seconds, so each can sit up
+# to a second either side of the real instant. Comparing them exactly refused
+# honest rows: sbatch at 12:00:00.999 records 12:00:00 while sacct rounds Submit
+# to 12:00:01 (deepseek). One second of slack on each bound, no more.
+OWNERSHIP_SLACK_S = 1
+
+
+def sacct_row_is_ours(sacct_submit, declared_at, bound_at=None,
+                      exact_submit=None):
     """Whether an sacct row can be evidence about the job WE submitted.
 
-    Returns (ok, why_not). The row's Submit must fall inside the window in
-    which our submission demonstrably happened:
+    Returns (ok, why_not).
 
-        declared_at  <=  Submit  <=  bound_at
+    Best case, `exact_submit`: the scheduler's OWN Submit for this job id,
+    recorded when the id was bound. Then ownership is an equality, and a reuse
+    is excluded in both time directions with no window at all.
 
-    Both bounds are needed, and using one without the other failed in opposite
-    directions:
+    Otherwise an interval, which is all the evidence available:
 
-      Lower only (declared_at): a row from a LATER reuse of the same job id
-      also post-dates the declaration, so it was attributed to us. Sol found
-      both consequences: a later FAILED row made an honest successful run
-      report FAILED, and a later COMPLETED row certified a training run that
-      had actually exited non-zero. The second is a false pass.
+        declared_at - slack  <=  Submit  <=  bound_at + slack
 
-      Upper only (bound_at): `bind` runs after `sbatch`, so the honest Submit
-      is always EARLIER than the moment we recorded, and every real submission
-      was discarded. That was the previous implementation.
+    Both bounds are load-bearing and each alone failed in the opposite
+    direction. Lower only: a row from a LATER reuse also post-dates the
+    declaration, which let a later clean COMPLETED row certify a run that had
+    exited non-zero (sol; a false pass). Upper only: `bind` runs after
+    `sbatch`, so the honest Submit is always earlier than the moment we
+    recorded, and every real submission was discarded.
 
-    bound_at is recorded after the scheduler returned the id, so our Submit
-    cannot be later than it. Second resolution on both sides, because sacct
-    renders Submit as whole seconds and demanding more would reject every row.
-
-    KNOWN LIMIT: a reuse inside the declaration second is indistinguishable
-    from an honest same-second submission, and so is one inside the binding
-    second. sacct emits no finer precision.
+    KNOWN LIMIT, when exact_submit is absent: a reuse landing between our
+    submission and our binding falls inside the interval (luna). It needs the
+    scheduler's id counter to wrap into that window, but it is real. Recording
+    the scheduler's Submit at bind time is what removes it, which is why
+    `exact_submit` exists and why `bind` populates it whenever sacct answers.
     """
     if declared_at is None:
         return False, ("the contract carries no usable declaration time, so an "
@@ -205,11 +211,19 @@ def sacct_row_is_ours(sacct_submit, declared_at, bound_at=None):
         return False, ("sacct reported no usable Submit time, so its row "
                        "cannot be confirmed to describe this contract's job "
                        "rather than another job reusing the id")
-    if int(sacct_submit) < int(declared_at):
+    if exact_submit is not None:
+        if abs(int(sacct_submit) - int(exact_submit)) > OWNERSHIP_SLACK_S:
+            return False, ("this row's submit time differs from the one the "
+                           "scheduler reported for this job id when it was "
+                           "bound, so the id has been reused and the row "
+                           "describes a different job")
+        return True, None
+    if int(sacct_submit) < int(declared_at) - OWNERSHIP_SLACK_S:
         return False, ("the sacct row was submitted before this contract was "
                        "declared, so the job id has been reused and the row "
                        "describes an earlier job")
-    if bound_at is not None and int(sacct_submit) > int(bound_at):
+    if (bound_at is not None
+            and int(sacct_submit) > int(bound_at) + OWNERSHIP_SLACK_S):
         return False, ("the sacct row was submitted after this contract's job "
                        "id was recorded, so the id has been reused and the row "
                        "describes a later job")
@@ -291,7 +305,8 @@ def squeue_state(job_id):
     return out.splitlines()[0].strip() or None
 
 
-def slurm_state(job_id, declared_at=None, bound_at=None):
+def slurm_state(job_id, declared_at=None, bound_at=None,
+                exact_at=None):
     """Latest sacct row for a job, or None when accounting is unavailable.
     Takes the LAST row: a requeued job has one per attempt, oldest first."""
     rc, out = run(["sacct", "-n", "-X", "-P", "-j", str(job_id),
@@ -305,7 +320,8 @@ def slurm_state(job_id, declared_at=None, bound_at=None):
     state = fields[0].split()[0] if fields and fields[0] else None
     code = fields[1] if len(fields) > 1 else ""
     submit = parse_iso_ts(fields[2].strip()) if len(fields) > 2 else None
-    ours, _why = sacct_row_is_ours(submit, declared_at, bound_at)
+    ours, _why = sacct_row_is_ours(submit, declared_at, bound_at,
+                                   exact_at)
     if not ours:
         # Slurm resets and reuses job ids; a row we cannot attribute to our own
         # submission says nothing about this contract's run. Carry WHY: an
@@ -1188,12 +1204,13 @@ def read_binding(run_dir):
         # is: an unbound binding survived `init --force`.
         if (isinstance(b, dict) and b.get("job_id")
                 and (cid is None or b.get("contract_id") == cid)):
-            return str(b["job_id"]), b.get("submitted_at")
+            return (str(b["job_id"]), b.get("submitted_at"),
+                    b.get("sacct_submit"))
 
     init_id = (contract.get("run") or {}).get("slurm_job_id")
     if init_id:
-        return str(init_id), contract.get("created_at")
-    return None, None
+        return str(init_id), contract.get("created_at"), None
+    return None, None, None
 
 
 def cmd_bind(args):
@@ -1241,13 +1258,32 @@ def cmd_bind(args):
                  f"point the verifier at other accounting. Use --force only if "
                  f"that record is wrong.")
 
-    existing_id, existing_at = read_binding(run_dir)
+    existing_id, existing_at, _ = read_binding(run_dir)
     if existing_id is not None and existing_id != job_id and not args.force:
         sys.exit(f"error: this contract is already bound to job {existing_id}; "
                  f"binding it to {job_id} would let a second job's accounting "
                  f"certify it. Use --force only if the first binding was wrong.")
 
+    # Ask the scheduler for this job's Submit now, while we know the id is the
+    # one we just submitted. Recorded, ownership becomes an equality and a reuse
+    # is excluded in both directions; absent, the interval is the fallback.
+    exact = None
+    if shutil.which("sacct"):
+        rc, out = run(["sacct", "-n", "-X", "-P", "-j", job_id, "-o", "Submit"])
+        if rc == 0 and out:
+            rows = [ln.strip() for ln in out.splitlines() if ln.strip()]
+            # One row only. Several means the id is ALREADY ambiguous, and
+            # picking one would be a guess.
+            if len(rows) == 1 and parse_iso_ts(rows[0]) is not None:
+                exact = rows[0]
+    if exact:
+        print(f"  scheduler reports this job was submitted at {exact}")
+    else:
+        print("  note: sacct did not report a single submit time for this job, "
+              "so ownership will use the declaration-to-binding window")
+
     rec = {"job_id": job_id,
+           "sacct_submit": exact,
            # Re-binding the SAME id keeps the FIRST time: rewriting it made the
            # operation non-idempotent, and a retry moved the anchor forward.
            "submitted_at": (existing_at if existing_id == job_id and existing_at
@@ -1511,8 +1547,9 @@ def cmd_check(args):
     # Ownership is established by the binding, never inferred from timestamps.
     # The binding establishes WHICH job id is ours; the declaration time is
     # what an sacct row gets placed against.
-    jid, _bound_iso = read_binding(run_dir)
+    jid, _bound_iso, _exact_iso = read_binding(run_dir)
     bound_at = parse_iso_ts(_bound_iso)
+    exact_at = parse_iso_ts(_exact_iso)
     if state == "CONVERGED":
         if not jid:
             # No job id: the only admissible evidence is an explicitly recorded
@@ -1548,7 +1585,7 @@ def cmd_check(args):
             # attempt while the job is running again, and a stale terminal row
             # must not outrank a live one.
             qstate = squeue_state(jid)
-            sstate = slurm_state(jid, declared_at, bound_at)
+            sstate = slurm_state(jid, declared_at, bound_at, exact_at)
             if qstate:
                 # ANY squeue state means the job is still in the system --
                 # enumerating live states missed real ones such as STAGE_OUT.
@@ -1695,7 +1732,8 @@ def cmd_check(args):
                        "it, but this cannot establish convergence")
 
     if state == "RUNNING" and contract.get("preemptible"):
-        sstate = slurm_state(jid, declared_at, bound_at) if jid else None
+        sstate = (slurm_state(jid, declared_at, bound_at, exact_at)
+                  if jid else None)
         if sstate in ("PREEMPTED", "REQUEUED", "SUSPENDED"):
             state = "PREEMPTED"
             reasons.append(f"scheduler reports {sstate} for job {jid}; "
