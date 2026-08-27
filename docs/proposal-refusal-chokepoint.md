@@ -1,3 +1,55 @@
+# Proposal: replace the action-naming lint with a refusal chokepoint
+
+> **STATUS: NOT IMPLEMENTED. Committee verdict 2026-08-27: REVIEW_FAIL.**
+> Direction endorsed, this specification rejected. Author: gpt-5.6-sol
+> (xhigh, 27,970 reasoning tokens). Panel: deepseek-v4-pro, luna,
+> kimi-k2.7-code (glm-5.1 errored). Sol excluded as author.
+>
+> **The diagnosis is right and worth keeping:** do not lint free English for
+> imperative verbs. Make an omitted action *unrepresentable* rather than
+> *detectable*, so the test checks architecture instead of wording. Five
+> versions of the lint have now failed, four of them caught by reviewers and
+> never by the test.
+>
+> **Five defects must be fixed before any of this is built.** Two were found
+> independently by two reviewers each.
+>
+> 1. **CRITICAL (kimi-k2.7-code), MAJOR (luna), independently.** The design
+>    requires `from cli_refusal import ...`. This repo installs skills
+>    individually (`install.sh --only NAME`), so a skill cannot import from a
+>    sibling and helpers are COPIED byte-identical. Inlining makes the
+>    chokepoint's own `sys.exit` calls look like the forbidden direct exits
+>    the test bans, and trips its missing-import check. A correct build fails.
+>    Fix: the test must accept inlined definitions and exempt the chokepoint
+>    itself by name.
+> 2. **MAJOR (luna).** `exit_status(1)` is part of the proposal's own approved
+>    API, takes only an integer, and terminates without any action. So
+>    omission is NOT unrepresentable through the supported API, which is the
+>    proposal's central claim. Sol's residual section does not mention it:
+>    a fifth gap, unstated. Fix: remove the sink, or require an action.
+> 3. **MAJOR (kimi-k2.7-code).** The test code uses `ast.Str`,
+>    `ast.NameConstant` and `ast.Index`, all removed in Python 3.10. The repo
+>    runs 3.13 (Mac), 3.12 (lambda), 3.10 (andromeda, chimera), so it would
+>    abort everywhere before checking anything. Fix: `ast.Constant`.
+> 4. **MAJOR (kimi-k2.7-code).** The validator rule rejects honest
+>    composition: `return child_problem(value)` is flagged even though it
+>    returns an action-carrying refusal. Refusing an honest pattern is as
+>    serious here as passing a dishonest one. Fix: allow delegation to
+>    another `*_problem`.
+> 5. **MAJOR (kimi-k2.7-code).** `argparse.error(...)` and direct stderr
+>    writes stay unblocked, so the rule is violated while the architecture
+>    test is green. Sol lists this as a future channel needing "coding
+>    policy"; kimi's point is that argparse is already present and reachable.
+>
+> Sequencing note, not part of the review: this is a ~43-site migration to
+> two tools whose verifier logic has been clean across three consecutive
+> committees, and an actionless refusal is a usability defect rather than a
+> false pass. `hanig-reproducible-result` is unstarted, so the chokepoint can
+> be designed into it from the beginning instead of retrofitted. That is
+> Hani's call.
+
+---
+
 ## Recommendation
 
 Do not lint unrestricted English for imperative verbs. That has already failed repeatedly and cannot be made reliable with the stated constraints.
