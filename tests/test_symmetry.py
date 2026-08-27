@@ -163,6 +163,40 @@ class TestVerifierSymmetry(unittest.TestCase):
             failed = set(getattr(m, "SLURM_FAILED", None) or m.SLURM_BAD_END)
             self.assertIn("SPECIAL_EXIT", failed, path.name)
 
+    def test_every_refusal_names_an_action(self):
+        """The bias this repo had: careful about false passes, careless about
+        whether a rejected user can proceed. kimi found one refusal that named
+        no way out; a sweep found two more. A refusal a user cannot act on is a
+        defect even when the refusal is correct.
+
+        Heuristic by necessity -- it reads the reason strings in blocks that set
+        a non-passing state and looks for an imperative. It is here to catch a
+        NEW actionless refusal, not to prove the existing ones are well worded.
+        """
+        import re
+        actionable = ("record", "bind", "submit", "re-declare", "init",
+                      "Run ", "declare", "use ", "Use ", "Split", "split",
+                      "raise", "SLURM_TIME_FORMAT", "Check", "Point",
+                      "re-run", "Re-declare", "fix the writer", "omit")
+        for path in (WORKFLOW, TRAINING):
+            src = path.read_text()
+            blocks = re.findall(
+                r'state = "(?:INCOMPLETE_EVIDENCE|CONTRACT_VIOLATED)"\n'
+                r'((?:\s+reasons\.append\((?:[^()]|\([^()]*\))*\)\n)+)', src)
+            for body in blocks:
+                msgs = re.findall(r'"([^"]{30,})"', body)
+                text = " ".join(m for m in msgs if any(c.isalpha() for c in m))
+                # Only judge blocks whose reason text this crude reader could
+                # actually recover: a long whitespace run or an f-string split
+                # across concatenations yields nothing to assess, and asserting
+                # on that measures the regex rather than the message.
+                if len(text.strip()) < 40:
+                    continue
+                self.assertTrue(
+                    any(a in text for a in actionable),
+                    f"{path.name}: a refusal names no action the user can "
+                    f"take: {text[:120]}")
+
     def test_the_shared_helpers_really_are_identical(self):
         """Copies drift. Where a helper exists in both files under the same
         name, its CODE must match -- a fix applied to one copy and not the

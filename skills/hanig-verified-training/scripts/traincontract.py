@@ -1654,7 +1654,10 @@ def cmd_check(args):
 
     if not rows:
         state = "INCOMPLETE_EVIDENCE"
-        reasons.append("no usable metric rows; cannot judge anything")
+        reasons.append(
+            f"no usable metric rows in {contract.get('metrics_file')}; nothing "
+            f"can be judged. Check that the trainer wrote it and that each "
+            f"line is a JSON object with a numeric 'step'")
     else:
         last_step = max(r["step"] for r in rows)
         budget_cap, _ = ((nonneg_int(budget_raw)[0], None)
@@ -1850,7 +1853,10 @@ def cmd_check(args):
                     reasons.append(
                         f"sacct reports {sstate} for job {jid}, which is not a "
                         f"recognised successful terminal state; nothing "
-                        f"confirms the run succeeded")
+                        f"confirms the run succeeded. If that state does mean "
+                        f"success on this cluster, declare the outcome with "
+                        f"`record` -- unrecognised states are never assumed "
+                        f"good")
                 else:
                     reasons.append(f"sacct reports {sstate} for job {jid}; "
                                    f"relying on the recorded local "
@@ -1860,7 +1866,9 @@ def cmd_check(args):
                 state = "CONTRACT_VIOLATED"
                 reasons.append(f"scheduler reports {sstate} for job {jid}; the "
                                f"job did not end successfully, so its metrics "
-                               f"cannot certify convergence")
+                               f"cannot certify convergence. Fix the run and "
+                               f"train again under a contract declared with "
+                               f"`init --force`")
             elif sstate is None:
                 # A recorded job id with no scheduler record either way is not
                 # evidence of anything. Accept an explicit local termination,
@@ -1944,7 +1952,10 @@ def cmd_check(args):
                     f"loadable model from this run")
         elif not ckpt.get("exists"):
             state = "INCOMPLETE_EVIDENCE"
-            reasons.append(f"checkpoint dir missing: {ckpt.get('dir')}")
+            reasons.append(
+                f"checkpoint dir missing: {ckpt.get('dir')}. Point "
+                f"--checkpoint-dir at where the trainer actually writes, or "
+                f"omit it and accept INCOMPLETE_EVIDENCE for convergence")
         elif not ckpt.get("files"):
             state = "INCOMPLETE_EVIDENCE"
             detail = "(directory empty)"

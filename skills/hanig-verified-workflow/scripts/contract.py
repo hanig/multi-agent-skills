@@ -1459,7 +1459,9 @@ def cmd_check(args):
             reasons.append(
                 f"artifact(s) the verdict depends on predate this contract "
                 f"instance and cannot have been produced by it: "
-                f"{'; '.join(stale_outputs[:3])}")
+                f"{'; '.join(stale_outputs[:3])}. Re-run the job so it writes "
+                f"them, or `init --force` to declare a new contract instance "
+                f"before the run that will")
         elif not has_execution_evidence:
             # Every predicate holds, but nothing confirms a job ran to
             # completion. Pre-existing files must never pass as a result.
@@ -1479,7 +1481,10 @@ def cmd_check(args):
 
     if state is None:
         state = "INCOMPLETE_EVIDENCE"
-        reasons.append("no scheduler evidence and no predicates evaluated")
+        reasons.append(
+            "no scheduler evidence and no predicates were evaluated, so there "
+            "is nothing to judge. Submit through `submit`, or declare the "
+            "outcome of a directly-executed run with `record`")
 
     # Criteria edited after declaration. Timestamps miss this: rewriting
     # contract.json updates its own mtime, not the artifacts'. Absent on
