@@ -1038,6 +1038,12 @@ def checkpoint_survey(ckpt_dir, pattern=None):
             info["other"].append(rec)
         # Lowercased: the check was case-sensitive, so a framework staging
         # `checkpoint-100.pt.TMP` had it counted as a complete checkpoint (luna).
+        #
+        # Applied even when --checkpoint-glob selected the file, which luna
+        # raised. Deliberate: a name ending .tmp/.part/.writing means something
+        # is mid-write, and the failure direction here is "not yet a usable
+        # checkpoint", which is the safe one. A glob that deliberately matches
+        # staged files is asking to certify a partial model.
         elif (f.name.lower().endswith(PARTIAL_SUFFIXES) or st.st_size == 0
               or not readable):
             info["partial"].append(rec)

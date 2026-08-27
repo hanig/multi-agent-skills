@@ -1197,6 +1197,28 @@ class TestEveryOffsetRenderingSacctCanEmit(unittest.TestCase):
         self.assertGreaterEqual(sys.version_info[:2], (3, 7),
                                 "%z colon/Z support needs 3.7+")
 
+    def test_strptime_preserves_the_parsed_offset(self):
+        """luna asserted CPython's time.strptime discards the %z offset, so
+        non-zero-offset renderings would not converge on one epoch. It does not
+        reproduce: tm_gmtoff carries it. Asserted directly, because this is the
+        single fact the whole timestamp fix rests on."""
+        for form, want_off in (("2023-12-31T22:00:00-0200", -7200),
+                               ("2024-01-01T00:00:00+0000", 0),
+                               ("2024-08-12T20:35:00+05:30", 19800)):
+            tm = time.strptime(form, "%Y-%m-%dT%H:%M:%S%z")
+            self.assertEqual(tm.tm_gmtoff, want_off, form)
+
+    def test_lunas_two_rendering_scenario(self):
+        """Its stated failure case, run rather than argued: a contract declared
+        at 2024-01-01T00:00:00+0000 and an honest Submit rendered
+        2023-12-31T22:00:00-0200 are THE SAME INSTANT and must compare equal."""
+        m = self.module()
+        decl = m.parse_iso_ts("2024-01-01T00:00:00+0000")
+        submit = m.parse_iso_ts("2023-12-31T22:00:00-0200")
+        self.assertEqual(decl, submit)
+        ours, why = m.sacct_row_is_ours(submit, decl)
+        self.assertTrue(ours, why)
+
     def test_garbage_still_returns_none(self):
         m = self.module()
         for bad in ("not-a-timestamp", "", "   ", "2024-13-45T99:99:99",
