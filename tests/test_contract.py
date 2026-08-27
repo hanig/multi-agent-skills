@@ -911,7 +911,7 @@ class TestPortability(unittest.TestCase):
     def test_stdlib_only(self):
         """Must run on a login node with no pip install rights."""
         src = SCRIPT.read_text()
-        allowed = {"argparse", "hashlib", "json", "os", "re", "shutil", "signal", "stat", "math",
+        allowed = {"argparse", "calendar", "hashlib", "json", "os", "re", "shutil", "signal", "stat", "math",
                    "subprocess", "sys", "tempfile", "time", "pathlib"}
         for line in src.splitlines():
             s = line.strip()

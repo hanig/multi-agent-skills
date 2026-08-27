@@ -29,6 +29,7 @@ network. Verified on chimera 3.10.12, lambda 3.12.3, andromeda 3.10.12.
 """
 
 import argparse
+import calendar
 import hashlib
 import json
 import math
@@ -526,24 +527,46 @@ def artifact_is_fresh(mtime, declared_at, declared_epoch=None):
 
 
 def parse_iso_ts(s):
-    """Epoch seconds from an ISO timestamp written by now_iso(), or None."""
+    """Epoch seconds from an ISO timestamp, or None. Timezone-aware.
+
+    sacct emits fractional seconds on some builds; an unparsed timestamp became
+    None, which artifact_is_fresh treats as "no comparison possible" and
+    therefore fresh, so a stale reused row was accepted.
+
+    The offset is HONOURED, not discarded. time.strptime parses %z and
+    time.mktime then throws it away by reading the fields as local time, so the
+    same instant written +0000, -0700 and +0200 produced three epochs spanning
+    nine hours (deepseek CRITICAL, luna independently). That silently misplaced
+    every sacct row whose rendering did not match the verifier host, in both
+    directions: a reused row could pass, and an honest one be refused.
+    """
     if not isinstance(s, str) or not s:
         return None
-    # sacct emits fractional seconds on some builds; an unparsed timestamp
-    # became None, which artifact_is_fresh treats as "no comparison possible"
-    # and therefore fresh -- so a stale reused row was accepted.
     s = s.strip()
-    # Strip ONLY the fractional-seconds run. My first attempt collected every
-    # digit after the dot, which swallowed the timezone offset's digits and
-    # produced an unparsable string -- so the guard silently failed open on
-    # exactly the timestamps it was added for.
+    # Strip ONLY the fractional-seconds run. A first attempt collected every
+    # digit after the dot, swallowing the offset's digits and producing an
+    # unparsable string -- so the guard failed open on exactly the timestamps
+    # it was added for.
     s = re.sub(r"\.\d+", "", s, count=1)
     for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S",
                 "%Y-%m-%d %H:%M:%S%z", "%Y-%m-%d %H:%M:%S"):
         try:
-            return time.mktime(time.strptime(s, fmt))
+            tm = time.strptime(s, fmt)
         except (ValueError, OverflowError):
             continue
+        try:
+            off = tm.tm_gmtoff
+        except AttributeError:              # pragma: no cover
+            off = None
+        if off is not None:
+            # Offset given: read the fields as UTC, then correct by the offset.
+            return float(calendar.timegm(tm) - off)
+        # No offset: a naive local timestamp, which is what sacct emits by
+        # default, so local is the correct reading.
+        try:
+            return time.mktime(tm)
+        except (ValueError, OverflowError):
+            return None
     return None
 
 

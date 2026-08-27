@@ -81,6 +81,14 @@ as predating a declaration made later in the same second).
   contract's second.
 - A job queued before its contract was declared — `init` running inside a job
   that waited in the queue — fails closed. `record` is the way through.
+- **Two runs interleaved with monotonic, non-duplicate, evenly-spaced steps are
+  not detectable** from the metrics file alone (luna). The integrity check
+  catches backwards steps, duplicates and gaps, which is every interleaving
+  that leaves a trace in the step sequence; an interleaving that does not
+  leave one is indistinguishable from a single noisy run. A threshold
+  criterion is the exposed case, since one run's row can satisfy it. A
+  `rel_improvement_below` plateau criterion is not, because alternating
+  values do not plateau. Prefer plateau criteria over bare thresholds.
 
 ## Out of scope
 Unsandboxed `command` predicates. Nextflow/Snakemake back ends. Any migration

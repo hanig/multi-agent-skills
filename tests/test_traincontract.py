@@ -10,6 +10,7 @@ No GPU, no cluster, no network.
     python3 tests/test_traincontract.py
 """
 
+import calendar
 import json
 import os
 import shutil
@@ -1868,7 +1869,7 @@ class TestValidators(unittest.TestCase):
 
 class TestPortability(unittest.TestCase):
     def test_stdlib_only(self):
-        allowed = {"argparse", "fnmatch", "hashlib", "json", "math", "os", "re",
+        allowed = {"argparse", "fnmatch", "calendar", "hashlib", "json", "math", "os", "re",
                    "signal", "stat", "subprocess", "sys", "tempfile", "time",
                    "pathlib"}
         for line in SCRIPT.read_text().splitlines():
@@ -2282,6 +2283,80 @@ class TestBindPhase3Round2(Base):
         for bad in ("abc", "x1", "", "  ", "5; rm -rf /", "../../etc", "-1"):
             r = tc("bind", str(self.run_dir), "--job-id", bad, "--force")
             self.assertNotEqual(r.returncode, 0, repr(bad))
+
+class TestTimezoneAwareTimestamps(Base):
+    """deepseek CRITICAL and luna independently: time.strptime parses %z and
+    time.mktime then discards it by reading the fields as local time, so the
+    same instant written +0000, -0700 and +0200 produced three epochs nine
+    hours apart. Every sacct row whose rendering did not match the verifier
+    host was misplaced, in both directions."""
+
+    def helper(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("tc_tz", SCRIPT)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m
+
+    def test_the_same_instant_parses_identically_in_any_offset(self):
+        m = self.helper()
+        vals = [m.parse_iso_ts(s) for s in
+                ("2024-08-12T15:05:00+0000", "2024-08-12T08:05:00-0700",
+                 "2024-08-12T17:05:00+0200", "2024-08-12T15:05:00+00:00",
+                 "2024-08-12T15:05:00.123+0000")]
+        self.assertTrue(all(v is not None for v in vals), vals)
+        self.assertEqual(len(set(vals)), 1, f"same instant, different epochs: {vals}")
+        want = float(calendar.timegm(
+            time.strptime("2024-08-12T15:05:00", "%Y-%m-%dT%H:%M:%S")))
+        self.assertEqual(vals[0], want)
+
+    def test_a_naive_timestamp_is_still_read_as_local(self):
+        """sacct emits local time with no offset by default, so that reading
+        must not change."""
+        m = self.helper()
+        naive = "2024-08-12T08:05:00"
+        self.assertEqual(m.parse_iso_ts(naive),
+                         time.mktime(time.strptime(naive, "%Y-%m-%dT%H:%M:%S")))
+
+    def test_an_honest_utc_row_is_not_discarded_as_stale(self):
+        """End to end: SLURM_TIME_FORMAT can render Submit in UTC while the
+        contract's created_at carries the local offset. Before the fix those
+        were compared across a 7-hour error."""
+        self.write_metrics(PLATEAU_ROWS)
+        self.add_checkpoint()
+        self.init(record=False)
+        tc("bind", str(self.run_dir), "--job-id", "5")
+        submit_utc = time.strftime("%Y-%m-%dT%H:%M:%S",
+                                   time.gmtime(self._contract_time() + 1))
+        b = self.tmp / "utcbin"
+        b.mkdir()
+        (b / "sacct").write_text(
+            f'#!/bin/sh\necho "COMPLETED|0:0|{submit_utc}+0000"\n')
+        (b / "squeue").write_text("#!/bin/sh\nexit 0\n")
+        for n in ("sacct", "squeue"):
+            (b / n).chmod(0o755)
+        env = dict(os.environ, PATH=f"{b}:{os.environ['PATH']}")
+        r = subprocess.run([sys.executable, str(SCRIPT), "check",
+                            str(self.run_dir)], capture_output=True,
+                           text=True, env=env)
+        self.assertEqual(r.returncode, CONVERGED, r.stdout + r.stderr)
+
+
+class TestPartialCheckpointCase(Base):
+    def test_uppercase_temp_suffix_is_still_partial(self):
+        """luna: the suffix check was case-sensitive, so a framework staging
+        `checkpoint-100.pt.TMP` had it counted as a complete checkpoint."""
+        self.write_metrics(PLATEAU_ROWS)
+        for name in ("model-100.pt.TMP", "model-100.pt.Part",
+                     "model-100.pt.INCOMPLETE"):
+            with self.subTest(name=name):
+                self.setUp()
+                self.write_metrics(PLATEAU_ROWS)
+                (self.ckpt / name).write_bytes(b"x" * 1024)
+                self.init()
+                r = tc("check", str(self.run_dir))
+                self.assertNotEqual(r.returncode, CONVERGED,
+                                    f"{name}: {r.stdout}")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
