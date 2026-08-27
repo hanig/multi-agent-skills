@@ -1186,13 +1186,22 @@ def cmd_bind(args):
         sys.exit("error: contract is not a JSON object")
 
     job_id = str(args.job_id).strip()
-    if not job_id or not job_id.replace("_", "").replace(".", "").isalnum():
-        sys.exit(f"error: implausible job id {args.job_id!r}")
+    # Slurm ids are numeric, with _ for array tasks and . for steps. Accepting
+    # any alphanumeric string took "abc" (luna); a leading digit is the cheap
+    # discriminator that keeps 12345, 12345_7 and 12345.batch.
+    if not re.fullmatch(r"\d[\w.]*", job_id):
+        sys.exit(f"error: implausible Slurm job id {args.job_id!r}")
 
     # Refuse a contract that already has terminal evidence: binding a new job
     # id afterwards points the verifier at different accounting and can flip a
     # settled verdict.
     term = read_termination(run_dir)
+    if term is not None and not termination_matches(term, contract):
+        # A receipt left behind by `init --force` belongs to the PREVIOUS
+        # contract. Checking read_termination alone let it block binding an
+        # honest new run (luna); every other consumer of this file already
+        # filters by contract instance.
+        term = None
     if term is not None and term.get("terminal") and not args.force:
         sys.exit(f"error: {run_dir} already has a recorded termination "
                  f"(exit {term.get('exit_code')}); binding a job id now would "

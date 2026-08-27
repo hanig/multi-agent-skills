@@ -1484,8 +1484,15 @@ class TestFailClosedGaps(Base):
         self.init(converge={"metric": "loss", "mode": "min",
                             "threshold": 0.5, "min_steps": 0})
         r = tc("check", str(self.run_dir))
+        # The invariant is that it cannot converge. On a slow filesystem the
+        # watchdog can fire before the truncation notice is reached -- chimera
+        # ran this suite 15x slower than the laptop and tripped the 600s cap --
+        # and that is ALSO fail-closed, so accept either reason rather than
+        # pinning the one that happens to win locally.
         self.assertNotEqual(r.returncode, CONVERGED, r.stdout[:400])
-        self.assertIn("truncated", r.stdout.lower())
+        out = r.stdout.lower()
+        self.assertTrue("truncated" in out or "watchdog" in out,
+                        f"expected a truncation or watchdog reason: {out[:300]}")
 
 
 class TestFailClosedRound2(Base):
@@ -2233,6 +2240,47 @@ class TestBindDiscipline(Base):
         self.init(record=False)
         for bad in ("", "  ", "5; rm -rf /", "../../etc"):
             r = tc("bind", str(self.run_dir), "--job-id", bad)
+            self.assertNotEqual(r.returncode, 0, repr(bad))
+
+class TestBindPhase3Round2(Base):
+    """Round-2 findings on the round-1 fixes. Both real, both in scope."""
+
+    def test_a_stale_receipt_from_a_forced_reinit_does_not_block_bind(self):
+        """luna: cmd_bind read read_termination() directly instead of filtering
+        by contract instance, so a receipt left behind by `init --force`
+        belonged to the PREVIOUS contract and refused to let the new honest run
+        bind. Every other consumer of that file already filters."""
+        self.write_metrics(PLATEAU_ROWS)
+        self.add_checkpoint()
+        self.init()                                  # contract A, with a receipt
+        self.assertTrue((self.run_dir / "training-termination.json").exists())
+        r = tc("init", str(self.run_dir), "--force",  # contract B, receipt stays
+               "--metrics", str(self.metrics),
+               "--checkpoint-dir", str(self.ckpt),
+               "--converge", json.dumps(PLATEAU))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rb = tc("bind", str(self.run_dir), "--job-id", "42")
+        self.assertEqual(rb.returncode, 0, rb.stderr)
+
+    def test_a_receipt_for_THIS_contract_still_blocks_bind(self):
+        """The other half: the guard must still do its job."""
+        self.write_metrics(PLATEAU_ROWS)
+        self.add_checkpoint()
+        self.init()
+        rb = tc("bind", str(self.run_dir), "--job-id", "42")
+        self.assertNotEqual(rb.returncode, 0)
+        self.assertIn("already has a recorded termination", rb.stderr)
+
+    def test_job_id_must_look_like_a_slurm_id(self):
+        """luna: any alphanumeric string was accepted, including "abc"."""
+        self.write_metrics(PLATEAU_ROWS)
+        self.add_checkpoint()
+        self.init(record=False)
+        for good in ("12345", "12345_7", "12345.batch"):
+            r = tc("bind", str(self.run_dir), "--job-id", good, "--force")
+            self.assertEqual(r.returncode, 0, f"{good}: {r.stderr}")
+        for bad in ("abc", "x1", "", "  ", "5; rm -rf /", "../../etc", "-1"):
+            r = tc("bind", str(self.run_dir), "--job-id", bad, "--force")
             self.assertNotEqual(r.returncode, 0, repr(bad))
 
 if __name__ == "__main__":
