@@ -376,16 +376,37 @@ def predicate_fault(pred):
         return (f"unknown predicate kind {kind!r}; "
                 f"allowed: {', '.join(sorted(PREDICATE_SCHEMA))}")
     allowed = {"kind", *spec["required"], *spec["optional"]}
+    readable = sorted(allowed - {"kind"})
     missing = [k for k in spec["required"] if k not in pred]
     if missing:
         return (f"{kind} predicate is missing required key(s) "
                 f"{', '.join(missing)}")
-    unknown = sorted(set(pred) - allowed)
+    # Annotation keys are opt-in and underscore-prefixed. Refusing EVERY
+    # unlisted key also refused a criterion the previous version evaluated
+    # exactly as the author intended -- `{"lines":3,"description":"output"}`
+    # (deepseek-v4-pro, MAJOR). Refusing an honest declaration is as serious
+    # here as accepting a dishonest one, so there has to be a way to say
+    # "this key is documentation, not criteria".
+    for key in sorted(pred):
+        if not key.startswith("_"):
+            continue
+        # ...but an underscored form of a key the kind READS is a typo, not an
+        # annotation. Without this, `_lines` would be ignored, `lines` would
+        # default, and the criterion would be silently weakened again -- the
+        # very defect this function exists to stop, reintroduced through the
+        # escape hatch added to fix a different one.
+        if key.lstrip("_") in allowed:
+            return (f"{kind} predicate has {key!r}, which reads as an "
+                    f"annotation and is ignored. Did you mean "
+                    f"{key.lstrip('_')!r}? Rename it, or use a name that is "
+                    f"not one of {', '.join(readable)}.")
+    unknown = sorted(k for k in set(pred) - allowed if not k.startswith("_"))
     if unknown:
         return (f"{kind} predicate has unrecognised key(s) "
                 f"{', '.join(unknown)}; it reads only "
-                f"{', '.join(sorted(allowed - {'kind'}))}. "
-                f"A typo here would silently weaken the criterion.")
+                f"{', '.join(readable)}. A typo here would silently weaken "
+                f"the criterion. If these are notes, prefix them with '_' "
+                f"and they will be ignored.")
     return None
 
 

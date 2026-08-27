@@ -3002,5 +3002,48 @@ class TestLaterLocalRetryDecidesHereToo(Base):
         r = self._check(self._sacct("FAILED|1:0"))
         self.assertEqual(r.returncode, VIOLATED, r.stdout + r.stderr)
 
+class TestUnreadCriterionKeys(unittest.TestCase):
+    """Sibling of the contract.py predicate-key tests. Both tools must behave
+    identically: typo refused, annotation accepted, underscored READ key
+    refused as a typo rather than ignored."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.metrics = self.tmp / "m.jsonl"
+        self.metrics.write_text("")
+
+    def init_with(self, crit):
+        return tc("init", str(self.tmp / f"r{abs(hash(str(crit)))}"),
+                     "--metrics", str(self.metrics),
+                     "--checkpoint-dir", str(self.tmp / "ck"),
+                     "--converge", json.dumps(crit))
+
+    BASE = {"metric": "val_loss", "mode": "min", "threshold": 0.5}
+
+    def test_a_typod_key_is_refused(self):
+        r = self.init_with({**self.BASE, "min_step": 10})
+        self.assertNotEqual(r.returncode, 0,
+                            "min_step accepted; min_steps would default and "
+                            "the criterion would be silently weakened")
+        self.assertIn("min_steps", r.stderr)
+
+    def test_an_annotation_is_accepted(self):
+        r = self.init_with({**self.BASE, "_why": "picked from the v3 sweep"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_an_underscored_read_key_is_refused(self):
+        r = self.init_with({**self.BASE, "_min_steps": 10})
+        self.assertNotEqual(r.returncode, 0,
+                            "_min_steps was ignored; the criterion would be "
+                            "silently weakened through the annotation hatch")
+        self.assertIn("min_steps", r.stderr)
+
+    def test_a_correct_criterion_is_still_accepted(self):
+        r = self.init_with({**self.BASE, "min_steps": 10})
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

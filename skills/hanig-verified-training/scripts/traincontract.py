@@ -925,6 +925,30 @@ CONVERGE_KEYS = frozenset({"metric", "mode", "threshold",
 DIVERGE_KEYS = frozenset({"metric", "above", "below"})
 
 
+def unread_key_problem(crit, allowed, what):
+    """Why a criterion's key set is not interpretable, or None.
+
+    Underscore-prefixed keys are annotations and ignored: refusing EVERY
+    unlisted key also refused criteria the previous version evaluated exactly
+    as intended (deepseek-v4-pro, MAJOR, on contract.py's predicates). But an
+    underscored form of a key that IS read is a typo, not an annotation --
+    otherwise `_min_steps` is ignored, `min_steps` defaults, and the criterion
+    is silently weakened through the hatch opened to fix a different defect."""
+    readable = ", ".join(sorted(allowed))
+    for key in sorted(crit):
+        if key.startswith("_") and key.lstrip("_") in allowed:
+            return (f"{what} has {key!r}, which reads as an annotation and is "
+                    f"ignored. Did you mean {key.lstrip('_')!r}? Rename it, or "
+                    f"use a name that is not one of {readable}.")
+    unknown = sorted(k for k in set(crit) - allowed if not k.startswith("_"))
+    if unknown:
+        return (f"{what} has unrecognised key(s) {', '.join(unknown)}; it "
+                f"reads only {readable}. A typo here would silently weaken "
+                f"the criterion. If these are notes, prefix them with '_' and "
+                f"they will be ignored.")
+    return None
+
+
 def criterion_problem(crit):
     """Why a convergence criterion cannot be evaluated, or None.
 
@@ -952,16 +976,15 @@ def criterion_problem(crit):
         n, err = nonneg_int(crit.get("over_evals", 5))
         if err or n < 1:
             return "'over_evals' must be a whole number of at least 1"
-    # Enumerate the keys this criterion is READ with. Every known key above was
-    # validated, but an unknown one was silently ignored, so a typo
+    # Enumerate the keys this criterion is READ with. Every known key above
+    # was validated, but an unknown one was silently ignored, so a typo
     # (`min_step` for `min_steps`) left the real criterion WEAKER than the
     # declared one with no warning. Same defect found in contract.py's
-    # predicates by real use on lambda; fixed in both.
-    unknown = sorted(set(crit) - CONVERGE_KEYS)
-    if unknown:
-        return (f"unrecognised key(s) {', '.join(unknown)}; this criterion "
-                f"reads only {', '.join(sorted(CONVERGE_KEYS))}. A typo here "
-                f"would silently weaken the criterion.")
+    # predicates by real use on lambda; fixed in both, with the same
+    # underscore-annotation hatch in both.
+    problem = unread_key_problem(crit, CONVERGE_KEYS, "this criterion")
+    if problem:
+        return problem
     return None
 
 
@@ -1327,12 +1350,10 @@ def cmd_init(args):
                 _, err = finite_number(rule[k])
                 if err:
                     sys.exit(f"error: divergence rule {i} '{k}' {err}")
-        extra = sorted(set(rule) - DIVERGE_KEYS)
-        if extra:
-            sys.exit(f"error: divergence rule {i} has unrecognised key(s) "
-                     f"{', '.join(extra)}; it reads only "
-                     f"{', '.join(sorted(DIVERGE_KEYS))}. A typo here would "
-                     f"silently weaken the rule.")
+        problem = unread_key_problem(rule, DIVERGE_KEYS,
+                                     f"divergence rule {i}")
+        if problem:
+            sys.exit(f"error: {problem}")
 
     if not args.checkpoint_dir and not args.retrospective:
         print("NOTE: no --checkpoint-dir given; a CONVERGED verdict will be "
