@@ -2731,5 +2731,75 @@ class TestMultiRowSqueue(Base):
         r = self._check(env)
         self.assertIn("RUNNING", r.stdout)
 
+class TestTerminalSqueueRowIsNotActivity(Base):
+    """deepseek: squeue keeps a finished job listed for MinJobAge (default
+    300s), so for minutes after an honest run ends squeue still returns a row.
+    Treating ANY owned row as still-active reported RUNNING and never evaluated
+    the criterion -- a false negative on every check made inside that window.
+
+    The previous comment defended treating all states as live because
+    "enumerating live states missed real ones such as STAGE_OUT". Both
+    properties are wanted, so TERMINAL is the enumerated set and anything not
+    in it reads as active: an unknown state still fails toward not-finished."""
+
+    def _bin(self, squeue_state, sacct_row=None):
+        b = self.tmp / f"tq{abs(hash((squeue_state, sacct_row)))}"
+        b.mkdir()
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S",
+                              time.localtime(self._contract_time()))
+        (b / "squeue").write_text(
+            f'#!/bin/sh\necho "{squeue_state}|{stamp}"\n')
+        (b / "sacct").write_text(
+            f'#!/bin/sh\necho "{sacct_row}|{stamp}"\n' if sacct_row
+            else "#!/bin/sh\nexit 0\n")
+        for n in ("squeue", "sacct"):
+            (b / n).chmod(0o755)
+        return dict(os.environ, PATH=f"{b}:{os.environ['PATH']}")
+
+    def setUpBound(self):
+        self.write_metrics(PLATEAU_ROWS)
+        self.add_checkpoint()
+        self.init(record=False)
+        self.assertEqual(tc("bind", str(self.run_dir), "--job-id", "77"
+                            ).returncode, 0)
+
+    def _check(self, env):
+        return subprocess.run([sys.executable, str(SCRIPT), "check",
+                               str(self.run_dir)], capture_output=True,
+                              text=True, env=env)
+
+    def test_a_completed_squeue_row_does_not_block_the_verdict(self):
+        self.setUpBound()
+        r = self._check(self._bin("COMPLETED", "COMPLETED|0:0"))
+        self.assertEqual(r.returncode, CONVERGED, r.stdout + r.stderr)
+
+    def test_other_terminal_states_also_do_not_block(self):
+        for st in ("CANCELLED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY"):
+            with self.subTest(state=st):
+                self.setUp()
+                self.setUpBound()
+                r = self._check(self._bin(st, "COMPLETED|0:0"))
+                self.assertEqual(r.returncode, CONVERGED,
+                                 f"{st}: {r.stdout}")
+
+    def test_a_live_state_still_blocks(self):
+        self.setUpBound()
+        r = self._check(self._bin("RUNNING"))
+        self.assertNotEqual(r.returncode, CONVERGED, r.stdout)
+        self.assertIn("RUNNING", r.stdout)
+
+    def test_an_unknown_state_still_blocks(self):
+        """The property the old behaviour was protecting: a state we have never
+        seen must not be assumed finished."""
+        self.setUpBound()
+        r = self._check(self._bin("STAGE_OUT"))
+        self.assertNotEqual(r.returncode, CONVERGED, r.stdout)
+        self.assertIn("STAGE_OUT", r.stdout)
+
+    def test_a_requeue_state_still_reads_as_preempted(self):
+        self.setUpBound()
+        r = self._check(self._bin("REQUEUED"))
+        self.assertNotEqual(r.returncode, CONVERGED, r.stdout)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

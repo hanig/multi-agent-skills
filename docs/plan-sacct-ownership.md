@@ -111,6 +111,14 @@ as predating a declaration made later in the same second).
   slack is NOT the fix, because it widens the reuse window by the same amount.
   Clusters run NTP, and skew large enough to matter here would already be
   breaking Slurm's own scheduling and accounting. Stated as a requirement.
+- **An owned squeue row in a TERMINAL state is not evidence of activity.**
+  squeue lists a finished job for MinJobAge (default 300s), so treating any
+  owned row as still-active reported RUNNING and never evaluated the criterion
+  for every check made inside that window (deepseek). TERMINAL is the
+  enumerated set and anything not in it reads as active, which keeps the
+  property the earlier behaviour protected -- an unrecognised state such as
+  STAGE_OUT must not be assumed finished -- while no longer blocking a
+  completed run.
 - **squeue rows are subject to the same ownership test as sacct rows.** They
   were not for eight rounds: `-o %T` fetched only the state, so a later reuse
   of the id sitting in the queue turned an honestly finished run back into

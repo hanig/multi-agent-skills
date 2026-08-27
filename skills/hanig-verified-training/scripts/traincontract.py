@@ -167,6 +167,20 @@ SLURM_BAD_END = ("FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY",
 # is treated as unconfirmed rather than assumed good.
 SLURM_OK_END = ("COMPLETED",)
 
+# States in which Slurm has FINISHED with a job. squeue keeps a finished job
+# listed for MinJobAge (default 300s), so for minutes after an honest run ends
+# squeue still returns a row -- and treating any owned row as "still active"
+# made the verifier report RUNNING and never evaluate the predicates
+# (deepseek). Terminal is the enumerable set; anything NOT here reads as
+# active, so an unrecognised state still fails toward "not finished" rather
+# than certifying a live job. That keeps the property the previous comment was
+# protecting ("enumerating live states missed real ones such as STAGE_OUT")
+# while no longer blocking a completed one.
+SLURM_TERMINAL_IN_QUEUE = frozenset((
+    "COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY",
+    "NODE_FAIL", "BOOT_FAIL", "DEADLINE", "REVOKED", "SPECIAL_EXIT",
+))
+
 
 # Both our ISO stamps and sacct's Submit are whole seconds, so each can sit up
 # to a second either side of the real instant. Comparing them exactly refused
@@ -362,9 +376,15 @@ def squeue_state(job_id, declared_at=None, bound_at=None):
         submit = parse_iso_ts(parts[1].strip()) if len(parts) > 1 else None
         ours, _why = sacct_row_is_ours(submit, declared_at, bound_at)
         if ours:
-            found = parts[0].strip() or found
-    # None means no row we can attribute; reporting an unattributable one would
-    # let another job's queue state overrule terminal evidence we own.
+            state = parts[0].strip()
+            # An owned row whose state is TERMINAL is not evidence of activity:
+            # squeue lists a finished job for MinJobAge, and reporting it as
+            # live turned an honest converged run into RUNNING (deepseek).
+            if state and state.split()[0].upper() in SLURM_TERMINAL_IN_QUEUE:
+                continue
+            found = state or found
+    # None means no owned row that is still live; reporting an unattributable
+    # one would let another job's queue state overrule evidence we own.
     return found
 
 
