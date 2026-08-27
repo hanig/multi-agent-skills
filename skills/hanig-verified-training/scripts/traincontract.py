@@ -303,15 +303,22 @@ def squeue_state(job_id, declared_at=None, bound_at=None):
     rc, out = run(["squeue", "-h", "-j", str(job_id), "-o", "%T|%V"])
     if rc != 0 or not out:
         return None
-    first = out.splitlines()[0].split("|")
-    state = first[0].strip() or None
-    submit = parse_iso_ts(first[1].strip()) if len(first) > 1 else None
-    ours, _why = sacct_row_is_ours(submit, declared_at, bound_at)
-    if not ours:
-        # Not our job. Reporting it would let another job's queue state
-        # overrule terminal evidence we own.
-        return None
-    return state
+    # EVERY row, not just the first, and the LAST owned one: squeue returns
+    # several for job arrays and for a reused id, so a stale row printed first
+    # made this return None while our own live row sat unread below it
+    # (deepseek). Missing a live job is how a still-running run gets certified.
+    found = None
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("|")
+        submit = parse_iso_ts(parts[1].strip()) if len(parts) > 1 else None
+        ours, _why = sacct_row_is_ours(submit, declared_at, bound_at)
+        if ours:
+            found = parts[0].strip() or found
+    # None means no row we can attribute; reporting an unattributable one would
+    # let another job's queue state overrule terminal evidence we own.
+    return found
 
 
 def slurm_state(job_id, declared_at=None, bound_at=None):

@@ -56,6 +56,13 @@ DEFAULT_PROFILE = "standard"
 # what was reviewed, so truncation is always reported in the output.
 MAX_CHARS = 180_000
 
+# Every reviewer here is a reasoning model, and reasoning tokens come out of the
+# same budget as the answer. At 16000 a 150KB review spent the whole budget
+# thinking and returned NO content -- which read as an unavailable reviewer, and
+# cost kimi-k2.7-code a whole session before the error message was made to say
+# so. Sized for the answer AFTER the thinking.
+DEFAULT_MAX_OUTPUT_TOKENS = 64_000
+
 
 SYSTEM = """You are an adversarial code reviewer. Your job is to REFUTE, not to approve.
 
@@ -296,7 +303,7 @@ def call_openrouter(rev, prompt, timeout, deadline=None):
         "model": rev["model"],
         "messages": [{"role": "system", "content": SYSTEM},
                      {"role": "user", "content": prompt}],
-        "max_tokens": rev.get("max_output_tokens", 16000),
+        "max_tokens": rev.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS),
     }
     if rev.get("effort"):
         payload["reasoning"] = {"effort": rev["effort"]}
@@ -1013,7 +1020,11 @@ def main():
                          "reported but does not decide the verdict")
     ap.add_argument("--quorum", type=int, default=2,
                     help="reviewers that must complete for a verdict (default 2)")
-    ap.add_argument("--timeout", type=int, default=600, help="per reviewer seconds")
+    ap.add_argument("--timeout", type=int, default=1200,
+                    help="per reviewer seconds (default 1200: at 64000 output "
+                         "tokens a reasoning model can still be streaming at "
+                         "600s, and a cut-off reviewer is REVIEW_PARTIAL, not "
+                         "a pass)")
     ap.add_argument("--only", action="append", default=[], help="run only these reviewers")
     ap.add_argument("--profile", default=None,
                     help="reviewer panel: fast | standard | deep "

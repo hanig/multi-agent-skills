@@ -2659,5 +2659,77 @@ class TestMixedGenerationCheckpointSet(Base):
         r = tc("check", str(self.run_dir))
         self.assertEqual(r.returncode, CONVERGED, r.stdout + r.stderr)
 
+class TestMultiRowSqueue(Base):
+    """deepseek: the squeue ownership check read only the FIRST row. squeue
+    returns several for job arrays and, exactly in the case ownership exists
+    for, when an id has been reused -- so a stale row printed first made this
+    report "no live job" while our own live row sat unread below it. Missing a
+    live job is how a still-running run gets certified.
+
+    sacct_state has taken the LAST row for requeues since round 2. This path
+    took the first, which is the eleventh instance of the same class."""
+
+    def _squeue(self, *lines):
+        b = self.tmp / f"mq{abs(hash(lines))}"
+        b.mkdir()
+        body = "\n".join(f'echo "{ln}"' for ln in lines)
+        (b / "squeue").write_text(f"#!/bin/sh\n{body}\n")
+        (b / "sacct").write_text("#!/bin/sh\nexit 0\n")
+        for n in ("squeue", "sacct"):
+            (b / n).chmod(0o755)
+        return dict(os.environ, PATH=f"{b}:{os.environ['PATH']}")
+
+    def _stamp(self, offset):
+        b = json.loads(
+            (self.run_dir / "training-binding.json").read_text())
+        return time.strftime("%Y-%m-%dT%H:%M:%S",
+                             time.localtime(parse_local_iso(b["submitted_at"])
+                                            + offset))
+
+    def setUpBound(self):
+        self.write_metrics(PLATEAU_ROWS)
+        self.add_checkpoint()
+        self.init(record=False)
+        self.assertEqual(tc("bind", str(self.run_dir), "--job-id", "12345"
+                            ).returncode, 0)
+
+    def _check(self, env):
+        return subprocess.run([sys.executable, str(SCRIPT), "check",
+                               str(self.run_dir)], capture_output=True,
+                              text=True, env=env)
+
+    def test_our_live_row_below_a_stale_one_is_still_found(self):
+        """THE case: the reused id's old row prints first, ours second."""
+        self.setUpBound()
+        env = self._squeue(f"COMPLETED|{self._stamp(-3600)}",
+                           f"PENDING|{self._stamp(0)}")
+        r = self._check(env)
+        self.assertNotEqual(r.returncode, CONVERGED,
+                            "our job is still queued; it cannot have converged")
+        self.assertIn("PENDING", r.stdout)
+
+    def test_all_rows_unownable_still_means_not_ours(self):
+        self.setUpBound()
+        env = self._squeue(f"PENDING|{self._stamp(-3600)}",
+                           f"RUNNING|{self._stamp(7200)}")
+        r = self._check(env)
+        self.assertNotIn("PENDING", r.stdout)
+        self.assertNotIn("RUNNING", r.stdout)
+
+    def test_a_blank_line_in_the_output_is_skipped(self):
+        self.setUpBound()
+        env = self._squeue("", f"RUNNING|{self._stamp(0)}", "")
+        r = self._check(env)
+        self.assertIn("RUNNING", r.stdout)
+
+    def test_the_last_owned_row_wins_for_a_requeue(self):
+        """Matching sacct_state: a requeued job has one row per attempt and the
+        latest is the live one."""
+        self.setUpBound()
+        env = self._squeue(f"PREEMPTED|{self._stamp(0)}",
+                           f"RUNNING|{self._stamp(1)}")
+        r = self._check(env)
+        self.assertIn("RUNNING", r.stdout)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

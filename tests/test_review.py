@@ -1233,15 +1233,18 @@ class TestEmptyContentNamesItsCause(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual(res["text"], '{"verdict": "upheld"}')
 
-    def test_the_heavy_reasoner_has_a_raised_budget_in_config(self):
+    def test_every_reviewer_has_room_to_reason_and_then_answer(self):
+        """Was asserted per-reviewer for kimi; deepseek then hit the same wall
+        at a larger input, so the DEFAULT is what needs to be right. Reasoning
+        tokens come out of the answer's budget."""
         import json as _json
         cfg = _json.loads((REPO / "skills" / "hanig-review-gate"
                            / "reviewers.json").read_text())
-        kimis = [r for r in cfg["reviewers"] if r["name"].startswith("kimi")]
-        self.assertTrue(kimis)
-        for r in kimis:
-            self.assertGreaterEqual(r.get("max_output_tokens", 0), 32000,
-                                    f"{r['name']} needs room to reason AND answer")
+        self.assertGreaterEqual(review.DEFAULT_MAX_OUTPUT_TOKENS, 32_000)
+        for r in cfg["reviewers"]:
+            effective = r.get("max_output_tokens",
+                              review.DEFAULT_MAX_OUTPUT_TOKENS)
+            self.assertGreaterEqual(effective, 32_000, r["name"])
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

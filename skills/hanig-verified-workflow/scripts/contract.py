@@ -676,13 +676,23 @@ def squeue_active(job_id, declared_at=None, bound_at=None):
     rc, out, _ = run(["squeue", "-h", "-j", str(job_id), "-o", "%T|%V"])
     if rc != 0 or not out.strip():
         return False
-    first = out.splitlines()[0].split("|")
-    submit = parse_iso_ts(first[1].strip()) if len(first) > 1 else None
-    ours, _why = sacct_row_is_ours(submit, declared_at, bound_at)
-    # A queued row we cannot attribute is not evidence that OUR job is running.
-    # Fails toward "not active", which then makes the sacct path decide -- and
-    # that path applies the same ownership test.
-    return bool(ours)
+    # EVERY row, not just the first. squeue returns several for job arrays and,
+    # exactly in the case this ownership test exists for, when an id has been
+    # reused: a stale row printed first made this return "not active" and our
+    # own live row further down was never read (deepseek). sacct_state has
+    # taken the last row for requeues since round 2; this path took the first.
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("|")
+        submit = parse_iso_ts(parts[1].strip()) if len(parts) > 1 else None
+        ours, _why = sacct_row_is_ours(submit, declared_at, bound_at)
+        if ours:
+            return True
+    # No row we can attribute. Not evidence that OUR job is running, so this
+    # fails toward "not active" and the sacct path decides -- applying the
+    # same ownership test.
+    return False
 
 
 # --- commands ---------------------------------------------------------------
