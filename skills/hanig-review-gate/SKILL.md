@@ -87,6 +87,26 @@ Review is done when the findings still arriving are **out of scope, minor, or
 matters of taste**. It is never done when the findings list is empty; that will
 not happen, and waiting for it is the loop.
 
+### What "still finding things" actually meant here
+
+Across this repo's rounds the findings did not stop, but they changed character,
+and that change is the useful signal:
+
+| phase | what the findings were |
+|---|---|
+| early | false passes reachable by accident, no tampering needed |
+| middle | the same rule missing from a sibling path — twelve instances |
+| late | real findings whose honest fix had to be WEAKER than the finding implied |
+
+Recognising that last phase matters. Three times the strong fix was
+unavailable: an ownership anchor drawn from the evidence it validated, which
+created a worse false pass than it closed; interleaving detection that step
+numbers cannot support; and content-identity freshness that would have refused
+every deterministic re-run, which is a reproducibility tool's success case.
+**A real finding does not imply an available fix.** Documenting the limit is
+then the answer, and shipping the strong version of an unavailable fix costs
+more than the finding did. Once, building it was the only way to find that out.
+
 ## The rule
 
 **Do not report work as complete, and do not assert that code works, until the
