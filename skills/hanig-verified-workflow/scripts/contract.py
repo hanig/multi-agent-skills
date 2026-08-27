@@ -369,18 +369,24 @@ def predicate_fault(pred):
     """Return a human-readable fault string, or None if the predicate is
     interpretable. Names the allowed keys so the refusal carries the fix."""
     if not isinstance(pred, dict):
-        return f"predicate is not an object: {pred!r}"
+        return (f"predicate is not an object: {pred!r}. Use a JSON object, "
+                f'e.g. {{"kind":"exists","path":"out.tsv"}}')
     kind = pred.get("kind")
     spec = PREDICATE_SCHEMA.get(kind)
     if spec is None:
-        return (f"unknown predicate kind {kind!r}; "
-                f"allowed: {', '.join(sorted(PREDICATE_SCHEMA))}")
+        return (f"unknown predicate kind {kind!r}; use one of: "
+                f"{', '.join(sorted(PREDICATE_SCHEMA))}")
     allowed = {"kind", *spec["required"], *spec["optional"]}
     readable = sorted(allowed - {"kind"})
     missing = [k for k in spec["required"] if k not in pred]
     if missing:
+        # Name the fix, not just the fault: a refusal a user cannot act on is
+        # a defect here even when the refusal is correct (kimi-k2.7-code).
+        example = {"kind": kind}
+        example.update({k: "..." for k in spec["required"]})
         return (f"{kind} predicate is missing required key(s) "
-                f"{', '.join(missing)}")
+                f"{', '.join(missing)}; add them, e.g. "
+                f"{json.dumps(example)}")
     # Annotation keys are opt-in and underscore-prefixed. Refusing EVERY
     # unlisted key also refused a criterion the previous version evaluated
     # exactly as the author intended -- `{"lines":3,"description":"output"}`
@@ -598,7 +604,9 @@ def sacct_row_is_ours(sacct_submit, declared_at, bound_at=None):
     """
     if declared_at is None:
         return False, ("the contract carries no usable declaration time, so an "
-                       "sacct row cannot be placed relative to it")
+                       "sacct row cannot be placed relative to it. Re-declare "
+                       "the contract with `init --force` so it records a "
+                       "created_at, then re-submit.")
     if sacct_submit is None:
         # Fails CLOSED. Skipping the check when Submit would not parse let an
         # old COMPLETED row for a reused id certify a new run.
@@ -958,7 +966,9 @@ def cmd_init(args):
         try:
             pred = json.loads(spec)
         except json.JSONDecodeError as e:
-            sys.exit(f"error: --predicate is not valid JSON: {e}\n  {spec}")
+            sys.exit(f"error: --predicate is not valid JSON: {e}\n  {spec}\n"
+                     f'  Pass one JSON object per --predicate, e.g. '
+                     f'--predicate \'{{"kind":"exists","path":"out.tsv"}}\'')
         # Refuse at declare time. A malformed predicate caught only at check
         # time has already let the run proceed under a criterion that is not
         # the one the user wrote.

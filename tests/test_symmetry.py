@@ -198,6 +198,80 @@ class TestVerifierSymmetry(unittest.TestCase):
                     f"{path.name}: a refusal names no action the user can "
                     f"take: {text[:120]}")
 
+    def test_declare_time_refusals_also_name_an_action(self):
+        """The sibling of the test above, and the reason it was needed.
+
+        test_every_refusal_names_an_action scans only `reasons.append` inside
+        blocks that set INCOMPLETE_EVIDENCE or CONTRACT_VIOLATED. Every
+        refusal raised at DECLARE time -- `sys.exit` in cmd_init, and the
+        strings returned by predicate_fault / unread_key_problem -- was
+        invisible to it. kimi-k2.7-code then found exactly what that test
+        claims to catch: three new refusals that state the defect and name no
+        corrective action. A test that cannot see a whole class of the thing it
+        guards is weaker than the rule it enforces (7th instance here).
+
+        Uses the AST, not a regex. The regex first written for this test read
+        only double-quoted literals, so a message fixed with single quotes
+        still looked broken -- measuring the reader instead of the message,
+        which is the same flaw one level down."""
+        import ast
+
+        def refusal_texts(src):
+            """Every string a sys.exit() or a return assembles, joined."""
+            tree = ast.parse(src)
+            out = []
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call):
+                    f = node.func
+                    is_exit = (isinstance(f, ast.Attribute)
+                               and f.attr == "exit") or (
+                               isinstance(f, ast.Name) and f.id == "exit")
+                    if not is_exit:
+                        continue
+                    args = node.args
+                elif isinstance(node, ast.Return) and node.value is not None:
+                    args = [node.value]
+                else:
+                    continue
+                pieces = []
+                for a in args:
+                    for sub in ast.walk(a):
+                        if isinstance(sub, ast.Constant) and isinstance(
+                                sub.value, str):
+                            pieces.append(sub.value)
+                text = " ".join(pieces).strip()
+                if text:
+                    out.append(text)
+            return out
+
+        actionable = ("record", "bind", "submit", "re-declare", "init", "add",
+                      "Run ", "declare", "use ", "Use ", "Split", "split",
+                      "raise", "SLURM_TIME_FORMAT", "Check", "Point", "Pass ",
+                      "pass ", "re-run", "Re-declare", "fix the writer",
+                      "omit", "Rename", "rename", "prefix", "Did you mean")
+        for path in (WORKFLOW, TRAINING):
+            judged = 0
+            for text in refusal_texts(path.read_text()):
+                low = text.lower()
+                # Only judge strings that read as a refusal, not usage text,
+                # help strings, or ordinary detail lines.
+                if len(text) < 45:
+                    continue
+                if not any(w in low for w in (
+                        "error:", "cannot", "unrecognised", "unknown key",
+                        "missing required", "is not an object", "refus")):
+                    continue
+                judged += 1
+                self.assertTrue(
+                    any(a in text for a in actionable),
+                    f"{path.name}: a declare-time refusal names no action the "
+                    f"user can take: {text[:150]}")
+            self.assertGreater(
+                judged, 3,
+                f"{path.name}: this test recovered only {judged} refusal "
+                f"strings, so it is measuring its own reader rather than the "
+                f"messages. That is how the gap it exists to close was missed.")
+
     def test_both_tools_refuse_an_unrecognised_criterion_key(self):
         """The 17th instance. Both tools validated every key they KNEW and
         silently ignored any they did not, so a typo left the declared

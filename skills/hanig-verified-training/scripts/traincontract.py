@@ -244,7 +244,9 @@ def sacct_row_is_ours(sacct_submit, declared_at, bound_at=None):
     """
     if declared_at is None:
         return False, ("the contract carries no usable declaration time, so an "
-                       "sacct row cannot be placed relative to it")
+                       "sacct row cannot be placed relative to it. Re-declare "
+                       "the contract with `init --force` so it records a "
+                       "created_at, then re-submit.")
     if sacct_submit is None:
         # Fails CLOSED. Skipping the check when Submit would not parse let an
         # old COMPLETED row for a reused id certify a new run.
@@ -1008,7 +1010,9 @@ def eval_convergence(rows, crit, sparse_ok=False):
         # Certifying convergence while an evaluation of the very metric being
         # judged could not be read is certifying from incomplete evidence.
         return False, (f"{len(unusable)} unusable value(s) for {key!r} "
-                       f"({unusable[0]}); cannot certify convergence")
+                       f"({unusable[0]}); cannot certify convergence. Fix the "
+                       f"writer so it emits finite numbers for this metric, or "
+                       f"re-declare against a metric it writes cleanly.")
     if not series:
         return False, f"no numeric values for {key!r}"
 
@@ -1340,11 +1344,16 @@ def cmd_init(args):
             sys.exit(f"error: unusable convergence criterion: {problem}")
     for i, rule in enumerate(diverge):
         if not isinstance(rule, dict) or not rule.get("metric"):
-            sys.exit(f"error: divergence rule {i} needs a 'metric'")
+            sys.exit(f"error: divergence rule {i} needs a 'metric'; add "
+                     f'one, e.g. {{"metric":"train_loss","above":1e9}}')
         if not any(k in rule for k in ("above", "below")):
-            sys.exit(f"error: divergence rule {i} needs 'above' or 'below'")
+            sys.exit(f"error: divergence rule {i} needs 'above' or 'below'; "
+                     f'add a ceiling or a floor, e.g. '
+                     f'{{"metric":"train_loss","above":1e9}}')
         if not isinstance(rule.get("metric"), str):
-            sys.exit(f"error: divergence rule {i} 'metric' must be a string")
+            sys.exit(f"error: divergence rule {i} 'metric' must be a "
+                     f"string; use the metric's name as written in the "
+                     f"metrics file")
         for k in ("above", "below"):
             if k in rule:
                 _, err = finite_number(rule[k])
