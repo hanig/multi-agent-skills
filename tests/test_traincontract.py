@@ -1434,10 +1434,10 @@ class TestFailClosedGaps(Base):
         self.add_checkpoint()
         self.init(converge={"metric": "loss", "mode": "min",
                             "threshold": 0.5, "min_steps": 0}, record=False)
-        cpath = self.run_dir / "training-contract.json"
-        c = json.loads(cpath.read_text())
-        c["run"]["slurm_job_id"] = "424242"
-        cpath.write_text(json.dumps(c))
+        # Was hand-editing run.slurm_job_id into the contract, the workaround
+        # that existed because `bind` did not. That field is digested now.
+        rb = tc("bind", str(self.run_dir), "--job-id", "424242")
+        self.assertEqual(rb.returncode, 0, rb.stderr)
         env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
         r = subprocess.run([sys.executable, str(SCRIPT), "check",
                             str(self.run_dir)], capture_output=True,
@@ -1453,12 +1453,14 @@ class TestFailClosedGaps(Base):
             (bindir / n).chmod(0o755)
         self.write_metrics([{"step": 100, "loss": 0.4}])
         self.add_checkpoint()
+        # bind BEFORE record, which is the real order: sbatch, bind, the job
+        # runs, then termination. `bind` refuses an already-terminal contract,
+        # so recording first was the unrealistic part of this fixture.
         self.init(converge={"metric": "loss", "mode": "min",
-                            "threshold": 0.5, "min_steps": 0})
-        cpath = self.run_dir / "training-contract.json"
-        c = json.loads(cpath.read_text())
-        c["run"]["slurm_job_id"] = "424242"
-        cpath.write_text(json.dumps(c))
+                            "threshold": 0.5, "min_steps": 0}, record=False)
+        rb = tc("bind", str(self.run_dir), "--job-id", "424242")
+        self.assertEqual(rb.returncode, 0, rb.stderr)
+        self.record_terminal()
         env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
         r = subprocess.run([sys.executable, str(SCRIPT), "check",
                             str(self.run_dir)], capture_output=True,
@@ -1493,7 +1495,11 @@ class TestFailClosedRound2(Base):
         CONVERGED standing. Only COMPLETED now counts as success."""
         bindir = self.tmp / "sbin"
         bindir.mkdir()
-        (bindir / "sacct").write_text("#!/bin/sh\necho SPECIAL_EXIT\n")
+        # Was a bare "SPECIAL_EXIT" with no ExitCode and no Submit column;
+        # real sacct emits all three, and the missing Submit meant this test
+        # stopped at the ownership check instead of reaching the state check.
+        (bindir / "sacct").write_text(
+            '#!/bin/sh\necho "SPECIAL_EXIT|0:0|$(date -u +%Y-%m-%dT%H:%M:%S)"\n')
         (bindir / "squeue").write_text("#!/bin/sh\nexit 0\n")
         for n in ("sacct", "squeue"):
             (bindir / n).chmod(0o755)
@@ -1501,10 +1507,10 @@ class TestFailClosedRound2(Base):
         self.add_checkpoint()
         self.init(converge={"metric": "loss", "mode": "min",
                             "threshold": 0.5, "min_steps": 0}, record=False)
-        cpath = self.run_dir / "training-contract.json"
-        c = json.loads(cpath.read_text())
-        c["run"]["slurm_job_id"] = "7"
-        cpath.write_text(json.dumps(c))
+        # Was hand-editing run.slurm_job_id into the contract, the workaround
+        # that existed because `bind` did not. That field is digested now.
+        rb = tc("bind", str(self.run_dir), "--job-id", "7")
+        self.assertEqual(rb.returncode, 0, rb.stderr)
         env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
         r = subprocess.run([sys.executable, str(SCRIPT), "check",
                             str(self.run_dir)], capture_output=True,
@@ -1634,20 +1640,31 @@ class TestVerdictLogicRound(Base):
     """The round where I redirected reviewers from adversarial input to verdict
     logic. All four findings were false-pass paths."""
 
-    def _fake_sacct(self, state_line):
-        b = self.tmp / f"sb{abs(hash(state_line))}"
+    def _fake_sacct(self, state_line, submit="now"):
+        """state_line is "State|ExitCode"; a Submit column is appended.
+
+        The Submit column used to be omitted entirely, so `submit` parsed as
+        None and the job-id-reuse check was skipped -- which is why six tests
+        in this file passed while D1 (an unparseable Submit failing OPEN) was
+        live. Real sacct always emits the column, so the fixture does too:
+        "now" computes it at call time, so it post-dates the binding.
+        """
+        b = self.tmp / f"sb{abs(hash((state_line, submit)))}"
         b.mkdir()
-        (b / "sacct").write_text(f"#!/bin/sh\necho '{state_line}'\n")
+        col = ('$(date -u +%Y-%m-%dT%H:%M:%S)' if submit == "now"
+               else submit)
+        (b / "sacct").write_text(
+            f'#!/bin/sh\necho "{state_line}|{col}"\n')
         (b / "squeue").write_text("#!/bin/sh\nexit 0\n")
         for n in ("sacct", "squeue"):
             (b / n).chmod(0o755)
         return b
 
-    def _with_jid(self, bindir):
-        cpath = self.run_dir / "training-contract.json"
-        c = json.loads(cpath.read_text())
-        c["run"]["slurm_job_id"] = "5"
-        cpath.write_text(json.dumps(c))
+    def _with_jid(self, bindir, job_id="5"):
+        # Was rewriting run.slurm_job_id straight into the contract, which is
+        # what a user had to do before `bind` existed. Use the real mechanism.
+        r = tc("bind", str(self.run_dir), "--job-id", job_id)
+        self.assertEqual(r.returncode, 0, r.stderr)
         env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
         return subprocess.run([sys.executable, str(SCRIPT), "check",
                                str(self.run_dir)], capture_output=True,
@@ -2064,6 +2081,159 @@ class TestIntegrityScoping(Base):
                                     "threshold": 0.5, "min_steps": 0})
                 r = tc("check", str(self.run_dir))
                 self.assertEqual(r.returncode, VIOLATED, r.stdout + r.stderr)
+
+class TestSacctRowOwnership(Base):
+    """The realistic ordering, which my first implementation of this could not
+    fail: sbatch submits, and `bind` runs SECONDS LATER. Comparing the sacct
+    Submit against our own bind time had the direction inverted, so every
+    honest submission was discarded as a reused job id. The verification that
+    missed it generated the fake Submit at check time -- necessarily after bind
+    -- so it was circular.
+
+    Fixtures here pin Submit to an EXPLICIT time relative to the contract, never
+    to `date` at check time.
+    """
+
+    def _sacct(self, line):
+        b = self.tmp / f"sb{abs(hash(line))}"
+        b.mkdir()
+        (b / "sacct").write_text(f'#!/bin/sh\necho "{line}"\n')
+        (b / "squeue").write_text("#!/bin/sh\nexit 0\n")
+        for n in ("sacct", "squeue"):
+            (b / n).chmod(0o755)
+        return dict(os.environ, PATH=f"{b}:{os.environ['PATH']}")
+
+    def _iso_offset(self, seconds):
+        """An ISO stamp `seconds` from the contract's declaration."""
+        return time.strftime("%Y-%m-%dT%H:%M:%S",
+                             time.localtime(self._contract_time() + seconds))
+
+    def _check(self, env):
+        return subprocess.run([sys.executable, str(SCRIPT), "check",
+                               str(self.run_dir)], capture_output=True,
+                              text=True, env=env)
+
+    def setUpConverging(self):
+        self.write_metrics(PLATEAU_ROWS)
+        self.add_checkpoint()
+        self.init(record=False)
+
+    def test_submit_before_bind_but_after_declaration_is_ours(self):
+        """THE case the inverted comparison broke: sbatch at +1s, bind at +3s.
+        The row is honest and must count."""
+        self.setUpConverging()
+        submit = self._iso_offset(1)
+        r = tc("bind", str(self.run_dir), "--job-id", "5")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        got = self._check(self._sacct(f"COMPLETED|0:0|{submit}"))
+        self.assertEqual(got.returncode, CONVERGED, got.stdout + got.stderr)
+
+    def test_submit_before_the_declaration_is_a_reused_id(self):
+        self.setUpConverging()
+        submit = self._iso_offset(-3600)
+        tc("bind", str(self.run_dir), "--job-id", "5")
+        got = self._check(self._sacct(f"COMPLETED|0:0|{submit}"))
+        self.assertNotEqual(got.returncode, CONVERGED, got.stdout)
+        self.assertIn("reused", got.stdout)
+
+    def test_submit_in_the_declaration_second_is_accepted(self):
+        """Deliberate, and a documented limit: sacct emits whole seconds, so a
+        reuse inside that second cannot be told from an honest submission.
+        Refusing it would reject every job submitted in its contract's second."""
+        self.setUpConverging()
+        submit = self._iso_offset(0)
+        tc("bind", str(self.run_dir), "--job-id", "5")
+        got = self._check(self._sacct(f"COMPLETED|0:0|{submit}"))
+        self.assertEqual(got.returncode, CONVERGED, got.stdout + got.stderr)
+
+    def test_absent_submit_column_fails_closed(self):
+        self.setUpConverging()
+        tc("bind", str(self.run_dir), "--job-id", "5")
+        got = self._check(self._sacct("COMPLETED|0:0"))
+        self.assertNotEqual(got.returncode, CONVERGED, got.stdout)
+        self.assertIn("Submit", got.stdout)
+
+    def test_unparseable_submit_fails_closed(self):
+        self.setUpConverging()
+        tc("bind", str(self.run_dir), "--job-id", "5")
+        got = self._check(self._sacct("COMPLETED|0:0|not-a-timestamp"))
+        self.assertNotEqual(got.returncode, CONVERGED, got.stdout)
+
+    def test_init_inside_a_slurm_job_accepts_an_earlier_submit(self):
+        """A job queued at 12:00:00 starts at 12:00:05, and init runs inside it,
+        so created_at is 12:00:05 while the honest Submit is 12:00:00. Anchoring
+        on created_at rejected the supported workflow; the declaration is the
+        anchor and the row predates it, so this documents the residual gap
+        rather than pretending it is closed."""
+        self.setUpConverging()
+        tc("bind", str(self.run_dir), "--job-id", "9")
+        submit = self._iso_offset(-5)
+        got = self._check(self._sacct(f"COMPLETED|0:0|{submit}"))
+        # Fails closed, and says why, rather than certifying on a row it
+        # cannot place. `record` is the documented way through.
+        self.assertNotEqual(got.returncode, CONVERGED, got.stdout)
+
+
+class TestBindDiscipline(Base):
+    def test_bind_refuses_an_already_terminal_contract(self):
+        self.write_metrics(PLATEAU_ROWS)
+        self.add_checkpoint()
+        self.init()                        # records a local termination
+        r = tc("bind", str(self.run_dir), "--job-id", "5")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("already has a recorded termination", r.stderr)
+
+    def test_force_overrides_the_terminal_refusal(self):
+        self.write_metrics(PLATEAU_ROWS)
+        self.add_checkpoint()
+        self.init()
+        r = tc("bind", str(self.run_dir), "--job-id", "5", "--force")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_rebinding_the_same_id_preserves_the_first_timestamp(self):
+        """Rewriting it made bind non-idempotent: a retry moved the anchor."""
+        self.write_metrics(PLATEAU_ROWS)
+        self.add_checkpoint()
+        self.init(record=False)
+        self.assertEqual(tc("bind", str(self.run_dir), "--job-id", "7"
+                            ).returncode, 0)
+        first = json.loads(
+            (self.run_dir / "training-binding.json").read_text())["submitted_at"]
+        time.sleep(1.1)
+        self.assertEqual(tc("bind", str(self.run_dir), "--job-id", "7"
+                            ).returncode, 0)
+        again = json.loads(
+            (self.run_dir / "training-binding.json").read_text())["submitted_at"]
+        self.assertEqual(first, again)
+
+    def test_binding_a_different_id_is_refused_without_force(self):
+        self.write_metrics(PLATEAU_ROWS)
+        self.add_checkpoint()
+        self.init(record=False)
+        tc("bind", str(self.run_dir), "--job-id", "7")
+        r = tc("bind", str(self.run_dir), "--job-id", "8")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("already bound", r.stderr)
+
+    def test_a_binding_from_another_contract_instance_is_ignored(self):
+        self.write_metrics(PLATEAU_ROWS)
+        self.add_checkpoint()
+        self.init(record=False)
+        tc("bind", str(self.run_dir), "--job-id", "7")
+        bpath = self.run_dir / "training-binding.json"
+        b = json.loads(bpath.read_text())
+        b["contract_id"] = "0123456789abcdef"
+        bpath.write_text(json.dumps(b))
+        r = tc("check", str(self.run_dir))
+        self.assertNotEqual(r.returncode, CONVERGED, r.stdout)
+
+    def test_bind_rejects_an_implausible_job_id(self):
+        self.write_metrics(PLATEAU_ROWS)
+        self.add_checkpoint()
+        self.init(record=False)
+        for bad in ("", "  ", "5; rm -rf /", "../../etc"):
+            r = tc("bind", str(self.run_dir), "--job-id", bad)
+            self.assertNotEqual(r.returncode, 0, repr(bad))
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

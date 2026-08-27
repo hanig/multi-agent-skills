@@ -446,6 +446,54 @@ def criteria_digest(contract):
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
+def sacct_row_is_ours(sacct_submit, declared_at):
+    """Whether an sacct row can be evidence about the job WE submitted.
+
+    Returns (ok, why_not).
+
+    Two independent questions, and only one of them is a timestamp:
+
+      Is this job id ours?  Answered by the BINDING (contract.py's attempts
+      log, traincontract.py's `bind`), which records the id against this
+      contract instance. Established, not inferred.
+
+      Is this ROW from a prior job that reused the id?  Answered here. Our job
+      was submitted after the contract was declared, so a row whose Submit
+      predates the declaration belongs to an earlier job.
+
+    Compared against the contract's declaration, NOT against our own recorded
+    bind time. A previous version compared bind time and had the direction
+    inverted: `bind` runs after `sbatch`, so the honest sacct Submit is always
+    EARLIER than the moment we recorded, and every real submission was thrown
+    out as a reused id. The verification that missed it generated the fake
+    Submit at check time, which is necessarily after bind, so it could not
+    fail.
+
+    Second resolution on both sides: sacct renders Submit as whole seconds, and
+    comparing it against a sub-second declaration epoch was the original
+    precision mismatch that made an honest same-second submission look stale.
+
+    KNOWN LIMIT: a reuse inside the declaration second is indistinguishable
+    from an honest same-second submission, because sacct emits no more
+    precision than that. Accepting it is deliberate; refusing it would reject
+    every job submitted in the same second as its contract.
+    """
+    if declared_at is None:
+        return False, ("the contract carries no usable declaration time, so an "
+                       "sacct row cannot be placed relative to it")
+    if sacct_submit is None:
+        # Fails CLOSED. Skipping the check when Submit would not parse let an
+        # old COMPLETED row for a reused id certify a new run.
+        return False, ("sacct reported no usable Submit time, so its row "
+                       "cannot be confirmed to describe this contract's job "
+                       "rather than an earlier job reusing the id")
+    if int(sacct_submit) < int(declared_at):
+        return False, ("the sacct row was submitted before this contract was "
+                       "declared, so the job id has been reused and the row "
+                       "describes an earlier job")
+    return True, None
+
+
 def artifact_is_fresh(mtime, declared_at, declared_epoch=None):
     """Whether an artifact could have been produced by this contract instance.
 
@@ -711,8 +759,12 @@ def owned_attempts(attempts, contract):
     An unbound attempts log survived `init --force`, so a stale local exit-0
     record certified a run that never happened under the new contract."""
     want = contract.get("contract_id")
-    if want is None:
-        return attempts          # contracts written before ids existed
+    if not isinstance(want, str) or not want.strip():
+        # Returning ALL attempts here made the binding opt-out, the same
+        # absent-field bypass already closed for criteria_digest. contract_id
+        # is digested now and every `init` writes one, so an absent one is a
+        # malformed contract, not an old one; nothing predating it exists.
+        return []
     return [a for a in attempts if a.get("contract_id") == want]
 
 
@@ -877,17 +929,13 @@ def cmd_check(args):
             sstate, scode, ssubmit = sacct_state(job_id)
             evidence["scheduler"] = {"state": sstate, "exit_code": scode,
                                      "submit": ssubmit}
-            submitted_at = parse_iso_ts(ssubmit)
-            if (sstate is not None and declared_at is not None
-                    and submitted_at is not None
-                    and not artifact_is_fresh(submitted_at, declared_at,
-                                              declared_epoch)):
-                # Slurm resets and reuses job ids; an old row for a reused id
-                # is not evidence about this contract's run.
-                reasons.append(
-                    f"sacct row for job {job_id} was submitted at {ssubmit}, "
-                    f"before this contract was declared; the id has probably "
-                    f"been reused, so the row is not evidence for this run")
+            # The attempt log already established that this job id is ours;
+            # this only rules out a row from a PRIOR job reusing the id, so it
+            # compares against the declaration. See sacct_row_is_ours.
+            ours, why_not = sacct_row_is_ours(parse_iso_ts(ssubmit), declared_at)
+            if sstate is not None and not ours:
+                reasons.append(f"sacct row for job {job_id} discarded: "
+                               f"{why_not}")
                 sstate, scode = None, None
                 # Clear the RECORDED state too: terminal_confirmed reads
                 # evidence["scheduler"], so nulling only the locals left the

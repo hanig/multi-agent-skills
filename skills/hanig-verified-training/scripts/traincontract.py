@@ -54,6 +54,7 @@ SCHEMA_VERSION = 1
 CONTRACT = "training-contract.json"
 VERIFICATION = "training-verification.json"
 TERMINATION = "training-termination.json"
+BINDING = "training-binding.json"
 
 STATES = {"CONVERGED": 0, "RUNNING": 1, "DIVERGED": 2, "BUDGET_EXHAUSTED": 3,
           "CONTRACT_VIOLATED": 4, "PREEMPTED": 5, "INCOMPLETE_EVIDENCE": 6}
@@ -165,6 +166,54 @@ SLURM_BAD_END = ("FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY",
 SLURM_OK_END = ("COMPLETED",)
 
 
+def sacct_row_is_ours(sacct_submit, declared_at):
+    """Whether an sacct row can be evidence about the job WE submitted.
+
+    Returns (ok, why_not).
+
+    Two independent questions, and only one of them is a timestamp:
+
+      Is this job id ours?  Answered by the BINDING (contract.py's attempts
+      log, traincontract.py's `bind`), which records the id against this
+      contract instance. Established, not inferred.
+
+      Is this ROW from a prior job that reused the id?  Answered here. Our job
+      was submitted after the contract was declared, so a row whose Submit
+      predates the declaration belongs to an earlier job.
+
+    Compared against the contract's declaration, NOT against our own recorded
+    bind time. A previous version compared bind time and had the direction
+    inverted: `bind` runs after `sbatch`, so the honest sacct Submit is always
+    EARLIER than the moment we recorded, and every real submission was thrown
+    out as a reused id. The verification that missed it generated the fake
+    Submit at check time, which is necessarily after bind, so it could not
+    fail.
+
+    Second resolution on both sides: sacct renders Submit as whole seconds, and
+    comparing it against a sub-second declaration epoch was the original
+    precision mismatch that made an honest same-second submission look stale.
+
+    KNOWN LIMIT: a reuse inside the declaration second is indistinguishable
+    from an honest same-second submission, because sacct emits no more
+    precision than that. Accepting it is deliberate; refusing it would reject
+    every job submitted in the same second as its contract.
+    """
+    if declared_at is None:
+        return False, ("the contract carries no usable declaration time, so an "
+                       "sacct row cannot be placed relative to it")
+    if sacct_submit is None:
+        # Fails CLOSED. Skipping the check when Submit would not parse let an
+        # old COMPLETED row for a reused id certify a new run.
+        return False, ("sacct reported no usable Submit time, so its row "
+                       "cannot be confirmed to describe this contract's job "
+                       "rather than an earlier job reusing the id")
+    if int(sacct_submit) < int(declared_at):
+        return False, ("the sacct row was submitted before this contract was "
+                       "declared, so the job id has been reused and the row "
+                       "describes an earlier job")
+    return True, None
+
+
 def artifact_is_fresh(mtime, declared_at, declared_epoch=None):
     """Whether an artifact could have been produced by this contract instance.
 
@@ -240,7 +289,7 @@ def squeue_state(job_id):
     return out.splitlines()[0].strip() or None
 
 
-def slurm_state(job_id, declared_at=None, declared_epoch=None):
+def slurm_state(job_id, declared_at=None):
     """Latest sacct row for a job, or None when accounting is unavailable.
     Takes the LAST row: a requeued job has one per attempt, oldest first."""
     rc, out = run(["sacct", "-n", "-X", "-P", "-j", str(job_id),
@@ -254,11 +303,13 @@ def slurm_state(job_id, declared_at=None, declared_epoch=None):
     state = fields[0].split()[0] if fields and fields[0] else None
     code = fields[1] if len(fields) > 1 else ""
     submit = parse_iso_ts(fields[2].strip()) if len(fields) > 2 else None
-    if (declared_at is not None and submit is not None
-            and not artifact_is_fresh(submit, declared_at, declared_epoch)):
-        # Slurm resets and reuses job ids; an old row for a reused id says
-        # nothing about this contract's run.
-        return "STALE_ROW"
+    ours, _why = sacct_row_is_ours(submit, declared_at)
+    if not ours:
+        # Slurm resets and reuses job ids; a row we cannot attribute to our own
+        # submission says nothing about this contract's run. Carry WHY: an
+        # absent Submit and a genuinely older row are different diagnoses, and
+        # reporting one fixed sentence for both misdescribed the second.
+        return f"STALE_ROW:{_why}"
     if state in SLURM_OK_END and not exit_code_is_clean(code):
         # COMPLETED beside a non-zero exit code is not a clean finish; the code
         # was previously not even fetched.
@@ -668,20 +719,21 @@ DIGESTED_FIELDS = (
     "created_at", "created_at_epoch", "contract_id",
 )
 
-# NOT digested: `run`. Its slurm_job_id is a genuine false-pass vector -- point
-# it at another job that succeeded and its accounting is consulted instead --
-# but init captures it from $SLURM_JOB_ID, which does not exist yet when the
-# contract is declared on a login node before sbatch. Digesting it would break
-# that workflow, and the honest fix is a `bind` subcommand that sets the job id
-# and re-stamps the digest, which is an interface change, not a bug fix.
-# Meanwhile the sacct row must still post-date the contract (see STALE_ROW),
-# which is what stops an OLD job from certifying a new contract.
+# `run` is NOT digested wholesale: it carries hostname, user, python version
+# and NCCL env, none of which decide anything, and digesting them made an
+# unrelated edit look like post-hoc criterion selection. Only the job id
+# matters, because read_binding falls back to it when no `bind` record exists.
+DIGESTED_RUN_KEYS = ("slurm_job_id",)
 
 
 def criteria_digest(contract):
     """Stable fingerprint of every field that decides the verdict."""
-    payload = json.dumps({k: (contract or {}).get(k) for k in DIGESTED_FIELDS},
-                         sort_keys=True, default=str)
+    c = contract or {}
+    fields = {k: c.get(k) for k in DIGESTED_FIELDS}
+    run = c.get("run") if isinstance(c.get("run"), dict) else {}
+    for k in DIGESTED_RUN_KEYS:
+        fields[f"run.{k}"] = run.get(k)
+    payload = json.dumps(fields, sort_keys=True, default=str)
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
@@ -1073,6 +1125,101 @@ def cmd_init(args):
         print(f"  budget: {args.max_steps} steps")
 
 
+def read_binding(run_dir):
+    """The job id bound to this contract, as (job_id, submitted_at_iso).
+
+    Two ways a binding is genuine, and only these two:
+      - `bind` wrote one after sbatch returned an id (the login-node flow);
+      - `init` ran INSIDE the job and captured $SLURM_JOB_ID, in which case the
+        contract's own created_at IS the submission time. Requiring a redundant
+        `bind` there would break a workflow that is already correct.
+    """
+    contract = {}
+    raw, rerr = read_json_bounded(run_dir / CONTRACT)
+    if not rerr:
+        try:
+            c = json.loads(raw)
+            if isinstance(c, dict):
+                contract = c
+        except (ValueError, RecursionError):
+            pass
+    cid = contract.get("contract_id")
+
+    raw, rerr = read_json_bounded(run_dir / BINDING)
+    if not rerr and raw:
+        try:
+            b = json.loads(raw)
+        except (ValueError, RecursionError):
+            b = None
+        # Bound to THIS contract instance, exactly as the termination record
+        # is: an unbound binding survived `init --force`.
+        if (isinstance(b, dict) and b.get("job_id")
+                and (cid is None or b.get("contract_id") == cid)):
+            return str(b["job_id"]), b.get("submitted_at")
+
+    init_id = (contract.get("run") or {}).get("slurm_job_id")
+    if init_id:
+        return str(init_id), contract.get("created_at")
+    return None, None
+
+
+def cmd_bind(args):
+    """Bind a Slurm job id to this contract after submission.
+
+    `init` captures $SLURM_JOB_ID, which does not exist when the contract is
+    declared on a login node before sbatch. Without this there was no recorded
+    submission time to compare an sacct row against, so the verifier had to
+    infer ownership from timestamps -- which fails open on an unparseable
+    Submit and closed on a whole-second one."""
+    run_dir = Path(args.run_dir).resolve()
+    cpath = run_dir / CONTRACT
+    if not cpath.exists():
+        sys.exit(f"error: no training contract at {cpath}")
+    raw, rerr = read_json_bounded(cpath)
+    if rerr:
+        sys.exit(f"error: contract unreadable: {rerr}")
+    try:
+        contract = json.loads(raw)
+    except (ValueError, RecursionError) as e:
+        sys.exit(f"error: contract malformed: {e}")
+    if not isinstance(contract, dict):
+        sys.exit("error: contract is not a JSON object")
+
+    job_id = str(args.job_id).strip()
+    if not job_id or not job_id.replace("_", "").replace(".", "").isalnum():
+        sys.exit(f"error: implausible job id {args.job_id!r}")
+
+    # Refuse a contract that already has terminal evidence: binding a new job
+    # id afterwards points the verifier at different accounting and can flip a
+    # settled verdict.
+    term = read_termination(run_dir)
+    if term is not None and term.get("terminal") and not args.force:
+        sys.exit(f"error: {run_dir} already has a recorded termination "
+                 f"(exit {term.get('exit_code')}); binding a job id now would "
+                 f"point the verifier at other accounting. Use --force only if "
+                 f"that record is wrong.")
+
+    existing_id, existing_at = read_binding(run_dir)
+    if existing_id is not None and existing_id != job_id and not args.force:
+        sys.exit(f"error: this contract is already bound to job {existing_id}; "
+                 f"binding it to {job_id} would let a second job's accounting "
+                 f"certify it. Use --force only if the first binding was wrong.")
+
+    rec = {"job_id": job_id,
+           # Re-binding the SAME id keeps the FIRST time: rewriting it made the
+           # operation non-idempotent, and a retry moved the anchor forward.
+           "submitted_at": (existing_at if existing_id == job_id and existing_at
+                            else now_iso()),
+           "host": os.uname().nodename,
+           "contract_id": contract.get("contract_id"),
+           "criteria_digest": contract.get("criteria_digest")}
+    werr = write_receipt(run_dir / BINDING, rec)
+    if werr:
+        sys.exit(f"error: cannot write the binding: {werr}")
+    print(f"bound job {job_id} to {run_dir}")
+    print(f"verify with: traincontract.py check {run_dir}")
+
+
 def cmd_record(args):
     """Record the terminal outcome of a run not managed by Slurm.
 
@@ -1319,7 +1466,10 @@ def cmd_check(args):
     # finished, whatever the metrics so far show.
     declared_at = parse_iso_ts(contract.get("created_at"))
     declared_epoch = contract_epoch(contract)
-    jid = (contract.get("run") or {}).get("slurm_job_id")
+    # Ownership is established by the binding, never inferred from timestamps.
+    # The binding establishes WHICH job id is ours; the declaration time is
+    # what an sacct row gets placed against.
+    jid, _bound_iso = read_binding(run_dir)
     if state == "CONVERGED":
         if not jid:
             # No job id: the only admissible evidence is an explicitly recorded
@@ -1336,10 +1486,13 @@ def cmd_check(args):
                 state = "INCOMPLETE_EVIDENCE"
                 reasons.append(
                     "the criterion is met by the metrics present, but nothing "
-                    "shows the run terminated: no slurm_job_id is recorded and "
-                    "no local termination was declared. Run `traincontract.py "
-                    "record <run-dir> --exit-code N` after a local run, or "
-                    "record the job id in the contract.")
+                    "shows the run terminated: no job id is bound to this "
+                    "contract and no local termination was declared. Run "
+                    "`traincontract.py bind <run-dir> --job-id N` after sbatch, "
+                    "or `traincontract.py record <run-dir> --exit-code N` after "
+                    "a local run. Editing the job id into the contract by hand "
+                    "is not a substitute: the binding records WHEN we submitted, "
+                    "which is what an sacct row gets checked against.")
             elif term["exit_code"] != 0:
                 state = "CONTRACT_VIOLATED"
                 reasons.append(f"recorded local run exited "
@@ -1352,7 +1505,7 @@ def cmd_check(args):
             # attempt while the job is running again, and a stale terminal row
             # must not outrank a live one.
             qstate = squeue_state(jid)
-            sstate = slurm_state(jid, declared_at, declared_epoch)
+            sstate = slurm_state(jid, declared_at)
             if qstate:
                 # ANY squeue state means the job is still in the system --
                 # enumerating live states missed real ones such as STAGE_OUT.
@@ -1370,15 +1523,16 @@ def cmd_check(args):
                 state = "RUNNING"
                 reasons.append(f"scheduler reports {sstate} for job {jid}; the "
                                f"criterion is met so far but the run is not over")
-            elif sstate == "STALE_ROW":
+            elif str(sstate).startswith("STALE_ROW"):
                 term = read_termination(run_dir)
                 if not termination_matches(term, contract) or \
                         term["exit_code"] != 0:
                     state = "INCOMPLETE_EVIDENCE"
+                    why = str(sstate).split(":", 1)[1] if ":" in str(sstate) \
+                        else "it cannot be attributed to this contract"
                     reasons.append(
-                        f"the sacct row for job {jid} was submitted before this "
-                        f"contract was declared, so the id has probably been "
-                        f"reused and the row is not evidence for this run")
+                        f"the sacct row for job {jid} is not evidence for this "
+                        f"run: {why}")
                 else:
                     reasons.append(f"sacct row for job {jid} looks stale (id "
                                    f"reuse); relying on the recorded local "
@@ -1491,9 +1645,7 @@ def cmd_check(args):
                        "it, but this cannot establish convergence")
 
     if state == "RUNNING" and contract.get("preemptible"):
-        jid = (contract.get("run") or {}).get("slurm_job_id")
-        sstate = (slurm_state(jid, declared_at, declared_epoch)
-                  if jid else None)
+        sstate = slurm_state(jid, declared_at) if jid else None
         if sstate in ("PREEMPTED", "REQUEUED", "SUSPENDED"):
             state = "PREEMPTED"
             reasons.append(f"scheduler reports {sstate} for job {jid}; "
@@ -1586,6 +1738,15 @@ def main():
                    help="audit a finished run; cannot establish convergence")
     p.add_argument("--force", action="store_true")
     p.set_defaults(fn=cmd_init)
+
+    p = sub.add_parser("bind",
+                       help="bind a Slurm job id to this contract after "
+                            "sbatch, when init could not capture $SLURM_JOB_ID")
+    p.add_argument("run_dir")
+    p.add_argument("--job-id", required=True)
+    p.add_argument("--force", action="store_true",
+                   help="replace an existing binding to a DIFFERENT job id")
+    p.set_defaults(fn=cmd_bind)
 
     p = sub.add_parser("record",
                        help="record the terminal outcome of a run not managed "
