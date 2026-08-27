@@ -405,31 +405,36 @@ class TestMalformedPredicates(Base):
                                 f"predicate {bad} left no receipt")
                 self.assertIn(r.returncode, range(8))
 
-    def test_underscored_keys_are_annotations_and_are_accepted(self):
+    def test_the_reserved_note_key_is_accepted_and_never_evaluated(self):
         """deepseek-v4-pro, MAJOR: refusing every unlisted key also refused a
         criterion the previous version evaluated exactly as the author
-        intended. Refusing an honest declaration is as serious here as
-        accepting a dishonest one, so notes need a way in."""
+        intended, so notes need a route in. The FIRST version of that route
+        allowed any underscore-prefixed key, which the same reviewer then broke
+        with `_lines_`. One reserved name has no boundary left to probe."""
         out = self.tmp / "ann.tsv"
         r = contract("init", str(self.tmp / "ra"), "--command", "x",
                      "--predicate",
                      json.dumps({"kind": "min_lines", "path": str(out),
-                                 "lines": 3, "_why": "three header rows"}))
+                                 "lines": 3, "note": "three header rows"}))
         self.assertEqual(r.returncode, 0, r.stderr)
 
-    def test_an_underscored_read_key_is_a_typo_not_an_annotation(self):
-        """The hatch above must not reintroduce the defect it was added
-        alongside: `_lines` ignored + `lines` defaulted = the criterion
-        silently weakened, through the escape hatch."""
+    def test_no_underscore_spelling_of_a_read_key_gets_through(self):
+        """The bypass, and every neighbour of it. `_lines_` strips to `lines_`
+        under lstrip('_'), is not a read key, and so passed as an annotation
+        while `lines` fell back to its default -- the original defect, through
+        the hatch added to fix it."""
         out = self.tmp / "und.tsv"
-        r = contract("init", str(self.tmp / "ru"), "--command", "x",
-                     "--predicate",
-                     json.dumps({"kind": "min_lines", "path": str(out),
-                                 "_lines": 3}))
-        self.assertNotEqual(r.returncode, 0,
-                            "_lines was accepted; the criterion would fall "
-                            "back to the default and be silently weakened")
-        self.assertIn("lines", r.stderr)
+        for key in ("_lines", "lines_", "_lines_", "__lines__", "_l_i_n_e_s",
+                    "min", "Lines", "LINES"):
+            with self.subTest(key=key):
+                r = contract("init", str(self.tmp / f"ru{abs(hash(key))}"),
+                             "--command", "x", "--predicate",
+                             json.dumps({"kind": "min_lines",
+                                         "path": str(out), key: 3}))
+                self.assertNotEqual(
+                    r.returncode, 0,
+                    f"{key!r} was accepted; `lines` would fall back to its "
+                    f"default and the criterion would be silently weakened")
 
     def test_the_refusal_of_an_unread_key_names_the_annotation_route(self):
         """Every refusal names an action -- here, how to keep the note."""
@@ -439,7 +444,7 @@ class TestMalformedPredicates(Base):
                      json.dumps({"kind": "min_lines", "path": str(out),
                                  "lines": 3, "description": "output"}))
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("_", r.stderr,
+        self.assertIn("note", r.stderr,
                       "the refusal must tell the author how to keep the note")
 
     def test_a_typod_key_is_refused_rather_than_silently_weakened(self):

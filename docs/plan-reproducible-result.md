@@ -1,4 +1,4 @@
-# Plan v5 — hanig-reproducible-result
+# Plan v6 — hanig-reproducible-result
 
 Regenerate and verify figures, tables, benchmark results and exports with
 input-to-output provenance.
@@ -24,15 +24,23 @@ inputs later changed still exited 0, and the review survived the change it was
 supposed to be invalidated by (kimi, CRITICAL):
 
 ```
-DISQUALIFIERS, most serious first:
-1. FAILED               the build command failed
+STEP 0 -- TRUST GATE, before any disqualifier is evaluated:
+0. INCOMPLETE_EVIDENCE  no attempt names this contract instance.
+                        NOTHING from an unbound attempt is read: not its rc,
+                        not its consumed digests, not its double-render
+                        record. The gate is not a ranked disqualifier, it is
+                        a precondition on reading the attempt at all.
+
+DISQUALIFIERS, most serious first, over the BOUND attempt only:
+1. FAILED               the bound attempt's build command failed
 2. INCOMPLETE_EVIDENCE  a declared check could not run, OR the contract
                         declared deterministic: true and no double render was
-                        ever recorded, OR the attempt does not name this
-                        contract instance
+                        ever recorded
 3. NONDETERMINISTIC     a recorded double render differed
-4. CONTRACT_DRIFTED     the attempt's consumed inputs differ from the declared
-5. STALE                the attempt's consumed inputs differ from the inputs now
+4. CONTRACT_DRIFTED     the bound attempt's consumed inputs differ from the
+                        declared
+5. STALE                the bound attempt's consumed inputs differ from the
+                        inputs now
 
 ACHIEVEMENT, highest reached:
 6. GENERATED            outputs exist
@@ -59,6 +67,19 @@ its rc, its consumed digests or its double-render record. The receipt-binding
 rule reached receipts and reviews and not attempts, so a build from a previous
 contract could satisfy a re-declared one with no build ever run for it
 (glm-5.1). Fifth place this same rule has had to be applied.
+
+**The trust gate is STEP 0 and not disqualifier 2, because a ranking cannot
+express it.** v5 listed `FAILED` first and folded "the attempt does not name
+this contract instance" into disqualifier 2, so an attempt left over from a
+previous contract with rc=1 satisfied `FAILED` before the trust rule was ever
+consulted: `check` would report "the build failed" (exit 5) for a contract that
+was never built, instead of `INCOMPLETE_EVIDENCE` (exit 6). The two states carry
+opposite actions -- "fix your build" versus "run the build" -- so this is not a
+cosmetic ordering point (deepseek-v4-pro, MAJOR). Binding is a precondition on
+reading the attempt, so it cannot sit in a list of findings ranked against each
+other. **Sixth place this same receipt-binding rule has had to be applied**,
+which is itself the argument for making it a gate rather than a rule to
+remember at each new site.
 
 **These conditions OVERLAP, so this is a priority rule and not mutual
 exclusivity**, which v1 claimed and could not deliver: a build can succeed and
@@ -298,6 +319,9 @@ this is stated rather than pretended away:
    `INCOMPLETE_EVIDENCE`, never a pass.
 20. `check` refuses to trust an attempt that does not name this contract
    instance -- its rc, its consumed digests and its double-render record alike.
+   This is evaluated as STEP 0, BEFORE any disqualifier including `FAILED`. An
+   unbound attempt yields `INCOMPLETE_EVIDENCE`, never `FAILED`, because the
+   actions differ: "run the build" is not "fix your build".
 21. The exit code carries the most serious DISQUALIFIER, or the highest
    ACHIEVEMENT when there is none. Achievements are never compared against
    disqualifiers, because `REVIEWED` logically contains `VALIDATED` and a single

@@ -3028,16 +3028,22 @@ class TestUnreadCriterionKeys(unittest.TestCase):
                             "the criterion would be silently weakened")
         self.assertIn("min_steps", r.stderr)
 
-    def test_an_annotation_is_accepted(self):
-        r = self.init_with({**self.BASE, "_why": "picked from the v3 sweep"})
+    def test_the_reserved_note_key_is_accepted(self):
+        r = self.init_with({**self.BASE, "note": "picked from the v3 sweep"})
         self.assertEqual(r.returncode, 0, r.stderr)
 
-    def test_an_underscored_read_key_is_refused(self):
-        r = self.init_with({**self.BASE, "_min_steps": 10})
-        self.assertNotEqual(r.returncode, 0,
-                            "_min_steps was ignored; the criterion would be "
-                            "silently weakened through the annotation hatch")
-        self.assertIn("min_steps", r.stderr)
+    def test_no_underscore_spelling_of_a_read_key_gets_through(self):
+        """Sibling of the contract.py test. `_min_steps_` strips to
+        "min_steps_" under lstrip('_') and passed as an annotation while
+        `min_steps` fell back to its default (deepseek-v4-pro)."""
+        for key in ("_min_steps", "min_steps_", "_min_steps_",
+                    "__min_steps__", "min_step", "Min_Steps"):
+            with self.subTest(key=key):
+                r = self.init_with({**self.BASE, key: 10})
+                self.assertNotEqual(
+                    r.returncode, 0,
+                    f"{key!r} was accepted; min_steps would default and the "
+                    f"criterion would be silently weakened")
 
     def test_a_correct_criterion_is_still_accepted(self):
         r = self.init_with({**self.BASE, "min_steps": 10})

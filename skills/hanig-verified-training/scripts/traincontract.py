@@ -925,29 +925,28 @@ def criteria_digest(contract):
 CONVERGE_KEYS = frozenset({"metric", "mode", "threshold",
                            "rel_improvement_below", "over_evals", "min_steps"})
 DIVERGE_KEYS = frozenset({"metric", "above", "below"})
+# Recorded, never evaluated, allowed on every criterion. Mirrors
+# contract.py's ANNOTATION_KEYS exactly.
+ANNOTATION_KEYS = frozenset({"note"})
 
 
 def unread_key_problem(crit, allowed, what):
     """Why a criterion's key set is not interpretable, or None.
 
-    Underscore-prefixed keys are annotations and ignored: refusing EVERY
-    unlisted key also refused criteria the previous version evaluated exactly
-    as intended (deepseek-v4-pro, MAJOR, on contract.py's predicates). But an
-    underscored form of a key that IS read is a typo, not an annotation --
-    otherwise `_min_steps` is ignored, `min_steps` defaults, and the criterion
-    is silently weakened through the hatch opened to fix a different defect."""
-    readable = ", ".join(sorted(allowed))
-    for key in sorted(crit):
-        if key.startswith("_") and key.lstrip("_") in allowed:
-            return (f"{what} has {key!r}, which reads as an annotation and is "
-                    f"ignored. Did you mean {key.lstrip('_')!r}? Rename it, or "
-                    f"use a name that is not one of {readable}.")
-    unknown = sorted(k for k in set(crit) - allowed if not k.startswith("_"))
+    ONE reserved annotation key, not a naming convention. The first version
+    allowed any underscore-prefixed key; deepseek-v4-pro broke it with
+    `_min_steps_`, which strips to "min_steps_", is not a read key, and so
+    passed as an annotation while `min_steps` fell back to its default -- the
+    defect this exists to stop, through the hatch added to fix it. A closed set
+    has no boundary left to probe."""
+    readable = ", ".join(sorted(allowed - ANNOTATION_KEYS))
+    unknown = sorted(set(crit) - allowed - ANNOTATION_KEYS)
     if unknown:
         return (f"{what} has unrecognised key(s) {', '.join(unknown)}; it "
                 f"reads only {readable}. A typo here would silently weaken "
-                f"the criterion. If these are notes, prefix them with '_' and "
-                f"they will be ignored.")
+                f"the criterion. Put any commentary in "
+                f"{sorted(ANNOTATION_KEYS)[0]!r}, which is recorded and never "
+                f"evaluated.")
     return None
 
 
@@ -959,11 +958,16 @@ def criterion_problem(crit):
     if not isinstance(crit, dict):
         return "not a JSON object"
     if not isinstance(crit.get("metric"), str) or not crit["metric"].strip():
-        return f"'metric' must be a non-empty string, got {crit.get('metric')!r}"
+        return (f"'metric' must be a non-empty string, got "
+                f"{crit.get('metric')!r}; use the metric's name exactly as the "
+                f"metrics file writes it")
     if crit.get("mode", "min") not in ("min", "max"):
-        return f"mode must be 'min' or 'max', got {crit.get('mode')!r}"
+        return (f"mode must be 'min' or 'max', got {crit.get('mode')!r}; "
+                f"use 'min' for a loss, 'max' for an accuracy")
     if "threshold" not in crit and "rel_improvement_below" not in crit:
-        return "needs either 'threshold' or 'rel_improvement_below'"
+        return ("needs either 'threshold' or 'rel_improvement_below'; add "
+                "one, e.g. \"threshold\": 0.5 for an absolute target, or "
+                "\"rel_improvement_below\": 0.002 for a plateau")
     for key in ("threshold", "rel_improvement_below"):
         if key in crit:
             _, err = finite_number(crit[key])
@@ -977,7 +981,9 @@ def criterion_problem(crit):
     if "rel_improvement_below" in crit:
         n, err = nonneg_int(crit.get("over_evals", 5))
         if err or n < 1:
-            return "'over_evals' must be a whole number of at least 1"
+            return ("'over_evals' must be a whole number of at least 1; "
+                    "set it to the number of evaluations the plateau must "
+                    "hold for, or omit it to use the default of 5")
     # Enumerate the keys this criterion is READ with. Every known key above
     # was validated, but an unknown one was silently ignored, so a typo
     # (`min_step` for `min_steps`) left the real criterion WEAKER than the
@@ -1336,7 +1342,9 @@ def cmd_init(args):
         converge = json.loads(args.converge) if args.converge else None
         diverge = [json.loads(d) for d in args.diverge]
     except json.JSONDecodeError as e:
-        sys.exit(f"error: criterion is not valid JSON: {e}")
+        sys.exit(f"error: criterion is not valid JSON: {e}. Pass one JSON "
+                 f'object, e.g. --converge \'{{"metric":"val_loss",'
+                 f'"mode":"min","threshold":0.5}}\'.')
 
     if converge is not None:
         problem = criterion_problem(converge)
@@ -1471,7 +1479,8 @@ def cmd_bind(args):
     run_dir = Path(args.run_dir).resolve()
     cpath = run_dir / CONTRACT
     if not cpath.exists():
-        sys.exit(f"error: no training contract at {cpath}")
+        sys.exit(f"error: no training contract at {cpath}. Run `init "
+                 f"{cpath.parent}` first.")
     raw, rerr = read_json_bounded(cpath)
     if rerr:
         sys.exit(f"error: contract unreadable: {rerr}")
@@ -1480,14 +1489,16 @@ def cmd_bind(args):
     except (ValueError, RecursionError) as e:
         sys.exit(f"error: contract malformed: {e}")
     if not isinstance(contract, dict):
-        sys.exit("error: contract is not a JSON object")
+        sys.exit("error: contract is not a JSON object. Re-declare it with "
+                 "`init --force`.")
 
     job_id = str(args.job_id).strip()
     # Slurm ids are numeric, with _ for array tasks and . for steps. Accepting
     # any alphanumeric string took "abc" (luna); a leading digit is the cheap
     # discriminator that keeps 12345, 12345_7 and 12345.batch.
     if not re.fullmatch(r"\d[\w.]*", job_id):
-        sys.exit(f"error: implausible Slurm job id {args.job_id!r}")
+        sys.exit(f"error: implausible Slurm job id {args.job_id!r}. Pass "
+                 f"the numeric id sbatch printed.")
 
     # Refuse a contract that already has terminal evidence: binding a new job
     # id afterwards points the verifier at different accounting and can flip a
@@ -1534,7 +1545,8 @@ def cmd_record(args):
     metrics alone -- which is exactly the false pass its sibling refuses."""
     run_dir = Path(args.run_dir).resolve()
     if not (run_dir / CONTRACT).exists():
-        sys.exit(f"error: no training contract at {run_dir / CONTRACT}")
+        sys.exit(f"error: no training contract at {run_dir / CONTRACT}. "
+                 f"Run `init {run_dir}` first.")
     digest, cid = None, None
     try:
         raw, rerr = read_json_bounded(run_dir / CONTRACT)
@@ -1619,7 +1631,8 @@ def cmd_check(args):
     arm_watchdog(getattr(args, "watchdog", 600), _timed_out)
     cpath = run_dir / CONTRACT
     if not cpath.exists():
-        sys.exit(f"error: no training contract at {cpath}")
+        sys.exit(f"error: no training contract at {cpath}. Run `init "
+                 f"{cpath.parent}` first.")
     # Bound before the try below, so `bail` can read it on the path where the
     # contract could not be parsed. Reading it unconditionally there would
     # NameError and turn "a broken contract is a verdict, not a crash" into a

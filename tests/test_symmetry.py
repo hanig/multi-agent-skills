@@ -202,75 +202,88 @@ class TestVerifierSymmetry(unittest.TestCase):
         """The sibling of the test above, and the reason it was needed.
 
         test_every_refusal_names_an_action scans only `reasons.append` inside
-        blocks that set INCOMPLETE_EVIDENCE or CONTRACT_VIOLATED. Every
-        refusal raised at DECLARE time -- `sys.exit` in cmd_init, and the
-        strings returned by predicate_fault / unread_key_problem -- was
-        invisible to it. kimi-k2.7-code then found exactly what that test
-        claims to catch: three new refusals that state the defect and name no
-        corrective action. A test that cannot see a whole class of the thing it
-        guards is weaker than the rule it enforces (7th instance here).
+        blocks that set INCOMPLETE_EVIDENCE or CONTRACT_VIOLATED, so every
+        refusal raised at DECLARE time was invisible to it. kimi-k2.7-code then
+        found exactly what that test claims to catch.
 
-        Uses the AST, not a regex. The regex first written for this test read
-        only double-quoted literals, so a message fixed with single quotes
-        still looked broken -- measuring the reader instead of the message,
-        which is the same flaw one level down."""
+        Twice weaker than the rule before this version, both times found by a
+        reviewer rather than by the test:
+          - a regex over double-quoted literals only, so a message fixed with
+            single quotes still looked broken (measuring the reader);
+          - a keyword filter ("error:", "cannot", ...) that RECOVERED the
+            actionless `over_evals` string and then skipped it for lacking a
+            marker, so a new actionless refusal would not have failed the test
+            (deepseek-v4-pro).
+
+        So the selection is STRUCTURAL now, not keyword-based: every string a
+        `sys.exit` assembles, and every string returned by a function whose
+        name ends in _problem or _fault. Those are refusal channels by
+        construction, so nothing has to be guessed from the wording."""
         import ast
 
+        REFUSAL_FUNCS = ("_problem", "_fault")
+
         def refusal_texts(src):
-            """Every string a sys.exit() or a return assembles, joined."""
             tree = ast.parse(src)
-            out = []
+            found = []
+
+            def strings_in(node):
+                return [n.value for n in ast.walk(node)
+                        if isinstance(n, ast.Constant)
+                        and isinstance(n.value, str)]
+
+            # (a) every sys.exit(...) anywhere
             for node in ast.walk(tree):
                 if isinstance(node, ast.Call):
                     f = node.func
-                    is_exit = (isinstance(f, ast.Attribute)
-                               and f.attr == "exit") or (
-                               isinstance(f, ast.Name) and f.id == "exit")
-                    if not is_exit:
-                        continue
-                    args = node.args
-                elif isinstance(node, ast.Return) and node.value is not None:
-                    args = [node.value]
-                else:
+                    if (isinstance(f, ast.Attribute) and f.attr == "exit") or \
+                       (isinstance(f, ast.Name) and f.id == "exit"):
+                        for a in node.args:
+                            t = " ".join(strings_in(a)).strip()
+                            if t:
+                                found.append(("sys.exit", t))
+
+            # (b) every return inside a *_problem / *_fault function
+            for fn in ast.walk(tree):
+                if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     continue
-                pieces = []
-                for a in args:
-                    for sub in ast.walk(a):
-                        if isinstance(sub, ast.Constant) and isinstance(
-                                sub.value, str):
-                            pieces.append(sub.value)
-                text = " ".join(pieces).strip()
-                if text:
-                    out.append(text)
-            return out
+                if not fn.name.endswith(REFUSAL_FUNCS):
+                    continue
+                for node in ast.walk(fn):
+                    if isinstance(node, ast.Return) and node.value is not None:
+                        t = " ".join(strings_in(node.value)).strip()
+                        if t:
+                            found.append((fn.name, t))
+            return found
 
         actionable = ("record", "bind", "submit", "re-declare", "init", "add",
                       "Run ", "declare", "use ", "Use ", "Split", "split",
                       "raise", "SLURM_TIME_FORMAT", "Check", "Point", "Pass ",
                       "pass ", "re-run", "Re-declare", "fix the writer",
-                      "omit", "Rename", "rename", "prefix", "Did you mean")
+                      "omit", "Rename", "rename", "Put any", "set it",
+                      "Write ", "point ", "Point ")
         for path in (WORKFLOW, TRAINING):
             judged = 0
-            for text in refusal_texts(path.read_text()):
-                low = text.lower()
-                # Only judge strings that read as a refusal, not usage text,
-                # help strings, or ordinary detail lines.
-                if len(text) < 45:
+            for where, text in refusal_texts(path.read_text()):
+                # Usage/help blocks are not refusals. A message ending in
+                # ':' is a WRAPPER around an interpolated detail -- e.g.
+                # "unusable convergence criterion: {problem}" -- and the
+                # detail it prepends is itself checked where it is produced,
+                # so judging the bare prefix would demand an action twice.
+                if len(text) < 30 or text.lstrip().startswith("usage:"):
                     continue
-                if not any(w in low for w in (
-                        "error:", "cannot", "unrecognised", "unknown key",
-                        "missing required", "is not an object", "refus")):
+                if text.rstrip().endswith(":"):
                     continue
                 judged += 1
                 self.assertTrue(
                     any(a in text for a in actionable),
-                    f"{path.name}: a declare-time refusal names no action the "
-                    f"user can take: {text[:150]}")
+                    f"{path.name}: a declare-time refusal in {where} names no "
+                    f"action the user can take: {text[:160]}")
             self.assertGreater(
-                judged, 3,
-                f"{path.name}: this test recovered only {judged} refusal "
-                f"strings, so it is measuring its own reader rather than the "
-                f"messages. That is how the gap it exists to close was missed.")
+                judged, 6,
+                f"{path.name}: only {judged} refusal strings recovered, so "
+                f"this test is measuring its own reader rather than the "
+                f"messages. That is twice now.")
 
     def test_both_tools_refuse_an_unrecognised_criterion_key(self):
         """The 17th instance. Both tools validated every key they KNEW and

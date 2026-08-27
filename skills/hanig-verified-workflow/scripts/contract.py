@@ -350,6 +350,15 @@ def repo_state(cwd):
 # to count. Kept deliberately small: a few structural checks plus an escape
 # hatch to a shell command for anything domain-specific.
 
+# Annotation keys: recorded, never evaluated, allowed on every kind. ONE
+# reserved name, not a naming CONVENTION. The first fix here allowed any
+# underscore-prefixed key, which deepseek-v4-pro then broke with `_lines_`:
+# lstrip("_") gives "lines_", which is not a read key, so it passed as an
+# annotation and `lines` fell back to its default -- the original defect,
+# through the hatch added to fix it. Patching the normalisation just moves the
+# boundary; a closed set has no boundary to probe.
+ANNOTATION_KEYS = frozenset({"note"})
+
 # Every predicate kind and the exact keys it reads. Enumerated, not inferred:
 # an unrecognised key used to be silently ignored, so a typo'd criterion
 # (`{"kind":"min_lines","min":3}` -- the reader is `lines`) fell back to the
@@ -376,8 +385,8 @@ def predicate_fault(pred):
     if spec is None:
         return (f"unknown predicate kind {kind!r}; use one of: "
                 f"{', '.join(sorted(PREDICATE_SCHEMA))}")
-    allowed = {"kind", *spec["required"], *spec["optional"]}
-    readable = sorted(allowed - {"kind"})
+    allowed = {"kind", *ANNOTATION_KEYS, *spec["required"], *spec["optional"]}
+    readable = sorted(allowed - {"kind"} - ANNOTATION_KEYS)
     missing = [k for k in spec["required"] if k not in pred]
     if missing:
         # Name the fix, not just the fault: a refusal a user cannot act on is
@@ -387,32 +396,13 @@ def predicate_fault(pred):
         return (f"{kind} predicate is missing required key(s) "
                 f"{', '.join(missing)}; add them, e.g. "
                 f"{json.dumps(example)}")
-    # Annotation keys are opt-in and underscore-prefixed. Refusing EVERY
-    # unlisted key also refused a criterion the previous version evaluated
-    # exactly as the author intended -- `{"lines":3,"description":"output"}`
-    # (deepseek-v4-pro, MAJOR). Refusing an honest declaration is as serious
-    # here as accepting a dishonest one, so there has to be a way to say
-    # "this key is documentation, not criteria".
-    for key in sorted(pred):
-        if not key.startswith("_"):
-            continue
-        # ...but an underscored form of a key the kind READS is a typo, not an
-        # annotation. Without this, `_lines` would be ignored, `lines` would
-        # default, and the criterion would be silently weakened again -- the
-        # very defect this function exists to stop, reintroduced through the
-        # escape hatch added to fix a different one.
-        if key.lstrip("_") in allowed:
-            return (f"{kind} predicate has {key!r}, which reads as an "
-                    f"annotation and is ignored. Did you mean "
-                    f"{key.lstrip('_')!r}? Rename it, or use a name that is "
-                    f"not one of {', '.join(readable)}.")
-    unknown = sorted(k for k in set(pred) - allowed if not k.startswith("_"))
+    unknown = sorted(set(pred) - allowed)
     if unknown:
         return (f"{kind} predicate has unrecognised key(s) "
-                f"{', '.join(unknown)}; it reads only "
-                f"{', '.join(readable)}. A typo here would silently weaken "
-                f"the criterion. If these are notes, prefix them with '_' "
-                f"and they will be ignored.")
+                f"{', '.join(unknown)}; it reads only {', '.join(readable)}. "
+                f"A typo here would silently weaken the criterion. Put any "
+                f"commentary in {sorted(ANNOTATION_KEYS)[0]!r}, which is "
+                f"recorded and never evaluated.")
     return None
 
 
@@ -1054,17 +1044,21 @@ def cmd_submit(args):
             raise ValueError(f"contract unreadable: {rerr}")
         contract = json.loads(raw)
     except (OSError, ValueError, RecursionError) as e:
-        sys.exit(f"error: contract unreadable or malformed: {e}")
+        sys.exit(f"error: contract unreadable or malformed: {e}. "
+                 f"Re-declare it with `init --force`.")
     shape = contract_problems(contract)
     if shape:
         sys.exit("error: unusable contract: " + "; ".join(shape[:3]))
 
     if not shutil.which("sbatch"):
-        sys.exit("error: sbatch not found on PATH")
+        sys.exit("error: sbatch not found on PATH. Run this on a node with "
+                 "Slurm, or run the job yourself and log the outcome with "
+                 "`record <run_dir> --exit-code N`.")
 
     script = run_dir / "job.sbatch"
     if not script.exists():
-        sys.exit(f"error: expected a batch script at {script}")
+        sys.exit(f"error: expected a batch script at {script}. Write the "
+                 f"job script there, or point --script at it.")
 
     argv = ["sbatch", "--parsable", *args.sbatch_arg, str(script)]
     rc, out, err = run(argv, cwd=str(run_dir), timeout=60)
@@ -1157,7 +1151,8 @@ def _load_contract_for_record(run_dir):
     except (ValueError, RecursionError) as e:
         sys.exit(f"error: contract malformed: {e}")
     if not isinstance(c, dict):
-        sys.exit("error: contract is not a JSON object")
+        sys.exit("error: contract is not a JSON object. Re-declare it with "
+                 "`init --force`.")
     return c
 
 
