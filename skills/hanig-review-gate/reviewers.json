@@ -86,16 +86,20 @@
       "_note": "dropped 2026-08-27: $15.00/M output, dearer than sol ($10.00) which is the deep-only tie-breaker, so cheapest-first reached its priciest reviewer before its designated last resort. Disabled rather than deleted so the reason survives; flip enabled to re-add."
     },
     {
-      "name": "glm-5.1",
+      "name": "glm-5.3",
       "provider": "openrouter",
-      "model": "z-ai/glm-5.1",
+      "model": "z-ai/glm-5.3",
       "effort": null,
       "profiles": [
         "standard",
         "deep"
       ],
       "enabled": true,
-      "_note": "Asked for as GLM 5.3, which OpenRouter does not carry: the line ends at 5.1, and 5.2 is published only as :free. 5.1 is the newest stable paid build, 204k context, $1.26/$3.96 per M. Verified against the live models list rather than guessed, because a wrong model id fails as an unavailable reviewer and that misread cost a whole session once already."
+      "_note": "1M context, so it does not need the >100KB review split. glm-5.2 is marginally cheaper (1.19/3.74) with the same context if cost matters more than recency.",
+      "_cost": {
+        "in": 1.4,
+        "out": 4.4
+      }
     }
   ]
 }
