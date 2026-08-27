@@ -1323,11 +1323,15 @@ class TestEscalateFormsACommittee(unittest.TestCase):
         self.assertIn("standard", tiers)
 
 
-class TestTieBreakerIsHeldUntilQuorumFails(unittest.TestCase):
-    """sol is the tie-breaker: recruited ONLY when the panel that already ran
-    is below quorum. Deep-tier membership alone is not that guarantee -- the
-    ladder can reach deep for other reasons, and --profile deep ran the dearest
-    reviewer unconditionally."""
+class TestSolIsBothDeepReviewerAndTieBreaker(unittest.TestCase):
+    """Sol has two roles, not one. A first attempt gated it behind
+    `tiebreak_only`, which excluded it from the deep tier altogether -- it must
+    review at deep AND arbitrate when the cheaper tiers cannot fill quorum.
+
+    The ladder already gives both: deep is reached when the cheaper tiers came
+    up clean, and when they could not reach quorum. It is skipped only when a
+    finding already has quorum behind it, which is the case where the right
+    move is to fix the finding rather than pay for another opinion."""
 
     class Args:
         def __init__(self, quorum):
@@ -1341,36 +1345,51 @@ class TestTieBreakerIsHeldUntilQuorumFails(unittest.TestCase):
             {"name": "cheap1", "profiles": ["fast"]},
             {"name": "cheap2", "profiles": ["fast"]},
             {"name": "mid1", "profiles": ["standard"]},
-            {"name": "tie", "profiles": ["deep"], "tiebreak_only": True},
+            {"name": "sol", "profiles": ["deep"]},
         ]
         self._avail, self._run = review.availability, review.run_one
         self.addCleanup(setattr, review, "availability", self._avail)
         self.addCleanup(setattr, review, "run_one", self._run)
 
-    def stub(self, available):
+    def stub(self, available, refuting=()):
         review.availability = lambda r: (
             None if r["name"] in available else "no credits")
-        review.run_one = lambda rev, *a, **k: {
-            "ok": True, "name": rev["name"], "verdict": "upheld",
-            "findings": [], "claims": [{"status": "upheld", "claim": "c"}],
-            "elapsed_s": 0.1}
+        def run_one(rev, *a, **k):
+            bad = rev["name"] in refuting
+            return {"ok": True, "name": rev["name"],
+                    "verdict": "refuted" if bad else "upheld", "findings": [],
+                    "claims": [{"status": "refuted" if bad else "upheld",
+                                "claim": "c"}],
+                    "elapsed_s": 0.1}
+        review.run_one = run_one
 
-    def test_the_tiebreaker_is_not_run_when_quorum_is_met(self):
-        self.stub({"cheap1", "cheap2", "mid1", "tie"})
+    def ran(self, completed):
+        return [r["name"] for r in completed]
+
+    def test_sol_reviews_at_deep_when_the_cheaper_tiers_are_clean(self):
+        self.stub({"cheap1", "cheap2", "mid1", "sol"})
+        completed, _f, _u, tiers = review.escalate(
+            self.roster, "p", self.Args(quorum=3), False, "l", 10)
+        self.assertIn("deep", tiers)
+        self.assertIn("sol", self.ran(completed),
+                      "sol must review at deep, not only arbitrate")
+
+    def test_sol_is_recruited_when_the_panel_cannot_fill_quorum(self):
+        # Only one cheap reviewer answers, so quorum 2 needs sol.
+        self.stub({"cheap1", "sol"})
         completed, _f, _u, _t = review.escalate(
             self.roster, "p", self.Args(quorum=2), False, "l", 10)
-        self.assertNotIn("tie", [r["name"] for r in completed],
-                         "the tie-breaker ran with quorum already met")
+        self.assertIn("sol", self.ran(completed),
+                      "the panel was below quorum and sol was not recruited")
 
-    def test_the_tiebreaker_runs_when_the_panel_falls_below_quorum(self):
-        # Only one non-tiebreak reviewer answers, so quorum 2 is unreachable
-        # without the tie-breaker.
-        self.stub({"cheap1", "tie"})
-        completed, _f, _u, _t = review.escalate(
+    def test_sol_is_not_paid_for_a_finding_that_already_has_quorum(self):
+        self.stub({"cheap1", "cheap2", "mid1", "sol"}, refuting={"cheap1"})
+        completed, _f, _u, tiers = review.escalate(
             self.roster, "p", self.Args(quorum=2), False, "l", 10)
-        self.assertIn("tie", [r["name"] for r in completed],
-                      "the panel was below quorum and the tie-breaker was "
-                      "still held back")
+        self.assertNotIn("deep", tiers)
+        self.assertNotIn("sol", self.ran(completed),
+                         "a finding with quorum behind it should be fixed, not "
+                         "escalated to the dearest reviewer")
 
 
 if __name__ == "__main__":

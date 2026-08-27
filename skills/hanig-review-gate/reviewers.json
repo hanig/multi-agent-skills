@@ -68,8 +68,7 @@
         "in": 2.0,
         "out": 10.0
       },
-      "_note": "reached via openrouter (the OPENAI_API_KEY account has no credits). TIE-BREAKER ONLY: recruited solely when the panel that already ran is below quorum.",
-      "tiebreak_only": true
+      "_note": "reached via openrouter (the OPENAI_API_KEY account has no credits). Deep-tier reviewer AND tie-breaker: the ladder reaches deep both when the cheaper tiers came up clean and when they could not fill quorum, and skips it only when a finding already has quorum behind it."
     },
     {
       "name": "kimi-k3",
