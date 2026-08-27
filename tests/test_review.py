@@ -1323,5 +1323,55 @@ class TestEscalateFormsACommittee(unittest.TestCase):
         self.assertIn("standard", tiers)
 
 
+class TestTieBreakerIsHeldUntilQuorumFails(unittest.TestCase):
+    """sol is the tie-breaker: recruited ONLY when the panel that already ran
+    is below quorum. Deep-tier membership alone is not that guarantee -- the
+    ladder can reach deep for other reasons, and --profile deep ran the dearest
+    reviewer unconditionally."""
+
+    class Args:
+        def __init__(self, quorum):
+            self.quorum = quorum
+            self.json = True
+            self.timeout = 1
+            self.claim = []
+
+    def setUp(self):
+        self.roster = [
+            {"name": "cheap1", "profiles": ["fast"]},
+            {"name": "cheap2", "profiles": ["fast"]},
+            {"name": "mid1", "profiles": ["standard"]},
+            {"name": "tie", "profiles": ["deep"], "tiebreak_only": True},
+        ]
+        self._avail, self._run = review.availability, review.run_one
+        self.addCleanup(setattr, review, "availability", self._avail)
+        self.addCleanup(setattr, review, "run_one", self._run)
+
+    def stub(self, available):
+        review.availability = lambda r: (
+            None if r["name"] in available else "no credits")
+        review.run_one = lambda rev, *a, **k: {
+            "ok": True, "name": rev["name"], "verdict": "upheld",
+            "findings": [], "claims": [{"status": "upheld", "claim": "c"}],
+            "elapsed_s": 0.1}
+
+    def test_the_tiebreaker_is_not_run_when_quorum_is_met(self):
+        self.stub({"cheap1", "cheap2", "mid1", "tie"})
+        completed, _f, _u, _t = review.escalate(
+            self.roster, "p", self.Args(quorum=2), False, "l", 10)
+        self.assertNotIn("tie", [r["name"] for r in completed],
+                         "the tie-breaker ran with quorum already met")
+
+    def test_the_tiebreaker_runs_when_the_panel_falls_below_quorum(self):
+        # Only one non-tiebreak reviewer answers, so quorum 2 is unreachable
+        # without the tie-breaker.
+        self.stub({"cheap1", "tie"})
+        completed, _f, _u, _t = review.escalate(
+            self.roster, "p", self.Args(quorum=2), False, "l", 10)
+        self.assertIn("tie", [r["name"] for r in completed],
+                      "the panel was below quorum and the tie-breaker was "
+                      "still held back")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

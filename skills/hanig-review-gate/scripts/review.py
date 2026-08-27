@@ -897,6 +897,17 @@ def escalate(all_reviewers, prompt, args, truncated, label, body_len):
         panel = [r for r in all_reviewers
                  if (not r.get("profiles") or tier in r["profiles"])
                  and r["name"] not in seen]
+        # A tie-breaker is recruited ONLY when the panel that already ran is
+        # below quorum. Being deep-tier is not the same guarantee: the ladder
+        # can reach deep for other reasons, and --profile deep would run the
+        # dearest reviewer unconditionally.
+        if len(completed) >= args.quorum:
+            held = [r for r in panel if r.get("tiebreak_only")]
+            if held and not args.json:
+                print(f"  -> holding {', '.join(r['name'] for r in held)}: "
+                      f"tie-breaker only, and quorum is already met with "
+                      f"{len(completed)} verdict(s).")
+            panel = [r for r in panel if not r.get("tiebreak_only")]
         runnable, tier_unavail = [], []
         for rev in panel:
             why = availability(rev)
@@ -1068,6 +1079,16 @@ def main():
         # A reviewer with no declared profiles is in every profile.
         reviewers = [r for r in reviewers
                      if not r.get("profiles") or profile in r["profiles"]]
+        # A tie-breaker only makes sense against a panel that has already run,
+        # which a single fixed profile has no notion of. Without this,
+        # `--profile deep` ran the dearest reviewer on every invocation.
+        held = [r["name"] for r in reviewers if r.get("tiebreak_only")]
+        if held:
+            reviewers = [r for r in reviewers if not r.get("tiebreak_only")]
+            if not args.list:
+                print(f"note: {', '.join(held)} held back (tie-breaker only); "
+                      f"use --escalate to recruit them when the panel falls "
+                      f"below quorum, or --only to force them.", flush=True)
         if not reviewers:
             config_error(f"no reviewers in profile {profile!r}")
     # --escalate deliberately keeps the full roster: the ladder filters per

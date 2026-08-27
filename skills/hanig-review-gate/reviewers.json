@@ -25,8 +25,8 @@
     },
     {
       "name": "luna",
-      "provider": "openai",
-      "model": "gpt-5.6-luna",
+      "provider": "openrouter",
+      "model": "openai/gpt-5.6-luna",
       "effort": "high",
       "profiles": [
         "fast",
@@ -37,7 +37,8 @@
       "_cost": {
         "in": 0.2,
         "out": 1.2
-      }
+      },
+      "_note": "reached via openrouter: the OPENAI_API_KEY account has no credits. Same model, funded route."
     },
     {
       "name": "kimi-k2.7-code",
@@ -56,8 +57,8 @@
     },
     {
       "name": "sol",
-      "provider": "openai",
-      "model": "gpt-5.6-sol",
+      "provider": "openrouter",
+      "model": "openai/gpt-5.6-sol",
       "effort": "xhigh",
       "profiles": [
         "deep"
@@ -66,7 +67,9 @@
       "_cost": {
         "in": 2.0,
         "out": 10.0
-      }
+      },
+      "_note": "reached via openrouter (the OPENAI_API_KEY account has no credits). TIE-BREAKER ONLY: recruited solely when the panel that already ran is below quorum.",
+      "tiebreak_only": true
     },
     {
       "name": "kimi-k3",
