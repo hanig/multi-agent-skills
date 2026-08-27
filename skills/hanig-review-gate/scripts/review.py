@@ -1058,8 +1058,15 @@ def main():
                     help="run only these reviewers; repeatable, and also "
                          "accepts a comma-separated list")
     ap.add_argument("--profile", default=None,
-                    help="reviewer panel: fast | standard | deep "
-                         "(default from reviewers.json). --only overrides it.")
+                    choices=["plan", "fast", "standard", "deep"],
+                    help="reviewer panel (default from reviewers.json). "
+                         "--only overrides it.")
+    ap.add_argument("--kind", choices=["plan", "implementation"], default=None,
+                    help="what is being reviewed. REQUIRED for a real review: "
+                         "a plan review and an implementation review have "
+                         "different panels and different rules, and leaving it "
+                         "implicit is how a design proposal got reviewed by the "
+                         "implementation panel.")
     ap.add_argument("--watchdog", type=int, default=None,
                     help="hard bound on total runtime in seconds; exits "
                          "REVIEW_UNAVAILABLE if exceeded (default: 3x the "
@@ -1090,14 +1097,34 @@ def main():
     # --- the protocol, enforced rather than remembered ---------------------
     # Every rule below was already written down, and drifted from anyway,
     # because prose in a memory file is not a constraint. See PROTOCOL.md.
+    # --plan is an alias for --kind plan; --kind is what the rules key on, so
+    # `--profile plan` cannot set the panel while leaving the rules off.
     if args.plan:
+        if args.kind and args.kind != "plan":
+            config_error(f"--plan and --kind {args.kind} disagree. Pass one.")
+        args.kind = "plan"
+    if args.profile == "plan" and args.kind is None:
+        args.kind = "plan"
+    if not args.list and args.kind is None:
+        config_error(
+            "--kind is required: pass `--kind plan` for acceptance criteria or "
+            "a design (two contrasting models, never escalated), or "
+            "`--kind implementation --round N` for code. Leaving it implicit "
+            "is how a design proposal got reviewed by the four-model "
+            "implementation panel.")
+    if args.kind == "implementation" and args.round is None and not args.list:
+        config_error(
+            f"--kind implementation requires --round N (1..{MAX_ROUNDS}), so "
+            f"the bound on rounds per change can be applied. Pass --round 1 if "
+            f"this is the first round for this change.")
+    if args.kind == "plan":
         if args.escalate:
             config_error("--plan and --escalate are contradictory: a plan "
                          "review is TWO contrasting models and stops there. "
                          "Drop --escalate, or drop --plan if this is an "
                          "implementation.")
         if args.profile and args.profile != "plan":
-            config_error(f"--plan fixes the profile at 'plan'; remove "
+            config_error(f"a plan review uses the 'plan' panel; remove "
                          f"--profile {args.profile}.")
         args.profile = "plan"
         if args.quorum > 2:
@@ -1117,9 +1144,12 @@ def main():
                 f"change is genuinely new.")
     profile = args.profile or DEFAULT_PROFILE
     if not args.only and not args.escalate:
-        # A reviewer with no declared profiles is in every profile.
+        # An UNDECLARED reviewer is in NO profile. It used to be in every
+        # profile, so adding an entry without a `profiles` key silently put a
+        # third model on the two-model plan panel (sol). The residual must be
+        # exclusion, not inclusion.
         reviewers = [r for r in reviewers
-                     if not r.get("profiles") or profile in r["profiles"]]
+                     if profile in (r.get("profiles") or [])]
         if not reviewers:
             config_error(f"no reviewers in profile {profile!r}")
     # --escalate deliberately keeps the full roster: the ladder filters per
@@ -1140,6 +1170,32 @@ def main():
             config_error(f"no reviewer matches {wanted}. Available: {have}. "
                          f"Pass one of those, or drop --only to use the "
                          f"profile.")
+    # --- validate the EFFECTIVE panel -------------------------------------
+    # Every earlier version of this checked the panel BEFORE selection, so
+    # `--plan --only a,b,c` ran three reviewers and `--plan --only x --quorum 1`
+    # ran one. A rule applied to the intended panel and not the actual one is
+    # not enforcement (sol). This runs after --only, --profile and enabled
+    # state, and before any reviewer is called.
+    if args.kind == "plan" and not args.list:
+        runnable = [r for r in reviewers if r.get("enabled", True)]
+        names = ", ".join(sorted(r["name"] for r in runnable)) or "none"
+        if len(runnable) != 2:
+            config_error(
+                f"a plan review is exactly TWO contrasting models; this panel "
+                f"has {len(runnable)} ({names}). A third adds agreement, not "
+                f"insight, and one is not a committee. Drop --only, or name "
+                f"exactly two reviewers from different providers.")
+        if len({r["provider"] for r in runnable}) != 2:
+            config_error(
+                f"the two plan reviewers ({names}) share a provider, so they "
+                f"can share a failure mode. Contrasting means different "
+                f"providers. Name one from each.")
+        if args.quorum != 2:
+            config_error(
+                f"a plan review needs both verdicts: pass --quorum 2, not "
+                f"{args.quorum}. Below that one model decides; above it, the "
+                f"panel can never reach quorum.")
+
     if args.list:
         print(f"profile: {profile}"
               + ("  (--only overrides profile filtering)" if args.only else ""))

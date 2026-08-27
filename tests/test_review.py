@@ -437,7 +437,10 @@ class TestRound10Regressions(unittest.TestCase):
     def test_zero_quorum_is_rejected(self):
         """luna: --quorum 0 made the quorum test vacuously true, so a single
         reviewer could carry a REVIEW_PASS."""
+        # --kind is required before the quorum check is reached, so this
+        # names one: the test is about quorum 0, not about the new flag.
         r = subprocess.run([sys.executable, str(SCRIPT), "--quorum", "0",
+                            "--kind", "implementation", "--round", "1",
                             "--diff"], capture_output=True, text=True)
         self.assertEqual(r.returncode, 4, r.stderr)
         self.assertIn("at least 1", r.stderr)
@@ -1417,58 +1420,122 @@ class TestSolIsBothDeepReviewerAndTieBreaker(unittest.TestCase):
 
 
 class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
-    """Every rule here was already written down in a memory file and drifted
-    from anyway, in the same session that wrote it. Prose is not a constraint.
-    See skills/hanig-review-gate/PROTOCOL.md."""
+    """The protocol rules, tested by INVOKING THE CLI and asserting it refuses.
 
-    def test_the_plan_panel_is_exactly_two_contrasting_models(self):
-        revs = review.load_reviewers()
-        panel = [r for r in revs if "plan" in (r.get("profiles") or [])
+    The first version of this class asserted `review.MAX_ROUNDS == 3` and
+    grepped the source for an error-message substring. sol pointed out that
+    deleting the runtime guard while leaving the constant, or leaving the
+    string in dead code, passes both. That is the tenth instance in this repo
+    of a test built from the same assumption as the code, and I wrote it while
+    fixing that very class.
+
+    So: run the real command line, assert the exit code is REVIEW_ERROR, and
+    assert no reviewer was ever contacted (a refusal at configuration time
+    prints no 'reviewing ...' banner)."""
+
+    def run_cli(self, *argv):
+        import subprocess
+        r = subprocess.run(
+            [sys.executable, str(SCRIPT), "--file", str(SCRIPT), *argv],
+            capture_output=True, text=True, timeout=120)
+        return r
+
+    def assert_refused(self, r, *, because):
+        self.assertEqual(
+            r.returncode, review.STATES["REVIEW_ERROR"],
+            f"expected refusal ({because}); got rc={r.returncode}\n"
+            f"{r.stdout[:300]}{r.stderr[:300]}")
+        self.assertNotIn(
+            "reviewing", r.stdout,
+            f"a reviewer was contacted despite {because}")
+
+    def test_a_review_must_declare_its_kind(self):
+        self.assert_refused(self.run_cli(),
+                            because="--kind was omitted")
+
+    def test_an_implementation_review_must_declare_its_round(self):
+        self.assert_refused(self.run_cli("--kind", "implementation"),
+                            because="--round was omitted")
+
+    def test_the_round_bound_is_enforced_at_runtime(self):
+        self.assert_refused(
+            self.run_cli("--kind", "implementation", "--round",
+                         str(review.MAX_ROUNDS + 1)),
+            because="the round exceeds MAX_ROUNDS")
+
+    def test_a_plan_review_cannot_be_escalated(self):
+        self.assert_refused(self.run_cli("--kind", "plan", "--escalate"),
+                            because="--escalate was passed to a plan review")
+
+    def test_a_plan_panel_cannot_be_widened_past_two(self):
+        """sol: `--plan --only a,b,c` ran three reviewers, because the panel
+        was checked before --only was applied rather than after."""
+        names = [r["name"] for r in review.load_reviewers()
+                 if r.get("enabled", True)][:3]
+        self.assertEqual(len(names), 3, "need three enabled reviewers to test")
+        self.assert_refused(
+            self.run_cli("--kind", "plan", "--only", ",".join(names),
+                         "--quorum", "2"),
+            because="three reviewers were selected for a plan review")
+
+    def test_a_plan_panel_cannot_be_narrowed_to_one(self):
+        one = next(r["name"] for r in review.load_reviewers()
+                   if r.get("enabled", True))
+        self.assert_refused(
+            self.run_cli("--kind", "plan", "--only", one, "--quorum", "1"),
+            because="one reviewer is not a committee")
+
+    def test_the_two_plan_reviewers_cannot_share_a_provider(self):
+        by_prov = {}
+        for r in review.load_reviewers():
+            if r.get("enabled", True):
+                by_prov.setdefault(r["provider"], []).append(r["name"])
+        pair = next((v[:2] for v in by_prov.values() if len(v) >= 2), None)
+        if not pair:
+            self.skipTest("no two enabled reviewers share a provider")
+        self.assert_refused(
+            self.run_cli("--kind", "plan", "--only", ",".join(pair),
+                         "--quorum", "2"),
+            because="both plan reviewers use the same provider")
+
+    def test_an_undeclared_reviewer_joins_no_profile(self):
+        """A reviewer with no `profiles` key was in EVERY profile, so adding
+        one silently put a third model on the two-model plan panel."""
+        src = SCRIPT.read_text()
+        self.assertNotIn('not r.get("profiles") or profile in r["profiles"]',
+                         src,
+                         "undeclared reviewers are still in every profile")
+
+    def test_the_configured_plan_panel_is_two_contrasting_models(self):
+        panel = [r for r in review.load_reviewers()
+                 if "plan" in (r.get("profiles") or [])
                  and r.get("enabled", True)]
-        self.assertEqual(
-            len(panel), 2,
-            f"a plan review is two contrasting models; found {len(panel)}. "
-            f"A third adds agreement, not insight.")
-        self.assertEqual(
-            len({r["provider"] for r in panel}), 2,
-            "the two plan reviewers share a provider, so they can share a "
-            "failure mode; contrasting means different provider and family")
+        self.assertEqual(len(panel), 2, f"plan panel is {len(panel)}, not 2")
+        self.assertEqual(len({r["provider"] for r in panel}), 2,
+                         "the plan panel shares a provider")
 
-    def test_the_round_bound_exists_and_is_three(self):
-        self.assertEqual(review.MAX_ROUNDS, 3)
-
-    def test_plan_and_escalate_are_refused_together(self):
-        src = (REPO / "skills" / "hanig-review-gate" / "scripts"
-               / "review.py").read_text()
-        self.assertIn("--plan and --escalate are contradictory", src)
-
-    def test_every_protocol_refusal_names_an_action(self):
-        """The rule the gate itself was exempt from for five rounds."""
+    def test_every_config_error_names_an_action(self):
         import ast
-        src = (REPO / "skills" / "hanig-review-gate" / "scripts"
-               / "review.py").read_text()
-        tree = ast.parse(src)
-        actionable = ("Drop ", "drop ", "Pass ", "pass ", "remove ", "Step "
-                      "back", "Override", "must be", "Available:")
+        tree = ast.parse(SCRIPT.read_text())
+        actionable = ("Drop ", "drop ", "Pass ", "pass ", "remove ", "Step",
+                      "Override", "must be", "Available:", "Name one",
+                      "name exactly")
         checked = 0
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
+            f = getattr(node, "func", None)
+            if not (isinstance(node, ast.Call) and isinstance(f, ast.Name)
+                    and f.id == "config_error"):
                 continue
-            f = node.func
-            if not (isinstance(f, ast.Name) and f.id == "config_error"):
-                continue
-            text = " ".join(
-                n.value for n in ast.walk(node)
-                if isinstance(n, ast.Constant) and isinstance(n.value, str))
+            text = " ".join(n.value for n in ast.walk(node)
+                            if isinstance(n, ast.Constant)
+                            and isinstance(n.value, str))
             if len(text.strip()) < 30:
                 continue
             checked += 1
-            self.assertTrue(
-                any(a in text for a in actionable),
-                f"a config_error names no action: {text[:130]}")
-        self.assertGreater(checked, 3,
-                           "recovered too few config_error messages to be "
-                           "measuring anything")
+            self.assertTrue(any(a in text for a in actionable),
+                            f"a config_error names no action: {text[:130]}")
+        self.assertGreater(checked, 6, "too few config_error messages "
+                                       "recovered to be measuring anything")
 
 
 if __name__ == "__main__":

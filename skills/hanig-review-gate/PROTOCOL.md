@@ -15,7 +15,7 @@ enforces them.
 | when | before code exists | after the change is written |
 | panel | **two contrasting models** | cheapest-first ladder |
 | escalation | **never** | `--escalate`, always from `fast` |
-| flag | `--plan` | `--escalate --round N` |
+| flag | `--kind plan` | `--kind implementation --escalate --round N` |
 | judged against | do these criteria hold together | does the code meet the criteria |
 
 **Plan review is Phase 1 and it is where the value is.** Three plan reviews
@@ -29,6 +29,43 @@ produced one reviewer upholding every claim and adding nothing, while the
 other two found all five defects. Contrasting means different provider and
 family, so they do not share a failure mode. `--plan` fixes the panel at two
 and refuses `--escalate`.
+
+## What the tool enforces, and what it does not
+
+Audited by gpt-5.6-sol on 2026-08-27, which found the first version was
+"largely caller-attested": it refused the literal flag combinations I had
+thought of and nothing else.
+
+**Enforced, checked against the EFFECTIVE panel after `--only`, `--profile`
+and enabled-state have all been applied** (checking the intended panel instead
+of the actual one is what made the first version bypassable):
+
+| rule | how it is bypassed now |
+|---|---|
+| a review declares its kind | it cannot; `--kind` is required |
+| an implementation review declares its round | it cannot; `--round` is required with `--kind implementation` |
+| at most 3 rounds per change | claiming `--round 1` forever. Not detectable without a change identity the tool does not have. |
+| a plan panel is exactly two | it cannot; size is checked after selection |
+| the two are on different providers | it cannot; providers are compared after selection |
+| a plan review is never escalated | it cannot |
+| a plan review needs both verdicts | it cannot; quorum must be 2 |
+| an undeclared reviewer joins no profile | it cannot; membership must be declared |
+
+**Not enforced, and honestly out of reach of this tool:**
+
+- **The round bound rests on an honest `--round`.** Nothing ties a round number
+  to a change, so `--round 1` can be claimed forever. Closing it needs a
+  per-change receipt keyed to a plan digest, which is real work and not yet
+  done. Stated because an unstated limit reads as a guarantee.
+- **Stepping back when round N+1 finds a defect in round N's fix.** The tool
+  cannot see that a finding is about the previous fix.
+- **Excluding a design's author from the panel judging it.** The tool does not
+  know who wrote the thing under review.
+- **Declaring acceptance criteria before implementing**, and **asserting the
+  counter-claim**. Both are properties of the claims passed in, not of the
+  invocation.
+
+Four of those five are judgement. The first is a gap with a known fix.
 
 ## Review against declared criteria, never against perfection
 

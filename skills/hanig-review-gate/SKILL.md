@@ -33,7 +33,7 @@ because these rules were written down once and drifted from anyway.
 | when | before code exists | after the change is written |
 | panel | **two contrasting models** | cheapest-first ladder |
 | escalation | **never** | `--escalate`, always from `fast` |
-| flag | `--plan` | `--escalate --round N` |
+| flag | `--kind plan` | `--kind implementation --escalate --round N` |
 | judged against | do these criteria hold together | does the code meet them |
 
 **Two contrasting models for a plan, never escalated.** A third adds agreement,
@@ -214,13 +214,19 @@ Sources: `--diff` (working tree, default), `--staged`, `--range HEAD~3..HEAD`,
 ladder. `--only NAME` restricts to named reviewers, accepts `a,b,c` or repeated
 flags, and is not combinable with `--escalate`.
 
-`--plan` is the plan-review mode: it fixes the profile at `plan` (two
-contrasting models) and refuses `--escalate` or a quorum above 2.
+`--kind plan|implementation` is REQUIRED for a real review, because a plan and
+an implementation get different panels and different rules, and leaving it
+implicit is how a design proposal got reviewed by the implementation panel.
+`--plan` is an alias for `--kind plan`. A plan review is validated on the panel
+that will ACTUALLY run, after `--only` and `--profile`: exactly two reviewers,
+on two different providers, quorum 2, never escalated.
 
-`--round N` declares which round this is for the change under review. Past
-`MAX_ROUNDS` (3) the gate refuses and names the step-back, because past that
-point the rounds have historically been finding defects in the previous round's
-fixes rather than converging.
+`--round N` is required with `--kind implementation` and declares which round
+this is for the change under review. Past `MAX_ROUNDS` (3) the gate refuses and
+names the step-back. **It rests on an honest round number:** nothing ties a
+round to a change, so `--round 1` can be claimed forever. Closing that needs a
+per-change receipt keyed to a plan digest, which is not built. See PROTOCOL.md
+for the full list of what is and is not enforced.
 `--json` for machine consumption.
 
 ## Claims are the point
