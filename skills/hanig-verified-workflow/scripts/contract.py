@@ -548,7 +548,7 @@ MAX_DIR_ENTRIES_SCANNED = 20_000
 
 
 def directory_freshness(path, declared_at, declared_epoch):
-    """(has_fresh_file, scanned, truncated) for a declared output directory.
+    """(has_fresh_file, scanned, truncated, newest_mtime) for a directory.
 
     A directory's OWN mtime records when entries were added or removed, not
     when their contents changed, so it is not evidence about the data. Judging
@@ -561,22 +561,27 @@ def directory_freshness(path, declared_at, declared_epoch):
     weaker than for a checkpoint set: at least ONE regular file must post-date
     the contract. Old files sitting alongside new output are normal.
     """
-    scanned = 0
+    scanned, newest = 0, None
+    found_fresh = False
     for root, dirs, files in os.walk(str(path)):
         for name in files:
             scanned += 1
             if scanned > MAX_DIR_ENTRIES_SCANNED:
-                return False, scanned - 1, True
+                return found_fresh, scanned - 1, True, newest
             try:
                 st = os.stat(os.path.join(root, name))
             except OSError:
                 continue
             if not stat.S_ISREG(st.st_mode):
                 continue
+            newest = (st.st_mtime if newest is None
+                      else max(newest, st.st_mtime))
             if artifact_is_fresh(st.st_mtime, declared_at, declared_epoch):
-                return True, scanned, False
+                # Keep walking: the caller needs the NEWEST mtime for the
+                # terminal-record ordering guard, not just the first fresh hit.
+                found_fresh = True
         del dirs
-    return False, scanned, False
+    return found_fresh, scanned, False, newest
 
 
 def preexisting_fingerprints(specs, base_dir, hash_limit_mb):
@@ -1270,8 +1275,15 @@ def cmd_check(args):
             if op.is_dir():
                 # Judge the CONTENTS: the directory's own mtime says only that
                 # an entry was added or removed.
-                fresh, scanned, truncated = directory_freshness(
+                fresh, scanned, truncated, dir_newest = directory_freshness(
                     op, declared_at, declared_epoch)
+                # A directory output must feed the ordering guard too: it did
+                # not, so terminal_record_postdates saw None and a record from
+                # before the run certified a directory written after it (kimi).
+                if dir_newest is not None:
+                    newest_output_mtime = (
+                        dir_newest if newest_output_mtime is None
+                        else max(newest_output_mtime, dir_newest))
                 if not fresh:
                     if truncated:
                         entry = (f"{spec} (no file from this run found in the "

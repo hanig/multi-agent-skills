@@ -1745,5 +1745,82 @@ class TestUnchangedOutputIsReportedNotRefused(unittest.TestCase):
         c = json.loads((self.run_dir / "contract.json").read_text())
         self.assertEqual(c["hash_limit_mb"], 8)
 
+class TestDirectoryOutputFeedsTheOrderingGuard(unittest.TestCase):
+    """kimi: a declared output DIRECTORY did not contribute its newest file
+    mtime, so terminal_record_postdates saw None and skipped -- letting a record
+    written before the run certify a directory written after it. The gap was in
+    the ordering fix from one commit earlier, which only wired up plain files.
+    Fourteenth instance of a rule reaching one path and not its sibling."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.run_dir = self.tmp / "run"
+        self.od = self.tmp / "results"
+        self.od.mkdir()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def build(self):
+        contract("init", str(self.run_dir), "--command", "echo hi",
+                 "--output", str(self.od))
+        return json.loads(
+            (self.run_dir / "contract.json").read_text())["created_at_epoch"]
+
+    def record_at(self, decl, offset):
+        contract("record", str(self.run_dir), "--exit-code", "0")
+        apath = self.run_dir / "attempts.jsonl"
+        lines = [json.loads(l) for l in apath.read_text().splitlines()
+                 if l.strip()]
+        lines[-1]["submitted_at"] = time.strftime(
+            "%Y-%m-%dT%H:%M:%S%z", time.localtime(decl + offset))
+        apath.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+
+    def test_a_record_predating_the_directory_output_is_refused(self):
+        decl = self.build()
+        self.record_at(decl, 1)
+        (self.od / "out.tsv").write_text("written AFTER the record\n")
+        os.utime(self.od / "out.tsv", (decl + 600, decl + 600))
+        r = contract("check", str(self.run_dir))
+        self.assertNotEqual(r.returncode, PASS, r.stdout + r.stderr)
+        self.assertIn("predates the declared output", r.stdout)
+
+    def test_the_honest_order_passes(self):
+        decl = self.build()
+        (self.od / "out.tsv").write_text("this run\n")
+        os.utime(self.od / "out.tsv", (decl + 2, decl + 2))
+        self.record_at(decl, 4)
+        r = contract("check", str(self.run_dir))
+        self.assertEqual(r.returncode, PASS, r.stdout + r.stderr)
+
+    def test_the_newest_file_in_the_tree_is_what_counts(self):
+        """Not the first fresh one found: the walk must keep going."""
+        decl = self.build()
+        sub = self.od / "nested"
+        sub.mkdir()
+        (self.od / "early.tsv").write_text("a\n")
+        os.utime(self.od / "early.tsv", (decl + 2, decl + 2))
+        (sub / "late.tsv").write_text("b\n")
+        os.utime(sub / "late.tsv", (decl + 900, decl + 900))
+        self.record_at(decl, 10)          # after `early`, before `late`
+        r = contract("check", str(self.run_dir))
+        self.assertNotEqual(r.returncode, PASS, r.stdout + r.stderr)
+
+    def test_directory_freshness_reports_the_newest_mtime(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("cm_dirn", SCRIPT)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        (self.od / "a").write_text("a\n")
+        (self.od / "b").write_text("b\n")
+        os.utime(self.od / "a", (1000, 1000))
+        os.utime(self.od / "b", (2000, 2000))
+        fresh, scanned, truncated, newest = m.directory_freshness(
+            self.od, 500, 500.0)
+        self.assertTrue(fresh)
+        self.assertEqual(scanned, 2)
+        self.assertFalse(truncated)
+        self.assertEqual(newest, 2000)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
