@@ -80,12 +80,12 @@
         "standard",
         "deep"
       ],
-      "enabled": true,
+      "enabled": false,
       "_cost": {
         "in": 3.0,
         "out": 15.0
       },
-      "_note": "$3/$15 per M, the dearest reviewer here. Enabled at Hani's direction while both OpenAI reviewers are out of credits: a 1M context window and a different lab is worth the cost when the deep tier is otherwise empty."
+      "_note": "dropped 2026-08-27: $15.00/M output, dearer than sol ($10.00) which is the deep-only tie-breaker, so cheapest-first reached its priciest reviewer before its designated last resort. Disabled rather than deleted so the reason survives; flip enabled to re-add."
     },
     {
       "name": "glm-5.1",
