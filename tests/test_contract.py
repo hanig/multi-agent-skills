@@ -1299,5 +1299,97 @@ class TestOwnershipWindowAndExactSubmit(unittest.TestCase):
         limits = (REPO / "docs" / "plan-sacct-ownership.md").read_text()
         self.assertIn("bind promptly", limits)
 
+class TestDeclaredDirectoryFreshness(unittest.TestCase):
+    """Found by asking whether the checkpoint-set bug had a sibling here, which
+    it did. A declared output that is a DIRECTORY was judged by the directory's
+    own mtime, which records when entries were added or removed and says
+    nothing about their contents. One new entry made a directory of entirely
+    previous-run data look fresh, and check returned SCIENTIFIC_PASS.
+
+    Tenth instance in this repo of fixing one place and missing the sibling;
+    the first found by looking for the pattern rather than being told."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.run_dir = self.tmp / "run"
+        self.out = self.tmp / "outdir"
+        self.out.mkdir()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def build(self):
+        r = contract("init", str(self.run_dir), "--command", "echo hi",
+                     "--output", str(self.out))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(
+            (self.run_dir / "contract.json").read_text())["created_at_epoch"]
+
+    def age(self, name, offset, decl):
+        os.utime(self.out / name, (decl + offset, decl + offset))
+
+    def test_a_directory_of_stale_files_cannot_certify(self):
+        (self.out / "old.tsv").write_text("previous run\n")
+        decl = self.build()
+        self.age("old.tsv", -3600, decl)
+        (self.out / "marker").write_text("x")
+        self.age("marker", -3600, decl)
+        os.utime(self.out, (decl + 2, decl + 2))    # fresh CONTAINER mtime
+        contract("record", str(self.run_dir), "--exit-code", "0")
+        r = contract("check", str(self.run_dir))
+        self.assertEqual(r.returncode, INCOMPLETE, r.stdout + r.stderr)
+        self.assertIn("predate", r.stdout)
+
+    def test_one_fresh_file_in_the_directory_is_enough(self):
+        """A directory is a container, not one artifact: old files sitting
+        alongside this run's output are normal."""
+        (self.out / "old.tsv").write_text("previous run\n")
+        decl = self.build()
+        self.age("old.tsv", -3600, decl)
+        (self.out / "new.tsv").write_text("this run\n")
+        self.age("new.tsv", 2, decl)
+        contract("record", str(self.run_dir), "--exit-code", "0")
+        r = contract("check", str(self.run_dir))
+        self.assertEqual(r.returncode, PASS, r.stdout + r.stderr)
+
+    def test_a_fresh_file_in_a_subdirectory_counts(self):
+        sub = self.out / "nested"
+        sub.mkdir()
+        (sub / "deep.tsv").write_text("this run\n")
+        decl = self.build()
+        os.utime(sub / "deep.tsv", (decl + 2, decl + 2))
+        contract("record", str(self.run_dir), "--exit-code", "0")
+        r = contract("check", str(self.run_dir))
+        self.assertEqual(r.returncode, PASS, r.stdout + r.stderr)
+
+    def test_an_empty_directory_cannot_certify(self):
+        decl = self.build()
+        os.utime(self.out, (decl + 2, decl + 2))
+        contract("record", str(self.run_dir), "--exit-code", "0")
+        r = contract("check", str(self.run_dir))
+        self.assertEqual(r.returncode, INCOMPLETE, r.stdout + r.stderr)
+        self.assertIn("no regular file", r.stdout)
+
+    def test_the_walk_is_bounded(self):
+        """An unbounded walk on a scratch directory would stall the verifier."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("cm_dir", SCRIPT)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        self.assertLessEqual(m.MAX_DIR_ENTRIES_SCANNED, 100_000)
+        self.assertGreaterEqual(m.MAX_DIR_ENTRIES_SCANNED, 1_000)
+
+    def test_a_plain_file_output_is_unchanged(self):
+        f = self.tmp / "single.tsv"
+        f.write_text("x\n")
+        r = contract("init", str(self.run_dir), "--command", "echo hi",
+                     "--output", str(f))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        decl = json.loads(
+            (self.run_dir / "contract.json").read_text())["created_at_epoch"]
+        os.utime(f, (decl + 2, decl + 2))
+        contract("record", str(self.run_dir), "--exit-code", "0")
+        self.assertEqual(contract("check", str(self.run_dir)).returncode, PASS)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -505,6 +505,45 @@ def sacct_row_is_ours(sacct_submit, declared_at, bound_at=None):
     return True, None
 
 
+# A directory tree is walked only this far when judging freshness. An
+# unbounded walk on a scratch directory with millions of entries would stall
+# the verifier; the watchdog would catch it, but reporting INCOMPLETE_EVIDENCE
+# because we gave up counting is worse than sampling and saying so.
+MAX_DIR_ENTRIES_SCANNED = 20_000
+
+
+def directory_freshness(path, declared_at, declared_epoch):
+    """(has_fresh_file, scanned, truncated) for a declared output directory.
+
+    A directory's OWN mtime records when entries were added or removed, not
+    when their contents changed, so it is not evidence about the data. Judging
+    a declared directory by it passed a contract whose outputs were entirely a
+    previous run's: one new entry made the directory look fresh while every
+    file in it predated the contract. Same shape as a TensorFlow checkpoint
+    set judged by its newest member.
+
+    A directory is a container rather than a single artifact, so the rule is
+    weaker than for a checkpoint set: at least ONE regular file must post-date
+    the contract. Old files sitting alongside new output are normal.
+    """
+    scanned = 0
+    for root, dirs, files in os.walk(str(path)):
+        for name in files:
+            scanned += 1
+            if scanned > MAX_DIR_ENTRIES_SCANNED:
+                return False, scanned - 1, True
+            try:
+                st = os.stat(os.path.join(root, name))
+            except OSError:
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            if artifact_is_fresh(st.st_mtime, declared_at, declared_epoch):
+                return True, scanned, False
+        del dirs
+    return False, scanned, False
+
+
 def artifact_is_fresh(mtime, declared_at, declared_epoch=None):
     """Whether an artifact could have been produced by this contract instance.
 
@@ -1070,9 +1109,26 @@ def cmd_check(args):
         if not op.is_absolute():
             op = Path(base_dir) / op
         try:
-            if op.exists() and not artifact_is_fresh(op.stat().st_mtime,
-                                                     declared_at,
-                                                     declared_epoch):
+            if not op.exists():
+                continue
+            if op.is_dir():
+                # Judge the CONTENTS: the directory's own mtime says only that
+                # an entry was added or removed.
+                fresh, scanned, truncated = directory_freshness(
+                    op, declared_at, declared_epoch)
+                if not fresh:
+                    if truncated:
+                        entry = (f"{spec} (no file from this run found in the "
+                                 f"first {scanned} scanned; too large to judge)")
+                    elif scanned == 0:
+                        entry = f"{spec} (directory holds no regular file)"
+                    else:
+                        entry = (f"{spec} (all {scanned} file(s) predate the "
+                                 f"contract)")
+                    if entry not in stale_outputs:
+                        stale_outputs.append(entry)
+            elif not artifact_is_fresh(op.stat().st_mtime, declared_at,
+                                       declared_epoch):
                 entry = f"{spec} (mtime predates the contract)"
                 if entry not in stale_outputs:
                     stale_outputs.append(entry)
