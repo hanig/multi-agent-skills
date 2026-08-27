@@ -141,6 +141,26 @@ sounds: across six review rounds on this repo, **every single one failed**, and
 running the full panel each time paid the slowest, dearest reviewer to re-find
 defects a cheap one had already caught.
 
+### Sizing a round
+
+Two failures here were the reviewer infrastructure, not the code, and both read
+as an unavailable reviewer rather than as what they were.
+
+**Reasoning tokens come out of the answer's budget.** At 16000 a large review
+spent the whole allowance thinking and returned NO content, which cost one
+reviewer an entire session before the error message was made to say so. The
+default is 64000 and the error now reports the token counts.
+
+**Review one file at a time past roughly 100KB.** Raising the budget bought
+exactly one round before the input grew past it too. Splitting keeps working and
+sharpens the per-file context.
+
+**Put the limits in a FILE, not in the context prose.** The context grew into a
+wall of thirteen inlined "do not re-report" clauses, and a reviewer then burned
+its whole 64000-token budget reasoning over that wall on a 97KB file it had
+answered fine one round earlier. Pass the limits document with `--file` and keep
+the prose to what changed this round.
+
 **Pass `--threat-model`** whenever the code has one. A finding whose
 preconditions it excludes is printed under OUT OF SCOPE and does not decide the
 verdict; everything else gates as before. Without the flag, every finding gates.
