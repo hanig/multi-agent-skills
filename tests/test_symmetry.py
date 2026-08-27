@@ -216,6 +216,32 @@ class TestVerifierSymmetry(unittest.TestCase):
         self.assertIn("read_termination", window,
                       "the BAD_END branch must consider a later local retry")
 
+    def test_both_receipts_name_the_contract_instance(self):
+        """kimi, reviewing the PLAN for a third skill, found that neither
+        verifier's receipt carried a contract_id -- so a receipt left behind by
+        `init --force` is indistinguishable from a current one, and anything
+        reading receipts attributes an old pass to a contract never verified.
+        The termination record has been bound this way since round 4; the
+        receipt never was, in either file.
+
+        A plan review for skill 3 finding a defect in skills 1 and 2 is the
+        best argument in this repo for reviewing designs before code."""
+        for path in (WORKFLOW, TRAINING):
+            src = path.read_text()
+            i = src.index("verification = {")
+            # every receipt literal in the file, not just the first
+            n = 0
+            while True:
+                j = src.find("verification = {", i if n == 0 else i + 1)
+                if j == -1:
+                    break
+                block = src[j:src.index("}", j)]
+                self.assertIn('"contract_id"', block,
+                              f"{path.name}: a receipt at offset {j} does not "
+                              f"name the contract instance it verified")
+                i, n = j, n + 1
+            self.assertGreater(n, 0, f"{path.name}: no receipt literal found")
+
     def test_the_shared_helpers_really_are_identical(self):
         """Copies drift. Where a helper exists in both files under the same
         name, its CODE must match -- a fix applied to one copy and not the

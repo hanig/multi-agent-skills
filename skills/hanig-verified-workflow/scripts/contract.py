@@ -1178,6 +1178,11 @@ def cmd_check(args):
         # Still emit a receipt: a corrupt contract is a verdict, not a crash.
         verification = {
             "schema_version": SCHEMA_VERSION, "checked_at": now_iso(),
+            # No instance to name: the contract could not be parsed. Recorded
+            # as null rather than omitted, so a reader can tell "unknown" from
+            # "this field predates the change".
+            "contract_id": None,
+            "criteria_digest": None,
             "state": "CONTRACT_VIOLATED",
             "exit_code": STATES["CONTRACT_VIOLATED"],
             "reasons": [f"contract unreadable or malformed: {e}"],
@@ -1522,6 +1527,15 @@ def cmd_check(args):
     verification = {
         "schema_version": SCHEMA_VERSION,
         "checked_at": now_iso(),
+        # WHICH contract instance this verdict is about. Without it a receipt
+        # left behind by `init --force` is indistinguishable from a current
+        # one, so anything reading receipts -- a handoff, a dashboard, a human
+        # -- attributes an old pass to a contract that was never verified
+        # (kimi, reviewing the plan for a skill that would have done exactly
+        # that). The termination record has been bound this way since round 4;
+        # the receipt never was.
+        "contract_id": contract.get("contract_id"),
+        "criteria_digest": contract.get("criteria_digest"),
         "unchanged_outputs": unchanged_outputs,
         "state": state,
         "exit_code": STATES[state],

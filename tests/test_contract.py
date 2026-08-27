@@ -1864,5 +1864,65 @@ class TestAbsentSubmitNamesItsRemedy(unittest.TestCase):
         text = doc.read_text()
         self.assertIn("no Submit time is refused", text)
 
+class TestReceiptNamesItsContractInstance(unittest.TestCase):
+    """kimi, reviewing the PLAN for hanig-portable-handoff: neither verifier's
+    receipt carried a contract_id, so a receipt left by `init --force` is
+    indistinguishable from a current one and anything reading receipts
+    attributes an old pass to a contract that was never verified. The planned
+    skill would have done exactly that.
+
+    A plan review for skill 3 finding a defect in skills 1 and 2 is the
+    strongest argument in this repo for reviewing designs before code."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.run_dir = self.tmp / "run"
+        self.out = self.tmp / "o.tsv"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def run_once(self):
+        contract("init", str(self.run_dir), "--command", "echo hi",
+                 "--output", str(self.out))
+        c = json.loads((self.run_dir / "contract.json").read_text())
+        self.out.write_text("x\n")
+        os.utime(self.out, (c["created_at_epoch"] + 2,) * 2)
+        contract("record", str(self.run_dir), "--exit-code", "0")
+        contract("check", str(self.run_dir))
+        return c
+
+    def test_the_receipt_names_the_instance_it_verified(self):
+        c = self.run_once()
+        v = json.loads((self.run_dir / "verification.json").read_text())
+        self.assertEqual(v["contract_id"], c["contract_id"])
+        self.assertEqual(v["criteria_digest"], c["criteria_digest"])
+
+    def test_a_stale_receipt_is_distinguishable_after_force(self):
+        """The whole point: `init --force` leaves the old receipt behind, and a
+        reader must be able to tell."""
+        first = self.run_once()
+        stale = json.loads((self.run_dir / "verification.json").read_text())
+        self.assertEqual(stale["exit_code"], PASS)
+        r = contract("init", str(self.run_dir), "--force", "--command",
+                     "echo hi", "--output", str(self.out))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        second = json.loads((self.run_dir / "contract.json").read_text())
+        self.assertNotEqual(second["contract_id"], first["contract_id"])
+        # The receipt on disk still says PASS, and now says whose PASS it was.
+        self.assertNotEqual(stale["contract_id"], second["contract_id"])
+
+    def test_a_malformed_contract_receipt_names_no_instance(self):
+        """Honest rather than omitted: null distinguishes "unknown" from "this
+        field predates the change"."""
+        self.run_once()
+        (self.run_dir / "contract.json").write_text("{ not json")
+        r = contract("check", str(self.run_dir))
+        self.assertEqual(r.returncode, VIOLATED)
+        self.assertNotIn("Traceback", r.stderr)
+        v = json.loads((self.run_dir / "verification.json").read_text())
+        self.assertIn("contract_id", v)
+        self.assertIsNone(v["contract_id"])
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

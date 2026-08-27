@@ -1569,10 +1569,21 @@ def cmd_check(args):
     cpath = run_dir / CONTRACT
     if not cpath.exists():
         sys.exit(f"error: no training contract at {cpath}")
+    # Bound before the try below, so `bail` can read it on the path where the
+    # contract could not be parsed. Reading it unconditionally there would
+    # NameError and turn "a broken contract is a verdict, not a crash" into a
+    # crash -- which is what the first version of this change did.
+    contract = {}
+
     def bail(reason, state="CONTRACT_VIOLATED"):
         """Always leave a receipt: a broken contract is a verdict, not a crash."""
         verification = {
             "schema_version": SCHEMA_VERSION, "checked_at": now_iso(),
+            # WHICH contract instance this verdict is about; see contract.py.
+            # Empty when the contract itself could not be read, which is
+            # honest: there is no instance to name.
+            "contract_id": contract.get("contract_id"),
+            "criteria_digest": contract.get("criteria_digest"),
             "state": state, "exit_code": STATES[state], "reasons": [reason],
             "evaluations": 0, "last_step": None, "checkpoint": {},
         }
@@ -1585,7 +1596,11 @@ def cmd_check(args):
         raw, rerr = read_json_bounded(cpath)
         if rerr:
             raise ValueError(f"contract unreadable: {rerr}")
-        contract = json.loads(raw)
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            contract.update(parsed)
+        else:
+            raise ValueError("contract is not a JSON object")
     except (OSError, ValueError, RecursionError) as e:
         bail(f"contract unreadable or malformed: {e}")
     problems = contract_problems(contract)
@@ -2020,6 +2035,9 @@ def cmd_check(args):
     verification = {
         "schema_version": SCHEMA_VERSION,
         "checked_at": now_iso(),
+        # WHICH contract instance this verdict is about; see contract.py.
+        "contract_id": contract.get("contract_id"),
+        "criteria_digest": contract.get("criteria_digest"),
         "state": state,
         "exit_code": STATES[state],
         "retrospective": contract.get("retrospective", False),
