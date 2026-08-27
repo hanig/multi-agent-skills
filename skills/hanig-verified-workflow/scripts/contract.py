@@ -544,6 +544,56 @@ def directory_freshness(path, declared_at, declared_epoch):
     return False, scanned, False
 
 
+def preexisting_fingerprints(specs, base_dir, hash_limit_mb):
+    """Digest each declared output that already exists, keyed by path.
+
+    A file that does not exist yet needs no fingerprint: whatever appears there
+    later can only have come from this run or later. It is the ALREADY PRESENT
+    output that mtime cannot speak for.
+    """
+    out = {}
+    for spec in specs:
+        if not isinstance(spec, str) or not spec:
+            continue
+        pth = Path(spec)
+        if not pth.is_absolute():
+            pth = Path(base_dir) / pth
+        try:
+            if not pth.is_file():
+                continue
+            st = pth.stat()
+            digest, truncated = sha256_file(pth, limit_bytes=hash_limit_mb
+                                            * (1 << 20))
+        except OSError:
+            continue
+        out[str(spec)] = {"sha256": digest, "size": st.st_size,
+                          "prefix_only": bool(truncated)}
+    return out
+
+
+def unchanged_since_declaration(spec, base_dir, contract, hash_limit_mb):
+    """Whether this declared output is byte-identical to the file that was
+    already there when the contract was declared. None when unknowable."""
+    fps = contract.get("preexisting_outputs")
+    if not isinstance(fps, dict):
+        return None                       # contract predates the field
+    fp = fps.get(str(spec))
+    if not isinstance(fp, dict) or not fp.get("sha256"):
+        return None                       # nothing was there to compare
+    pth = Path(spec)
+    if not pth.is_absolute():
+        pth = Path(base_dir) / pth
+    try:
+        if not pth.is_file():
+            return None
+        if pth.stat().st_size != fp.get("size"):
+            return False                  # different length, different file
+        digest, _ = sha256_file(pth, limit_bytes=hash_limit_mb * (1 << 20))
+    except OSError:
+        return None
+    return digest == fp["sha256"]
+
+
 def artifact_is_fresh(mtime, declared_at, declared_epoch=None):
     """Whether an artifact could have been produced by this contract instance.
 
@@ -760,6 +810,25 @@ def cmd_init(args):
             else os.path.join(str(Path(args.cwd or os.getcwd()).resolve()), i),
             args.hash_limit_mb) for i in args.input],
         "declared_outputs": list(args.output),
+        # Fingerprints of declared outputs that ALREADY EXIST at declaration
+        # time. mtime is the only cheap provenance signal a filesystem gives,
+        # and `touch` defeats it: a file from a previous run, touched after
+        # init, passed every freshness check (kimi, CRITICAL). The accidental
+        # form matters more than the adversarial one, because `cp` without -p
+        # updates mtimes, so a stale artifact copied into place looks new.
+        #
+        # Content settles it: if a declared output is byte-identical to what
+        # was there when the contract was declared, this run did not produce
+        # it, whatever its mtime says. Only pre-existing outputs are digested,
+        # which is exactly the suspicious case and costs nothing in the normal
+        # one where the file does not exist yet.
+        # The limit must match at check time or the digests cannot be
+        # compared at all.
+        "hash_limit_mb": int(args.hash_limit_mb),
+        "preexisting_outputs": preexisting_fingerprints(
+            list(args.output) + [pr.get("path") for pr in predicates
+                                 if isinstance(pr, dict)],
+            args.cwd or os.getcwd(), args.hash_limit_mb),
         "predicates": predicates,
         # Recorded for audit only -- NOT enforced. Enforcing would require
         # observing everything the job wrote, which this tool does not do.
@@ -937,6 +1006,8 @@ CONTRACT_TYPES = {
     # null` pass validation and then get iterated.
     "inputs": (list,),
     "declared_outputs": (list,),
+    "preexisting_outputs": (dict, type(None)),
+    "hash_limit_mb": (int, type(None)),
     "predicates": (list,),
     "declared_write_scopes_unenforced": (list,),
     "preemption_expected": (bool, type(None)),
@@ -1137,6 +1208,7 @@ def cmd_check(args):
         # A command predicate reads paths this verifier cannot see, so nothing
         # about artifact provenance can be established from it.
         command_only = True
+    unchanged_outputs = []
     for spec in checked_paths:
         if not isinstance(spec, str) or not spec:
             continue
@@ -1162,11 +1234,25 @@ def cmd_check(args):
                                  f"contract)")
                     if entry not in stale_outputs:
                         stale_outputs.append(entry)
-            elif not artifact_is_fresh(op.stat().st_mtime, declared_at,
-                                       declared_epoch):
-                entry = f"{spec} (mtime predates the contract)"
-                if entry not in stale_outputs:
-                    stale_outputs.append(entry)
+            else:
+                limit = contract.get("hash_limit_mb")
+                same = unchanged_since_declaration(
+                    spec, base_dir, contract,
+                    limit if isinstance(limit, int) and limit > 0 else 256)
+                if same is True and spec not in unchanged_outputs:
+                    # REPORTED, NOT BLOCKING. Content-identity cannot tell a
+                    # file that was never regenerated from one a deterministic
+                    # pipeline regenerated identically, and for this repo the
+                    # second is the SUCCESS case: blocking on it would refuse
+                    # exactly the runs most worth certifying. Kimi's finding is
+                    # real and this is the honest limit of the signal, so it is
+                    # said out loud rather than acted on.
+                    unchanged_outputs.append(spec)
+                if not artifact_is_fresh(op.stat().st_mtime, declared_at,
+                                         declared_epoch):
+                    entry = f"{spec} (mtime predates the contract)"
+                    if entry not in stale_outputs:
+                        stale_outputs.append(entry)
         except OSError:
             pass
 
@@ -1293,9 +1379,19 @@ def cmd_check(args):
                            "criteria were fitted to the result; re-declare "
                            "before the run, or mark it --retrospective")
 
+    if unchanged_outputs:
+        reasons.append(
+            f"note: {len(unchanged_outputs)} declared output(s) are "
+            f"byte-identical to the file that was already there when the "
+            f"contract was declared ({', '.join(unchanged_outputs[:3])}). A "
+            f"deterministic re-run looks exactly like this, so it is not "
+            f"treated as failure -- but if this pipeline is not deterministic, "
+            f"nothing here shows the file was rewritten.")
+
     verification = {
         "schema_version": SCHEMA_VERSION,
         "checked_at": now_iso(),
+        "unchanged_outputs": unchanged_outputs,
         "state": state,
         "exit_code": STATES[state],
         "retrospective": contract.get("retrospective", False),

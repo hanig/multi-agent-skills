@@ -226,6 +226,53 @@ def sacct_row_is_ours(sacct_submit, declared_at, bound_at=None):
     return True, None
 
 
+# Digest at most this much of a metrics file. A metrics file is text and
+# normally small; a prefix settles the question for anything larger, because a
+# run that appended to it changed the prefix's length if not its bytes.
+METRICS_DIGEST_LIMIT = 64 << 20
+
+
+def file_fingerprint(path, limit=METRICS_DIGEST_LIMIT):
+    """(sha256, size) for a file, or None. Bounded, and never raises."""
+    h = hashlib.sha256()
+    total = 0
+    try:
+        st = os.stat(str(path))
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        with open(str(path), "rb") as fh:
+            while total < limit:
+                chunk = fh.read(min(1 << 20, limit - total))
+                if not chunk:
+                    break
+                total += len(chunk)
+                h.update(chunk)
+    except OSError:
+        return None
+    return {"sha256": h.hexdigest(), "size": st.st_size}
+
+
+def metrics_unchanged_since_declaration(contract):
+    """Whether the metrics file is byte-identical to the one that was already
+    there when the contract was declared. None when unknowable.
+
+    mtime is the only cheap provenance signal a filesystem gives, and `touch`
+    defeats it: a converged curve from a previous run, touched after init,
+    passed post-hoc detection and certified CONVERGED (kimi, CRITICAL). The
+    accidental form matters more than the adversarial one, since `cp` without
+    -p updates mtimes. Content settles it.
+    """
+    fp = contract.get("preexisting_metrics")
+    if not isinstance(fp, dict) or not fp.get("sha256"):
+        return None                # nothing was there, or an older contract
+    now = file_fingerprint(contract.get("metrics_file", ""))
+    if now is None:
+        return None
+    if now["size"] != fp.get("size"):
+        return False
+    return now["sha256"] == fp["sha256"]
+
+
 def artifact_is_fresh(mtime, declared_at, declared_epoch=None):
     """Whether an artifact could have been produced by this contract instance.
 
@@ -642,6 +689,7 @@ CONTRACT_TYPES = {
     "checkpoint_dir": (str, type(None)),
     "checkpoint_glob": (str, type(None)),
     "sparse_metric": (bool, type(None)),
+    "preexisting_metrics": (dict, type(None)),
     "criteria_digest": (str, type(None)),
     "contract_id": (str, type(None)),
     "converge": (dict, type(None)),
@@ -1217,6 +1265,9 @@ def cmd_init(args):
         if args.checkpoint_dir else None,
         "checkpoint_glob": args.checkpoint_glob,
         "sparse_metric": bool(args.sparse_metric),
+        # Fingerprint of the metrics file if it ALREADY EXISTS at declaration.
+        # See metrics_unchanged_since_declaration: `touch` defeats mtime.
+        "preexisting_metrics": file_fingerprint(str(Path(args.metrics).resolve())),
         # Fingerprint of the declared criteria, so a later edit to an unrelated
         # field is not mistaken for post-hoc criterion selection. Filled in
         # below, once the fields it covers exist.
@@ -1476,6 +1527,18 @@ def cmd_check(args):
                 #     after declaration? (catches an edit the timestamps miss)
                 declared_at = parse_iso_ts(contract.get("created_at"))
                 declared_epoch = contract_epoch(contract)
+                if metrics_unchanged_since_declaration(contract) is True:
+                    # REPORTED, NOT BLOCKING, unlike a mtime that predates the
+                    # contract. A training run that appends to an existing
+                    # metrics file changes it, so byte-identity here is a
+                    # strong hint the curve is the old one -- but a resumed run
+                    # writing to a fresh path, or a deterministic replay, looks
+                    # the same, and this tool exists to certify reproducible
+                    # work. Said out loud for a human to judge.
+                    reasons.append(
+                        "note: the metrics file is byte-identical to the one "
+                        "that already existed when this contract was declared, "
+                        "so nothing here shows this run wrote it")
                 if ((declared_at is not None or declared_epoch is not None)
                         and not artifact_is_fresh(m_mtime, declared_at,
                                                   declared_epoch)):

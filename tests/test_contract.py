@@ -1610,5 +1610,82 @@ class TestLocalRecordCannotBindASchedulerJob(unittest.TestCase):
         contract("record", str(self.run_dir), "--exit-code", "3")
         self.assertEqual(contract("check", str(self.run_dir)).returncode, FAILED)
 
+class TestUnchangedOutputIsReportedNotRefused(unittest.TestCase):
+    """kimi, CRITICAL: `touch` defeats mtime freshness, so a file from a
+    previous run touched after init passed every check. The finding is real and
+    the obvious fix is WRONG here: content-identity cannot tell a file that was
+    never regenerated from one a deterministic pipeline regenerated
+    identically, and for this repo the second is the success case. Blocking on
+    it refused every deterministic re-run -- ten tests went red, which is how
+    the tension was noticed.
+
+    So `init` fingerprints declared outputs that already exist, and `check`
+    REPORTS byte-identity as a note without changing the verdict."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.run_dir = self.tmp / "run"
+        self.out = self.tmp / "o.tsv"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def run_it(self, content_after=None):
+        self.out.write_text("from a PREVIOUS run\n")
+        os.utime(self.out, (time.time() - 86400,) * 2)
+        contract("init", str(self.run_dir), "--command", "echo hi",
+                 "--output", str(self.out))
+        decl = json.loads(
+            (self.run_dir / "contract.json").read_text())["created_at_epoch"]
+        if content_after is not None:
+            self.out.write_text(content_after)
+        os.utime(self.out, (decl + 2, decl + 2))
+        contract("record", str(self.run_dir), "--exit-code", "0")
+        return contract("check", str(self.run_dir))
+
+    def test_init_fingerprints_a_preexisting_declared_output(self):
+        self.out.write_text("from a PREVIOUS run\n")
+        contract("init", str(self.run_dir), "--command", "echo hi",
+                 "--output", str(self.out))
+        c = json.loads((self.run_dir / "contract.json").read_text())
+        fps = c["preexisting_outputs"]
+        self.assertIn(str(self.out), fps)
+        self.assertTrue(fps[str(self.out)]["sha256"])
+        self.assertEqual(fps[str(self.out)]["size"],
+                         len("from a PREVIOUS run\n"))
+
+    def test_an_output_that_did_not_exist_is_not_fingerprinted(self):
+        contract("init", str(self.run_dir), "--command", "echo hi",
+                 "--output", str(self.tmp / "never.tsv"))
+        c = json.loads((self.run_dir / "contract.json").read_text())
+        self.assertEqual(c["preexisting_outputs"], {})
+
+    def test_a_touched_but_unchanged_output_is_noted_not_refused(self):
+        r = self.run_it(content_after=None)
+        self.assertEqual(r.returncode, PASS, r.stdout + r.stderr)
+        self.assertIn("byte-identical", r.stdout)
+        v = json.loads((self.run_dir / "verification.json").read_text())
+        self.assertEqual(v["unchanged_outputs"], [str(self.out)])
+
+    def test_a_deterministic_rerun_still_passes_and_that_is_the_point(self):
+        """The case that makes blocking wrong: identical output IS the goal."""
+        r = self.run_it(content_after="from a PREVIOUS run\n")
+        self.assertEqual(r.returncode, PASS, r.stdout + r.stderr)
+
+    def test_a_rewritten_output_is_not_noted(self):
+        r = self.run_it(content_after="THIS run wrote this\n")
+        self.assertEqual(r.returncode, PASS, r.stdout + r.stderr)
+        self.assertNotIn("byte-identical", r.stdout)
+        v = json.loads((self.run_dir / "verification.json").read_text())
+        self.assertEqual(v["unchanged_outputs"], [])
+
+    def test_the_digest_limit_is_recorded_so_check_can_match_it(self):
+        """The digest must be computed the same way at both ends."""
+        self.out.write_text("x\n")
+        contract("init", str(self.run_dir), "--command", "echo hi",
+                 "--output", str(self.out), "--hash-limit-mb", "8")
+        c = json.loads((self.run_dir / "contract.json").read_text())
+        self.assertEqual(c["hash_limit_mb"], 8)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

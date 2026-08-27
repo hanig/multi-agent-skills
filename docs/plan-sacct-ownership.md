@@ -141,6 +141,15 @@ as predating a declaration made later in the same second).
   an existing allocation should use `record`. This is the one sibling asymmetry
   in the two verifiers that is intended, so it is stated here rather than left
   to look like the twelve that were not.
+- **`touch` defeats mtime-based freshness, and this cannot be fixed here.**
+  A file from a previous run, touched after `init`, satisfies every freshness
+  check (kimi, CRITICAL). `init` now fingerprints declared outputs that already
+  exist and `check` REPORTS byte-identity, but it does not refuse on it: content
+  identity cannot distinguish a file that was never regenerated from one a
+  deterministic pipeline regenerated identically, and for this repo the second
+  is the success case. Blocking on it turned ten tests red, all of them
+  legitimate. The receipt carries `unchanged_outputs` so a human can judge; if
+  your pipeline is not deterministic, that note means the file was not rewritten.
 - **A DST fold can displace an offset-free sacct Submit by an hour.** In the
   ambiguous hour, an offset-free local timestamp has two valid readings and
   libc picks one; an honest row can land outside the interval and be refused
