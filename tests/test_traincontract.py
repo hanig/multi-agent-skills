@@ -1329,18 +1329,25 @@ class TestFifoContract(Base):
         import stat as _st
         bindir = self.tmp / "fakebin"
         bindir.mkdir()
-        (bindir / "squeue").write_text("#!/bin/sh\necho STAGE_OUT\n")
-        (bindir / "sacct").write_text("#!/bin/sh\necho COMPLETED\n")
-        for n in ("squeue", "sacct"):
-            (bindir / n).chmod(0o755)
         self.write_metrics([{"step": 100, "loss": 0.4}])
         self.add_checkpoint()
         self.init(converge={"metric": "loss", "mode": "min",
-                            "threshold": 0.5, "min_steps": 0})
-        cpath = self.run_dir / "training-contract.json"
-        c = json.loads(cpath.read_text())
-        c["run"]["slurm_job_id"] = "42"
-        cpath.write_text(json.dumps(c))
+                            "threshold": 0.5, "min_steps": 0}, record=False)
+        rb = tc("bind", str(self.run_dir), "--job-id", "42")
+        self.assertEqual(rb.returncode, 0, rb.stderr)
+        # squeue rows carry a submit time now (`-o %T|%V`) and are subject to
+        # the same ownership test as sacct rows: a queue entry for a REUSED id
+        # must not overrule terminal evidence we own (sol). The fixture emits
+        # what squeue emits, pinned inside the ownership window.
+        bound = parse_local_iso(json.loads(
+            (self.run_dir / "training-binding.json").read_text())["submitted_at"])
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(bound))
+        (bindir / "squeue").write_text(
+            f'#!/bin/sh\necho "STAGE_OUT|{stamp}"\n')
+        (bindir / "sacct").write_text(
+            f'#!/bin/sh\necho "COMPLETED|0:0|{stamp}"\n')
+        for n in ("squeue", "sacct"):
+            (bindir / n).chmod(0o755)
         env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
         r = subprocess.run([sys.executable, str(SCRIPT), "check",
                             str(self.run_dir)], capture_output=True,
@@ -2479,6 +2486,112 @@ class TestTimestampsUnderForeignTimezones(Base):
             else:
                 os.environ["TZ"] = old
             time.tzset()
+
+class TestSqueueRowsAreOwnedToo(Base):
+    """sol, round 3: ownership was applied to sacct rows for eight rounds and
+    never to squeue rows. `-o %T` fetched only the state, so a LATER reuse of
+    the id that happened to be queued turned an honestly finished run back into
+    RUNNING, with its predicates never evaluated. Ninth instance in this repo of
+    fixing one path and missing its sibling."""
+
+    def _bin(self, squeue_line=None, sacct_line=None):
+        b = self.tmp / f"qb{abs(hash((squeue_line, sacct_line)))}"
+        b.mkdir()
+        (b / "squeue").write_text(
+            f'#!/bin/sh\necho "{squeue_line}"\n' if squeue_line
+            else "#!/bin/sh\nexit 0\n")
+        (b / "sacct").write_text(
+            f'#!/bin/sh\necho "{sacct_line}"\n' if sacct_line
+            else "#!/bin/sh\nexit 0\n")
+        for n in ("squeue", "sacct"):
+            (b / n).chmod(0o755)
+        return dict(os.environ, PATH=f"{b}:{os.environ['PATH']}")
+
+    def _stamp(self, offset=0):
+        b = json.loads(
+            (self.run_dir / "training-binding.json").read_text())
+        return time.strftime("%Y-%m-%dT%H:%M:%S",
+                             time.localtime(parse_local_iso(b["submitted_at"])
+                                            + offset))
+
+    def _check(self, env):
+        return subprocess.run([sys.executable, str(SCRIPT), "check",
+                               str(self.run_dir)], capture_output=True,
+                              text=True, env=env)
+
+    def setUpBound(self):
+        self.write_metrics(PLATEAU_ROWS)
+        self.add_checkpoint()
+        self.init(record=False)
+        self.assertEqual(tc("bind", str(self.run_dir), "--job-id", "42"
+                            ).returncode, 0)
+
+    def test_a_later_reuse_sitting_in_the_queue_does_not_block_us(self):
+        """THE case: our job finished, its id was reused hours later by a
+        PENDING job, and squeue's row for that job used to overrule our owned
+        terminal evidence."""
+        self.setUpBound()
+        env = self._bin(squeue_line=f"PENDING|{self._stamp(3600)}",
+                        sacct_line=f"COMPLETED|0:0|{self._stamp(0)}")
+        r = self._check(env)
+        self.assertEqual(r.returncode, CONVERGED, r.stdout + r.stderr)
+
+    def test_our_own_queued_job_still_blocks(self):
+        """The other half: a queue row inside the ownership window is ours and
+        must still prevent a verdict."""
+        self.setUpBound()
+        env = self._bin(squeue_line=f"RUNNING|{self._stamp(0)}")
+        r = self._check(env)
+        self.assertNotEqual(r.returncode, CONVERGED, r.stdout)
+        self.assertIn("RUNNING", r.stdout)
+
+    def test_a_queue_row_with_no_submit_time_is_not_ours(self):
+        """Fails toward 'not active', which hands the decision to the sacct
+        path -- which applies the same ownership test."""
+        self.setUpBound()
+        env = self._bin(squeue_line="RUNNING")
+        r = self._check(env)
+        self.assertNotEqual(r.returncode, CONVERGED, r.stdout)
+
+
+class TestTensorFlowShardCompleteness(Base):
+    """sol, round 3: a stale .index left by a previous run paired with ONE fresh
+    shard passed as a complete checkpoint, because each file only needed *any*
+    matching counterpart. The name states the expected count."""
+
+    def test_a_partial_shard_set_is_not_a_checkpoint(self):
+        self.write_metrics(PLATEAU_ROWS)
+        (self.ckpt / "model.index").write_bytes(b"x" * 512)
+        (self.ckpt / "model.data-00000-of-00002").write_bytes(b"x" * 4096)
+        self.init()
+        r = tc("check", str(self.run_dir))
+        self.assertNotEqual(r.returncode, CONVERGED, r.stdout)
+
+    def test_a_complete_shard_set_is_a_checkpoint(self):
+        self.write_metrics(PLATEAU_ROWS)
+        (self.ckpt / "model.index").write_bytes(b"x" * 512)
+        for i in range(2):
+            (self.ckpt / f"model.data-0000{i}-of-00002").write_bytes(b"x" * 4096)
+        self.init()
+        r = tc("check", str(self.run_dir))
+        self.assertEqual(r.returncode, CONVERGED, r.stdout + r.stderr)
+
+    def test_shards_disagreeing_on_the_total_are_refused(self):
+        self.write_metrics(PLATEAU_ROWS)
+        (self.ckpt / "model.index").write_bytes(b"x" * 512)
+        (self.ckpt / "model.data-00000-of-00002").write_bytes(b"x" * 4096)
+        (self.ckpt / "model.data-00001-of-00003").write_bytes(b"x" * 4096)
+        self.init()
+        r = tc("check", str(self.run_dir))
+        self.assertNotEqual(r.returncode, CONVERGED, r.stdout)
+
+    def test_a_single_shard_checkpoint_still_works(self):
+        self.write_metrics(PLATEAU_ROWS)
+        (self.ckpt / "model.index").write_bytes(b"x" * 512)
+        (self.ckpt / "model.data-00000-of-00001").write_bytes(b"x" * 4096)
+        self.init()
+        r = tc("check", str(self.run_dir))
+        self.assertEqual(r.returncode, CONVERGED, r.stdout + r.stderr)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

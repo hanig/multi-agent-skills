@@ -104,6 +104,22 @@ as predating a declaration made later in the same second).
   as wide as the delay before you run it. A reuse within one second of our
   submission is indistinguishable regardless, because sacct emits whole seconds
   and the slack is a second wide.
+- **Ownership assumes the verifier host and the Slurm controller agree on the
+  time to within the slack.** Our anchors come from the login host's clock and
+  Submit comes from slurmctld, so skew shifts the whole interval: an honest row
+  is refused at one end and a reuse admitted at the other (sol). Widening the
+  slack is NOT the fix, because it widens the reuse window by the same amount.
+  Clusters run NTP, and skew large enough to matter here would already be
+  breaking Slurm's own scheduling and accounting. Stated as a requirement.
+- **squeue rows are subject to the same ownership test as sacct rows.** They
+  were not for eight rounds: `-o %T` fetched only the state, so a later reuse
+  of the id sitting in the queue turned an honestly finished run back into
+  RUNNING with its predicates never evaluated. Both verifiers now request
+  `%T|%V` and place the row.
+- **A TensorFlow checkpoint must have every shard its own name declares.**
+  `model.data-00000-of-00002` says two; accepting the set because each file had
+  *any* counterpart let a stale `.index` from a previous run pair with one
+  fresh shard and certify a run with no loadable model.
 - **A DST fold can displace an offset-free sacct Submit by an hour.** In the
   ambiguous hour, an offset-free local timestamp has two valid readings and
   libc picks one; an honest row can land outside the interval and be refused

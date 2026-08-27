@@ -74,7 +74,7 @@ CHECKPOINT_SUFFIXES = (".pt", ".pth", ".ckpt", ".safetensors", ".bin", ".h5",
 # TensorFlow checkpoints are a PAIR: an .index plus one or more
 # .data-NNNNN-of-NNNNN shards sharing its stem. Neither half alone is loadable,
 # so neither counts on its own.
-TF_SHARD = re.compile(r"\.data-\d+-of-\d+$")
+TF_SHARD = re.compile(r"\.data-(\d+)-of-(\d+)$")
 
 # Documentation, logs and configs live beside checkpoints and must never be
 # mistaken for one, however they are named.
@@ -292,13 +292,26 @@ def exit_code_is_clean(code):
         return False
 
 
-def squeue_state(job_id):
-    """State from squeue, or None. sacct has no row for a job that has not
-    started, so squeue is the only thing that knows it is still queued."""
-    rc, out = run(["squeue", "-h", "-j", str(job_id), "-o", "%T"])
+def squeue_state(job_id, declared_at=None, bound_at=None):
+    """State of OUR job from squeue, or None. sacct has no row for a job that
+    has not started, so squeue is the only thing that knows it is still queued.
+
+    Ownership applies here as it does to an sacct row, and for eight rounds it
+    did not: `-o %T` fetched only the state, so a later reuse of the id sitting
+    PENDING turned a converged run with owned terminal evidence back into
+    RUNNING (sol). %V is the submit time, which is what places the row."""
+    rc, out = run(["squeue", "-h", "-j", str(job_id), "-o", "%T|%V"])
     if rc != 0 or not out:
         return None
-    return out.splitlines()[0].strip() or None
+    first = out.splitlines()[0].split("|")
+    state = first[0].strip() or None
+    submit = parse_iso_ts(first[1].strip()) if len(first) > 1 else None
+    ours, _why = sacct_row_is_ours(submit, declared_at, bound_at)
+    if not ours:
+        # Not our job. Reporting it would let another job's queue state
+        # overrule terminal evidence we own.
+        return None
+    return state
 
 
 def slurm_state(job_id, declared_at=None, bound_at=None):
@@ -971,6 +984,35 @@ def eval_divergence(rows, rules):
 
 # --- checkpoints ------------------------------------------------------------
 
+def _tf_shards_complete(stem, siblings):
+    """Whether EVERY data shard a TensorFlow checkpoint declares is present.
+
+    `model.data-00000-of-00002` says there are two shards. Accepting the set
+    because each file had *any* matching counterpart passed a half-written
+    checkpoint, and let a stale .index left by a previous run pair with one
+    fresh shard (sol). The name states the expected count; require it.
+    """
+    shards = {}
+    for s in siblings:
+        m = TF_SHARD.search(s.name)
+        if not m or s.name[: m.start()] != stem:
+            continue
+        if s.size <= 0 or not s.readable:
+            return False            # a zero-byte or unreadable shard is nothing
+        idx, total = m.group(1), m.group(2)
+        try:
+            shards[int(idx)] = int(total)
+        except (TypeError, ValueError):
+            return False
+    if not shards:
+        return False
+    totals = set(shards.values())
+    if len(totals) != 1:
+        return False                # shards disagree on how many there are
+    total = totals.pop()
+    return total > 0 and set(shards) == set(range(total))
+
+
 def looks_like_checkpoint(name, pattern=None, siblings=()):
     """Whether a file plausibly IS a loadable checkpoint.
 
@@ -981,18 +1023,15 @@ def looks_like_checkpoint(name, pattern=None, siblings=()):
     low = name.lower()
     if low.endswith(".index"):
         stem = name[: -len(".index")]
-        # The shard must exist, share the exact stem, and be non-empty: a
-        # zero-byte or differently-named shard leaves nothing loadable.
-        return any(s.name != name and TF_SHARD.search(s.name)
-                   and s.name[: TF_SHARD.search(s.name).start()] == stem
-                   and s.size > 0 and s.readable
-                   for s in siblings)
+        return _tf_shards_complete(stem, siblings)
     m = TF_SHARD.search(name)
     if m:
-        # A shard is only evidence alongside its index.
+        # A shard is only evidence alongside its index AND its siblings.
         stem = name[: m.start()]
-        return any(s.name == stem + ".index" and s.size > 0 and s.readable
-                   for s in siblings)
+        if not any(s.name == stem + ".index" and s.size > 0 and s.readable
+                   for s in siblings):
+            return False
+        return _tf_shards_complete(stem, siblings)
     if low.endswith(NON_MODEL_SUFFIXES):
         return False  # checkpoint_notes.txt is not a checkpoint
     return low.endswith(CHECKPOINT_SUFFIXES) or "checkpoint" in low
@@ -1557,7 +1596,7 @@ def cmd_check(args):
             # squeue FIRST: sacct can hold a COMPLETED row for an earlier
             # attempt while the job is running again, and a stale terminal row
             # must not outrank a live one.
-            qstate = squeue_state(jid)
+            qstate = squeue_state(jid, declared_at, bound_at)
             sstate = slurm_state(jid, declared_at, bound_at)
             if qstate:
                 # ANY squeue state means the job is still in the system --

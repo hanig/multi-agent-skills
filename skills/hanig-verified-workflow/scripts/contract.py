@@ -623,11 +623,27 @@ def sacct_state(job_id):
     return state, code, submit
 
 
-def squeue_active(job_id):
+def squeue_active(job_id, declared_at=None, bound_at=None):
+    """Whether OUR job is still in the queue.
+
+    Ownership applies here exactly as it does to an sacct row, and for eight
+    rounds it did not: `-o %T` fetched only the state, so a later reuse of the
+    id that happened to be RUNNING made an honestly finished run report RUNNING
+    forever, its predicates never evaluated (sol). %V is the submit time, which
+    is what places the row.
+    """
     if not shutil.which("squeue"):
         return False
-    rc, out, _ = run(["squeue", "-h", "-j", str(job_id), "-o", "%T"])
-    return rc == 0 and bool(out.strip())
+    rc, out, _ = run(["squeue", "-h", "-j", str(job_id), "-o", "%T|%V"])
+    if rc != 0 or not out.strip():
+        return False
+    first = out.splitlines()[0].split("|")
+    submit = parse_iso_ts(first[1].strip()) if len(first) > 1 else None
+    ours, _why = sacct_row_is_ours(submit, declared_at, bound_at)
+    # A queued row we cannot attribute is not evidence that OUR job is running.
+    # Fails toward "not active", which then makes the sacct path decide -- and
+    # that path applies the same ownership test.
+    return bool(ours)
 
 
 # --- commands ---------------------------------------------------------------
@@ -955,7 +971,8 @@ def cmd_check(args):
     if attempts:
         job_id = attempts[-1]["job_id"]
         evidence["job_id"] = job_id
-        if squeue_active(job_id):
+        if squeue_active(job_id, declared_at,
+                         parse_iso_ts(attempts[-1].get("submitted_at"))):
             state = "RUNNING"
             reasons.append(f"job {job_id} still in the queue")
         else:
