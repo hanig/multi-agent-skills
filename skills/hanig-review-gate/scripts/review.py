@@ -927,16 +927,32 @@ def escalate(all_reviewers, prompt, args, truncated, label, body_len):
                           f"{len(r['findings'])} finding(s)  {r['elapsed_s']}s")
                 else:
                     print(f"  {r['name']:<18} ERROR     {r['error'][:70]}")
-        # Any confirmed defect or refuted claim so far ends the ladder: fix it
-        # before paying a dearer tier to look at the same code.
+        # A confirmed defect or refuted claim ends the ladder -- but only once
+        # QUORUM is met. Checked before the quorum test, one reviewer's finding
+        # ended the ladder on its own: four of five reviews in one session were
+        # decided by a single model, and the committee never formed. A finding
+        # from one reviewer is a hypothesis; adjudicating it is what a panel is
+        # for, and stopping also leaves every other claim unexamined by anyone
+        # else. The round that did reach quorum is the one where the second and
+        # third readers found what the first had upheld.
         bad = any(is_confirmed(f) for r in tier_completed for f in r["findings"]) \
             or any(norm(c.get("status")) == "refuted"
                    for r in tier_completed for c in r["claims"])
-        if bad:
+        if bad and len(completed) >= args.quorum:
             if not args.json:
-                print(f"  -> tier {tier} found problems; stopping before the "
-                      f"dearer tiers.")
+                print(f"  -> tier {tier} found problems with "
+                      f"{len(completed)} verdict(s) (quorum {args.quorum}); "
+                      f"stopping before the dearer tiers.")
             break
+        if bad:
+            # Still cheapest-first: this recruits the next tier only, and the
+            # ladder stops as soon as quorum is reached.
+            if not args.json:
+                print(f"  -> tier {tier} found problems but only "
+                      f"{len(completed)} verdict(s) (quorum {args.quorum}); "
+                      f"escalating to adjudicate rather than acting on one "
+                      f"opinion.")
+            continue
         if len(completed) < args.quorum:
             # Below quorum through reviewer errors, not findings. Escalating
             # recruits more readers; stopping would waste the run and report a

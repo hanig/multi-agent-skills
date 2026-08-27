@@ -1246,5 +1246,82 @@ class TestEmptyContentNamesItsCause(unittest.TestCase):
                               review.DEFAULT_MAX_OUTPUT_TOKENS)
             self.assertGreaterEqual(effective, 32_000, r["name"])
 
+
+class TestEscalateFormsACommittee(unittest.TestCase):
+    """The ladder checked `bad` BEFORE quorum, so one reviewer's refuted claim
+    ended it on its own. Four of five reviews in one session were decided by a
+    single model and no committee ever formed -- and the one round that did
+    reach quorum is the round where the second and third readers found what the
+    first had upheld. A finding from one reviewer is a hypothesis; adjudicating
+    it is what the panel is for.
+
+    Nothing in this file covered the stopping rule, so changing it broke no
+    test. That is why these exist."""
+
+    class Args:
+        def __init__(self, quorum):
+            self.quorum = quorum
+            self.json = True
+            self.timeout = 1
+            self.claim = []
+
+    def setUp(self):
+        self.roster = [
+            {"name": "cheap1", "profiles": ["fast"]},
+            {"name": "cheap2", "profiles": ["fast"]},
+            {"name": "mid1", "profiles": ["standard"]},
+            {"name": "mid2", "profiles": ["standard"]},
+            {"name": "dear1", "profiles": ["deep"]},
+        ]
+        self._avail = review.availability
+        self._run = review.run_one
+        self.addCleanup(setattr, review, "availability", self._avail)
+        self.addCleanup(setattr, review, "run_one", self._run)
+
+    def stub(self, available, verdicts):
+        """available: names that answer. verdicts: name -> refuted bool."""
+        review.availability = lambda r: (
+            None if r["name"] in available else "no credits")
+        def run_one(rev, *a, **k):
+            refuted = verdicts.get(rev["name"], False)
+            return {"ok": True, "name": rev["name"],
+                    "verdict": "refuted" if refuted else "upheld",
+                    "findings": [],
+                    "claims": ([{"status": "refuted", "claim": "c"}]
+                               if refuted else [{"status": "upheld",
+                                                 "claim": "c"}]),
+                    "elapsed_s": 0.1}
+        review.run_one = run_one
+
+    def test_a_lone_refuted_verdict_does_not_end_the_ladder(self):
+        # Only one fast reviewer answers, and it refutes.
+        self.stub({"cheap1", "mid1", "mid2"}, {"cheap1": True})
+        completed, _failed, _un, tiers = review.escalate(
+            self.roster, "p", self.Args(quorum=2), False, "l", 10)
+        self.assertIn("standard", tiers,
+                      "the ladder stopped on one reviewer's refuted claim; "
+                      "no committee formed")
+        self.assertGreaterEqual(
+            len(completed), 2,
+            "a verdict was reached below quorum on a single opinion")
+
+    def test_the_ladder_stops_once_quorum_has_adjudicated(self):
+        # Both fast reviewers answer; one refutes. Quorum 2 is met, so the
+        # dearer tiers must not run: cheapest-first still holds.
+        self.stub({"cheap1", "cheap2", "mid1", "dear1"}, {"cheap1": True})
+        _c, _f, _u, tiers = review.escalate(
+            self.roster, "p", self.Args(quorum=2), False, "l", 10)
+        self.assertEqual(tiers, ["fast"],
+                         "quorum was met with a finding, so the ladder should "
+                         "have stopped before the dearer tiers")
+
+    def test_a_clean_tier_below_quorum_still_escalates(self):
+        # Unchanged behaviour, asserted so it cannot regress.
+        self.stub({"cheap1", "mid1"}, {})
+        _c, _f, _u, tiers = review.escalate(
+            self.roster, "p", self.Args(quorum=2), False, "l", 10)
+        self.assertIn("standard", tiers)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
