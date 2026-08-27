@@ -1,4 +1,4 @@
-# Plan v4 — hanig-reproducible-result
+# Plan v5 — hanig-reproducible-result
 
 Regenerate and verify figures, tables, benchmark results and exports with
 input-to-output provenance.
@@ -130,6 +130,37 @@ dirty-diff hash (with a scrubbed remote), environment, input digests, declared
 outputs, declared checks, a per-instance `contract_id`, `created_at` and
 `created_at_epoch`.
 
+## What "consumed inputs" means, exactly
+
+Criteria 11 and 17 both rest on "the digests the build recorded as consumed",
+and v4 never said how that set is determined. Left open, an implementer could
+record every file the command opened -- including system libraries, so the next
+OS update makes an honest result permanently `STALE` and it can never reach
+`REVIEWED` -- or use a narrow heuristic that misses a real input, letting
+`CONTRACT_DRIFTED` go undetected (deepseek-v4-pro, MAJOR).
+
+**The consumed set is exactly the DECLARED inputs, digested by `build` at the
+moment it runs. The tool never traces, discovers, or infers file access.** No
+`strace`, no `lsof`, no filesystem watching: none of it is stdlib-only, and all
+of it would pull system files into the provenance set.
+
+That gives three digest comparisons for the same path, all of them content
+comparisons and none of them a time comparison:
+
+| digest | taken at | disagreement means |
+|---|---|---|
+| declared | `declare` | -- |
+| consumed | `build`, as it runs | vs declared: `CONTRACT_DRIFTED`, the inputs changed between declaring and building |
+| current | `check` | vs consumed: `STALE`, the inputs changed after the build |
+
+**The residual, stated rather than hidden: an input that was never declared is
+invisible to this tool.** A build that secretly reads `~/scratch/fudge.csv`
+reaches `REVIEWED` with no complaint. Provenance is exactly as good as the
+declaration, and the receipt must say so in those words, next to the input list
+it actually checked. This is a limit, not a defect to be fixed later: closing it
+needs syscall tracing, which the stdlib cannot do and which would drag every
+system library into the same trap described above.
+
 ## `result.py build <result_dir> [--double]`
 
 Executes the declared command, bounded by a watchdog, capturing rc and output
@@ -228,7 +259,7 @@ this is stated rather than pretended away:
   A consumer trusting a receipt without running `check` is trusting a
   photograph. Said in the receipt itself, not only here.
 
-## Acceptance criteria
+## Acceptance criteria (24)
 
 1. `REVIEWED` is reachable only through `review`, and only from `VALIDATED`.
 2. A review is invalidated by any subsequent change to the digests it recorded,
@@ -271,6 +302,24 @@ this is stated rather than pretended away:
    ACHIEVEMENT when there is none. Achievements are never compared against
    disqualifiers, because `REVIEWED` logically contains `VALIDATED` and a single
    ranking made a fully reviewed result exit 1.
+
+22. Every declared check enumerates the keys it is read with, and a key the
+   check does not read is REFUSED at `declare` rather than ignored. v4 said
+   checks fail closed when they *cannot run*, which does not reach a typo: a
+   misspelled `min_sze` was simply not a check, so the intended verification
+   never ran and the result could reach `VALIDATED` and then `REVIEWED` with
+   the user believing it had been applied (deepseek-v4-pro, MAJOR). Carries the
+   defect the siblings hit by real use, plus its fix: underscore-prefixed keys
+   are annotations and ignored, EXCEPT an underscored form of a key the check
+   actually reads, which is refused as a typo naming the key it resembles.
+   Without that exception the hatch reintroduces the defect one level deeper.
+23. The receipt records the outcome of EVERY declared check by name: passed,
+   failed, or could-not-run with the reason. A check that could not run is
+   distinguishable in the receipt from one that ran and failed, because the
+   actions differ.
+24. The consumed-input set is exactly the declared inputs, digested at build
+   time. The tool never traces file access, and the receipt states that an
+   undeclared input is not covered.
 
 ## Out of scope
 Visual design, narrative, plot aesthetics. Rendering engines. Anything needing
