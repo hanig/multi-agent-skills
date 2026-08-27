@@ -34,8 +34,32 @@ PLATEAU_ROWS = [{"step": s, "val_loss": 2.0} for s in range(100, 900, 100)]
 
 
 def tc(*argv):
-    return subprocess.run([sys.executable, str(SCRIPT), *argv],
-                          capture_output=True, text=True)
+    r = subprocess.run([sys.executable, str(SCRIPT), *argv],
+                       capture_output=True, text=True)
+    # Same reason as test_contract.py's wrapper: these fixtures stamp metrics
+    # and checkpoints FORWARD to satisfy the provenance rule, inverting the real
+    # order in which a run finishes and is then recorded. Emulate the real order
+    # rather than weakening a rule that is correct.
+    if argv and argv[0] == "record" and r.returncode == 0 and len(argv) > 1:
+        _order_record_after_artifacts(Path(argv[1]))
+    return r
+
+
+def _order_record_after_artifacts(run_dir):
+    path = run_dir / "training-termination.json"
+    try:
+        c = json.loads((run_dir / "training-contract.json").read_text())
+        base = time.mktime(time.strptime(c["created_at"],
+                                         "%Y-%m-%dT%H:%M:%S%z"))
+        rec = json.loads(path.read_text())
+    except (OSError, ValueError, KeyError):
+        return
+    rec["recorded_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z",
+                                       time.localtime(base + 4))
+    try:
+        path.write_text(json.dumps(rec, indent=2) + "\n")
+    except OSError:
+        pass
 
 
 def parse_local_iso(s):
@@ -1544,7 +1568,9 @@ class TestFailClosedRound2(Base):
             (self.run_dir / "training-binding.json").read_text())["submitted_at"])
         stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(bound))
         (bindir / "sacct").write_text(
-            f'#!/bin/sh\necho "SPECIAL_EXIT|0:0|{stamp}"\n')
+            # NOT SPECIAL_EXIT any more: that is now classified as a failure
+            # in both verifiers, so it stopped being an unknown state.
+            f'#!/bin/sh\necho "WARP_DRIVE_ENGAGED|0:0|{stamp}"\n')
         for n in ("sacct", "squeue"):
             (bindir / n).chmod(0o755)
         env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
@@ -1783,7 +1809,10 @@ class TestVerdictLogicRound(Base):
         self.assertEqual(r.returncode, 0, r.stderr)
         r = tc("check", str(self.run_dir))
         self.assertEqual(r.returncode, INCOMPLETE, r.stdout)
-        self.assertIn("stale", r.stdout)
+        # Was asserting the word "stale". The message now names WHICH
+        # fault it is, because reporting a contract mismatch for a record
+        # that merely predates its evidence misdescribed the problem.
+        self.assertIn("ignoring the termination record", r.stdout)
 
 
 class TestInstanceBinding(Base):
@@ -1803,7 +1832,10 @@ class TestInstanceBinding(Base):
         self.assertEqual(r.returncode, 0, r.stderr)
         r = tc("check", str(self.run_dir))
         self.assertEqual(r.returncode, INCOMPLETE, r.stdout)
-        self.assertIn("stale", r.stdout)
+        # Was asserting the word "stale". The message now names WHICH
+        # fault it is, because reporting a contract mismatch for a record
+        # that merely predates its evidence misdescribed the problem.
+        self.assertIn("ignoring the termination record", r.stdout)
 
     def test_each_init_gets_a_distinct_contract_id(self):
         self.write_metrics([{"step": 1, "loss": 0.4}])

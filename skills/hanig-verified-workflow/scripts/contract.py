@@ -60,23 +60,24 @@ STATES = {
 
 # Slurm states that mean "this attempt is over and it did not succeed".
 SLURM_FAILED = {"FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL",
-                "BOOT_FAIL", "DEADLINE", "REVOKED"}
+                "BOOT_FAIL", "DEADLINE", "REVOKED", "SPECIAL_EXIT"}
 SLURM_PREEMPTED = {"PREEMPTED", "REQUEUED", "RESIZING", "SUSPENDED"}
 SLURM_OK = {"COMPLETED"}
 
-# States in which Slurm has FINISHED with a job. squeue keeps a finished job
-# listed for MinJobAge (default 300s), so for minutes after an honest run ends
-# squeue still returns a row -- and treating any owned row as "still active"
-# made the verifier report RUNNING and never evaluate the predicates
-# (deepseek). Terminal is the enumerable set; anything NOT here reads as
-# active, so an unrecognised state still fails toward "not finished" rather
-# than certifying a live job. That keeps the property the previous comment was
-# protecting ("enumerating live states missed real ones such as STAGE_OUT")
-# while no longer blocking a completed one.
-SLURM_TERMINAL_IN_QUEUE = frozenset((
-    "COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY",
-    "NODE_FAIL", "BOOT_FAIL", "DEADLINE", "REVOKED", "SPECIAL_EXIT",
-))
+# Every state in which Slurm has FINISHED with a job, DERIVED from the two sets
+# above rather than listed again. squeue keeps a finished job listed for
+# MinJobAge (default 300s), so treating any owned row as "still active" made
+# the verifier report RUNNING and never evaluate the predicates. Terminal is
+# the enumerable set; anything NOT here reads as active, so an unrecognised
+# state still fails toward "not finished" rather than certifying a live job --
+# the property the earlier behaviour protected ("enumerating live states missed
+# real ones such as STAGE_OUT").
+#
+# Derived, because listing it separately immediately drifted: SPECIAL_EXIT was
+# added here and not to SLURM_FAILED, so an sacct row in that state matched no
+# classification and fell through to RUNNING forever. Both reviewers found it
+# independently, in the same commit that fixed the classification it broke.
+SLURM_TERMINAL_IN_QUEUE = frozenset(SLURM_OK | SLURM_FAILED)
 
 
 # --- small helpers ----------------------------------------------------------
@@ -466,6 +467,26 @@ def criteria_digest(contract):
 # honest rows: sbatch at 12:00:00.999 records 12:00:00 while sacct rounds Submit
 # to 12:00:01 (deepseek). One second of slack on each bound, no more.
 OWNERSHIP_SLACK_S = 1
+
+
+def terminal_record_postdates(record_ts, newest_evidence_mtime):
+    """Whether a terminal record can speak for this evidence.
+
+    A record written BEFORE the artifacts it certifies belongs to an earlier
+    run. Reusing a run directory is the ordinary way this happens: init once,
+    train, `record --exit-code 0`; then train again in the same directory, and
+    the first run's record certified the second run's metrics because the
+    contract_id still matched (kimi). Ownership said WHICH contract; nothing
+    said WHEN.
+
+    The honest flow always orders correctly -- the run finishes, then it is
+    recorded -- so requiring it costs nothing and refusing a record that
+    predates its own evidence costs at most a re-record. One second of slack,
+    since both sides can be whole seconds.
+    """
+    if record_ts is None or newest_evidence_mtime is None:
+        return True                    # nothing to order against
+    return int(record_ts) + OWNERSHIP_SLACK_S >= int(newest_evidence_mtime)
 
 
 def sacct_row_is_ours(sacct_submit, declared_at, bound_at=None):
@@ -1137,7 +1158,15 @@ def cmd_check(args):
     #    different kinds of evidence and must not cross: a local record
     #    carries its own exit code and needs no scheduler at all.
     submitted = [a for a in attempts if not a.get("local")]
-    if submitted:
+    # Only the LATEST attempt decides, whichever kind it is. The scheduler block
+    # used to run on submitted[-1] unconditionally and set state first, so a
+    # failed submit followed by an honest local re-run and `record --exit-code 0`
+    # kept the old FAILED verdict -- contradicting this file's own comment that
+    # "a failed first try followed by a successful retry is the normal shape of
+    # this work" (deepseek). If the newest attempt is local, its exit code is
+    # the outcome and the scheduler has nothing to say about it.
+    newest_is_local = bool(attempts and attempts[-1].get("local"))
+    if submitted and not newest_is_local:
         binding = submitted[-1]
         job_id = binding["job_id"]
         evidence["job_id"] = job_id
@@ -1228,6 +1257,7 @@ def cmd_check(args):
         # about artifact provenance can be established from it.
         command_only = True
     unchanged_outputs = []
+    newest_output_mtime = None
     for spec in checked_paths:
         if not isinstance(spec, str) or not spec:
             continue
@@ -1267,8 +1297,10 @@ def cmd_check(args):
                     # real and this is the honest limit of the signal, so it is
                     # said out loud rather than acted on.
                     unchanged_outputs.append(spec)
-                if not artifact_is_fresh(op.stat().st_mtime, declared_at,
-                                         declared_epoch):
+                _m = op.stat().st_mtime
+                newest_output_mtime = (_m if newest_output_mtime is None
+                                       else max(newest_output_mtime, _m))
+                if not artifact_is_fresh(_m, declared_at, declared_epoch):
                     entry = f"{spec} (mtime predates the contract)"
                     if entry not in stale_outputs:
                         stale_outputs.append(entry)
@@ -1283,6 +1315,16 @@ def cmd_check(args):
     # failure win made the verdict unrecoverable without hand-editing.
     last_attempt = attempts[-1] if attempts else None
     last_is_local = bool(last_attempt and last_attempt.get("terminal") is True)
+    if last_is_local and not terminal_record_postdates(
+            parse_iso_ts(last_attempt.get("submitted_at")), newest_output_mtime):
+        # A record written BEFORE the outputs it certifies belongs to an
+        # earlier run in this directory. Same gap kimi found in
+        # traincontract.py's termination_matches: ownership said WHICH
+        # contract, nothing said WHEN.
+        reasons.append("the recorded local run predates the declared "
+                       "output(s) it would certify, so it belongs to an "
+                       "earlier run; re-run `record` after this run finishes")
+        last_is_local = False
     if last_is_local and state is None:
         ec = last_attempt.get("exit_code")
         evidence["local"] = {"exit_code": ec}

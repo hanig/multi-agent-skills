@@ -126,6 +126,43 @@ class TestVerifierSymmetry(unittest.TestCase):
                     f"but never loops: it can only be reading ONE row, and a "
                     f"reused job id produces several.")
 
+    def test_no_terminal_state_is_left_unclassified(self):
+        """Both reviewers, independently: SPECIAL_EXIT was added to the
+        terminal-in-queue set and not to the failure set, so an sacct row in
+        that state matched no classification and fell through to RUNNING
+        forever. It was introduced by the commit that FIXED a classification
+        problem, one commit earlier.
+
+        Both files now DERIVE the terminal set from the classification sets, so
+        the drift is impossible; this asserts the property directly rather than
+        trusting that."""
+        import importlib.util
+        for path in (WORKFLOW, TRAINING):
+            spec = importlib.util.spec_from_file_location(
+                f"sym_{path.stem}", path)
+            m = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(m)
+            terminal = set(m.SLURM_TERMINAL_IN_QUEUE)
+            ok = set(getattr(m, "SLURM_OK", None) or m.SLURM_OK_END)
+            failed = set(getattr(m, "SLURM_FAILED", None) or m.SLURM_BAD_END)
+            unclassified = terminal - (ok | failed)
+            self.assertEqual(
+                unclassified, set(),
+                f"{path.name}: {unclassified} are terminal but match no "
+                f"classification, so a row in that state falls through to "
+                f"RUNNING and never reaches a verdict")
+
+    def test_special_exit_is_a_failure_in_both(self):
+        """Named explicitly because it is the state that drifted."""
+        import importlib.util
+        for path in (WORKFLOW, TRAINING):
+            spec = importlib.util.spec_from_file_location(
+                f"se_{path.stem}", path)
+            m = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(m)
+            failed = set(getattr(m, "SLURM_FAILED", None) or m.SLURM_BAD_END)
+            self.assertIn("SPECIAL_EXIT", failed, path.name)
+
     def test_the_shared_helpers_really_are_identical(self):
         """Copies drift. Where a helper exists in both files under the same
         name, its CODE must match -- a fix applied to one copy and not the

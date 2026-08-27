@@ -162,7 +162,8 @@ def run(argv, timeout=30):
 SLURM_NOT_DONE = ("PREEMPTED", "REQUEUED", "SUSPENDED", "RESIZING")
 SLURM_ACTIVE = ("RUNNING", "PENDING", "CONFIGURING", "COMPLETING")
 SLURM_BAD_END = ("FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY",
-                 "NODE_FAIL", "BOOT_FAIL", "DEADLINE", "REVOKED")
+                 "NODE_FAIL", "BOOT_FAIL", "DEADLINE", "REVOKED",
+                 "SPECIAL_EXIT")
 # The ONLY states that count as successful termination. Anything unrecognised
 # is treated as unconfirmed rather than assumed good.
 SLURM_OK_END = ("COMPLETED",)
@@ -176,10 +177,12 @@ SLURM_OK_END = ("COMPLETED",)
 # than certifying a live job. That keeps the property the previous comment was
 # protecting ("enumerating live states missed real ones such as STAGE_OUT")
 # while no longer blocking a completed one.
-SLURM_TERMINAL_IN_QUEUE = frozenset((
-    "COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY",
-    "NODE_FAIL", "BOOT_FAIL", "DEADLINE", "REVOKED", "SPECIAL_EXIT",
-))
+# DERIVED from the classification sets, never listed again: listing it
+# separately drifted within one commit in the sibling verifier, where
+# SPECIAL_EXIT was added to the terminal set and not to the failure set, so a
+# row in that state matched nothing and fell through to RUNNING forever.
+SLURM_TERMINAL_IN_QUEUE = frozenset(set(SLURM_OK_END) | set(SLURM_BAD_END)
+                                    | {"SPECIAL_EXIT"})
 
 
 # Both our ISO stamps and sacct's Submit are whole seconds, so each can sit up
@@ -187,6 +190,26 @@ SLURM_TERMINAL_IN_QUEUE = frozenset((
 # honest rows: sbatch at 12:00:00.999 records 12:00:00 while sacct rounds Submit
 # to 12:00:01 (deepseek). One second of slack on each bound, no more.
 OWNERSHIP_SLACK_S = 1
+
+
+def terminal_record_postdates(record_ts, newest_evidence_mtime):
+    """Whether a terminal record can speak for this evidence.
+
+    A record written BEFORE the artifacts it certifies belongs to an earlier
+    run. Reusing a run directory is the ordinary way this happens: init once,
+    train, `record --exit-code 0`; then train again in the same directory, and
+    the first run's record certified the second run's metrics because the
+    contract_id still matched (kimi). Ownership said WHICH contract; nothing
+    said WHEN.
+
+    The honest flow always orders correctly -- the run finishes, then it is
+    recorded -- so requiring it costs nothing and refusing a record that
+    predates its own evidence costs at most a re-record. One second of slack,
+    since both sides can be whole seconds.
+    """
+    if record_ts is None or newest_evidence_mtime is None:
+        return True                    # nothing to order against
+    return int(record_ts) + OWNERSHIP_SLACK_S >= int(newest_evidence_mtime)
 
 
 def sacct_row_is_ours(sacct_submit, declared_at, bound_at=None):
@@ -1475,20 +1498,38 @@ def read_termination(run_dir):
     return rec
 
 
-def termination_matches(rec, contract):
-    """Whether a termination record belongs to this contract INSTANCE.
+def termination_problem(rec, contract, newest_evidence_mtime=None):
+    """Why a termination record cannot be used, or None.
 
-    The criteria digest alone is not enough: `init --force` with identical
-    criteria produces an identical digest, so a stale record still matched."""
+    Two distinct reasons, and reporting one for the other misdescribes the
+    fault: a record can belong to a DIFFERENT contract instance, or belong to
+    this one but predate the evidence it would certify."""
     if rec is None:
-        return False
+        return "no termination record"
+    if not terminal_record_postdates(parse_iso_ts(rec.get("recorded_at")),
+                                     newest_evidence_mtime):
+        return ("the termination record predates the metrics or checkpoint it "
+                "would certify, so it belongs to an earlier run in this "
+                "directory; re-run `record` after this run finishes")
     want_id = contract.get("contract_id")
     if want_id is not None:
-        return rec.get("contract_id") == want_id
+        if rec.get("contract_id") != want_id:
+            return ("the termination record was written for a different "
+                    "contract instance")
+        return None
     want = contract.get("criteria_digest")
     if want is None:
-        return True          # contracts written before ids existed
-    return rec.get("criteria_digest") == want
+        return None
+    if rec.get("criteria_digest") != want:
+        return ("the termination record was written for different criteria "
+                "(digest mismatch)")
+    return None
+
+
+def termination_matches(rec, contract, newest_evidence_mtime=None):
+    """Boolean form of termination_problem, which carries the reason."""
+    return termination_problem(rec, contract, newest_evidence_mtime) is None
+
 
 
 def cmd_check(args):
@@ -1684,6 +1725,17 @@ def cmd_check(args):
     # finished, whatever the metrics so far show.
     declared_at = parse_iso_ts(contract.get("created_at"))
     declared_epoch = contract_epoch(contract)
+    # The newest thing a termination record would be certifying. A record that
+    # predates its own evidence belongs to an earlier run in this directory.
+    newest_evidence = None
+    try:
+        newest_evidence = os.stat(contract["metrics_file"]).st_mtime
+    except (OSError, KeyError, TypeError):
+        pass
+    _ck_newest = (ckpt.get("newest") or {}).get("mtime")
+    if _ck_newest is not None:
+        newest_evidence = (_ck_newest if newest_evidence is None
+                           else max(newest_evidence, _ck_newest))
     # Ownership is established by the binding, never inferred from timestamps.
     # The binding establishes WHICH job id is ours; the declaration time is
     # what an sacct row gets placed against.
@@ -1696,10 +1748,9 @@ def cmd_check(args):
             # finished -- contract.py has refused this since round 4, and both
             # reviewers converged on the asymmetry.
             term = read_termination(run_dir)
-            if term is not None and not termination_matches(term, contract):
-                reasons.append("a termination record exists but was written for "
-                               "a different contract (criteria digest "
-                               "mismatch); ignoring it as stale")
+            problem = termination_problem(term, contract, newest_evidence)
+            if term is not None and problem:
+                reasons.append(f"ignoring the termination record: {problem}")
                 term = None
             if term is None:
                 state = "INCOMPLETE_EVIDENCE"
@@ -1744,7 +1795,7 @@ def cmd_check(args):
                                f"criterion is met so far but the run is not over")
             elif str(sstate).startswith("STALE_ROW"):
                 term = read_termination(run_dir)
-                if not termination_matches(term, contract) or \
+                if not termination_matches(term, contract, newest_evidence) or \
                         term["exit_code"] != 0:
                     state = "INCOMPLETE_EVIDENCE"
                     why = str(sstate).split(":", 1)[1] if ":" in str(sstate) \
@@ -1766,7 +1817,7 @@ def cmd_check(args):
                 # Unknown state: enumerate-the-bad-ones fails open, and Slurm
                 # has states such as SPECIAL_EXIT that no list will cover.
                 term = read_termination(run_dir)
-                if not termination_matches(term, contract):
+                if not termination_matches(term, contract, newest_evidence):
                     term = None
                 if term is None or term["exit_code"] != 0:
                     state = "INCOMPLETE_EVIDENCE"
@@ -1789,7 +1840,7 @@ def cmd_check(args):
                 # evidence of anything. Accept an explicit local termination,
                 # otherwise refuse -- contract.py has required this since r4.
                 term = read_termination(run_dir)
-                if term is not None and not termination_matches(term, contract):
+                if term is not None and not termination_matches(term, contract, newest_evidence):
                     # The sibling branch above has filtered this since round 4;
                     # this one never did, so a receipt left by `init --force`
                     # kept CONVERGED alive for the NEW contract (sol).

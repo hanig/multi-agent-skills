@@ -176,6 +176,27 @@ as predating a declaration made later in the same second).
   `rel_improvement_below` plateau criterion is not, because alternating
   values do not plateau. Prefer plateau criteria over bare thresholds.
 
+## A conflict between reviewers, and how the threat model settled it
+
+kimi and deepseek reached opposite conclusions about the same scenario: a
+submitted job fails, then a local `record --exit-code 0` is appended.
+
+- kimi read it as laundering a failed job and said the FAILED verdict must
+  stand.
+- deepseek read it as an honest local re-run being refused, which this file's
+  own comment calls the normal shape of the work: a failed first try followed
+  by a successful retry.
+
+The threat model decides it. Deliberate falsification by someone holding shell
+access as the user is out of scope, because they can already run arbitrary code
+as the verifier. Refusing an honest retry is a live false negative. So **the
+latest attempt decides, whichever kind it is** — and what kimi's finding
+legitimately closed stays closed: a local record cannot borrow another job's
+sacct row, because only `submit` binds a scheduler job.
+
+Recorded here because two reviewers disagreeing is not a defect in either of
+them, and the tie-break has to be written down or it gets re-litigated.
+
 ## Out of scope
 Unsandboxed `command` predicates. Nextflow/Snakemake back ends. Any migration
 path for contracts predating today.

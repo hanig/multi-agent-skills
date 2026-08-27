@@ -29,8 +29,38 @@ PASS, RUNNING, FAILED, TECH, VIOLATED, PREEMPTED, INCOMPLETE = range(7)
 
 
 def contract(*argv, cwd=None):
-    return subprocess.run([sys.executable, str(SCRIPT), *argv],
-                          capture_output=True, text=True, cwd=cwd)
+    r = subprocess.run([sys.executable, str(SCRIPT), *argv],
+                       capture_output=True, text=True, cwd=cwd)
+    # These fixtures stamp declared outputs FORWARD (created_at + 2) so they
+    # satisfy the provenance rule, which inverts the real order: a run finishes
+    # and is THEN recorded. Once the verifier began checking that a terminal
+    # record post-dates the evidence it certifies, every fixture that recorded
+    # at wall-clock now looked like a record from an earlier run. Emulating the
+    # real order here beats editing twenty call sites, and beats weakening a
+    # rule that is correct.
+    if argv and argv[0] == "record" and r.returncode == 0 and len(argv) > 1:
+        _order_record_after_outputs(Path(argv[1]))
+    return r
+
+
+def _order_record_after_outputs(run_dir):
+    apath = run_dir / "attempts.jsonl"
+    try:
+        c = json.loads((run_dir / "contract.json").read_text())
+        base = time.mktime(time.strptime(c["created_at"],
+                                         "%Y-%m-%dT%H:%M:%S%z"))
+        lines = [json.loads(l) for l in apath.read_text().splitlines()
+                 if l.strip()]
+    except (OSError, ValueError, KeyError):
+        return
+    if not lines or lines[-1].get("terminal") is not True:
+        return
+    lines[-1]["submitted_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z",
+                                              time.localtime(base + 4))
+    try:
+        apath.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+    except OSError:
+        pass
 
 
 class Base(unittest.TestCase):
@@ -1578,18 +1608,46 @@ class TestLocalRecordCannotBindASchedulerJob(unittest.TestCase):
                           "a caller-supplied id must not reach sacct")
         self.assertIsNone(ev.get("job_id"))
 
-    def test_a_failed_submitted_job_is_not_overridden_by_a_local_record(self):
-        """kimi's escalation: the batch job fails, then someone appends a clean
-        local record."""
+    def test_an_honest_local_rerun_recovers_from_a_failed_submit(self):
+        """Two reviewers reached opposite conclusions about this scenario and
+        the threat model settles it.
+
+        kimi read it as an attacker appending a clean record to launder a
+        failed job, and this test formerly asserted that the FAILED verdict
+        must stand. deepseek read the same code as refusing an honest local
+        re-run, which the file's own comment calls "the normal shape of this
+        work": a failed first try followed by a successful retry.
+
+        Deliberate falsification by someone holding shell access as the user is
+        OUT OF SCOPE -- they can already run arbitrary code as the verifier --
+        while refusing an honest retry is a live false negative. So the latest
+        attempt decides, whichever kind it is. What kimi's finding legitimately
+        closed remains closed and is tested above: a local record cannot borrow
+        another job's sacct row."""
         c = self.build()
         decl = c["created_at_epoch"]
         self.submitted_attempt(c, "4242", decl)
         env = self.sched("FAILED|1:0", decl)
-        self.assertEqual(self.check(env).returncode, FAILED)
-        contract("record", str(self.run_dir), "--job-id", "999999",
-                 "--exit-code", "0")
+        self.assertEqual(self.check(env).returncode, FAILED,
+                         "the failed submit alone must fail")
+        contract("record", str(self.run_dir), "--exit-code", "0")
         r = self.check(env)
-        self.assertEqual(r.returncode, FAILED, r.stdout + r.stderr)
+        self.assertEqual(r.returncode, PASS, r.stdout + r.stderr)
+        ev = json.loads(
+            (self.run_dir / "verification.json").read_text())["evidence"]
+        self.assertIsNone(ev.get("scheduler"),
+                          "the newest attempt is local, so the scheduler has "
+                          "nothing to say about it")
+
+    def test_a_failed_local_record_after_a_submit_still_fails(self):
+        """The other direction: the latest attempt decides both ways."""
+        c = self.build()
+        decl = c["created_at_epoch"]
+        self.submitted_attempt(c, "4242", decl)
+        env = self.sched("COMPLETED|0:0", decl)
+        self.assertEqual(self.check(env).returncode, PASS)
+        contract("record", str(self.run_dir), "--exit-code", "7")
+        self.assertEqual(self.check(env).returncode, FAILED)
 
     def test_a_submitted_attempt_still_binds_normally(self):
         c = self.build()
