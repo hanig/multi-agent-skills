@@ -1038,11 +1038,21 @@ def cmd_check(args):
 
     # 1. Scheduler evidence, when a job was submitted through us. Absence of
     #    accounting is missing evidence, never a failure verdict.
-    if attempts:
-        job_id = attempts[-1]["job_id"]
+    #
+    #    ONLY an attempt written by `submit` binds a scheduler job. `record`
+    #    declares the outcome of a directly-executed run and accepts a
+    #    --job-id for bookkeeping; using that id to query sacct meant
+    #    `record --job-id <some clean job> --exit-code 0` made another job's
+    #    COMPLETED row certify this contract (kimi, CRITICAL). The two are
+    #    different kinds of evidence and must not cross: a local record
+    #    carries its own exit code and needs no scheduler at all.
+    submitted = [a for a in attempts if not a.get("local")]
+    if submitted:
+        binding = submitted[-1]
+        job_id = binding["job_id"]
         evidence["job_id"] = job_id
         if squeue_active(job_id, declared_at,
-                         parse_iso_ts(attempts[-1].get("submitted_at"))):
+                         parse_iso_ts(binding.get("submitted_at"))):
             state = "RUNNING"
             reasons.append(f"job {job_id} still in the queue")
         else:
@@ -1051,7 +1061,7 @@ def cmd_check(args):
             # unattributable row never becomes state in the first place.
             sstate, scode, ssubmit, why_not = sacct_state(
                 job_id, declared_at,
-                parse_iso_ts(attempts[-1].get("submitted_at")))
+                parse_iso_ts(binding.get("submitted_at")))
             evidence["scheduler"] = {"state": sstate, "exit_code": scode,
                                      "submit": ssubmit}
             if sstate is None and why_not:
@@ -1359,7 +1369,11 @@ def main():
                        help="record the terminal outcome of a directly-executed run")
     p.add_argument("run_dir")
     p.add_argument("--exit-code", type=int, required=True)
-    p.add_argument("--job-id", default=None)
+    p.add_argument("--job-id", default=None,
+                   help="recorded for bookkeeping only; a local record is "
+                        "never used to query the scheduler, because a "
+                        "caller-supplied id would let another job's accounting "
+                        "certify this contract")
     p.set_defaults(fn=cmd_record)
 
     p = sub.add_parser("check", help="verify the contract and emit a receipt")

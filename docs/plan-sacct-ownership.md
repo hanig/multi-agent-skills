@@ -126,6 +126,21 @@ as predating a declaration made later in the same second).
   `model.data-00000-of-00002` says two; accepting the set because each file had
   *any* counterpart let a stale `.index` from a previous run pair with one
   fresh shard and certify a run with no loadable model.
+- **A declared output directory is judged on at most 20000 entries.** If the
+  only file from this run lies beyond that, the verdict is INCOMPLETE_EVIDENCE
+  and the reason says the directory was too large to judge rather than that it
+  was stale (deepseek).
+- **`record` never binds a scheduler job.** It declares the outcome of a
+  directly-executed run; its `--job-id` is bookkeeping. Using that id to query
+  sacct let `record --job-id <some clean job> --exit-code 0` borrow another
+  job's COMPLETED row (kimi, CRITICAL). Only `submit` binds.
+- **`contract.py init` deliberately does NOT capture `$SLURM_JOB_ID`**, where
+  `traincontract.py init` does. Its flow is submit-then-check: `submit` runs
+  sbatch and records the attempt with our own submission time, which is a
+  stronger binding than an env var read at declaration. A run launched inside
+  an existing allocation should use `record`. This is the one sibling asymmetry
+  in the two verifiers that is intended, so it is stated here rather than left
+  to look like the twelve that were not.
 - **A DST fold can displace an offset-free sacct Submit by an hour.** In the
   ambiguous hour, an offset-free local timestamp has two valid readings and
   libc picks one; an honest row can land outside the interval and be refused

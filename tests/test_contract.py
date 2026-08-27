@@ -1478,28 +1478,137 @@ class TestEverySacctRowIsOwnershipTested(unittest.TestCase):
         self.assertEqual(r.returncode, INCOMPLETE, r.stdout + r.stderr)
         self.assertNotIn("all 2 predicates hold", r.stdout.split("[PASS]")[0])
 
-    def test_only_unattributable_rows_with_an_attempt_present(self):
-        """The sacct path IS entered here: an attempt exists, and every sacct
-        row belongs to some other job."""
-        decl = self.build(record=True)
+    def test_only_unattributable_rows_with_a_submitted_attempt(self):
+        """The sacct path is entered only for a SUBMITTED attempt: a local
+        `record` no longer binds a scheduler job, because a caller-supplied
+        --job-id could borrow another job's row (kimi). So this writes the
+        attempt `submit` would write."""
+        decl = self.build(record=False)
+        c = json.loads((self.run_dir / "contract.json").read_text())
+        (self.run_dir / "attempts.jsonl").write_text(json.dumps({
+            "contract_id": c["contract_id"], "attempt": 1, "job_id": "4242",
+            "submitted_at": time.strftime("%Y-%m-%dT%H:%M:%S",
+                                          time.localtime(decl)),
+            "sbatch_args": [], "host": "x"}) + "\n")
         r = self.check(self.env(decl, ("COMPLETED|0:0", -7200),
                                       ("COMPLETED|0:0", 7200)))
         self.assertIn("discarded", r.stdout)
+        self.assertNotEqual(r.returncode, PASS, r.stdout)
 
-    def test_a_discarded_row_still_lets_a_local_record_decide(self):
-        """The other half: `record` is independent evidence and an
-        unattributable sacct row must not veto it."""
+    def test_a_local_record_decides_without_consulting_sacct_at_all(self):
+        """`record` is independent evidence, and since kimi's finding it does
+        not reach the scheduler: a stray row for any id is irrelevant to it."""
         decl = self.build(record=True)
         r = self.check(self.env(decl, ("COMPLETED|0:0", 7200)))
         self.assertEqual(r.returncode, PASS, r.stdout + r.stderr)
+        ev = json.loads(
+            (self.run_dir / "verification.json").read_text())["evidence"]
+        self.assertIsNone(ev.get("scheduler"))
 
     def test_an_unattributable_row_never_becomes_recorded_state(self):
         """terminal_confirmed reads the receipt, so a discarded row must not
-        appear there as a state -- an earlier fix had to null it out by hand."""
-        decl = self.build()
+        appear there as a state -- an earlier fix had to null it out by hand.
+
+        Needs a SUBMITTED attempt: a local record does not reach sacct at all,
+        so the receipt has no scheduler block to inspect."""
+        decl = self.build(record=False)
+        c = json.loads((self.run_dir / "contract.json").read_text())
+        (self.run_dir / "attempts.jsonl").write_text(json.dumps({
+            "contract_id": c["contract_id"], "attempt": 1, "job_id": "4242",
+            "submitted_at": time.strftime("%Y-%m-%dT%H:%M:%S",
+                                          time.localtime(decl)),
+            "sbatch_args": [], "host": "x"}) + "\n")
         self.check(self.env(decl, ("COMPLETED|0:0", 7200)))
         ev = json.loads((self.run_dir / "verification.json").read_text())
         self.assertIsNone(ev["evidence"]["scheduler"]["state"])
+
+class TestLocalRecordCannotBindASchedulerJob(unittest.TestCase):
+    """kimi, CRITICAL: `record` accepts --job-id and check used attempts[-1] as
+    the scheduler binding, so `record --job-id <some clean job> --exit-code 0`
+    made another job's COMPLETED row certify this contract. A local record and a
+    submitted job are different kinds of evidence; they must not cross."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.run_dir = self.tmp / "run"
+        self.out = self.tmp / "o.tsv"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def build(self):
+        contract("init", str(self.run_dir), "--command", "echo hi",
+                 "--output", str(self.out))
+        c = json.loads((self.run_dir / "contract.json").read_text())
+        self.out.write_text("result\n")
+        os.utime(self.out, (c["created_at_epoch"] + 2,
+                            c["created_at_epoch"] + 2))
+        return c
+
+    def sched(self, row, decl):
+        b = self.tmp / f"b{abs(hash(row))}"
+        b.mkdir()
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(decl))
+        (b / "sacct").write_text(f'#!/bin/sh\necho "{row}|{stamp}"\n')
+        (b / "squeue").write_text("#!/bin/sh\nexit 0\n")
+        for n in ("sacct", "squeue"):
+            (b / n).chmod(0o755)
+        return dict(os.environ, PATH=f"{b}:{os.environ['PATH']}")
+
+    def submitted_attempt(self, c, job_id, decl):
+        (self.run_dir / "attempts.jsonl").write_text(json.dumps({
+            "contract_id": c["contract_id"], "attempt": 1, "job_id": job_id,
+            "submitted_at": time.strftime("%Y-%m-%dT%H:%M:%S",
+                                          time.localtime(decl)),
+            "sbatch_args": [], "host": "x"}) + "\n")
+
+    def check(self, env):
+        return subprocess.run([sys.executable, str(SCRIPT), "check",
+                               str(self.run_dir)], capture_output=True,
+                              text=True, env=env)
+
+    def test_a_local_record_never_queries_the_scheduler(self):
+        c = self.build()
+        contract("record", str(self.run_dir), "--job-id", "999999",
+                 "--exit-code", "0")
+        self.check(self.sched("COMPLETED|0:0", c["created_at_epoch"]))
+        ev = json.loads(
+            (self.run_dir / "verification.json").read_text())["evidence"]
+        self.assertIsNone(ev.get("scheduler"),
+                          "a caller-supplied id must not reach sacct")
+        self.assertIsNone(ev.get("job_id"))
+
+    def test_a_failed_submitted_job_is_not_overridden_by_a_local_record(self):
+        """kimi's escalation: the batch job fails, then someone appends a clean
+        local record."""
+        c = self.build()
+        decl = c["created_at_epoch"]
+        self.submitted_attempt(c, "4242", decl)
+        env = self.sched("FAILED|1:0", decl)
+        self.assertEqual(self.check(env).returncode, FAILED)
+        contract("record", str(self.run_dir), "--job-id", "999999",
+                 "--exit-code", "0")
+        r = self.check(env)
+        self.assertEqual(r.returncode, FAILED, r.stdout + r.stderr)
+
+    def test_a_submitted_attempt_still_binds_normally(self):
+        c = self.build()
+        decl = c["created_at_epoch"]
+        self.submitted_attempt(c, "4242", decl)
+        r = self.check(self.sched("COMPLETED|0:0", decl))
+        self.assertEqual(r.returncode, PASS, r.stdout + r.stderr)
+
+    def test_a_local_record_alone_still_supplies_terminal_evidence(self):
+        """The legitimate use, unchanged: a directly-executed run."""
+        self.build()
+        contract("record", str(self.run_dir), "--exit-code", "0")
+        r = contract("check", str(self.run_dir))
+        self.assertEqual(r.returncode, PASS, r.stdout + r.stderr)
+
+    def test_a_local_record_of_failure_still_fails(self):
+        self.build()
+        contract("record", str(self.run_dir), "--exit-code", "3")
+        self.assertEqual(contract("check", str(self.run_dir)).returncode, FAILED)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
