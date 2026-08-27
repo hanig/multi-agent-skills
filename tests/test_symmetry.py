@@ -227,10 +227,27 @@ class TestVerifierSymmetry(unittest.TestCase):
             tree = ast.parse(src)
             found = []
 
+            # Names whose value is itself a refusal string this test checks
+            # elsewhere, so a message ending in one is a legitimate wrapper.
+            CARRIES_ACTION = {"problem", "fault", "why", "reason"}
+
             def strings_in(node):
                 return [n.value for n in ast.walk(node)
                         if isinstance(n, ast.Constant)
                         and isinstance(n.value, str)]
+
+            def wraps_a_checked_refusal(node):
+                """True when the message ENDS in an interpolation of a value
+                that carries its own action. Anything else -- an exception, a
+                path, a plain literal -- must name an action itself."""
+                js = [n for n in ast.walk(node) if isinstance(n, ast.JoinedStr)]
+                if not js:
+                    return False
+                tail = js[-1].values[-1] if js[-1].values else None
+                if not isinstance(tail, ast.FormattedValue):
+                    return False
+                v = tail.value
+                return isinstance(v, ast.Name) and v.id in CARRIES_ACTION
 
             # (a) every sys.exit(...) anywhere
             for node in ast.walk(tree):
@@ -241,7 +258,8 @@ class TestVerifierSymmetry(unittest.TestCase):
                         for a in node.args:
                             t = " ".join(strings_in(a)).strip()
                             if t:
-                                found.append(("sys.exit", t))
+                                found.append(("sys.exit", t,
+                                              wraps_a_checked_refusal(a)))
 
             # (b) every return inside a *_problem / *_fault function
             for fn in ast.walk(tree):
@@ -253,7 +271,8 @@ class TestVerifierSymmetry(unittest.TestCase):
                     if isinstance(node, ast.Return) and node.value is not None:
                         t = " ".join(strings_in(node.value)).strip()
                         if t:
-                            found.append((fn.name, t))
+                            found.append((fn.name, t,
+                                          wraps_a_checked_refusal(node.value)))
             return found
 
         actionable = ("record", "bind", "submit", "re-declare", "init", "add",
@@ -264,15 +283,23 @@ class TestVerifierSymmetry(unittest.TestCase):
                       "Write ", "point ", "Point ")
         for path in (WORKFLOW, TRAINING):
             judged = 0
-            for where, text in refusal_texts(path.read_text()):
-                # Usage/help blocks are not refusals. A message ending in
-                # ':' is a WRAPPER around an interpolated detail -- e.g.
-                # "unusable convergence criterion: {problem}" -- and the
-                # detail it prepends is itself checked where it is produced,
-                # so judging the bare prefix would demand an action twice.
+            for where, text, is_wrapper in refusal_texts(
+                    path.read_text()):
+                # Usage/help blocks are not refusals.
                 if len(text) < 30 or text.lstrip().startswith("usage:"):
                     continue
-                if text.rstrip().endswith(":"):
+                # A wrapper exemption is needed -- "unusable convergence
+                # criterion: {problem}" prepends a detail that is itself
+                # checked where it is produced -- but the FIRST version
+                # exempted any text ending in ':', which kimi-k2.7-code and
+                # glm-5.1 both found independently: it also skipped
+                # f"error: contract malformed: {e}", hiding two real
+                # actionless refusals, and would skip a bare
+                # sys.exit("...cannot be recovered:") outright. So the
+                # exemption is now keyed on WHAT is interpolated: only a
+                # value that is itself a checked refusal string counts. An
+                # exception never names an action, so {e} does not qualify.
+                if is_wrapper:
                     continue
                 judged += 1
                 self.assertTrue(

@@ -1149,7 +1149,8 @@ def _load_contract_for_record(run_dir):
     try:
         c = json.loads(raw)
     except (ValueError, RecursionError) as e:
-        sys.exit(f"error: contract malformed: {e}")
+        sys.exit(f"error: contract malformed: {e}. Re-declare it with "
+                 f"`init --force`.")
     if not isinstance(c, dict):
         sys.exit("error: contract is not a JSON object. Re-declare it with "
                  "`init --force`.")

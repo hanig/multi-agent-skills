@@ -1487,7 +1487,8 @@ def cmd_bind(args):
     try:
         contract = json.loads(raw)
     except (ValueError, RecursionError) as e:
-        sys.exit(f"error: contract malformed: {e}")
+        sys.exit(f"error: contract malformed: {e}. Re-declare it with "
+                 f"`init --force`.")
     if not isinstance(contract, dict):
         sys.exit("error: contract is not a JSON object. Re-declare it with "
                  "`init --force`.")
