@@ -21,6 +21,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 WORKFLOW = REPO / "skills" / "hanig-verified-workflow" / "scripts" / "contract.py"
 TRAINING = REPO / "skills" / "hanig-verified-training" / "scripts" / "traincontract.py"
+HANDOFF = REPO / "skills" / "hanig-portable-handoff" / "scripts" / "handoff.py"
 
 
 def code_only(path):
@@ -241,6 +242,82 @@ class TestVerifierSymmetry(unittest.TestCase):
                               f"name the contract instance it verified")
                 i, n = j, n + 1
             self.assertGreater(n, 0, f"{path.name}: no receipt literal found")
+
+    def test_the_copied_helpers_are_identical_across_all_three(self):
+        """handoff.py cannot import from its siblings: `install.sh --only NAME`
+        installs one skill, so it must run with neither verifier present. It
+        carries byte-identical copies instead, and duplication is safe only
+        when something mechanical enforces it -- sixteen defects here came from
+        a rule living in one copy and not the other.
+
+        Grouped by SIGNATURE. `run()` legitimately takes no cwd in the training
+        verifier, and demanding identity across genuinely different needs would
+        be a test asserting its own preference. Within one signature, any
+        difference is drift: this check found five on its first run, including a
+        copy of `run()` missing the AttributeError fallback that keeps the
+        timeout path working where killpg is unavailable.
+        """
+        shared = ("now_iso", "run", "sha256_file", "repo_state",
+                  "arm_watchdog", "write_receipt", "read_text_bounded")
+        trees = {p.name: ast.parse(p.read_text())
+                 for p in (WORKFLOW, TRAINING, HANDOFF)}
+
+        def sig_and_body(tree, name):
+            for n in ast.walk(tree):
+                if isinstance(n, ast.FunctionDef) and n.name == name:
+                    stripped = [s for s in n.body
+                                if not (isinstance(s, ast.Expr)
+                                        and isinstance(s.value, ast.Constant)
+                                        and isinstance(s.value.value, str))]
+                    return (tuple(a.arg for a in n.args.args),
+                            ast.dump(ast.Module(body=stripped, type_ignores=[])))
+            return None
+
+        for name in shared:
+            found = {f: sig_and_body(tr, name) for f, tr in trees.items()}
+            present = {f: v for f, v in found.items() if v is not None}
+            by_sig = {}
+            for f, (sig, body) in present.items():
+                by_sig.setdefault(sig, {})[f] = body
+            for sig, members in by_sig.items():
+                bodies = set(members.values())
+                self.assertEqual(
+                    len(bodies), 1,
+                    f"{name}{sig} differs between {sorted(members)}; fix every "
+                    f"copy or extract it")
+
+    def test_every_copied_helper_has_its_constants(self):
+        """A verbatim copy needs its dependencies too. Copying
+        read_text_bounded into handoff.py left a reference to a constant that
+        only exists in contract.py -- a NameError that py_compile cannot see
+        and only a runtime call reveals, so the module imported fine and the
+        first real capture crashed.
+
+        Imports each script and calls the copied helpers, which is the only
+        check that would have caught it."""
+        import importlib.util
+        import tempfile
+        for path in (WORKFLOW, TRAINING, HANDOFF):
+            spec = importlib.util.spec_from_file_location(
+                f"const_{path.stem}", path)
+            m = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(m)
+            with tempfile.NamedTemporaryFile("w", suffix=".txt",
+                                             delete=False) as fh:
+                fh.write("probe\n")
+                probe = fh.name
+            try:
+                self.assertTrue(m.now_iso())
+                for helper in ("read_text_bounded", "sha256_file"):
+                    fn = getattr(m, helper, None)
+                    if fn is None:
+                        continue
+                    fn(probe)          # NameError here is the defect
+                if hasattr(m, "repo_state"):
+                    m.repo_state(str(REPO))
+            finally:
+                import os as _os
+                _os.unlink(probe)
 
     def test_the_shared_helpers_really_are_identical(self):
         """Copies drift. Where a helper exists in both files under the same

@@ -165,5 +165,18 @@ timestamp is an inference.
 12. Python 3.7+ stdlib only.
 13. No test fixture generates a timestamp at check time.
 
+## One decision the reviews did not surface
+
+`install.sh --only NAME` installs a single skill, so `hanig-portable-handoff`
+must run without `hanig-verified-workflow` present. It therefore cannot import
+`repo_state()` and the other small helpers from its sibling, and the plan's
+"reuses rather than a second implementation" is not achievable as written.
+
+It carries byte-identical copies instead, and `tests/test_symmetry.py` is
+extended from two files to three so they cannot drift. Duplication is safe only
+when something mechanical enforces the duplication; sixteen defects in this repo
+came from a rule living in one copy and not the other, and every one was found
+by review rather than by a test until that file existed.
+
 ## Out of scope
 Data sync. Credential transfer. Any daemon.
