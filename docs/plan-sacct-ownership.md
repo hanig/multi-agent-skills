@@ -26,10 +26,20 @@ as predating a declaration made later in the same second).
 - *Which job id is ours?* Established by the BINDING — `contract.py`'s attempts
   log, `traincontract.py`'s `bind` — which records the id against this contract
   instance. Established, not inferred.
-- *Is this ROW from a prior job that reused the id?* Judged against the
-  contract's DECLARATION, at second resolution, failing closed when Submit
-  cannot be parsed. Our job is submitted after the contract is declared, so a
-  row predating the declaration belongs to an earlier job.
+- *Is this ROW ours, or another job's reuse of the id?* Judged by an
+  INTERVAL, at second resolution, failing closed when Submit cannot be parsed:
+
+      declared_at  <=  Submit  <=  bound_at
+
+  Both bounds are load-bearing, and each alone failed in the opposite
+  direction. Lower only: a row from a LATER reuse also post-dates the
+  declaration, so it was attributed to us -- which let a later clean COMPLETED
+  row certify a training run that had actually exited non-zero (sol; a false
+  pass) and made a later FAILED row report an honest successful run as FAILED.
+  Upper only: `bind` runs after `sbatch`, so the honest Submit is always
+  earlier than the moment we recorded, and every real submission was discarded.
+  `bound_at` is recorded after the scheduler returned the id, so our Submit
+  cannot be later than it.
 
 ## The change
 
@@ -75,8 +85,8 @@ as predating a declaration made later in the same second).
 
 ## Known limits, stated rather than papered over
 
-- A reuse INSIDE the declaration second is indistinguishable from an honest
-  same-second submission: sacct emits no finer precision. Accepted
+- A reuse INSIDE the declaration second, or inside the binding second, is
+  indistinguishable from an honest submission: sacct emits no finer precision. Accepted
   deliberately, because refusing it would reject every job submitted in its
   contract's second.
 - A job queued before its contract was declared — `init` running inside a job

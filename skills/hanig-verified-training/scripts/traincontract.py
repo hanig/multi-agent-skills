@@ -167,37 +167,34 @@ SLURM_BAD_END = ("FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY",
 SLURM_OK_END = ("COMPLETED",)
 
 
-def sacct_row_is_ours(sacct_submit, declared_at):
+def sacct_row_is_ours(sacct_submit, declared_at, bound_at=None):
     """Whether an sacct row can be evidence about the job WE submitted.
 
-    Returns (ok, why_not).
+    Returns (ok, why_not). The row's Submit must fall inside the window in
+    which our submission demonstrably happened:
 
-    Two independent questions, and only one of them is a timestamp:
+        declared_at  <=  Submit  <=  bound_at
 
-      Is this job id ours?  Answered by the BINDING (contract.py's attempts
-      log, traincontract.py's `bind`), which records the id against this
-      contract instance. Established, not inferred.
+    Both bounds are needed, and using one without the other failed in opposite
+    directions:
 
-      Is this ROW from a prior job that reused the id?  Answered here. Our job
-      was submitted after the contract was declared, so a row whose Submit
-      predates the declaration belongs to an earlier job.
+      Lower only (declared_at): a row from a LATER reuse of the same job id
+      also post-dates the declaration, so it was attributed to us. Sol found
+      both consequences: a later FAILED row made an honest successful run
+      report FAILED, and a later COMPLETED row certified a training run that
+      had actually exited non-zero. The second is a false pass.
 
-    Compared against the contract's declaration, NOT against our own recorded
-    bind time. A previous version compared bind time and had the direction
-    inverted: `bind` runs after `sbatch`, so the honest sacct Submit is always
-    EARLIER than the moment we recorded, and every real submission was thrown
-    out as a reused id. The verification that missed it generated the fake
-    Submit at check time, which is necessarily after bind, so it could not
-    fail.
+      Upper only (bound_at): `bind` runs after `sbatch`, so the honest Submit
+      is always EARLIER than the moment we recorded, and every real submission
+      was discarded. That was the previous implementation.
 
-    Second resolution on both sides: sacct renders Submit as whole seconds, and
-    comparing it against a sub-second declaration epoch was the original
-    precision mismatch that made an honest same-second submission look stale.
+    bound_at is recorded after the scheduler returned the id, so our Submit
+    cannot be later than it. Second resolution on both sides, because sacct
+    renders Submit as whole seconds and demanding more would reject every row.
 
     KNOWN LIMIT: a reuse inside the declaration second is indistinguishable
-    from an honest same-second submission, because sacct emits no more
-    precision than that. Accepting it is deliberate; refusing it would reject
-    every job submitted in the same second as its contract.
+    from an honest same-second submission, and so is one inside the binding
+    second. sacct emits no finer precision.
     """
     if declared_at is None:
         return False, ("the contract carries no usable declaration time, so an "
@@ -207,11 +204,15 @@ def sacct_row_is_ours(sacct_submit, declared_at):
         # old COMPLETED row for a reused id certify a new run.
         return False, ("sacct reported no usable Submit time, so its row "
                        "cannot be confirmed to describe this contract's job "
-                       "rather than an earlier job reusing the id")
+                       "rather than another job reusing the id")
     if int(sacct_submit) < int(declared_at):
         return False, ("the sacct row was submitted before this contract was "
                        "declared, so the job id has been reused and the row "
                        "describes an earlier job")
+    if bound_at is not None and int(sacct_submit) > int(bound_at):
+        return False, ("the sacct row was submitted after this contract's job "
+                       "id was recorded, so the id has been reused and the row "
+                       "describes a later job")
     return True, None
 
 
@@ -290,7 +291,7 @@ def squeue_state(job_id):
     return out.splitlines()[0].strip() or None
 
 
-def slurm_state(job_id, declared_at=None):
+def slurm_state(job_id, declared_at=None, bound_at=None):
     """Latest sacct row for a job, or None when accounting is unavailable.
     Takes the LAST row: a requeued job has one per attempt, oldest first."""
     rc, out = run(["sacct", "-n", "-X", "-P", "-j", str(job_id),
@@ -304,7 +305,7 @@ def slurm_state(job_id, declared_at=None):
     state = fields[0].split()[0] if fields and fields[0] else None
     code = fields[1] if len(fields) > 1 else ""
     submit = parse_iso_ts(fields[2].strip()) if len(fields) > 2 else None
-    ours, _why = sacct_row_is_ours(submit, declared_at)
+    ours, _why = sacct_row_is_ours(submit, declared_at, bound_at)
     if not ours:
         # Slurm resets and reuses job ids; a row we cannot attribute to our own
         # submission says nothing about this contract's run. Carry WHY: an
@@ -1511,6 +1512,7 @@ def cmd_check(args):
     # The binding establishes WHICH job id is ours; the declaration time is
     # what an sacct row gets placed against.
     jid, _bound_iso = read_binding(run_dir)
+    bound_at = parse_iso_ts(_bound_iso)
     if state == "CONVERGED":
         if not jid:
             # No job id: the only admissible evidence is an explicitly recorded
@@ -1546,7 +1548,7 @@ def cmd_check(args):
             # attempt while the job is running again, and a stale terminal row
             # must not outrank a live one.
             qstate = squeue_state(jid)
-            sstate = slurm_state(jid, declared_at)
+            sstate = slurm_state(jid, declared_at, bound_at)
             if qstate:
                 # ANY squeue state means the job is still in the system --
                 # enumerating live states missed real ones such as STAGE_OUT.
@@ -1611,6 +1613,13 @@ def cmd_check(args):
                 # evidence of anything. Accept an explicit local termination,
                 # otherwise refuse -- contract.py has required this since r4.
                 term = read_termination(run_dir)
+                if term is not None and not termination_matches(term, contract):
+                    # The sibling branch above has filtered this since round 4;
+                    # this one never did, so a receipt left by `init --force`
+                    # kept CONVERGED alive for the NEW contract (sol).
+                    reasons.append("a termination record exists but was written "
+                                   "for a different contract; ignoring it")
+                    term = None
                 if term is None:
                     state = "INCOMPLETE_EVIDENCE"
                     reasons.append(
@@ -1686,7 +1695,7 @@ def cmd_check(args):
                        "it, but this cannot establish convergence")
 
     if state == "RUNNING" and contract.get("preemptible"):
-        sstate = slurm_state(jid, declared_at) if jid else None
+        sstate = slurm_state(jid, declared_at, bound_at) if jid else None
         if sstate in ("PREEMPTED", "REQUEUED", "SUSPENDED"):
             state = "PREEMPTED"
             reasons.append(f"scheduler reports {sstate} for job {jid}; "

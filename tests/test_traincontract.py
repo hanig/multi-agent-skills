@@ -38,6 +38,21 @@ def tc(*argv):
                           capture_output=True, text=True)
 
 
+def parse_local_iso(s):
+    """Epoch from an ISO stamp with or without an offset, for fixture use."""
+    s = str(s).strip()
+    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            tm = time.strptime(s, fmt)
+        except ValueError:
+            continue
+        off = getattr(tm, "tm_gmtoff", None)
+        if off is not None:
+            return float(calendar.timegm(tm) - off)
+        return time.mktime(tm)
+    raise ValueError(s)
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -1506,11 +1521,7 @@ class TestFailClosedRound2(Base):
         # Was a bare "SPECIAL_EXIT" with no ExitCode and no Submit column;
         # real sacct emits all three, and the missing Submit meant this test
         # stopped at the ownership check instead of reaching the state check.
-        (bindir / "sacct").write_text(
-            '#!/bin/sh\necho "SPECIAL_EXIT|0:0|$(date +%Y-%m-%dT%H:%M:%S)"\n')
         (bindir / "squeue").write_text("#!/bin/sh\nexit 0\n")
-        for n in ("sacct", "squeue"):
-            (bindir / n).chmod(0o755)
         self.write_metrics([{"step": 100, "loss": 0.4}])
         self.add_checkpoint()
         self.init(converge={"metric": "loss", "mode": "min",
@@ -1519,6 +1530,16 @@ class TestFailClosedRound2(Base):
         # that existed because `bind` did not. That field is digested now.
         rb = tc("bind", str(self.run_dir), "--job-id", "7")
         self.assertEqual(rb.returncode, 0, rb.stderr)
+        # Submit pinned to the binding second, not `date` at check time: our
+        # job is registered by the scheduler BEFORE we record its id, and a
+        # later stamp is now correctly read as a different job reusing the id.
+        bound = parse_local_iso(json.loads(
+            (self.run_dir / "training-binding.json").read_text())["submitted_at"])
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(bound))
+        (bindir / "sacct").write_text(
+            f'#!/bin/sh\necho "SPECIAL_EXIT|0:0|{stamp}"\n')
+        for n in ("sacct", "squeue"):
+            (bindir / n).chmod(0o755)
         env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
         r = subprocess.run([sys.executable, str(SCRIPT), "check",
                             str(self.run_dir)], capture_output=True,
@@ -1648,19 +1669,28 @@ class TestVerdictLogicRound(Base):
     """The round where I redirected reviewers from adversarial input to verdict
     logic. All four findings were false-pass paths."""
 
-    def _fake_sacct(self, state_line, submit="now"):
+    def _fake_sacct(self, state_line, submit=None):
         """state_line is "State|ExitCode"; a Submit column is appended.
 
-        The Submit column used to be omitted entirely, so `submit` parsed as
-        None and the job-id-reuse check was skipped -- which is why six tests
-        in this file passed while D1 (an unparseable Submit failing OPEN) was
-        live. Real sacct always emits the column, so the fixture does too:
-        "now" computes it at call time, so it post-dates the binding.
+        Two fixture bugs lived here. The column was once omitted entirely, so
+        Submit parsed as None and the reuse check was skipped -- which is why
+        six tests passed while an unparseable Submit was failing OPEN. Then it
+        was computed with `date` at CHECK time, i.e. AFTER `bind`, which the
+        real ordering never produces: sbatch registers the job, then bind
+        records the id. With an upper bound on ownership that made honest rows
+        look like a later reuse.
+
+        So the default reads the Submit from a file that `_with_jid` fills in
+        with the binding's own second, the tightest legitimate case. Pass
+        `submit` explicitly for a specific instant.
         """
-        b = self.tmp / f"sb{abs(hash((state_line, submit)))}"
+        b = self.tmp / f"sb{abs(hash((state_line, str(submit))))}"
         b.mkdir()
-        col = ('$(date +%Y-%m-%dT%H:%M:%S)' if submit == "now"
-               else submit)
+        if submit is None:
+            (b / "submit").write_text("1970-01-01T00:00:00")   # _with_jid fills
+            col = '$(cat "$(dirname "$0")/submit")'
+        else:
+            col = submit
         (b / "sacct").write_text(
             f'#!/bin/sh\necho "{state_line}|{col}"\n')
         (b / "squeue").write_text("#!/bin/sh\nexit 0\n")
@@ -1673,6 +1703,15 @@ class TestVerdictLogicRound(Base):
         # what a user had to do before `bind` existed. Use the real mechanism.
         r = tc("bind", str(self.run_dir), "--job-id", job_id)
         self.assertEqual(r.returncode, 0, r.stderr)
+        # sacct's Submit must fall at or before the binding: our job was
+        # registered by the scheduler before we recorded its id.
+        sfile = bindir / "submit"
+        if sfile.exists():
+            b = json.loads(
+                (self.run_dir / "training-binding.json").read_text())
+            bound = parse_local_iso(b["submitted_at"])
+            sfile.write_text(time.strftime("%Y-%m-%dT%H:%M:%S",
+                                          time.localtime(bound)))
         env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
         return subprocess.run([sys.executable, str(SCRIPT), "check",
                                str(self.run_dir)], capture_output=True,
@@ -2130,11 +2169,29 @@ class TestSacctRowOwnership(Base):
         """THE case the inverted comparison broke: sbatch at +1s, bind at +3s.
         The row is honest and must count."""
         self.setUpConverging()
-        submit = self._iso_offset(1)
+        submit = self._iso_offset(1)          # sbatch registers it at +1s
+        # bind must land AFTER that, as it does in reality: sbatch returns the
+        # id, then the user records it. The docstring said +3s; the code was
+        # binding immediately, which is an ordering sbatch never produces.
+        while time.time() < self._contract_time() + 2:
+            time.sleep(0.1)
         r = tc("bind", str(self.run_dir), "--job-id", "5")
         self.assertEqual(r.returncode, 0, r.stderr)
         got = self._check(self._sacct(f"COMPLETED|0:0|{submit}"))
         self.assertEqual(got.returncode, CONVERGED, got.stdout + got.stderr)
+
+    def test_a_row_submitted_after_the_binding_is_a_later_reuse(self):
+        """sol: ownership had only a lower bound, so a row from a LATER reuse
+        of the id post-dated the declaration and was attributed to us. In
+        traincontract that let a clean COMPLETED row from the other job certify
+        a training run that had actually failed."""
+        self.setUpConverging()
+        r = tc("bind", str(self.run_dir), "--job-id", "5")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        later = self._iso_offset(3600)        # the id reused an hour later
+        got = self._check(self._sacct(f"COMPLETED|0:0|{later}"))
+        self.assertNotEqual(got.returncode, CONVERGED, got.stdout)
+        self.assertIn("later job", got.stdout)
 
     def test_submit_before_the_declaration_is_a_reused_id(self):
         self.setUpConverging()
@@ -2325,9 +2382,12 @@ class TestTimezoneAwareTimestamps(Base):
         self.write_metrics(PLATEAU_ROWS)
         self.add_checkpoint()
         self.init(record=False)
-        tc("bind", str(self.run_dir), "--job-id", "5")
         submit_utc = time.strftime("%Y-%m-%dT%H:%M:%S",
                                    time.gmtime(self._contract_time() + 1))
+        # bind after the submission, as sbatch dictates.
+        while time.time() < self._contract_time() + 2:
+            time.sleep(0.1)
+        tc("bind", str(self.run_dir), "--job-id", "5")
         b = self.tmp / "utcbin"
         b.mkdir()
         (b / "sacct").write_text(

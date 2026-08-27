@@ -447,37 +447,34 @@ def criteria_digest(contract):
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
-def sacct_row_is_ours(sacct_submit, declared_at):
+def sacct_row_is_ours(sacct_submit, declared_at, bound_at=None):
     """Whether an sacct row can be evidence about the job WE submitted.
 
-    Returns (ok, why_not).
+    Returns (ok, why_not). The row's Submit must fall inside the window in
+    which our submission demonstrably happened:
 
-    Two independent questions, and only one of them is a timestamp:
+        declared_at  <=  Submit  <=  bound_at
 
-      Is this job id ours?  Answered by the BINDING (contract.py's attempts
-      log, traincontract.py's `bind`), which records the id against this
-      contract instance. Established, not inferred.
+    Both bounds are needed, and using one without the other failed in opposite
+    directions:
 
-      Is this ROW from a prior job that reused the id?  Answered here. Our job
-      was submitted after the contract was declared, so a row whose Submit
-      predates the declaration belongs to an earlier job.
+      Lower only (declared_at): a row from a LATER reuse of the same job id
+      also post-dates the declaration, so it was attributed to us. Sol found
+      both consequences: a later FAILED row made an honest successful run
+      report FAILED, and a later COMPLETED row certified a training run that
+      had actually exited non-zero. The second is a false pass.
 
-    Compared against the contract's declaration, NOT against our own recorded
-    bind time. A previous version compared bind time and had the direction
-    inverted: `bind` runs after `sbatch`, so the honest sacct Submit is always
-    EARLIER than the moment we recorded, and every real submission was thrown
-    out as a reused id. The verification that missed it generated the fake
-    Submit at check time, which is necessarily after bind, so it could not
-    fail.
+      Upper only (bound_at): `bind` runs after `sbatch`, so the honest Submit
+      is always EARLIER than the moment we recorded, and every real submission
+      was discarded. That was the previous implementation.
 
-    Second resolution on both sides: sacct renders Submit as whole seconds, and
-    comparing it against a sub-second declaration epoch was the original
-    precision mismatch that made an honest same-second submission look stale.
+    bound_at is recorded after the scheduler returned the id, so our Submit
+    cannot be later than it. Second resolution on both sides, because sacct
+    renders Submit as whole seconds and demanding more would reject every row.
 
     KNOWN LIMIT: a reuse inside the declaration second is indistinguishable
-    from an honest same-second submission, because sacct emits no more
-    precision than that. Accepting it is deliberate; refusing it would reject
-    every job submitted in the same second as its contract.
+    from an honest same-second submission, and so is one inside the binding
+    second. sacct emits no finer precision.
     """
     if declared_at is None:
         return False, ("the contract carries no usable declaration time, so an "
@@ -487,11 +484,15 @@ def sacct_row_is_ours(sacct_submit, declared_at):
         # old COMPLETED row for a reused id certify a new run.
         return False, ("sacct reported no usable Submit time, so its row "
                        "cannot be confirmed to describe this contract's job "
-                       "rather than an earlier job reusing the id")
+                       "rather than another job reusing the id")
     if int(sacct_submit) < int(declared_at):
         return False, ("the sacct row was submitted before this contract was "
                        "declared, so the job id has been reused and the row "
                        "describes an earlier job")
+    if bound_at is not None and int(sacct_submit) > int(bound_at):
+        return False, ("the sacct row was submitted after this contract's job "
+                       "id was recorded, so the id has been reused and the row "
+                       "describes a later job")
     return True, None
 
 
@@ -955,7 +956,9 @@ def cmd_check(args):
             # The attempt log already established that this job id is ours;
             # this only rules out a row from a PRIOR job reusing the id, so it
             # compares against the declaration. See sacct_row_is_ours.
-            ours, why_not = sacct_row_is_ours(parse_iso_ts(ssubmit), declared_at)
+            ours, why_not = sacct_row_is_ours(
+                parse_iso_ts(ssubmit), declared_at,
+                parse_iso_ts(attempts[-1].get("submitted_at")))
             if sstate is not None and not ours:
                 reasons.append(f"sacct row for job {job_id} discarded: "
                                f"{why_not}")
