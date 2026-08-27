@@ -729,9 +729,9 @@ def finite_number(v):
     try:
         fv = float(v)
     except (TypeError, ValueError, OverflowError):
-        return None, f"not a number: {v!r}"
+        return None, f"not a number: {v!r}; use a plain number, e.g. 0.5"
     if math.isnan(fv) or math.isinf(fv):
-        return None, f"must be finite: {v!r}"
+        return None, f"must be finite: {v!r}; use a real bound, not NaN or infinity"
     return fv, None
 
 
@@ -740,19 +740,19 @@ def nonneg_int(v):
     min_steps of 1.5 became 1 and allowed convergence below the declared
     minimum -- and catches the OverflowError from int(float('inf'))."""
     if isinstance(v, bool):
-        return None, f"must be an integer: {v!r}"
+        return None, f"must be an integer: {v!r}; use a whole number of steps"
     if isinstance(v, int):
-        return (v, None) if v >= 0 else (None, f"must not be negative: {v!r}")
+        return (v, None) if v >= 0 else (None, f"must not be negative: {v!r}; use 0 or more")
     try:
         fv = float(v)
     except (TypeError, ValueError, OverflowError):
-        return None, f"not an integer: {v!r}"
+        return None, f"not an integer: {v!r}; use a whole number of steps"
     if math.isnan(fv) or math.isinf(fv):
-        return None, f"must be finite: {v!r}"
+        return None, f"must be finite: {v!r}; use a real bound, not NaN or infinity"
     if fv != int(fv):
         return None, f"must be a whole number, not {v!r}"
     iv = int(fv)
-    return (iv, None) if iv >= 0 else (None, f"must not be negative: {v!r}")
+    return (iv, None) if iv >= 0 else (None, f"must not be negative: {v!r}; use 0 or more")
 
 
 CONTRACT_TYPES = {
@@ -790,7 +790,8 @@ def contract_problems(contract):
             continue
         val = contract[field]
         if want in (int, (int, type(None))) and isinstance(val, bool):
-            problems.append(f"'{field}' must be an integer, not a boolean")
+            problems.append(f"'{field}' must be an integer, not a boolean; "
+                            f"use a whole number")
             continue
         if not isinstance(val, want):
             names = (want.__name__ if isinstance(want, type)
@@ -804,7 +805,8 @@ def contract_problems(contract):
         val = contract.get(field)
         if val is not None and not isinstance(val, bool) and isinstance(val, int):
             if val < 0:
-                problems.append(f"'{field}' must not be negative")
+                problems.append(f"'{field}' must not be negative; use 0 "
+                                f"or more")
     if isinstance(contract.get("converge"), dict):
         bad = criterion_problem(contract["converge"])
         if bad:
@@ -956,7 +958,8 @@ def criterion_problem(crit):
     Checked at init as well as at check: a criterion with a typo in it used to
     be accepted, then crash the verifier when it was finally evaluated."""
     if not isinstance(crit, dict):
-        return "not a JSON object"
+        return ('not a JSON object; pass one JSON object, e.g. '
+                '{"metric":"val_loss","mode":"min","threshold":0.5}')
     if not isinstance(crit.get("metric"), str) or not crit["metric"].strip():
         return (f"'metric' must be a non-empty string, got "
                 f"{crit.get('metric')!r}; use the metric's name exactly as the "
@@ -968,16 +971,19 @@ def criterion_problem(crit):
         return ("needs either 'threshold' or 'rel_improvement_below'; add "
                 "one, e.g. \"threshold\": 0.5 for an absolute target, or "
                 "\"rel_improvement_below\": 0.002 for a plateau")
+    # The action comes from finite_number / nonneg_int, which now name one.
+    # Restated here because `err` is too generic a name for the action check to
+    # exempt: elsewhere it holds a raw exception, which never names an action.
     for key in ("threshold", "rel_improvement_below"):
         if key in crit:
             _, err = finite_number(crit[key])
             if err:
-                return f"'{key}' {err}"
+                return f"'{key}' {err} (use a finite number)"
     for key in ("over_evals", "min_steps"):
         if key in crit:
             _, err = nonneg_int(crit[key])
             if err:
-                return f"'{key}' {err}"
+                return f"'{key}' {err} (use a whole number of 0 or more)"
     if "rel_improvement_below" in crit:
         n, err = nonneg_int(crit.get("over_evals", 5))
         if err or n < 1:
@@ -1366,7 +1372,11 @@ def cmd_init(args):
             if k in rule:
                 _, err = finite_number(rule[k])
                 if err:
-                    sys.exit(f"error: divergence rule {i} '{k}' {err}")
+                    # Spelled out rather than leaning on {err}: `err` is too
+                    # generic a name to exempt from the action check, since
+                    # elsewhere it holds a raw exception.
+                    sys.exit(f"error: divergence rule {i} '{k}' {err}. Use a "
+                             f"finite number for the bound.")
         problem = unread_key_problem(rule, DIVERGE_KEYS,
                                      f"divergence rule {i}")
         if problem:
@@ -1483,7 +1493,8 @@ def cmd_bind(args):
                  f"{cpath.parent}` first.")
     raw, rerr = read_json_bounded(cpath)
     if rerr:
-        sys.exit(f"error: contract unreadable: {rerr}")
+        sys.exit(f"error: contract unreadable: {rerr}. Re-declare it with "
+                 f"`init --force`.")
     try:
         contract = json.loads(raw)
     except (ValueError, RecursionError) as e:

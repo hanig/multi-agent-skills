@@ -1382,6 +1382,25 @@ class TestSolIsBothDeepReviewerAndTieBreaker(unittest.TestCase):
         self.assertIn("sol", self.ran(completed),
                       "the panel was below quorum and sol was not recruited")
 
+    def test_a_finding_from_an_earlier_tier_is_not_forgotten(self):
+        """glm-5.1, MAJOR: `bad` was computed from the CURRENT tier only, so a
+        finding in fast was forgotten when standard came back clean with quorum
+        met, and the ladder paid for the deep tier with a defect already on the
+        table.
+
+        glm-5.1 also noted that test_a_lone_refuted_verdict_does_not_end_the_
+        ladder has this exact cross-tier shape but never exercises the gap,
+        because its deep reviewer is unavailable. Here sol IS available, which
+        is the whole point."""
+        self.stub({"cheap1", "mid1", "sol"}, refuting={"cheap1"})
+        completed, _f, _u, tiers = review.escalate(
+            self.roster, "p", self.Args(quorum=2), False, "l", 10)
+        self.assertNotIn(
+            "deep", tiers,
+            "a finding in the fast tier was forgotten once standard came back "
+            "clean, so the ladder paid for the deep tier anyway")
+        self.assertNotIn("sol", [r["name"] for r in completed])
+
     def test_sol_is_not_paid_for_a_finding_that_already_has_quorum(self):
         self.stub({"cheap1", "cheap2", "mid1", "sol"}, refuting={"cheap1"})
         completed, _f, _u, tiers = review.escalate(

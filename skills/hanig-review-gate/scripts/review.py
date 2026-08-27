@@ -893,6 +893,11 @@ def escalate(all_reviewers, prompt, args, truncated, label, body_len):
     """
     seen, completed, failed, unavailable = set(), [], [], []
     tiers_run = []
+    # Findings ACCUMULATE across tiers. Computed per tier, a finding from an
+    # earlier tier was forgotten once a later tier came back clean with quorum
+    # met, so the ladder fell through to the dearest reviewer with a defect
+    # already on the table (glm-5.1, MAJOR).
+    bad_so_far = False
     for tier in LADDER:
         panel = [r for r in all_reviewers
                  if (not r.get("profiles") or tier in r["profiles"])
@@ -935,9 +940,11 @@ def escalate(all_reviewers, prompt, args, truncated, label, body_len):
         # for, and stopping also leaves every other claim unexamined by anyone
         # else. The round that did reach quorum is the one where the second and
         # third readers found what the first had upheld.
-        bad = any(is_confirmed(f) for r in tier_completed for f in r["findings"]) \
+        bad_so_far = bad_so_far \
+            or any(is_confirmed(f) for r in tier_completed for f in r["findings"]) \
             or any(norm(c.get("status")) == "refuted"
                    for r in tier_completed for c in r["claims"])
+        bad = bad_so_far
         if bad and len(completed) >= args.quorum:
             if not args.json:
                 print(f"  -> tier {tier} found problems with "

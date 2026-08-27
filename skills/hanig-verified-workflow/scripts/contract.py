@@ -1048,7 +1048,8 @@ def cmd_submit(args):
                  f"Re-declare it with `init --force`.")
     shape = contract_problems(contract)
     if shape:
-        sys.exit("error: unusable contract: " + "; ".join(shape[:3]))
+        sys.exit("error: unusable contract: " + "; ".join(shape[:3])
+                 + ". Re-declare it with `init --force`.")
 
     if not shutil.which("sbatch"):
         sys.exit("error: sbatch not found on PATH. Run this on a node with "
@@ -1063,7 +1064,8 @@ def cmd_submit(args):
     argv = ["sbatch", "--parsable", *args.sbatch_arg, str(script)]
     rc, out, err = run(argv, cwd=str(run_dir), timeout=60)
     if rc != 0:
-        sys.exit(f"error: sbatch failed: {err or out}")
+        sys.exit(f"error: sbatch failed: {err or out}. Fix the batch "
+                 f"script or the sbatch arguments, then re-run `submit`.")
     job_id = out.split(";")[0].strip()
 
     attempt = {
@@ -1145,7 +1147,8 @@ def owned_attempts(attempts, contract):
 def _load_contract_for_record(run_dir):
     raw, err = read_text_bounded(run_dir / CONTRACT)
     if err:
-        sys.exit(f"error: contract unreadable: {err}")
+        sys.exit(f"error: contract unreadable: {err}. Re-declare it with "
+                 f"`init --force`.")
     try:
         c = json.loads(raw)
     except (ValueError, RecursionError) as e:
@@ -1166,7 +1169,8 @@ def cmd_record(args):
     be."""
     run_dir = Path(args.run_dir).resolve()
     if not (run_dir / CONTRACT).exists():
-        sys.exit(f"error: no contract at {run_dir / CONTRACT}")
+        sys.exit(f"error: no contract at {run_dir / CONTRACT}. Run `init "
+                 f"{run_dir}` first.")
     contract = _load_contract_for_record(run_dir)
     attempt = {
         "contract_id": contract.get("contract_id"),
@@ -1253,7 +1257,8 @@ def cmd_check(args):
     arm_watchdog(getattr(args, "watchdog", 600), _timed_out)
     cpath = run_dir / CONTRACT
     if not cpath.exists():
-        sys.exit(f"error: no contract at {cpath}")
+        sys.exit(f"error: no contract at {cpath}. Run `init "
+                 f"{cpath.parent}` first.")
     try:
         raw, rerr = read_text_bounded(cpath)
         if rerr:
