@@ -25,8 +25,8 @@
     },
     {
       "name": "luna",
-      "provider": "openrouter",
-      "model": "openai/gpt-5.6-luna",
+      "provider": "openai",
+      "model": "gpt-5.6-luna",
       "effort": "high",
       "profiles": [
         "fast",
@@ -37,8 +37,7 @@
       "_cost": {
         "in": 0.2,
         "out": 1.2
-      },
-      "_note": "reached via openrouter: the OPENAI_API_KEY account has no credits. Same model, funded route."
+      }
     },
     {
       "name": "kimi-k2.7-code",
@@ -57,8 +56,8 @@
     },
     {
       "name": "sol",
-      "provider": "openrouter",
-      "model": "openai/gpt-5.6-sol",
+      "provider": "openai",
+      "model": "gpt-5.6-sol",
       "effort": "xhigh",
       "profiles": [
         "deep"
@@ -68,7 +67,7 @@
         "in": 2.0,
         "out": 10.0
       },
-      "_note": "reached via openrouter (the OPENAI_API_KEY account has no credits). Deep-tier reviewer AND tie-breaker: the ladder reaches deep both when the cheaper tiers came up clean and when they could not fill quorum, and skips it only when a finding already has quorum behind it."
+      "_note": "deep-tier reviewer AND tie-breaker: the ladder reaches deep both when the cheaper tiers came up clean and when they could not fill quorum, and skips it only when a finding already has quorum behind it."
     },
     {
       "name": "kimi-k3",
