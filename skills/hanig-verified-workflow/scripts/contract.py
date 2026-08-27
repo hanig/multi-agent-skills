@@ -314,6 +314,19 @@ def env_identity():
     return env
 
 
+# https://user:pass@host/repo is an ordinary git remote and a credential in
+# plain sight. Recorded verbatim, it reached every contract and every handoff,
+# and `resume` printed it when listing code differences (deepseek, CRITICAL).
+USERINFO_URL = re.compile(r"^([a-zA-Z][\w+.-]*://)([^/@]*@)")
+
+
+def scrub_url(value):
+    """Strip userinfo from a URL, keeping the rest legible."""
+    if not isinstance(value, str):
+        return value
+    return USERINFO_URL.sub(r"\1[redacted]@", value)
+
+
 def repo_state(cwd):
     """Git identity of the code that ran, including a digest of uncommitted
     changes -- a dirty tree is still reproducible if we fingerprint the diff."""
@@ -326,7 +339,8 @@ def repo_state(cwd):
         "branch": git(cwd, "rev-parse", "--abbrev-ref", "HEAD"),
         "dirty": bool(diff),
         "diff_sha256": hashlib.sha256(diff.encode()).hexdigest() if diff else None,
-        "remote": git(cwd, "config", "--get", "remote.origin.url"),
+        "remote": scrub_url(git(cwd, "config", "--get",
+                                        "remote.origin.url")),
     }
 
 

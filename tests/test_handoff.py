@@ -511,5 +511,98 @@ class TestPortability(unittest.TestCase):
         r = sh(HANDOFF, "resume")          # missing required argument
         self.assertEqual(r.returncode, USAGE)
 
+class TestPhase3Findings(Base):
+    """Phase 3 reviewed the implementation against the plan and found four
+    criterion violations. Both reviewers independently found the first."""
+
+    def test_a_changed_contract_is_drift_not_clean(self):
+        """CRITICAL, both reviewers: contract_digest was recorded and never
+        compared, so input-identity drift passed as CLEAN. The criterion says
+        code AND inputs must match; the mechanism existed and was unused."""
+        self.workflow_run()
+        self.capture()
+        self.assertEqual(self.resume().returncode, CLEAN)
+        cp = self.run_dir / "contract.json"
+        c = json.loads(cp.read_text())
+        c["command"] = "echo something else entirely"
+        cp.write_text(json.dumps(c))
+        r = self.resume()
+        self.assertEqual(r.returncode, DRIFTED, r.stdout)
+        self.assertIn("contract has changed", r.stdout)
+        self.assertIn("Re-capture", r.stdout)
+
+    def test_an_unreadable_contract_is_elsewhere_not_clean(self):
+        self.workflow_run()
+        self.capture()
+        (self.run_dir / "contract.json").unlink()
+        r = self.resume()
+        self.assertNotEqual(r.returncode, CLEAN, r.stdout)
+
+    def test_a_credential_in_a_git_remote_is_scrubbed(self):
+        """CRITICAL: https://user:pass@host is an ordinary remote and a
+        credential in plain sight. It reached every contract and every handoff,
+        and resume printed it when listing code differences."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("hf_scrub", HANDOFF)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        got = m.scrub_url("https://alice:hunter2@git.example.com/repo.git")
+        self.assertNotIn("hunter2", got)
+        self.assertIn("git.example.com/repo.git", got)
+        self.assertEqual(m.scrub_url("git@github.com:hanig/x.git"),
+                         "git@github.com:hanig/x.git")
+        self.assertEqual(m.scrub_url(None), None)
+
+    def test_the_same_scrub_is_in_the_verifier(self):
+        """The leak was in contract.py too, which records the remote in every
+        contract. Fixed in both, byte-identically, and test_symmetry.py holds
+        them together."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("cm_scrub", CONTRACT)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        self.assertNotIn("hunter2",
+                         m.scrub_url("https://u:hunter2@example.com/r.git"))
+
+    def test_a_credential_shaped_value_under_a_plain_key_is_scrubbed(self):
+        """Redaction inspected only KEYS, so a token under {"note": ...}
+        leaked."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("hf_val", HANDOFF)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        out = m.redact_env({"note": "Authorization: Bearer abcdef1234567890",
+                            "plain": "just a note",
+                            "key_path": "sk-abcdefghijklmnopqrstuv"})
+        self.assertNotIn("abcdef1234567890", json.dumps(out))
+        self.assertNotIn("sk-abcdefghijklmnopqrstuv", json.dumps(out))
+        self.assertEqual(out["plain"], "just a note")
+
+    def test_a_contract_with_no_instance_id_yields_no_verdict(self):
+        """`if want:` alone accepted the receipt when the contract named no
+        instance, which is the opposite of the criterion."""
+        self.workflow_run()
+        cp = self.run_dir / "contract.json"
+        c = json.loads(cp.read_text())
+        del c["contract_id"]
+        cp.write_text(json.dumps(c))
+        h = self.capture()
+        v = h["runs"][0]["verdict"]
+        self.assertIsNone(v["verdict"])
+        self.assertIn("names no instance", v["reason"])
+        self.assertIn("init", v["reason"])
+
+    def test_base_does_not_reroot_what_did_not_move(self):
+        """Fixing the digest check exposed this: --base re-rooted everything,
+        so a run directory that had not moved reported ELSEWHERE about a
+        contract sitting where it always was."""
+        self.workflow_run()
+        self.capture()
+        moved = self.tmp / "moved"
+        moved.mkdir()
+        shutil.move(str(self.out), str(moved / self.out.name))
+        r = self.resume("--base", str(moved))
+        self.assertEqual(r.returncode, CLEAN, r.stdout)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

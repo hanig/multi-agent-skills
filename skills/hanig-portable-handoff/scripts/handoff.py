@@ -167,6 +167,19 @@ def sha256_file(path, limit_bytes=None):
     return h.hexdigest(), False
 
 
+# https://user:pass@host/repo is an ordinary git remote and a credential in
+# plain sight. Recorded verbatim, it reached every contract and every handoff,
+# and `resume` printed it when listing code differences (deepseek, CRITICAL).
+USERINFO_URL = re.compile(r"^([a-zA-Z][\w+.-]*://)([^/@]*@)")
+
+
+def scrub_url(value):
+    """Strip userinfo from a URL, keeping the rest legible."""
+    if not isinstance(value, str):
+        return value
+    return USERINFO_URL.sub(r"\1[redacted]@", value)
+
+
 def repo_state(cwd):
     """Git identity of the code that ran, including a digest of uncommitted
     changes -- a dirty tree is still reproducible if we fingerprint the diff."""
@@ -179,7 +192,8 @@ def repo_state(cwd):
         "branch": git(cwd, "rev-parse", "--abbrev-ref", "HEAD"),
         "dirty": bool(diff),
         "diff_sha256": hashlib.sha256(diff.encode()).hexdigest() if diff else None,
-        "remote": git(cwd, "config", "--get", "remote.origin.url"),
+        "remote": scrub_url(git(cwd, "config", "--get",
+                                        "remote.origin.url")),
     }
 
 
@@ -268,6 +282,28 @@ def git(cwd, *args):
 
 # --- redaction --------------------------------------------------------------
 
+# https://user:pass@host/repo is a perfectly ordinary git remote and a
+# credential in plain sight. It was written verbatim into the handoff and
+# printed by resume (deepseek, CRITICAL).
+CREDENTIAL_VALUE = re.compile(
+    r"(bearer\s+[\w.\-]{12,}"
+    r"|(?:aws)?(?:secret|access)[_-]?key\s*[:=]\s*\S{8,}"
+    r"|(?:api[_-]?)?token\s*[:=]\s*\S{8,}"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r"|gh[pousr]_[A-Za-z0-9]{16,}"
+    r"|sk-[A-Za-z0-9_\-]{16,})", re.I)
+
+
+def scrub_value(value):
+    """Redact a credential-shaped VALUE wherever it appears, whatever its key."""
+    if not isinstance(value, str):
+        return value
+    value = scrub_url(value)
+    if CREDENTIAL_VALUE.search(value):
+        return "[redacted: credential-shaped value]"
+    return value
+
+
 def redact_env(mapping):
     """Replace credential-shaped VALUES, keep the names.
 
@@ -283,8 +319,10 @@ def redact_env(mapping):
             out[k] = "[redacted]"
         elif isinstance(v, dict):
             out[k] = redact_env(v)
+        elif isinstance(v, list):
+            out[k] = [scrub_value(x) if isinstance(x, str) else x for x in v]
         else:
-            out[k] = v
+            out[k] = scrub_value(v)
     return out
 
 
@@ -407,6 +445,12 @@ def attributed_verdict(run_dir, contract, receipt_name):
         return {"verdict": None, "reason": "no verification receipt"}
     want = (contract or {}).get("contract_id")
     got = rec.get("contract_id")
+    if not want:
+        # No instance to match against. `if want:` alone accepted the receipt,
+        # which is the opposite of what criterion 2 says (kimi).
+        return {"verdict": None, "state": rec.get("state"),
+                "reason": "the contract names no instance, so no receipt can "
+                          "be attributed to it; re-declare it with `init`"}
     if want:
         if got is None:
             return {"verdict": None, "state": rec.get("state"),
@@ -518,8 +562,16 @@ def cmd_capture(args):
 # --- resume -----------------------------------------------------------------
 
 def rebase_path(recorded, base):
-    """Re-root a recorded absolute path under --base, for a tree that moved."""
+    """Re-root a recorded absolute path under --base, for a tree that moved.
+
+    The RECORDED path wins when it still exists: --base is for the parts that
+    moved, and re-rooting everything broke a run directory that had not, so an
+    honest resume reported ELSEWHERE about a contract sitting where it always
+    was.
+    """
     if not base:
+        return recorded
+    if Path(recorded).exists():
         return recorded
     p = Path(recorded)
     parts = [x for x in p.parts if x not in ("/", "")]
@@ -616,6 +668,28 @@ def cmd_resume(args):
             if ptr.get("size") is not None and size_now != ptr["size"]:
                 drift.append(f"{rd}: {path} is {size_now} bytes, was "
                              f"{ptr['size']} at capture")
+        # Input identity, which is why contract_digest is recorded at all. It
+        # was captured and never compared, so a changed contract passed as
+        # CLEAN -- the criterion says code AND inputs must match, and both
+        # reviewers found this independently.
+        recorded_digest = run.get("contract_digest")
+        if recorded_digest:
+            name = ("training-contract.json" if run.get("kind") == "training"
+                    else "contract.json")
+            live = read_state_file(rebase_path(rd, args.base), name)
+            if live is None:
+                elsewhere.append(
+                    f"{rd}: {name} is not readable from here, so the input "
+                    f"identity cannot be compared")
+            else:
+                now_digest = contract_digest(live)
+                if now_digest != recorded_digest:
+                    drift.append(
+                        f"{rd}: the contract has changed since capture "
+                        f"(recorded {recorded_digest[:12]}, here "
+                        f"{(now_digest or 'unreadable')[:12]}). Re-capture, or "
+                        f"restore the contract this handoff was taken against")
+
         v = run.get("verdict") or {}
         if v.get("reason"):
             reports.append(f"{rd}: verdict not attributable -- {v['reason']}")
