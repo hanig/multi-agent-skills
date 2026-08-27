@@ -116,6 +116,12 @@ as predating a declaration made later in the same second).
   of the id sitting in the queue turned an honestly finished run back into
   RUNNING with its predicates never evaluated. Both verifiers now request
   `%T|%V` and place the row.
+- **A TensorFlow checkpoint must be wholly from this run, not just complete.**
+  Freshness applies to EVERY component of the selected set. Requiring only
+  completeness plus a fresh newest file let a previous run's index and shard 1
+  pair with one freshly written shard 0: complete by count, fresh by newest,
+  and a mixture that loads to nothing (kimi, finding the half of sol's report
+  the first fix missed).
 - **A TensorFlow checkpoint must have every shard its own name declares.**
   `model.data-00000-of-00002` says two; accepting the set because each file had
   *any* counterpart let a stale `.index` from a previous run pair with one

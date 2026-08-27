@@ -2593,5 +2593,71 @@ class TestTensorFlowShardCompleteness(Base):
         r = tc("check", str(self.run_dir))
         self.assertEqual(r.returncode, CONVERGED, r.stdout + r.stderr)
 
+class TestMixedGenerationCheckpointSet(Base):
+    """kimi, after its output budget was raised and it could answer at all: the
+    shard-completeness fix required every shard to be PRESENT but freshness was
+    still checked only on the NEWEST file. A previous run's index and shard 1
+    paired with one freshly written shard 0 is complete by count, fresh by
+    newest, and loads to nothing. This was the half of sol's finding that the
+    first fix missed."""
+
+    def _set(self, stem="model.ckpt", shards=2):
+        (self.ckpt / f"{stem}.index").write_bytes(b"x" * 512)
+        for i in range(shards):
+            (self.ckpt / f"{stem}.data-0000{i}-of-0000{shards}"
+             ).write_bytes(b"x" * 4096)
+        return stem
+
+    def _age(self, *names, offset):
+        when = self._contract_time() + offset
+        for n in names:
+            os.utime(self.ckpt / n, (when, when))
+
+    def test_a_mixed_generation_set_cannot_converge(self):
+        self.write_metrics(PLATEAU_ROWS)
+        self._set()
+        self.init()
+        self._age("model.ckpt.index", "model.ckpt.data-00001-of-00002",
+                  offset=-3600)                       # previous run
+        self._age("model.ckpt.data-00000-of-00002", offset=2)   # this run
+        r = tc("check", str(self.run_dir))
+        self.assertNotEqual(r.returncode, CONVERGED, r.stdout)
+
+    def test_a_wholly_fresh_set_converges(self):
+        self.write_metrics(PLATEAU_ROWS)
+        self._set()
+        self.init()
+        self._age("model.ckpt.index", "model.ckpt.data-00000-of-00002",
+                  "model.ckpt.data-00001-of-00002", offset=2)
+        r = tc("check", str(self.run_dir))
+        self.assertEqual(r.returncode, CONVERGED, r.stdout + r.stderr)
+
+    def test_a_wholly_stale_set_cannot_converge(self):
+        self.write_metrics(PLATEAU_ROWS)
+        self._set()
+        self.init()
+        self._age("model.ckpt.index", "model.ckpt.data-00000-of-00002",
+                  "model.ckpt.data-00001-of-00002", offset=-3600)
+        r = tc("check", str(self.run_dir))
+        self.assertNotEqual(r.returncode, CONVERGED, r.stdout)
+
+    def test_a_stale_index_alone_is_enough_to_refuse(self):
+        """The index carries no weights but the set is unloadable without it."""
+        self.write_metrics(PLATEAU_ROWS)
+        self._set()
+        self.init()
+        self._age("model.ckpt.data-00000-of-00002",
+                  "model.ckpt.data-00001-of-00002", offset=2)
+        self._age("model.ckpt.index", offset=-3600)
+        r = tc("check", str(self.run_dir))
+        self.assertNotEqual(r.returncode, CONVERGED, r.stdout)
+
+    def test_a_single_file_checkpoint_is_its_own_set(self):
+        self.write_metrics(PLATEAU_ROWS)
+        self.add_checkpoint("model-step-1000.pt")
+        self.init()
+        r = tc("check", str(self.run_dir))
+        self.assertEqual(r.returncode, CONVERGED, r.stdout + r.stderr)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1178,5 +1178,70 @@ class TestListMeasuresAvailability(unittest.TestCase):
         self.assertIn("UNVERIFIED", src)
         self.assertIn("--no-probe", src)
 
+class TestEmptyContentNamesItsCause(unittest.TestCase):
+    """kimi-k2.7-code was written off as an unavailable reviewer for a whole
+    session on the strength of "unparseable verdict: empty response". It was
+    answering fine: as a heavy reasoner it spent its ENTIRE 16000-token output
+    budget on reasoning tokens and emitted no content, with
+    finish_reason=length. The message named the symptom and hid the cause, so
+    the obvious next step -- raise the budget -- was never taken."""
+
+    def _reply(self, content, finish_reason, reasoning=None, completion=None):
+        return {"choices": [{"message": {"content": content},
+                             "finish_reason": finish_reason}],
+                "usage": {"completion_tokens": completion,
+                          "completion_tokens_details":
+                              {"reasoning_tokens": reasoning}}}
+
+    def call(self, data):
+        """Drive call_openrouter with a substituted transport."""
+        old_post = review._post
+        old_key = os.environ.get("OPENROUTER_API_KEY")
+        try:
+            os.environ["OPENROUTER_API_KEY"] = "sk-or-test"
+            review._post = lambda *a, **k: (data, None)
+            return review.call_openrouter(
+                {"name": "kimi-k2.7-code", "model": "m"}, "prompt", 30)
+        finally:
+            review._post = old_post
+            if old_key is not None:
+                os.environ["OPENROUTER_API_KEY"] = old_key
+            else:
+                os.environ.pop("OPENROUTER_API_KEY", None)
+
+    def test_budget_exhaustion_says_to_raise_the_budget(self):
+        res, err = self.call(self._reply("", "length", reasoning=17240,
+                                         completion=16000))
+        self.assertIsNone(res)
+        self.assertIn("whole output budget", err)
+        self.assertIn("reasoning", err)
+        self.assertIn("max_output_tokens", err)
+
+    def test_empty_for_another_reason_reports_that_reason(self):
+        res, err = self.call(self._reply("", "content_filter"))
+        self.assertIsNone(res)
+        self.assertIn("content_filter", err)
+        self.assertNotIn("whole output budget", err)
+
+    def test_whitespace_only_content_counts_as_empty(self):
+        res, err = self.call(self._reply("   \n  ", "length", completion=16000))
+        self.assertIsNone(res)
+        self.assertIn("output budget", err)
+
+    def test_real_content_still_comes_through(self):
+        res, err = self.call(self._reply('{"verdict": "upheld"}', "stop"))
+        self.assertIsNone(err)
+        self.assertEqual(res["text"], '{"verdict": "upheld"}')
+
+    def test_the_heavy_reasoner_has_a_raised_budget_in_config(self):
+        import json as _json
+        cfg = _json.loads((REPO / "skills" / "hanig-review-gate"
+                           / "reviewers.json").read_text())
+        kimis = [r for r in cfg["reviewers"] if r["name"].startswith("kimi")]
+        self.assertTrue(kimis)
+        for r in kimis:
+            self.assertGreaterEqual(r.get("max_output_tokens", 0), 32000,
+                                    f"{r['name']} needs room to reason AND answer")
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -307,11 +307,29 @@ def call_openrouter(rev, prompt, timeout, deadline=None):
     if err:
         return None, err
     try:
-        text = data["choices"][0]["message"]["content"]
+        choice = data["choices"][0]
+        text = choice["message"]["content"]
     except (KeyError, IndexError, TypeError):
         # redact: an error body can echo the Authorization header back.
         return None, redact(f"unexpected response shape: {str(data)[:200]}")
     usage = data.get("usage", {})
+    if not (text or "").strip():
+        # "empty response" hid the cause for a whole session: a heavy reasoner
+        # spent its ENTIRE output budget on reasoning tokens and never emitted
+        # content, with finish_reason=length. Say which it was.
+        reason = choice.get("finish_reason")
+        detail = usage.get("completion_tokens_details") or {}
+        think = detail.get("reasoning_tokens")
+        if reason == "length":
+            return None, (
+                f"no content: the model used its whole output budget "
+                f"({usage.get('completion_tokens')} tokens"
+                + (f", {think} of them reasoning" if think else "")
+                + f") before emitting any. Raise max_output_tokens for "
+                  f"{rev['name']} in reviewers.json, or review fewer files.")
+        return None, (f"no content in the reply (finish_reason="
+                      f"{reason!r}"
+                      + (f", {think} reasoning tokens" if think else "") + ")")
     return {"text": text,
             "in_tokens": usage.get("prompt_tokens"),
             "out_tokens": usage.get("completion_tokens")}, None

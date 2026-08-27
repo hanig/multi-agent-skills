@@ -1013,6 +1013,31 @@ def _tf_shards_complete(stem, siblings):
     return total > 0 and set(shards) == set(range(total))
 
 
+def checkpoint_set_members(name, files):
+    """Every file that has to be present for `name` to be loadable.
+
+    A TensorFlow checkpoint is an .index plus its data shards, so freshness has
+    to hold for the WHOLE set. Checking only the newest file let a previous
+    run's index and shard 1 pair with one freshly written shard 0: complete by
+    count, fresh by newest, and a stale/new mixture that loads to nothing
+    (kimi). Single-file formats are their own set.
+    """
+    stem = None
+    if name.lower().endswith(".index"):
+        stem = name[: -len(".index")]
+    else:
+        m = TF_SHARD.search(name)
+        if m:
+            stem = name[: m.start()]
+    if stem is None:
+        return [name]
+    members = [f["name"] for f in files
+               if f["name"] == stem + ".index"
+               or (TF_SHARD.search(f["name"])
+                   and f["name"][: TF_SHARD.search(f["name"]).start()] == stem)]
+    return members or [name]
+
+
 def looks_like_checkpoint(name, pattern=None, siblings=()):
     """Whether a file plausibly IS a loadable checkpoint.
 
@@ -1713,14 +1738,31 @@ def cmd_check(args):
                        "a trained model")
     elif state == "CONVERGED" and contract.get("checkpoint_dir"):
         newest = ckpt.get("newest") or {}
-        if (declared_at is not None and newest
-                and not artifact_is_fresh(newest.get("mtime"), declared_at,
-                                          declared_epoch)):
+        # EVERY component of the selected checkpoint, not just the newest file.
+        stale_members = []
+        if declared_at is not None and newest:
+            by_name = {f["name"]: f for f in (ckpt.get("files") or [])}
+            for member in checkpoint_set_members(newest.get("name", ""),
+                                                 ckpt.get("files") or []):
+                rec = by_name.get(member)
+                if rec is not None and not artifact_is_fresh(
+                        rec.get("mtime"), declared_at, declared_epoch):
+                    stale_members.append(member)
+        if stale_members:
             state = "INCOMPLETE_EVIDENCE"
-            reasons.append(
-                f"the newest checkpoint ({newest.get('name')}) predates this "
-                f"contract, so no artifact from this run supports the verdict; "
-                f"a reused checkpoint directory cannot certify a new run")
+            if stale_members == [newest.get("name")]:
+                reasons.append(
+                    f"the newest checkpoint ({newest.get('name')}) predates "
+                    f"this contract, so no artifact from this run supports the "
+                    f"verdict; a reused checkpoint directory cannot certify a "
+                    f"new run")
+            else:
+                reasons.append(
+                    f"the checkpoint selected ({newest.get('name')}) needs "
+                    f"{len(stale_members)} file(s) that predate this contract "
+                    f"({', '.join(stale_members[:3])}), so it is a mixture of "
+                    f"this run's output and a previous run's; that is not a "
+                    f"loadable model from this run")
         elif not ckpt.get("exists"):
             state = "INCOMPLETE_EVIDENCE"
             reasons.append(f"checkpoint dir missing: {ckpt.get('dir')}")
