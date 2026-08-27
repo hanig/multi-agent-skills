@@ -158,14 +158,30 @@ as predating a declaration made later in the same second).
   is the success case. Blocking on it turned ten tests red, all of them
   legitimate. The receipt carries `unchanged_outputs` so a human can judge; if
   your pipeline is not deterministic, that note means the file was not rewritten.
-- **A terminal record must post-date the evidence it certifies** — both a local
-  `record` and an sacct terminal row, via one shared helper. Without it, reusing
-  a run directory let an earlier run's record certify later artifacts, and a
-  Slurm job that COMPLETED at T=10 certified metrics written at T=20 (kimi,
-  CRITICAL, and its sibling in the same round). Ordering gates only whether a
-  row can CERTIFY, never whether it can condemn: a FAILED job is bad news
-  whenever it ended. Where sacct does not populate End there is nothing to
-  order against, and refusing on that would break honest clusters, so it passes.
+- **Artifact-to-attempt attribution is not derivable from timestamps, and a
+  contract certifies ONE run.** A terminal record post-dating the evidence it
+  certifies is REPORTED as a note, never enforced. It was enforced for exactly
+  one round, and three findings across both reviewers retired it:
+
+  1. Ordering cannot say WHICH attempt produced an artifact. A later no-op
+     Slurm job whose End post-dates an earlier local run's outputs certified
+     them anyway (kimi, CRITICAL) — the rule did not close the hole it was
+     built for.
+  2. An archiving or sync script that reads and touches a checkpoint after the
+     run advances the evidence past the job's End, so an HONEST converged run
+     became INCOMPLETE_EVIDENCE (deepseek). That is routine on a shared
+     filesystem.
+  3. Where sacct does not populate End the check skipped entirely (deepseek),
+     so it also failed open on the clusters it was meant to protect.
+
+  Underneath all three is one fact, and it is the same fact that retired the
+  exact-submit anchor and content-identity freshness: **a timestamp supports an
+  inference, never an attribution.** Re-running in the same directory without
+  `init --force` is outside what a contract can verify. Use a fresh run
+  directory per run, or `init --force` to declare a new instance.
+
+  Ordering still gates nothing in the condemning direction either way: a FAILED
+  job is bad news whenever it ended.
 - **The metrics-file caps are limits too.** A file over MAX_METRICS_BYTES,
   MAX_METRICS_LINES, or MAX_METRICS_LINE_BYTES is read partially, and a partial
   series cannot certify convergence, so an honest run with a very large metrics

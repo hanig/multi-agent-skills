@@ -763,7 +763,7 @@ def exit_code_is_clean(code):
 
 
 def sacct_state(job_id, declared_at=None, bound_at=None,
-                newest_evidence_mtime=None):
+                newest_evidence_mtime=None, note_out=None):
     """Terminal state of OUR job from Slurm accounting.
 
     Returns (state, exit_code, submit, why_not). An all-None state is absent
@@ -787,6 +787,8 @@ def sacct_state(job_id, declared_at=None, bound_at=None,
     if rc != 0 or not out:
         return None, None, None, None
     chosen, last_why, saw = None, None, None
+    if note_out is None:
+        note_out = []
     for line in out.splitlines():
         if not line.strip():
             continue
@@ -800,15 +802,20 @@ def sacct_state(job_id, declared_at=None, bound_at=None,
             continue
         state = f[0].strip().split()[0] if f[0].strip() else None
         end = parse_iso_ts(f[3].strip()) if len(f) > 3 else None
-        # Same ordering rule as a local record, which had it and this did not:
-        # a job that ended before the outputs it certifies is not the run that
-        # produced them (kimi, on the sibling in traincontract.py).
+        # Ordering is REPORTED, not enforced. Enforced for one round, three
+        # findings across two reviewers showed why: it cannot say WHICH attempt
+        # produced an artifact, so a later no-op job certified an earlier run's
+        # outputs anyway (kimi, CRITICAL); an archiving or sync script touching
+        # an output after the run advances the evidence past the job's End and
+        # REFUSES honest evidence (deepseek); and where sacct omits End it skips
+        # entirely (deepseek). Artifact-to-attempt attribution is not derivable
+        # from timestamps. A contract certifies ONE run.
         if state in SLURM_OK and not terminal_record_postdates(
                 end, newest_evidence_mtime):
-            last_why = ("the scheduler row ended before the declared output(s) "
-                        "it would certify, so that job is not the run which "
-                        "produced them")
-            continue
+            note_out.append("the scheduler row for this job ended before the "
+                            "declared output(s) it certifies; if this "
+                            "directory was reused, that job is not the one "
+                            "which produced them")
         chosen = (state, f[1].strip() if len(f) > 1 else None, submit)
     if chosen is None:
         return None, None, saw, last_why
@@ -1199,6 +1206,7 @@ def cmd_check(args):
     # that produced them, and section 2's walk happens too late to say so.
     base_dir = contract.get("cwd") or str(run_dir)
     newest_output_mtime = newest_declared_mtime(contract, base_dir)
+    ordering_notes = []
 
     # 1. Scheduler evidence, when a job was submitted through us. Absence of
     #    accounting is missing evidence, never a failure verdict.
@@ -1234,7 +1242,7 @@ def cmd_check(args):
             sstate, scode, ssubmit, why_not = sacct_state(
                 job_id, declared_at,
                 parse_iso_ts(binding.get("submitted_at")),
-                newest_output_mtime)
+                newest_output_mtime, ordering_notes)
             evidence["scheduler"] = {"state": sstate, "exit_code": scode,
                                      "submit": ssubmit}
             if sstate is None and why_not:
@@ -1370,14 +1378,11 @@ def cmd_check(args):
     last_is_local = bool(last_attempt and last_attempt.get("terminal") is True)
     if last_is_local and not terminal_record_postdates(
             parse_iso_ts(last_attempt.get("submitted_at")), newest_output_mtime):
-        # A record written BEFORE the outputs it certifies belongs to an
-        # earlier run in this directory. Same gap kimi found in
-        # traincontract.py's termination_matches: ownership said WHICH
-        # contract, nothing said WHEN.
-        reasons.append("the recorded local run predates the declared "
-                       "output(s) it would certify, so it belongs to an "
-                       "earlier run; re-run `record` after this run finishes")
-        last_is_local = False
+        # Reported, not enforced: see sacct_state. A post-run touch inverts
+        # this ordering on an honest run.
+        ordering_notes.append("the recorded local run predates the declared "
+                              "output(s) it certifies; if this directory was "
+                              "reused, that record is not this run's")
     if last_is_local and state is None:
         ec = last_attempt.get("exit_code")
         evidence["local"] = {"exit_code": ec}
@@ -1492,6 +1497,9 @@ def cmd_check(args):
                            "declared, so passing them shows only that the "
                            "criteria were fitted to the result; re-declare "
                            "before the run, or mark it --retrospective")
+
+    for n in ordering_notes:
+        reasons.append(f"note: {n}")
 
     if unchanged_outputs:
         reasons.append(

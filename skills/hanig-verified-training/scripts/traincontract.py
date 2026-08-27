@@ -412,7 +412,7 @@ def squeue_state(job_id, declared_at=None, bound_at=None):
 
 
 def slurm_state(job_id, declared_at=None, bound_at=None,
-                newest_evidence_mtime=None):
+                newest_evidence_mtime=None, note_out=None):
     """Terminal state of OUR job from sacct, or None when unavailable.
 
     Ownership is applied to EVERY row and the last OWNED one wins. Taking
@@ -429,6 +429,8 @@ def slurm_state(job_id, declared_at=None, bound_at=None,
     if rc != 0 or not out:
         return None
     chosen, last_why, saw_any = None, None, False
+    if note_out is None:
+        note_out = []
     for line in out.splitlines():
         if not line.strip():
             continue
@@ -442,18 +444,24 @@ def slurm_state(job_id, declared_at=None, bound_at=None,
         if not ours:
             last_why = why
             continue
-        # The ordering rule applies to a SCHEDULER terminal row exactly as it
-        # does to a local termination record, and for eight rounds it applied
-        # only to the latter: a job that COMPLETED at T=10 certified metrics
-        # written at T=20, so running training locally in a bound run directory
-        # borrowed the Slurm job's success (kimi, CRITICAL). A job writes its
-        # metrics and then ends, so End >= newest evidence is the honest order.
+        # Ordering is REPORTED, not enforced. It was enforced for one round and
+        # three findings across two reviewers showed why it cannot be:
+        #   - it cannot say WHICH attempt produced an artifact, so a later
+        #     no-op job certified an earlier run's outputs anyway (kimi);
+        #   - an archiving or sync script touching a checkpoint after the run
+        #     advances the evidence past the job's End and REFUSES honest
+        #     evidence, which is routine on a shared filesystem (deepseek);
+        #   - where sacct does not populate End it skips entirely (deepseek).
+        # Underneath all three is one fact: artifact-to-attempt attribution is
+        # not derivable from timestamps. A contract certifies ONE run, and a
+        # second run in the same directory is something the contract cannot
+        # distinguish. Reported so a human can judge; see the plan's limits.
         if state in SLURM_OK_END and not terminal_record_postdates(
                 end, newest_evidence_mtime):
-            last_why = ("the scheduler row ended before the metrics or "
-                        "checkpoint it would certify, so that job is not the "
-                        "run which produced them")
-            continue
+            note_out.append("the scheduler row for this job ended before the "
+                            "metrics or checkpoint it certifies; if this "
+                            "directory was reused for a second run, that job "
+                            "is not the one which produced them")
         chosen = (state, code)
     if chosen is None:
         return f"STALE_ROW:{last_why}" if saw_any and last_why else None
@@ -1520,11 +1528,9 @@ def termination_problem(rec, contract, newest_evidence_mtime=None):
     this one but predate the evidence it would certify."""
     if rec is None:
         return "no termination record"
-    if not terminal_record_postdates(parse_iso_ts(rec.get("recorded_at")),
-                                     newest_evidence_mtime):
-        return ("the termination record predates the metrics or checkpoint it "
-                "would certify, so it belongs to an earlier run in this "
-                "directory; re-run `record` after this run finishes")
+    # NOT a rejection: see slurm_state's note. A post-run touch by an
+    # archiving script inverts this ordering on an honest run, and ordering
+    # cannot say which attempt produced an artifact anyway.
     want_id = contract.get("contract_id")
     if want_id is not None:
         if rec.get("contract_id") != want_id:
@@ -1741,6 +1747,7 @@ def cmd_check(args):
     declared_epoch = contract_epoch(contract)
     # The newest thing a termination record would be certifying. A record that
     # predates its own evidence belongs to an earlier run in this directory.
+    ordering_notes = []
     newest_evidence = None
     try:
         newest_evidence = os.stat(contract["metrics_file"]).st_mtime
@@ -1790,7 +1797,7 @@ def cmd_check(args):
             # must not outrank a live one.
             qstate = squeue_state(jid, declared_at, bound_at)
             sstate = slurm_state(jid, declared_at, bound_at,
-                                 newest_evidence)
+                                 newest_evidence, ordering_notes)
             if qstate:
                 # ANY squeue state means the job is still in the system --
                 # enumerating live states missed real ones such as STAGE_OUT.
@@ -1954,7 +1961,8 @@ def cmd_check(args):
                        "it, but this cannot establish convergence")
 
     if state == "RUNNING" and contract.get("preemptible"):
-        sstate = (slurm_state(jid, declared_at, bound_at, newest_evidence)
+        sstate = (slurm_state(jid, declared_at, bound_at,
+                              newest_evidence, ordering_notes)
                   if jid else None)
         if sstate in ("PREEMPTED", "REQUEUED", "SUSPENDED"):
             state = "PREEMPTED"
@@ -1962,6 +1970,9 @@ def cmd_check(args):
                            f"a requeue is expected, not a failure")
         else:
             reasons.append("preemptible: a requeue is expected, not a failure")
+
+    for n in ordering_notes:
+        reasons.append(f"note: {n}")
 
     if integrity and state not in ("CONTRACT_VIOLATED",):
         reasons.extend(f"note: {p}" for p in integrity)

@@ -1776,14 +1776,21 @@ class TestDirectoryOutputFeedsTheOrderingGuard(unittest.TestCase):
             "%Y-%m-%dT%H:%M:%S%z", time.localtime(decl + offset))
         apath.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
 
-    def test_a_record_predating_the_directory_output_is_refused(self):
+    def test_a_record_predating_the_directory_output_is_noted(self):
+        """Was asserting REFUSED. Enforced for one round, then reversed: three
+        findings across two reviewers showed ordering cannot bear a verdict.
+        It cannot say WHICH attempt produced an artifact, so a later no-op job
+        certified an earlier run's outputs anyway; an archiving or sync script
+        touching a file after the run inverts the ordering on an HONEST run,
+        which is routine on a shared filesystem; and where sacct omits End it
+        skipped entirely. Reported so a human can judge."""
         decl = self.build()
         self.record_at(decl, 1)
         (self.od / "out.tsv").write_text("written AFTER the record\n")
         os.utime(self.od / "out.tsv", (decl + 600, decl + 600))
         r = contract("check", str(self.run_dir))
-        self.assertNotEqual(r.returncode, PASS, r.stdout + r.stderr)
         self.assertIn("predates the declared output", r.stdout)
+        self.assertIn("note:", r.stdout)
 
     def test_the_honest_order_passes(self):
         decl = self.build()
@@ -1794,7 +1801,8 @@ class TestDirectoryOutputFeedsTheOrderingGuard(unittest.TestCase):
         self.assertEqual(r.returncode, PASS, r.stdout + r.stderr)
 
     def test_the_newest_file_in_the_tree_is_what_counts(self):
-        """Not the first fresh one found: the walk must keep going."""
+        """Not the first fresh one found: the walk must keep going. Asserted on
+        the NOTE now that ordering is reported rather than enforced."""
         decl = self.build()
         sub = self.od / "nested"
         sub.mkdir()
@@ -1804,7 +1812,8 @@ class TestDirectoryOutputFeedsTheOrderingGuard(unittest.TestCase):
         os.utime(sub / "late.tsv", (decl + 900, decl + 900))
         self.record_at(decl, 10)          # after `early`, before `late`
         r = contract("check", str(self.run_dir))
-        self.assertNotEqual(r.returncode, PASS, r.stdout + r.stderr)
+        self.assertIn("predates the declared output", r.stdout,
+                      "the nested newer file must be what the note compares to")
 
     def test_directory_freshness_reports_the_newest_mtime(self):
         import importlib.util

@@ -2874,12 +2874,30 @@ class TestSchedulerRowMustPostdateItsEvidence(Base):
                                str(self.run_dir)], capture_output=True,
                               text=True, env=env)
 
-    def test_a_job_that_ended_before_the_metrics_cannot_certify_them(self):
+    def test_a_job_that_ended_before_the_metrics_is_noted(self):
+        """Was asserting it cannot certify. Enforced for one round, then
+        reversed: ordering cannot say WHICH attempt produced an artifact, an
+        archiving script touching a checkpoint after the run inverts it on an
+        honest run, and an absent End skips it. All three from the reviewers
+        that asked for the rule in the first place. Reported, not enforced."""
         self.setUpBound()
         self._age_artifacts(20)
         r = self._check(self._bin(submit_off=0, end_off=10))
-        self.assertNotEqual(r.returncode, CONVERGED, r.stdout)
         self.assertIn("ended before", r.stdout)
+        self.assertIn("note:", r.stdout)
+
+    def test_a_post_run_touch_does_not_refuse_an_honest_run(self):
+        """deepseek: a post-processing or sync script that reads and touches a
+        checkpoint advances the evidence past the job's End. Routine on a
+        shared filesystem, and it must not turn a converged run into
+        INCOMPLETE_EVIDENCE."""
+        self.setUpBound()
+        self._age_artifacts(10)
+        env = self._bin(submit_off=0, end_off=20)
+        self.assertEqual(self._check(env).returncode, CONVERGED)
+        self._age_artifacts(900)          # the archiver touches it
+        r = self._check(env)
+        self.assertEqual(r.returncode, CONVERGED, r.stdout + r.stderr)
 
     def test_the_honest_order_converges(self):
         """A job writes its metrics and then ends."""
