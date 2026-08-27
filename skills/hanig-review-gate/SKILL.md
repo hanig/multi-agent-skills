@@ -5,7 +5,8 @@ description: >-
   reporting work complete, before committing or opening a PR, and whenever a
   claim is being asserted about code that was just written — "this works", "this
   is covered", "this handles X". Sends the diff and the claims to independent
-  models (GPT-5.6-Sol at xhigh, Kimi K3, DeepSeek-V4-Pro) prompted to refute
+  models (DeepSeek-V4-Pro, GPT-5.6-Luna, Kimi-K2.7-Code, GLM-5.3, and
+  GPT-5.6-Sol at xhigh) prompted to refute
   rather than approve. Use also when asked to double-check, get a second
   opinion, or verify a change against other models.
 ---
@@ -19,6 +20,48 @@ So before anything is reported complete, the work **and the specific claims made
 about it** go to models that did not write the code, each prompted to **refute**.
 A reviewer that cannot decide is instructed to refute, because a false "looks
 good" costs far more than one more look.
+
+## Two phases, two different reviews
+
+A plan review and an implementation review are not the same review and must not
+use the same panel. `PROTOCOL.md` in this directory states the full model; the
+enforceable parts are enforced by `review.py` rather than left to memory,
+because these rules were written down once and drifted from anyway.
+
+| | plan review | implementation review |
+|---|---|---|
+| when | before code exists | after the change is written |
+| panel | **two contrasting models** | cheapest-first ladder |
+| escalation | **never** | `--escalate`, always from `fast` |
+| flag | `--plan` | `--escalate --round N` |
+| judged against | do these criteria hold together | does the code meet them |
+
+**Two contrasting models for a plan, never escalated.** A third adds agreement,
+not insight. Measured, not assumed: a four-model panel on one design proposal
+had one reviewer uphold every claim and add nothing, while the other two found
+all five defects. Contrasting means a different provider and family, so the two
+cannot share a failure mode. `--plan` fixes the panel at two and refuses
+`--escalate` or a quorum above 2.
+
+**Plan review is Phase 1 and it is where the value is.** Three plan reviews cost
+about ten cents and twelve minutes and rejected two designs before any code
+existed. The 28-round session below spent all 28 rounds inside a framing that a
+plan review would have rejected.
+
+## The author does not judge their own work
+
+When a reviewer proposes a design, exclude it from the panel that reviews the
+proposal: `--only` the others. A design's author is the worst judge of whether
+its residual is complete. Asked to fix a recurring problem, one reviewer wrote a
+proposal with a "residual risk" section listing three ways through; the panel
+found two more it had not named, one of them inside the proposal's own API.
+
+## Reviewers refute; they do not design
+
+The system prompt says so, and a finding carries severity, location, summary and
+failure scenario with **no remediation field**. Do not ask the panel for a plan.
+The author writes the plan and the panel attacks it. Asking a refutation panel
+to design is a category error that produces agreement-shaped noise.
 
 ## Review against a declared plan, never against perfection
 
@@ -167,8 +210,17 @@ verdict; everything else gates as before. Without the flag, every finding gates.
 
 Sources: `--diff` (working tree, default), `--staged`, `--range HEAD~3..HEAD`,
 `--file PATH` (repeatable). `--list` shows reviewers and live availability.
-`--profile fast|standard|deep` picks a single fixed panel instead of the ladder.
-`--only NAME` restricts to named reviewers (not combinable with `--escalate`).
+`--profile plan|fast|standard|deep` picks a single fixed panel instead of the
+ladder. `--only NAME` restricts to named reviewers, accepts `a,b,c` or repeated
+flags, and is not combinable with `--escalate`.
+
+`--plan` is the plan-review mode: it fixes the profile at `plan` (two
+contrasting models) and refuses `--escalate` or a quorum above 2.
+
+`--round N` declares which round this is for the change under review. Past
+`MAX_ROUNDS` (3) the gate refuses and names the step-back, because past that
+point the rounds have historically been finding defects in the previous round's
+fixes rather than converging.
 `--json` for machine consumption.
 
 ## Claims are the point
