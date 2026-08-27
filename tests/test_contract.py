@@ -1296,8 +1296,14 @@ class TestOwnershipWindowAndExactSubmit(unittest.TestCase):
         m = self.module()
         self.assertTrue(m.sacct_row_is_ours(105, 100, 110)[0],
                         "accepted, and documented as the limit it is")
-        limits = (REPO / "docs" / "plan-sacct-ownership.md").read_text()
-        self.assertIn("bind promptly", limits)
+        # The doc lives outside the tree deployed to a cluster (skills/ and
+        # tests/ only), so a hard read made the suite fail on every cluster
+        # while passing locally. Check it where it exists; the behaviour above
+        # is the part that must hold everywhere.
+        doc = REPO / "docs" / "plan-sacct-ownership.md"
+        if not doc.exists():
+            self.skipTest("docs/ not deployed here; behaviour asserted above")
+        self.assertIn("bind promptly", doc.read_text())
 
 class TestDeclaredDirectoryFreshness(unittest.TestCase):
     """Found by asking whether the checkpoint-set bug had a sibling here, which
