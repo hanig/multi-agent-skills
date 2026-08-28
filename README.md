@@ -102,3 +102,22 @@ python3 tests/test_contract.py
 
 Standard library only, no network, no cluster. Passing on macOS 3.10.16 and on
 all three clusters (3.10.12, 3.12.3, 3.10.12).
+
+## Coordination: Paseo, and the fusion
+
+These verifiers adjudicate evidence: they answer "was the work actually done",
+and refuse a self-assertion. They do not dispatch work.
+
+Shreshth's `multi-agent-skills` (extracted to `~/paseo-multi-agent-skills`) is
+the other half: agent coordination on the Paseo daemon -- who does the work, in
+what isolation, notified how. Its skills are installed alongside these.
+
+**As of 2026-08-28 the two are being fused deliberately.** An earlier note in
+MEMORY.md called "do not port the coordination machinery" a settled premise; it
+was not settled, it was my own narrowing of the brief, and it was overturned.
+The reason it gave (do not rebuild a fleet and message bus) expired when Paseo
+was installed: there is nothing left to rebuild.
+
+The fusion's point: his agents coordinate but cannot prove anything -- an agent
+reporting "done" is a bare claim, which is the self-assertion these tools exist
+to refuse. Ours prove but cannot dispatch. Neither repo has the combination.
