@@ -1017,18 +1017,30 @@ class TestTimestampParsing(unittest.TestCase):
 
 class TestPortability(unittest.TestCase):
     def test_stdlib_only(self):
-        """Must run on a login node with no pip install rights."""
-        src = SCRIPT.read_text()
-        allowed = {"argparse", "calendar", "hashlib", "json", "os", "re", "shutil", "signal", "stat", "math",
-                   "subprocess", "sys", "tempfile", "time", "pathlib"}
-        for line in src.splitlines():
-            s = line.strip()
-            if s.startswith("import ") and not s.startswith("import ("):
-                mod = s.split()[1].split(".")[0]
-                self.assertIn(mod, allowed, f"non-stdlib import: {mod}")
-            elif s.startswith("from ") and " import " in s:
-                mod = s.split()[1].split(".")[0]
-                self.assertIn(mod, allowed, f"non-stdlib import: {mod}")
+        """Must run on a login node with no pip install rights.
+
+        AST-based, not textual. The line-scanning version read `import json,
+        sys` out of a shell snippet embedded in a STRING -- Python code this
+        file emits for a cluster job to run, not code this file imports -- and
+        reported a non-stdlib import called "json,". A test that reads strings
+        as syntax measures the reader, and that has cost this repo four
+        rewrites of one test already."""
+        import ast
+        allowed = {"argparse", "calendar", "hashlib", "json", "os", "re",
+                   "shutil", "signal", "stat", "math", "subprocess", "sys",
+                   "tempfile", "time", "pathlib"}
+        tree = ast.parse(SCRIPT.read_text())
+        found = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                found.update(a.name.split(".")[0] for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                found.add(node.module.split(".")[0])
+        extra = sorted(found - allowed)
+        self.assertFalse(extra, f"non-stdlib import(s): {', '.join(extra)}")
+        self.assertGreater(len(found), 5,
+                           "recovered too few imports to be measuring "
+                           "anything")
 
     def test_compiles_under_target_python(self):
         r = subprocess.run([sys.executable, "-m", "py_compile", str(SCRIPT)],
@@ -2000,6 +2012,66 @@ class TestReceiptNamesItsContractInstance(unittest.TestCase):
         v = json.loads((self.run_dir / "verification.json").read_text())
         self.assertIn("contract_id", v)
         self.assertIsNone(v["contract_id"])
+
+class TestProductionEvidence(Base):
+    """SIBLING MISS #20, and a FALSE PASS in the tool shipped longest.
+
+    An output written by something OTHER than the declared command reached
+    SCIENTIFIC_PASS, exit 0. `artifact_is_fresh` proves "written after the
+    contract was declared" and never "written by this job", so a file appearing
+    mid-run from an unrelated process satisfied every predicate AND the
+    freshness check. result.py had already been given a production gate by a
+    committee; the lesson was applied to the new tool and not to its twin."""
+
+    def test_an_output_this_job_did_not_write_is_refused(self):
+        out = self.tmp / "unrelated.tsv"
+        self.init("--output", str(out), "--require-production-evidence")
+        time.sleep(1.1)                      # clear the contract's mtime floor
+        out.write_text("written by an unrelated process\n")
+        self.record_attempt()
+        r = contract("check", str(self.run_dir))
+        self.assertEqual(
+            r.returncode, INCOMPLETE,
+            f"an output no job wrote reached exit {r.returncode}:\n{r.stdout}")
+        self.assertIn("production evidence", r.stdout)
+
+    def test_a_contract_without_the_flag_is_unchanged(self):
+        """Non-breaking: silently downgrading every existing run would be its
+        own defect, so the strictness is opt-in per contract, exactly as
+        result.py gates on `deterministic`."""
+        out = self.tmp / "plain.tsv"
+        self.init("--output", str(out))
+        time.sleep(1.1)
+        out.write_text("x\n")
+        self.record_attempt()
+        r = contract("check", str(self.run_dir))
+        self.assertEqual(r.returncode, 0,
+                         f"an existing contract's behaviour changed:\n"
+                         f"{r.stdout}")
+
+    def test_the_window_is_content_not_mtime(self):
+        """The bracket must compare digests, never timestamps: a timestamp
+        supports an inference, never an attribution."""
+        import importlib.util as u
+        spec = u.spec_from_file_location("c", SCRIPT)
+        m = u.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        snippet = m.bracket_snippet(["a.tsv"], "/tmp/evidence.json")
+        self.assertIn("shasum -a 256", snippet)
+        self.assertIn("written_in_window", snippet)
+        for word in ("mtime", "stat -f", "date +"):
+            self.assertNotIn(word, snippet,
+                             f"the production window uses {word!r}, which is "
+                             f"time-based attribution")
+
+    def test_submit_never_mutates_the_users_script(self):
+        """A wrapper that mangles a real job script is a worse outcome than the
+        defect it closes."""
+        src = SCRIPT.read_text()
+        self.assertIn("job.bracketed.sbatch", src,
+                      "the bracket must go into a COPY")
+        self.assertIn("your", src)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

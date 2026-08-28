@@ -140,6 +140,19 @@ def append_line(path, line):
                 pass
 
 
+def write_text(path, text):
+    """Atomic text write. Returns an error string or None, never raises: a
+    half-written job script submitted to Slurm is worse than a refusal."""
+    try:
+        p = Path(path)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(text)
+        tmp.replace(p)
+        return None
+    except (OSError, ValueError) as e:
+        return f"{type(e).__name__}: {e}"
+
+
 def write_receipt(path, payload):
     """Write a receipt without ever blocking.
 
@@ -992,6 +1005,10 @@ def cmd_init(args):
             else os.path.join(str(Path(args.cwd or os.getcwd()).resolve()), i),
             args.hash_limit_mb) for i in args.input],
         "declared_outputs": list(args.output),
+        # Opt-in, like result.py's `deterministic`. An old contract keeps its
+        # behaviour and its receipt says which claim it can support; silently
+        # downgrading every existing run would be its own defect.
+        "require_production_evidence": bool(args.require_production_evidence),
         # Fingerprints of declared outputs that ALREADY EXIST at declaration
         # time. mtime is the only cheap provenance signal a filesystem gives,
         # and `touch` defeats it: a file from a previous run, touched after
@@ -1033,6 +1050,114 @@ def cmd_init(args):
               f"(too large to digest fully)")
 
 
+
+# --- production evidence --------------------------------------------------
+# A false pass, found 2026-08-28 by applying a plan-review finding to shipped
+# code: an output written by something OTHER than the declared command reached
+# SCIENTIFIC_PASS, because `artifact_is_fresh` proves "written after the
+# contract was declared" and NEVER "written by this job". result.py had already
+# been given a production gate by a committee; this is instance #20 of the
+# sibling-miss class, and the twin was the one shipped longest.
+#
+# result.py brackets a SYNCHRONOUS command: digest the outputs immediately
+# before and after, seconds apart. contract.py cannot do that from outside,
+# because the job runs asynchronously on a cluster for hours -- so the bracket
+# goes INSIDE the job, where it executes beside the artifacts. Content, never a
+# timestamp.
+#
+# Opt-in per contract, exactly as result.py gates on `deterministic`: an old
+# contract keeps its behaviour, and the receipt records which claim it can
+# support. Silently downgrading every existing run would be its own defect.
+PRODUCTION_EVIDENCE_FILE = "production-window.json"
+
+
+def bracket_snippet(outputs, evidence_path):
+    """Shell that digests each declared output at job start and job end.
+
+    Emitted into a COPY of the batch script, never into the user's file: a
+    wrapper that mangles a real job script is a worse outcome than the defect
+    it closes. Uses only coreutils that exist on every cluster node here.
+    """
+    quoted = " ".join(f"'{o}'" for o in outputs)
+    return f"""
+# --- contract.py production window (injected; edit the original, not this) ---
+__cx_digest() {{
+  for f in {quoted}; do
+    if [ -f "$f" ]; then
+      printf '%s\\t%s\\n' "$f" "$(shasum -a 256 "$f" 2>/dev/null | cut -d' ' -f1)"
+    else
+      printf '%s\\t\\n' "$f"
+    fi
+  done
+}}
+__cx_before="$(__cx_digest)"
+__cx_finish() {{
+  __cx_after="$(__cx_digest)"
+  python3 - "$__cx_before" "$__cx_after" <<'__CXPY' > '{evidence_path}' 2>/dev/null || true
+import json, sys
+def parse(blob):
+    out = {{}}
+    for line in (blob or "").splitlines():
+        if "\t" in line:
+            path, digest = line.split("\t", 1)
+            out[path] = digest.strip() or None
+    return out
+before, after = parse(sys.argv[1]), parse(sys.argv[2])
+window = {{}}
+for path in sorted(set(before) | set(after)):
+    b, a = before.get(path), after.get(path)
+    window[path] = {{"before": b, "after": a,
+                    "appeared_in_window": b is None and a is not None,
+                    "changed_in_window": bool(b and a and b != a),
+                    "written_in_window": bool((b is None and a is not None)
+                                              or (b and a and b != a))}}
+json.dump({{"schema_version": 1, "window": window}}, sys.stdout, indent=2)
+__CXPY
+}}
+trap __cx_finish EXIT
+# --- end injected block ---------------------------------------------------
+"""
+
+
+def production_evidence_fault(run_dir, contract):
+    """Why this contract cannot show the JOB produced its outputs, or None.
+
+    Returns None when the contract does not require production evidence: an
+    existing contract keeps its behaviour, and `check` records the weaker claim
+    in the receipt rather than silently downgrading work that already passed.
+    """
+    if not contract.get("require_production_evidence"):
+        return None
+    outputs = [str(o) for o in (contract.get("declared_outputs") or [])]
+    # read_text_bounded is the only bounded reader in this file; there is no
+    # read_json_bounded, and calling one that does not exist is the
+    # missing-callee defect test_symmetry.py was written to catch. It cannot see
+    # a NEW callee, only a copied one, so this is checked by test_contract.py
+    # exercising the path instead.
+    text, err = read_text_bounded(Path(run_dir) / PRODUCTION_EVIDENCE_FILE)
+    raw = None
+    if not err:
+        try:
+            raw = json.loads(text)
+        except (ValueError, RecursionError) as e:
+            err = f"malformed: {e}"
+    if err or not isinstance(raw, dict):
+        return (f"this contract requires production evidence and none was "
+                f"recorded ({err or 'unreadable'}). Re-submit with `submit` so "
+                f"the job brackets its outputs, or re-declare without "
+                f"--require-production-evidence to accept the weaker claim.")
+    window = raw.get("window") or {}
+    unwritten = [o for o in outputs
+                 if not (window.get(o) or {}).get("written_in_window")]
+    if unwritten:
+        return (f"{len(unwritten)} declared output(s) were not written while "
+                f"the job ran: {', '.join(unwritten[:3])}. Every predicate "
+                f"holding says the artifacts look right, not that this job "
+                f"produced them. Re-run the job, or re-declare if another "
+                f"process legitimately owns those files.")
+    return None
+
+
 def cmd_submit(args):
     run_dir = Path(args.run_dir).resolve()
     cpath = run_dir / CONTRACT
@@ -1061,7 +1186,40 @@ def cmd_submit(args):
         sys.exit(f"error: expected a batch script at {script}. Write the "
                  f"job script there, or point --script at it.")
 
-    argv = ["sbatch", "--parsable", *args.sbatch_arg, str(script)]
+    submitted = script
+    if contract.get("require_production_evidence"):
+        outputs = [str(o) for o in (contract.get("declared_outputs") or [])]
+        if not outputs:
+            sys.exit("error: this contract requires production evidence but "
+                     "declares no outputs. Re-declare with --output PATH, or "
+                     "without --require-production-evidence.")
+        raw_script, serr = read_text_bounded(script)
+        if serr:
+            sys.exit(f"error: cannot read {script}: {serr}. Fix the script, "
+                     f"then re-run `submit`.")
+        lines = raw_script.splitlines(keepends=True)
+        # After the shebang and every #SBATCH directive: injecting above them
+        # would make Slurm ignore the directives entirely.
+        insert_at = 0
+        for i, line in enumerate(lines):
+            if line.startswith("#!") or line.startswith("#SBATCH") \
+                    or not line.strip() or line.lstrip().startswith("#"):
+                insert_at = i + 1
+            else:
+                break
+        evidence = run_dir / PRODUCTION_EVIDENCE_FILE
+        wrapped = ("".join(lines[:insert_at])
+                   + bracket_snippet(outputs, evidence)
+                   + "".join(lines[insert_at:]))
+        submitted = run_dir / "job.bracketed.sbatch"
+        werr = write_text(submitted, wrapped)
+        if werr:
+            sys.exit(f"error: cannot write {submitted}: {werr}. Check the "
+                     f"directory is writable, then re-run `submit`.")
+        print(f"  bracketed a copy at {submitted.name}; your {script.name} is "
+              f"untouched")
+
+    argv = ["sbatch", "--parsable", *args.sbatch_arg, str(submitted)]
     rc, out, err = run(argv, cwd=str(run_dir), timeout=60)
     if rc != 0:
         sys.exit(f"error: sbatch failed: {err or out}. Fix the batch "
@@ -1593,8 +1751,19 @@ def cmd_check(args):
                                "(sacct unavailable or job still pending); "
                                "cannot distinguish a result from a stale file")
         else:
-            state = "SCIENTIFIC_PASS"
-            reasons.append(f"all {len(results)} predicates hold")
+            # --- production evidence, before any pass -----------------------
+            # Every predicate holding says the artifacts LOOK right. It does not
+            # say this job wrote them: an output written by an unrelated process
+            # after the contract was declared satisfied every predicate AND the
+            # mtime freshness check, and reached SCIENTIFIC_PASS. Fixed here;
+            # result.py's committee had already found the same shape.
+            prod_fault = production_evidence_fault(run_dir, contract)
+            if prod_fault:
+                state = "INCOMPLETE_EVIDENCE"
+                reasons.append(prod_fault)
+            else:
+                state = "SCIENTIFIC_PASS"
+                reasons.append(f"all {len(results)} predicates hold")
 
     if state is None:
         state = "INCOMPLETE_EVIDENCE"
@@ -1698,6 +1867,11 @@ def main():
                    help="input path whose identity to record; repeatable")
     p.add_argument("--output", action="append", default=[],
                    help="declared output; implies exists + non-empty predicates")
+    p.add_argument("--require-production-evidence", action="store_true",
+                    help="bracket the job so it records a digest of every "
+                         "declared output at start and end. Without it, an "
+                         "output written by something OTHER than this job "
+                         "cannot be distinguished from one this job wrote.")
     p.add_argument("--predicate", action="append", default=[],
                    help='extra predicate as JSON, e.g. \'{"kind":"min_lines",'
                         '"path":"out.tsv","lines":1000}\'; repeatable')
