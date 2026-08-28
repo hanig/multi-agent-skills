@@ -1,339 +1,361 @@
-# Plan: fuse coordination with adjudication
+# Plan v2: fuse coordination with adjudication
 
-> **STATUS: v1 REJECTED. Plan review 2026-08-28, deepseek-v4-pro + luna,
-> quorum 2, both verdicts in. 6 MAJOR findings, 2 found independently by both; 1 later voided by an architectural correction from Hani, so 5 stand.
-> Author gpt-5.6-sol excluded from the panel.**
+> **STATUS: v2 CLOSER, NOT ACCEPTED. Plan review 2026-08-28: deepseek-v4-pro
+> UPHELD all 7 claims with 0 findings; luna refuted 1 and found 3 MAJOR. Split
+> verdict, and the dissenter was right — the fourth time this session.**
 >
-> The direction is endorsed: one system at the level of authority and state,
-> two engines underneath, an admission layer as the sole authority on "done",
-> and a sealed work order as the minimum unit. What is rejected is that v1
-> ENFORCES any of it.
+> All four withdrawals were accepted by both reviewers. Extending `bus await`
+> instead of building a parallel admission controller stands. What fails is the
+> classification of predicates and the ORDER of the steps.
 >
-> **1. The seal is not sealed (both members, independently).** The work order
-> has no integrity protection, so it can be mutated after sealing. deepseek's
-> case: an operator edits the `verifier` field to a lenient one, dispatch
-> proceeds, and the admission controller admits using the wrong verifier. luna
-> reached the same conclusion from immutability. A "sealed" object that nothing
-> seals is the self-assertion this whole system exists to refuse, relocated
-> into the fusion layer.
+> **The one idea behind all three findings: a predicate that can be satisfied
+> without doing the work.** This is the fourth appearance of that shape in this
+> project — it is the same error as `result.py`'s missing production gate, where
+> integrity proved the bytes were bound to an attempt and nothing proved the
+> command wrote them.
 >
-> **2. The existing Paseo path bypasses admission entirely (luna).** An agent
-> goes idle and writes `{"validation":{"passed":true}}`; a consumer runs
-> `bus await`, accepts the truthy status, and launches dependent work. No
-> sealed work order, no receipt, no admission. So this is two things bolted
-> together after all: removing the admission layer would not break the system,
-> because the old path still works.
+> **1. `--require-clean` alone is a completion path (MAJOR).** An idle agent
+> already sitting at a clean HEAD, `bus await AGENT --require-clean` with no
+> `--base`, no verifier and no `--lifecycle-only`: cleanliness passes and the
+> await reports ARTIFACT READY, exit 0, with no new artifact and no work done.
+> Step 1 excluded only status/json assertions and counted `--require-clean` as a
+> measured git predicate. **Measured is not the same as evidence of
+> production.** A clean worktree is a NEGATIVE property, satisfied by inaction.
+> Predicates must be classified by whether they can only be true if work
+> happened, not by whether the tool measures them itself.
 >
-> **3. ~~The verifier cannot run where the artifacts are~~ (deepseek) --
-> VOID, on Hani's correction 2026-08-28.** The finding assumed a central
-> controller on the Mac reaching out to clusters. That is not the architecture:
+> **2. Step 2 opens a hole that step 3 closes (MAJOR).** `bus await AGENT
+> --verifier /bin/true` exits 0 and reports ARTIFACT READY. v2 was honest that
+> a freely chosen verifier is not independently authorized, but it still
+> sequenced the success path BEFORE the authorization mechanism. Honesty about
+> a gap does not license shipping the gap first. Either authorization lands with
+> the verifier predicate, or the predicate is refused until it does.
 >
-> > "The controller will be on each machine. I'm not planning to control
-> > everything from a Mac... projects on each server will be controlled from
-> > that server. I'm just making a uniform tooling here."
+> **3. Policy from the base commit does not pin the verifier EXECUTABLE
+> (MAJOR).** The base policy authorizes `python verify.py`; `verify.py` in the
+> inspected worktree is changed to return 0 without validating anything; the
+> verifier runs in that worktree cwd, so bus accepts the zero exit. **The policy
+> bytes are unchanged while the behaviour is not.** Pinning the authorizing
+> policy is not pinning what the policy invokes.
 >
-> So the verifier ALWAYS runs where the artifacts are, because the controller
-> is local to them. There is no remote-verification problem, no cross-machine
-> artifact transport, and no credential path to design. "Distributed admission"
-> is not a hard problem here; it is the default, and the unit of deployment is
-> the machine.
->
-> The assumption was MINE, not sol's and not deepseek's: I wrote the problem
-> statement that framed this as a fleet dispatched from one place, and both
-> reasoned correctly from what I gave them. Ask what the topology is before
-> designing for one.
->
-> **What this changes.** The install story carries weight the design does not:
-> identical tooling must land on the Mac, lambda, andromeda and chimera and
-> behave identically, which is exactly why skills install individually
-> (`install.sh --only NAME`) with no sibling imports. Peer messaging becomes
-> notification between equals, never control. Nothing in the fusion needs to
-> move an artifact.
->
-> **4. Nothing requires an independent contract authorizer (luna).** The prose
-> calls for a separate adjudicator when a coordinator is an agent; the FIELDS
-> reject only `issuer == executor`. So a coordinating agent picks weak
-> thresholds, names itself issuer and a worker executor, and seals. The
-> self-assertion one level up, which is exactly the question this plan was
-> asked to answer.
->
-> **5. ADMITTED does not freeze the artifacts (luna).** The receipt binds hash
-> H; a later retry, transfer or cleanup makes it H2; downstream sees ADMITTED
-> and consumes H2 against a receipt for H.
->
-> **6. Human review is a dead end (luna).** `AWAITING_HUMAN_REVIEW` has no
-> transition that produces ADMITTED, so an approved result leaves downstream
-> work blocked "or encourages an out-of-band bypass".
->
-> **What v2 must settle before any code.** Findings 1, 4 and 5 are the same
-> question wearing three hats: what makes a claim in this system evidence
-> rather than an assertion, when the threat model says contract files are
-> trusted input? That trust is defensible for a human author and NOT
-> defensible for an agent author, and v1 did not notice the difference.
-> Finding 3 is void: admission is per-machine by design, so the verifier is
-> always co-located with the artifacts it judges.
->
-> Finding 2 is the cheapest and the most urgent: as long as `bus await` accepts
-> an agent-authored status, none of the rest matters.
+> **What v3 must settle.** Classify every predicate as production-evidencing or
+> not, and require at least one of the former for ARTIFACT READY. Land verifier
+> authorization with the verifier predicate rather than after it. Pin the
+> verifier's identity by content, not by the name of the policy that authorizes
+> it — and if that cannot be done inside the threat model (agents
+> honest-but-fallible, contract files trusted, no signatures), say so and scope
+> the claim down rather than implying independence.
 
 ---
 
-## Verdict
+## What I am withdrawing from v1
 
-The fusion should be **one system at the level of authority and state**, with two deliberately separate engines underneath:
+I withdraw four material claims:
 
-- Paseo coordinates execution.
-- Domain verifiers adjudicate evidence.
-- A new admission layer is the only component allowed to turn either into “done.”
+- **A new admission controller is not warranted.** `bus await` already is the admission controller. The right design extends that chokepoint.
+- **The sealed work order should not be the minimum unit.** It duplicates launch records, contract files, attempts, and receipts already present across the two repos.
+- **`ADMITTED` should not be a durable universal state.** Admission is a point-in-time verifier result. A permanent `ADMITTED` label creates the stale-artifact problem unless artifacts are immutable.
+- **The Mac-centered remote-control topology was wrong.** Deployment is per machine. Verification runs locally beside the artifacts; cross-machine verification, transport, credentials, and central reconciliation are out.
 
-If Paseo merely launches an agent and later calls `contract.py check`, the result is two things bolted together. The fusion becomes real only when the shared state machine makes this invariant unavoidable:
+I also withdraw the broad statement that the coordination repo cannot prove anything. It already has a real, tested enforcement point.
 
-> No work item reaches an accepted terminal state unless a fresh verifier receipt, bound to that exact work item, contract, attempt, and artifacts, passes its declared admission policy.
+## What `bus await` proves today
 
-Do not merge the repositories wholesale. Fuse their protocol and authority boundary.
+The implementation confirms your correction.
 
-## Assumptions
+Sound measurements:
 
-- Agents are honest-but-fallible, not malicious processes actively forging files or exploiting the host.
-- Contract files remain trusted input, matching the current verifier threat model. A malicious agent with write access to both contracts and receipts cannot be stopped by JSON conventions; that would require OS isolation, signatures, or an external authority.
-- “Independent” means separation of roles and execution context, not necessarily a different human.
-- Scientific thresholds often require project or human authority. A general agent may instantiate approved parameters but must not invent post hoc biological success criteria.
-- Paseo runs the control plane on the Mac. Verification may execute on the cluster where the data lives.
-- Existing Slurm, Snakemake, and Nextflow remain the execution schedulers. Paseo schedules agents, not GPUs.
-- Ceremony must scale with risk. A code-formatting task and a Tahoe-100M training run should use the same envelope protocol but different contract policies.
+- `launch_contract_issues` compares observed cwd, provider, model, thinking setting, and Git branch with declared expectations.
+- `--base` reads Git state itself and refuses when HEAD is absent, the base cannot resolve, or HEAD equals the base.
+- `--require-clean` reads the worktree rather than trusting an agent report.
+- `cmd_await` distinguishes `idle`, `ARTIFACT READY`, `IDLE WITHOUT ARTIFACT`, and `INVALID LAUNCH CONTRACT`.
+- The tests prove that idle without the required commit exits nonzero and a launch mismatch fails closed.
 
-## Root cause: why three levels deep
+This is genuinely the same thesis: lifecycle settlement is not completion.
 
-### Why 1: Why can coordinated work be called done without proof?
+But its proof boundary is narrower than its labels imply:
 
-Because the consumer accepts the wrong object.
+- `HEAD != base` proves that HEAD differs, not that it descends from the base, implements the task, or passes tests.
+- `--require-clean` has a fail-open edge: `git_value()` returns `""` both for a clean worktree and for Git failure/timeout. By contrast, `--base` notices missing values and fails closed.
+- `git_evidence()` is diagnostic only. Its comment explicitly says evidence may degrade while the verdict still ships.
+- `--require-json` proves only that a non-empty value exists in an agent-writable document. It does not prove the value is true.
+- An await invocation with no contract flags returns exit 0 for idle. The prose is honest, but shell composition sees success.
 
-Paseo reports that an agent became idle, completed a turn, or emitted a status file. `bus await` improves this substantially: it checks launch identity, branch, base commit, cleanliness, and optionally truthy JSON fields. But a truthy `validation.passed` remains a claim written by the work process. It is not equivalent to a verifier independently reaching a bound verdict.
+So `bus await` is a sound admission layer for the facts it independently measures, with two implementation defects and one intentionally weak predicate. It is not yet an adjudication bridge to the domain verifiers.
 
-The coordination repo therefore already proves some useful facts—it is not evidence-free—but it cannot adjudicate scientific or artifact completion.
+## Revised minimum unit
 
-### Why 2: Why is the wrong object authoritative?
-
-Because the repositories have no common acceptance object.
-
-The coordination side reasons in terms of agents, workspaces, prompts, commits, statuses, and notifications. The adjudication side reasons in terms of contract instances, criteria digests, attempts, artifacts, and receipts. Today a human or coordinating agent informally translates between those worlds.
-
-That informal translation is the hole. There is no machine-enforced statement that:
-
-- Paseo agent `A`
-- executing attempt `B`
-- under contract instance `C`
-- produced artifacts `D`
-- that verifier `V` checked against criteria digest `E`.
-
-The existing receipt-binding work correctly prevents stale evidence from attaching to a new contract. The same binding is missing across the coordination boundary.
-
-### Why 3: Why was that translation left informal?
-
-Because each half was designed around a different failure:
-
-- Paseo minimizes coordination failure: wrong workspace, wrong provider, lost notifications, idle workers, unbounded loops.
-- The verifier family minimizes epistemic failure: stale artifacts, missing evidence, retrospective criteria, unbound attempts, silently weakened predicates.
-
-Neither owns the final question: **who has authority to admit a result into downstream work?**
-
-The deepest root cause is therefore not a missing dispatcher or another verifier. It is **missing admission control**. “Done” currently conflates four separate facts:
-
-1. The agent stopped.
-2. An artifact appeared.
-3. The artifact satisfied predeclared criteria.
-4. The result is scientifically acceptable for downstream use.
-
-Those must remain distinct states.
-
-There is a symmetric bypass risk on the strict side. If every small task requires bespoke criteria, two plan reviewers, a fleet verifier, and human approval, users will route around the system. The corresponding three-level cause is: excess ceremony → contracts are bespoke → the system lacks reusable project-approved templates and risk classes. The answer is not weaker receipts; it is cheap contract instantiation for routine work.
-
-## 1. Minimum unit: the sealed work order
-
-The minimum unit is not an agent and not a dispatcher. It is a **sealed work order**.
-
-An agent is an interchangeable executor. A dispatcher is transport. Neither is the durable object whose completion is being asserted.
-
-A work order should consist of:
+The minimum fused unit is a **contracted await**, not a new work-order subsystem:
 
 ```text
-.agent-runs/<work-id>/
-  work-order.json       immutable after sealing
-  contract/...          domain contract, or a content-bound reference to it
-  events.jsonl          append-only dispatch, binding, retry, and lifecycle events
-  attempts.jsonl        executor and scheduler attempts
-  receipts/...          verifier-produced receipts
+Paseo agent identity
++ launch constraints
++ independently measured artifact predicates
++ an authorized verifier invocation
+= one admission evaluation
 ```
 
-`work-order.json` needs at least:
+The durable components already exist:
 
-- `work_id`: random instance identity, not content-derived.
-- `issuer`: role and session/person identity.
-- `contract_type`: workflow, training, result, code change, or another registered type.
-- `contract_id` and `criteria_digest`.
-- Exact executor prompt or command digest.
-- Workspace, repository, base commit, cluster, and declared write scope.
-- Verifier command/profile and the receipt schema expected from it.
-- Acceptance policy: which receipt states admit the work.
-- Retry, timeout, and human-review policy.
-- Sealing record: when criteria became immutable and what approved them.
+- The launch record binds the worker to its execution scope.
+- The domain contract binds criteria to a contract instance.
+- The domain verifier binds its receipt to criteria and artifacts.
+- `bus await` decides whether those obligations have been met.
 
-Post-launch events bind the work order to:
-
-- Paseo agent and workspace IDs.
-- Provider/model settings as observed, not merely requested.
-- Slurm job/array IDs where applicable.
-- Attempt IDs.
-- Artifact identities.
-
-The state is derived from these files rather than trusted as a mutable agent-authored field:
+The missing operation is for `bus await` to execute the declared verifier and treat its result as another conjunctive artifact predicate:
 
 ```text
-DRAFT
-  → SEALED
-  → DISPATCHED
-  → EXECUTION_SETTLED
-  → VERIFIED | REJECTED | INCOMPLETE_EVIDENCE
-  → ADMITTED | AWAITING_HUMAN_REVIEW
+idle
+AND launch contract matches
+AND Git predicates pass, when declared
+AND verifier exits 0
+= ARTIFACT READY
 ```
 
-Only `ADMITTED` means done for downstream automation. `EXECUTION_SETTLED` is explicitly not completion.
+That is materially smaller and clearer than another state machine.
 
-## 2. Who declares the contract?
+## Should `--verifier CMD` replace the sealed work order?
 
-The rule should be:
+Yes, with one qualification: **the command needs independent authorization**.
 
-> Criteria must be authorized upstream of the executor and sealed before that executor starts.
+Adding only:
 
-There are three legitimate declaration paths.
+```text
+bus await <agent> --verifier "contract.py check ..."
+```
 
-### Project-authorized template
+would close the `--require-json` weakness relative to the worker. The worker no longer asserts `validation.passed`; `bus` executes a different process and reads its exit status.
 
-The strongest practical default for genomics work.
+But it does not close the coordinator-level self-assertion. A coordinating agent could select `/bin/true`, a lenient verifier, or a legitimate verifier pointed at a weak contract.
 
-A human or project maintainer checks a reusable contract template into the project: expected sample manifest, reference build, outputs, schemas, QC thresholds, convergence policy, and required review class. A coordinating agent may fill declared parameters such as sample set, output directory, seed, or allocation. It may not alter predicates or thresholds.
+Therefore:
 
-This removes most ceremony from routine runs.
+- Extend `bus await`; do not build a parallel controller.
+- Keep domain contracts and receipts.
+- Add a small verifier-policy mechanism only after the direct execution path works.
+- Do not call a freely chosen verifier “independently authorized.”
 
-### Independent contract author
+## What makes a claim evidence rather than assertion?
 
-For novel work, the parent coordinator may draft the contract, but the worker that will satisfy it may not author or modify it. If the coordinator is an agent, a separate plan adjudicator must approve the criteria digest before sealing.
+The distinction is not “JSON versus Git” or even “human versus agent.” It is:
 
-The existing plan-review gate is relevant, but its output needs a durable receipt bound to the exact criteria digest. The repo currently acknowledges that this binding is not enforced in [PROTOCOL.md](/Users/hani/multi-agent-skills/skills/hanig-review-gate/PROTOCOL.md:1). The previously rejected per-change round ledger should not be revived wholesale; contract authorization needs a smaller receipt that says only, “these criteria were reviewed before dispatch.”
+> Evidence is an observation made by an authority that did not control the proposition being judged, using criteria fixed before the judged execution.
 
-### Human scientific authority
+Examples:
 
-For claims such as biological validity, acceptable batch effects, model selection, or readiness for publication, an agent cannot manufacture the standard. The work order must either reference a previously approved project policy or stop at `AWAITING_HUMAN_REVIEW`.
+- The worker says `tests_passed: true`: assertion.
+- `bus` runs the test command and observes exit 0: evidence of that command’s result.
+- `bus` observes a clean worktree: evidence of cleanliness at that moment.
+- A verifier reads an agent-authored contract containing `min_rows: 1`: evidence that the artifact has one row, but no evidence that one row was an adequate criterion.
+- A human/project policy fixed `min_rows: 10000` before dispatch and a separate verifier measures it: evidence against independently authorized criteria.
 
-A retrospective contract remains useful for audit but cannot authorize `ADMITTED`.
+This supports your framing, with one rejection: a field saying `"author": "human"` does not make trusted input human-authored. On one Unix account, an agent can write the same field and file. Under the honest-but-fallible threat model, forgery is not the concern, but accidental self-authorization still is.
 
-### Enforcement
+The code must enforce provenance, not asserted identity.
 
-The dispatcher—not the prompt—enforces this:
+## Enforcing human versus agent authorization
 
-- It refuses to launch an execution-role agent unless the work order is sealed.
-- It refuses a seal whose issuer is the designated executor.
-- Agent workspaces receive the sealed contract read-only where practical.
-- Any change to the criteria digest invalidates the seal and requires a new work-order instance.
-- An executor may append evidence and observed bindings but cannot replace criteria.
-- The admission controller reruns the declared verifier; it does not trust a receipt merely because one exists.
+Do not add `issuer` and `executor` strings and compare them. That was weak.
 
-This prevents accidental self-assertion. It is not tamper-proof against a malicious same-user process; that limitation must remain explicit.
+Use two mechanically distinguishable authority classes.
 
-## 3. What a real three-cluster genomics fleet still needs
+### 1. Project-authorized criteria
 
-Neither repository currently supplies the full cross-host control loop.
+The acceptance policy exists at the declared base commit before the worker launches.
 
-- **Durable identity across layers.** One work ID must connect the Paseo agent, remote checkout, Slurm job and array elements, training attempt, artifacts, verifier receipt, and handoff.
+The await/launch machinery reads it from the Git object database:
 
-- **Remote verifier execution.** Large artifacts should be checked on lambda, andromeda, or chimera. Pulling data back to the Mac is frequently impossible and sometimes scientifically wrong because it changes the environment being certified.
+```text
+git show <base-commit>:<policy-path>
+```
 
-- **Connection-loss recovery.** The control plane must distinguish an unreachable cluster from a failed job and from incomplete evidence. A Mac sleep, SSH interruption, or accounting delay cannot erase ownership of a running job.
+It does not read the worker’s current worktree copy.
 
-- **Idempotent dispatch and reconciliation.** After restart, the controller must discover whether it already launched the agent or submitted the Slurm job before attempting either again.
+The policy fixes:
 
-- **Array-aware and DAG-aware receipts.** A 10,000-sample array needs per-element outcomes plus an aggregation policy. “9,997 passed” is neither total failure nor scientific pass unless the contract declared the permitted missingness.
+- Verifier argv or an allowed verifier identifier.
+- Contract type.
+- Which criteria are locked.
+- Which fields may be instantiated per run.
+- Required success state and receipt fields.
+- Whether human scientific review is required.
 
-- **Dataset and reference identity.** Sample sheets, genome assemblies, annotations, tokenizer/model versions, train/validation splits, and immutable dataset manifests need first-class identities using the existing identity ladder.
+The machine can prove that this policy predates the worker and that the worker’s edits cannot change what is invoked. “Human-authorized” is then a repository trust assumption: humans approve the base revision. That matches the existing trusted-input threat model.
 
-- **Storage locality and transfer provenance.** A file copied between clusters becomes a new observed artifact. The system needs source identity, destination identity, transfer verification, and an explicit statement of whether byte identity or semantic equivalence was checked.
+Fields should describe provenance rather than personalities:
 
-- **Resource and retry semantics.** Preemption, OOM, wall-clock exhaustion, requeue, partial checkpoints, and resumption must be attempts under one work order—not new work silently replacing old work.
+```text
+authority.kind = "base_policy"
+authority.base_commit
+authority.policy_path
+authority.policy_blob_oid
+```
 
-- **Permission boundaries and secrets.** Worker prompts and receipts must not contain credentials. Write scopes need enforcement or at least preflight/reconciliation, not only prose.
+Code enforcement:
 
-- **Scientific review routing.** Mechanical verification, adversarial code review, and human scientific acceptance are distinct receipt types. Projects need policies specifying which combination is required.
+- Resolve the exact base commit.
+- Read policy bytes from that commit.
+- Verify their blob identity.
+- Construct the verifier invocation from those bytes.
+- Refuse a policy present only in the worktree.
+- Refuse worktree changes that alter locked criteria.
+- Never accept an argv supplied by the worker as the authorized verifier.
 
-- **Downstream dependency gating.** A dependent task may consume only `ADMITTED` upstream artifacts, not merely paths produced by settled jobs.
+### 2. Independently reviewed agent-authored criteria
 
-The portable handoff machinery is valuable here, but it should carry the work-order identity and current admission state rather than becoming a second source of truth.
+This should be a later capability, not part of the first useful release.
 
-## 4. What should not be fused
+An agent may draft novel criteria, but they become authorized only through a plan-review receipt that binds:
 
-Several separations are essential.
+- The exact criteria digest.
+- The threat model digest.
+- Reviewer identities/providers.
+- A passing two-reviewer quorum.
+- A timestamp before worker launch.
+- The execution agent identity, which must not be one of the authorizing sessions.
 
-- **Do not make the message bus an evidence store.** Bus messages and completion notifications remain untrusted hints. They may point to receipts but never substitute for them.
+The present review gate does not yet emit all of that as a durable, content-bound authorization receipt. Until it does, agent-authored novel criteria should be labeled `UNAUTHORIZED_CRITERIA` and must not produce `ARTIFACT READY`.
 
-- **Do not merge agent lifecycle with result state.** `idle`, `completed`, and `notifyOnFinish` remain coordination facts only.
+That is stricter but honest. Do not ship an `author: human` field as a substitute.
 
-- **Do not treat a Git commit as a universal artifact receipt.** It is useful evidence for code work, irrelevant or insufficient for most cluster runs.
+## Revisiting the five findings
 
-- **Do not turn `paseo-loop` verifier prompts into mechanical proof.** A verifier agent provides judgment evidence. Objective checks still require domain verifiers.
+### 1. The seal is not sealed
 
-- **Do not combine design committees with refutation panels.** A committee may propose a plan. Its members must not approve their own plan. The review gate’s “reviewers refute; they do not design” boundary is correct.
+Confirmed against v1. The work-order proposal offered immutability by declaration.
 
-- **Do not combine advisor output with gating.** Advisors remain advisory.
+The revised design avoids the problem in two ways:
 
-- **Do not make model rankings part of correctness.** Model selection affects cost and capability, not whether a receipt is admissible.
+- Direct `--verifier` is process configuration for one running await, not a mutable file later reread.
+- Agent-safe automated use loads the verifier policy from the immutable base commit, not the worktree.
 
-- **Do not force one universal domain contract.** Workflow, training, results, code review, and human scientific acceptance need different criteria and states. Share the envelope, binding rules, and admission protocol—not every field.
+No signatures are needed under the stated threat model.
 
-- **Do not introduce a Paseo dependency into the verifiers.** The stdlib verifiers must remain usable on isolated login nodes. Paseo belongs above them.
+### 2. The old path bypasses admission
 
-- **Do not let skills import siblings.** Integration should occur through versioned JSON and subprocess exit/receipt protocols. Any shared parser or validator copied among independently installable skills must remain byte-identical and symmetry-tested.
+Confirmed and first priority.
 
-- **Do not claim cryptographic or scientific proof.** The system proves bounded statements under a declared threat model. Review-model agreement is evidence, not proof; structural validation is not biological correctness.
+No-contract `idle` must cease returning an ordinary success unless the caller explicitly requests lifecycle-only waiting.
 
-The key correction to the initial gap statement is: the coordination repo already verifies useful launch and Git facts, and the adjudication repo does not prove arbitrary truth. The missing capability is trustworthy composition of their bounded claims.
+The clean interface is:
+
+```text
+bus await ... <artifact predicate>
+bus await ... --lifecycle-only
+```
+
+Without either, refuse before waiting.
+
+`--lifecycle-only` should print something like:
+
+```text
+LIFECYCLE SETTLED — no artifact judgment requested
+```
+
+not “finished.”
+
+This retains valid analysis/advisor use cases without allowing accidental admission.
+
+### 3. No independent contract authorizer
+
+Confirmed against v1.
+
+Comparing claimed identities does not solve it. Base-commit policy provenance does. Independently reviewed agent-authored policies can follow later.
+
+### 4. ADMITTED does not freeze artifacts
+
+Confirmed—and the right response is to remove universal `ADMITTED`, not build a generic freezer.
+
+`ARTIFACT READY` means “the predicates held when `bus await` ran.” The verifier receipt must say when and what digests it judged.
+
+Downstream consumers have three honest options:
+
+- Rerun the verifier immediately before consumption.
+- Consume content-addressed or otherwise immutable outputs.
+- Use a domain-specific promotion step that copies or renames verified outputs into an immutable release location.
+
+A generic bus cannot freeze arbitrary Slurm outputs, checkpoints, directories, databases, or object-store paths. Leave that out.
+
+Also, once an await returns ready, automated retries must stop. A later retry creates new evidence and requires a new await evaluation.
+
+### 5. Human review is a dead end
+
+Confirmed against v1, but mostly created by my unnecessary global state machine.
+
+Human review belongs inside the applicable domain contract:
+
+- `result.py review` already writes a review bound to exact output digests.
+- Rerunning `result.py check` can then reach its success state.
+- `bus await --verifier ...` reruns that verifier and observes exit 0.
+
+For domains without a review transition, the domain verifier must define one or explicitly stop at mechanically validated. The bus should not invent a generic human-review state it cannot complete.
+
+## What should remain separate
+
+- `--require-json` may remain as a supporting coordination assertion, but it must not be sufficient by itself for `ARTIFACT READY`.
+- Model reviewers authorize claims only through a content-bound review receipt; their prose is not a verifier result.
+- The bus runs verifier commands but does not learn workflow, training, figure, table, or genomics semantics.
+- Domain verifiers remain stdlib-only and Paseo-independent.
+- Artifact immutability remains domain/storage-specific.
+- Agent-authored novel contract authorization should remain unsupported until the review gate can produce a properly bound plan receipt.
+- Per-machine deployments remain independent. Portable handoff may report other machines’ work, but no machine is the global completion authority.
 
 ## PLAN
 
-1. **Define and test the sealed work-order protocol.**
+1. **Close the no-contract exit-zero path in `bus await`.**
+
+   Change:
+
+   - Require at least one real artifact predicate, or an explicit `--lifecycle-only`.
+   - Rename the lifecycle-only verdict so it cannot be read as completion.
+   - Do not count `--status-file`/`--require-json` alone as independently verified evidence.
 
    Acceptance criteria:
 
-   - A versioned `work-order.json` schema identifies the work instance, issuer, executor role, domain contract ID/digest, execution scope, verifier, and admission policy.
-   - Criteria are sealed before any dispatch event can be recorded.
-   - Changing any criterion, verifier, acceptance state, command/prompt, or declared scope invalidates the seal.
-   - The designated executor cannot also be the sole contract authorizer.
-   - Retrospective contracts can be recorded but cannot reach `ADMITTED`.
-   - Existing workflow, training, result, and review receipts can be represented without collapsing their domain-specific states.
-   - Fixtures prove that identical criteria in a new work-order instance cannot reuse an old receipt.
-   - The protocol is stdlib-compatible and requires no sibling-skill import.
+   - `bus await AGENT` with no artifact predicate and no `--lifecycle-only` exits nonzero before polling and names both remedies.
+   - `bus await AGENT --lifecycle-only` may exit 0 on idle but prints `LIFECYCLE SETTLED` and explicitly says no artifact judgment occurred.
+   - Idle with an unmet declared predicate still exits with `IDLE WITHOUT ARTIFACT`.
+   - A non-empty agent-authored status field alone cannot produce `ARTIFACT READY`.
+   - Existing permission, error, timeout, continuation, and launch-mismatch behavior remains unchanged.
+   - Tests are added alongside `TestAwaitVerdicts`, including a shell-composition assertion that bare idle cannot unlock a following command.
 
-2. **Build receipt-based admission independently of Paseo.**
+2. **Extend `bus await` with an independently executed verifier predicate and harden its existing Git measurements.**
 
-   Acceptance criteria:
+   Change:
 
-   - Given a sealed work order, the admission command runs the declared verifier and derives state from its fresh output.
-   - It accepts only the explicitly configured success state and exit code; arbitrary truthy JSON cannot pass.
-   - The receipt must match the work ID, contract ID, criteria digest, attempt ID, and current artifact identities required by that contract type.
-   - Missing, malformed, stale, mismatched, unavailable, partial, or retrospectively produced evidence never admits the work.
-   - Mutating an artifact after a passing check causes the next admission evaluation to refuse it.
-   - Mechanical success requiring human scientific review yields `AWAITING_HUMAN_REVIEW`, not `ADMITTED`.
-   - Tests include all three existing artifact-contract tools and assert the shared binding/refusal behavior without requiring identical domain states.
-
-3. **Add the Paseo dispatch-and-reconcile adapter, starting with one vertical slice.**
-
-   First slice: one Paseo worker submits or monitors one Slurm workflow contract and returns a workflow receipt.
+   - Add a verifier command that `bus` executes locally after the agent is idle and launch constraints pass.
+   - Make verifier success conjunctive with `--base`, `--require-clean`, and other measured predicates.
+   - Give Git queries a tri-state result so “Git failed” cannot mean “clean.”
+   - Require HEAD to descend from the declared base, not merely differ from it.
 
    Acceptance criteria:
 
-   - Dispatch refuses an unsealed or unauthorized work order.
-   - The recorded launch binding matches the observed Paseo agent, workspace, cwd, provider/model settings, base revision, and declared write scope.
-   - Agent `idle`, a clean commit, a status-file claim, and Slurm `COMPLETED` are each independently demonstrated insufficient for admission.
-   - On lifecycle settlement, the adapter invokes the admission command; only `ADMITTED` unlocks downstream work.
-   - Retries and Slurm requeues create new attempts under the same work ID and cannot reuse prior-attempt receipts.
-   - Restarting the controller reconciles existing Paseo and Slurm identities without duplicate launch or submission.
-   - Cluster unreachability produces `INCOMPLETE_EVIDENCE`, preserves the work binding, and can be retried safely.
-   - An end-to-end fixture proves both paths: `idle + commit + no valid receipt` is refused; a fresh, correctly bound verifier receipt is admitted.
+   - Verifier exit 0 plus all other predicates passing yields `ARTIFACT READY`.
+   - Verifier nonzero, timeout, missing executable, signal termination, or unreadable required receipt never yields exit 0.
+   - Verifier stdout/stderr are bounded and included as evidence without becoming the verdict source.
+   - The verifier runs in the inspected agent cwd unless an explicit, validated cwd is declared.
+   - The command is executed without an implicit shell, or the interface explicitly documents and tests its trusted-command threat boundary.
+   - `--require-clean` fails closed when Git errors or times out.
+   - An unrelated Git history with `HEAD != base` fails the ancestry check.
+   - A worker-authored `status.json` claiming success cannot override a failing verifier.
+   - Tests use fake verifier executables and cover success, failure, timeout, malformed receipt, conjunction with Git predicates, and retry after initially incomplete evidence.
+
+3. **Authorize verifier selection through a base-commit policy; defer agent-authored policy authorization.**
+
+   Change:
+
+   - Add a small versioned acceptance-policy format loaded from the declared base commit.
+   - The policy fixes verifier argv, contract type, locked criteria, allowed run parameters, expected success state, and required receipt bindings.
+   - Automated agent workflows must use this policy path. Freely supplied verifier commands are caller-authorized/manual mode and must be reported as such.
+
+   Acceptance criteria:
+
+   - The policy is read from `git show <base>:<path>`, never from the worker’s worktree.
+   - The observed base commit and policy blob identity are recorded in the launch/await report.
+   - Editing the worktree policy to replace the verifier with a lenient command has no effect on the invoked verifier.
+   - A policy added only after the base commit is refused.
+   - A run contract that weakens a locked criterion is refused before verifier execution.
+   - Only explicitly declared parameter fields may vary per run; an unread or unknown field is refused.
+   - The verifier receipt must bind the domain contract ID, criteria digest, and current artifact identities required by its policy.
+   - No `author: human` field is trusted as evidence.
+   - Agent-authored novel policies without a content-bound independent plan-review receipt return `UNAUTHORIZED_CRITERIA`; building that receipt path is explicitly deferred.
