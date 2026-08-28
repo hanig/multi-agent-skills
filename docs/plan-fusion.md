@@ -1,7 +1,7 @@
 # Plan: fuse coordination with adjudication
 
 > **STATUS: v1 REJECTED. Plan review 2026-08-28, deepseek-v4-pro + luna,
-> quorum 2, both verdicts in. 6 MAJOR findings, 2 found independently by both.
+> quorum 2, both verdicts in. 6 MAJOR findings, 2 found independently by both; 1 later voided by an architectural correction from Hani, so 5 stand.
 > Author gpt-5.6-sol excluded from the panel.**
 >
 > The direction is endorsed: one system at the level of authority and state,
@@ -24,12 +24,31 @@
 > together after all: removing the admission layer would not break the system,
 > because the old path still works.
 >
-> **3. The verifier cannot run where the artifacts are (deepseek).** THE FATAL
-> ONE for this user. Artifacts land on lambda, andromeda or chimera; the
-> admission controller runs on the Mac, cannot reach them, and returns
-> INCOMPLETE_EVIDENCE forever -- blocking honest work on the primary use case.
-> A system that blocks legitimate science gets switched off, and then it
-> prevents nothing.
+> **3. ~~The verifier cannot run where the artifacts are~~ (deepseek) --
+> VOID, on Hani's correction 2026-08-28.** The finding assumed a central
+> controller on the Mac reaching out to clusters. That is not the architecture:
+>
+> > "The controller will be on each machine. I'm not planning to control
+> > everything from a Mac... projects on each server will be controlled from
+> > that server. I'm just making a uniform tooling here."
+>
+> So the verifier ALWAYS runs where the artifacts are, because the controller
+> is local to them. There is no remote-verification problem, no cross-machine
+> artifact transport, and no credential path to design. "Distributed admission"
+> is not a hard problem here; it is the default, and the unit of deployment is
+> the machine.
+>
+> The assumption was MINE, not sol's and not deepseek's: I wrote the problem
+> statement that framed this as a fleet dispatched from one place, and both
+> reasoned correctly from what I gave them. Ask what the topology is before
+> designing for one.
+>
+> **What this changes.** The install story carries weight the design does not:
+> identical tooling must land on the Mac, lambda, andromeda and chimera and
+> behave identically, which is exactly why skills install individually
+> (`install.sh --only NAME`) with no sibling imports. Peer messaging becomes
+> notification between equals, never control. Nothing in the fusion needs to
+> move an artifact.
 >
 > **4. Nothing requires an independent contract authorizer (luna).** The prose
 > calls for a separate adjudicator when a coordinator is an agent; the FIELDS
@@ -51,9 +70,8 @@
 > rather than an assertion, when the threat model says contract files are
 > trusted input? That trust is defensible for a human author and NOT
 > defensible for an agent author, and v1 did not notice the difference.
-> Finding 3 is independent and may be the harder engineering problem: the
-> verifier must run where the artifacts are, which means admission is
-> distributed, not central.
+> Finding 3 is void: admission is per-machine by design, so the verifier is
+> always co-located with the artifacts it judges.
 >
 > Finding 2 is the cheapest and the most urgent: as long as `bus await` accepts
 > an agent-authored status, none of the rest matters.
