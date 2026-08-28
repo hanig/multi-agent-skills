@@ -67,11 +67,10 @@ class ConformanceCase(unittest.TestCase):
     named reason for one that does not."""
 
     def each_tool(self):
-        for name in TOOLS:
-            if not present(name):
-                continue
-            with self.subTest(tool=name):
-                yield name
+        """Every tool that exists. NOT a generator wrapping subTest: a failure
+        inside a `with subTest` in a generator surfaces as GeneratorExit and
+        reports the real assertion twice, once uninterpretably."""
+        return [n for n in TOOLS if present(n)]
 
     def assert_all_tools_present_or_skipped(self):
         missing = [n for n in TOOLS if not present(n)]
