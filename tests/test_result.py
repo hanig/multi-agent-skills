@@ -283,5 +283,85 @@ class TestRefusalsAndScope(Base):
         self.assertTrue(scope["structure_only"])
 
 
+class TestPhase3Findings(unittest.TestCase):
+    """Both committee members found these independently, reviewing against
+    criteria they had written themselves. Neither was caught by my own 23
+    tests, which is the point of Phase 3."""
+
+    def test_achievements_are_cumulative(self):
+        """FINDING B. evaluate() took the HIGHEST fired achievement, so
+        `checks_passed` without `outputs_exist` returned VALIDATED: a false pass
+        in a tool whose only job is refusing them."""
+        st, rc, _ = result.evaluate({"checks_passed"})
+        self.assertNotEqual(st, "VALIDATED",
+                            "checks_passed alone reached VALIDATED with no "
+                            "output in existence")
+        st, _, _ = result.evaluate({"accepted_by_person"})
+        self.assertNotEqual(st, "REVIEWED",
+                            "a review alone reached REVIEWED")
+        # And the honest ladder still climbs.
+        self.assertEqual(result.evaluate({"outputs_exist"})[0], "GENERATED")
+        self.assertEqual(
+            result.evaluate({"outputs_exist", "checks_passed"})[0], "VALIDATED")
+
+
+class TestStaleUsesBuildTimeDigests(Base):
+    """FINDING A. STALE compared DECLARE-time digests to current, which
+    criterion 11 forbids verbatim, and CONTRACT_DRIFTED was unreachable because
+    nothing recorded what the build consumed."""
+
+    def test_build_records_the_digests_it_consumed(self):
+        self.declare()
+        cli("build", str(self.tmp), cwd=str(self.tmp))
+        line = (self.tmp / "attempts.jsonl").read_text().strip().splitlines()[-1]
+        attempt = json.loads(line)
+        self.assertIn("consumed_inputs", attempt,
+                      "the build recorded no consumed digests, so STALE can "
+                      "only compare declare-time to now -- the attribution "
+                      "criterion 11 forbids")
+        self.assertIn("in.tsv", attempt["consumed_inputs"])
+
+    def test_edit_build_revert_is_drift_not_a_pass(self):
+        """The case a declare-time baseline false-PASSES: an input is changed,
+        the build consumes the changed version, then the input is reverted. The
+        declared digest matches the current file, so a declare-vs-now
+        comparison sees nothing wrong."""
+        original = (self.tmp / "in.tsv").read_text()
+        self.declare("--check", json.dumps({"kind": "exists",
+                                            "path": "fig.txt"}))
+        (self.tmp / "in.tsv").write_text("gene\tval\nEDITED\t9.9\n")
+        cli("build", str(self.tmp), cwd=str(self.tmp))
+        (self.tmp / "in.tsv").write_text(original)      # revert
+        r = cli("check", str(self.tmp), cwd=str(self.tmp))
+        self.assertNotEqual(
+            r.returncode, result.STATES["VALIDATED"],
+            f"an edit-build-revert passed as VALIDATED:\n{r.stdout}")
+        self.assertIn("build time", r.stdout)
+
+    def test_an_honest_rebuild_is_not_false_alarmed(self):
+        """The other horn: a declare-time baseline FALSE-ALARMS an honest
+        rebuild after a legitimate input change."""
+        self.declare("--check", json.dumps({"kind": "exists",
+                                            "path": "fig.txt"}))
+        (self.tmp / "in.tsv").write_text("gene\tval\nMYC\t9.9\n")
+        cli("build", str(self.tmp), cwd=str(self.tmp))   # rebuild AFTER the edit
+        r = cli("check", str(self.tmp), cwd=str(self.tmp))
+        self.assertNotEqual(
+            r.returncode, result.STATES["STALE"],
+            f"an honest rebuild after an input change was called STALE:\n"
+            f"{r.stdout}")
+
+    def test_contract_drifted_is_reachable(self):
+        """It was dead code: with no consumed digests there was nothing to
+        compare the declared ones against."""
+        self.declare("--check", json.dumps({"kind": "exists",
+                                            "path": "fig.txt"}))
+        (self.tmp / "in.tsv").write_text("changed before the build\n")
+        cli("build", str(self.tmp), cwd=str(self.tmp))
+        r = cli("check", str(self.tmp), cwd=str(self.tmp))
+        self.assertEqual(r.returncode, result.STATES["CONTRACT_DRIFTED"],
+                         f"CONTRACT_DRIFTED unreachable:\n{r.stdout}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

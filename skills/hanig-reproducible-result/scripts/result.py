@@ -190,10 +190,16 @@ def evaluate(hits):
                     reasons.append(_explain(later))
             return gate["state"], STATES[gate["state"]], reasons
 
+    # Achievements are CUMULATIVE: each requires every achievement below it.
+    # Taking the highest FIRED one let a result with no outputs and no declared
+    # checks reach VALIDATED, because `checks_passed` fired vacuously -- a false
+    # pass in a tool whose whole job is refusing them. Found independently by
+    # both committee members reviewing against criteria they wrote.
     reached = None
     for gate in _ACHIEVEMENTS:
-        if gate["id"] in fired:
-            reached = gate
+        if gate["id"] not in fired:
+            break
+        reached = gate
     if reached is None:
         g = dict(id="nothing_established", state="INCOMPLETE_EVIDENCE",
                  why="no declared output exists",
@@ -517,6 +523,16 @@ def cmd_build(args):
 
     after = {str(o): fingerprint(_abs(o, cwd)) for o in outputs}
 
+    # The digests this BUILD consumed, captured at build time. Criterion 11
+    # names the alternative verbatim as forbidden: "never by the declared
+    # digests: a declare-time digest standing in for what the build used is an
+    # attribution, and it false-alarms an honest rebuild while false-passing an
+    # edit-build-revert." I shipped exactly that, and both reviewers caught it.
+    # Without this field CONTRACT_DRIFTED is also unreachable, because there is
+    # nothing to compare the declared digests against.
+    consumed = {str(i): fingerprint(_abs(i, cwd))
+                for i in (contract.get("declared_inputs") or [])}
+
     production = {}
     for o in outputs:
         o = str(o)
@@ -549,6 +565,7 @@ def cmd_build(args):
         "stdout_tail": (out or "")[-4000:],
         "stderr_tail": (err_text or "")[-4000:],
         "production": production,
+        "consumed_inputs": consumed,
         "double_render": None,
     }
 
@@ -845,14 +862,36 @@ def gather(run_dir, contract, args):
     if present:
         hits.add("outputs_exist")
 
-    # --- inputs: drift vs staleness, both by content -----------------------
+    # --- inputs: drift vs staleness, both by content, both from the BUILD ---
+    # Two comparisons, three digests of the same path, no timestamps:
+    #   declared (at declare) vs consumed (at build)  -> CONTRACT_DRIFTED
+    #   consumed (at build)   vs current (now)        -> STALE
+    # Comparing declared directly to current is what criterion 11 forbids: it
+    # false-alarms an honest rebuild and false-passes an edit-build-revert.
     declared = contract.get("input_digests") or {}
-    for i, was in declared.items():
-        now = fingerprint(_abs(i, cwd))
-        if was.get("sha256") and now.get("sha256") \
-                and was["sha256"] != now["sha256"]:
-            hits.add("inputs_changed_since_build")
-            notes.append(f"input {i} differs from the declared digest")
+    consumed = latest.get("consumed_inputs")
+    if consumed is None:
+        # An attempt from before consumed_inputs was recorded cannot support
+        # either verdict. Refuse rather than fall back to the declared digests.
+        if declared:
+            hits.add("check_could_not_run")
+            notes.append("this attempt predates consumed-input recording, so "
+                         "neither drift nor staleness can be judged. Re-run "
+                         "`result.py build`.")
+    else:
+        for i, was in declared.items():
+            at_build = (consumed.get(i) or {}).get("sha256")
+            if was.get("sha256") and at_build and was["sha256"] != at_build:
+                hits.add("consumed_differs_from_declared")
+                notes.append(f"input {i} differed from its declared digest at "
+                             f"build time")
+        for i, at in consumed.items():
+            now = fingerprint(_abs(i, cwd))
+            if at.get("sha256") and now.get("sha256") \
+                    and at["sha256"] != now["sha256"]:
+                hits.add("inputs_changed_since_build")
+                notes.append(f"input {i} changed after the build that consumed "
+                             f"it")
 
     # --- determinism -------------------------------------------------------
     if contract.get("deterministic"):
@@ -877,10 +916,15 @@ def gather(run_dir, contract, args):
         if not could_run:
             hits.add("check_could_not_run")
     ev["checks"] = results
+    # An EMPTY check set is not a pass. "Nothing declared, nothing unmet" reads
+    # as reasonable and is exactly how a result with no outputs reached
+    # VALIDATED. A contract that declares no checks has established GENERATED at
+    # most: the command ran, and nothing examined what it produced.
     if results and all(r["ok"] and r["could_run"] for r in results):
         hits.add("checks_passed")
     elif not results:
-        hits.add("checks_passed")   # nothing declared, nothing unmet
+        notes.append("no checks were declared, so nothing beyond existence was "
+                     "examined. Add --check at declare time to reach VALIDATED.")
 
     # --- review ------------------------------------------------------------
     for rev in _reviews(run_dir):
