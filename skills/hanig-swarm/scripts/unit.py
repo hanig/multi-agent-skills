@@ -86,6 +86,14 @@ EVENTS = "events.jsonl"
 RECEIPT = "receipt.json"
 KINDS = ("slurm", "pipeline", "code")
 
+# Constants the LIFTED code needs. Both were missing, and neither
+# py_compile nor 22 local tests could see it: off-cluster there is no `sacct`,
+# so sacct_state returns before it ever reaches sacct_row_is_ours. One real job
+# on lambda found it immediately. Third variant of one defect class today --
+# missing callee, missing import, now missing constant.
+OWNERSHIP_SLACK_S = 1              # seconds of clock slack when binding a row
+MAX_DIR_ENTRIES_SCANNED = 20_000   # bound on a directory freshness walk
+
 # Slurm states that mean "this attempt is over and it did not succeed".
 SLURM_FAILED = {"FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL",
                 "BOOT_FAIL", "DEADLINE", "REVOKED", "SPECIAL_EXIT"}

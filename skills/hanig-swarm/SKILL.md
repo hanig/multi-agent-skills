@@ -89,4 +89,24 @@ reuse, `0:0` on a CANCELLED job not counting as success, `End` arriving as the
 literal `Unknown`, states containing spaces (`CANCELLED by 10025`), and a
 timezone bug that made one instant read as three epochs nine hours apart.
 
+## Cluster gotchas, paid for on lambda 2026-08-28
+
+**`--mem` is REQUIRED on lambda**, and `sbatch --test-only` does NOT enforce it.
+Without it a real submission fails with Slurm's most misleading message,
+"Requested node configuration is not available", while `--test-only` accepts the
+identical flags. Put `--mem=` in every unit's `sbatch` list. Fourth time in one
+session that test-only and real submission disagreed.
+
+**`--test-only` start times are pessimistic.** It predicted 22:08 for a job that
+started and finished within one second of submission. Do not use its estimate to
+decide whether to wait.
+
+**A lift needs its callees, its imports AND its constants.** All three were
+missing at some point in this module. The constants were the expensive ones:
+`OWNERSHIP_SLACK_S` and `MAX_DIR_ENTRIES_SCANNED` were absent, `py_compile` was
+clean, and 22 local tests passed -- because off-cluster there is no `sacct`, so
+`sacct_state` returns before it can reach `sacct_row_is_ours`. One real job found
+it in seconds. `tests/test_swarm.py::TestTheLiftIsClosed` now checks all three on
+the AST, and is verified to fail when a constant is renamed.
+
 Python 3.8+, stdlib only, login-node safe, no network.

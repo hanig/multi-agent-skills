@@ -282,5 +282,102 @@ class TestCoordinator(Base):
             self.assertIn(uid, r.stdout)
 
 
+class TestTheLiftIsClosed(unittest.TestCase):
+    """A lifted helper needs its CALLEES, its IMPORTS and its CONSTANTS.
+
+    All three bit in one day. The constant was the expensive one:
+    OWNERSHIP_SLACK_S and MAX_DIR_ENTRIES_SCANNED were missing, py_compile was
+    clean, and 22 local tests passed -- because off-cluster there is no `sacct`,
+    so sacct_state returns before it can reach sacct_row_is_ours. One real job
+    on lambda found it immediately.
+
+    AST-based, never textual. My first version regexed ALL-CAPS words and
+    reported 90 false positives out of docstring prose; the second missed that
+    `A, B = 0, 1` has a Tuple target, not a Name."""
+
+    FILES = (SCRIPTS / "unit.py", SCRIPTS / "swarm.py")
+
+    def _assigned(self, tree):
+        import ast
+        out = set()
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Assign):
+                for t in n.targets:
+                    if isinstance(t, ast.Name):
+                        out.add(t.id)
+                    elif isinstance(t, (ast.Tuple, ast.List)):
+                        out |= {e.id for e in t.elts
+                                if isinstance(e, ast.Name)}
+            elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+                out.add(n.target.id)
+        return out
+
+    def _imported(self, tree):
+        import ast
+        out = set()
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Import):
+                out.update(a.asname or a.name.split(".")[0] for a in n.names)
+            elif isinstance(n, ast.ImportFrom):
+                out.update(a.asname or a.name for a in n.names)
+        return out
+
+    def test_every_constant_the_lift_uses_is_defined(self):
+        import ast
+        for f in self.FILES:
+            tree = ast.parse(f.read_text())
+            loads = {n.id for n in ast.walk(tree)
+                     if isinstance(n, ast.Name)
+                     and isinstance(n.ctx, ast.Load)
+                     and n.id.isupper() and len(n.id) > 2}
+            missing = sorted(loads - self._assigned(tree) - self._imported(tree))
+            self.assertFalse(
+                missing,
+                f"{f.name} references undefined constant(s) {missing}. A lifted "
+                f"helper needs its constants, and no local test can reach the "
+                f"code path that would raise -- there is no sacct here.")
+
+    def test_every_module_the_lift_uses_is_imported(self):
+        import ast
+        STDLIB = {"os", "sys", "re", "json", "time", "stat", "shutil", "signal",
+                  "subprocess", "hashlib", "calendar", "argparse", "math",
+                  "tempfile", "fnmatch", "pathlib"}
+        for f in self.FILES:
+            tree = ast.parse(f.read_text())
+            used = {n.value.id for n in ast.walk(tree)
+                    if isinstance(n, ast.Attribute)
+                    and isinstance(n.value, ast.Name)}
+            missing = sorted((used & STDLIB) - self._imported(tree))
+            self.assertFalse(missing, f"{f.name} uses {missing} unimported")
+
+    def test_the_module_actually_executes(self):
+        """py_compile only parses. Executing is what surfaced the missing
+        import; calling is what surfaces a missing callee."""
+        import importlib.util as iu
+        for f in self.FILES:
+            spec = iu.spec_from_file_location(f.stem + "_probe", f)
+            mod = iu.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+
+    def test_the_ownership_slack_is_actually_used(self):
+        """Non-vacuity: the constant must be REACHED by the function that
+        needed it, not merely defined at the top of the file.
+
+        Done on the AST. A 1200-character window after the `def` caught only
+        the docstring, which is long here -- a textual window is fragile in
+        exactly the way this whole test class is about."""
+        import ast
+        tree = ast.parse((SCRIPTS / "unit.py").read_text())
+        fn = next((n for n in ast.walk(tree)
+                   if isinstance(n, ast.FunctionDef)
+                   and n.name == "sacct_row_is_ours"), None)
+        self.assertIsNotNone(fn, "sacct_row_is_ours was not lifted at all")
+        names = {n.id for n in ast.walk(fn)
+                 if isinstance(n, ast.Name)}
+        self.assertIn("OWNERSHIP_SLACK_S", names,
+                      "the constant is defined but the function that needs it "
+                      "does not reference it")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
