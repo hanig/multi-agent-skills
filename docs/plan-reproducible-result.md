@@ -1,4 +1,4 @@
-# Plan v6 — hanig-reproducible-result
+# Plan v7 — hanig-reproducible-result
 
 Regenerate and verify figures, tables, benchmark results and exports with
 input-to-output provenance.
@@ -182,6 +182,43 @@ it actually checked. This is a limit, not a defect to be fixed later: closing it
 needs syscall tracing, which the stdlib cannot do and which would drag every
 system library into the same trap described above.
 
+## How an artifact names its contract, exactly
+
+v6 said `check` verifies that the attempt names this contract instance, and
+never said how an artifact does that. A committee found it by being asked what
+was MISSING rather than what was wrong: **the trust gate was checking a
+self-assertion, not evidence** (deepseek-v4-pro). A PNG cannot carry a
+contract_id, a user can write a sidecar by hand, and nothing stopped either.
+
+**The binding is a manifest, not a per-artifact marking.** `build` writes
+`result-manifest.json` next to the contract, containing, for every declared
+output: its path, its digest, its size, and the `contract_id` and
+`attempt_id` of the build that produced it. `check` trusts an output only when
+the manifest names it AND the digest still matches AND the manifest names this
+contract instance.
+
+Three properties, and the third is the one that matters:
+
+1. **No artifact is modified.** Figures, CSVs and PDFs stay byte-identical to
+   what the generator wrote. Embedding provenance in the artifact would change
+   the bytes whose reproducibility is the thing being judged.
+2. **A hand-written manifest cannot fake a build**, because the manifest alone
+   is never sufficient: `check` also requires an attempt record whose
+   `attempt_id` matches, and the attempt is written by `build` with the
+   command's real exit code. Forging both is possible for anyone who can edit
+   the directory, which the threat model already places out of scope: a
+   `command` predicate runs unsandboxed, so directory write access is total
+   authority already.
+3. **The manifest is evidence about the past, not an assertion about the
+   present.** The digests it carries are compared against the files as they
+   stand now, so a manifest that was accurate when written becomes detectably
+   wrong the moment an output changes. That is what makes it evidence rather
+   than a claim.
+
+**Stated residual:** this binds artifacts to a build, not to a *correct* build.
+An honest manifest for a wrong figure is still `VALIDATED`. Only `review`,
+which requires a named person, ever asserts more.
+
 ## `result.py build <result_dir> [--double]`
 
 Executes the declared command, bounded by a watchdog, capturing rc and output
@@ -280,7 +317,58 @@ this is stated rather than pretended away:
   A consumer trusting a receipt without running `check` is trusting a
   photograph. Said in the receipt itself, not only here.
 
-## Acceptance criteria (24)
+## Why this is a third tool and not a shared core
+
+A committee was asked, before any code was written, whether a third
+near-identical tool is right at all, given that the sibling-miss class -- a
+rule applied to one twin and not the other -- has hit this repo 19 times with
+only two tools. Both members first said no: extract a byte-identical shared
+core, copied per skill, enforced by a symmetry test.
+
+**Both then withdrew that recommendation when challenged with the evidence.**
+That mechanism already exists here. `contract.py` and `traincontract.py`
+already share byte-identical helpers, and `tests/test_symmetry.py` already
+asserts byte-identity, checks each copy carries its constants and callees, and
+CALLS each copy so a missing callee fails rather than merely compiling. The 19
+misses happened anyway, because almost none of them were IN the copied
+helpers. They were in the policy around them, and one was two functions in a
+single file (quorum gating a PASS but not a FAIL, fixed in `escalate()` and
+missed in `decide_state()`).
+
+luna: *"the dominant defect class is policy symmetry and duplicated decision
+logic, not copied-helper drift."* Extraction addresses the part of the problem
+that was already solved.
+
+**So the anti-drift mechanism is a cross-tool CONFORMANCE SUITE**, not a larger
+core. `tests/test_conformance.py` drives all three tools through one abstract
+interface and fails when they disagree on behaviour meant to be identical,
+while explicitly exempting what is legitimately tool-specific:
+
+| must agree | may differ |
+|---|---|
+| an unbound record is never trusted, for rc, digests or any other field | state names |
+| absent evidence is never a pass | numeric codes |
+| a criterion with an unread key is refused, not defaulted | domain criteria |
+| every refusal names an action | which artifacts are judged |
+| disqualifiers outrank achievements | which disqualifiers exist |
+| a receipt names the contract instance it judged | receipt field names |
+
+Each row is a rule that has already been missed in one tool and not its twin.
+The suite is written BEFORE `result.py`, so the third tool is born conformant
+rather than audited into conformance later.
+
+## On the state numbering
+
+`result.py` keeps its own numbering, ordered by its own severity rather than a
+sibling's. The committee split and then converged: luna withdrew the objection
+outright, since nothing dispatches on a numeric code across tools and each CLI
+is invoked by name; deepseek maintained the principle but withdrew the
+renumbering, asking only for a documented convention. The convention, now
+stated: **0 is fully done in every tool of this family, and every non-zero code
+is documented per tool.** Nothing else is promised across tools, and the
+conformance suite tests behaviour rather than numbers.
+
+## Acceptance criteria (27)
 
 1. `REVIEWED` is reachable only through `review`, and only from `VALIDATED`.
 2. A review is invalidated by any subsequent change to the digests it recorded,
@@ -344,6 +432,17 @@ this is stated rather than pretended away:
 24. The consumed-input set is exactly the declared inputs, digested at build
    time. The tool never traces file access, and the receipt states that an
    undeclared input is not covered.
+
+25. `build` writes `result-manifest.json` binding every declared output to a
+   digest, a `contract_id` and an `attempt_id`. `check` trusts an output only
+   when the manifest names it, the digest still matches, and an attempt with
+   that `attempt_id` exists. No artifact is modified to carry provenance.
+26. `tests/test_conformance.py` exists and drives all three tools through one
+   interface, asserting the shared-behaviour rows above and exempting the
+   tool-specific ones. It is written BEFORE `result.py`.
+27. The receipt states, in words, that provenance covers the DECLARED inputs
+   only, and carries that limitation in a machine-readable field so a consumer
+   can see the claim's boundary without parsing prose.
 
 ## Out of scope
 Visual design, narrative, plot aesthetics. Rendering engines. Anything needing
