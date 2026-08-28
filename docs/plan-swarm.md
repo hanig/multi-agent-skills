@@ -290,19 +290,54 @@ Acceptance criteria:
   tickets unattended is a swarm that spams a shared workspace.
 - f. A dry run prints the issues it WOULD create or move, and creates nothing.
 
-**7. `grill-me`: adversarial questioning as a swarm skill.**
+**7. `grill-me`: interrogate the HUMAN before dispatching anything.**
 
-Hani asked to onboard it as part of this. NOT FOUND on this machine: not in
-`~/.claude/skills`, `~/.agents/skills`, the Box stranded set
-(`grant-writing`, `lab-update`, `literature-digest`, `manuscript-drafting`), the
-org store, or a claude.ai skill search. **Blocked pending a pointer from Hani.**
+FOUND on chimera, byte-identical in three colleagues' skill directories
+(`rishiv`, `ivyliu`, `aadduri`), now installed on this Mac along with its
+richer variant `grill-with-docs`. My earlier guess -- "adversarial questioning,
+belongs beside paseo-committee" -- was wrong in the way that matters. Its ten
+lines:
 
-Working assumption, to be corrected: it interrogates a plan or a claim by asking
-progressively harder questions. If so it belongs at the PLAN boundary, next to
-`paseo-committee`, and its natural place in this system is step 6's ticket
-generation -- grilling a proposed project into a unit DAG before anything is
-dispatched, which is where a bad plan is cheapest to catch. Do not design around
-this until the skill is in hand.
+> Interview me relentlessly about every aspect of this plan until we reach a
+> shared understanding. Walk down each branch of the design tree, resolving
+> dependencies between decisions one-by-one. **For each question, provide your
+> recommended answer.** Ask the questions one at a time. **If a question can be
+> answered by exploring the codebase, explore the codebase instead.**
+
+**It is the input side, not another reviewer.** `paseo-committee` is two AI
+agents arguing with each other; `review.py` is a panel attacking a claim. Both
+are AI-to-AI. `grill-me` extracts the decisions only Hani holds, one at a time,
+with a recommendation attached so answering is cheap.
+
+That gap is measurable in this very session. Three times a wrong assumption of
+mine survived into built work: the mandate ("make it my own" narrowed to
+"extract one idea", recorded as settled premise and quoted back for three days),
+the topology (a fleet dispatched from a Mac, when the controller is per-machine),
+and the goal itself ((a) verified evidence vs (b) an autonomous swarm -- days of
+verifiers before it surfaced). Each was one question with a recommended answer.
+Each cost more than the question would have.
+
+`grill-with-docs` adds domain awareness: it challenges the plan against existing
+documentation, sharpens terminology, and updates `CONTEXT.md` / ADRs inline as
+decisions crystallise. It carries `disable-model-invocation: true`, so it runs
+only when asked for by name.
+
+Acceptance criteria:
+
+- a. Before a swarm plan is dispatched for the first time, its open decisions
+  have been grilled: every `NEEDS A DECISION` and every `ASSUMPTION:` line is
+  either answered by Hani or explicitly deferred by him, not by me.
+- b. **A question answerable by inspection is never asked.** Cluster limits, ssh
+  config, partition names, what a colleague's skill contains -- check, do not
+  ask. Today's `--mem` correction and this skill's own location were both one
+  command away.
+- c. Every question carries a recommended answer, so the default costs one word.
+- d. Grilling happens BEFORE step 6 files any ticket. A ticket generated from an
+  ungrilled plan propagates a wrong assumption into a shared workspace, where it
+  is expensive to retract.
+- e. What the grilling settles is written into the plan as answered, with who
+  answered it, so a later session does not silently re-derive it -- the failure
+  mode that produced "the settled premise of the repo".
 
 
 
