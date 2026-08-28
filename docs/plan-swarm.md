@@ -128,6 +128,15 @@ Two questions could not be confirmed interactively; each is answered here with t
 
 Build order is by value per line: the isolation-conclusive predicate first (smallest, load-bearing), the coordinator second (the swarm itself), the human interface third (what keeps it switched on).
 
+**Status 2026-08-28.** Steps 1 and 2 are BUILT and one real Slurm job ran end to
+end on lambda (`DONE`, exit 0). `converge.py` was ported before deleting
+`traincontract.py`. Steps 3 and 4 below are NOT built, and they are the two
+capabilities Shreshth's repo has that ours lacks: he has a Mac-local read-only
+sprint monitor, and Paseo `create_schedule` / `create_heartbeat`. Our coordinator
+was designed to detach and be re-entered by a schedule, and no schedule has ever
+been created -- so today the "autonomous" swarm only advances when a human types
+`swarm.py advance`. That is the gap between a coordinator and a swarm.
+
 **1. Unit contract + Slurm-state predicate (the load-bearing primitive).**
 A stdlib-only module (Python 3.8+, login-node safe). Allocate an exclusive, never-reused run-dir per attempt; record command, declared outputs, pinned read-only inputs, env identity, Slurm job-id, budget charge; append-only event log. `check` returns {RUNNING, DONE, FAILED, PREEMPTED, INCOMPLETE} using ONLY the surviving functions lifted from `contract.py:61-80,582-636,646-918` plus the watchdog `87-116`. Per-kind done: Slurm job = terminal-OK owned row + output-exists; pipeline = engine terminal exit + final-output-exists, receipt marks interior unjudged; code agent = delegate to `bus await`.
 
@@ -153,13 +162,60 @@ Acceptance criteria:
 - f. A pipeline unit whose engine exits non-zero is FAILED regardless of any partial outputs in the publish dir.
 
 **3. Human monitor + gated promotion (what keeps it switched on).**
-Adapt `start-a-sprint`'s loopback dashboard. Per-unit: kind, state, job-id, wall-clock, GPU-hours/cost, predicate verdict, promotion status. Reads durable state, so it works with the coordinator down. Promotion moves outputs from the exclusive dir to the declared shared canonical path only on explicit human approval, atomically, recorded (unit, digest, approver, timestamp).
+
+Adapt `start-a-sprint`'s Mac-local read-only monitor. Per unit: kind, state,
+job-id, wall-clock, GPU-hours against budget, predicate verdict, attempt count,
+promotion status. Reads durable state ONLY, so it renders with the coordinator
+stopped. Promotion moves outputs from the exclusive write root to a declared
+shared canonical path on explicit human approval, atomically, recorded.
 
 Acceptance criteria:
-- a. Dashboard shows all units with live verdicts, read-only, loopback-only (127.0.0.1), no daemon required beyond the page server.
-- b. No output reaches the shared canonical path without explicit approval; a unit with no promotion declared never touches a shared path.
-- c. Promotion is atomic (rename/link, not partial copy) and appends a record naming unit, digest, approver, timestamp.
-- d. The dashboard renders correctly while the coordinator process is stopped, reading only durable per-unit state.
+
+- a. Loopback only (127.0.0.1), read-only, no daemon beyond the page server, and
+  it renders correctly while the coordinator process is stopped.
+- b. Every unit in the plan appears with a live verdict, including HELD units and
+  the reason they are held.
+- c. Budget is shown as spent-of-declared, and a halted swarm says so on the page
+  rather than only in a log.
+- d. No output reaches a shared canonical path without explicit approval; a unit
+  that declares no promotion never touches a shared path at all.
+- e. Promotion is ATOMIC (rename or link, never a partial copy) and appends a
+  record naming unit, attempt, digest, approver and timestamp.
+- f. A promotion whose source digest no longer matches the receipt is REFUSED,
+  naming the mismatch. The receipt is evidence about a moment, and promotion
+  happens later.
+- g. The page never executes anything: no dispatch, no retry, no cancel. Reading
+  and approving are the only verbs, so a stale page cannot start work.
+
+**4. Scheduling: make `advance` run without a human (what makes it autonomous).**
+
+`swarm.py advance` is idempotent and safe to re-enter -- that was designed in at
+step 2 and has never been wired. Until it is, the swarm is a dispatcher a person
+must poke. Shreshth has this: Paseo `create_schedule` starts a fresh agent on a
+cron cadence, `create_heartbeat` returns a prompt to an existing session.
+
+Acceptance criteria:
+
+- a. One command registers a recurring `advance` for a named plan, per machine,
+  and one removes it. Registering twice does not create two schedules.
+- b. The schedule survives the session that created it, and survives a logout on
+  a cluster login node (or the plan states plainly that it does not, and says
+  what to use instead).
+- c. A failing `advance` does not silently stop the schedule; the failure is
+  visible on the monitor page from step 3.
+- d. Two `advance` runs that overlap do not double-dispatch a unit. Either a lock
+  or the existing persist-before-act ordering must be shown to cover it, with a
+  test that runs two advances concurrently against one state dir.
+- e. The cadence is declared in the plan, not hardcoded, and a unit kind whose
+  jobs run for days does not get polled every minute.
+- f. Stopping the schedule leaves the DAG resumable by hand: no state lives only
+  in the scheduler.
+
+**ASSUMPTION** (substrate): Paseo schedules, since Paseo is already a dependency
+and this adds no per-machine OS daemon. Correctable to a cron entry per machine
+without touching the unit contract, because `advance` is invoked identically
+either way. Criterion 4(b) is the one that decides it: if a Paseo schedule does
+not survive logout on a login node, cron wins.
 
 ---
 
