@@ -530,6 +530,10 @@ def contract_epoch(contract):
 # a predicate after the run to match what the run happened to produce was
 # undetectable (luna). The two tools now mean the same thing by provenance.
 DIGESTED_FIELDS = (
+    # require_production_evidence CHANGES THE VERDICT, so it must be bound:
+    # unbound, flipping it off left the digest matching and the integrity
+    # check silent. Found by audit the same day it was added.
+    "require_production_evidence",
     # What the verdict is measured against.
     "predicates", "declared_outputs", "command", "cwd",
     "retrospective", "preemption_expected", "inputs",

@@ -1012,6 +1012,8 @@ def parse_iso_ts(s):
 # metric absent from a row disqualifies convergence -- go undetected, as did
 # retargeting metrics_file or widening checkpoint_glob (luna).
 DIGESTED_FIELDS = (
+    # Verdict-affecting, therefore bound. See contract.py.
+    "require_production_evidence",
     # What the verdict is measured against.
     "converge", "diverge", "max_steps", "sparse_metric",
     "expect_eval_every", "metrics_file", "checkpoint_dir",

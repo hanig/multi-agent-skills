@@ -388,25 +388,47 @@ class TestExclusiveNamespace(Base):
         self.assertIn("exclusively", r.stdout)
 
     def test_an_honest_exclusive_run_still_passes(self):
-        """The counter-claim. A gate that fires on honest work gets removed."""
+        """The counter-claim. A gate that fires on honest work gets removed.
+
+        Declares the output in its own directory DIRECTLY rather than editing
+        the contract afterwards. The first version of this test set
+        `criteria_digest = None` to make the edit stick, which used the
+        fail-open bypass to make a test pass -- encoding a hole as expected
+        behaviour. An audit caught it the same day. A test that reaches for a
+        bypass is telling you the interface is wrong, not the test."""
         (self.tmp / "out").mkdir()
-        r = self.declare(
-            "--exclusive-outputs", "--check",
-            json.dumps({"kind": "min_size", "path": "out/fig.txt",
-                        "bytes": 1}),
-            command="wc -l < in.tsv > out/fig.txt")
+        r = cli("declare", str(self.tmp), "--command",
+                "wc -l < in.tsv > out/fig.txt",
+                "--output", "out/fig.txt", "--input", "in.tsv",
+                "--exclusive-outputs", "--check",
+                json.dumps({"kind": "min_size", "path": "out/fig.txt",
+                            "bytes": 1}),
+                cwd=str(self.tmp))
         self.assertEqual(r.returncode, 0, r.stderr)
-        # Re-point the declared output at the owned subdirectory.
-        cpath = self.tmp / "result-contract.json"
-        c = json.loads(cpath.read_text())
-        c["declared_outputs"] = ["out/fig.txt"]
-        c["criteria_digest"] = None
-        cpath.write_text(json.dumps(c))
         cli("build", str(self.tmp), cwd=str(self.tmp))
         r = cli("check", str(self.tmp), cwd=str(self.tmp))
         self.assertNotEqual(
             r.returncode, result.STATES["INCOMPLETE_EVIDENCE"],
             f"an honest exclusive run was refused:\n{r.stdout}")
+
+    def test_a_nulled_criteria_digest_is_refused(self):
+        """The bypass the test above used to rely on. Both siblings already
+        forbid it; result.py verified the digest only when truthy."""
+        self.declare()
+        cpath = self.tmp / "result-contract.json"
+        c = json.loads(cpath.read_text())
+        c["criteria_digest"] = None
+        cpath.write_text(json.dumps(c))
+        r = cli("check", str(self.tmp), cwd=str(self.tmp))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no criteria digest", r.stderr + r.stdout)
+
+    def test_verdict_affecting_flags_are_bound_to_the_digest(self):
+        """Unbound, either flag could be flipped while the digest still
+        matched, which defeats the digest entirely."""
+        for field in ("exclusive_outputs", "require_production_evidence"):
+            self.assertIn(field, result.DIGESTED_FIELDS,
+                          f"{field} changes the verdict and is not bound")
 
     def test_the_receipt_does_not_claim_attribution(self):
         """The wording correction. Three shipped tools implied the command

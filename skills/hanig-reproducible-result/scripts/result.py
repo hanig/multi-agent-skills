@@ -484,7 +484,11 @@ def cmd_declare(args):
     return 0
 
 
-DIGESTED_FIELDS = ("command", "declared_outputs", "declared_inputs",
+DIGESTED_FIELDS = (
+    # Both change the verdict, so both are bound. Unbound, either could be
+    # flipped while the digest still matched.
+    "exclusive_outputs", "require_production_evidence",
+    "command", "declared_outputs", "declared_inputs",
                    "declared_checks", "deterministic", "cwd", "contract_id")
 
 
@@ -1067,8 +1071,16 @@ def cmd_check(args):
                  f"{err or 'not a JSON object'}. Run `result.py declare "
                  f"{run_dir}` first.")
 
-    if contract.get("criteria_digest") and \
-            criteria_digest(contract) != contract["criteria_digest"]:
+    # FAIL CLOSED. Verifying only when the digest is truthy meant nulling it
+    # disabled the integrity check entirely -- the absent-field bypass, which
+    # both siblings already have tests forbidding. Every `declare` writes a
+    # digest, so an absent one is a malformed contract, not an old one.
+    declared_digest = contract.get("criteria_digest")
+    if not isinstance(declared_digest, str) or not declared_digest.strip():
+        sys.exit("error: this contract carries no criteria digest, so an edit "
+                 "to its criteria would be undetectable. Re-declare it with "
+                 "`declare --force`.")
+    if criteria_digest(contract) != declared_digest:
         sys.exit("error: the contract's criteria were edited after it was "
                  "declared, so its own digest no longer matches. Re-declare "
                  "with `declare --force`.")
