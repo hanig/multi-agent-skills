@@ -1,3 +1,61 @@
+# Proposal: harden the protocol enforcement (sol)
+
+> **STATUS: REJECTED AS SPECIFIED. Do not implement. Plan review round 2,
+> 2026-08-27: deepseek-v4-pro + luna, quorum 2, both verdicts in. 7 findings,
+> 6 MAJOR. Sol excluded as author.**
+>
+> Both reviewers independently refuted the same claim, by different mechanisms:
+> **the receipt-bound round counter locks honest authors out.**
+>
+> 1. `framing_identity` hashes the plan bytes, so ANY edit to the plan yields a
+>    new `change_id` and the implementation path then refuses the existing
+>    receipt: "supplied change id does not match". Editing your plan mid-change
+>    costs you the change (deepseek).
+> 2. The threat model explicitly permits harmless annotations, and
+>    `canonical_json_bytes` hashes the whole object, so adding a permitted
+>    `"note"` invalidates the receipt and blocks implementation. The proposal
+>    permits and forbids the same act (deepseek).
+> 3. `finish_round` consumes a round whenever `completed_count` is nonzero,
+>    below quorum included. Three flaky reviewers in a row exhaust the
+>    three-round bound and lock the author out of a change nobody reviewed
+>    (luna).
+>
+> Also confirmed: the structured threat model is satisfied by
+> `trusted=["x"], hostile=["y"], out_of_scope=["z"]`, so F8 buys ceremony and
+> not constraint (luna); a stale-reservation path with no fencing lets two
+> processes share a round number (luna); `read_text_bounded` decodes invalid
+> bytes to U+FFFD before hashing, so distinct sources produce the same evidence
+> hash and reuse a receipt (luna); and evidence identity is computed on the full
+> body while the retained copy is truncated, breaking the causal comparison F7
+> depends on (luna). F3's provider hard-coding stands from round 1.
+>
+> ## The decision this forces
+>
+> **F6 and F8 should be RETIRED, not fixed.** Both attempt to make an
+> author-attested value tamper-proof in a tool run by its own author, who can
+> edit the file anyway. Every version of that trade has cost honest work: three
+> distinct lockouts here, and a threat-model field that any three strings
+> satisfy. This repo has retired four rules as unfixable rather than ship a
+> strong-looking weak version; these are the fifth and sixth.
+>
+> The round bound stays as it is: `--round N`, refused past 3, resting on an
+> honest number. That limit is now stated in PROTOCOL.md rather than implied.
+>
+> **Worth taking from this proposal:** F10 (the `ast.Constant` version floor)
+> and F11 (the documentation contradiction), both small and real. F12's core is
+> already implemented — quorum now gates REVIEW_FAIL as well as REVIEW_PASS,
+> which round 1 exposed live. F3 is worth taking only in a softened form: an
+> unrecognised provider should WARN, never refuse, since refusing is the exact
+> defect deepseek found.
+>
+> **F7 should not be built.** Sol itself stated it can force a step-back on a
+> false causal attribution, and luna showed the evidence it reasons over can be
+> truncated. A mechanism that misfires on honest work, using evidence it cannot
+> trust, to enforce a rule that is a judgement call, is worse than the
+> judgement call.
+
+---
+
 Your F1/F2/F4/F5 changes are mostly correct, but I found two residual issues while verifying them:
 
 - `--profile plan` still implicitly sets `args.kind = "plan"`, so `--kind` is not literally required.

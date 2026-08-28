@@ -54,9 +54,19 @@ of the actual one is what made the first version bypassable):
 **Not enforced, and honestly out of reach of this tool:**
 
 - **The round bound rests on an honest `--round`.** Nothing ties a round number
-  to a change, so `--round 1` can be claimed forever. Closing it needs a
-  per-change receipt keyed to a plan digest, which is real work and not yet
-  done. Stated because an unstated limit reads as a guarantee.
+  to a change, so `--round 1` can be claimed forever. This is now a DECISION,
+  not a gap: a per-change receipt was designed, reviewed, and rejected. Both
+  plan reviewers independently showed it locks honest authors out -- editing
+  your own plan mid-change forfeits the change, adding an explicitly permitted
+  annotation invalidates the receipt, and three flaky reviewers exhaust the
+  bound on a change nobody reviewed. The gate is run by the person it
+  constrains, who can edit this file anyway; buying tamper-resistance with
+  honest-work failures is the wrong trade. See
+  `docs/proposal-protocol-hardening.md`.
+- **A structured threat model is not required.** Also designed and rejected:
+  validation that accepts `trusted=["x"], hostile=["y"], out_of_scope=["z"]`
+  buys ceremony, not constraint. The threat model stays free text, judged by
+  the reviewers who read it.
 - **Stepping back when round N+1 finds a defect in round N's fix.** The tool
   cannot see that a finding is about the previous fix.
 - **Excluding a design's author from the panel judging it.** The tool does not
