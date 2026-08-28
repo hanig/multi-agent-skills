@@ -43,13 +43,15 @@ SCHEMA_VERSION = 1
 
 # Receipt and state filenames written by the sibling verifiers. Read-only here.
 WORKFLOW_FILES = ("contract.json", "verification.json", "attempts.jsonl")
-TRAINING_FILES = ("training-contract.json", "training-verification.json",
-                  "training-termination.json", "training-binding.json")
+# traincontract.py was deleted 2026-08-28; its run-dir formats went with it and
+# swarm units replaced them. The allowlist is updated rather than widened: the
+# departed names are REMOVED, so capture cannot read a format nothing writes.
+SWARM_FILES = ("unit.json", "receipt.json", "events.jsonl")
 
 # The ONLY files capture may open. Criterion 1, stated as an allowlist because
 # v1 said "never reads a file's contents" while another criterion required
 # reading a receipt -- the two could not both hold (deepseek, plan review 1).
-CAPTURE_READS = frozenset(WORKFLOW_FILES + TRAINING_FILES)
+CAPTURE_READS = frozenset(WORKFLOW_FILES + SWARM_FILES)
 
 # Environment names whose VALUES must never appear in a handoff or a log.
 CREDENTIAL_NAME = re.compile(
@@ -473,12 +475,14 @@ def capture_run_dir(run_dir):
     out = {"run_dir": str(d), "kind": None, "pointers": [], "job_ids": []}
 
     wf = read_state_file(d, "contract.json")
-    tr = read_state_file(d, "training-contract.json")
+    # traincontract.py was deleted 2026-08-28; its convergence evaluator lives
+    # in hanig-swarm/converge.py and its run directories are now swarm units.
+    # A refusal must never name a tool that no longer exists.
+    tr = read_state_file(d, "unit.json")
     if wf is None and tr is None:
-        out["reason"] = ("no contract.json or training-contract.json here, so "
-                         "there is nothing to capture. Point at a run "
-                         "directory created by `contract.py init` or "
-                         "`traincontract.py init`")
+        out["reason"] = ("no contract.json or unit.json here, so there is "
+                         "nothing to capture. Point at a run directory created "
+                         "by `contract.py init` or `unit.py allocate`")
         return out
 
     contract = wf if wf is not None else tr

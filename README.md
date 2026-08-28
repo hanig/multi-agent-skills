@@ -58,11 +58,23 @@ name collision with an org-managed skill.
 
 | Skill | Purpose |
 |---|---|
-| `hanig-verified-workflow` | Declare and verify what "done" means for Slurm / Nextflow / Snakemake work. Distinguishes `SCIENTIFIC_PASS` from `TECHNICALLY_COMPLETE`. |
+| `hanig-swarm` | Coordinate a swarm of agents to build projects autonomously on Slurm. `unit.py` allocates an exclusive per-attempt write root and judges done; `swarm.py` validates a DAG, dispatches, detaches and advances; `converge.py` answers whether a training run converged or merely stopped. |
+| `hanig-verified-workflow` | Declare and verify what "done" means for a Slurm job. Distinguishes `SCIENTIFIC_PASS` from `TECHNICALLY_COMPLETE`. Its Slurm state machine is the ancestor of `unit.py`'s. |
+| `hanig-review-gate` | Adversarial multi-model review. A panel for CLAIMS, not a gate on every commit — see `PROTOCOL.md`. |
+| `hanig-portable-handoff` | Capture and resume run state across machines. |
 
-Planned, in order: `hanig-verified-training` (convergence vs `BUDGET_EXHAUSTED`),
-`hanig-portable-handoff` (cross-machine state), `hanig-reproducible-result`
-(figure and table provenance). See [docs/PLAN.md](docs/PLAN.md).
+**Deleted 2026-08-28, recoverable from history:** `hanig-verified-training` and
+`hanig-reproducible-result`, plus the conformance and symmetry suites.
+
+A committee concluded that isolation replaces attribution — an exclusive
+per-attempt write root makes a cheap predicate conclusive, so the machinery built
+to *prove* which process wrote a file was answering a question that no longer
+needed asking. `traincontract.py`'s convergence evaluator was the one capability
+with no replacement anywhere, including in Shreshth's repo, so it was ported to
+`hanig-swarm/converge.py` BEFORE the deletion. `result.py` went because figures
+and tables are not a swarm unit kind. The two suites expired with their subject:
+a cross-tool conformance lock needs several tools, and a symmetry lock needs a
+twin.
 
 All personal skills are prefixed `hanig-` so they can never collide with an
 Arc org-managed skill name.

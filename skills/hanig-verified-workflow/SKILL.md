@@ -134,4 +134,4 @@ Measured 2026-08-25 on all three; `contract.py` passes its suite on each.
 It cannot tell you the result is scientifically correct — only that the run
 produced what it declared. Interpretation stays with you. Choosing partitions,
 accounts, and storage tiers belongs to the cluster's own skill; figure and table
-provenance belongs to `hanig-reproducible-result`.
+provenance was `hanig-reproducible-result`, deleted 2026-08-28: figures and tables are not a swarm unit kind.

@@ -32,7 +32,6 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 HANDOFF = REPO / "skills" / "hanig-portable-handoff" / "scripts" / "handoff.py"
 CONTRACT = REPO / "skills" / "hanig-verified-workflow" / "scripts" / "contract.py"
-TRAINING = REPO / "skills" / "hanig-verified-training" / "scripts" / "traincontract.py"
 
 CLEAN, DRIFTED, ELSEWHERE, MALFORMED = 0, 1, 2, 3
 USAGE = 64
@@ -108,7 +107,12 @@ class TestCaptureRecordsOnlyWhatItMay(Base):
         spec.loader.exec_module(m)
         self.assertIn("contract.json", m.CAPTURE_READS)
         self.assertIn("verification.json", m.CAPTURE_READS)
-        self.assertIn("training-binding.json", m.CAPTURE_READS)
+        # unit.json replaced training-binding.json when traincontract.py was
+        # deleted 2026-08-28. Note the allowlist was UPDATED, not widened: the
+        # departed names were removed, so capture cannot read a format nothing
+        # writes any more.
+        self.assertIn("unit.json", m.CAPTURE_READS)
+        self.assertNotIn("training-binding.json", m.CAPTURE_READS)
         self.assertNotIn("o.tsv", m.CAPTURE_READS)
         self.assertLessEqual(len(m.CAPTURE_READS), 8)
 
