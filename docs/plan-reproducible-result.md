@@ -1,4 +1,4 @@
-# Plan v7 — hanig-reproducible-result
+# Plan v8 — hanig-reproducible-result
 
 Regenerate and verify figures, tables, benchmark results and exports with
 input-to-output provenance.
@@ -182,42 +182,69 @@ it actually checked. This is a limit, not a defect to be fixed later: closing it
 needs syscall tracing, which the stdlib cannot do and which would drag every
 system library into the same trap described above.
 
-## How an artifact names its contract, exactly
+## Two gates, not one: integrity binding and production evidence
 
-v6 said `check` verifies that the attempt names this contract instance, and
-never said how an artifact does that. A committee found it by being asked what
-was MISSING rather than what was wrong: **the trust gate was checking a
-self-assertion, not evidence** (deepseek-v4-pro). A PNG cannot carry a
-contract_id, a user can write a sidecar by hand, and nothing stopped either.
+v7 had one section here and it conflated two different claims. A committee of
+claude-opus-4-8 and gpt-5.6-sol, both reading this repo directly, split them and
+then converged.
 
-**The binding is a manifest, not a per-artifact marking.** `build` writes
-`result-manifest.json` next to the contract, containing, for every declared
-output: its path, its digest, its size, and the `contract_id` and
-`attempt_id` of the build that produced it. `check` trusts an output only when
-the manifest names it AND the digest still matches AND the manifest names this
-contract instance.
+### Gate 1: integrity binding (v7's manifest, kept unchanged)
 
-Three properties, and the third is the one that matters:
+`build` writes `result-manifest.json` binding every declared output to a digest,
+a `contract_id` and an `attempt_id`. `check` recomputes each digest and compares.
 
-1. **No artifact is modified.** Figures, CSVs and PDFs stay byte-identical to
-   what the generator wrote. Embedding provenance in the artifact would change
-   the bytes whose reproducibility is the thing being judged.
-2. **A hand-written manifest cannot fake a build**, because the manifest alone
-   is never sufficient: `check` also requires an attempt record whose
-   `attempt_id` matches, and the attempt is written by `build` with the
-   command's real exit code. Forging both is possible for anyone who can edit
-   the directory, which the threat model already places out of scope: a
-   `command` predicate runs unsandboxed, so directory write access is total
-   authority already.
-3. **The manifest is evidence about the past, not an assertion about the
-   present.** The digests it carries are compared against the files as they
-   stand now, so a manifest that was accurate when written becomes detectably
-   wrong the moment an output changes. That is what makes it evidence rather
-   than a claim.
+**This gate is sound and is NOT a self-assertion.** Both members settled that
+explicitly. Digest recomputation is a measurement `check` performs itself, not a
+claim it reads, and `contract_id` matching is real instance identity. A manifest
+accurate when written becomes detectably wrong the moment an output changes.
+It proves *integrity* and *instance binding*, and nothing else.
 
-**Stated residual:** this binds artifacts to a build, not to a *correct* build.
-An honest manifest for a wrong figure is still `VALIDATED`. Only `review`,
-which requires a named person, ever asserts more.
+### Gate 2: production evidence (new, and the reason v7 was wrong)
+
+What Gate 1 does NOT prove is that the declared command wrote the file. Both
+members found this from opposite sides: sol as "the mechanism supports observed
+after, not produced by", claude as "no output-production guard, so a build whose
+command produces nothing while a pre-existing output satisfies the digest would
+reach VALIDATED". Same hole, two faces.
+
+**The label matters because it decides the action.** "Relocated self-assertion"
+points at rewriting the binding; the correct label is **missing production
+evidence**, which points at adding a gate. v8 keeps the binding schema and adds
+fields.
+
+**The fix is a build-window delta.** `build` digests every declared output
+immediately BEFORE the command runs and immediately AFTER, and records, per
+output, whether it appeared or changed inside that window. `check` refuses
+`VALIDATED` for any output carrying no production evidence, unless the contract
+declared `deterministic: true` AND a recorded double render confirmed identity.
+
+This survives a trilemma that sol raised against the obvious alternative of
+porting `preexisting_fingerprints` + `artifact_is_fresh` from `contract.py`
+alone:
+
+| approach | why it fails |
+|---|---|
+| penalise unchanged bytes | falsely refuses an honest deterministic regeneration |
+| permit unchanged bytes | a no-op command adopts the old artifact |
+| require a fresh mtime | attribution by timestamp, which this repo has retired three rules over |
+
+The build-window delta escapes all three because it is a **content** comparison
+across a **bounded interval the tool itself opens and closes**, never a
+timestamp and never a bare before/after equality. A deterministic regeneration
+that produces identical bytes still shows as "written within the window" if the
+writer touched it, and the `deterministic: true` + double-render path covers the
+case where it provably need not have been.
+
+Port `preexisting_fingerprints` and the freshness check from `contract.py`
+anyway: they close the pre-existing-file and older-than-contract paths cheaply,
+and NOT carrying them across would be the 20th instance of the sibling-miss
+class, this time caught before the code existed rather than after.
+
+**Stated residual:** a concurrent writer racing a file into the build window is
+indistinguishable from the command writing it. That residual is already ceded by
+this family's threat model, since a `command` predicate runs unsandboxed and
+anyone who can race that write already holds total directory authority. It is an
+accepted limit, not a new one.
 
 ## `result.py build <result_dir> [--double]`
 
@@ -339,8 +366,16 @@ luna: *"the dominant defect class is policy symmetry and duplicated decision
 logic, not copied-helper drift."* Extraction addresses the part of the problem
 that was already solved.
 
-**So the anti-drift mechanism is a cross-tool CONFORMANCE SUITE**, not a larger
-core. `tests/test_conformance.py` drives all three tools through one abstract
+**A cross-tool conformance suite is worth building, but it is NOT the anti-drift
+mechanism, and v7 oversold it.** Scored against the real defect history by two
+members reading the commit log: sol found it would have caught 2 of 12
+documented misses, claude ~6 of 19. Both agree the majority fall in its own "may
+differ" column, and that the exemplar this plan led with -- the quorum defect --
+is reachable by none of extraction, symmetry, or conformance.
+
+What it honestly is: **a regression lock on the cross-tool shared-behaviour
+subset**, written before `result.py` so the third tool is born conformant on
+those rows. Claimed as more than that, it is theatre. `tests/test_conformance.py` drives all three tools through one abstract
 interface and fails when they disagree on behaviour meant to be identical,
 while explicitly exempting what is legitimately tool-specific:
 
@@ -357,6 +392,43 @@ Each row is a rule that has already been missed in one tool and not its twin.
 The suite is written BEFORE `result.py`, so the third tool is born conformant
 rather than audited into conformance later.
 
+## The dominant defect class, and the only thing that catches it
+
+**All three candidate mechanisms miss the biggest class**, which claude defended
+with the code open and sol conceded: intra-tool duplicated decision logic.
+
+The exemplar is defect #19. `escalate()` inlined `len(completed) >= args.quorum`
+and `decide_state()` inlined `n_completed < quorum`: two functions, one file,
+one rule, fixed in the first and missed in the second. Extraction cannot help,
+because both copies are already in one file. Symmetry cannot help, because
+`test_symmetry.py` compares same-named functions ACROSS files and these are
+differently-named functions in the same file. Conformance cannot help, because
+it is cross-tool and `review.py` is not even one of the three tools. It was
+found live by a plan review, by no test at all.
+
+**So `result.py` is built around a single decider from the first line.** Sol's
+condition, which claude's test then enforces: the test is only mechanisable if
+the architecture makes it so.
+
+1. **One pure evaluator** is the only function permitted to choose the decisive
+   state and exit code. It takes evidence and returns a state; it reads no
+   files and runs no commands.
+2. **The trust gate and every disqualifier live in one declarative registry**,
+   each represented exactly once, with its applicability, evidence requirement,
+   role and precedence as data rather than as control flow.
+3. **Command handlers gather evidence and must call the evaluator.** They never
+   compare a state or select an exit code themselves.
+4. **A structural test enforces it**: AST-walk the module, collect every
+   comparison against a gate threshold and every return of a state constant,
+   group by enclosing function, and assert each appears in exactly one. On the
+   real defect this fires, because the same comparison has two sites.
+
+**Stated limit, from claude:** this catches *duplication* of a gate predicate,
+never a *single wrong* predicate, and it is a lint on a chosen shape rather than
+a proof of behaviour. It works only because `result.py` is written in that shape
+deliberately. Within those bounds it would have caught #19, and nothing else in
+this repo would.
+
 ## On the state numbering
 
 `result.py` keeps its own numbering, ordered by its own severity rather than a
@@ -368,7 +440,7 @@ stated: **0 is fully done in every tool of this family, and every non-zero code
 is documented per tool.** Nothing else is promised across tools, and the
 conformance suite tests behaviour rather than numbers.
 
-## Acceptance criteria (27)
+## Acceptance criteria (31)
 
 1. `REVIEWED` is reachable only through `review`, and only from `VALIDATED`.
 2. A review is invalidated by any subsequent change to the digests it recorded,
@@ -436,7 +508,24 @@ conformance suite tests behaviour rather than numbers.
 25. `build` writes `result-manifest.json` binding every declared output to a
    digest, a `contract_id` and an `attempt_id`. `check` trusts an output only
    when the manifest names it, the digest still matches, and an attempt with
-   that `attempt_id` exists. No artifact is modified to carry provenance.
+   that `attempt_id` exists. No artifact is modified to carry provenance. This
+   proves integrity and instance binding, and explicitly NOT production.
+28. `build` digests every declared output immediately before and after the
+   command and records, per output, whether it appeared or changed in that
+   window. `check` refuses `VALIDATED` for any output with no production
+   evidence, unless `deterministic: true` and a recorded double render confirmed
+   identity. Never decided by mtime.
+29. `preexisting_fingerprints` and the freshness check are ported from
+   `contract.py`. Their absence would be the 20th sibling-miss.
+30. The decisive state and exit code are chosen by exactly ONE pure evaluator;
+   the trust gate and every disqualifier appear exactly once in a declarative
+   registry; handlers gather evidence and call the evaluator, never comparing
+   states themselves. An AST test asserts each gate predicate and state return
+   has exactly one site, and the plan states what that test cannot catch.
+31. Only the LATEST finalised attempt for the current contract decides. A
+   successful manifest is usable only if it references that attempt; an old
+   manifest never falls back into authority; an unfinalised latest attempt is
+   `INCOMPLETE_EVIDENCE`.
 26. `tests/test_conformance.py` exists and drives all three tools through one
    interface, asserting the shared-behaviour rows above and exempting the
    tool-specific ones. It is written BEFORE `result.py`.
