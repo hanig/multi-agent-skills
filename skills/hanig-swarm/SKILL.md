@@ -119,11 +119,32 @@ flat run has. Pair it with a threshold when the value matters.
 
 ## Cluster gotchas, paid for on lambda 2026-08-28
 
-**`--mem` is REQUIRED on lambda**, and `sbatch --test-only` does NOT enforce it.
-Without it a real submission fails with Slurm's most misleading message,
-"Requested node configuration is not available", while `--test-only` accepts the
-identical flags. Put `--mem=` in every unit's `sbatch` list. Fourth time in one
-session that test-only and real submission disagreed.
+**`--mem` is required on LAMBDA ONLY, and I first wrote this as if it were a
+cluster fact.** Corrected after checking all three:
+
+| | lambda | andromeda | chimera |
+|---|---|---|---|
+| default memory | `DefMemPerNode = UNLIMITED` | `DefMemPerCPU = 4096` | `DefMemPerCPU = 4096` |
+| `--mem` required | **yes** | no | no |
+| SelectTypeParameters | `CR_CORE_MEMORY,CR_ONE_TASK_PER_CORE` | `CR_CPU_MEMORY,CR_PACK_NODES` | `CR_CORE_MEMORY` |
+| python3 | 3.12.3 | 3.10.12 | 3.10.12 |
+
+Lambda is the only one with no default memory, so a job without `--mem` there
+fails with Slurm's most misleading message, "Requested node configuration is not
+available", while `sbatch --test-only` accepts the identical flags. Elsewhere it
+just works, which is exactly how a one-cluster quirk gets written down as a
+universal rule.
+
+**Partition names share NOTHING across the three** (`labinloop model_dev
+preemptible` / `all h100-reserved preemptible standard` / `gpu gpu_batch cpu
+gpu_high_mem`), so a unit's `sbatch` list is NOT portable. A plan written on one
+cluster does not run on another. See docs/plan-swarm.md step 5.
+
+**Python floor is 3.10**, not 3.12: andromeda and chimera both run 3.10.12. Test
+there, not on the newest.
+
+**`chimera` cannot take a remote command** -- its ssh config carries
+`RemoteCommand sh_dev`. Use `chimera-login`.
 
 **`--test-only` start times are pessimistic.** It predicted 22:08 for a job that
 started and finished within one second of submission. Do not use its estimate to

@@ -217,6 +217,95 @@ without touching the unit contract, because `advance` is invoked identically
 either way. Criterion 4(b) is the one that decides it: if a Paseo schedule does
 not survive logout on a login node, cron wins.
 
+**5. Portability: the swarm runs on THREE clusters, not on lambda.**
+
+Hani: "dont over-index on Lambda, check other servers too". Checking proved the
+point immediately -- a gotcha written into SKILL.md as a cluster fact was
+lambda-specific:
+
+| | lambda | andromeda | chimera |
+|---|---|---|---|
+| default memory | `DefMemPerNode = UNLIMITED` | `DefMemPerCPU = 4096` | `DefMemPerCPU = 4096` |
+| `--mem` required | **yes** | no | no |
+| SelectTypeParameters | `CR_CORE_MEMORY,CR_ONE_TASK_PER_CORE` | `CR_CPU_MEMORY,CR_PACK_NODES` | `CR_CORE_MEMORY` |
+| python3 | 3.12.3 | 3.10.12 | 3.10.12 |
+| partitions | `labinloop model_dev data_dev preemptible ...` | `all* h100-reserved preemptible standard` | `gpu gpu_batch cpu* gpu_high_mem ...` |
+
+**Partition names share NOTHING across the three**, so a unit's `sbatch` list is
+not portable and a plan written on one cluster does not run on another. That is a
+design gap, not a documentation gap: today a plan hardcodes cluster-specific
+flags.
+
+Acceptance criteria:
+
+- a. A unit declares a RESOURCE REQUEST (gpus, cpus, memory, walltime, and
+  whether it may be preempted), never raw `sbatch` flags. A per-machine profile
+  translates the request into that cluster's flags and partition.
+- b. The profile lives on the machine, not in the plan, so the same plan file
+  dispatches on lambda, andromeda and chimera without edits.
+- c. A request that a given cluster cannot satisfy is REFUSED at validate time,
+  naming the cluster and the limit, never at submit time.
+- d. Lambda's missing default memory is handled by its profile, not by every
+  plan author remembering.
+- e. The test suite runs under python3.10 -- andromeda and chimera both run
+  3.10.12, so 3.12 is not the floor to develop against.
+- f. `chimera` cannot take a remote command (`RemoteCommand sh_dev` in ssh
+  config); anything scripted uses `chimera-login`.
+- g. One real unit dispatched and judged DONE on EACH of the three, not on
+  lambda alone.
+
+**6. Tickets: the orchestrator opens a Linear project and works its issues.**
+
+Hani: "how can I automate so that the orchestrator creates a Linear project,
+uses issues (on Linear or Github)". This is the endgame -- "build projects
+autonomously" means the project is a real, trackable object, not a JSON file on
+one laptop.
+
+Shreshth already built the ticket-driven half. `start-a-sprint` turns "a
+prioritized ticket set into isolated, observable ticket pods": one coordinator
+per Linear ticket, one integration worktree and branch per ticket, one testable
+acceptance contract and declared write scopes per ticket. `linear-issues` (182
+lines) files and closes issues in the tahoebio workspace in a house style, with a
+Resolution line and Verification/Links on close.
+
+What does NOT transfer: his pods are code changes judged by `bus await` over a
+worktree. A Slurm unit is judged by `unit.py`, and its acceptance contract is a
+predicate over cluster artifacts. So the ticket is the shared object; the
+predicate underneath differs by unit kind, exactly as steps 1-2 already model.
+
+Acceptance criteria:
+
+- a. A swarm plan can be GENERATED from a ticket set, and each unit records the
+  issue it belongs to.
+- b. Issue state follows unit state, not the other way round: a unit reaching
+  DONE moves its issue, and a HELD unit says on the issue what it is waiting
+  for. The swarm's durable state stays authoritative.
+- c. Backend is pluggable, Linear or GitHub, chosen per project. Nothing in the
+  unit contract mentions either.
+- d. NO ISSUE IS EVER CLOSED ON A SELF-REPORT. Closure requires the unit's
+  predicate verdict, which is the whole thesis applied one level up: an agent
+  saying "done" on a ticket is exactly the self-assertion these tools refuse.
+- e. Writing to an issue tracker is an OUTWARD-FACING action and is gated on
+  explicit approval per run, the way promotion is in step 3. A swarm that files
+  tickets unattended is a swarm that spams a shared workspace.
+- f. A dry run prints the issues it WOULD create or move, and creates nothing.
+
+**7. `grill-me`: adversarial questioning as a swarm skill.**
+
+Hani asked to onboard it as part of this. NOT FOUND on this machine: not in
+`~/.claude/skills`, `~/.agents/skills`, the Box stranded set
+(`grant-writing`, `lab-update`, `literature-digest`, `manuscript-drafting`), the
+org store, or a claude.ai skill search. **Blocked pending a pointer from Hani.**
+
+Working assumption, to be corrected: it interrogates a plan or a claim by asking
+progressively harder questions. If so it belongs at the PLAN boundary, next to
+`paseo-committee`, and its natural place in this system is step 6's ticket
+generation -- grilling a proposed project into a unit DAG before anything is
+dispatched, which is where a bad plan is cheapest to catch. Do not design around
+this until the skill is in hand.
+
+
+
 ---
 
 ## Verification (end to end)
