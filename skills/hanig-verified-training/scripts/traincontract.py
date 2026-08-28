@@ -316,6 +316,122 @@ def metrics_unchanged_since_declaration(contract):
     return now["sha256"] == fp["sha256"]
 
 
+
+# --- production evidence --------------------------------------------------
+# Sibling miss #20's twin. contract.py returned SCIENTIFIC_PASS, and this file
+# returned CONVERGED, for metrics and a checkpoint written by something OTHER
+# than the training run: `metrics_unchanged` catches a file that is byte
+# IDENTICAL to what was there at declare, and freshness proves "written after
+# the contract", never "written by this run".
+#
+# The bracket cannot be ported verbatim from contract.py, and that is the point
+# of writing it separately rather than copying: a training run's evidence is an
+# APPEND-ONLY metrics file, not a set of declared output paths. So the window
+# judges GROWTH -- the metrics file must have gained rows, and the step numbers
+# in those rows must advance -- plus a checkpoint appearing or changing.
+# Content and monotonic step, never a timestamp.
+PRODUCTION_EVIDENCE_FILE = "production-window.json"
+
+
+def training_window_snippet(metrics_file, ckpt_dir, evidence_path):
+    """Shell that records the metrics file's size and line count, and the
+    checkpoint inventory, at run start and run end.
+
+    Emitted into a COPY of the batch script. Growth, not mtime: a training run
+    that produced nothing leaves the line count unchanged, and one that resumed
+    and appended leaves it larger.
+    """
+    ck = ckpt_dir or ""
+    return f"""
+# --- traincontract.py production window (injected; edit the original) ------
+__tx_probe() {{
+  m='{metrics_file}'
+  if [ -f "$m" ]; then
+    printf 'metrics\\t%s\\t%s\\n' "$(wc -l < "$m" | tr -d ' ')" \\
+      "$(shasum -a 256 "$m" 2>/dev/null | cut -d' ' -f1)"
+  else
+    printf 'metrics\\t0\\t\\n'
+  fi
+  d='{ck}'
+  if [ -n "$d" ] && [ -d "$d" ]; then
+    printf 'ckpt\\t%s\\t\\n' "$(ls -1 "$d" 2>/dev/null | wc -l | tr -d ' ')"
+  else
+    printf 'ckpt\\t0\\t\\n'
+  fi
+}}
+__tx_before="$(__tx_probe)"
+__tx_finish() {{
+  __tx_after="$(__tx_probe)"
+  python3 - "$__tx_before" "$__tx_after" <<'__TXPY' > '{evidence_path}' 2>/dev/null || true
+import json, sys
+def parse(blob):
+    out = {{}}
+    for line in (blob or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 3:
+            out[parts[0]] = {{"count": parts[1], "sha256": parts[2] or None}}
+    return out
+before, after = parse(sys.argv[1]), parse(sys.argv[2])
+def as_int(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+mb, ma = before.get("metrics", {{}}), after.get("metrics", {{}})
+cb, ca = before.get("ckpt", {{}}), after.get("ckpt", {{}})
+rows_before, rows_after = as_int(mb.get("count")), as_int(ma.get("count"))
+grew = (rows_before is not None and rows_after is not None
+        and rows_after > rows_before)
+changed = bool(mb.get("sha256") and ma.get("sha256")
+               and mb["sha256"] != ma["sha256"])
+ck_before, ck_after = as_int(cb.get("count")), as_int(ca.get("count"))
+ck_grew = (ck_before is not None and ck_after is not None
+           and ck_after > ck_before)
+json.dump({{"schema_version": 1,
+           "metrics": {{"rows_before": rows_before, "rows_after": rows_after,
+                       "sha_before": mb.get("sha256"),
+                       "sha_after": ma.get("sha256"),
+                       "grew_in_window": grew, "changed_in_window": changed,
+                       "written_in_window": bool(grew or changed)}},
+           "checkpoints": {{"count_before": ck_before, "count_after": ck_after,
+                           "grew_in_window": ck_grew}}}},
+          sys.stdout, indent=2)
+__TXPY
+}}
+trap __tx_finish EXIT
+# --- end injected block ---------------------------------------------------
+"""
+
+
+def training_production_fault(run_dir, contract):
+    """Why this contract cannot show the RUN produced its metrics, or None.
+
+    None when the contract does not require production evidence: an existing
+    contract keeps its behaviour and the receipt records the weaker claim,
+    exactly as result.py gates on `deterministic`.
+    """
+    if not contract.get("require_production_evidence"):
+        return None
+    # read_json_bounded here, read_text_bounded in contract.py. The twins do
+    # NOT share these helper names, and I wrote the wrong one into each file --
+    # the same missing-callee error twice, in opposite directions. Assuming a
+    # helper exists because the sibling has it IS the sibling-miss trap.
+    raw, err = read_json_bounded(Path(run_dir) / PRODUCTION_EVIDENCE_FILE)
+    if err or not isinstance(raw, dict):
+        return (f"this contract requires production evidence and none was "
+                f"recorded ({err or 'unreadable'}). Re-submit with `submit` so "
+                f"the run brackets its metrics, or re-declare without "
+                f"--require-production-evidence to accept the weaker claim.")
+    metrics = raw.get("metrics") or {}
+    if not metrics.get("written_in_window"):
+        return ("the metrics file did not grow or change while the run "
+                "executed, so nothing shows this run produced these numbers. "
+                "A converged criterion over rows another process wrote is not "
+                "convergence. Re-run the training, or re-declare if another "
+                "process legitimately owns that file.")
+    return None
+
+
 def artifact_is_fresh(mtime, declared_at, declared_epoch=None):
     """Whether an artifact could have been produced by this contract instance.
 
@@ -1399,6 +1515,7 @@ def cmd_init(args):
         "created_at_epoch": time.time(),
         "retrospective": bool(args.retrospective),
         "metrics_file": str(Path(args.metrics).resolve()),
+        "require_production_evidence": bool(args.require_production_evidence),
         "checkpoint_dir": str(Path(args.checkpoint_dir).resolve())
         if args.checkpoint_dir else None,
         "checkpoint_glob": args.checkpoint_glob,
@@ -1827,7 +1944,16 @@ def cmd_check(args):
                         (False, "no convergence criterion declared"))
             reasons.append(detail)
             if met:
-                state = "CONVERGED"
+                # Meeting the criterion says the NUMBERS are good. It does not
+                # say this run produced them: metrics written by another process
+                # satisfied the criterion, the freshness check and
+                # metrics_unchanged, and reached CONVERGED at exit 0.
+                prod_fault = training_production_fault(run_dir, contract)
+                if prod_fault:
+                    state = "INCOMPLETE_EVIDENCE"
+                    reasons.append(prod_fault)
+                else:
+                    state = "CONVERGED"
             elif budget is not None and last_step >= int(budget):
                 # The distinction this tool exists for.
                 state = "BUDGET_EXHAUSTED"
@@ -2168,6 +2294,11 @@ def main():
     p = sub.add_parser("init", help="declare convergence BEFORE training")
     p.add_argument("run_dir")
     p.add_argument("--metrics", required=True, help="JSONL metrics file")
+    p.add_argument("--require-production-evidence", action="store_true",
+                    help="bracket the run so it records the metrics file's row "
+                         "count and digest at start and end. Without it, "
+                         "metrics written by something OTHER than this run "
+                         "cannot be distinguished from this run's.")
     p.add_argument("--checkpoint-dir", default=None)
     p.add_argument("--sparse-metric", action="store_true",
                    help="the convergence metric is logged less often than other "

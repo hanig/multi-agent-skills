@@ -1947,15 +1947,27 @@ class TestValidators(unittest.TestCase):
 
 class TestPortability(unittest.TestCase):
     def test_stdlib_only(self):
+        """AST-based, not textual. The line-scanning version read `import json,
+        sys` out of a shell snippet this file emits as a STRING -- Python for a
+        cluster job to run, not code this file imports -- and reported a
+        non-stdlib module named "json,". Its twin in test_contract.py had the
+        identical flaw; fixing one and not the other would have been the very
+        sibling miss these suites exist to catch."""
+        import ast
         allowed = {"argparse", "fnmatch", "calendar", "hashlib", "json",
                    "math", "os", "re", "shutil", "signal", "stat",
                    "subprocess", "sys", "tempfile", "time", "pathlib"}
-        for line in SCRIPT.read_text().splitlines():
-            s = line.strip()
-            if s.startswith("import ") and not s.startswith("import ("):
-                self.assertIn(s.split()[1].split(".")[0], allowed, s)
-            elif s.startswith("from ") and " import " in s:
-                self.assertIn(s.split()[1].split(".")[0], allowed, s)
+        tree = ast.parse(SCRIPT.read_text())
+        found = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                found.update(a.name.split(".")[0] for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                found.add(node.module.split(".")[0])
+        extra = sorted(found - allowed)
+        self.assertFalse(extra, f"non-stdlib import(s): {', '.join(extra)}")
+        self.assertGreater(len(found), 5,
+                           "recovered too few imports to be measuring anything")
 
     def test_compiles(self):
         r = subprocess.run([sys.executable, "-m", "py_compile", str(SCRIPT)],
@@ -3049,6 +3061,88 @@ class TestUnreadCriterionKeys(unittest.TestCase):
         r = self.init_with({**self.BASE, "min_steps": 10})
         self.assertEqual(r.returncode, 0, r.stderr)
 
+
+
+class TestTrainingProductionEvidence(unittest.TestCase):
+    """Sibling miss #20's twin: CONVERGED, exit 0, for metrics and a checkpoint
+    written by something OTHER than the run. `metrics_unchanged` catches only a
+    byte-identical file, and freshness proves "written after the contract", not
+    "written by this run"."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        (self.tmp / "ck").mkdir()
+        self.metrics = self.tmp / "m.jsonl"
+
+    def declare(self, *extra):
+        return tc("init", str(self.tmp), "--metrics", str(self.metrics),
+                  "--checkpoint-dir", str(self.tmp / "ck"),
+                  "--converge",
+                  json.dumps({"metric": "val_loss", "mode": "min",
+                              "threshold": 0.5}), *extra)
+
+    def write_foreign_metrics(self):
+        time.sleep(1.1)
+        self.metrics.write_text('{"step":100,"val_loss":0.4}\n'
+                                '{"step":200,"val_loss":0.3}\n')
+        (self.tmp / "ck" / "ckpt-200.pt").write_text("fake\n")
+
+    def test_metrics_this_run_did_not_write_are_refused(self):
+        self.assertEqual(self.declare("--require-production-evidence").returncode,
+                         0)
+        self.write_foreign_metrics()
+        tc("record", str(self.tmp), "--exit-code", "0")
+        r = tc("check", str(self.tmp))
+        self.assertEqual(
+            r.returncode, 6,
+            f"a criterion met over rows another process wrote returned exit "
+            f"{r.returncode}:\n{r.stdout}")
+        self.assertIn("production evidence", r.stdout)
+
+    def test_a_contract_without_the_flag_is_unchanged(self):
+        self.assertEqual(self.declare().returncode, 0)
+        self.write_foreign_metrics()
+        tc("record", str(self.tmp), "--exit-code", "0")
+        r = tc("check", str(self.tmp))
+        self.assertEqual(r.returncode, 0,
+                         f"an existing contract's behaviour changed:\n"
+                         f"{r.stdout}")
+
+    def test_the_window_judges_growth_not_time(self):
+        """A training run's evidence is an APPEND-ONLY file, so the window must
+        judge rows gained, not appearance and not mtime. This is why the
+        bracket was written separately rather than copied from contract.py."""
+        import importlib.util as u
+        spec = u.spec_from_file_location("t", SCRIPT)
+        m = u.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        snip = m.training_window_snippet("/tmp/m.jsonl", "/tmp/ck", "/tmp/e.json")
+        self.assertIn("wc -l", snip)
+        self.assertIn("grew_in_window", snip)
+        for word in ("mtime", "date +", "stat -f"):
+            self.assertNotIn(word, snip, f"the window uses {word!r}, which is "
+                                         f"time-based attribution")
+
+    def test_every_helper_the_new_code_calls_actually_exists(self):
+        """I wrote read_text_bounded into this file, which has
+        read_json_bounded, and read_json_bounded into contract.py, which has
+        read_text_bounded. The same missing-callee error twice, in opposite
+        directions, because I assumed a helper existed since the TWIN had it.
+        py_compile cannot see it and test_symmetry only checks COPIED helpers.
+
+        So: import the module and CALL the new functions."""
+        import importlib.util as u
+        spec = u.spec_from_file_location("t2", SCRIPT)
+        m = u.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        # No evidence file present: must return a fault string, not raise.
+        fault = m.training_production_fault(
+            self.tmp, {"require_production_evidence": True})
+        self.assertIsInstance(fault, str)
+        self.assertIn("production evidence", fault)
+        # Not required: must return None.
+        self.assertIsNone(m.training_production_fault(self.tmp, {}))
 
 
 if __name__ == "__main__":
