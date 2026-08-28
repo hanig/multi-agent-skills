@@ -536,6 +536,31 @@ def sacct_state(job_id, declared_at=None, bound_at=None,
     return chosen[0], chosen[1], chosen[2], None
 
 
+# Lifted callee: sha256_file. Found by a closure check that enumerates by
+# EXCLUSION (what does this module load that is defined nowhere) rather than
+# against a hand-written list. Three inclusion-based checks missed it.
+def sha256_file(path, limit_bytes=None):
+    """Digest a regular file. limit_bytes caps work on huge inputs (weak rung).
+
+    Refuses anything that is not a regular file: if a declared input is replaced
+    by a FIFO or a character device, opening it can block forever and the
+    verifier would never emit a verdict at all."""
+    import stat as _stat
+    st = os.stat(path)
+    if not _stat.S_ISREG(st.st_mode):
+        raise OSError(f"not a regular file (mode {_stat.filemode(st.st_mode)})")
+    h = hashlib.sha256()
+    read = 0
+    fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    with os.fdopen(fd, "rb", closefd=True) as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+            read += len(chunk)
+            if limit_bytes and read >= limit_bytes:
+                return h.hexdigest(), True  # truncated
+    return h.hexdigest(), False
+
+
 # ==========================================================================
 # The unit contract. Everything above this line is lifted verbatim from
 # contract.py and must not be edited here; everything below is new.

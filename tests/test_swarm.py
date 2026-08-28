@@ -18,6 +18,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "skills" / "hanig-swarm" / "scripts"
 UNIT, SWARM = SCRIPTS / "unit.py", SCRIPTS / "swarm.py"
+CONVERGE = SCRIPTS / "converge.py"
 
 _s = importlib.util.spec_from_file_location("unit", UNIT)
 unit = importlib.util.module_from_spec(_s); _s.loader.exec_module(unit)
@@ -377,6 +378,153 @@ class TestTheLiftIsClosed(unittest.TestCase):
         self.assertIn("OWNERSHIP_SLACK_S", names,
                       "the constant is defined but the function that needs it "
                       "does not reference it")
+
+
+class TestConvergence(Base):
+    """The one capability neither the swarm nor Shreshth's repo provides.
+
+    Checked directly: nothing in ~/paseo-multi-agent-skills scores a numeric
+    criterion over a series. Its apparent hits are a Unix timestamp
+    ("epoch seconds"), a GPU-load scrape, and a REVIEWER agreeing a diff is
+    fixed. paseo-loop's two verification shapes cannot reach this: a shell check
+    answers "exit 0" and "checkpoint exists", never "did val_loss improve by
+    more than 0.002 over the last 5 evaluations at or beyond step 10,000".
+
+    Evaluator lifted verbatim from traincontract.py; this covers the wrapper."""
+
+    CRIT = {"metric": "val_loss", "mode": "min", "threshold": 0.5,
+            "min_steps": 10000}
+    PLATEAU = {"metric": "val_loss", "mode": "min",
+               "rel_improvement_below": 0.002, "over_evals": 5,
+               "min_steps": 10000}
+
+    def metrics(self, rows, name="m.jsonl"):
+        p = self.tmp / name
+        p.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        return str(p)
+
+    def check(self, path, criterion, *extra):
+        return run(CONVERGE, "check", path, "--criterion",
+                   json.dumps(criterion), *extra, cwd=str(self.tmp))
+
+    def falling(self):
+        return [{"step": s, "val_loss": round(max(0.30, 2.0 * 0.9 ** (s / 500)), 4)}
+                for s in range(0, 12001, 500)]
+
+    def flat(self):
+        return [{"step": s, "val_loss": 0.85 if s > 1000 else 1.5}
+                for s in range(0, 12001, 500)]
+
+    def test_a_converged_run_is_converged(self):
+        r = self.check(self.metrics(self.falling()), self.CRIT)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_a_flat_run_that_spent_its_budget_is_NOT_converged(self):
+        """THE distinction this module exists for. Under the swarm's own
+        predicate this run is DONE: it exited 0 and wrote its outputs."""
+        r = self.check(self.metrics(self.flat()), self.CRIT,
+                       "--budget", "12000")
+        self.assertEqual(r.returncode, 3, f"expected BUDGET_EXHAUSTED:\n"
+                                         f"{r.stdout}")
+        self.assertIn("NOT convergence", r.stdout)
+
+    def test_without_a_budget_a_flat_run_is_merely_not_yet(self):
+        r = self.check(self.metrics(self.flat()), self.CRIT)
+        self.assertEqual(r.returncode, 1, r.stdout)
+
+    def test_divergence_is_checked_before_convergence(self):
+        """A run that blew up and then coincidentally satisfied a threshold has
+        not converged."""
+        blew = [{"step": s, "train_loss": 1e12 if s > 3000 else 1.0,
+                 "val_loss": 0.4} for s in range(0, 12001, 500)]
+        r = self.check(self.metrics(blew), self.CRIT,
+                       "--diverge", json.dumps({"metric": "train_loss",
+                                                "above": 1e9}))
+        self.assertEqual(r.returncode, 2, f"a blown-up run was not DIVERGED:\n"
+                                         f"{r.stdout}")
+        self.assertIn("3500", r.stdout, "the breach step is not reported")
+
+    def test_a_typod_criterion_key_is_refused_not_defaulted(self):
+        bad = dict(self.CRIT)
+        bad["min_step"] = bad.pop("min_steps")
+        r = self.check(self.metrics(self.falling()), bad)
+        self.assertEqual(r.returncode, 4, r.stdout)
+        self.assertIn("min_steps", r.stdout)
+
+    def test_an_empty_criterion_is_refused(self):
+        r = self.check(self.metrics(self.falling()), {})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("BEFORE the run", r.stderr)
+
+    def test_a_plateau_criterion_accepts_a_flat_run_BY_DESIGN(self):
+        """Documented, not a defect: a plateau criterion asks "has improvement
+        stalled", and a flat run has stalled. It will therefore report CONVERGED
+        for a run plateaued at a BAD value. Pair it with a threshold if the
+        value matters -- inherited semantics from traincontract.py, recorded
+        here so nobody reads it as a bug later."""
+        r = self.check(self.metrics(self.flat()), self.PLATEAU)
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_missing_metrics_cannot_judge(self):
+        r = run(CONVERGE, "check", str(self.tmp / "nope.jsonl"), "--criterion",
+                json.dumps(self.CRIT), cwd=str(self.tmp))
+        self.assertEqual(r.returncode, 4)
+        self.assertIn("cannot read", r.stdout)
+
+
+class TestClosureByExclusion(unittest.TestCase):
+    """Every name a lifted module loads must resolve, checked by EXCLUSION.
+
+    Four inclusion-based checks each missed something, all in one day: a
+    stdlib allowlist without `stat`; an ALL-CAPS regex that read docstring
+    prose; a walker that missed `A, B = 0, 1` tuple targets; and a callee check
+    that missed `sha256_file`. Asking "what does this module load that is bound
+    nowhere" needs no list, so there is no list to get wrong."""
+
+    def test_no_module_loads_an_undefined_name(self):
+        import ast, builtins
+        for f in (SCRIPTS / "unit.py", SCRIPTS / "swarm.py",
+                  SCRIPTS / "converge.py"):
+            tree = ast.parse(f.read_text())
+            bound = set(dir(builtins)) | {"__file__", "__name__", "__doc__"}
+            for n in ast.walk(tree):
+                if isinstance(n, ast.Import):
+                    bound |= {a.asname or a.name.split(".")[0] for a in n.names}
+                elif isinstance(n, ast.ImportFrom):
+                    bound |= {a.asname or a.name for a in n.names}
+                elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                    ast.ClassDef)):
+                    bound.add(n.name)
+                    ar = getattr(n, "args", None)
+                    for a in (getattr(ar, "args", []) or []) + \
+                             (getattr(ar, "kwonlyargs", []) or []):
+                        bound.add(a.arg)
+                    for extra in (getattr(ar, "vararg", None),
+                                  getattr(ar, "kwarg", None)):
+                        if extra:
+                            bound.add(extra.arg)
+                elif isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+                    tg = n.targets if isinstance(n, ast.Assign) else [n.target]
+                    for t in tg:
+                        bound |= {x.id for x in ast.walk(t)
+                                  if isinstance(x, ast.Name)}
+                elif isinstance(n, (ast.For, ast.comprehension)):
+                    bound |= {x.id for x in ast.walk(n.target)
+                              if isinstance(x, ast.Name)}
+                elif isinstance(n, ast.ExceptHandler) and n.name:
+                    bound.add(n.name)
+                elif isinstance(n, ast.withitem) and n.optional_vars is not None:
+                    bound |= {x.id for x in ast.walk(n.optional_vars)
+                              if isinstance(x, ast.Name)}
+                elif isinstance(n, ast.Lambda):
+                    for a in n.args.args:
+                        bound.add(a.arg)
+            loaded = {n.id for n in ast.walk(tree)
+                      if isinstance(n, ast.Name)
+                      and isinstance(n.ctx, ast.Load)}
+            missing = sorted(loaded - bound)
+            self.assertFalse(missing, f"{f.name} loads undefined name(s) "
+                                      f"{missing}")
 
 
 if __name__ == "__main__":

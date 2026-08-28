@@ -89,6 +89,34 @@ reuse, `0:0` on a CANCELLED job not counting as success, `End` arriving as the
 literal `Unknown`, states containing spaces (`CANCELLED by 10025`), and a
 timezone bug that made one instant read as three epochs nine hours apart.
 
+## converge.py — did it converge, or just stop?
+
+`unit.py` answers existence and terminal state. For a training run that is not
+enough: a run that executes 40,000 steps, exits 0 and writes a checkpoint is
+DONE by that predicate even if the loss was flat for the last 30,000.
+
+```bash
+python3 skills/hanig-swarm/scripts/converge.py check metrics.jsonl \
+  --criterion '{"metric":"val_loss","mode":"min","rel_improvement_below":0.002,"over_evals":5,"min_steps":10000}' \
+  --diverge '{"metric":"train_loss","above":1e9}' --budget 40000
+# 0 CONVERGED | 1 NOT_YET | 2 DIVERGED | 3 BUDGET_EXHAUSTED | 4 INCOMPLETE
+```
+
+**BUDGET_EXHAUSTED is the distinction it exists for**: the run stopped, it did
+not finish. Divergence is checked BEFORE convergence, because a run that blew up
+and later coincidentally satisfied a threshold has not converged.
+
+**Nothing in Shreshth's repo does this**, checked directly: its apparent hits
+are a Unix timestamp ("epoch seconds"), a GPU-load scrape, and a REVIEWER
+agreeing a diff is fixed. `paseo-loop`'s verification shapes cannot reach it --
+a shell check answers "exit 0" and "checkpoint exists", never "did val_loss
+improve by more than 0.002 over the last 5 evaluations". Not an oversight: his
+domain is code changes, so his predicates are git-shaped.
+
+**Inherited semantics worth knowing:** a plateau criterion reports CONVERGED for
+a run plateaued at a BAD value, because it asks "has improvement stalled" and a
+flat run has. Pair it with a threshold when the value matters.
+
 ## Cluster gotchas, paid for on lambda 2026-08-28
 
 **`--mem` is REQUIRED on lambda**, and `sbatch --test-only` does NOT enforce it.
