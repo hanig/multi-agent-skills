@@ -273,7 +273,15 @@ def call_openai(rev, prompt, timeout, deadline=None):
     payload = {
         "model": rev["model"],
         "input": f"{SYSTEM}\n\n---\n\n{prompt}",
-        "max_output_tokens": rev.get("max_output_tokens", 16000),
+        # Same default as call_openrouter. This path was left at 16000 when
+        # that one was raised to 64000, and reviewers.json's own comment
+        # already claimed "All reviewers use DEFAULT_MAX_OUTPUT_TOKENS
+        # (64000)". luna at effort=high then spent its whole 16000 budget on
+        # reasoning for a 53KB document and returned an empty response twice,
+        # costing a plan review its quorum. It had worked minutes earlier only
+        # because it was temporarily routed via openrouter.
+        "max_output_tokens": rev.get("max_output_tokens",
+                                     DEFAULT_MAX_OUTPUT_TOKENS),
     }
     if rev.get("effort"):
         payload["reasoning"] = {"effort": rev["effort"]}
@@ -1002,10 +1010,20 @@ def decide_state(n_completed, n_failed, confirmed, refuted_claims,
     inline, the failed-reviewer hole below was invisible to every test."""
     if n_completed == 0:
         return "REVIEW_UNAVAILABLE"
-    if confirmed or refuted_claims:
-        return "REVIEW_FAIL"
+    # Quorum gates the FAIL as well as the PASS. It used to sit below the
+    # finding check, so one completed reviewer could deliver a verdict that the
+    # panel never reached: found live when a plan review returned REVIEW_FAIL
+    # on a single verdict because the second reviewer returned an empty
+    # response. The same asymmetry was fixed in escalate() and missed here --
+    # one rule, two places, the defect class this repo has hit 19 times.
+    #
+    # The finding is NOT discarded: it is still printed, and REVIEW_PARTIAL is
+    # not a pass (the caller is told never to treat it as one). What changes is
+    # that one opinion is not dignified as a committee verdict.
     if n_completed < quorum:
         return "REVIEW_PARTIAL"
+    if confirmed or refuted_claims:
+        return "REVIEW_FAIL"
     if n_failed:
         # A reviewer that errored, timed out, or returned unparseable output
         # produced no verdict. Quorum among the others does not speak for it,

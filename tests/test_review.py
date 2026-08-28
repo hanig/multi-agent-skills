@@ -1538,5 +1538,91 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
                                        "recovered to be measuring anything")
 
 
+class TestQuorumGatesFailAsWellAsPass(unittest.TestCase):
+    """Found by using the gate: a plan review returned REVIEW_FAIL on ONE
+    verdict, because luna returned an empty response and the finding check sat
+    above the quorum check. Quorum was required for a pass and not for a fail.
+
+    The same asymmetry had already been fixed in escalate(); this is the
+    sibling site, missed. The finding still prints and REVIEW_PARTIAL is still
+    not a pass -- what changes is that one opinion is not a committee."""
+
+    def test_a_finding_below_quorum_is_partial_not_fail(self):
+        st = review.decide_state(
+            n_completed=1, n_failed=1, confirmed=[{"severity": "major"}],
+            refuted_claims=[], rejecting=False, truncated=False, quorum=2)
+        self.assertEqual(st, "REVIEW_PARTIAL",
+                         "one reviewer's finding was returned as a committee "
+                         "verdict")
+
+    def test_a_refuted_claim_below_quorum_is_partial_not_fail(self):
+        st = review.decide_state(
+            n_completed=1, n_failed=0, confirmed=[],
+            refuted_claims=["c"], rejecting=False, truncated=False, quorum=2)
+        self.assertEqual(st, "REVIEW_PARTIAL")
+
+    def test_a_finding_at_quorum_still_fails(self):
+        """The counter-claim: this must not stop the gate from failing when the
+        panel actually did reach quorum."""
+        st = review.decide_state(
+            n_completed=2, n_failed=0, confirmed=[{"severity": "major"}],
+            refuted_claims=[], rejecting=False, truncated=False, quorum=2)
+        self.assertEqual(st, "REVIEW_FAIL")
+
+    def test_no_verdicts_is_still_unavailable(self):
+        st = review.decide_state(
+            n_completed=0, n_failed=2, confirmed=[{"severity": "critical"}],
+            refuted_claims=[], rejecting=False, truncated=False, quorum=2)
+        self.assertEqual(st, "REVIEW_UNAVAILABLE")
+
+
+class TestBothProviderPathsShareTheirLimits(unittest.TestCase):
+    """call_openai kept a hardcoded 16000 output budget after call_openrouter
+    was raised to 64000, and reviewers.json's comment already claimed both used
+    the shared default. luna then burned its whole budget on reasoning for a
+    53KB document and returned an empty response twice, costing a plan review
+    its quorum. One rule, two call paths, applied to one."""
+
+    def test_neither_path_hardcodes_an_output_budget(self):
+        import ast
+        src = SCRIPT.read_text()
+        tree = ast.parse(src)
+        for fn in ast.walk(tree):
+            if not isinstance(fn, ast.FunctionDef):
+                continue
+            if not fn.name.startswith("call_"):
+                continue
+            for node in ast.walk(fn):
+                # rev.get("max_output_tokens", <literal>) must fall back to the
+                # shared constant, never to a number written in place.
+                if not isinstance(node, ast.Call):
+                    continue
+                f = node.func
+                if not (isinstance(f, ast.Attribute) and f.attr == "get"):
+                    continue
+                if not node.args or not isinstance(node.args[0], ast.Constant):
+                    continue
+                if node.args[0].value != "max_output_tokens":
+                    continue
+                self.assertGreater(len(node.args), 1,
+                                   f"{fn.name}: no default given")
+                dflt = node.args[1]
+                self.assertNotIsInstance(
+                    dflt, ast.Constant,
+                    f"{fn.name} hardcodes an output budget; use "
+                    f"DEFAULT_MAX_OUTPUT_TOKENS so both paths move together")
+
+    def test_the_documented_default_matches_the_code(self):
+        """reviewers.json's comment states the number; a comment that lies
+        about the code is how this survived."""
+        import json
+        cfg = json.loads(
+            (REPO / "skills" / "hanig-review-gate" / "reviewers.json").read_text())
+        comment = cfg.get("_comment", "")
+        self.assertIn(str(review.DEFAULT_MAX_OUTPUT_TOKENS), comment,
+                     "reviewers.json documents a different default than the "
+                     "code uses")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
