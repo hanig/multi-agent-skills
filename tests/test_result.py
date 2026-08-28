@@ -363,5 +363,72 @@ class TestStaleUsesBuildTimeDigests(Base):
                          f"CONTRACT_DRIFTED unreachable:\n{r.stdout}")
 
 
+class TestExclusiveNamespace(Base):
+    """The answer to a CRITICAL both reviewers raised against attribution
+    itself: observation across a window shows an artifact CHANGED, never which
+    process changed it, and on a filesystem shared by ~18 people a concurrent
+    writer is ordinary rather than hypothetical. No window length fixes that.
+
+    Shreshth's repo never faced this because Paseo gives each agent its own git
+    worktree -- "one bounded, disjoint worker task and worktree per
+    implementation worker". He did not solve attribution; an exclusive namespace
+    made it unnecessary. This is that idea applied to output directories."""
+
+    def test_a_foreign_write_refutes_exclusivity(self):
+        r = self.declare(
+            "--exclusive-outputs", "--check",
+            json.dumps({"kind": "min_size", "path": "fig.txt", "bytes": 1}),
+            command="wc -l < in.tsv > fig.txt; printf 'x\\n' > other.txt")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        cli("build", str(self.tmp), cwd=str(self.tmp))
+        r = cli("check", str(self.tmp), cwd=str(self.tmp))
+        self.assertEqual(r.returncode, result.STATES["INCOMPLETE_EVIDENCE"],
+                         f"a foreign write did not refute exclusivity:\n"
+                         f"{r.stdout}")
+        self.assertIn("exclusively", r.stdout)
+
+    def test_an_honest_exclusive_run_still_passes(self):
+        """The counter-claim. A gate that fires on honest work gets removed."""
+        (self.tmp / "out").mkdir()
+        r = self.declare(
+            "--exclusive-outputs", "--check",
+            json.dumps({"kind": "min_size", "path": "out/fig.txt",
+                        "bytes": 1}),
+            command="wc -l < in.tsv > out/fig.txt")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # Re-point the declared output at the owned subdirectory.
+        cpath = self.tmp / "result-contract.json"
+        c = json.loads(cpath.read_text())
+        c["declared_outputs"] = ["out/fig.txt"]
+        c["criteria_digest"] = None
+        cpath.write_text(json.dumps(c))
+        cli("build", str(self.tmp), cwd=str(self.tmp))
+        r = cli("check", str(self.tmp), cwd=str(self.tmp))
+        self.assertNotEqual(
+            r.returncode, result.STATES["INCOMPLETE_EVIDENCE"],
+            f"an honest exclusive run was refused:\n{r.stdout}")
+
+    def test_the_receipt_does_not_claim_attribution(self):
+        """The wording correction. Three shipped tools implied the command
+        produced the artifact; the window can only show it changed."""
+        self.declare()
+        cli("build", str(self.tmp), cwd=str(self.tmp))
+        cli("check", str(self.tmp), cwd=str(self.tmp))
+        scope = json.loads(
+            (self.tmp / "verification.json").read_text())["provenance_scope"]
+        self.assertEqual(scope["production_claim"], "changed_during_window")
+        self.assertFalse(scope["production_attributed_to_command"])
+        self.assertIn("concurrent writer", scope["note"])
+
+    def test_without_the_flag_no_inventory_is_taken(self):
+        """Proportionality: inventorying a directory of a million files on
+        every build would make the verifier the slow part, and a verifier too
+        slow to run gets skipped."""
+        self.declare()
+        cli("build", str(self.tmp), cwd=str(self.tmp))
+        line = (self.tmp / "attempts.jsonl").read_text().strip().splitlines()[-1]
+        self.assertIsNone(json.loads(line)["owned_before"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -139,6 +139,13 @@ GATES = (
          why="an output carries no evidence that the command produced it",
          action="re-run `result.py build` so the build window is recorded, or "
                 "declare deterministic: true and run `build --double`"),
+    dict(id="foreign_write_in_owned_namespace", role="disqualifier",
+         state="INCOMPLETE_EVIDENCE",
+         why="an undeclared file changed inside a directory this contract "
+             "claims exclusively, so the exclusivity the attribution rests on "
+             "does not hold",
+         action="give this attempt its own output directory, or drop "
+                "--exclusive-outputs and accept the weaker claim"),
     dict(id="double_render_differed", role="disqualifier",
          state="NONDETERMINISTIC",
          why="a recorded double render differed where determinism was declared",
@@ -435,6 +442,19 @@ def cmd_declare(args):
         "command": args.command,
         "cwd": cwd,
         "declared_outputs": list(args.output),
+        # Exclusive ownership of the directories the declared outputs live in.
+        # This is the answer to a CRITICAL a committee raised against the whole
+        # attribution approach: observation across a window shows an artifact
+        # changed, never which process changed it, and on a cluster filesystem
+        # shared by ~18 people a concurrent writer is ordinary rather than
+        # hypothetical. No window length fixes that.
+        #
+        # Shreshth's repo never had this problem because Paseo gives each agent
+        # its own git worktree -- "one bounded, disjoint worker task and
+        # worktree per implementation worker". He did not solve attribution; an
+        # exclusive namespace made attribution unnecessary. This is that idea,
+        # applied to output directories rather than worktrees.
+        "exclusive_outputs": bool(args.exclusive_outputs),
         "declared_inputs": list(args.input),
         "declared_checks": checks,
         "deterministic": bool(args.deterministic),
@@ -482,6 +502,38 @@ def _abs(path, base):
     return p if p.is_absolute() else Path(base) / p
 
 
+def _owned_inventory(contract, cwd):
+    """Digest every regular file in each directory holding a declared output.
+
+    Bounded and non-recursive: an output directory with a million files would
+    otherwise make `build` the slowest part of the pipeline, and a verifier that
+    is too slow to run gets skipped. Truncation is REPORTED rather than silently
+    capping, because a silent cap reads as "nothing else was there".
+    """
+    LIMIT = 2000
+    inventory, truncated = {}, []
+    for out in (contract.get("declared_outputs") or []):
+        d = _abs(out, cwd).parent
+        key = str(d)
+        if key in inventory:
+            continue
+        entry, n = {}, 0
+        try:
+            for child in sorted(d.iterdir()):
+                if not child.is_file():
+                    continue
+                n += 1
+                if n > LIMIT:
+                    truncated.append(key)
+                    break
+                dg, size, err = digest_file(child)
+                entry[child.name] = {"sha256": dg, "size": size, "error": err}
+        except OSError as e:
+            entry = {"__error__": {"error": f"{type(e).__name__}: {e}"}}
+        inventory[key] = entry
+    return {"dirs": inventory, "truncated": truncated, "limit": LIMIT}
+
+
 # --- build ----------------------------------------------------------------
 def cmd_build(args):
     run_dir = Path(args.result_dir).resolve()
@@ -514,6 +566,8 @@ def cmd_build(args):
     # The window escapes all three because it is a CONTENT comparison across a
     # bounded interval the tool itself opens and closes. Never a clock.
     before = {str(o): fingerprint(_abs(o, cwd)) for o in outputs}
+    owned_before = _owned_inventory(contract, cwd) \
+        if contract.get("exclusive_outputs") else None
 
     started = now_iso()
     t0 = time.time()
@@ -533,6 +587,12 @@ def cmd_build(args):
     consumed = {str(i): fingerprint(_abs(i, cwd))
                 for i in (contract.get("declared_inputs") or [])}
 
+    # Exclusive-namespace inventory. Digesting only the DECLARED outputs cannot
+    # see a foreign write; inventorying the whole owned directory can, which is
+    # what turns an unattributable change into a detectable error.
+    owned_after = _owned_inventory(contract, cwd) \
+        if contract.get("exclusive_outputs") else None
+
     production = {}
     for o in outputs:
         o = str(o)
@@ -545,11 +605,14 @@ def cmd_build(args):
             "before": b.get("sha256"), "after": a.get("sha256"),
             "appeared_in_window": appeared,
             "changed_in_window": changed,
-            # The honest name. "produced" would overstate it: a concurrent
-            # writer racing this window is indistinguishable from the command,
-            # a residual this family already cedes because a `command` check
-            # runs unsandboxed and anyone who can race that write already holds
-            # total directory authority.
+            # The honest name, and it is now honest for a stronger reason than
+            # when it was written. A committee found the residual is not a
+            # corner case: on a filesystem shared by ~18 people, a concurrent
+            # writer is ordinary, so this field establishes THAT THE ARTIFACT
+            # CHANGED during the window and NOT that this command changed it.
+            # No window length fixes that -- observation cannot attribute.
+            # Exclusive ownership of the output namespace can, and that is
+            # tracked separately below.
             "written_in_window": bool(appeared or changed),
         }
 
@@ -566,6 +629,8 @@ def cmd_build(args):
         "stderr_tail": (err_text or "")[-4000:],
         "production": production,
         "consumed_inputs": consumed,
+        "owned_before": owned_before,
+        "owned_after": owned_after,
         "double_render": None,
     }
 
@@ -846,6 +911,38 @@ def gather(run_dir, contract, args):
     if integrity:
         hits.add("inputs_changed_since_build")
 
+    # --- foreign writes inside an exclusively-owned namespace --------------
+    # A change to a file we did NOT declare, inside a directory this contract
+    # claims to own, means something else wrote there while the command ran. It
+    # does not prove the declared outputs were written by someone else, but it
+    # DOES refute the exclusivity the attribution rests on -- so say so rather
+    # than continuing to imply attribution.
+    if contract.get("exclusive_outputs"):
+        ob = latest.get("owned_before") or {}
+        oa = latest.get("owned_after") or {}
+        declared_names = {Path(str(o)).name for o in outputs}
+        foreign = []
+        for d, after_files in (oa.get("dirs") or {}).items():
+            before_files = (ob.get("dirs") or {}).get(d) or {}
+            for name, rec in sorted(after_files.items()):
+                if name in declared_names or name.startswith("__"):
+                    continue
+                was = before_files.get(name)
+                if was is None or was.get("sha256") != rec.get("sha256"):
+                    foreign.append(f"{d}/{name}")
+        if foreign:
+            hits.add("foreign_write_in_owned_namespace")
+            notes.append(
+                f"{len(foreign)} undeclared file(s) appeared or changed inside "
+                f"a directory this contract claims exclusively: "
+                f"{', '.join(foreign[:3])}. Exclusivity is what lets a build "
+                f"window attribute a change to this command, so that claim no "
+                f"longer holds here.")
+        for d in (oa.get("truncated") or []):
+            notes.append(f"the inventory of {d} was truncated at "
+                         f"{oa.get('limit')} files, so a foreign write beyond "
+                         f"that is not covered")
+
     unproduced = [o for o in present if o not in produced]
     if unproduced:
         # deterministic:true plus a confirmed double render is the one honest
@@ -989,13 +1086,27 @@ def cmd_check(args):
         # Machine-readable scope, so a consumer sees the claim's boundary
         # without parsing prose. Provenance is exactly as good as the
         # declaration: an undeclared input is invisible to this tool.
+        # Machine-readable scope, so a consumer sees the claim's BOUNDARY
+        # without parsing prose. Corrected after a committee found the previous
+        # wording overstated what a build window can establish.
         "provenance_scope": {
             "covers": "declared inputs only",
             "undeclared_inputs_detected": False,
             "structure_only": True,
+            # The correction. Observation across a window shows the artifact
+            # changed; it cannot show WHICH process changed it. Attribution
+            # needs an exclusive output namespace, not a shorter window.
+            "production_claim": "changed_during_window",
+            "production_attributed_to_command": False,
+            "exclusive_output_namespace": bool(
+                contract.get("exclusive_outputs")),
             "note": "checks use magic bytes and structure; no PDF or image "
-                    "parser was used, and an input that was never declared "
-                    "is not covered.",
+                    "parser was used, and an input that was never declared is "
+                    "not covered. The production window shows that a declared "
+                    "output changed while the command ran, NOT that the "
+                    "command wrote it: a concurrent writer is "
+                    "indistinguishable by observation. Declare "
+                    "exclusive_outputs to make a foreign write detectable.",
         },
     }
     werr = write_json(run_dir / RECEIPT, receipt)
@@ -1016,7 +1127,10 @@ def cmd_check(args):
     if state == "GENERATED":
         print("\n  The command ran and produced its outputs. That is NOT "
               "success:\n  nothing has checked whether they are right.")
-    print(f"\n  provenance covers DECLARED inputs only; structure-only checks.")
+    print("\n  provenance covers DECLARED inputs only; structure-only checks.")
+    print("  the window shows a declared output CHANGED while the command "
+          "ran,\n  not that the command wrote it (a concurrent writer is "
+          "indistinguishable).")
     return code
 
 
@@ -1066,6 +1180,14 @@ def main():
     d.add_argument("--check", action="append", default=[])
     d.add_argument("--record-env", action="append", default=[])
     d.add_argument("--deterministic", action="store_true")
+    d.add_argument("--exclusive-outputs", action="store_true",
+                   help="claim exclusive ownership of the directories the "
+                        "declared outputs live in. `build` then inventories "
+                        "those directories before and after, and `check` "
+                        "reports any file that appeared or changed which was "
+                        "NOT declared -- a foreign write. Without this, a "
+                        "concurrent writer is indistinguishable from the "
+                        "command by observation alone.")
     d.add_argument("--cwd")
     d.add_argument("--force", action="store_true")
     d.set_defaults(fn=cmd_declare)

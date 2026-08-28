@@ -1,361 +1,325 @@
-# Plan v2: fuse coordination with adjudication
+# Plan v3: fuse coordination with adjudication
 
-> **STATUS: v2 CLOSER, NOT ACCEPTED. Plan review 2026-08-28: deepseek-v4-pro
-> UPHELD all 7 claims with 0 findings; luna refuted 1 and found 3 MAJOR. Split
-> verdict, and the dissenter was right — the fourth time this session.**
+> Author: gpt-5.6-sol. v1 rejected on 6 MAJOR, v2 on 3 MAJOR. Round 3 of the
+> 3 the protocol allows on one change.
 >
-> All four withdrawals were accepted by both reviewers. Extending `bus await`
-> instead of building a parallel admission controller stands. What fails is the
-> classification of predicates and the ORDER of the steps.
+> **Settled by v2 and accepted by both reviewers:** extend `bus await` rather
+> than build a parallel controller; no sealed work order; admission is
+> point-in-time, not a durable ADMITTED label; per-machine topology.
 >
-> **The one idea behind all three findings: a predicate that can be satisfied
-> without doing the work.** This is the fourth appearance of that shape in this
-> project — it is the same error as `result.py`'s missing production gate, where
-> integrity proved the bytes were bound to an attempt and nothing proved the
-> command wrote them.
+> **What v3 answers.** luna's three findings against v2 were one idea -- a
+> predicate that can be satisfied without doing the work -- and that shape has
+> since been found THREE times in this repo's own shipped verifiers, twice as a
+> false pass at exit 0 (`contract.py` SCIENTIFIC_PASS and `traincontract.py`
+> CONVERGED on artifacts written by an unrelated process; both closed at
+> 23678b8 and 40ea773). So v3 treats it as the organising principle: a
+> five-condition rule for what counts as production evidence, a partition of
+> every existing predicate against it, and enforcement in one verdict function.
 >
-> **1. `--require-clean` alone is a completion path (MAJOR).** An idle agent
-> already sitting at a clean HEAD, `bus await AGENT --require-clean` with no
-> `--base`, no verifier and no `--lifecycle-only`: cleanliness passes and the
-> await reports ARTIFACT READY, exit 0, with no new artifact and no work done.
-> Step 1 excluded only status/json assertions and counted `--require-clean` as a
-> measured git predicate. **Measured is not the same as evidence of
-> production.** A clean worktree is a NEGATIVE property, satisfied by inaction.
-> Predicates must be classified by whether they can only be true if work
-> happened, not by whether the tool measures them itself.
->
-> **2. Step 2 opens a hole that step 3 closes (MAJOR).** `bus await AGENT
-> --verifier /bin/true` exits 0 and reports ARTIFACT READY. v2 was honest that
-> a freely chosen verifier is not independently authorized, but it still
-> sequenced the success path BEFORE the authorization mechanism. Honesty about
-> a gap does not license shipping the gap first. Either authorization lands with
-> the verifier predicate, or the predicate is refused until it does.
->
-> **3. Policy from the base commit does not pin the verifier EXECUTABLE
-> (MAJOR).** The base policy authorizes `python verify.py`; `verify.py` in the
-> inspected worktree is changed to return 0 without validating anything; the
-> verifier runs in that worktree cwd, so bus accepts the zero exit. **The policy
-> bytes are unchanged while the behaviour is not.** Pinning the authorizing
-> policy is not pinning what the policy invokes.
->
-> **What v3 must settle.** Classify every predicate as production-evidencing or
-> not, and require at least one of the former for ARTIFACT READY. Land verifier
-> authorization with the verifier predicate rather than after it. Pin the
-> verifier's identity by content, not by the name of the policy that authorizes
-> it — and if that cannot be done inside the threat model (agents
-> honest-but-fallible, contract files trusted, no signatures), say so and scope
-> the claim down rather than implying independence.
+> Note it reclassifies `--base`, which I had assumed WAS the production
+> predicate: an arbitrary caller-supplied base is not, because HEAD may have
+> advanced earlier. Only a base anchored to the worker's verified launch record
+> qualifies.
 
----
+## The production-evidence rule
 
-## What I am withdrawing from v1
+A predicate is production-evidencing only when all five conditions hold:
 
-I withdraw four material claims:
+1. **Pre-state:** An observer outside the executor captured the artifact’s state before execution.
+2. **Post-state:** An independent observer captured its state after execution.
+3. **Material transition:** The predicate requires appearance, content change, or append-only growth—not merely existence, freshness, cleanliness, or a lifecycle transition.
+4. **Attempt binding:** The observation window is bound to the same agent/job attempt being admitted.
+5. **Artifact binding:** The resulting receipt identifies the exact post-state being accepted.
 
-- **A new admission controller is not warranted.** `bus await` already is the admission controller. The right design extends that chokepoint.
-- **The sealed work order should not be the minimum unit.** It duplicates launch records, contract files, attempts, and receipts already present across the two repos.
-- **`ADMITTED` should not be a durable universal state.** Admission is a point-in-time verifier result. A permanent `ADMITTED` label creates the stale-artifact problem unless artifacts are immutable.
-- **The Mac-centered remote-control topology was wrong.** Deployment is per machine. Verification runs locally beside the artifacts; cross-machine verification, transport, credentials, and central reconciliation are out.
+If any condition is missing, the predicate belongs to another category.
 
-I also withdraw the broad statement that the coordination repo cannot prove anything. It already has a real, tested enforcement point.
+This is a production-attribution rule under a single-writer assumption. A concurrent unrelated process writing the same output during the window remains indistinguishable from the intended process. The existing `result.py` comments correctly acknowledge this limit. Unique run directories, isolated worktrees, and declared output ownership reduce the honest accidental form; solving hostile races would exceed the threat model.
 
-## What `bus await` proves today
+## Actual predicate partition
 
-The implementation confirms your correction.
+| Predicate | Category | Can pass through inaction? | Can satisfy production requirement? |
+|---|---|---:|---:|
+| Agent `idle` | Lifecycle | Yes | No |
+| `--expect-cwd` | Execution scope | Yes | No |
+| `--expect-provider` | Execution scope | Yes | No |
+| `--expect-model` | Execution scope | Yes | No |
+| `--expect-thinking` | Execution scope | Yes | No |
+| `--expect-branch` | Execution scope | Yes | No |
+| `--require-clean` | Hygiene/integrity | Yes | No |
+| `--status-file` exists/parses | Agent assertion transport | Yes | No |
+| `--require-json PATH` truthy | Agent assertion | Yes | No |
+| `git_evidence()` output | Diagnostics | Yes | No |
+| Current `--base` with arbitrary caller-supplied base | Relative-state check | Yes: HEAD may have advanced earlier | No |
+| Base anchored by this worker’s verified launch record, with final tree changed | Production transition | No | Yes, for a Git artifact |
+| Authorized verifier exit 0 without an explicit production claim | Validation | Possibly | No |
+| Authorized, content-pinned verifier emitting a bound production receipt | Production plus validation | No, if its production gate is sound | Yes |
 
-Sound measurements:
+### Execution-scope checking
 
-- `launch_contract_issues` compares observed cwd, provider, model, thinking setting, and Git branch with declared expectations.
-- `--base` reads Git state itself and refuses when HEAD is absent, the base cannot resolve, or HEAD equals the base.
-- `--require-clean` reads the worktree rather than trusting an agent report.
-- `cmd_await` distinguishes `idle`, `ARTIFACT READY`, `IDLE WITHOUT ARTIFACT`, and `INVALID LAUNCH CONTRACT`.
-- The tests prove that idle without the required commit exits nonzero and a launch mismatch fails closed.
+Execution-scope checks are a separate category, not production evidence.
 
-This is genuinely the same thesis: lifecycle settlement is not completion.
+They answer:
 
-But its proof boundary is narrower than its labels imply:
+> Did the expected executor run in the expected place and configuration?
 
-- `HEAD != base` proves that HEAD differs, not that it descends from the base, implements the task, or passes tests.
-- `--require-clean` has a fail-open edge: `git_value()` returns `""` both for a clean worktree and for Git failure/timeout. By contrast, `--base` notices missing values and fails closed.
-- `git_evidence()` is diagnostic only. Its comment explicitly says evidence may degrade while the verdict still ships.
-- `--require-json` proves only that a non-empty value exists in an agent-writable document. It does not prove the value is true.
-- An await invocation with no contract flags returns exit 0 for idle. The prose is honest, but shell composition sees success.
+Production checks answer:
 
-So `bus await` is a sound admission layer for the facts it independently measures, with two implementation defects and one intentionally weak predicate. It is not yet an adjudication bridge to the domain verifiers.
+> Did an artifact materially transition during that execution?
 
-## Revised minimum unit
+Both matter. Neither implies the other.
 
-The minimum fused unit is a **contracted await**, not a new work-order subsystem:
+A correctly configured agent may do nothing. An artifact may change under the wrong agent, wrong job, or wrong environment. Therefore a strong admission requires scope checks and production evidence as separate conjuncts.
 
-```text
-Paseo agent identity
-+ launch constraints
-+ independently measured artifact predicates
-+ an authorized verifier invocation
-= one admission evaluation
-```
+The verifier family should eventually adopt the same distinction:
 
-The durable components already exist:
+- `contract_id` and attempt binding establish instance ownership.
+- Scheduler/job identity establishes execution scope.
+- The digest window establishes production.
+- Predicates establish artifact validity.
+- Current digests establish currency.
 
-- The launch record binds the worker to its execution scope.
-- The domain contract binds criteria to a contract instance.
-- The domain verifier binds its receipt to criteria and artifacts.
-- `bus await` decides whether those obligations have been met.
+Do not collapse those into one “provenance” boolean.
 
-The missing operation is for `bus await` to execute the declared verifier and treat its result as another conjunctive artifact predicate:
+## Classifying `--base` correctly
 
-```text
-idle
-AND launch contract matches
-AND Git predicates pass, when declared
-AND verifier exits 0
-= ARTIFACT READY
-```
+The existing `--base` is insufficient because `bus await` does not know that the supplied base was the worker’s starting state.
 
-That is materially smaller and clearer than another state machine.
+For Git work, production evidence requires:
 
-## Should `--verifier CMD` replace the sealed work order?
+- A verified `launch-worker` record for the same Paseo agent.
+- The record’s cwd and branch matching current inspected state.
+- The record’s base matching the HEAD observed during launch preflight.
+- Final HEAD being a descendant of that base.
+- Final tree digest differing from the base tree digest.
 
-Yes, with one qualification: **the command needs independent authorization**.
+The tree comparison matters. An empty commit advances HEAD but produces no material artifact.
 
-Adding only:
+This proves that the isolated worktree’s content changed during the worker interval. It does not prove that the diff satisfies the task; tests, review, write-scope checks, and other validators remain separate predicates.
+
+An unbound `--base` can remain diagnostic or supporting evidence, but cannot unlock `ARTIFACT READY`.
+
+## Enforcing the classification
+
+The classification must live in `bus` data and the single verdict decision—not in help text or caller convention.
+
+Each evaluated predicate should produce a structured internal result with:
+
+- Predicate identifier.
+- Category: `lifecycle`, `scope`, `hygiene`, `assertion`, `validation`, `production`, or `diagnostic`.
+- Passed/failed/unavailable.
+- Evidence detail.
+- Binding identifiers where relevant.
+
+The category is assigned by trusted implementation code. The caller must never be able to add `--class production` to an arbitrary predicate.
+
+The admission decision is then:
 
 ```text
-bus await <agent> --verifier "contract.py check ..."
+agent is idle
+AND every declared scope predicate passed
+AND every declared required predicate passed
+AND at least one internally classified production predicate passed
 ```
 
-would close the `--require-json` weakness relative to the worker. The worker no longer asserts `validation.passed`; `bus` executes a different process and reads its exit status.
+Otherwise:
 
-But it does not close the coordinator-level self-assertion. A coordinating agent could select `/bin/true`, a lenient verifier, or a legitimate verifier pointed at a weak contract.
+- No production predicate declared: usage refusal naming `--lifecycle-only` or a production-capable path.
+- Production predicate declared but unmet: `IDLE WITHOUT ARTIFACT`.
+- Scope mismatch: `INVALID LAUNCH CONTRACT`.
+- Explicit lifecycle-only wait: `LIFECYCLE SETTLED — no artifact judgment`.
 
-Therefore:
+This should be one decision function. The repository already learned that duplicated state selection inside one file is the dominant drift mechanism.
 
-- Extend `bus await`; do not build a parallel controller.
-- Keep domain contracts and receipts.
-- Add a small verifier-policy mechanism only after the direct execution path works.
-- Do not call a freely chosen verifier “independently authorized.”
+## The new verifier predicate
 
-## What makes a claim evidence rather than assertion?
+Do not ship free-form `--verifier CMD` as a production predicate.
 
-The distinction is not “JSON versus Git” or even “human versus agent.” It is:
+A generic verifier can prove many things that are not production:
 
-> Evidence is an observation made by an authority that did not control the proposition being judged, using criteria fixed before the judged execution.
+- `/bin/true` proves nothing.
+- A test suite may already pass before the worker starts.
+- A schema checker may accept a stale artifact.
+- `contract.py check` without `--require-production-evidence` can still reach its legacy success behavior.
+- `traincontract.py check` without a production bracket can validate a curve written by another run.
 
-Examples:
-
-- The worker says `tests_passed: true`: assertion.
-- `bus` runs the test command and observes exit 0: evidence of that command’s result.
-- `bus` observes a clean worktree: evidence of cleanliness at that moment.
-- A verifier reads an agent-authored contract containing `min_rows: 1`: evidence that the artifact has one row, but no evidence that one row was an adequate criterion.
-- A human/project policy fixed `min_rows: 10000` before dispatch and a separate verifier measures it: evidence against independently authorized criteria.
-
-This supports your framing, with one rejection: a field saying `"author": "human"` does not make trusted input human-authored. On one Unix account, an agent can write the same field and file. Under the honest-but-fallible threat model, forgery is not the concern, but accidental self-authorization still is.
-
-The code must enforce provenance, not asserted identity.
-
-## Enforcing human versus agent authorization
-
-Do not add `issuer` and `executor` strings and compare them. That was weak.
-
-Use two mechanically distinguishable authority classes.
-
-### 1. Project-authorized criteria
-
-The acceptance policy exists at the declared base commit before the worker launches.
-
-The await/launch machinery reads it from the Git object database:
+The interface should therefore be policy-based from its first successful version, for example conceptually:
 
 ```text
-git show <base-commit>:<policy-path>
+--verifier-policy <base-committed-policy>
 ```
 
-It does not read the worker’s current worktree copy.
+The policy specifies:
 
-The policy fixes:
+- Exact verifier source SHA-256.
+- Invocation template.
+- Whether it is validation-capable, production-capable, or both.
+- Receipt schema and required success state.
+- Required binding fields.
+- Required machine-readable production claim.
+- Contract fields that must enable production evidence.
+- Allowed run-specific substitutions.
 
-- Verifier argv or an allowed verifier identifier.
-- Contract type.
-- Which criteria are locked.
-- Which fields may be instantiated per run.
-- Required success state and receipt fields.
-- Whether human scientific review is required.
+No free-form verifier may be classified as production.
 
-The machine can prove that this policy predates the worker and that the worker’s edits cannot change what is invoked. “Human-authorized” is then a repository trust assumption: humans approve the base revision. That matches the existing trusted-input threat model.
+A manual free-form check could eventually exist as diagnostic validation, but it must not unlock `ARTIFACT READY`.
 
-Fields should describe provenance rather than personalities:
+## Pinning the verifier by content
+
+Content pinning is achievable for the current standalone Python verifier model, with a deliberately narrow claim.
+
+The base-committed policy stores the expected SHA-256 of the verifier source. At admission, `bus` should:
+
+1. Open the verifier as a bounded regular file.
+2. Hash its exact bytes.
+3. Compare with the authorized digest.
+4. Copy those verified bytes to a private temporary file.
+5. Execute that copy with the same Python interpreter running `bus`, preferably isolated from user-site imports.
+6. Record verifier digest, interpreter path/version, argv, cwd, and receipt.
+
+Executing a verified copy closes the worktree mutation:
 
 ```text
-authority.kind = "base_policy"
-authority.base_commit
-authority.policy_path
-authority.policy_blob_oid
+policy authorizes python verify.py
+worker changes verify.py
+bus hashes changed bytes
+digest mismatch
+verification never runs
 ```
 
-Code enforcement:
+Or, if the installed file still matches, the copied authorized bytes run regardless of later worktree edits.
 
-- Resolve the exact base commit.
-- Read policy bytes from that commit.
-- Verify their blob identity.
-- Construct the verifier invocation from those bytes.
-- Refuse a policy present only in the worktree.
-- Refuse worktree changes that alter locked criteria.
-- Never accept an argv supplied by the worker as the authorized verifier.
+### Scoped claim
 
-### 2. Independently reviewed agent-authored criteria
+This pins the verifier’s Python source bytes. It does not pin all behavior transitively:
 
-This should be a later capability, not part of the first useful release.
+- Python interpreter implementation.
+- `git`, `sacct`, `squeue`, `shasum`, or other subprocesses.
+- Kernel/filesystem behavior.
+- Environment variables the verifier intentionally reads.
+- Remote services.
 
-An agent may draft novel criteria, but they become authorized only through a plan-review receipt that binds:
+Those identities should be recorded when relevant, but “exact behavior is content-pinned” would be false. The honest claim is:
 
-- The exact criteria digest.
-- The threat model digest.
-- Reviewer identities/providers.
-- A passing two-reviewer quorum.
-- A timestamp before worker launch.
-- The execution agent identity, which must not be one of the authorizing sessions.
+> `bus` executed the exact authorized standalone verifier source bytes under the recorded local interpreter and environment assumptions.
 
-The present review gate does not yet emit all of that as a durable, content-bound authorization receipt. Until it does, agent-authored novel criteria should be labeled `UNAUTHORIZED_CRITERIA` and must not produce `ARTIFACT READY`.
+Arbitrary shell commands, binaries, local-import trees, and dynamically loaded verifier plugins should not be production-capable in the first version. Pinning their transitive behavior is not available cheaply and should be left out.
 
-That is stricter but honest. Do not ship an `author: human` field as a substitute.
+## Verifier receipts must expose production explicitly
 
-## Revisiting the five findings
+Exit 0 alone cannot tell `bus` whether the verifier established production.
 
-### 1. The seal is not sealed
+A verifier eligible for production admission needs a machine-readable receipt field with at least:
 
-Confirmed against v1. The work-order proposal offered immutability by declaration.
+- Contract ID.
+- Criteria digest.
+- Attempt ID.
+- Production state.
+- Production method.
+- Pre/post artifact identities or growth observations.
+- Current accepted artifact identities.
+- Verification timestamp.
 
-The revised design avoids the problem in two ways:
-
-- Direct `--verifier` is process configuration for one running await, not a mutable file later reread.
-- Agent-safe automated use loads the verifier policy from the immutable base commit, not the worktree.
-
-No signatures are needed under the stated threat model.
-
-### 2. The old path bypasses admission
-
-Confirmed and first priority.
-
-No-contract `idle` must cease returning an ordinary success unless the caller explicitly requests lifecycle-only waiting.
-
-The clean interface is:
+For example, semantically:
 
 ```text
-bus await ... <artifact predicate>
-bus await ... --lifecycle-only
+production.state = PASS
+production.method = content_window | append_growth | anchored_git_tree_change
+production.attempt_id = ...
 ```
 
-Without either, refuse before waiting.
+The field is trustworthy only because `bus` has just executed the authorized verifier bytes and parses the fresh output from that invocation. Reading a pre-existing receipt file alone would reintroduce stale self-assertion.
 
-`--lifecycle-only` should print something like:
+### Current verifier eligibility
+
+- **`result.py`:** conceptually eligible. Its production window is mandatory on the successful path, and its check remeasures current digests. Its receipt should expose that production conclusion explicitly.
+- **`contract.py`:** eligible only when the contract has `require_production_evidence: true`, the bracket evidence is bound to the current contract and attempt, and the fresh receipt states that it passed.
+- **`traincontract.py`:** eligible only after growth-based production evidence is complete and bound.
+
+The current `traincontract.py` visible on disk already contains an apparent growth/change bracket and `training_production_fault`, despite the prompt describing it as not closed. I treat that as in-progress rather than accepted: the receipt shown on disk does not yet expose the production conclusion, and the bracket evidence must be checked for current-attempt binding.
+
+The same binding requirement should be checked in `contract.py`: the visible `production-window.json` payload records paths and before/after digests but does not visibly name the contract ID or attempt ID. A stale window must never satisfy a later contract merely because its old `written_in_window` values are true.
+
+## Authorization and verifier execution must land together
+
+This is settled: land them atomically.
+
+There must never be an intermediate release where:
 
 ```text
-LIFECYCLE SETTLED — no artifact judgment requested
+bus await --verifier /bin/true
 ```
 
-not “finished.”
+can reach `ARTIFACT READY`.
 
-This retains valid analysis/advisor use cases without allowing accidental admission.
+The first verifier-capable release must include all of:
 
-### 3. No independent contract authorizer
+- Base-committed authorization policy.
+- Exact verifier source digest.
+- Execution of verified source bytes.
+- Receipt schema validation.
+- Contract/criteria/attempt binding.
+- An explicit production claim.
+- Internal classification as production-capable.
 
-Confirmed against v1.
+If this cannot fit safely into one change, keep verifier admission disabled until it can.
 
-Comparing claimed identities does not solve it. Base-commit policy provenance does. Independently reviewed agent-authored policies can follow later.
+## Human and agent authorization
 
-### 4. ADMITTED does not freeze artifacts
+The v2 answer still holds, narrowed further:
 
-Confirmed—and the right response is to remove universal `ADMITTED`, not build a generic freezer.
+- Do not trust an `author: human` field.
+- Base-committed project policy is the first supported authorization source.
+- Agent-authored novel criteria remain ineligible for production admission until a durable plan-review receipt is bound to their exact digest.
+- Do not implement that review-receipt path merely to complete the taxonomy. It is a separate later feature.
 
-`ARTIFACT READY` means “the predicates held when `bus await` ran.” The verifier receipt must say when and what digests it judged.
+This means the first fused system supports repeatable, project-authorized workflows. Novel agent-designed scientific criteria require a human to put them into the trusted base policy before dispatch.
 
-Downstream consumers have three honest options:
-
-- Rerun the verifier immediately before consumption.
-- Consume content-addressed or otherwise immutable outputs.
-- Use a domain-specific promotion step that copies or renames verified outputs into an immutable release location.
-
-A generic bus cannot freeze arbitrary Slurm outputs, checkpoints, directories, databases, or object-store paths. Leave that out.
-
-Also, once an await returns ready, automated retries must stop. A later retry creates new evidence and requires a new await evaluation.
-
-### 5. Human review is a dead end
-
-Confirmed against v1, but mostly created by my unnecessary global state machine.
-
-Human review belongs inside the applicable domain contract:
-
-- `result.py review` already writes a review bound to exact output digests.
-- Rerunning `result.py check` can then reach its success state.
-- `bus await --verifier ...` reruns that verifier and observes exit 0.
-
-For domains without a review transition, the domain verifier must define one or explicitly stop at mechanically validated. The bus should not invent a generic human-review state it cannot complete.
-
-## What should remain separate
-
-- `--require-json` may remain as a supporting coordination assertion, but it must not be sufficient by itself for `ARTIFACT READY`.
-- Model reviewers authorize claims only through a content-bound review receipt; their prose is not a verifier result.
-- The bus runs verifier commands but does not learn workflow, training, figure, table, or genomics semantics.
-- Domain verifiers remain stdlib-only and Paseo-independent.
-- Artifact immutability remains domain/storage-specific.
-- Agent-authored novel contract authorization should remain unsupported until the review gate can produce a properly bound plan receipt.
-- Per-machine deployments remain independent. Portable handoff may report other machines’ work, but no machine is the global completion authority.
+That is a usable limitation, not a missing checkbox.
 
 ## PLAN
 
-1. **Close the no-contract exit-zero path in `bus await`.**
-
-   Change:
-
-   - Require at least one real artifact predicate, or an explicit `--lifecycle-only`.
-   - Rename the lifecycle-only verdict so it cannot be read as completion.
-   - Do not count `--status-file`/`--require-json` alone as independently verified evidence.
+1. **Introduce predicate categories and make non-production-only awaits incapable of `ARTIFACT READY`.**
 
    Acceptance criteria:
 
-   - `bus await AGENT` with no artifact predicate and no `--lifecycle-only` exits nonzero before polling and names both remedies.
-   - `bus await AGENT --lifecycle-only` may exit 0 on idle but prints `LIFECYCLE SETTLED` and explicitly says no artifact judgment occurred.
-   - Idle with an unmet declared predicate still exits with `IDLE WITHOUT ARTIFACT`.
-   - A non-empty agent-authored status field alone cannot produce `ARTIFACT READY`.
-   - Existing permission, error, timeout, continuation, and launch-mismatch behavior remains unchanged.
-   - Tests are added alongside `TestAwaitVerdicts`, including a shell-composition assertion that bare idle cannot unlock a following command.
+   - Every existing await predicate is assigned one internal category from the partition above.
+   - `--require-clean` alone cannot return exit 0 as `ARTIFACT READY`.
+   - `--status-file`/`--require-json` alone cannot return `ARTIFACT READY`.
+   - Any combination of `--expect-*`, `--require-clean`, and status assertions remains non-production.
+   - Bare await requires explicit `--lifecycle-only` and reports no artifact judgment.
+   - An arbitrary unanchored `--base` is not counted as production.
+   - A single verdict function requires at least one passing production-class result.
+   - Tests enumerate every registered predicate and fail if a future predicate has no explicit category.
+   - Tests exhaust all current non-production-only combinations and prove none exits 0 as artifact-ready.
 
-2. **Extend `bus await` with an independently executed verifier predicate and harden its existing Git measurements.**
-
-   Change:
-
-   - Add a verifier command that `bus` executes locally after the agent is idle and launch constraints pass.
-   - Make verifier success conjunctive with `--base`, `--require-clean`, and other measured predicates.
-   - Give Git queries a tri-state result so “Git failed” cannot mean “clean.”
-   - Require HEAD to descend from the declared base, not merely differ from it.
+2. **Make anchored Git tree transition the first production predicate.**
 
    Acceptance criteria:
 
-   - Verifier exit 0 plus all other predicates passing yields `ARTIFACT READY`.
-   - Verifier nonzero, timeout, missing executable, signal termination, or unreadable required receipt never yields exit 0.
-   - Verifier stdout/stderr are bounded and included as evidence without becoming the verdict source.
-   - The verifier runs in the inspected agent cwd unless an explicit, validated cwd is declared.
-   - The command is executed without an implicit shell, or the interface explicitly documents and tests its trusted-command threat boundary.
-   - `--require-clean` fails closed when Git errors or times out.
-   - An unrelated Git history with `HEAD != base` fails the ancestry check.
-   - A worker-authored `status.json` claiming success cannot override a failing verifier.
-   - Tests use fake verifier executables and cover success, failure, timeout, malformed receipt, conjunction with Git predicates, and retry after initially incomplete evidence.
+   - Production-capable Git admission requires a verified `launch-worker` record for the same agent.
+   - The launch record’s cwd, branch, provider/model/thinking settings, and base match current observed state.
+   - The recorded base was HEAD during launch preflight.
+   - Final HEAD descends from the base.
+   - Final tree digest differs from the base tree digest; an empty commit is refused.
+   - A branch already advanced before the worker launch is refused when paired with a mismatched or absent launch record.
+   - `--require-clean` failures and Git command failures fail closed but remain hygiene results, not production.
+   - A valid anchored tree transition plus all declared scope/hygiene predicates yields `ARTIFACT READY`.
+   - Independent tests cover inaction, empty commit, unrelated pre-launch advancement, non-descendant history, dirty worktree, mismatched record, and a genuine post-launch tree change.
 
-3. **Authorize verifier selection through a base-commit policy; defer agent-authored policy authorization.**
-
-   Change:
-
-   - Add a small versioned acceptance-policy format loaded from the declared base commit.
-   - The policy fixes verifier argv, contract type, locked criteria, allowed run parameters, expected success state, and required receipt bindings.
-   - Automated agent workflows must use this policy path. Freely supplied verifier commands are caller-authorized/manual mode and must be reported as such.
+3. **Land policy authorization, verifier content pinning, and production-receipt admission atomically.**
 
    Acceptance criteria:
 
-   - The policy is read from `git show <base>:<path>`, never from the worker’s worktree.
-   - The observed base commit and policy blob identity are recorded in the launch/await report.
-   - Editing the worktree policy to replace the verifier with a lenient command has no effect on the invoked verifier.
-   - A policy added only after the base commit is refused.
-   - A run contract that weakens a locked criterion is refused before verifier execution.
-   - Only explicitly declared parameter fields may vary per run; an unread or unknown field is refused.
-   - The verifier receipt must bind the domain contract ID, criteria digest, and current artifact identities required by its policy.
-   - No `author: human` field is trusted as evidence.
-   - Agent-authored novel policies without a content-bound independent plan-review receipt return `UNAUTHORIZED_CRITERIA`; building that receipt path is explicitly deferred.
+   - No free-form verifier command can produce `ARTIFACT READY`.
+   - The policy is loaded from the declared base commit and records the authorized verifier SHA-256, invocation, capability class, receipt schema, and locked contract requirements.
+   - Worktree edits to the policy or verifier cannot alter the invoked verifier.
+   - `bus` executes a private copy of the exact verified Python source bytes with its recorded interpreter.
+   - A digest mismatch, non-regular verifier, oversized verifier, unsupported imports/executable shape, timeout, signal, or nonzero exit fails closed.
+   - Exit 0 without a fresh machine-readable production claim is validation-only and cannot satisfy the production requirement.
+   - The receipt must bind the contract ID, criteria digest, current attempt, production method, and accepted artifact identities.
+   - Workflow admission additionally requires `require_production_evidence: true`.
+   - Result admission accepts only a success path whose receipt records its production gate.
+   - Training admission remains disabled until its growth bracket and checkpoint evidence are bound to the current attempt and exposed in the receipt.
+   - Tests replace an authorized worktree verifier with `/bin/true` behavior and prove the changed bytes are never executed.
+   - Tests reuse a stale production receipt/window under a new contract or attempt and prove it is refused.
+   - Tests prove that an authorized validation-only verifier can strengthen an admission but cannot be its sole production evidence.
