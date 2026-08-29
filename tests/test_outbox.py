@@ -918,8 +918,6 @@ class TestTheThreeWeakPointsIFlagged(unittest.TestCase):
                 self.assertEqual(got.read_text().strip(), want, f"for {cmd!r}")
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
 
 
 class TestThePromotionDestination(unittest.TestCase):
@@ -1628,3 +1626,7 @@ class TestRound3ReviewFindings(unittest.TestCase):
         self.assertIn("KNOWN LIMIT", doc,
                       "the NFS lock-recovery limit must be recorded, not "
                       "papered over")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

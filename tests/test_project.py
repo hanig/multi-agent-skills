@@ -337,48 +337,81 @@ class TestSurveyIsSafeInSomeoneElsesDirectory(unittest.TestCase):
                             "the survey stalled on an unreachable remote")
 
 
-class TestThisFileRunsAllOfItself(unittest.TestCase):
-    """A reviewer found the __main__ block sitting ABOVE two later classes, so
-    `python3 tests/test_project.py` collected 15 tests, printed a green OK and
-    exited before the 13 security tests were even defined. Only `discover`
-    ever ran them, which is why the green looked real."""
+class TestNoTestGoesUncollectedAnywhere(unittest.TestCase):
+    """A reviewer found the __main__ block in this file sitting ABOVE two
+    later classes, so running it directly collected 15 tests, printed a green
+    OK, and exited before the 13 security tests were even defined.
 
-    def test_no_test_class_is_defined_after_the_main_block(self):
+    I fixed that file and did not check the others. The SAME defect was in
+    test_outbox.py, hiding nine classes including every lock test. So this
+    guard covers the whole suite: a property about the test suite cannot be
+    guarded one file at a time."""
+
+    def test_no_test_class_is_defined_after_a_main_block(self):
         import re
-        src = Path(__file__).read_text()
-        # Anchor to a TOP-LEVEL statement. Searching for the literal found the
-        # copy inside this test's own source, which sits above the classes it
-        # was meant to check, so the guard reported a problem that was its own
-        # reflection. A test that can match itself is testing the wrong file.
-        m = list(re.finditer(r'^if __name__ == "__main__":', src, re.M))
-        self.assertEqual(len(m), 1, "expected exactly one top-level __main__")
-        orphaned = re.findall(r"^class (\w+)", src[m[0].start():], re.M)
-        self.assertEqual(orphaned, [],
-                         f"these classes never run when this file is executed "
-                         f"directly: {orphaned}")
+        offenders = {}
+        for f in sorted((ROOT / "tests").glob("test_*.py")):
+            src = f.read_text()
+            # Anchor to a TOP-LEVEL statement. Searching for the literal found
+            # the copy inside this test's own source, so the guard matched its
+            # own reflection. A test that can match itself tests the wrong file.
+            m = list(re.finditer(r'^if __name__ == "__main__":', src, re.M))
+            if not m:
+                continue
+            self.assertEqual(len(m), 1,
+                             f"{f.name} has more than one top-level __main__")
+            orphaned = re.findall(r"^class (\w+)", src[m[0].start():], re.M)
+            if orphaned:
+                offenders[f.name] = orphaned
+        self.assertEqual(offenders, {},
+                         f"these classes never run when their file is executed "
+                         f"directly: {offenders}")
 
-    def test_collection_reaches_every_class_in_the_file(self):
-        """Compare what the loader COLLECTS against what the file DECLARES.
+    def test_every_declared_class_is_actually_collected(self):
+        """Compare what the loader COLLECTS against what each file DECLARES,
+        across the whole suite.
 
-        The obvious version of this test re-executes the file, which makes it
-        run itself, which re-executes the file: I wrote that and hung the
-        suite. Asking the loader is the same question without the recursion."""
+        The obvious version re-executes each file, which makes this file run
+        itself, which re-executes it: I wrote that and hung the suite. Asking
+        the loader is the same question without the recursion."""
         import re
-        src = Path(__file__).read_text()
-        declared = set(re.findall(r"^class (\w+)\(unittest\.TestCase\)",
-                                  src, re.M))
-        loaded = set()
-        suite = unittest.defaultTestLoader.loadTestsFromName(__name__)
+        missing = {}
+        for f in sorted((ROOT / "tests").glob("test_*.py")):
+            src = f.read_text()
+            # Only classes that actually CONTAIN tests. A shared `Base`
+            # subclassing TestCase with no test_ methods is legitimately not
+            # collected, and flagging it would be the cries-wolf failure that
+            # gets a guard deleted.
+            declared = set()
+            for node in ast.parse(src).body:
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                has_tests = any(isinstance(b, (ast.FunctionDef,
+                                               ast.AsyncFunctionDef))
+                                and b.name.startswith("test_")
+                                for b in node.body)
+                if has_tests:
+                    declared.add(node.name)
+            loaded = set()
+            try:
+                suite = unittest.defaultTestLoader.loadTestsFromName(
+                    f"tests.{f.stem}")
+            except Exception as e:      # noqa: BLE001 - report, do not hide
+                missing[f.name] = f"could not load: {e}"
+                continue
 
-        def walk(s):
-            for t in s:
-                if isinstance(t, unittest.TestSuite):
-                    walk(t)
-                else:
-                    loaded.add(type(t).__name__)
-        walk(suite)
-        self.assertEqual(declared - loaded, set(),
-                         f"declared but never collected: {declared - loaded}")
+            def walk(s):
+                for t in s:
+                    if isinstance(t, unittest.TestSuite):
+                        walk(t)
+                    else:
+                        loaded.add(type(t).__name__)
+            walk(suite)
+            gap = declared - loaded
+            if gap:
+                missing[f.name] = sorted(gap)
+        self.assertEqual(missing, {},
+                         f"declared but never collected: {missing}")
 
 
 
