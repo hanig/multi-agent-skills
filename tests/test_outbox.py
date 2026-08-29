@@ -936,3 +936,54 @@ class TestTheThreeWeakPointsIFlagged(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestThePromotionDestination(unittest.TestCase):
+    """promote_to is a path taken from the plan and written to, on the one
+    surface where this tool writes where other people read. Three ways it went
+    wrong, all found by trying them rather than by reading."""
+
+    def test_a_relative_destination_is_refused(self):
+        """It resolves against the coordinator's cwd, and cron runs from a
+        different directory than a shell, so one plan published to two
+        different places depending on how it was invoked."""
+        dest, err = S.resolve_promote_to("shared/canonical")
+        self.assertIsNone(dest)
+        self.assertIn("relative", err)
+        self.assertIn("absolute", err, "the refusal must name the fix")
+
+    def test_a_tilde_is_expanded_not_taken_literally(self):
+        """"~/canonical" created a directory literally named "~" and put the
+        results somewhere nobody would ever look."""
+        dest, err = S.resolve_promote_to("~/canonical")
+        self.assertIsNone(err, err)
+        self.assertFalse(str(dest).startswith("~"))
+        self.assertTrue(str(dest).startswith(str(Path.home())))
+
+    def test_a_destination_inside_the_run_root_is_refused(self):
+        """Promotion publishes OUT of the exclusive write area; a destination
+        inside it defeats the isolation everything else rests on."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t) / "runs"
+            root.mkdir()
+            dest, err = S.resolve_promote_to(str(root / "canonical"), str(root))
+            self.assertIsNone(dest)
+            self.assertIn("isolation", err)
+
+    def test_an_absolute_destination_outside_the_root_is_accepted(self):
+        """The counter-claim: the ordinary case must still work."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            dest, err = S.resolve_promote_to(str(Path(t) / "canonical"),
+                                             str(Path(t) / "runs"))
+            self.assertIsNone(err, err)
+            self.assertIsNotNone(dest)
+
+    def test_validate_refuses_a_bad_destination_before_anything_dispatches(self):
+        """A plan that cannot publish should not half-run first."""
+        with self.assertRaises(S.PlanError) as cm:
+            S.validate_plan({"units": [
+                {"id": "w", "kind": "slurm", "command": "true",
+                 "outputs": ["o"], "promote_to": "relative/path"}]})
+        self.assertIn("relative", str(cm.exception))

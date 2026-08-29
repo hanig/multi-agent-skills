@@ -110,6 +110,14 @@ def validate_plan(plan):
                 f"paseo on a shared login node is usually the wrong answer: "
                 f"it would run the agent processes there.")
 
+    for u in units:
+        if isinstance(u, dict) and u.get("promote_to"):
+            _, derr = resolve_promote_to(u.get("promote_to"))
+            if derr:
+                raise PlanError(
+                    f"unit {u.get('id', '?')!r} declares promote_to "
+                    f"{u['promote_to']!r}, but {derr}")
+
     seen, by_id = set(), {}
     for i, u in enumerate(units):
         if not isinstance(u, dict):
@@ -1167,6 +1175,48 @@ def cmd_advance(args):
 PROMOTIONS = "promotions.jsonl"
 
 
+def resolve_promote_to(raw, root=None):
+    """Return (path, error) for a declared promotion destination.
+
+    Three ways this went wrong, all found by trying them, all on the ONE path
+    where this tool writes where other people read:
+
+      - a RELATIVE path resolves against the coordinator's cwd, and cron runs
+        from a different directory than an interactive shell, so the same plan
+        published to two different places depending on how it was invoked
+      - "~/canonical" is not expanded by the filesystem, so it created a
+        directory literally named "~" and quietly put the results somewhere
+        nobody would ever look
+      - a destination INSIDE the run root published back into the exclusive
+        write area, muddling the isolation everything else rests on
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return None, "it is empty"
+    text = raw.strip()
+    if text.startswith("~"):
+        text = os.path.expanduser(text)
+        if text.startswith("~"):
+            return None, (f"{raw!r} starts with ~ but no home directory could "
+                          f"be resolved. Write the absolute path.")
+    if not os.path.isabs(text):
+        return None, (f"{raw!r} is a relative path. It would resolve against "
+                      f"whatever directory the coordinator happens to run in, "
+                      f"which differs between cron and a shell, so the same "
+                      f"plan would publish to two different places. Write an "
+                      f"absolute path.")
+    dest = Path(text).resolve()
+    if root:
+        try:
+            dest.relative_to(Path(root).resolve())
+            return None, (f"{raw!r} is inside the run root {root}. Promotion "
+                          f"publishes OUT of the exclusive write area; a "
+                          f"destination inside it defeats the isolation the "
+                          f"predicate depends on. Choose a path outside it.")
+        except ValueError:
+            pass
+    return dest, None
+
+
 def _redigest(attempt_dir, rel, recorded, accept_weak=False):
     """Re-derive one output's fingerprint NOW and compare with the receipt.
 
@@ -1233,7 +1283,10 @@ def promote(plan, state, state_dir, uid, approver, approve,
     u = units.get(uid)
     if not u:
         return [f"no unit {uid!r} in this plan"], False
-    dest_root = u.get("promote_to")
+    dest_root, derr = resolve_promote_to(u.get("promote_to"),
+                                         state.get("root"))
+    if u.get("promote_to") and derr:
+        return [f"REFUSING: unit {uid} declares promote_to but {derr}"], False
     if not dest_root:
         return ([f"unit {uid} declares no 'promote_to', so it has no shared "
                  f"destination and nothing to promote. Its outputs stay in the "
