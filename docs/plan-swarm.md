@@ -195,11 +195,11 @@ swarm state, an agent secrets/permissions policy, and input locality per cluster
 
 **7. On `converge.py`, independently flagged:** a plateau criterion treats a bad
 flat run as converged BY DESIGN, so plateau alone must never mean scientific
-success — pair it with a quality threshold, or treat it as "stop training"
+success: pair it with a quality threshold, or treat it as "stop training"
 rather than "done". This matches the note already in the code and goes further.
 
 **The immediate next milestone is one SCHEDULED, single-writer, crash-injected
-Slurm DAG on lambda** — not the dashboard, not the ticket abstraction. After it
+Slurm DAG on lambda**, not the dashboard, not the ticket abstraction. After it
 runs unattended for several days, INSTALL the same tooling on andromeda and
 chimera and run a separate project on each (not one plan spanning three, per
 Hani's correction), then connect Linear.
@@ -363,13 +363,18 @@ Acceptance criteria:
   exactly what would be created while creating nothing.
 - c. Every issue maps to one or more unit predicates, and every unit maps back
   to one issue, so neither can drift silently from the other.
-- d. Issue state follows unit state, never the reverse. Swarm durable state stays
-  authoritative; the tracker is a view.
-- e. **No issue is ever closed on a self-report.** Closure requires the unit's
-  predicate verdict. An agent saying "done" on a ticket is exactly the
-  self-assertion this family refuses.
-- f. Tracker mutations go through an idempotent outbox: a Linear outage must
-  never alter swarm state, and a retried update must not duplicate an issue.
+- d. BUILT. Issue state follows unit state, never the reverse. Swarm durable
+  state stays authoritative; the tracker is a view. Enforced structurally: the
+  coordinator imports no network module, checked by AST in `test_outbox.py`.
+- e. BUILT. **No issue is ever closed on a self-report.** A `close` intent is
+  emitted only from a predicate verdict and carries the receipt. An agent
+  saying "done" on a ticket is exactly the self-assertion this family refuses.
+- f. BUILT. Tracker mutations go through an idempotent outbox
+  (`<state-dir>/outbox.jsonl`, `swarm.py outbox`). Keyed on
+  `(project, unit, state, attempt_dir)`, so a retried drain converges instead
+  of duplicating, and an unwritable outbox warns rather than stalling the DAG.
+  See `docs/tracker-outbox.md`. No drain is written yet: the registry offers no
+  Linear connector, so that half waits on the account.
 - g. Re-running against an existing project updates rather than duplicating,
   keyed on the project and unit ids.
 

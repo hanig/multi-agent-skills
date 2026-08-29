@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""swarm.py — the coordinator: dispatch, bound, detach, advance the DAG.
+"""swarm.py: the coordinator: dispatch, bound, detach, advance the DAG.
 
 Step 2 of docs/plan-swarm.md. This is the CENTRE OF GRAVITY of the system, per
 the committee's drift guard: "the center of gravity is the coordinator and the
@@ -351,6 +351,98 @@ def _check(unit_dir):
     return rc, (out or "") + (err or "")
 
 
+# --- tracker outbox -------------------------------------------------------
+# The coordinator runs on a cluster LOGIN NODE. An MCP connector lives in the
+# Claude client on a laptop, so `swarm.py` cannot call Linear or Asana, and it
+# has no network code at all -- deliberately. Putting a tracker API token on a
+# shared login node would be the alternative, and it is worse.
+#
+# So the coordinator writes INTENTS and nothing else. Something that can reach
+# the tracker drains them later. Three properties fall out of that separation,
+# and each is a real defect avoided:
+#
+#   - a tracker outage NEVER alters swarm state; the swarm is authoritative and
+#     the tracker is a view of it
+#   - every intent carries an idempotency key, so a re-run of the drain cannot
+#     create a second issue for one unit
+#   - a CLOSE intent is emitted only from a predicate verdict, never from a
+#     unit's own report. An agent saying "done" on a ticket is exactly the
+#     self-assertion this whole family refuses.
+OUTBOX = "outbox.jsonl"
+
+# Unit states that justify a tracker mutation, and what each means to a reader.
+TRACKER_EVENTS = {
+    "SUBMITTED": ("start", "work started"),
+    "DONE": ("close", "the unit's predicate returned DONE"),
+    "FAILED": ("reopen", "the command failed"),
+    "FAILED_EVIDENCE": ("reopen", "no verdict arrived; evidence never landed"),
+    "PREEMPTED": ("note", "preempted; a new attempt will be minted"),
+    "HELD": ("block", "an upstream unit will not complete"),
+}
+
+
+def outbox_key(project, uid, state, attempt_dir):
+    """Idempotency key. Same project, unit, state and attempt yields the same
+    key, so draining twice is a no-op rather than a duplicate issue."""
+    basis = f"{project}\x00{uid}\x00{state}\x00{attempt_dir or ''}"
+    return hashlib.sha256(basis.encode()).hexdigest()[:16]
+
+
+def emit_intent(state_dir, project, uid, unit_state, us, evidence=None):
+    """Append one tracker intent. Returns the key, or None if already emitted.
+
+    Deterministic from state: replaying the same transitions produces the same
+    keys, which is what makes the drain safe to retry."""
+    action = TRACKER_EVENTS.get(unit_state)
+    if not action:
+        return None
+    verb, why = action
+    key = outbox_key(project, uid, unit_state, us.get("attempt_dir"))
+    path = Path(state_dir) / OUTBOX
+    try:
+        if path.is_file():
+            for line in path.read_text().splitlines():
+                if line.strip() and json.loads(line).get("key") == key:
+                    return None          # already emitted; do not duplicate
+    except (OSError, ValueError):
+        pass
+    intent = {
+        "key": key, "project": project, "unit": uid, "verb": verb,
+        "unit_state": unit_state, "why": why,
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "job_id": us.get("job_id"), "attempt_dir": us.get("attempt_dir"),
+        # A close intent MUST carry the verdict that justifies it. A drain that
+        # cannot see the evidence must refuse to close.
+        "evidence": evidence,
+        "applied": False,
+    }
+    try:
+        with path.open("a") as fh:
+            fh.write(json.dumps(intent, sort_keys=True) + "\n")
+    except OSError as e:
+        print(f"WARNING: could not append a tracker intent: {e}",
+              file=sys.stderr)
+        return None
+    return key
+
+
+def read_outbox(state_dir):
+    out = []
+    p = Path(state_dir) / OUTBOX
+    if not p.is_file():
+        return out
+    try:
+        for line in p.read_text().splitlines():
+            if line.strip():
+                try:
+                    out.append(json.loads(line))
+                except ValueError:
+                    continue
+    except OSError:
+        pass
+    return out
+
+
 # --- the DAG --------------------------------------------------------------
 RETRYABLE = {PREEMPTED}          # a preemption is not a failure
 TERMINAL_BAD = {FAILED}
@@ -418,8 +510,17 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None):
         if not us["attempt_dir"] or us["state"] == "DONE":
             continue
         rc, text = _check(us["attempt_dir"])
+        previous = us.get("state")
         us["state"] = NAME.get(rc, f"rc={rc}")
         report.append(f"{uid}: {us['state']}")
+        if us["state"] != previous:
+            evidence = None
+            if us["state"] == "DONE":
+                # The verdict itself, so a drain never closes on a self-report.
+                rp, _ = U.read_json(Path(us["attempt_dir"]) / "receipt.json")
+                evidence = {"receipt": rp} if rp else None
+            emit_intent(state_dir, plan.get("name") or "swarm", uid,
+                        us["state"], us, evidence)
 
         # INCOMPLETE could stay live forever, so a job that vanished was never
         # terminal and the DAG never moved. Once Slurm accounting has had time
@@ -475,6 +576,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None):
                            ("FAILED", "HELD", "FAILED_EVIDENCE")]
         if failed_upstream:
             us["state"] = "HELD"
+            emit_intent(state_dir, plan.get("name") or "swarm", uid, "HELD", us)
             report.append(f"{uid}: held, upstream "
                           f"{', '.join(failed_upstream)} will not complete")
             save_state(state_dir, state)
@@ -520,6 +622,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None):
             report.append(f"{uid}: submitted {job_id} but {berr}")
         us["job_id"] = str(job_id)
         us["state"] = "SUBMITTED"
+        emit_intent(state_dir, plan.get("name") or "swarm", uid, "SUBMITTED", us)
         dispatched += 1
         report.append(f"{uid}: submitted {job_id} -> {unit_dir}")
         save_state(state_dir, state)
@@ -614,6 +717,35 @@ def cmd_status(args):
     return EXIT_FAILED_UNIT if bad else EXIT_OK
 
 
+def cmd_outbox(args):
+    """Show pending tracker intents. Draining happens elsewhere, on a machine
+    that can reach the tracker -- this command exists so a human on the cluster
+    can see exactly what WOULD be sent, before anything is."""
+    intents = read_outbox(args.state_dir)
+    pending = [i for i in intents if not i.get("applied")]
+    if args.json:
+        print(json.dumps(pending if not args.all else intents, indent=2,
+                         sort_keys=True))
+        return EXIT_OK
+    if not intents:
+        print("  no tracker intents recorded")
+        print("  Intents appear as units change state. Nothing is ever sent "
+              "from here:\n  the coordinator runs on a login node and cannot "
+              "reach a tracker.")
+        return EXIT_OK
+    show = intents if args.all else pending
+    print(f"  {len(pending)} pending of {len(intents)} total\n")
+    for i in show:
+        ev = "with evidence" if i.get("evidence") else "no evidence"
+        print(f"  [{'applied' if i.get('applied') else 'PENDING'}] "
+              f"{i['verb']:6} {i['unit']:12} {i['unit_state']:16} {ev}")
+        print(f"      {i['why']}  key={i['key']}")
+    print("\n  Drain these from a machine that can reach the tracker. A close "
+          "intent\n  WITHOUT evidence must be refused: nothing closes on a "
+          "self-report.")
+    return EXIT_OK
+
+
 def main():
     ap = argparse.ArgumentParser(
         prog="swarm.py", description=__doc__,
@@ -643,6 +775,12 @@ def main():
     a = sub.add_parser("advance", help="idempotent; for a schedule or cron")
     common(a)
     a.set_defaults(fn=cmd_advance)
+
+    o = sub.add_parser("outbox", help="tracker intents waiting to be drained")
+    o.add_argument("--state-dir", default=".swarm/state")
+    o.add_argument("--all", action="store_true", help="include applied ones")
+    o.add_argument("--json", action="store_true")
+    o.set_defaults(fn=cmd_outbox)
 
     s = sub.add_parser("status", help="what every unit is doing")
     s.add_argument("plan")
