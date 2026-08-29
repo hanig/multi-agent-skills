@@ -128,6 +128,84 @@ Two questions could not be confirmed interactively; each is answered here with t
 
 Build order is by value per line: the isolation-conclusive predicate first (smallest, load-bearing), the coordinator second (the swarm itself), the human interface third (what keeps it switched on).
 
+**SHARPENED 2026-08-28 by gpt-5.6-sol against the built code.** Two things I
+asserted were wrong, and both are the same shape as errors this project has
+already made.
+
+**1. `advance` is NOT safe to schedule as it stands.** I called it "idempotent
+and safe to re-enter". Four concrete holes: two concurrent `advance` processes
+can both load old state and submit the same unit; the crash-before-bind window
+is unresolved; `INCOMPLETE` can stay live forever; and there is no plan digest
+or owner lease. So the step is **"safe autonomous advance", not "install a
+schedule"**, and its acceptance test must run two advances CONCURRENTLY and
+inject crashes immediately before `sbatch`, immediately after `sbatch`, and
+immediately after bind.
+
+**2. The isolation claim over-reaches, exactly as the attribution claim did.**
+The run directory is unique but is NOT an enforced boundary: a command can write
+an absolute path outside it, another process under the same Unix account can
+write into it, `write_scopes` describe intent rather than constraining writes,
+directory inputs are recorded as "not a regular file" rather than content-pinned,
+and neither the plan nor `unit.json` is frozen. The receipt must say:
+
+> Exclusive by coordinator allocation under a trusted-writer convention; not
+> isolated from other processes running as the same Unix user.
+
+OS-enforced isolation needs a container or mount namespace with the attempt
+directory as the only writable bind mount. Until then, do not claim it. **Third
+time this project has claimed more than its mechanism establishes.**
+
+**3. Scheduling substrate decided: deterministic cron/launchd/systemd-user, NOT
+a Paseo schedule.** "Starting a fresh LLM agent every few minutes to invoke a
+deterministic command adds cost and another failure mode." Paseo keeps alerts and
+agent work. Paseo schedules are the fallback only if cluster policy forbids cron.
+
+**4. Five cuts, seven nominal steps to six substantive ones:**
+
+- `grill-with-docs` is not a build step; it is a mandatory pre-dispatch GATE
+  inside the project front door.
+- GitHub Issues out of v1. Linear as the work ledger, GitHub PRs as code
+  evidence. "Pluggable backend" is abstraction before one proven backend.
+- No bespoke web monitor in v1. Ship `status --json`, a good terminal view, and
+  notifications; add a page once Hani knows what he actually reads.
+- Defer `pipeline` units until a real Nextflow/Snakemake project needs them.
+- No automatic cross-cluster failover. On outage, enter `BLOCKED_CLUSTER` and
+  ask. Rerouting is unsafe until dataset, container, checkpoint and canonical
+  output availability are profiled per cluster.
+
+**5. Eighteen of the 45 criteria are weak**, with named fixes. The sharpest:
+1(a) two random allocations differing does not prove exclusive writers, so test a
+forced collision; 1(h)'s "≤300 line core" is fuzzy and `unit.py` is already 864
+lines; 2(c) "GPU-hours spent" is undefined and today charges declared capacity
+once, never per retry; 3(e) atomic promotion by rename fails across filesystems,
+so promote a versioned directory and swap one canonical pointer; 3(g) "the page
+never executes" contradicts promotion approval, so separate a read-only monitor
+from an authenticated promotion command.
+
+**6. Eleven missing failure modes**, to fold into the safe-advance and operator
+steps rather than becoming new top-level ones: cluster outage (`BLOCKED_CLUSTER`,
+and never read a missing `sacct` row as failure OR success), a `NEEDS_HUMAN`
+state carrying question/recommendation/options/deadline, reserved-vs-accrued-vs
+-projected cost with a halt before the ceiling, agent-loop bounds, a plan digest
+that refuses advancement when the file changes mid-flight, an owner lease keyed
+by project so a second controller exits without acting, an idempotency token for
+crash-during-dispatch, escalation from `INCOMPLETE` to terminal `FAILED_OUTPUT`
+once accounting settles, an idempotent outbox so a tracker outage never alters
+swarm state, an agent secrets/permissions policy, and input locality per cluster.
+
+**7. On `converge.py`, independently flagged:** a plateau criterion treats a bad
+flat run as converged BY DESIGN, so plateau alone must never mean scientific
+success — pair it with a quality threshold, or treat it as "stop training"
+rather than "done". This matches the note already in the code and goes further.
+
+**The immediate next milestone is one SCHEDULED, single-writer, crash-injected
+Slurm DAG on lambda** — not the dashboard, not the ticket abstraction. After it
+runs unattended for several days, make the same plan run through cluster profiles
+on andromeda and chimera, then connect Linear.
+
+See `docs/scenario-mach1-zebrafish.md` for the whole string of events walked end
+to end.
+
 **Status 2026-08-28.** Steps 1 and 2 are BUILT and one real Slurm job ran end to
 end on lambda (`DONE`, exit 0). `converge.py` was ported before deleting
 `traincontract.py`. Steps 3 and 4 below are NOT built, and they are the two
@@ -290,7 +368,7 @@ Acceptance criteria:
   tickets unattended is a swarm that spams a shared workspace.
 - f. A dry run prints the issues it WOULD create or move, and creates nothing.
 
-**7. `grill-me`: interrogate the HUMAN before dispatching anything.**
+**7. `grill-with-docs`: interrogate the HUMAN before dispatching anything.**
 
 FOUND on chimera, byte-identical in three colleagues' skill directories
 (`rishiv`, `ivyliu`, `aadduri`), now installed on this Mac along with its
@@ -317,10 +395,30 @@ and the goal itself ((a) verified evidence vs (b) an autonomous swarm -- days of
 verifiers before it surfaced). Each was one question with a recommended answer.
 Each cost more than the question would have.
 
-`grill-with-docs` adds domain awareness: it challenges the plan against existing
-documentation, sharpens terminology, and updates `CONTEXT.md` / ADRs inline as
-decisions crystallise. It carries `disable-model-invocation: true`, so it runs
-only when asked for by name.
+**`grill-with-docs` is the one installed; the lighter `grill-me` was removed.**
+Both interrogate one question at a time with a recommended answer, and both
+refuse to ask what inspection can answer. The variant adds what this project
+actually needs:
+
+- **A glossary discipline.** This session's most expensive errors were
+  DEFINITIONAL. "Production evidence" was used to mean "changed during a
+  window", and three tools shipped receipts implying the command wrote the
+  file. Two reviewers had to correct the LABEL before the fix was visible:
+  "relocated self-assertion" pointed at rewriting the binding, "missing
+  production evidence" pointed at adding a gate. Same for "committee" (two
+  agents vs a five-model panel), "unit", and "settled".
+- **An ADR test worth its weight**: offer one only when the decision is hard to
+  reverse, surprising without context, AND a real trade-off. That describes
+  "isolation replaces attribution", the deletion of `traincontract.py` after
+  porting its evaluator, and all SEVEN retired rules -- which today live
+  scattered across commit messages and MEMORY.md, which is exactly why the same
+  idea was retired three times before anyone stepped back.
+- **Cross-referencing claims against code**, the rule `grill-me` states in one
+  line and this one operationalises.
+
+There is no `CONTEXT.md` or `docs/adr/` in this repo yet; it creates them lazily
+as decisions crystallise. `disable-model-invocation: true`, so it runs only when
+asked for by name.
 
 Acceptance criteria:
 
