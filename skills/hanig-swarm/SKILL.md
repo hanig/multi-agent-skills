@@ -117,6 +117,40 @@ domain is code changes, so his predicates are git-shaped.
 a run plateaued at a BAD value, because it asks "has improvement stalled" and a
 flat run has. Pair it with a threshold when the value matters.
 
+## Running it unattended
+
+`advance` is safe to schedule: it takes a lease, so a second invocation while
+one is running exits without acting. Use a DETERMINISTIC scheduler, not a Paseo
+schedule -- starting a fresh LLM agent every few minutes to invoke a
+deterministic command adds cost and another failure mode.
+
+```bash
+# once per project, on the server that owns it
+LINE="*/5 * * * * $HOME/swarm-live/scripts/swarm-cron.sh $HOME/swarm-live/PROJ  # hanig-swarm"
+{ crontab -l 2>/dev/null | grep -v swarm-cron.sh; echo "$LINE"; } | crontab -
+crontab -l | grep swarm      # confirm
+# remove with: crontab -e
+```
+
+**Verified on lambda 2026-08-28:** cron fired on its own and advanced the DAG
+with no human present. `crontab` exists on the lambda login node and the entry
+survives disconnection.
+
+The four things that make this safe, each proven by breaking it:
+
+| hole | guard | proven |
+|---|---|---|
+| two controllers both dispatch a unit | lease keyed on the state dir, 900s TTL, `--force` to steal | one of two concurrent advances refused, live |
+| crash between `sbatch` and bind | jobs named `swarm-<attempt>`; `reconcile_orphan` asks squeue/sacct | job id wiped from state on a LIVE job; advance recovered 187880 and did NOT resubmit |
+| `INCOMPLETE` forever | terminal `FAILED_EVIDENCE` after a 600s settle window; holds dependents | unit test |
+| plan edited mid-flight | canonical digest over dispatchable fields; refuses to advance | unit test |
+
+## First real DAG, lambda 2026-08-28
+
+Three units, `A -> {B, C}`, real `sbatch`. A submitted alone; B and C held; A
+reached DONE and released both in one pass; all three finished with each output
+in its own exclusive write root. `status` exited 0.
+
 ## Cluster gotchas, paid for on lambda 2026-08-28
 
 **`--mem` is required on LAMBDA ONLY, and I first wrote this as if it were a
