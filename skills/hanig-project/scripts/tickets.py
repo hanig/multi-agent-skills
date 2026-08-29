@@ -160,7 +160,17 @@ def check(plan, tickets):
         if issue is None:
             continue
         recorded = issue.get("unit_digest")
-        if recorded and recorded != unit_digest(u):
+        if not recorded:
+            # A missing digest is NOT a pass. An issue written before digests
+            # existed, or hand-edited, would otherwise be accepted however
+            # stale it had become: the check would say "no drift" precisely
+            # when it could not tell. A reviewer found this; unknown must fail
+            # the check that exists to detect unknown.
+            problems.append(
+                f"the issue for {u['id']!r} carries no unit digest, so "
+                f"whether it still describes this unit cannot be told. "
+                f"Re-run `draft` to refresh it; tracker ids are kept.")
+        elif recorded != unit_digest(u):
             problems.append(
                 f"unit {u['id']!r} has changed since its issue was written "
                 f"({recorded} -> {unit_digest(u)}), so the issue now "

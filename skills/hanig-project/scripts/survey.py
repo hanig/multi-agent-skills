@@ -17,12 +17,14 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 MAX_TREE_ENTRIES = 4000
 MAX_DEPTH = 6
 MAX_DIRS = 20_000        # a fan-out can leave hundreds of thousands of empty dirs
+MAX_ENTRIES_PER_DIR = 5_000   # one directory must not be materialised whole
 WALK_SECONDS = 20        # a survey that hangs is worse than a partial one
 RUN_TIMEOUT = 30
 MAX_OUTPUT = 200_000     # a child cannot inflate the survey without limit
@@ -58,19 +60,62 @@ _TOKENISH = re.compile(
     r"|-----BEGIN [A-Z ]*PRIVATE KEY-----)")   # a key pasted anywhere
 
 
+# Prefixes that also occur in ordinary human names, and so cannot be redacted
+# on sight without destroying legitimate data.
+_AMBIGUOUS_PREFIXES = ("hf_", "sk-learn", "sk-", "github_pat_")
+
+
+def _looks_random(body):
+    """Does this look like a generated secret rather than a human name?
+
+    Three reviewers found the previous version destroying legitimate data:
+    a file called `hf_my_model_weights_1234567890123456` matched the `hf_`
+    family and vanished into <redacted>, and a commit subject mentioning
+    `github_pat_2024_roadmap` lost the reference. Both were the cries-wolf
+    direction, and a scrubber that mangles ordinary filenames gets turned off.
+
+    Real tokens are random base62: mixed case or dense digits, and almost no
+    underscores. Human identifiers are lowercase words joined by underscores."""
+    if body.count("_") >= 2:
+        return False                       # my_model_weights, 2024_roadmap
+    # MIXED CASE is the discriminator. Real tokens from these families are
+    # base62 and essentially always contain both cases; human names are
+    # lowercase. An earlier version accepted "digits present" as evidence and
+    # so redacted `hf_bertbaseuncased2024run`, a perfectly ordinary model
+    # directory -- found by checking which of a reviewer's examples actually
+    # matched the pattern, three of which did not.
+    return (any(c.isupper() for c in body)
+            and any(c.islower() for c in body))
+
+
 def redact(text):
     """Strip credentials from a string bound for the survey file.
 
     NOT a guarantee. It removes URL userinfo, common query-string secret
-    parameters, and a list of known token families. A secret that matches none
-    of those -- a passphrase in a commit subject, a bespoke internal token --
-    passes through, and no pattern list can fix that. Treat the survey as
-    sensitive, not as sanitised."""
+    parameters, and a list of known token families whose bodies also look
+    generated. A secret that matches none of those -- a passphrase in a commit
+    subject, a bespoke internal token -- passes through, and no pattern list
+    can fix that. Treat the survey as sensitive, not as sanitised."""
     if not isinstance(text, str):
         return text
     out = _URL_CREDS.sub(lambda m: f"{m.group('scheme')}<redacted>@", text)
     out = _URL_QUERY_SECRET.sub(r"\1<redacted>", out)
-    return _TOKENISH.sub("<redacted>", out)
+
+    def _maybe(m):
+        whole = m.group(0)
+        # TWO CLASSES OF PREFIX, and conflating them was the bug in both
+        # directions. Nobody names a file `ghp_...` or `glpat-...`, so those
+        # are redacted unconditionally -- gating them on a randomness
+        # heuristic let ghp_AAAABBBBCCCCDDDDEEEE through. But `hf_`, `sk-` and
+        # `github_pat_` DO collide with ordinary names
+        # (hf_my_model_weights, sk-learn-notes.md, github_pat_2024_roadmap),
+        # so only those consult the heuristic.
+        if whole.startswith(_AMBIGUOUS_PREFIXES):
+            body = re.split(r"[_-]", whole, maxsplit=1)[-1]
+            return "<redacted>" if _looks_random(body) else whole
+        return "<redacted>"
+
+    return _TOKENISH.sub(_maybe, out)
 
 
 def scrub(obj):
@@ -80,7 +125,21 @@ def scrub(obj):
     if isinstance(obj, dict):
         # KEYS TOO. A file named `x.sk-aaaaaaaaaaaaaaaa` becomes a key in the
         # extension map, and scrubbing only values let it through.
-        return {scrub(k): scrub(v) for k, v in obj.items()}
+        #
+        # But two DISTINCT keys must not collapse onto one: `a.sk-aaa...` and
+        # `a.sk-bbb...` both redact to `a.<redacted>`, and the second would
+        # silently overwrite the first, losing a row from the survey. A
+        # reviewer found that; collisions are disambiguated instead.
+        out = {}
+        for k, v in obj.items():
+            key = scrub(k)
+            if key in out and key != k:
+                n = 2
+                while f"{key}#{n}" in out:
+                    n += 1
+                key = f"{key}#{n}"
+            out[key] = scrub(v)
+        return out
     if isinstance(obj, list):
         return [scrub(v) for v in obj]
     return redact(obj)
@@ -126,24 +185,34 @@ def run(argv, cwd=None, timeout=RUN_TIMEOUT):
         argv = [argv[0]] + _GIT_SAFETY + list(argv[1:])
     env = dict(os.environ)
     env.update(_CHILD_ENV)
+    # Redirect to TEMP FILES rather than pipes. Reading a pipe blocks, so the
+    # earlier version reached stdout.read() before wait(timeout=...) and the
+    # timeout never applied; worse, a child that filled the stderr pipe while
+    # we were blocked on stdout deadlocked outright. Files never block, the
+    # timeout is enforced where it is written, and only the first MAX_OUTPUT
+    # bytes are ever read into this process.
     try:
-        proc = subprocess.Popen(
-            argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL, env=env)
+        with tempfile.TemporaryFile() as fout, tempfile.TemporaryFile() as ferr:
+            try:
+                proc = subprocess.Popen(argv, cwd=cwd, stdout=fout,
+                                        stderr=ferr, stdin=subprocess.DEVNULL,
+                                        env=env)
+            except OSError:
+                return 127, "", "could not run"
+            try:
+                rc = proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                return 127, "", f"timed out after {timeout}s"
+            fout.seek(0)
+            ferr.seek(0)
+            # errors="replace": a commit message in ISO-8859-1 must not crash
+            # a survey with a UnicodeDecodeError traceback.
+            out = fout.read(MAX_OUTPUT).decode("utf-8", "replace")
+            err = ferr.read(2000).decode("utf-8", "replace")
     except OSError:
         return 127, "", "could not run"
-    try:
-        # errors="replace": a commit message in ISO-8859-1 must not crash a
-        # survey with a UnicodeDecodeError traceback.
-        out = proc.stdout.read(MAX_OUTPUT).decode("utf-8", "replace")
-        err = proc.stderr.read(2000).decode("utf-8", "replace")
-        proc.stdout.close()
-        proc.stderr.close()
-        rc = proc.wait(timeout=timeout)
-    except (subprocess.SubprocessError, OSError, ValueError):
-        proc.kill()
-        proc.wait()
-        return 127, "", "timed out or could not be read"
     return rc, out, err
 
 
@@ -253,9 +322,17 @@ def repo(root):
                         "--date=short"], cwd=str(root))
         if rc == 0:
             out["recent_commits"] = o.strip().splitlines()
-        rc, o, _ = run(["git", "status", "--porcelain"], cwd=str(root))
-        if rc == 0:
-            out["dirty_files"] = len([l for l in o.splitlines() if l.strip()])
+        # `git status` and `git diff` are NOT run here, and that is the whole
+        # point of this comment. Both inspect working-tree CONTENT, so both
+        # execute a filter driver the repo configures for itself via
+        # .gitattributes -- measured, with a positive control, firing through
+        # this script. A dirty-file count is a nice-to-have; arbitrary code
+        # execution from a repo you are merely reading is not a price worth
+        # paying for it. Every command above touches metadata only and was
+        # measured NOT to fire a filter.
+        out["dirty_files"] = None
+        out["dirty_files_note"] = ("not collected: `git status` executes "
+                                   "repo-configured filter drivers")
 
     # Language mix and size. HARD-BOUNDED in three ways, because the first
     # version was pointed at a cluster home directory and never returned:
@@ -266,35 +343,48 @@ def repo(root):
             ".mypy_cache", ".cache", "site-packages", ".conda", ".micromamba",
             "miniconda3", "miniforge3", ".local", ".rustup", ".cargo"}
     deadline = time.time() + WALK_SECONDS
-    base_depth = len(root.parts)
-    dirs_seen = 0
-    for dirpath, dirnames, filenames in os.walk(root):
-        # CHECKED PER DIRECTORY. Both guards used to sit inside the filename
-        # loop, so 300,000 EMPTY directories -- exactly what a failed fan-out
-        # leaves behind -- were walked without ever consulting either, and the
-        # partial result was then reported as a complete count. Two reviewers
-        # found this independently.
-        dirs_seen += 1
-        if dirs_seen > MAX_DIRS or time.time() > deadline:
+    # An explicit scandir STACK, not os.walk. os.walk builds the complete
+    # dirnames and filenames lists for a directory before handing them over,
+    # so a root with a million immediate children was materialised in full
+    # before any guard could look at it -- two reviewers found that, and it is
+    # the same class as the sorted(iterdir())[:60] that looked like a bound
+    # and was not. Here every entry is counted as it is seen.
+    stack, dirs_seen = [(root, 0)], 0
+    while stack and not truncated:
+        if time.time() > deadline or dirs_seen > MAX_DIRS:
             truncated = True
             break
-        if len(Path(dirpath).parts) - base_depth >= MAX_DEPTH:
-            dirnames[:] = []
-        dirnames[:] = [d for d in dirnames
-                       if d not in skip and not d.startswith(".")]
-        for fn in filenames:
-            files += 1
-            if files > MAX_TREE_ENTRIES or time.time() > deadline:
-                truncated = True
-                break
-            ext = Path(fn).suffix.lower() or "(none)"
-            exts[ext] = exts.get(ext, 0) + 1
-            try:
-                total_bytes += (Path(dirpath) / fn).stat().st_size
-            except OSError:
-                pass
-        if truncated:
-            break
+        current, depth = stack.pop()
+        dirs_seen += 1
+        try:
+            with os.scandir(current) as it:
+                per_dir = 0
+                for entry in it:
+                    per_dir += 1
+                    if (per_dir > MAX_ENTRIES_PER_DIR
+                            or files > MAX_TREE_ENTRIES
+                            or time.time() > deadline):
+                        truncated = True
+                        break
+                    try:
+                        is_dir = entry.is_dir(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if is_dir:
+                        if (entry.name not in skip
+                                and not entry.name.startswith(".")
+                                and depth + 1 < MAX_DEPTH):
+                            stack.append((entry.path, depth + 1))
+                        continue
+                    files += 1
+                    ext = Path(entry.name).suffix.lower() or "(none)"
+                    exts[ext] = exts.get(ext, 0) + 1
+                    try:
+                        total_bytes += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        pass
+        except OSError:
+            continue
     out["file_count"] = files
     out["counted_truncated_at"] = MAX_TREE_ENTRIES if truncated else None
     out["size_mb"] = round(total_bytes / 1e6, 1)
@@ -394,8 +484,7 @@ def main():
         print(f"  repo      {r['root']}")
         if r.get("git"):
             print(f"            git {r.get('head','?')} on "
-                  f"{r.get('branch','?')}, {r.get('commits','?')} commits, "
-                  f"{r.get('dirty_files',0)} dirty")
+                  f"{r.get('branch','?')}, {r.get('commits','?')} commits")
         # Say when the count is a floor rather than a total. Presenting a
         # capped walk as the whole tree would be a quiet lie in the one file
         # the interview is meant to trust.

@@ -6,6 +6,7 @@ back". These test the rules, not the plumbing.
 """
 import ast
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -232,12 +233,15 @@ class TestTheSurveyLeaksNothing(unittest.TestCase):
     def test_known_token_shapes_are_caught_anywhere_they_appear(self):
         sys.path.insert(0, str(SCRIPTS))
         import survey as S2
-        for secret in ("ghp_AAAABBBBCCCCDDDDEEEE",
-                       "sk-AAAABBBBCCCCDDDDEEEEFFFF",
-                       "xoxb-1234567890-abcdefghij",
-                       "lin_api_AAAABBBBCCCCDDDDEEEE"):
+        # Fixtures that look like REAL tokens: base62 with mixed case and
+        # digits. The earlier all-one-case fixtures were not representative,
+        # and passing them told me nothing about real keys.
+        for secret in ("ghp_AbCd1234EfGh5678IjKlMnOp9012",
+                       "sk-ant-api03-AbCd1234EfGh5678IjKl",
+                       "xoxb-1234567890-AbCdEfGhIjKl",
+                       "lin_api_AbCd1234EfGh5678IjKl"):
             self.assertNotIn(secret, S2.redact(f"leaked {secret} here"),
-                             f"{secret[:6]}... survived redaction")
+                             f"{secret[:8]}... survived redaction")
 
     def test_it_collects_no_environment_variable_values(self):
         """Env values are where secrets actually live. The survey records USER
@@ -492,8 +496,8 @@ class TestSurveyAgainstAHostileRepo(unittest.TestCase):
     def test_a_credential_shaped_dict_KEY_is_redacted(self):
         sys.path.insert(0, str(SCRIPTS))
         import survey as S2
-        got = S2.scrub({".sk-aaaaaaaaaaaaaaaaaaaa": 3})
-        self.assertNotIn("sk-aaaaaaaaaaaaaaaaaaaa", json.dumps(got))
+        got = S2.scrub({".sk-AbCd1234EfGh5678IjKl": 3})
+        self.assertNotIn("sk-AbCd1234EfGh5678IjKl", json.dumps(got))
 
     def test_the_redaction_claim_is_scoped_honestly(self):
         """A closed pattern list can never be complete, and saying otherwise
@@ -531,6 +535,198 @@ class TestTicketsFailClosed(unittest.TestCase):
     def test_an_unchanged_plan_reports_no_drift(self):
         """The counter-claim: a checker that always complains gets ignored."""
         self.assertEqual(T.check(PLAN, T.draft(PLAN)), [])
+
+
+class TestRound2ProjectFindings(unittest.TestCase):
+    """Round 2 of the pre-publication gate. Every test here is written to fail
+    against the implementation it replaced, because a reviewer showed several
+    of my earlier ones would not."""
+
+    def _repo_with_a_filter(self, base):
+        """A repo that runs a command whenever git touches file CONTENT."""
+        import subprocess as sp
+        hook = Path(base) / "hook"
+        marker = Path(base) / "FILTER_RAN"
+        hook.write_text(f"#!/bin/sh\ntouch {marker}\ncat\n")
+        hook.chmod(0o755)
+        r = Path(base) / "r"
+        r.mkdir()
+        sp.run(["git", "init", "-q", "."], cwd=r, capture_output=True)
+        sp.run(["git", "config", "filter.evil.clean", str(hook)], cwd=r,
+               capture_output=True)
+        sp.run(["git", "config", "filter.evil.smudge", str(hook)], cwd=r,
+               capture_output=True)
+        (r / ".gitattributes").write_text("f.txt filter=evil\n")
+        (r / "f.txt").write_text("aaaa\n")
+        sp.run(["git", "add", "-A"], cwd=r, capture_output=True)
+        return r, marker
+
+    def test_a_repo_configured_filter_does_not_execute(self):
+        """CRITICAL. `git status` and `git diff` read working-tree CONTENT and
+        so run a filter driver the repo configures for itself. My first
+        attempt at this test had broken quoting, never installed the filter,
+        and reported a comfortable 'no' -- which would have let me dismiss a
+        real finding. Hence the POSITIVE CONTROL below: if the filter cannot
+        be made to fire at all, this test has proved nothing."""
+        import subprocess as sp
+        with tempfile.TemporaryDirectory() as base:
+            r, marker = self._repo_with_a_filter(base)
+            self.assertTrue(marker.exists(),
+                            "positive control failed: the filter never fired "
+                            "even on `git add`, so this test cannot detect it")
+            sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "i"], cwd=r, capture_output=True)
+            (r / "f.txt").write_text("bbbb\n")
+            marker.unlink()
+            res = run(SURVEY, "--repo", str(r), "--json")
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertFalse(marker.exists(),
+                             "surveying the repo executed its filter driver")
+
+    def test_the_survey_does_not_run_git_status_or_diff(self):
+        """Those two commands are the vector. Naming them keeps the fix from
+        being undone by someone restoring a dirty-file count."""
+        src = SURVEY.read_text()
+        calls = re.findall(r'run\(\["git",\s*"([a-z-]+)"', src)
+        self.assertNotIn("status", calls)
+        self.assertNotIn("diff", calls)
+
+    def test_a_child_that_outlives_its_timeout_is_killed(self):
+        """The timeout was a fiction: the parent blocked in stdout.read()
+        BEFORE reaching wait(timeout=...), so it never applied, and a child
+        filling the stderr pipe deadlocked outright. Fails against a
+        pipe-reading implementation."""
+        import time as _t
+        sys.path.insert(0, str(SCRIPTS))
+        import survey as S2
+        t0 = _t.time()
+        rc, out, err = S2.run(["sh", "-c", "sleep 30"], timeout=2)
+        elapsed = _t.time() - t0
+        self.assertLess(elapsed, 15, "the timeout did not apply")
+        self.assertIn("timed out", err)
+
+    def test_a_child_flooding_stderr_does_not_deadlock(self):
+        """Reading stdout first while the child fills stderr past the pipe
+        buffer hangs until the timeout. Fails against the pipe version."""
+        import time as _t
+        sys.path.insert(0, str(SCRIPTS))
+        import survey as S2
+        t0 = _t.time()
+        rc, out, err = S2.run(
+            ["sh", "-c", "i=0; while [ $i -lt 4000 ]; do "
+                         "echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx 1>&2; "
+                         "i=$((i+1)); done; echo done"], timeout=20)
+        self.assertLess(_t.time() - t0, 15, "deadlocked on a full stderr pipe")
+        self.assertIn("done", out)
+
+    def test_one_enormous_directory_is_bounded_as_it_is_read(self):
+        """os.walk builds the whole entry list for a directory before any
+        guard sees it, so a root with a million children was materialised in
+        full. The per-directory cap replaced that.
+
+        Uses SUBDIRECTORIES, not files: the file cap is lower, so a directory
+        full of files trips that instead and the test passes either way. My
+        first version did exactly that and was vacuous, which the mutation
+        check caught."""
+        with tempfile.TemporaryDirectory() as d:
+            r = Path(d) / "r"
+            r.mkdir()
+            sys.path.insert(0, str(SCRIPTS))
+            import survey as S2
+            for i in range(S2.MAX_ENTRIES_PER_DIR + 200):
+                (r / f"run-{i}").mkdir()
+            res = run(SURVEY, "--repo", str(r), "--json")
+            self.assertEqual(res.returncode, 0, res.stderr)
+            data = json.loads(res.stdout)
+            self.assertEqual(data["repo"]["file_count"], 0,
+                             "no files exist, so the FILE cap must not be "
+                             "what stopped the walk")
+            self.assertTrue(
+                data["repo"]["counted_truncated_at"],
+                "a directory past the per-entry cap was reported as fully "
+                "counted, so the partial walk reads as a total")
+
+    def test_redaction_keeps_legitimate_names(self):
+        """The cries-wolf direction, found by three reviewers: a file named
+        hf_my_model_weights_1234567890123456 was replaced wholesale. Fails
+        against the unconditional family match."""
+        sys.path.insert(0, str(SCRIPTS))
+        import survey as S2
+        # These must MATCH the token pattern to be a real test. Three of the
+        # examples a reviewer gave did not match at all, so asserting on them
+        # proved nothing -- caught by mutating the code and finding this test
+        # still passed. `hf_bertbaseuncased2024run` does match, and was being
+        # redacted.
+        for legit in ("hf_bertbaseuncased2024run",
+                      "hf_llamathreeeightbinstruct",
+                      "sk-learnpipelineexample2024"):
+            self.assertTrue(S2._TOKENISH.search(legit),
+                            f"{legit} does not match the pattern, so this "
+                            f"assertion would pass vacuously")
+            self.assertEqual(S2.redact(legit), legit,
+                             f"redaction destroyed legitimate data: {legit}")
+
+    def test_redaction_still_catches_real_tokens(self):
+        """The counter-claim to the test above: narrowing must not blind it."""
+        sys.path.insert(0, str(SCRIPTS))
+        import survey as S2
+        for secret in ("ghp_AbCd1234EfGh5678IjKl",
+                       "glpat-Xy9Zw8Vu7Ts6Rq5Po4",
+                       "hf_QwErTyUiOp1234567890",
+                       "sk-ant-api03-AbCd1234EfGh5678"):
+            self.assertEqual(S2.redact(secret), "<redacted>", secret)
+
+    def test_two_keys_redacting_alike_do_not_collapse(self):
+        """`a.sk-aaa....txt` and `a.sk-bbb....txt` both become `a.<redacted>`,
+        and the second silently overwrote the first, losing a row."""
+        sys.path.insert(0, str(SCRIPTS))
+        import survey as S2
+        got = S2.scrub({"a.sk-AbCd1234EfGh5678.txt": 1,
+                        "a.sk-Zz9Yy8Xx7Ww6Vv5Uu4.txt": 2})
+        self.assertEqual(len(got), 2, f"a row was lost: {got}")
+        self.assertNotIn("sk-AbCd1234EfGh5678", json.dumps(got))
+
+    def test_an_issue_without_a_digest_fails_the_drift_check(self):
+        """"Cannot tell" must not read as "no drift" in the check whose whole
+        job is detecting what cannot otherwise be told."""
+        d = T.draft(PLAN)
+        d["issues"][0].pop("unit_digest")
+        problems = T.check(PLAN, d)
+        self.assertTrue(any("no unit digest" in p for p in problems), problems)
+
+    def test_a_first_run_with_no_existing_draft_is_not_refused(self):
+        """The fail-closed path must not fire when there is simply nothing
+        there yet, which would block every first use."""
+        with tempfile.TemporaryDirectory() as d:
+            plan = Path(d) / "plan.json"
+            plan.write_text(json.dumps(PLAN))
+            r = run(TICKETS, "draft", str(plan))
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
+class TestTheRedactionGapIsRecorded(unittest.TestCase):
+    """What this scrubber deliberately does NOT catch, written down so nobody
+    later mistakes silence for safety."""
+
+    def test_an_all_lowercase_sk_string_is_knowingly_left_alone(self):
+        """`sk-` collides with `sk-learn`, and an all-lowercase run with no
+        digits is indistinguishable from an ordinary descriptive name. A real
+        OpenAI key is 48 base62 characters with mixed case and digits, so this
+        trade-off costs nothing real and buys not mangling filenames. It is a
+        KNOWN GAP, recorded rather than hidden."""
+        sys.path.insert(0, str(SCRIPTS))
+        import survey as S2
+        self.assertEqual(S2.redact("sk-aaaaaaaaaaaaaaaaaaaa"),
+                         "sk-aaaaaaaaaaaaaaaaaaaa")
+        # And the realistic shape IS caught, which is the point.
+        self.assertEqual(S2.redact("sk-AbCd1234EfGh5678IjKlMnOp"), "<redacted>")
+
+    def test_the_docstring_says_it_is_not_a_guarantee(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import survey as S2
+        doc = S2.redact.__doc__ or ""
+        self.assertIn("NOT a guarantee", doc)
+        self.assertIn("sensitive, not as sanitised", doc)
 
 
 if __name__ == "__main__":
