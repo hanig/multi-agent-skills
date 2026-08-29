@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""unit.py — the unit contract for an autonomous agent swarm.
+"""unit.py: the unit contract for an autonomous agent swarm.
 
 Step 1 of docs/plan-swarm.md, planned by a two-member committee
 (claude-opus-4-8 + gpt-5.6-sol, fresh context, in parallel, both converged).

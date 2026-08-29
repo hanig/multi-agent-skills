@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""converge.py — did the training actually converge, or just stop?
+"""converge.py: did the training actually converge, or just stop?
 
 A swarm predicate. `unit.py` answers "did the job end cleanly and produce its
 declared outputs"; that is existence and terminal state, and for a training run
