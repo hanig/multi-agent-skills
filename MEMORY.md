@@ -27,7 +27,7 @@ bind mount.
 
 ## Status as of 2026-08-28
 
-Built and green: 443 tests.
+Built and green: 461 tests.
 
 | Piece | File | State |
 |---|---|---|
@@ -119,7 +119,21 @@ content digest for files under 256MB, and names the method, so a size-mtime
 match is reported as NOT establishing unchanged content rather than passing as
 one.
 
-Not built: plan steps 4 (install per server), 5-7. Operator controls (`status --json`, notifications,
+Plan step 5 (install per server) is essentially DONE: the same 461-test suite
+passes on the Mac (3.10.16), lambda (3.12.3), chimera (3.10.12) and andromeda
+(3.10.12), and a real 2-unit dependent DAG ran to DONE on each of the three
+clusters in its own project. `validate` now refuses a partition the local
+cluster lacks, so a plan written for another server fails with one clear line
+instead of a half-dispatched DAG. Still open in step 5: `install.sh` does not
+know about the swarm skill (deployment was rsync).
+
+Server quirks confirmed by running, not by reading: lambda requires `--mem`
+and the others do not; partitions differ entirely; the andromeda username is
+`hgoodarzi` with a Weka home at 93% full; `chimera` cannot take a remote ssh
+command, use `chimera-login`.
+
+Not built: steps 6 (tracker drain, blocked on the Linear account) and 7
+(grill-with-docs gate). Operator controls (`status --json`, notifications,
 `NEEDS_HUMAN`, promotion), per-server install, the project front door, and the
 `grill-with-docs` gate. All three declared kinds now have a working predicate and have been
 run for real.

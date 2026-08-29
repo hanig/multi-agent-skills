@@ -80,6 +80,52 @@ def _scopes_overlap(a, b):
     return na == nb or na.startswith(nb) or nb.startswith(na)
 
 
+def _known_partitions():
+    """Partition names this cluster actually has, or None if it cannot be told.
+
+    None is not an empty set. A host without `sinfo`, or a scheduler that does
+    not answer, means UNKNOWN, and a validator that refuses on unknown is a
+    validator that blocks honest work on the first flaky day."""
+    if not shutil.which("sinfo"):
+        return None
+    rc, out, _ = U.run(["sinfo", "-h", "-o", "%P"], timeout=30)
+    if rc != 0 or not (out or "").strip():
+        return None
+    names = set()
+    for line in out.splitlines():
+        n = line.strip().rstrip("*")        # the default partition carries a *
+        if n:
+            names.add(n)
+    return names or None
+
+
+def partition_problems(units, known=None):
+    """Which units name a partition this cluster does not have.
+
+    A project runs on ONE server and its plan carries that server's sbatch
+    flags, so a plan written for lambda and run on chimera names partitions
+    that do not exist here. Caught at validate, it is one clear line; caught
+    at submit, it is a half-dispatched DAG and an sbatch error per unit."""
+    if known is None:
+        known = _known_partitions()
+    if not known:
+        return []
+    bad = []
+    for u in units:
+        if not isinstance(u, dict):
+            continue
+        for arg in (u.get("sbatch") or []):
+            text = str(arg)
+            name = None
+            if text.startswith("--partition="):
+                name = text.split("=", 1)[1]
+            elif text.startswith("-p="):
+                name = text.split("=", 1)[1]
+            if name and name not in known:
+                bad.append((u.get("id", "?"), name))
+    return bad
+
+
 def validate_plan(plan):
     """Raise PlanError, or return a summary. Refuses BEFORE anything is
     dispatched: a plan that cannot be run should not half-run."""
@@ -117,6 +163,18 @@ def validate_plan(plan):
                 raise PlanError(
                     f"unit {u.get('id', '?')!r} declares promote_to "
                     f"{u['promote_to']!r}, but {derr}")
+
+    bad_parts = partition_problems(units)
+    if bad_parts:
+        known = sorted(_known_partitions() or [])
+        listed = "; ".join(f"{uid} wants {name!r}" for uid, name in bad_parts)
+        raise PlanError(
+            f"this plan names partition(s) that {os.uname().nodename} does "
+            f"not have: {listed}. This cluster offers: {', '.join(known)}. A "
+            f"project runs on ONE server and its plan carries that server's "
+            f"sbatch flags, so this is usually a plan written for a different "
+            f"cluster. Refusing here beats a half-dispatched DAG and an "
+            f"sbatch error per unit.")
 
     seen, by_id = set(), {}
     for i, u in enumerate(units):

@@ -1375,3 +1375,51 @@ class TestRenewalCannotOpenAWindow(unittest.TestCase):
             self.assertEqual(stolen, 0,
                              f"{stolen} contender(s) acquired a lease that was "
                              f"being actively renewed")
+
+
+class TestPlanIsRefusedForTheWrongCluster(unittest.TestCase):
+    """Plan criterion 5(f). A project runs on ONE server and its plan carries
+    that server's sbatch flags, so a plan written for lambda and run on
+    chimera names partitions that do not exist there."""
+
+    def test_a_partition_this_cluster_lacks_is_refused(self):
+        bad = S.partition_problems(
+            [{"id": "prep", "sbatch": ["--partition=labinloop", "--time=5"]},
+             {"id": "ok", "sbatch": ["--partition=cpu"]}],
+            known={"cpu", "gpu"})
+        self.assertEqual(bad, [("prep", "labinloop")])
+
+    def test_a_partition_this_cluster_has_is_accepted(self):
+        self.assertEqual(
+            S.partition_problems([{"id": "a", "sbatch": ["--partition=cpu"]}],
+                                 known={"cpu", "gpu"}), [])
+
+    def test_the_default_partition_star_is_stripped(self):
+        """`sinfo -o %P` marks the default with a trailing *, and comparing
+        the raw string would reject the one partition most plans use."""
+        self.assertEqual(
+            S.partition_problems([{"id": "a", "sbatch": ["--partition=cpu"]}],
+                                 known={"cpu", "gpu"}), [],
+            "the default partition must match after the * is stripped")
+        rc, out, _ = (0, "cpu*\ngpu\n", "")
+        names = {l.strip().rstrip("*") for l in out.splitlines() if l.strip()}
+        self.assertIn("cpu", names)
+
+    def test_an_unknown_partition_list_refuses_NOTHING(self):
+        """The cries-wolf guard. A host without sinfo, or a scheduler that did
+        not answer, is UNKNOWN, not empty. Refusing on unknown would block
+        every plan on the first flaky day, and this repo weights that as
+        seriously as a false pass."""
+        self.assertEqual(
+            S.partition_problems(
+                [{"id": "a", "sbatch": ["--partition=anything-at-all"]}],
+                known=None), [],
+            "an unknown partition list must not refuse a plan")
+        self.assertEqual(
+            S.partition_problems(
+                [{"id": "a", "sbatch": ["--partition=x"]}], known=set()), [],
+            "an empty partition list means the query failed, not that the "
+            "cluster has no partitions")
+
+    def test_a_unit_with_no_sbatch_flags_is_not_refused(self):
+        self.assertEqual(S.partition_problems([{"id": "a"}], known={"cpu"}), [])

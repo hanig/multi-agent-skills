@@ -335,18 +335,25 @@ behave identically wherever it lands, and must not bake in one cluster's quirks:
 
 Acceptance criteria:
 
-- a. `install.sh` puts the swarm skill on the Mac, lambda, andromeda and
-  chimera, and the SAME test suite passes on each.
-- b. The suite runs under **python3.10**, the floor two of the three run. 3.12
-  is not the development target.
+- a. DONE for the suite. 456 tests pass unchanged on the Mac (3.10.16),
+  lambda (3.12.3), chimera (3.10.12) and andromeda (3.10.12). `install.sh`
+  itself still does not know about the swarm skill; deployment was rsync.
+- b. DONE. Development is on 3.10.16 and the floor is exercised on two
+  clusters; 3.12 is verified but is not the target.
 - c. No cluster's quirk is hardcoded. `--mem` is a plan-level flag the author
   supplies, not a tool assumption; nothing refers to a partition by name.
 - d. `chimera` cannot take a remote command (`RemoteCommand sh_dev`); anything
   scripted uses `chimera-login`. Recorded so it is not rediscovered.
-- e. One real unit dispatched and judged DONE on EACH server, in that server's
-  own project, not one plan spanning three.
-- f. A plan validated on one server that names another server's partition fails
-  at validate time with a clear message, rather than at submit.
+- e. DONE on all three. A 2-unit dependent DAG dispatched and judged DONE in
+  its own project on lambda (`--mem` required, `preemptible`), chimera (`cpu`,
+  no `--mem`) and andromeda (`preemptible`, user `hgoodarzi`, Weka).
+- f. DONE. `validate` queries `sinfo` and refuses a partition this cluster
+  lacks, naming what it does offer. Verified on chimera: a plan naming
+  lambda's `labinloop` is refused by both `validate` and `run` with zero
+  attempt directories created. An UNKNOWN partition list (no sinfo, or a
+  scheduler that did not answer) refuses nothing, because a validator that
+  blocks honest work on the first flaky day is the failure this repo weights
+  equally with a false pass.
 
 **6. Tickets: the orchestrator CREATES the project and populates its issues.**
 
