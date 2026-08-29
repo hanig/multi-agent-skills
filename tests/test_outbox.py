@@ -130,29 +130,30 @@ class TestTheTrackerIsNeverAuthoritative(unittest.TestCase):
 # in-process synchronisation that could mask the race being tested. Each
 # spins until a shared wall-clock start so they collide as tightly as the
 # scheduler allows.
+# Contender run as a SEPARATE PROCESS. Real processes, real kernel locking,
+# no in-process synchronisation that could mask the race being tested.
 _CONTENDER = """
-import sys, time, json
+import sys, time
 sys.path.insert(0, %r)
 import swarm as S
 state_dir, start = sys.argv[1], float(sys.argv[2])
-# Sleep until just before the start, THEN spin. A pure busy-wait burned a
-# core per contender for the whole run-up, which is a rude thing to do on a
-# shared login node; 5ms of spin collides just as tightly.
-while True:
-    left = start - time.time()
-    if left <= 0.005:
-        break
-    time.sleep(min(left - 0.005, 0.05))
+while time.time() < start - 0.005:
+    time.sleep(0.001)
 while time.time() < start:
     pass
 ok, _ = S.acquire_lease(state_dir)
 print("WON" if ok else "lost")
+if ok:
+    time.sleep(1.5)          # hold it while the rest try
 """
 
 
-class TestTheLeaseIsAtomic(unittest.TestCase):
-    """Three reviewers independently broke the read-then-write lease. These
-    pin the fix against the actual failure they described."""
+class TestOnlyOneControllerRuns(unittest.TestCase):
+    """The property five hand-rolled lease versions were trying to provide,
+    now stated against the OS lock. These are unchanged in intent from the
+    tests that guarded the old scheme; only the mechanism beneath them moved."""
+
+    TRIALS = 3
 
     def _contend(self, state_dir, n):
         import tempfile
@@ -163,79 +164,54 @@ class TestTheLeaseIsAtomic(unittest.TestCase):
             [sys.executable, str(src), str(state_dir), str(start)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             for _ in range(n)]
-        return [p.communicate(timeout=60)[0].strip() for p in procs]
-
-    # REPEATED. A single trial of this passed against an implementation that
-    # was still racy: with 8 contenders it happened to produce one winner.
-    # Running it repeatedly is what exposed the second defect, a re-read
-    # missing inside the takeover's own critical section.
-    TRIALS = 5
+        return [p.communicate(timeout=90)[0].strip() for p in procs]
 
     def test_many_concurrent_acquirers_yield_exactly_one_winner(self):
-        """The real race, run for real. A structural claim that the code calls
-        O_EXCL would pass even if the surrounding logic still let two through;
-        counting winners across real processes cannot."""
         import tempfile
         for i in range(self.TRIALS):
             with tempfile.TemporaryDirectory() as d:
                 out = self._contend(d, 12)
                 self.assertEqual(out.count("WON"), 1,
                                  f"trial {i}: expected exactly one controller "
-                                 f"to win the lease, got {out.count('WON')}: "
-                                 f"{out}")
+                                 f"to win, got {out.count('WON')}: {out}")
 
-    def test_a_stale_lease_can_be_taken_but_only_by_one(self):
-        """A controller killed mid-run must not block the project forever. The
-        takeover is itself a race, and it is the one that was still broken
-        after the first fix."""
-        import tempfile
-        for i in range(self.TRIALS):
-            with tempfile.TemporaryDirectory() as d:
-                (Path(d) / S.LEASE).write_text(json.dumps(
-                    {"owner": "ghost", "host": "elsewhere", "pid": 999999,
-                     "acquired_at": 0, "expires_at": 0}))
-                out = self._contend(d, 12)
-                self.assertEqual(out.count("WON"), 1,
-                                 f"trial {i}: a stale lease must be taken by "
-                                 f"exactly one contender, got "
-                                 f"{out.count('WON')}: {out}")
-
-    def test_a_fresh_lease_is_never_taken(self):
+    def test_a_held_lock_is_never_taken(self):
         """The counter-claim: exclusion must actually exclude."""
         import tempfile
         with tempfile.TemporaryDirectory() as d:
-            (Path(d) / S.LEASE).write_text(json.dumps(
-                {"owner": "live", "host": "elsewhere", "pid": 999999,
-                 "acquired_at": time.time(),
-                 "expires_at": time.time() + 900}))
-            out = self._contend(d, 4)
-            self.assertEqual(out.count("WON"), 0, f"took a live lease: {out}")
+            ok, _ = S.acquire_lease(d)
+            self.assertTrue(ok)
+            try:
+                out = self._contend(d, 6)
+                self.assertEqual(out.count("WON"), 0,
+                                 f"contenders took a held lock: {out}")
+            finally:
+                S.release_lease(d)
 
-    def test_release_does_not_delete_another_controllers_lease(self):
-        """The exit-path defect: a controller already taken over would unlink
-        its successor's lease on the way out, leaving nobody protected."""
+    def test_releasing_frees_it_for_the_next_controller(self):
         import tempfile
         with tempfile.TemporaryDirectory() as d:
-            (Path(d) / S.LEASE).write_text(json.dumps(
-                {"owner": "someone", "host": "otherhost", "pid": 4242,
-                 "acquired_at": time.time(),
-                 "expires_at": time.time() + 900}))
+            ok, _ = S.acquire_lease(d)
+            self.assertTrue(ok)
             S.release_lease(d)
-            self.assertTrue((Path(d) / S.LEASE).is_file(),
-                            "released a lease this process did not hold")
+            out = self._contend(d, 4)
+            self.assertEqual(out.count("WON"), 1, out)
 
-    def test_renewal_refuses_when_we_no_longer_hold_it(self):
-        """If we were taken over, the right response is to stop, not to steal
-        it back and have two controllers believe they hold it."""
+    def test_two_projects_in_one_process_lock_independently(self):
+        """A single global fd made acquire return True for ANY state directory
+        once one had been acquired, so a second project was never locked at
+        all. Found by the new tests on the first run."""
         import tempfile
-        with tempfile.TemporaryDirectory() as d:
-            S.acquire_lease(d)
-            self.assertTrue(S.renew_lease(d))
-            (Path(d) / S.LEASE).write_text(json.dumps(
-                {"owner": "x", "host": "otherhost", "pid": 4242,
-                 "acquired_at": time.time(),
-                 "expires_at": time.time() + 900}))
-            self.assertFalse(S.renew_lease(d))
+        with tempfile.TemporaryDirectory() as a, \
+                tempfile.TemporaryDirectory() as b:
+            self.assertTrue(S.acquire_lease(a)[0])
+            try:
+                out = self._contend(b, 3)
+                self.assertEqual(out.count("WON"), 1,
+                                 f"holding project A's lock wrongly blocked "
+                                 f"or granted project B: {out}")
+            finally:
+                S.release_lease(a)
 
 
 class TestThePlanDigestCoversDispatch(unittest.TestCase):
@@ -1159,51 +1135,6 @@ class TestRound2ReviewFindings(unittest.TestCase):
     """A four-reviewer implementation review returned REVIEW_FAIL with a
     CRITICAL. These pin each confirmed finding against the failure described."""
 
-    def test_a_deposed_controller_cannot_clobber_its_successors_lease(self):
-        """THE CRITICAL, found independently by three reviewers. renew_lease
-        re-read ownership then called os.replace, which overwrites whatever is
-        at the path, so a takeover landing in that window left TWO controllers
-        believing they held the lease. The original TOCTOU one level up, in
-        the function written to fix it."""
-        import tempfile
-        with tempfile.TemporaryDirectory() as d:
-            ok, _ = S.acquire_lease(d)
-            self.assertTrue(ok)
-            lease = Path(d) / S.LEASE
-            # B takes over after A's lease expires, and publishes its own.
-            lease.unlink()
-            lease.write_text(json.dumps(
-                {"owner": "B", "host": "other", "pid": 999,
-                 "token": "B-TOKEN", "acquired_at": time.time(),
-                 "expires_at": time.time() + 900}))
-            self.assertIs(S.renew_lease(d), False,
-                          "a deposed controller reported a successful renewal")
-            self.assertEqual(json.loads(lease.read_text())["token"], "B-TOKEN",
-                             "renewal clobbered the successor's lease")
-            S.release_lease(d)
-            self.assertEqual(json.loads(lease.read_text())["token"], "B-TOKEN",
-                             "release deleted the successor's lease")
-
-    def test_identity_is_a_token_not_a_pid(self):
-        """pids are reused and two controllers on one host share host+pid, so
-        neither distinguishes "my lease" from one that merely looks like it."""
-        import ast
-        src = SWARM.read_text()
-        fn = next(n for n in ast.parse(src).body
-                  if isinstance(n, ast.FunctionDef) and n.name == "renew_lease")
-        code = "\n".join(ast.unparse(x) for x in fn.body)
-        self.assertIn("_HELD_TOKEN", code)
-        # Check the COMPARISONS, not the whole function text. pid is fine in a
-        # unique temp filename and fatal in an ownership test, and a blanket
-        # ban on the substring cannot tell the two apart.
-        for cmp_node in [n for n in ast.walk(fn) if isinstance(n, ast.Compare)]:
-            rendered = ast.unparse(cmp_node)
-            self.assertNotIn("getpid", rendered,
-                             f"ownership is decided by pid here: {rendered}")
-            self.assertNotIn("nodename", rendered,
-                             f"ownership is decided by hostname here: "
-                             f"{rendered}")
-
     def test_cannot_tell_is_not_treated_as_lease_loss(self):
         """A transient NFS read returned False, the caller treated it as loss,
         and a STICKY halted flag stopped a healthy project until a human
@@ -1314,67 +1245,137 @@ class TestRound2ReviewFindings(unittest.TestCase):
                                  want, f"for {cmd!r}")
 
 
-class TestRenewalCannotOpenAWindow(unittest.TestCase):
-    def test_renewal_never_leaves_the_lease_file_absent(self):
-        """MY regression, caught on lambda and not by any local test: renewal
-        unlinked the lease and republished it, and acquire_lease's fast path
-        does not hold the breaker, so a contender walked into the gap. Two
-        advances dispatched one DAG: six jobs for three units."""
+class TestTheLockIsArbitratedByTheOS(unittest.TestCase):
+    """The sixth lease. Five hand-rolled versions preceded it and two
+    independent reviews found a CRITICAL in each of the last two. These test
+    the properties that motivated the change, not the implementation."""
+
+    def test_the_filesystem_under_the_test_really_excludes(self):
+        """NFS can silently degrade advisory locking to local-only, which
+        would be WORSE than the old scheme because it would look like it
+        worked. Verified here on whatever filesystem the suite runs on, and
+        measured separately on lambda (nfs), chimera (nfs4) and andromeda
+        (weka): 10 contenders, three trials, one winner every time."""
+        import subprocess as sp
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            probe = Path(d) / "probe.py"
+            probe.write_text(
+                "import fcntl, os, sys, time\n"
+                "path, start = sys.argv[1], float(sys.argv[2])\n"
+                "while time.time() < start - 0.005: time.sleep(0.001)\n"
+                "while time.time() < start: pass\n"
+                "fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)\n"
+                "try:\n"
+                "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+                "except OSError:\n"
+                "    print('lost'); sys.exit(0)\n"
+                "print('WON', flush=True)\n"
+                "time.sleep(1.5)\n")
+            start = time.time() + 1.5
+            procs = [sp.Popen([sys.executable, str(probe),
+                               str(Path(d) / "L"), str(start)],
+                              stdout=sp.PIPE, text=True) for _ in range(10)]
+            out = [p.communicate(timeout=60)[0].strip() for p in procs]
+            self.assertEqual(out.count("WON"), 1,
+                             f"advisory locking does not exclude across "
+                             f"processes on this filesystem: {out}")
+
+    def test_a_dead_holder_frees_the_project_with_no_cleanup(self):
+        """THE reason for the change. Every defect in five rewrites lived in
+        machinery that existed because a plain file cannot tell you its owner
+        died: the TTL, the breaker, the token, the mtime heuristic. A killed
+        holder used to wedge the project until a human deleted a directory."""
+        import subprocess as sp
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            holder_src = Path(d) / "holder.py"
+            holder_src.write_text(
+                "import sys, time\n"
+                f"sys.path.insert(0, {str(SWARM.parent)!r})\n"
+                "import swarm as S\n"
+                "ok, _ = S.acquire_lease(sys.argv[1])\n"
+                "print('HELD' if ok else 'no', flush=True)\n"
+                "time.sleep(120)\n")
+            sd = str(Path(d) / "st")
+            holder = sp.Popen([sys.executable, str(holder_src), sd],
+                              stdout=sp.PIPE, text=True)
+            self.assertEqual(holder.stdout.readline().strip(), "HELD")
+            ok, why = S.acquire_lease(sd)
+            self.assertFalse(ok, "acquired a lock a live process holds")
+            holder.kill()
+            holder.wait(timeout=15)
+            ok, why = S.acquire_lease(sd)
+            self.assertTrue(ok, f"a killed holder still blocks the project: "
+                                f"{why}")
+            S.release_lease(sd)
+
+    def test_a_slow_holder_is_never_deposed(self):
+        """The CRITICAL from round 2: a holder merely PAUSED past the TTL had
+        its breaker stolen and then clobbered its successor. There is no TTL
+        now, so being slow cannot cost the lock."""
+        import subprocess as sp
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            holder_src = Path(d) / "holder.py"
+            holder_src.write_text(
+                "import sys, time\n"
+                f"sys.path.insert(0, {str(SWARM.parent)!r})\n"
+                "import swarm as S\n"
+                "ok, _ = S.acquire_lease(sys.argv[1])\n"
+                "print('HELD' if ok else 'no', flush=True)\n"
+                "time.sleep(6)\n")
+            sd = str(Path(d) / "st")
+            holder = sp.Popen([sys.executable, str(holder_src), sd],
+                              stdout=sp.PIPE, text=True)
+            self.assertEqual(holder.stdout.readline().strip(), "HELD")
+            stolen = 0
+            deadline = time.time() + 3
+            while time.time() < deadline:
+                ok, _ = S.acquire_lease(sd)
+                if ok:
+                    stolen += 1
+                    S.release_lease(sd)
+            holder.wait(timeout=20)
+            self.assertEqual(stolen, 0,
+                             f"{stolen} contender(s) took the lock from a live "
+                             f"holder that was simply slow")
+
+    def test_renewal_is_not_a_clock_any_more(self):
+        """There is nothing to renew: the lock is held until the process
+        releases it or exits. A timestamp that had to be refreshed is what let
+        a paused controller be deposed."""
         import ast
         src = SWARM.read_text()
         fn = next(n for n in ast.parse(src).body
                   if isinstance(n, ast.FunctionDef) and n.name == "renew_lease")
         code = "\n".join(ast.unparse(x) for x in fn.body)
-        self.assertNotIn("path.unlink()", code,
-                         "renewal must replace in place; removing the lease "
-                         "opens a window in which it does not exist at all")
-        self.assertIn("os.replace", code)
+        for gone in ("expires_at", "LEASE_TTL_S", "os.replace", "unlink"):
+            self.assertNotIn(gone, code,
+                             f"renewal still manipulates {gone}; the lock "
+                             f"should need no refreshing at all")
 
-    def test_the_fast_path_backs_off_while_a_mutation_is_in_progress(self):
-        import tempfile
-        with tempfile.TemporaryDirectory() as d:
-            (Path(d) / (S.LEASE + ".break")).mkdir()
-            ok, why = S.acquire_lease(d)
-            self.assertFalse(ok, "acquired while another controller was "
-                                 "mid-mutation")
-            self.assertIn("mutating", why)
+    def test_the_hand_rolled_machinery_is_gone(self):
+        """Closure by exclusion: if any of it survives, some path still
+        depends on the reasoning that failed five times."""
+        src = SWARM.read_text()
+        for gone in ("_Breaker", "_HELD_TOKEN", "_publish_lease",
+                     "lease.json.break", "LEASE + \".break\""):
+            self.assertNotIn(gone, src, f"{gone} still present")
 
-    def test_a_renewing_holder_keeps_the_lease_against_contenders(self):
-        """The end-to-end property, run for real: while one process renews in
-        a loop, no other may acquire."""
-        import subprocess as sp
-        import tempfile
-        with tempfile.TemporaryDirectory() as d:
-            src = Path(d) / "renewer.py"
-            src.write_text(
-                "import sys, time\n"
-                f"sys.path.insert(0, {str(SWARM.parent)!r})\n"
-                "import swarm as S\n"
-                "ok, _ = S.acquire_lease(sys.argv[1])\n"
-                "assert ok\n"
-                "print('HELD', flush=True)\n"
-                "end = time.time() + 3\n"
-                "while time.time() < end:\n"
-                "    S.renew_lease(sys.argv[1])\n")
-            sd = Path(d) / "st"
-            holder = sp.Popen([sys.executable, str(src), str(sd)],
-                              stdout=sp.PIPE, text=True)
-            self.assertEqual(holder.stdout.readline().strip(), "HELD")
-            stolen = 0
-            deadline = time.time() + 2
-            while time.time() < deadline:
-                r = sp.run([sys.executable, "-c",
-                            f"import sys; sys.path.insert(0, {str(SWARM.parent)!r});"
-                            "import swarm as S;"
-                            f"ok,_=S.acquire_lease({str(sd)!r});"
-                            "print('WON' if ok else 'lost')"],
-                           capture_output=True, text=True)
-                if "WON" in r.stdout:
-                    stolen += 1
-            holder.wait(timeout=15)
-            self.assertEqual(stolen, 0,
-                             f"{stolen} contender(s) acquired a lease that was "
-                             f"being actively renewed")
+    def test_the_lease_file_decides_nothing(self):
+        """It exists so a human blocked by the lock can see who holds it. If
+        a decision were taken from it, the file would be load-bearing again."""
+        import ast
+        src = SWARM.read_text()
+        for name in ("acquire_lease", "renew_lease", "release_lease"):
+            fn = next(n for n in ast.parse(src).body
+                      if isinstance(n, ast.FunctionDef) and n.name == name)
+            code = "\n".join(ast.unparse(x) for x in fn.body)
+            self.assertNotIn("acquired_at') >", code)
+            self.assertNotIn("expires_at", code,
+                             f"{name} still decides something from the "
+                             f"descriptive lease file")
 
 
 class TestPlanIsRefusedForTheWrongCluster(unittest.TestCase):

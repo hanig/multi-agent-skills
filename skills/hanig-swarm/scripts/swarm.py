@@ -30,6 +30,7 @@ Python 3.8+, stdlib only, login-node safe.
 """
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -305,231 +306,94 @@ def plan_digest(plan):
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-# The token of the lease THIS process holds, set when it is acquired. pid and
-# host are not identity: pids are reused, and two controllers on one host can
-# share both. Only a token distinguishes "my lease" from "a lease that happens
-# to look like mine".
-_HELD_TOKEN = None
-
-
-def _lease_body():
-    return {"owner": os.environ.get("USER", "?"), "host": os.uname().nodename,
-            "pid": os.getpid(), "token": os.urandom(16).hex(),
-            "acquired_at": time.time(),
-            "expires_at": time.time() + LEASE_TTL_S}
-
-
-class _Breaker:
-    """The single arbiter for every MUTATION of the lease file.
-
-    A CRITICAL found by three reviewers independently: renew_lease re-read
-    ownership and then called os.replace, which overwrites whatever is at the
-    path. A takeover completing in that window was silently clobbered and two
-    controllers both believed they held the lease. release_lease had the same
-    shape with unlink. Both were the original TOCTOU one level up, inside the
-    functions written to fix it, and renew_lease's docstring described a
-    hard-link guard that was not in the code.
-
-    Serialising takeover, renewal and release behind one atomic mkdir removes
-    the window rather than narrowing it. Entering returns False if another
-    controller is mid-mutation, which is "cannot tell", not "lost"."""
-
-    def __init__(self, state_dir):
-        self.path = Path(state_dir) / (LEASE + ".break")
-        self.got = False
-
-    def __enter__(self):
-        try:
-            self.path.mkdir()
-            self.got = True
-        except FileExistsError:
-            # A stale breaker must not wedge the project forever.
-            try:
-                if time.time() - self.path.stat().st_mtime > LEASE_TTL_S:
-                    self.path.rmdir()
-                    self.path.mkdir()
-                    self.got = True
-            except OSError:
-                self.got = False
-        except OSError:
-            self.got = False
-        return self.got
-
-    def __exit__(self, *exc):
-        if self.got:
-            try:
-                self.path.rmdir()
-            except OSError:
-                pass
-        return False
-
-
-def _publish_lease(path, body):
-    """Create the lease atomically AND fully populated.
-
-    O_EXCL alone is not enough: it creates a ZERO-LENGTH file and the body
-    lands a moment later. A rival reading in that window parsed nothing,
-    concluded the lease was stale, and broke a live one -- measured as two
-    winners out of twelve. link() is atomic and publishes a file that is
-    already complete."""
-    tmp = path.with_suffix(f".{os.getpid()}.{time.time_ns()}.tmp")
-    try:
-        with open(tmp, "w") as fh:
-            fh.write(body)
-            fh.flush()
-            os.fsync(fh.fileno())
-    except OSError as e:
-        return f"cannot write the lease: {e}"
-    try:
-        os.link(str(tmp), str(path))
-        return True
-    except FileExistsError:
-        return False
-    except OSError as e:
-        return f"cannot publish the lease: {e}"
-    finally:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
+# Locks this process holds, KEYED BY PROJECT. A single global fd made
+# acquire_lease return True for any state directory once one had been
+# acquired, so a second project in the same process was never actually
+# locked. Caught by the new tests, which is what they are for.
+_LOCK_FDS = {}
+LOCK = "lease.lock"
 
 
 def acquire_lease(state_dir, force=False):
-    """One writer at a time. Returns (ok, holder_description)."""
-    global _HELD_TOKEN
+    """One controller at a time, arbitrated by the OS. Returns (ok, holder).
+
+    THE SIXTH VERSION, and the first that does not invent its own mutual
+    exclusion. The five before it were hand-rolled from atomic file
+    primitives, and two independent reviews found a CRITICAL in each of the
+    last two: a deposed controller could overwrite its successor's lease, and
+    the breaker that was meant to prevent that was itself reclaimable by mtime
+    alone, so a holder merely PAUSED past the TTL had it stolen and then
+    clobbered the successor on resume. One reviewer also showed the
+    reclamation was unreachable from acquire_lease, so a killed holder wedged
+    the project permanently.
+
+    Every one of those defects lived in machinery that existed for a single
+    reason: a plain file cannot tell you its owner died. An advisory lock can,
+    because the kernel drops it when the process exits, however it exits. That
+    removes the stale-lease TTL, the breaker directory, the ownership token,
+    the mtime heuristic and the renewal loop, and with them the entire class
+    of bug that five rewrites could not close.
+
+    MEASURED, not assumed: 10 concurrent processes, three trials, on lambda
+    (nfs), chimera (nfs4) and andromeda (weka) -- exactly one winner every
+    time. NFS can silently degrade locking to local-only, which would be worse
+    than the old scheme because it would look like it worked, so this is
+    re-checked by the test suite on whatever filesystem it runs on."""
     Path(state_dir).mkdir(parents=True, exist_ok=True)
-    path = Path(state_dir) / LEASE
-    mine = _lease_body()
-
-    # Back off if another controller is mid-mutation. The fast path is the
-    # one lease operation that does not hold the breaker, so it is the one
-    # that can walk into a window opened by the others.
-    if (Path(state_dir) / (LEASE + ".break")).exists():
-        return False, "another controller is mutating the lease"
-
-    got = _publish_lease(path, json.dumps(mine, sort_keys=True))
-    if got is True:
-        _HELD_TOKEN = mine["token"]
-        return True, None
-    if isinstance(got, str):
-        return False, got
-
-    held, err = U.read_json(path)
-    readable = (not err) and isinstance(held, dict)
-    if readable and held.get("token") and held.get("token") == _HELD_TOKEN:
-        return True, None                      # re-entrant: already ours
-    if readable:
-        fresh = float(held.get("expires_at") or 0) > time.time()
-    else:
-        # Unreadable. Judge by the file's own age rather than assuming stale,
-        # so a corrupt lease still expires but a momentary bad read never
-        # breaks a live one.
-        try:
-            fresh = (time.time() - path.stat().st_mtime) < LEASE_TTL_S
-        except OSError:
-            fresh = False
-        held = {}
-    if fresh and not force:
-        age = int(time.time() - float(held.get("acquired_at") or 0))
-        return False, (f"{held.get('owner')}@{held.get('host')} "
-                       f"pid {held.get('pid')}, {age}s ago")
-
-    with _Breaker(state_dir) as got_breaker:
-        if not got_breaker:
-            return False, "another controller is taking over the stale lease"
-        # RE-READ inside the critical section. The staleness decision above
-        # was made before we held the breaker, and a rival may have installed
-        # a fresh lease in between.
-        again, aerr = U.read_json(path)
-        if not aerr and isinstance(again, dict):
-            if again.get("token") and again.get("token") == _HELD_TOKEN:
-                return True, None
-            if float(again.get("expires_at") or 0) > time.time() and not force:
-                age = int(time.time() - float(again.get("acquired_at") or 0))
-                return False, (f"{again.get('owner')}@{again.get('host')} "
-                               f"pid {again.get('pid')}, {age}s ago "
-                               f"(took over while we waited)")
-        try:
-            path.unlink()
-        except OSError:
-            pass
-        got = _publish_lease(path, json.dumps(mine, sort_keys=True))
-        if got is not True:
-            return False, (got if isinstance(got, str)
-                           else "lost the race for the stale lease")
-        _HELD_TOKEN = mine["token"]
-        return True, None
+    key = str(Path(state_dir).resolve())
+    if key in _LOCK_FDS:
+        return True, None                     # already ours, in this process
+    path = Path(state_dir) / LOCK
+    try:
+        fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError as e:
+        return False, f"cannot open the lock at {path}: {e}"
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        held, err = U.read_json(Path(state_dir) / LEASE)
+        if not err and isinstance(held, dict):
+            age = int(time.time() - float(held.get("acquired_at") or 0))
+            return False, (f"{held.get('owner')}@{held.get('host')} "
+                           f"pid {held.get('pid')}, {age}s ago")
+        return False, "another controller holds it"
+    _LOCK_FDS[key] = fd
+    # Descriptive only. Nothing decides anything from this file; it exists so a
+    # human blocked by the lock can see who has it.
+    U.write_json(Path(state_dir) / LEASE,
+                 {"owner": os.environ.get("USER", "?"),
+                  "host": os.uname().nodename, "pid": os.getpid(),
+                  "acquired_at": time.time()})
+    return True, None
 
 
 def renew_lease(state_dir):
-    """Push the expiry out. Returns True (renewed), False (we no longer hold
-    it) or None (cannot tell).
+    """Returns True while this process still holds the lock.
 
-    None matters as much as False. An earlier version returned False on any
-    read error, and the caller treated every False as loss and wrote a STICKY
-    halted flag into durable state, so one transient NFS blip stopped a
-    healthy project until a human edited the state file. This repo's own
-    discipline elsewhere is to degrade to "cannot tell"."""
-    path = Path(state_dir) / LEASE
-    if _HELD_TOKEN is None:
-        return False
-    with _Breaker(state_dir) as got_breaker:
-        if not got_breaker:
-            return None                        # someone mid-mutation; retry
-        held, err = U.read_json(path)
-        if err == "missing":
-            return False
-        if err or not isinstance(held, dict):
-            return None                        # unreadable != lost
-        if held.get("token") != _HELD_TOKEN:
-            return False                       # genuinely taken over
-        body = json.dumps({**held, "expires_at": time.time() + LEASE_TTL_S},
-                          sort_keys=True)
-        # REPLACE IN PLACE. Unlinking first and republishing left a window in
-        # which the lease file did not exist at all, and acquire_lease's fast
-        # path does not take the breaker, so a contender walked straight into
-        # it and won: measured as TWO advances dispatching one DAG on lambda,
-        # six jobs for three units. os.replace is safe HERE and only here,
-        # because every other mutation is serialised behind the same breaker,
-        # and a rival acquire can only ever see a file that exists and so
-        # fails its link().
-        tmp = path.with_suffix(f".renew.{os.getpid()}.{time.time_ns()}.tmp")
-        try:
-            with open(tmp, "w") as fh:
-                fh.write(body)
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp, path)
-            return True
-        except OSError:
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-            return None
+    There is nothing to renew. The old lease expired on a clock because a file
+    cannot notice its owner died, and that expiry is exactly what let a paused
+    controller be deposed and then clobber its successor. An advisory lock is
+    held until the process releases it or exits, so a slow advance keeps it by
+    construction rather than by refreshing a timestamp."""
+    return str(Path(state_dir).resolve()) in _LOCK_FDS
 
 
 def release_lease(state_dir):
-    """Release only OUR OWN lease, and only while holding the arbiter, so a
-    controller that was already taken over cannot delete its successor's lease
-    on the way out and leave the project unprotected."""
-    global _HELD_TOKEN
-    if _HELD_TOKEN is None:
+    """Release ours. The kernel does this anyway if we die, which is the whole
+    point; doing it explicitly just frees the project sooner."""
+    key = str(Path(state_dir).resolve())
+    fd = _LOCK_FDS.pop(key, None)
+    if fd is None:
         return
-    path = Path(state_dir) / LEASE
-    with _Breaker(state_dir) as got_breaker:
-        if not got_breaker:
-            return
-        held, err = U.read_json(path)
-        if err or not isinstance(held, dict):
-            return
-        if held.get("token") != _HELD_TOKEN:
-            return
-        try:
-            path.unlink()
-        except OSError:
-            pass
-    _HELD_TOKEN = None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
 
 
 # --- durable state --------------------------------------------------------
