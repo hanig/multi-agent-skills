@@ -247,127 +247,146 @@ def plan_digest(plan):
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+# The token of the lease THIS process holds, set when it is acquired. pid and
+# host are not identity: pids are reused, and two controllers on one host can
+# share both. Only a token distinguishes "my lease" from "a lease that happens
+# to look like mine".
+_HELD_TOKEN = None
+
+
 def _lease_body():
     return {"owner": os.environ.get("USER", "?"), "host": os.uname().nodename,
-            "pid": os.getpid(), "acquired_at": time.time(),
+            "pid": os.getpid(), "token": os.urandom(16).hex(),
+            "acquired_at": time.time(),
             "expires_at": time.time() + LEASE_TTL_S}
 
 
-def acquire_lease(state_dir, force=False):
-    """One writer at a time. Returns (ok, holder_description).
+class _Breaker:
+    """The single arbiter for every MUTATION of the lease file.
 
-    ATOMIC. An earlier version read the lease and then wrote it, which three
-    reviewers independently broke: two advances starting together both see no
-    lease and both proceed. The fix is the primitive this whole repo rests on
-    -- an exclusive create that the OS arbitrates -- rather than a check that
-    a scheduler can interleave.
+    A CRITICAL found by three reviewers independently: renew_lease re-read
+    ownership and then called os.replace, which overwrites whatever is at the
+    path. A takeover completing in that window was silently clobbered and two
+    controllers both believed they held the lease. release_lease had the same
+    shape with unlink. Both were the original TOCTOU one level up, inside the
+    functions written to fix it, and renew_lease's docstring described a
+    hard-link guard that was not in the code.
 
-    Taking over a STALE lease is the delicate half: several contenders may
-    agree it is stale, and only one may win. They race to create a breaker
-    directory instead, because mkdir is likewise atomic."""
-    Path(state_dir).mkdir(parents=True, exist_ok=True)
-    path = Path(state_dir) / LEASE
-    body = json.dumps(_lease_body(), sort_keys=True)
+    Serialising takeover, renewal and release behind one atomic mkdir removes
+    the window rather than narrowing it. Entering returns False if another
+    controller is mid-mutation, which is "cannot tell", not "lost"."""
 
-    def _create_exclusive():
-        """Create the lease atomically AND fully populated.
+    def __init__(self, state_dir):
+        self.path = Path(state_dir) / (LEASE + ".break")
+        self.got = False
 
-        O_EXCL alone is not enough: it creates a ZERO-LENGTH file, and the
-        body is written a moment later. A rival reading in that window sees an
-        empty lease, parses nothing, concludes it is stale, and breaks a lease
-        that was in fact live -- observed here as two winners out of twelve.
-        Writing the body to a private temp file and hard-linking it into place
-        closes the window, because link() is atomic and the file it publishes
-        is already complete."""
-        tmp = path.with_suffix(f".{os.getpid()}.{time.time_ns()}.tmp")
+    def __enter__(self):
         try:
-            with open(tmp, "w") as fh:
-                fh.write(body)
-                fh.flush()
-                os.fsync(fh.fileno())
-        except OSError as e:
-            return f"cannot write the lease: {e}"
-        try:
-            os.link(str(tmp), str(path))
-            return True
+            self.path.mkdir()
+            self.got = True
         except FileExistsError:
-            return False
-        except OSError as e:
-            return f"cannot publish the lease: {e}"
-        finally:
+            # A stale breaker must not wedge the project forever.
             try:
-                tmp.unlink()
+                if time.time() - self.path.stat().st_mtime > LEASE_TTL_S:
+                    self.path.rmdir()
+                    self.path.mkdir()
+                    self.got = True
+            except OSError:
+                self.got = False
+        except OSError:
+            self.got = False
+        return self.got
+
+    def __exit__(self, *exc):
+        if self.got:
+            try:
+                self.path.rmdir()
             except OSError:
                 pass
+        return False
 
-    got = _create_exclusive()
+
+def _publish_lease(path, body):
+    """Create the lease atomically AND fully populated.
+
+    O_EXCL alone is not enough: it creates a ZERO-LENGTH file and the body
+    lands a moment later. A rival reading in that window parsed nothing,
+    concluded the lease was stale, and broke a live one -- measured as two
+    winners out of twelve. link() is atomic and publishes a file that is
+    already complete."""
+    tmp = path.with_suffix(f".{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        with open(tmp, "w") as fh:
+            fh.write(body)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError as e:
+        return f"cannot write the lease: {e}"
+    try:
+        os.link(str(tmp), str(path))
+        return True
+    except FileExistsError:
+        return False
+    except OSError as e:
+        return f"cannot publish the lease: {e}"
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def acquire_lease(state_dir, force=False):
+    """One writer at a time. Returns (ok, holder_description)."""
+    global _HELD_TOKEN
+    Path(state_dir).mkdir(parents=True, exist_ok=True)
+    path = Path(state_dir) / LEASE
+    mine = _lease_body()
+
+    # Back off if another controller is mid-mutation. The fast path is the
+    # one lease operation that does not hold the breaker, so it is the one
+    # that can walk into a window opened by the others.
+    if (Path(state_dir) / (LEASE + ".break")).exists():
+        return False, "another controller is mutating the lease"
+
+    got = _publish_lease(path, json.dumps(mine, sort_keys=True))
     if got is True:
+        _HELD_TOKEN = mine["token"]
         return True, None
     if isinstance(got, str):
         return False, got
 
     held, err = U.read_json(path)
     readable = (not err) and isinstance(held, dict)
-    held = held if readable else {}
-    same_process = (held.get("pid") == os.getpid()
-                    and held.get("host") == os.uname().nodename)
-    if same_process:
-        return True, None                      # re-entrant within one process
+    if readable and held.get("token") and held.get("token") == _HELD_TOKEN:
+        return True, None                      # re-entrant: already ours
     if readable:
         fresh = float(held.get("expires_at") or 0) > time.time()
     else:
-        # Unreadable. Judge by the file's own age rather than assuming it is
-        # stale, so a corrupt lease still expires instead of wedging the
-        # project, but a momentary bad read never breaks a live one.
+        # Unreadable. Judge by the file's own age rather than assuming stale,
+        # so a corrupt lease still expires but a momentary bad read never
+        # breaks a live one.
         try:
             fresh = (time.time() - path.stat().st_mtime) < LEASE_TTL_S
         except OSError:
             fresh = False
+        held = {}
     if fresh and not force:
         age = int(time.time() - float(held.get("acquired_at") or 0))
         return False, (f"{held.get('owner')}@{held.get('host')} "
                        f"pid {held.get('pid')}, {age}s ago")
 
-    # Stale, or forced. Exactly one contender may break it.
-    breaker = Path(state_dir) / (LEASE + ".break")
-    try:
-        breaker.mkdir()
-    except FileExistsError:
-        # A controller SIGKILLed between mkdir and the finally leaves this
-        # behind, and every later takeover then fails forever: one crash
-        # blocking the project, which is precisely what LEASE_TTL_S exists to
-        # prevent. Found by three reviewers, one rating it critical. A breaker
-        # is only ever held across a few filesystem calls, so one older than
-        # BREAKER_STALE_S was abandoned.
-        try:
-            age = time.time() - breaker.stat().st_mtime
-        except OSError:
+    with _Breaker(state_dir) as got_breaker:
+        if not got_breaker:
             return False, "another controller is taking over the stale lease"
-        if age < BREAKER_STALE_S:
-            return False, "another controller is taking over the stale lease"
-        try:
-            breaker.rmdir()
-            breaker.mkdir()
-        except OSError:
-            return False, ("a takeover breaker is abandoned but could not be "
-                           f"cleared: remove {breaker} by hand")
-    except OSError as e:
-        return False, f"cannot arbitrate the stale lease: {e}"
-    try:
-        # RE-READ inside the critical section. The staleness decision above was
-        # made before we held the breaker, and a rival may have installed a
-        # fresh lease and released the breaker in between. Acting on the older
-        # read let a second controller unlink a live lease and take over: the
-        # same read-then-act shape as the original defect, one level down.
-        # Found by running the race repeatedly rather than once.
+        # RE-READ inside the critical section. The staleness decision above
+        # was made before we held the breaker, and a rival may have installed
+        # a fresh lease in between.
         again, aerr = U.read_json(path)
         if not aerr and isinstance(again, dict):
-            still_stale = float(again.get("expires_at") or 0) <= time.time()
-            ours = (again.get("pid") == os.getpid()
-                    and again.get("host") == os.uname().nodename)
-            if ours:
+            if again.get("token") and again.get("token") == _HELD_TOKEN:
                 return True, None
-            if not still_stale and not force:
+            if float(again.get("expires_at") or 0) > time.time() and not force:
                 age = int(time.time() - float(again.get("acquired_at") or 0))
                 return False, (f"{again.get('owner')}@{again.get('host')} "
                                f"pid {again.get('pid')}, {age}s ago "
@@ -376,72 +395,83 @@ def acquire_lease(state_dir, force=False):
             path.unlink()
         except OSError:
             pass
-        got = _create_exclusive()
+        got = _publish_lease(path, json.dumps(mine, sort_keys=True))
         if got is not True:
             return False, (got if isinstance(got, str)
                            else "lost the race for the stale lease")
+        _HELD_TOKEN = mine["token"]
         return True, None
-    finally:
-        try:
-            breaker.rmdir()
-        except OSError:
-            pass
 
 
 def renew_lease(state_dir):
-    """Push the expiry out. Returns False if we no longer hold it.
+    """Push the expiry out. Returns True (renewed), False (we no longer hold
+    it) or None (cannot tell).
 
-    Publishes by the same hard-link route as acquisition, so renewal cannot
-    overwrite a successor's lease: an earlier version read, checked ownership,
-    then wrote, and three reviewers pointed out that a takeover completing in
-    that window let the deposed controller clobber the new holder. Here the
-    old lease is removed and the new one linked into place only while we still
-    own it, and the link fails outright if someone else published first."""
+    None matters as much as False. An earlier version returned False on any
+    read error, and the caller treated every False as loss and wrote a STICKY
+    halted flag into durable state, so one transient NFS blip stopped a
+    healthy project until a human edited the state file. This repo's own
+    discipline elsewhere is to degrade to "cannot tell"."""
     path = Path(state_dir) / LEASE
-    held, err = U.read_json(path)
-    if err or not isinstance(held, dict):
+    if _HELD_TOKEN is None:
         return False
-    if held.get("pid") != os.getpid() or held.get("host") != os.uname().nodename:
-        return False
-    body = json.dumps({**held, "expires_at": time.time() + LEASE_TTL_S},
-                      sort_keys=True)
-    tmp = path.with_suffix(f".renew.{os.getpid()}.{time.time_ns()}.tmp")
-    try:
-        with open(tmp, "w") as fh:
-            fh.write(body)
-            fh.flush()
-            os.fsync(fh.fileno())
-        # Re-check ownership as late as possible, then swap.
-        again, aerr = U.read_json(path)
-        if (aerr or not isinstance(again, dict)
-                or again.get("pid") != os.getpid()
-                or again.get("host") != os.uname().nodename):
+    with _Breaker(state_dir) as got_breaker:
+        if not got_breaker:
+            return None                        # someone mid-mutation; retry
+        held, err = U.read_json(path)
+        if err == "missing":
             return False
-        os.replace(tmp, path)
-        return True
-    except OSError:
-        return False
-    finally:
+        if err or not isinstance(held, dict):
+            return None                        # unreadable != lost
+        if held.get("token") != _HELD_TOKEN:
+            return False                       # genuinely taken over
+        body = json.dumps({**held, "expires_at": time.time() + LEASE_TTL_S},
+                          sort_keys=True)
+        # REPLACE IN PLACE. Unlinking first and republishing left a window in
+        # which the lease file did not exist at all, and acquire_lease's fast
+        # path does not take the breaker, so a contender walked straight into
+        # it and won: measured as TWO advances dispatching one DAG on lambda,
+        # six jobs for three units. os.replace is safe HERE and only here,
+        # because every other mutation is serialised behind the same breaker,
+        # and a rival acquire can only ever see a file that exists and so
+        # fails its link().
+        tmp = path.with_suffix(f".renew.{os.getpid()}.{time.time_ns()}.tmp")
         try:
-            tmp.unlink()
+            with open(tmp, "w") as fh:
+                fh.write(body)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+            return True
         except OSError:
-            pass
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            return None
 
 
 def release_lease(state_dir):
-    """Only ever release OUR OWN lease. Blindly unlinking would let a
-    controller that had already been taken over delete its successor's lease
-    on the way out, leaving the project unprotected."""
+    """Release only OUR OWN lease, and only while holding the arbiter, so a
+    controller that was already taken over cannot delete its successor's lease
+    on the way out and leave the project unprotected."""
+    global _HELD_TOKEN
+    if _HELD_TOKEN is None:
+        return
     path = Path(state_dir) / LEASE
-    held, err = U.read_json(path)
-    if err or not isinstance(held, dict):
-        return
-    if held.get("pid") != os.getpid() or held.get("host") != os.uname().nodename:
-        return
-    try:
-        path.unlink()
-    except OSError:
-        pass
+    with _Breaker(state_dir) as got_breaker:
+        if not got_breaker:
+            return
+        held, err = U.read_json(path)
+        if err or not isinstance(held, dict):
+            return
+        if held.get("token") != _HELD_TOKEN:
+            return
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    _HELD_TOKEN = None
 
 
 # --- durable state --------------------------------------------------------
@@ -548,19 +578,17 @@ def _submit(u, unit_dir, dry_run):
             # The wrapper records the exit status, because nothing else
             # will: a detached child is reparented to init and its code can
             # never be reaped. Written by OUR wrapper into the exclusive root,
-            # not by the engine, and the receipt says exactly that.
-            # The command runs in a SUBSHELL. An `exit N` inside it is very
-            # common in pipeline wrappers, and it terminated the outer shell
-            # before the status line ran: engine.rc was never written and the
-            # check then reported "killed, or the node rebooted", which was
-            # false. The subshell contains the exit so the status is always
-            # recorded. Newlines, not semicolons, so a trailing comment in the
-            # command cannot swallow the closing paren.
-            # `wait` before recording the status: a command ending in
-            # `... &` returns 0 immediately while a child keeps writing, so
-            # the unit could reach DONE and the declared output change
-            # afterwards. Waiting makes the recorded status cover the whole
-            # job the command started.
+            # not by the engine.
+            #
+            # SCOPE: this is the FOREGROUND command's status. A command that
+            # backgrounds its real work ("engine.sh &") returns 0 immediately
+            # and the background failure is invisible here; `wait` cannot
+            # recover it portably, since POSIX `wait` with no operands returns
+            # 0 regardless. Reviewers were right that the earlier comment
+            # claimed to cover "the whole job". It does not, and the receipt
+            # now says so. The declared-outputs check still applies, so a
+            # false DONE additionally requires the background work to fail
+            # AFTER writing every declared output.
             wrapped = (f'(\n{u["command"]}\nrc=$?\nwait\nexit $rc\n)\n'
                        f'printf %s "$?" > {U.ENGINE_RC}\n')
             proc = subprocess.Popen(
@@ -753,9 +781,18 @@ def _paseo_json(out):
     first balanced object instead."""
     if not out:
         return None
-    i = out.find("{")
-    if i < 0:
-        return None
+    # Scan EVERY candidate brace, not just the first. paseo's preamble can
+    # contain one ("Tip: reuse with --workspace {id}"), and starting there
+    # parsed "{id}", failed, and left a launched agent unbound.
+    for i, ch in enumerate(out):
+        if ch == "{":
+            got = _balanced_from(out, i)
+            if got is not None:
+                return got
+    return None
+
+
+def _balanced_from(out, i):
     depth, instr, esc = 0, False, False
     for j, ch in enumerate(out[i:], i):
         if instr:
@@ -811,8 +848,12 @@ def reconcile_orphan(unit_dir, allocated_at=None, kind=None):
         if rc != 0:
             return None, "UNKNOWN"
         try:
+            # EXACT trailing match. `attempt_id in name` also matched an
+            # attempt whose id is a prefix of another's, binding a unit to
+            # somebody else's agent.
             for a in json.loads(out or "[]"):
-                if attempt_id in str(a.get("name") or ""):
+                name = str(a.get("name") or "")
+                if name.split()[-1:] == [attempt_id]:
                     aid = a.get("id") or a.get("agentId")
                     if aid:
                         return str(aid), (
@@ -942,7 +983,10 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         # engine takes far longer. Renewing between units keeps mutual
         # exclusion for as long as we are actually making progress, instead of
         # losing it on a fixed clock while still running.
-        if not dry_run and not renew_lease(state_dir):
+        # None is "cannot tell" and must NOT be treated as loss: one
+        # transient NFS read used to halt a healthy project until a human
+        # edited durable state. Only an explicit False stops us.
+        if not dry_run and renew_lease(state_dir) is False:
             # We LOST the lease. Three reviewers found this discarded, which
             # is the worst outcome in the file: a controller deposed mid-run
             # keeps checking, dispatching and writing swarm-state.json
@@ -1276,14 +1320,24 @@ def _redigest(attempt_dir, rel, recorded, accept_weak=False):
                            f"Re-check the attempt to mint a stronger receipt, "
                            f"or pass --accept-weak-evidence to publish on "
                            f"size and mtime alone, which is recorded.")
-        # Refusing outright would make any output over the digest limit
-        # permanently unpromotable, and a 40GB checkpoint is exactly the thing
-        # worth publishing. So the refusal names an escape hatch rather than
-        # being a dead end, the approver has to type it, and the promotion
-        # record says the evidence was weak.
-        return True, (f"{rel}: matches on size and mtime only ({shown}). This "
-                      f"does NOT establish the content is unchanged; accepted "
-                      f"because --accept-weak-evidence was passed.")
+        # Two reviewers found that this branch returned success without
+        # comparing ANYTHING: st was bound from src.stat() and discarded, so a
+        # file replaced with different content and a different size was
+        # published while the record asserted a "size and mtime" match that
+        # was never performed. A false statement in the audit trail of the one
+        # outward-facing surface is worse than no record at all.
+        if st.st_size != recorded.get("size"):
+            return False, (f"{rel}: size changed since the verdict "
+                           f"({recorded.get('size')} -> {st.st_size}). "
+                           f"--accept-weak-evidence lowers the standard to "
+                           f"size and mtime; it does not waive them.")
+        if int(st.st_mtime) != recorded.get("mtime"):
+            return False, (f"{rel}: mtime changed since the verdict. "
+                           f"--accept-weak-evidence lowers the standard to "
+                           f"size and mtime; it does not waive them.")
+        return True, (f"{rel}: size and mtime match ({shown}). This does NOT "
+                      f"establish the content is unchanged; accepted because "
+                      f"--accept-weak-evidence was passed.")
     if recorded.get("sha256") and method.startswith("tree-digest"):
         now = U._tree_digest(src)
         if now.get("sha256") != recorded["sha256"]:
@@ -1404,8 +1458,22 @@ def promote(plan, state, state_dir, uid, approver, approve,
                     shutil.copytree(src, dst)
                 else:
                     shutil.copy2(src, dst)
-            # Fully populated before it takes the canonical name, so a reader
-            # never sees a partial version directory.
+            # RE-VERIFY THE COPY. Fingerprints were checked before copying,
+            # and an ordinary concurrent writer on a shared filesystem can
+            # change a source file in between, so what landed in staging is
+            # the only thing worth trusting. Reviewers found this window; it
+            # is closed by checking the copy rather than by hoping.
+            for rel, rec in sorted(recorded.items()):
+                good, why = _redigest(staging, rel, rec, accept_weak)
+                if not good:
+                    shutil.rmtree(staging, ignore_errors=True)
+                    return lines + ["", f"REFUSING: the copy does not match "
+                                        f"the receipt, so the source changed "
+                                        f"while it was being read. {why}",
+                                    "Nothing was published and the canonical "
+                                    "pointer did not move."], False
+            # Fully populated AND verified before it takes the canonical name,
+            # so a reader never sees a partial or altered version directory.
             os.replace(staging, version)      # same directory: atomic
         tmp_link = dest / f".current-{os.getpid()}"
         if tmp_link.is_symlink() or tmp_link.exists():
@@ -1484,10 +1552,18 @@ def _status_rows(plan, state, state_dir):
     promoted = {}
     try:
         for line in (Path(state_dir) / PROMOTIONS).read_text().splitlines():
-            if line.strip():
+            if not line.strip():
+                continue
+            # Skip a BAD LINE, never the whole file. A crash during append
+            # leaves a partial record, and discarding everything showed
+            # already-promoted units as "NOT promoted", inviting the operator
+            # to publish a second time.
+            try:
                 r = json.loads(line)
                 promoted[r["unit"]] = r
-    except (OSError, ValueError):
+            except (ValueError, KeyError, TypeError):
+                continue
+    except OSError:
         pass
     rows = []
     for uid, u in units.items():

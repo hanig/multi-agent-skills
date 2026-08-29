@@ -135,6 +135,14 @@ import sys, time, json
 sys.path.insert(0, %r)
 import swarm as S
 state_dir, start = sys.argv[1], float(sys.argv[2])
+# Sleep until just before the start, THEN spin. A pure busy-wait burned a
+# core per contender for the whole run-up, which is a rude thing to do on a
+# shared login node; 5ms of spin collides just as tightly.
+while True:
+    left = start - time.time()
+    if left <= 0.005:
+        break
+    time.sleep(min(left - 0.005, 0.05))
 while time.time() < start:
     pass
 ok, _ = S.acquire_lease(state_dir)
@@ -1145,3 +1153,225 @@ class TestNoStateChangeEscapesTheOutbox(unittest.TestCase):
             keys = [i["key"] for i in S.read_outbox(sd)]
             self.assertEqual(len(keys), len(set(keys)),
                              "an unchanged unit emitted twice")
+
+
+class TestRound2ReviewFindings(unittest.TestCase):
+    """A four-reviewer implementation review returned REVIEW_FAIL with a
+    CRITICAL. These pin each confirmed finding against the failure described."""
+
+    def test_a_deposed_controller_cannot_clobber_its_successors_lease(self):
+        """THE CRITICAL, found independently by three reviewers. renew_lease
+        re-read ownership then called os.replace, which overwrites whatever is
+        at the path, so a takeover landing in that window left TWO controllers
+        believing they held the lease. The original TOCTOU one level up, in
+        the function written to fix it."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            ok, _ = S.acquire_lease(d)
+            self.assertTrue(ok)
+            lease = Path(d) / S.LEASE
+            # B takes over after A's lease expires, and publishes its own.
+            lease.unlink()
+            lease.write_text(json.dumps(
+                {"owner": "B", "host": "other", "pid": 999,
+                 "token": "B-TOKEN", "acquired_at": time.time(),
+                 "expires_at": time.time() + 900}))
+            self.assertIs(S.renew_lease(d), False,
+                          "a deposed controller reported a successful renewal")
+            self.assertEqual(json.loads(lease.read_text())["token"], "B-TOKEN",
+                             "renewal clobbered the successor's lease")
+            S.release_lease(d)
+            self.assertEqual(json.loads(lease.read_text())["token"], "B-TOKEN",
+                             "release deleted the successor's lease")
+
+    def test_identity_is_a_token_not_a_pid(self):
+        """pids are reused and two controllers on one host share host+pid, so
+        neither distinguishes "my lease" from one that merely looks like it."""
+        import ast
+        src = SWARM.read_text()
+        fn = next(n for n in ast.parse(src).body
+                  if isinstance(n, ast.FunctionDef) and n.name == "renew_lease")
+        code = "\n".join(ast.unparse(x) for x in fn.body)
+        self.assertIn("_HELD_TOKEN", code)
+        # Check the COMPARISONS, not the whole function text. pid is fine in a
+        # unique temp filename and fatal in an ownership test, and a blanket
+        # ban on the substring cannot tell the two apart.
+        for cmp_node in [n for n in ast.walk(fn) if isinstance(n, ast.Compare)]:
+            rendered = ast.unparse(cmp_node)
+            self.assertNotIn("getpid", rendered,
+                             f"ownership is decided by pid here: {rendered}")
+            self.assertNotIn("nodename", rendered,
+                             f"ownership is decided by hostname here: "
+                             f"{rendered}")
+
+    def test_cannot_tell_is_not_treated_as_lease_loss(self):
+        """A transient NFS read returned False, the caller treated it as loss,
+        and a STICKY halted flag stopped a healthy project until a human
+        edited durable state. The discipline elsewhere is "cannot tell"."""
+        src = SWARM.read_text()
+        self.assertIn("renew_lease(state_dir) is False", src,
+                      "only an explicit False may stop the advance; None "
+                      "means cannot tell")
+
+    def test_accept_weak_evidence_still_compares_size_and_mtime(self):
+        """Two reviewers: the weak branch returned success without comparing
+        ANYTHING, so a changed output was published while the record asserted
+        a size-and-mtime match that never happened -- a false statement in the
+        audit trail of the one outward-facing surface."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            att = root / "att"
+            att.mkdir()
+            (att / "o.txt").write_text("original\n")
+            st = (att / "o.txt").stat()
+            rec = {"size": st.st_size, "mtime": int(st.st_mtime),
+                   "method": "size-mtime (WEAK: over the digest limit)"}
+            good, _ = S._redigest(str(att), "o.txt", rec, True)
+            self.assertTrue(good, "an unchanged output must still pass")
+            (att / "o.txt").write_text("completely different content here\n")
+            good, why = S._redigest(str(att), "o.txt", rec, True)
+            self.assertFalse(good, "a changed output was accepted under "
+                                   "--accept-weak-evidence")
+            self.assertIn("does not waive", why)
+
+    def test_the_copy_is_re_verified_before_the_pointer_moves(self):
+        """Fingerprints are checked before copying, and an ordinary concurrent
+        writer can change the source in between, so what landed in staging is
+        the only thing worth trusting."""
+        src = SWARM.read_text()
+        seg = src[src.index("def promote("):]
+        seg = seg[:seg.index("\ndef ")]
+        i = seg.index("_redigest(staging")
+        j = seg.index("os.replace(staging, version)")
+        self.assertLess(i, j, "the copy must be verified BEFORE it takes the "
+                              "canonical name")
+
+    def test_a_brace_in_paseos_preamble_does_not_break_the_id_parse(self):
+        """'Tip: reuse with --workspace {id}' made the parser start at that
+        brace, fail, and leave a launched agent unbound."""
+        out = ('Created workspace wks_x - p\n'
+               'Tip: reuse with --workspace {id}\n'
+               '{"agentId": "the-real-one"}')
+        self.assertEqual((S._paseo_json(out) or {}).get("agentId"),
+                         "the-real-one")
+
+    def test_unit_py_parses_paseo_output_as_robustly_as_swarm_py(self):
+        """The tolerant extractor existed and this call site used raw
+        json.loads, so a completed agent with every output present would be
+        reported INCOMPLETE and stall its dependents."""
+        sys.path.insert(0, str(SWARM.parent))
+        import unit as U2
+        out = 'Some notice {with a brace}\n{"Status": "idle"}'
+        self.assertEqual((U2._json_object_in(out) or {}).get("Status"), "idle")
+        seg = (SWARM.parent / "unit.py").read_text()
+        seg = seg[seg.index("def _code_state("):]
+        seg = seg[:seg.index("\ndef ")]
+        self.assertNotIn("json.loads(out)", seg)
+
+    def test_one_bad_line_does_not_discard_the_promotions_log(self):
+        """A crash during append leaves a partial record; discarding the whole
+        file showed promoted units as NOT promoted, inviting a second publish."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            (Path(t) / S.PROMOTIONS).write_text(
+                json.dumps({"unit": "a", "promoted_to": "/x", "approver": "h"})
+                + "\n{ partial-write-from-a-crash\n"
+                + json.dumps({"unit": "b", "promoted_to": "/y",
+                              "approver": "h"}) + "\n")
+            plan = {"name": "p", "units": [
+                {"id": "a", "kind": "slurm", "command": "true",
+                 "outputs": ["o"], "promote_to": "/x"},
+                {"id": "b", "kind": "slurm", "command": "true",
+                 "outputs": ["o"], "promote_to": "/y"}]}
+            state = {"schema_version": 1, "halted": None, "units": {}}
+            rows = {r["id"]: r for r in S._status_rows(plan, state, t)}
+            self.assertEqual(rows["a"]["promoted"], "/x")
+            self.assertEqual(rows["b"]["promoted"], "/y",
+                             "a record after the bad line was lost")
+
+    def test_orphan_recovery_matches_an_agent_exactly(self):
+        """`attempt_id in name` also matched an attempt whose id is a prefix
+        of another's, binding a unit to somebody else's agent."""
+        src = SWARM.read_text()
+        seg = src[src.index('if kind == "code":'):]
+        seg = seg[:seg.index("name = f\"swarm-")]
+        self.assertNotIn("attempt_id in str(", seg)
+        self.assertIn("[attempt_id]", seg)
+
+    def test_exec_in_a_pipeline_command_was_a_false_finding(self):
+        """One reviewer said `exec true` leaves engine.rc absent. Measured
+        instead of accepted: exec replaces the SUBSHELL, so the outer status
+        line still runs. Kept as a test so the refutation stays checked."""
+        import subprocess as sp
+        import tempfile
+        for cmd, want in (("exec true", "0"), ("exec false", "1")):
+            with tempfile.TemporaryDirectory() as d:
+                wrapped = f'(\n{cmd}\n)\nprintf %s "$?" > engine.rc\n'
+                sp.run(["sh", "-c", wrapped], cwd=d,
+                       stdout=sp.DEVNULL, stderr=sp.DEVNULL)
+                self.assertEqual((Path(d) / "engine.rc").read_text().strip(),
+                                 want, f"for {cmd!r}")
+
+
+class TestRenewalCannotOpenAWindow(unittest.TestCase):
+    def test_renewal_never_leaves_the_lease_file_absent(self):
+        """MY regression, caught on lambda and not by any local test: renewal
+        unlinked the lease and republished it, and acquire_lease's fast path
+        does not hold the breaker, so a contender walked into the gap. Two
+        advances dispatched one DAG: six jobs for three units."""
+        import ast
+        src = SWARM.read_text()
+        fn = next(n for n in ast.parse(src).body
+                  if isinstance(n, ast.FunctionDef) and n.name == "renew_lease")
+        code = "\n".join(ast.unparse(x) for x in fn.body)
+        self.assertNotIn("path.unlink()", code,
+                         "renewal must replace in place; removing the lease "
+                         "opens a window in which it does not exist at all")
+        self.assertIn("os.replace", code)
+
+    def test_the_fast_path_backs_off_while_a_mutation_is_in_progress(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / (S.LEASE + ".break")).mkdir()
+            ok, why = S.acquire_lease(d)
+            self.assertFalse(ok, "acquired while another controller was "
+                                 "mid-mutation")
+            self.assertIn("mutating", why)
+
+    def test_a_renewing_holder_keeps_the_lease_against_contenders(self):
+        """The end-to-end property, run for real: while one process renews in
+        a loop, no other may acquire."""
+        import subprocess as sp
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "renewer.py"
+            src.write_text(
+                "import sys, time\n"
+                f"sys.path.insert(0, {str(SWARM.parent)!r})\n"
+                "import swarm as S\n"
+                "ok, _ = S.acquire_lease(sys.argv[1])\n"
+                "assert ok\n"
+                "print('HELD', flush=True)\n"
+                "end = time.time() + 3\n"
+                "while time.time() < end:\n"
+                "    S.renew_lease(sys.argv[1])\n")
+            sd = Path(d) / "st"
+            holder = sp.Popen([sys.executable, str(src), str(sd)],
+                              stdout=sp.PIPE, text=True)
+            self.assertEqual(holder.stdout.readline().strip(), "HELD")
+            stolen = 0
+            deadline = time.time() + 2
+            while time.time() < deadline:
+                r = sp.run([sys.executable, "-c",
+                            f"import sys; sys.path.insert(0, {str(SWARM.parent)!r});"
+                            "import swarm as S;"
+                            f"ok,_=S.acquire_lease({str(sd)!r});"
+                            "print('WON' if ok else 'lost')"],
+                           capture_output=True, text=True)
+                if "WON" in r.stdout:
+                    stolen += 1
+            holder.wait(timeout=15)
+            self.assertEqual(stolen, 0,
+                             f"{stolen} contender(s) acquired a lease that was "
+                             f"being actively renewed")

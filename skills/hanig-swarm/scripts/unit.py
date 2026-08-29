@@ -876,6 +876,41 @@ def _proc_elapsed(pid):
     return None
 
 
+def _json_object_in(text):
+    """First balanced JSON object in `text`, ignoring human preamble.
+
+    Shared shape with swarm.py's _paseo_json: a tool that prints "Created
+    workspace ..." before its JSON defeats a bare json.loads, and every brace
+    has to be tried because the preamble can contain one too."""
+    if not text:
+        return None
+    for i, ch in enumerate(text):
+        if ch != "{":
+            continue
+        depth, instr, esc = 0, False, False
+        for j, c in enumerate(text[i:], i):
+            if instr:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    instr = False
+                continue
+            if c == '"':
+                instr = True
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[i:j + 1])
+                    except ValueError:
+                        break
+    return None
+
+
 def _proc_alive(pid, launched_at):
     """Is the process we launched STILL the process at that pid?
 
@@ -1016,11 +1051,15 @@ def _code_state(unit_dir, spec, present, missing, notes):
                      f"{(err or out).strip()[:160]}. If the agent was deleted, "
                      f"re-dispatch this unit.")
         return "INCOMPLETE"
-    try:
-        rec = json.loads(out)
-    except ValueError:
-        notes.append(f"paseo returned output for agent {agent} that is not "
-                     f"JSON, so its lifecycle cannot be read.")
+    # paseo prints human notices before its JSON. swarm.py grew a tolerant
+    # extractor for exactly that and this call site kept using raw json.loads,
+    # so a completed agent with every output present would be reported
+    # INCOMPLETE and stall its dependents. Same input, same parser.
+    rec = _json_object_in(out)
+    if rec is None:
+        notes.append(f"paseo returned no readable JSON for agent {agent}, so "
+                     f"its lifecycle cannot be read. Try `paseo inspect "
+                     f"{agent}` by hand.")
         return "INCOMPLETE"
 
     status = str(rec.get("Status") or rec.get("status") or "").lower()
