@@ -527,5 +527,169 @@ class TestClosureByExclusion(unittest.TestCase):
                                       f"{missing}")
 
 
+class TestSafeUnattendedAdvance(Base):
+    """`advance` was called "idempotent and safe to re-enter" before it was
+    audited. It was not, and a human typing the command notices all four holes
+    while a cron job does not:
+
+      1. two concurrent advances could both submit one unit
+      2. a crash between sbatch and bind left a job nothing owned
+      3. INCOMPLETE could stay live forever, so the DAG never moved
+      4. nothing detected the plan changing while units were live
+
+    sol's required test: run two advances CONCURRENTLY, and inject crashes
+    immediately before sbatch, immediately after sbatch, and after bind."""
+
+    PLAN = {"name": "safe", "units": [
+        {"id": "A", "kind": "slurm", "command": "true", "outputs": ["o"],
+         "write_scopes": ["r/A/"]},
+        {"id": "B", "kind": "slurm", "command": "true", "outputs": ["o"],
+         "write_scopes": ["r/B/"]}]}
+
+    def state(self):
+        return json.loads(
+            (self.tmp / ".swarm/state/swarm-state.json").read_text())
+
+    def test_two_concurrent_advances_do_not_both_dispatch(self):
+        """Hole 1. The second controller must exit without acting."""
+        import threading
+        p = self.plan(self.PLAN)
+        results = []
+        def go():
+            results.append(self.swarm("run", p, "--dry-run"))
+        t1, t2 = threading.Thread(target=go), threading.Thread(target=go)
+        t1.start(); t2.start(); t1.join(); t2.join()
+        blocked = [r for r in results
+                   if "another controller holds this project" in r.stdout]
+        self.assertEqual(len(blocked), 1,
+                         "both advances proceeded; the lease did not hold")
+        for uid in ("A", "B"):
+            attempts = self.state()["units"].get(uid, {}).get("attempts", [])
+            self.assertLessEqual(len(attempts), 1,
+                                 f"{uid} was dispatched twice")
+
+    def test_a_stale_lease_does_not_block_forever(self):
+        """The counter-claim. A controller killed mid-run must not lock the
+        project permanently -- that turns a crash into an outage."""
+        p = self.plan(self.PLAN)
+        (self.tmp / ".swarm/state").mkdir(parents=True, exist_ok=True)
+        (self.tmp / ".swarm/state/lease.json").write_text(json.dumps(
+            {"owner": "ghost", "host": "dead-node", "pid": 999999,
+             "acquired_at": 0, "expires_at": 0}))
+        r = self.swarm("run", p, "--dry-run")
+        self.assertNotIn("another controller", r.stdout,
+                         "an expired lease still blocked the run")
+
+    def test_a_plan_edited_mid_flight_is_refused(self):
+        """Hole 4. A mid-flight edit redefines what the recorded attempts were
+        for, so the safe answer is to stop, not to carry on."""
+        p = self.plan(self.PLAN)
+        self.swarm("run", p, "--dry-run")
+        edited = dict(self.PLAN)
+        edited["units"] = list(self.PLAN["units"]) + [
+            {"id": "C", "kind": "slurm", "command": "true", "outputs": ["o"],
+             "write_scopes": ["r/C/"]}]
+        Path(p).write_text(json.dumps(edited))
+        r = self.swarm("advance", p, "--dry-run")
+        self.assertIn("changed while units are live", r.stdout)
+        self.assertNotIn("C: submitted", r.stdout)
+
+    def _fake_scheduler(self, job_id):
+        """A squeue/sacct on PATH that reports a job for any name.
+
+        Needed because the first version of this test ran under --dry-run,
+        where reconciliation is skipped entirely -- so it passed because
+        `attempt_dir` being set already blocks re-dispatch, NOT because
+        reconciliation worked. It could not fail when reconciliation was
+        deleted. A test that cannot fail is the defect class this repo has hit
+        eleven times."""
+        binp = self.tmp / "fakebin"
+        binp.mkdir(exist_ok=True)
+        for name in ("squeue", "sacct"):
+            f = binp / name
+            f.write_text(f'#!/bin/sh\necho "{job_id}"\n')
+            f.chmod(0o755)
+        return str(binp)
+
+    def test_reconcile_finds_a_job_the_scheduler_already_has(self):
+        """Hole 2, the dangerous one, tested directly against a fake scheduler.
+
+        If we die between sbatch and bind, the job is running and nothing
+        records its id. Resubmitting would put two jobs in one exclusive write
+        root -- the precise thing it exists to prevent."""
+        import importlib.util as iu, os
+        spec = iu.spec_from_file_location("sw_r", SWARM)
+        m = iu.module_from_spec(spec); spec.loader.exec_module(m)
+        d = self.tmp / "runs" / "A" / "deadbeefcafe0001"
+        d.mkdir(parents=True)
+        old_path = os.environ["PATH"]
+        os.environ["PATH"] = self._fake_scheduler("778899") + os.pathsep + old_path
+        try:
+            job, note = m.reconcile_orphan(str(d))
+        finally:
+            os.environ["PATH"] = old_path
+        self.assertEqual(job, "778899",
+                         "reconciliation did not recover a job the scheduler "
+                         "already had; a crashed dispatch would be resubmitted")
+        self.assertIn("Not resubmitted", note)
+
+    def test_reconcile_returns_nothing_when_the_job_never_landed(self):
+        """The counter-claim: it must not invent a job. A false recovery binds
+        a unit to a job that does not exist and the DAG waits forever."""
+        import importlib.util as iu, os
+        spec = iu.spec_from_file_location("sw_r2", SWARM)
+        m = iu.module_from_spec(spec); spec.loader.exec_module(m)
+        d = self.tmp / "runs" / "B" / "deadbeefcafe0002"
+        d.mkdir(parents=True)
+        binp = self.tmp / "emptybin"; binp.mkdir()
+        for name in ("squeue", "sacct"):
+            f = binp / name
+            f.write_text("#!/bin/sh\nexit 0\n")   # success, no output
+            f.chmod(0o755)
+        old_path = os.environ["PATH"]
+        os.environ["PATH"] = str(binp) + os.pathsep + old_path
+        try:
+            job, note = m.reconcile_orphan(str(d))
+        finally:
+            os.environ["PATH"] = old_path
+        self.assertIsNone(job, "reconciliation invented a job id")
+
+    def test_a_crash_before_bind_does_not_create_a_second_attempt(self):
+        """The state-level half: whatever reconciliation concludes, a crashed
+        dispatch must never yield two attempts in one write root."""
+        p = self.plan(self.PLAN)
+        self.swarm("run", p, "--dry-run")
+        sp = self.tmp / ".swarm/state/swarm-state.json"
+        st = json.loads(sp.read_text())
+        orphan = st["units"]["A"]["attempt_dir"]
+        st["units"]["A"].pop("job_id", None)
+        st["units"]["A"]["state"] = "ALLOCATED"
+        sp.write_text(json.dumps(st))
+        before = len(st["units"]["A"]["attempts"])
+        self.swarm("advance", p, "--dry-run")
+        after = self.state()["units"]["A"]
+        self.assertEqual(len(after["attempts"]), before)
+        self.assertEqual(after["attempt_dir"], orphan)
+
+    def test_the_job_is_named_so_reconciliation_can_find_it(self):
+        """Reconciliation only works because the submitted script names the
+        job after the attempt. Without that there is nothing to ask about."""
+        src = SWARM.read_text()
+        self.assertIn("--job-name=swarm-", src)
+        self.assertIn("reconcile_orphan", src)
+
+    def test_reconcile_asks_the_scheduler_not_the_state(self):
+        """It must consult squeue/sacct -- the only party that knows whether a
+        submission landed. Reading our own state would beg the question."""
+        import ast
+        tree = ast.parse(SWARM.read_text())
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == "reconcile_orphan")
+        body = ast.dump(fn)
+        self.assertIn("squeue", body)
+        self.assertIn("sacct", body)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

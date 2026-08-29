@@ -30,6 +30,7 @@ Python 3.8+, stdlib only, login-node safe.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -168,6 +169,69 @@ def validate_plan(plan):
             "with_deps": sum(1 for u in units if u.get("needs"))}
 
 
+# --- safety for unattended running ----------------------------------------
+# `advance` was called "idempotent and safe to re-enter" before it was audited.
+# It was not. Four holes, all of which matter the moment a scheduler runs it
+# rather than a human:
+#
+#   1. Two concurrent advances could both load old state and submit one unit.
+#   2. A crash between sbatch and bind left a job running that nothing owned.
+#   3. INCOMPLETE could stay live forever, so a lost job never became terminal.
+#   4. Nothing detected the plan file changing while units were live.
+#
+# A human typing `advance` notices all four. A cron job does not.
+LEASE = "lease.json"
+LEASE_TTL_S = 900          # a stale lease must expire, or one crash blocks forever
+SETTLE_S = 600             # accounting lag before a missing row becomes terminal
+
+
+def plan_digest(plan):
+    """Canonical digest of the plan's DISPATCHABLE content.
+
+    Comments, ordering and formatting must not invalidate a live run, so this
+    digests the semantic fields only."""
+    units = sorted((u.get("id"), u.get("kind"), u.get("command"),
+                    tuple(u.get("outputs") or []), tuple(u.get("needs") or []),
+                    tuple(u.get("sbatch") or []))
+                   for u in (plan.get("units") or []))
+    payload = json.dumps({"units": units, "budget": plan.get("budget")},
+                         sort_keys=True)
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def acquire_lease(state_dir, force=False):
+    """One writer at a time. Returns (ok, holder_description).
+
+    Keyed on the state directory, since that is what two controllers would
+    corrupt. A lease older than LEASE_TTL_S is stale and may be taken: a
+    controller killed mid-run must not block the project forever."""
+    path = Path(state_dir) / LEASE
+    Path(state_dir).mkdir(parents=True, exist_ok=True)
+    mine = {"owner": os.environ.get("USER", "?"), "host": os.uname().nodename,
+            "pid": os.getpid(), "acquired_at": time.time(),
+            "expires_at": time.time() + LEASE_TTL_S}
+    held, err = U.read_json(path)
+    if not err and isinstance(held, dict):
+        fresh = float(held.get("expires_at") or 0) > time.time()
+        same_process = (held.get("pid") == os.getpid()
+                        and held.get("host") == mine["host"])
+        if fresh and not same_process and not force:
+            age = int(time.time() - float(held.get("acquired_at") or 0))
+            return False, (f"{held.get('owner')}@{held.get('host')} "
+                           f"pid {held.get('pid')}, {age}s ago")
+    err = U.write_json(path, mine)
+    if err:
+        return False, f"cannot write the lease: {err}"
+    return True, None
+
+
+def release_lease(state_dir):
+    try:
+        (Path(state_dir) / LEASE).unlink()
+    except OSError:
+        pass
+
+
 # --- durable state --------------------------------------------------------
 def load_state(state_dir):
     """Every transition is on disk BEFORE it is acted on, so a coordinator
@@ -229,8 +293,14 @@ def _submit(u, unit_dir, dry_run):
         return f"dry-{os.urandom(3).hex()}", None
     if kind == "slurm":
         script = Path(unit_dir) / "job.sbatch"
-        body = ["#!/bin/bash", "set -euo pipefail",
-                f"cd {unit_dir}", u["command"], ""]
+        # The job is NAMED for the attempt. This is what closes the
+        # crash-before-bind window: if we die between sbatch and bind, the job
+        # is still running and nothing records its id -- but the scheduler
+        # knows it by this name, so `reconcile` can find it instead of
+        # submitting a second one.
+        attempt_id = Path(unit_dir).name
+        body = ["#!/bin/bash", f"#SBATCH --job-name=swarm-{attempt_id}",
+                "set -euo pipefail", f"cd {unit_dir}", u["command"], ""]
         for extra in (u.get("sbatch") or []):
             body.insert(1, f"#SBATCH {extra}")
         werr = U.write_json(Path(unit_dir) / "submitted.json",
@@ -286,6 +356,27 @@ RETRYABLE = {PREEMPTED}          # a preemption is not a failure
 TERMINAL_BAD = {FAILED}
 
 
+def reconcile_orphan(unit_dir):
+    """Did a job for this attempt reach the scheduler even though we never
+    recorded its id? Returns (job_id, note).
+
+    Asks the SCHEDULER, which is the only party that knows. Blindly
+    resubmitting after a crash is how one unit becomes two jobs writing the
+    same directory -- the exact thing the exclusive write root is for."""
+    attempt_id = Path(unit_dir).name
+    name = f"swarm-{attempt_id}"
+    for argv in (["squeue", "-h", "-n", name, "-o", "%i"],
+                 ["sacct", "-n", "-P", "-X", "--name", name, "-o", "JobID"]):
+        rc, out, _ = U.run(argv, timeout=60)
+        if rc == 0 and (out or "").strip():
+            job = out.strip().splitlines()[0].split("|")[0].strip()
+            if job:
+                return job, (f"recovered job {job} for attempt {attempt_id}: it "
+                             f"had reached the scheduler but was never bound. "
+                             f"Not resubmitted.")
+    return None, None
+
+
 def advance(plan, state, state_dir, root, dry_run, max_new=None):
     """Idempotent. Re-check every live unit, then dispatch whatever is ready.
 
@@ -294,6 +385,31 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None):
     acts."""
     units = {u["id"]: u for u in plan["units"]}
     report, dispatched, halted = [], 0, state.get("halted")
+
+    # The plan must not change under a live run. A mid-flight edit silently
+    # redefines what the recorded attempts were for.
+    digest = plan_digest(plan)
+    if state.get("plan_digest") is None:
+        state["plan_digest"] = digest
+    elif state["plan_digest"] != digest:
+        return ([f"REFUSING to advance: the plan file changed while units are "
+                 f"live (digest {state['plan_digest'][:12]} -> {digest[:12]}). "
+                 f"A mid-flight edit redefines what the recorded attempts were "
+                 f"for. Revert the plan, or start a new state directory for the "
+                 f"revised plan."], 0, "plan changed mid-flight")
+
+    # An attempt allocated but never bound may still have reached the
+    # scheduler. Ask before dispatching anything else.
+    for uid, u in sorted(units.items()):
+        us = _unit_state(state, uid)
+        if us["attempt_dir"] and not us.get("job_id") and not dry_run:
+            job, note = reconcile_orphan(us["attempt_dir"])
+            if job:
+                us["job_id"] = job
+                _bind(us["attempt_dir"], job)
+                us["state"] = "SUBMITTED"
+                report.append(f"{uid}: {note}")
+                save_state(state_dir, state)
 
     # 1. Re-check anything with a live attempt. The coordinator does not judge;
     #    unit.py does, and its exit code is the whole input.
@@ -304,6 +420,26 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None):
         rc, text = _check(us["attempt_dir"])
         us["state"] = NAME.get(rc, f"rc={rc}")
         report.append(f"{uid}: {us['state']}")
+
+        # INCOMPLETE could stay live forever, so a job that vanished was never
+        # terminal and the DAG never moved. Once Slurm accounting has had time
+        # to settle, an attempt still lacking a verdict IS a failure -- of
+        # evidence, which is a different thing from the command failing, so it
+        # gets its own name rather than being called FAILED.
+        if rc == INCOMPLETE:
+            first = us.get("incomplete_since")
+            if first is None:
+                us["incomplete_since"] = time.time()
+            elif time.time() - float(first) > SETTLE_S:
+                us["state"] = "FAILED_EVIDENCE"
+                report.append(
+                    f"{uid}: no verdict {int(time.time() - float(first))}s "
+                    f"after the first INCOMPLETE, past the {SETTLE_S}s "
+                    f"accounting settle window. Treating as terminal: the "
+                    f"evidence never arrived. Check `sacct -j "
+                    f"{us.get('job_id')}` by hand.")
+        else:
+            us.pop("incomplete_since", None)
         if rc in RETRYABLE:
             policy = u.get("max_attempts", 3)
             if len(us["attempts"]) < policy:
@@ -325,7 +461,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None):
     # 3. Dispatch every unit whose dependencies are DONE.
     for uid, u in sorted(units.items()):
         us = _unit_state(state, uid)
-        if us["attempt_dir"] or us["state"] in ("DONE", "FAILED"):
+        if us["attempt_dir"] or us["state"] in ("DONE", "FAILED",
+                                                "FAILED_EVIDENCE"):
             continue
         # A failed upstream is checked FIRST. Ordered the other way round, the
         # HELD branch was dead code: a FAILED dependency is also not DONE, so
@@ -335,7 +472,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None):
         needs = u.get("needs") or []
         failed_upstream = [d for d in needs
                            if _unit_state(state, d)["state"] in
-                           ("FAILED", "HELD")]
+                           ("FAILED", "HELD", "FAILED_EVIDENCE")]
         if failed_upstream:
             us["state"] = "HELD"
             report.append(f"{uid}: held, upstream "
@@ -422,10 +559,22 @@ def cmd_validate(args):
 def cmd_run(args):
     """Dispatch what is ready, then EXIT. Does not babysit."""
     plan = _load_plan(args.plan)
-    state = load_state(args.state_dir)
-    report, dispatched, halted = advance(
-        plan, state, args.state_dir, args.root, args.dry_run,
-        args.max_new_dispatches)
+    # ONE WRITER. Two schedulers firing at once, or a human running `advance`
+    # while cron does, would both read old state and submit the same unit.
+    ok, holder = acquire_lease(args.state_dir, force=getattr(args, "force", False))
+    if not ok:
+        print(f"another controller holds this project: {holder}")
+        print("  Wait for it, or pass --force if you are certain it is dead. A "
+              "stale lease expires on its own after "
+              f"{LEASE_TTL_S}s.")
+        return EXIT_HALTED
+    try:
+        state = load_state(args.state_dir)
+        report, dispatched, halted = advance(
+            plan, state, args.state_dir, args.root, args.dry_run,
+            args.max_new_dispatches)
+    finally:
+        release_lease(args.state_dir)
     for line in report:
         print(f"  {line}")
     print(f"\ndispatched {dispatched} unit(s); coordinator exiting. Advance "
@@ -450,7 +599,7 @@ def cmd_status(args):
     for u in plan.get("units") or []:
         us = state["units"].get(u["id"]) or {}
         st = us.get("state") or "-"
-        if st == "FAILED":
+        if st in ("FAILED", "FAILED_EVIDENCE"):
             bad = True
         rows.append((u["id"], u.get("kind", "?"), st,
                      us.get("job_id") or "-",
@@ -473,6 +622,9 @@ def main():
 
     def common(p):
         p.add_argument("plan")
+        p.add_argument("--force", action="store_true",
+                       help="take the lease even if another controller holds "
+                            "it. Only when you are certain that one is dead.")
         p.add_argument("--state-dir", default=".swarm/state")
         p.add_argument("--root", default=".swarm/runs")
         p.add_argument("--dry-run", action="store_true",
