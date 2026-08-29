@@ -8,6 +8,13 @@
 Project: fine-tune Mach-1 on a zebrafish split, three seeds, against a frozen
 baseline, capped at 160 H100-hours.
 
+> **CORRECTION, Hani 2026-08-28.** This walkthrough spreads the DAG across
+> chimera, lambda and andromeda. That is NOT the intended use: skills are
+> installed on each server and a project runs entirely on ONE of them. Read the
+> dispatch section as "these are the unit shapes", not "these are three
+> clusters". Cross-cluster portability was invited by my problem statement and
+> is now out of scope — see step 5 of docs/plan-swarm.md.
+
 ## Hani starts it
 
 Hani says:

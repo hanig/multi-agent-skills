@@ -200,8 +200,9 @@ rather than "done". This matches the note already in the code and goes further.
 
 **The immediate next milestone is one SCHEDULED, single-writer, crash-injected
 Slurm DAG on lambda** — not the dashboard, not the ticket abstraction. After it
-runs unattended for several days, make the same plan run through cluster profiles
-on andromeda and chimera, then connect Linear.
+runs unattended for several days, INSTALL the same tooling on andromeda and
+chimera and run a separate project on each (not one plan spanning three, per
+Hani's correction), then connect Linear.
 
 See `docs/scenario-mach1-zebrafish.md` for the whole string of events walked end
 to end.
@@ -295,78 +296,82 @@ without touching the unit contract, because `advance` is invoked identically
 either way. Criterion 4(b) is the one that decides it: if a Paseo schedule does
 not survive logout on a login node, cron wins.
 
-**5. Portability: the swarm runs on THREE clusters, not on lambda.**
+**5. Install cleanly on each server; a project lives on ONE server.**
 
-Hani: "dont over-index on Lambda, check other servers too". Checking proved the
-point immediately -- a gotcha written into SKILL.md as a cluster fact was
-lambda-specific:
+**Corrected by Hani 2026-08-28**, and it removes the largest piece of
+complexity sol had proposed:
+
+> "I expect to install these skills on each of the respective servers, and just
+> use it on those servers for distinct projects. I don't necessarily expect to
+> jump between them."
+
+So **cross-cluster plan portability is NOT a requirement**. A project is bound to
+one server, its plan carries that server's `sbatch` flags, and nothing has to
+translate a resource request across clusters. Dropped as a result: the
+resource-request vocabulary, per-machine profile translation, dataset and
+container path mapping across clusters, and cross-cluster completion evidence.
+Sol's scenario put `validate-data` on chimera, training on andromeda and
+evaluation on lambda; that is not the use case, and it was my problem statement
+that invited it.
+
+What the cluster differences DO still mean is that the tooling must install and
+behave identically wherever it lands, and must not bake in one cluster's quirks:
 
 | | lambda | andromeda | chimera |
 |---|---|---|---|
 | default memory | `DefMemPerNode = UNLIMITED` | `DefMemPerCPU = 4096` | `DefMemPerCPU = 4096` |
 | `--mem` required | **yes** | no | no |
-| SelectTypeParameters | `CR_CORE_MEMORY,CR_ONE_TASK_PER_CORE` | `CR_CPU_MEMORY,CR_PACK_NODES` | `CR_CORE_MEMORY` |
 | python3 | 3.12.3 | 3.10.12 | 3.10.12 |
-| partitions | `labinloop model_dev data_dev preemptible ...` | `all* h100-reserved preemptible standard` | `gpu gpu_batch cpu* gpu_high_mem ...` |
-
-**Partition names share NOTHING across the three**, so a unit's `sbatch` list is
-not portable and a plan written on one cluster does not run on another. That is a
-design gap, not a documentation gap: today a plan hardcodes cluster-specific
-flags.
+| partitions | `labinloop model_dev preemptible ...` | `all* h100-reserved preemptible standard` | `gpu gpu_batch cpu* gpu_high_mem ...` |
 
 Acceptance criteria:
 
-- a. A unit declares a RESOURCE REQUEST (gpus, cpus, memory, walltime, and
-  whether it may be preempted), never raw `sbatch` flags. A per-machine profile
-  translates the request into that cluster's flags and partition.
-- b. The profile lives on the machine, not in the plan, so the same plan file
-  dispatches on lambda, andromeda and chimera without edits.
-- c. A request that a given cluster cannot satisfy is REFUSED at validate time,
-  naming the cluster and the limit, never at submit time.
-- d. Lambda's missing default memory is handled by its profile, not by every
-  plan author remembering.
-- e. The test suite runs under python3.10 -- andromeda and chimera both run
-  3.10.12, so 3.12 is not the floor to develop against.
-- f. `chimera` cannot take a remote command (`RemoteCommand sh_dev` in ssh
-  config); anything scripted uses `chimera-login`.
-- g. One real unit dispatched and judged DONE on EACH of the three, not on
-  lambda alone.
+- a. `install.sh` puts the swarm skill on the Mac, lambda, andromeda and
+  chimera, and the SAME test suite passes on each.
+- b. The suite runs under **python3.10**, the floor two of the three run. 3.12
+  is not the development target.
+- c. No cluster's quirk is hardcoded. `--mem` is a plan-level flag the author
+  supplies, not a tool assumption; nothing refers to a partition by name.
+- d. `chimera` cannot take a remote command (`RemoteCommand sh_dev`); anything
+  scripted uses `chimera-login`. Recorded so it is not rediscovered.
+- e. One real unit dispatched and judged DONE on EACH server, in that server's
+  own project, not one plan spanning three.
+- f. A plan validated on one server that names another server's partition fails
+  at validate time with a clear message, rather than at submit.
 
-**6. Tickets: the orchestrator opens a Linear project and works its issues.**
+**6. Tickets: the orchestrator CREATES the project and populates its issues.**
 
-Hani: "how can I automate so that the orchestrator creates a Linear project,
-uses issues (on Linear or Github)". This is the endgame -- "build projects
-autonomously" means the project is a real, trackable object, not a JSON file on
-one laptop.
+**Clarified by Hani 2026-08-28:**
 
-Shreshth already built the ticket-driven half. `start-a-sprint` turns "a
-prioritized ticket set into isolated, observable ticket pods": one coordinator
-per Linear ticket, one integration worktree and branch per ticket, one testable
-acceptance contract and declared write scopes per ticket. `linear-issues` (182
-lines) files and closes issues in the tahoebio workspace in a house style, with a
-Resolution line and Verification/Links on close.
+> "I want the project creation and population of issues to be done
+> automatically (asking me for approval is fine of course)"
 
-What does NOT transfer: his pods are code changes judged by `bus await` over a
-worktree. A Slurm unit is judged by `unit.py`, and its acceptance contract is a
-predicate over cluster artifacts. So the ticket is the shared object; the
-predicate underneath differs by unit kind, exactly as steps 1-2 already model.
+I had written this as "outward-facing, gated on explicit approval per run",
+which read as heavy and manual. The requirement is the opposite: **automatic,
+with one approval**. The orchestrator drafts the project and the full issue set,
+shows them, and on a single yes creates and populates everything. It does not
+ask per issue.
+
+Linear is the work ledger for v1; GitHub PRs are code evidence. A pluggable
+backend is abstraction before one proven backend, so GitHub Issues wait.
 
 Acceptance criteria:
 
-- a. A swarm plan can be GENERATED from a ticket set, and each unit records the
-  issue it belongs to.
-- b. Issue state follows unit state, not the other way round: a unit reaching
-  DONE moves its issue, and a HELD unit says on the issue what it is waiting
-  for. The swarm's durable state stays authoritative.
-- c. Backend is pluggable, Linear or GitHub, chosen per project. Nothing in the
-  unit contract mentions either.
-- d. NO ISSUE IS EVER CLOSED ON A SELF-REPORT. Closure requires the unit's
-  predicate verdict, which is the whole thesis applied one level up: an agent
-  saying "done" on a ticket is exactly the self-assertion these tools refuse.
-- e. Writing to an issue tracker is an OUTWARD-FACING action and is gated on
-  explicit approval per run, the way promotion is in step 3. A swarm that files
-  tickets unattended is a swarm that spams a shared workspace.
-- f. A dry run prints the issues it WOULD create or move, and creates nothing.
+- a. From a grilled project brief, the orchestrator DRAFTS the project and every
+  issue, and creates them all after ONE approval. No per-issue prompting.
+- b. The draft is shown in full before anything is created, and a dry run prints
+  exactly what would be created while creating nothing.
+- c. Every issue maps to one or more unit predicates, and every unit maps back
+  to one issue, so neither can drift silently from the other.
+- d. Issue state follows unit state, never the reverse. Swarm durable state stays
+  authoritative; the tracker is a view.
+- e. **No issue is ever closed on a self-report.** Closure requires the unit's
+  predicate verdict. An agent saying "done" on a ticket is exactly the
+  self-assertion this family refuses.
+- f. Tracker mutations go through an idempotent outbox: a Linear outage must
+  never alter swarm state, and a retried update must not duplicate an issue.
+- g. Re-running against an existing project updates rather than duplicating,
+  keyed on the project and unit ids.
 
 **7. `grill-with-docs`: interrogate the HUMAN before dispatching anything.**
 
