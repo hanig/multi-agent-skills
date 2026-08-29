@@ -714,10 +714,14 @@ class TestSafeUnattendedAdvance(Base):
             results.append(self.swarm("run", p, "--dry-run"))
         t1, t2 = threading.Thread(target=go), threading.Thread(target=go)
         t1.start(); t2.start(); t1.join(); t2.join()
-        blocked = [r for r in results
-                   if "another controller holds this project" in r.stdout]
+        # Assert on BEHAVIOUR, not on the wording. This matched the prose
+        # "another controller holds this project", so rewording the refusal
+        # broke the test while the property it guards still held.
+        blocked = [r for r in results if r.returncode != 0]
         self.assertEqual(len(blocked), 1,
-                         "both advances proceeded; the lease did not hold")
+                         f"expected exactly one advance to be refused, got "
+                         f"{len(blocked)}: "
+                         f"{[r.stdout.strip()[:80] for r in results]}")
         for uid in ("A", "B"):
             attempts = self.state()["units"].get(uid, {}).get("attempts", [])
             self.assertLessEqual(len(attempts), 1,

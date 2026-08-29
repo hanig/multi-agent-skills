@@ -272,10 +272,7 @@ def validate_plan(plan):
 #
 # A human typing `advance` notices all four. A cron job does not.
 LEASE = "lease.json"
-LEASE_TTL_S = 900
-# A breaker is held across a few filesystem calls only, so one
 # older than this was abandoned by a controller that died.
-BREAKER_STALE_S = 120          # a stale lease must expire, or one crash blocks forever
 SETTLE_S = 600             # accounting lag before a missing row becomes terminal
 
 
@@ -315,7 +312,7 @@ _LOCK_FDS = {}
 LOCK = "lease.lock"
 
 
-def acquire_lease(state_dir, force=False):
+def acquire_lease(state_dir):
     """One controller at a time, arbitrated by the OS. Returns (ok, holder).
 
     THE SIXTH VERSION, and the first that does not invent its own mutual
@@ -1156,12 +1153,19 @@ def cmd_run(args):
     plan = _load_plan(args.plan)
     # ONE WRITER. Two schedulers firing at once, or a human running `advance`
     # while cron does, would both read old state and submit the same unit.
-    ok, holder = acquire_lease(args.state_dir, force=getattr(args, "force", False))
+    ok, holder = acquire_lease(args.state_dir)
     if not ok:
-        print(f"another controller holds this project: {holder}")
-        print("  Wait for it, or pass --force if you are certain it is dead. A "
-              "stale lease expires on its own after "
-              f"{LEASE_TTL_S}s.")
+        print(f"cannot take this project's lock: {holder}")
+        # The old text here said "pass --force if you are certain it is dead"
+        # and "a stale lease expires on its own after 900s". Both became false
+        # when the lock moved to the kernel: --force was accepted and silently
+        # ignored, and there is no expiry to wait out. Telling an operator to
+        # type a flag that does nothing is worse than offering nothing.
+        print("  A live controller cannot be forced off, and a dead one frees "
+              "the project immediately, so there is nothing to wait out and "
+              "nothing to override.")
+        print("  If nothing is really running, the lock is already free: "
+              "check with `swarm.py status`.")
         return EXIT_HALTED
     try:
         state = load_state(args.state_dir)
@@ -1607,9 +1611,6 @@ def main():
 
     def common(p):
         p.add_argument("plan")
-        p.add_argument("--force", action="store_true",
-                       help="take the lease even if another controller holds "
-                            "it. Only when you are certain that one is dead.")
         p.add_argument("--state-dir", default=".swarm/state")
         p.add_argument("--root", default=".swarm/runs")
         p.add_argument("--dry-run", action="store_true",

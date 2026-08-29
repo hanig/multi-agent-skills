@@ -140,7 +140,7 @@ The four things that make this safe, each proven by breaking it:
 
 | hole | guard | proven |
 |---|---|---|
-| two controllers both dispatch a unit | lease keyed on the state dir, 900s TTL, `--force` to steal | one of two concurrent advances refused, live |
+| two controllers both dispatch a unit | an OS advisory lock (`flock`) on the state dir; the kernel frees it when the holder dies, so there is no TTL and nothing to steal | 8 concurrent advances x 3 trials on each of lambda, chimera and andromeda: one dispatcher every time |
 | crash between `sbatch` and bind | jobs named `swarm-<attempt>`; `reconcile_orphan` asks squeue/sacct | job id wiped from state on a LIVE job; advance recovered 187880 and did NOT resubmit |
 | `INCOMPLETE` forever | terminal `FAILED_EVIDENCE` after a 600s settle window; holds dependents | unit test |
 | plan edited mid-flight | canonical digest over dispatchable fields; refuses to advance | unit test |
