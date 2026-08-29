@@ -27,7 +27,7 @@ bind mount.
 
 ## Status as of 2026-08-28
 
-Built and green: 424 tests.
+Built and green: 443 tests.
 
 | Piece | File | State |
 |---|---|---|
@@ -123,6 +123,35 @@ Not built: plan steps 4 (install per server), 5-7. Operator controls (`status --
 `NEEDS_HUMAN`, promotion), per-server install, the project front door, and the
 `grill-with-docs` gate. All three declared kinds now have a working predicate and have been
 run for real.
+
+## Live validation on lambda, 2026-08-28
+
+Everything below was run on the real cluster and its NFS home, not locally.
+
+- **Eight simultaneous advances against one live DAG**: exactly 1 dispatched,
+  7 refused by the lease, 3 jobs in the scheduler, 1 attempt directory per
+  unit. This is the property unattended operation rests on.
+- **The lease on NFS**: 192 contended acquisitions, 16 contenders per trial,
+  one winner every time. NFS matters: `O_EXCL` is unreliable on it, so the
+  lease is published by `link()`.
+- **A real failing DAG**: a job exiting 9 became FAILED; a job exiting 0 that
+  wrote nothing became FAILED naming its own log; the downstream unit became
+  HELD naming what held it; `status` exited 2.
+- **Promotion onto NFS**, including a refused re-promotion after tampering.
+- Crash injections: allocated-but-never-submitted, and bind-failed-after-sbatch.
+
+Two defects that only running found, both invisible to local tests:
+
+1. A unit reaching FAILED through the SETTLE branch emitted NO tracker intent,
+   because emission happened at three specific call sites and that transition
+   was made at a fourth. Its issue would have sat on "work started" forever.
+   Intents now come from diffing the final state against a snapshot taken at
+   the start of the advance, which cannot miss a path added later.
+2. A clean exit with absent outputs was labelled FAILED_EVIDENCE and told the
+   operator to check `sacct` -- the one place that reports success for exactly
+   that failure. It is now FAILED and points at the job's own log. `unit.py`
+   records a machine-readable REASON so the coordinator branches on a code
+   rather than on the wording of a note.
 
 ## The open decision: which tracker
 
