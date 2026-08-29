@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -19,6 +20,9 @@ REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "skills" / "hanig-swarm" / "scripts"
 UNIT, SWARM = SCRIPTS / "unit.py", SCRIPTS / "swarm.py"
 CONVERGE = SCRIPTS / "converge.py"
+_cv = importlib.util.spec_from_file_location('_cv', CONVERGE)
+_cvm = importlib.util.module_from_spec(_cv); _cv.loader.exec_module(_cvm)
+CONVERGE_QUIET_S = _cvm.BUDGET_QUIET_S
 
 _s = importlib.util.spec_from_file_location("unit", UNIT)
 unit = importlib.util.module_from_spec(_s); _s.loader.exec_module(unit)
@@ -406,6 +410,8 @@ class TestConvergence(Base):
 
     Evaluator lifted verbatim from traincontract.py; this covers the wrapper."""
 
+    # Read from the module rather than hard-coded, so raising the window in
+    # converge.py cannot silently leave this test asserting the old one.
     CRIT = {"metric": "val_loss", "mode": "min", "threshold": 0.5,
             "min_steps": 10000}
     PLATEAU = {"metric": "val_loss", "mode": "min",
@@ -435,12 +441,40 @@ class TestConvergence(Base):
 
     def test_a_flat_run_that_spent_its_budget_is_NOT_converged(self):
         """THE distinction this module exists for. Under the swarm's own
-        predicate this run is DONE: it exited 0 and wrote its outputs."""
-        r = self.check(self.metrics(self.flat()), self.CRIT,
-                       "--budget", "12000")
+        predicate this run is DONE: it exited 0 and wrote its outputs.
+
+        The file must have gone QUIET first. Reaching the last budgeted step
+        says the budget is spent; it does not say the run stopped."""
+        import os
+        m = self.metrics(self.flat())
+        old = time.time() - (CONVERGE_QUIET_S + 60)
+        os.utime(m, (old, old))
+        r = self.check(m, self.CRIT, "--budget", "12000")
         self.assertEqual(r.returncode, 3, f"expected BUDGET_EXHAUSTED:\n"
                                          f"{r.stdout}")
         self.assertIn("NOT convergence", r.stdout)
+
+    def test_a_LIVE_run_at_its_last_budgeted_step_is_not_called_stopped(self):
+        """The counter-claim, and a defect three reviewers would have caught
+        later at real cost: a healthy run that has just logged step 40000 of a
+        40000 budget may log again in seconds. Calling it stopped ends a run
+        that was still working."""
+        r = self.check(self.metrics(self.flat()), self.CRIT, "--budget", "12000")
+        self.assertEqual(r.returncode, 1,
+                         f"a run whose metrics file was just written must not "
+                         f"be reported as stopped:\n{r.stdout}")
+        self.assertIn("may still be going", r.stdout)
+
+    def test_a_non_finite_metric_is_divergence_not_convergence(self):
+        """A false CONVERGED, found by review. Python's json parser accepts
+        Infinity, and inf clears any threshold."""
+        for literal in ("Infinity", "NaN"):
+            m = Path(self.tmp) / f"nf-{literal}.jsonl"
+            m.write_text('{"step":100,"val_loss":%s}\n' % literal)
+            r = self.check(str(m), self.CRIT)
+            self.assertEqual(r.returncode, 2,
+                             f"{literal} must be DIVERGED, not converged or "
+                             f"merely not-yet:\n{r.stdout}")
 
     def test_without_a_budget_a_flat_run_is_merely_not_yet(self):
         r = self.check(self.metrics(self.flat()), self.CRIT)

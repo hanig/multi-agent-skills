@@ -196,6 +196,18 @@ def metric_series_with_problems(rows, key):
         except (OverflowError, ValueError):
             problems.append(f"step {r['step']}: {key} is too large to evaluate")
             continue
+        # Python's json parser accepts the non-standard literals Infinity,
+        # -Infinity and NaN. An infinite value clears ANY threshold, so a run
+        # that blew up numerically was reported CONVERGED: a false pass, which
+        # is the failure this whole family of tools exists to prevent. NaN is
+        # equally dangerous in the other direction, since every comparison
+        # against it is False.
+        if fv != fv or fv in (float("inf"), float("-inf")):
+            problems.append(
+                f"step {r['step']}: {key} is {v}, which is not a finite "
+                f"number. A run producing it has diverged numerically; it "
+                f"cannot be judged converged.")
+            continue
         out.append((r["step"], fv))
     return sorted(out, key=lambda x: x[0]), problems
 
@@ -472,9 +484,18 @@ def eval_divergence(rows, rules):
 
 
 # ==========================================================================
-# Everything above is lifted verbatim from traincontract.py and must not be
-# edited here. Everything below is the swarm predicate around it.
+# Everything above was lifted from traincontract.py, which has since been
+# deleted, so there is no longer a twin to drift from. It is edited only to fix
+# a defect in the lifted behaviour itself, never to adapt it to swarm: the
+# non-finite guard in metric_series_with_problems is such a fix, and closed a
+# false CONVERGED. Everything below is the swarm predicate around it.
 # ==========================================================================
+
+# How long the metrics file must be QUIET before "the budget is spent"
+# may be reported as "the run stopped". Below this, a run that just
+# logged its final budgeted step is still alive.
+BUDGET_QUIET_S = 900
+
 
 def judge(metrics_path, criterion, diverge_rules, budget, sparse_ok=False):
     """Answer ONE question and return (state_name, [reasons]).
@@ -512,6 +533,18 @@ def judge(metrics_path, criterion, diverge_rules, budget, sparse_ok=False):
     if problem:
         return "INCOMPLETE", [f"unusable convergence criterion: {problem}"]
 
+    # A non-finite value in the TRACKED metric is divergence by direct
+    # measurement, and it must be said so rather than dropped. The series
+    # builder already refuses to admit inf or NaN, which stops the false
+    # CONVERGED; without this branch the refusal showed up as NOT_YET, telling
+    # an operator to keep burning GPU-hours on a run that had blown up.
+    _, series_problems = metric_series_with_problems(rows, criterion["metric"])
+    nonfinite = [q for q in series_problems if "not a finite number" in q]
+    if nonfinite:
+        return "DIVERGED", nonfinite + [
+            f"{criterion['metric']} left the finite range, so no threshold "
+            f"comparison against it is meaningful."]
+
     met, detail = eval_convergence(rows, criterion, sparse_ok)
     reasons.append(detail)
     if met:
@@ -526,9 +559,29 @@ def judge(metrics_path, criterion, diverge_rules, budget, sparse_ok=False):
             if isinstance(step, (int, float)) and not isinstance(step, bool):
                 last = step
         if last is not None and last >= float(budget):
+            # "The run stopped" is a claim about the JOB, and the last logged
+            # step alone cannot support it: a healthy run that has just written
+            # step 40000 of a 40000 budget is still going and may log again in
+            # seconds. Asserting it had stopped was an over-claim of exactly
+            # the kind this repo keeps having to walk back, so require that the
+            # metrics file has also gone quiet.
+            try:
+                quiet_for = time.time() - Path(metrics_path).stat().st_mtime
+            except OSError:
+                quiet_for = None
+            if quiet_for is not None and quiet_for < BUDGET_QUIET_S:
+                reasons.append(
+                    f"step {last:g} has reached the {budget}-step budget, but "
+                    f"{metrics_path} was written {int(quiet_for)}s ago and the "
+                    f"run may still be going. Not calling it stopped yet; "
+                    f"re-check after {BUDGET_QUIET_S}s of silence.")
+                return "NOT_YET", reasons
+            silence = (f", and the metrics file has not been written for "
+                       f"{int(quiet_for)}s" if quiet_for is not None else "")
             reasons.append(f"reached the {budget}-step budget at step {last:g} "
-                           f"without meeting the criterion. This is NOT "
-                           f"convergence: the run stopped, it did not finish.")
+                           f"without meeting the criterion{silence}. This is "
+                           f"NOT convergence: the run stopped, it did not "
+                           f"finish.")
             return "BUDGET_EXHAUSTED", reasons
     return "NOT_YET", reasons
 

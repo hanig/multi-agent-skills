@@ -185,49 +185,188 @@ LEASE_TTL_S = 900          # a stale lease must expire, or one crash blocks fore
 SETTLE_S = 600             # accounting lag before a missing row becomes terminal
 
 
+# Fields that cannot change what a dispatch DOES. Everything else is
+# digested. Listing the cosmetic fields rather than the meaningful ones is
+# deliberate: four reviewers broke the previous inclusion list by naming
+# fields it had simply forgotten (inputs, gpu_hours, charge_to, write_scopes,
+# max_attempts, timeout_s, prompt, provider). An exclusion list fails in the
+# safe direction, because a field added next year is covered until someone
+# argues it is cosmetic.
+COSMETIC_FIELDS = {"description", "comment", "notes", "title", "owner",
+                   "tags", "_comment"}
+
+
 def plan_digest(plan):
     """Canonical digest of the plan's DISPATCHABLE content.
 
-    Comments, ordering and formatting must not invalidate a live run, so this
-    digests the semantic fields only."""
-    units = sorted((u.get("id"), u.get("kind"), u.get("command"),
-                    tuple(u.get("outputs") or []), tuple(u.get("needs") or []),
-                    tuple(u.get("sbatch") or []))
-                   for u in (plan.get("units") or []))
-    payload = json.dumps({"units": units, "budget": plan.get("budget")},
-                         sort_keys=True)
+    Comments, ordering and formatting must not invalidate a live run. Anything
+    that reaches `unit.py allocate` or the submitted script must."""
+    def unit_payload(u):
+        return {k: v for k, v in sorted(u.items())
+                if k not in COSMETIC_FIELDS}
+    units = sorted((unit_payload(u) for u in (plan.get("units") or [])),
+                   key=lambda d: json.dumps(d, sort_keys=True))
+    payload = json.dumps(
+        {"units": units,
+         "budget": plan.get("budget"),
+         "root": plan.get("root")}, sort_keys=True, default=str)
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _lease_body():
+    return {"owner": os.environ.get("USER", "?"), "host": os.uname().nodename,
+            "pid": os.getpid(), "acquired_at": time.time(),
+            "expires_at": time.time() + LEASE_TTL_S}
 
 
 def acquire_lease(state_dir, force=False):
     """One writer at a time. Returns (ok, holder_description).
 
-    Keyed on the state directory, since that is what two controllers would
-    corrupt. A lease older than LEASE_TTL_S is stale and may be taken: a
-    controller killed mid-run must not block the project forever."""
-    path = Path(state_dir) / LEASE
+    ATOMIC. An earlier version read the lease and then wrote it, which three
+    reviewers independently broke: two advances starting together both see no
+    lease and both proceed. The fix is the primitive this whole repo rests on
+    -- an exclusive create that the OS arbitrates -- rather than a check that
+    a scheduler can interleave.
+
+    Taking over a STALE lease is the delicate half: several contenders may
+    agree it is stale, and only one may win. They race to create a breaker
+    directory instead, because mkdir is likewise atomic."""
     Path(state_dir).mkdir(parents=True, exist_ok=True)
-    mine = {"owner": os.environ.get("USER", "?"), "host": os.uname().nodename,
-            "pid": os.getpid(), "acquired_at": time.time(),
-            "expires_at": time.time() + LEASE_TTL_S}
+    path = Path(state_dir) / LEASE
+    body = json.dumps(_lease_body(), sort_keys=True)
+
+    def _create_exclusive():
+        """Create the lease atomically AND fully populated.
+
+        O_EXCL alone is not enough: it creates a ZERO-LENGTH file, and the
+        body is written a moment later. A rival reading in that window sees an
+        empty lease, parses nothing, concludes it is stale, and breaks a lease
+        that was in fact live -- observed here as two winners out of twelve.
+        Writing the body to a private temp file and hard-linking it into place
+        closes the window, because link() is atomic and the file it publishes
+        is already complete."""
+        tmp = path.with_suffix(f".{os.getpid()}.{time.time_ns()}.tmp")
+        try:
+            with open(tmp, "w") as fh:
+                fh.write(body)
+                fh.flush()
+                os.fsync(fh.fileno())
+        except OSError as e:
+            return f"cannot write the lease: {e}"
+        try:
+            os.link(str(tmp), str(path))
+            return True
+        except FileExistsError:
+            return False
+        except OSError as e:
+            return f"cannot publish the lease: {e}"
+        finally:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+    got = _create_exclusive()
+    if got is True:
+        return True, None
+    if isinstance(got, str):
+        return False, got
+
     held, err = U.read_json(path)
-    if not err and isinstance(held, dict):
+    readable = (not err) and isinstance(held, dict)
+    held = held if readable else {}
+    same_process = (held.get("pid") == os.getpid()
+                    and held.get("host") == os.uname().nodename)
+    if same_process:
+        return True, None                      # re-entrant within one process
+    if readable:
         fresh = float(held.get("expires_at") or 0) > time.time()
-        same_process = (held.get("pid") == os.getpid()
-                        and held.get("host") == mine["host"])
-        if fresh and not same_process and not force:
-            age = int(time.time() - float(held.get("acquired_at") or 0))
-            return False, (f"{held.get('owner')}@{held.get('host')} "
-                           f"pid {held.get('pid')}, {age}s ago")
-    err = U.write_json(path, mine)
-    if err:
-        return False, f"cannot write the lease: {err}"
-    return True, None
+    else:
+        # Unreadable. Judge by the file's own age rather than assuming it is
+        # stale, so a corrupt lease still expires instead of wedging the
+        # project, but a momentary bad read never breaks a live one.
+        try:
+            fresh = (time.time() - path.stat().st_mtime) < LEASE_TTL_S
+        except OSError:
+            fresh = False
+    if fresh and not force:
+        age = int(time.time() - float(held.get("acquired_at") or 0))
+        return False, (f"{held.get('owner')}@{held.get('host')} "
+                       f"pid {held.get('pid')}, {age}s ago")
+
+    # Stale, or forced. Exactly one contender may break it.
+    breaker = Path(state_dir) / (LEASE + ".break")
+    try:
+        breaker.mkdir()
+    except FileExistsError:
+        return False, "another controller is taking over the stale lease"
+    except OSError as e:
+        return False, f"cannot arbitrate the stale lease: {e}"
+    try:
+        # RE-READ inside the critical section. The staleness decision above was
+        # made before we held the breaker, and a rival may have installed a
+        # fresh lease and released the breaker in between. Acting on the older
+        # read let a second controller unlink a live lease and take over: the
+        # same read-then-act shape as the original defect, one level down.
+        # Found by running the race repeatedly rather than once.
+        again, aerr = U.read_json(path)
+        if not aerr and isinstance(again, dict):
+            still_stale = float(again.get("expires_at") or 0) <= time.time()
+            ours = (again.get("pid") == os.getpid()
+                    and again.get("host") == os.uname().nodename)
+            if ours:
+                return True, None
+            if not still_stale and not force:
+                age = int(time.time() - float(again.get("acquired_at") or 0))
+                return False, (f"{again.get('owner')}@{again.get('host')} "
+                               f"pid {again.get('pid')}, {age}s ago "
+                               f"(took over while we waited)")
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        got = _create_exclusive()
+        if got is not True:
+            return False, (got if isinstance(got, str)
+                           else "lost the race for the stale lease")
+        return True, None
+    finally:
+        try:
+            breaker.rmdir()
+        except OSError:
+            pass
+
+
+def renew_lease(state_dir):
+    """Push the expiry out. An honest advance can legitimately outlive
+    LEASE_TTL_S -- a synchronous pipeline engine, or many `sacct` calls each
+    up to their own timeout -- and losing the lease mid-run is how ONE unit
+    becomes two jobs. Called between units, so progress is what renews it.
+
+    Refuses to renew a lease this process no longer holds: if we were taken
+    over, the correct response is to stop, not to steal it back."""
+    path = Path(state_dir) / LEASE
+    held, err = U.read_json(path)
+    if err or not isinstance(held, dict):
+        return False
+    if held.get("pid") != os.getpid() or held.get("host") != os.uname().nodename:
+        return False
+    held["expires_at"] = time.time() + LEASE_TTL_S
+    return not U.write_json(path, held)
 
 
 def release_lease(state_dir):
+    """Only ever release OUR OWN lease. Blindly unlinking would let a
+    controller that had already been taken over delete its successor's lease
+    on the way out, leaving the project unprotected."""
+    path = Path(state_dir) / LEASE
+    held, err = U.read_json(path)
+    if err or not isinstance(held, dict):
+        return
+    if held.get("pid") != os.getpid() or held.get("host") != os.uname().nodename:
+        return
     try:
-        (Path(state_dir) / LEASE).unlink()
+        path.unlink()
     except OSError:
         pass
 
@@ -317,13 +456,38 @@ def _submit(u, unit_dir, dry_run):
             return None, f"sbatch refused it: {(err or out).strip()[:200]}"
         return out.split(";")[0].strip(), None
     if kind == "pipeline":
-        # The engine owns its interior. Give it a fresh work dir and a fresh
-        # publish dir inside the exclusive root, then stay out of the way.
-        rc, out, err = U.run(["sh", "-c", u["command"]], cwd=str(unit_dir),
-                             timeout=u.get("timeout_s", 120))
-        if rc != 0:
-            return None, f"engine launch failed: {(err or out).strip()[:200]}"
-        return (out.strip().splitlines() or ["engine-local"])[-1], None
+        # The engine owns its interior. Give it a fresh work dir inside the
+        # exclusive root, then stay out of the way.
+        #
+        # LAUNCHED DETACHED, never run to completion here. An earlier version
+        # ran it synchronously under a 120s default, so an honest `nextflow
+        # run` was SIGKILLed by the coordinator at two minutes and recorded
+        # FAILED. Raising the timeout only moves the damage: advance would then
+        # block for hours, holding the lease and checking nothing else. The
+        # coordinator dispatches and detaches, exactly as it does for sbatch,
+        # and unit.py judges the result later from the artifacts.
+        log = Path(unit_dir) / "engine.log"
+        try:
+            fh = open(log, "ab")
+        except OSError as e:
+            return None, f"cannot open {log}: {e}"
+        try:
+            proc = subprocess.Popen(
+                ["sh", "-c", u["command"]], cwd=str(unit_dir),
+                stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                start_new_session=True)
+        except OSError as e:
+            fh.close()
+            return None, f"engine launch failed: {e}"
+        fh.close()
+        werr = U.write_json(Path(unit_dir) / "engine.json",
+                            {"pid": proc.pid, "command": u["command"],
+                             "host": os.uname().nodename,
+                             "launched_at": time.time(),
+                             "log": "engine.log"})
+        if werr:
+            return None, f"launched pid {proc.pid} but {werr}"
+        return f"engine-{proc.pid}", None
     if kind == "code":
         # Shreshth's path, unchanged: Paseo owns the agent lifecycle.
         rc, out, err = U.run(
@@ -448,7 +612,7 @@ RETRYABLE = {PREEMPTED}          # a preemption is not a failure
 TERMINAL_BAD = {FAILED}
 
 
-def reconcile_orphan(unit_dir):
+def reconcile_orphan(unit_dir, allocated_at=None):
     """Did a job for this attempt reach the scheduler even though we never
     recorded its id? Returns (job_id, note).
 
@@ -457,8 +621,15 @@ def reconcile_orphan(unit_dir):
     same directory -- the exact thing the exclusive write root is for."""
     attempt_id = Path(unit_dir).name
     name = f"swarm-{attempt_id}"
+    # `sacct` WITHOUT -S defaults to jobs that started today. A crash at 23:50
+    # whose job finished at 23:55 is invisible to a 00:10 reconcile, and the
+    # unit decays to FAILED_EVIDENCE though it succeeded. Anchor the window to
+    # when the attempt was allocated, an hour early for clock skew.
+    since = (allocated_at - 3600) if allocated_at else (time.time() - 7 * 86400)
+    start = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(since))
     for argv in (["squeue", "-h", "-n", name, "-o", "%i"],
-                 ["sacct", "-n", "-P", "-X", "--name", name, "-o", "JobID"]):
+                 ["sacct", "-n", "-P", "-X", "--name", name,
+                  "-S", start, "-o", "JobID"]):
         rc, out, _ = U.run(argv, timeout=60)
         if rc == 0 and (out or "").strip():
             job = out.strip().splitlines()[0].split("|")[0].strip()
@@ -469,7 +640,8 @@ def reconcile_orphan(unit_dir):
     return None, None
 
 
-def advance(plan, state, state_dir, root, dry_run, max_new=None):
+def advance(plan, state, state_dir, root, dry_run, max_new=None,
+            accept_plan_change=False):
     """Idempotent. Re-check every live unit, then dispatch whatever is ready.
 
     Safe to run from a Paseo schedule or cron every few minutes: it never
@@ -483,29 +655,77 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None):
     digest = plan_digest(plan)
     if state.get("plan_digest") is None:
         state["plan_digest"] = digest
+    elif state["plan_digest"] != digest and accept_plan_change:
+        prior = state["plan_digest"]
+        state["plan_digest"] = digest
+        state.setdefault("ratified_edits", []).append(
+            {"from": prior, "to": digest,
+             "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+             "by": os.environ.get("USER", "?")})
+        report.append(f"plan change RATIFIED: {prior[:12]} -> {digest[:12]}. "
+                      f"Recorded attempts are kept.")
+        save_state(state_dir, state)
     elif state["plan_digest"] != digest:
+        # The old remedy here was "start a new state directory", which
+        # re-dispatches DONE units and duplicates live jobs: a refusal whose
+        # named action is worse than the fault. Raising a budget ceiling is a
+        # DESIGNED human intervention, so there must be a way to say yes.
         return ([f"REFUSING to advance: the plan file changed while units are "
                  f"live (digest {state['plan_digest'][:12]} -> {digest[:12]}). "
                  f"A mid-flight edit redefines what the recorded attempts were "
-                 f"for. Revert the plan, or start a new state directory for the "
-                 f"revised plan."], 0, "plan changed mid-flight")
+                 f"for.",
+                 f"If the edit was intended, ratify it explicitly:",
+                 f"    python3 swarm.py advance <plan> --accept-plan-change",
+                 f"which records the new digest and keeps every recorded "
+                 f"attempt. Units already DONE are not re-dispatched."], 0,
+                "plan changed mid-flight")
 
     # An attempt allocated but never bound may still have reached the
     # scheduler. Ask before dispatching anything else.
     for uid, u in sorted(units.items()):
         us = _unit_state(state, uid)
-        if us["attempt_dir"] and not us.get("job_id") and not dry_run:
-            job, note = reconcile_orphan(us["attempt_dir"])
-            if job:
-                us["job_id"] = job
-                _bind(us["attempt_dir"], job)
+        if dry_run or not us["attempt_dir"]:
+            continue
+        if us.get("bind_pending") and us.get("job_id"):
+            if not _bind(us["attempt_dir"], us["job_id"]):
+                us.pop("bind_pending", None)
                 us["state"] = "SUBMITTED"
-                report.append(f"{uid}: {note}")
+                report.append(f"{uid}: binding to job {us['job_id']} succeeded "
+                              f"on retry; the unit can now be judged.")
                 save_state(state_dir, state)
+            continue
+        if us.get("job_id"):
+            continue
+        job, note = reconcile_orphan(us["attempt_dir"], us.get("allocated_at"))
+        if job:
+            us["job_id"] = job
+            _bind(us["attempt_dir"], job)
+            us["state"] = "SUBMITTED"
+            report.append(f"{uid}: {note}")
+            save_state(state_dir, state)
+        elif us["state"] == "ALLOCATED":
+            # Allocated, then the coordinator died before `sbatch`. The
+            # scheduler has never heard of it, so nothing is running and the
+            # directory is inert. Releasing the attempt lets the unit dispatch
+            # into a FRESH write root; keeping it wedged the unit forever,
+            # because only a PREEMPTED verdict cleared attempt_dir.
+            report.append(f"{uid}: allocated at {us['attempt_dir']} but never "
+                          f"reached the scheduler (absent from both squeue and "
+                          f"sacct). Releasing the attempt; it will re-dispatch "
+                          f"into a new directory. The stale one is left on disk "
+                          f"rather than deleted.")
+            us["attempt_dir"] = None
+            save_state(state_dir, state)
 
     # 1. Re-check anything with a live attempt. The coordinator does not judge;
     #    unit.py does, and its exit code is the whole input.
     for uid, u in units.items():
+        # Each `_check` can take its own timeout, and a synchronous pipeline
+        # engine takes far longer. Renewing between units keeps mutual
+        # exclusion for as long as we are actually making progress, instead of
+        # losing it on a fixed clock while still running.
+        if not dry_run:
+            renew_lease(state_dir)
         us = _unit_state(state, uid)
         if not us["attempt_dir"] or us["state"] == "DONE":
             continue
@@ -606,7 +826,11 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None):
         us["attempt_dir"] = unit_dir
         us["attempts"].append(unit_dir)
         us["state"] = "ALLOCATED"
-        us["gpu_hours"] = want
+        us["allocated_at"] = time.time()
+        # ACCUMULATE. Overwriting meant a unit preempted twice was charged
+        # once, so retries could walk straight through a ceiling: budget 8,
+        # three 4-hour attempts, 12 committed.
+        us["gpu_hours"] = float(us.get("gpu_hours") or 0) + want
         spent += want
         save_state(state_dir, state)
 
@@ -619,7 +843,16 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None):
         berr = _bind(unit_dir, job_id) if str(job_id).replace("_", "").isdigit() \
             else None
         if berr:
-            report.append(f"{uid}: submitted {job_id} but {berr}")
+            # The job is REAL and running; only the binding write failed, on an
+            # NFS blip say. Recording job_id without this flag was a wedge: the
+            # reconcile net skips anything with a job_id, so the unit could
+            # never be judged and decayed to FAILED_EVIDENCE while the job
+            # succeeded. Retried at the top of the next advance.
+            us["bind_pending"] = True
+            report.append(f"{uid}: submitted {job_id} but {berr}. The job is "
+                          f"running; the binding will be retried next advance.")
+        else:
+            us.pop("bind_pending", None)
         us["job_id"] = str(job_id)
         us["state"] = "SUBMITTED"
         emit_intent(state_dir, plan.get("name") or "swarm", uid, "SUBMITTED", us)
@@ -675,7 +908,8 @@ def cmd_run(args):
         state = load_state(args.state_dir)
         report, dispatched, halted = advance(
             plan, state, args.state_dir, args.root, args.dry_run,
-            args.max_new_dispatches)
+            args.max_new_dispatches,
+            accept_plan_change=getattr(args, "accept_plan_change", False))
     finally:
         release_lease(args.state_dir)
     for line in report:
@@ -763,6 +997,13 @@ def main():
                        help="allocate and record, but do not submit. The DAG "
                             "logic is testable without a scheduler.")
         p.add_argument("--max-new-dispatches", type=int, default=None)
+        p.add_argument("--accept-plan-change", action="store_true",
+                       help="ratify an intentional mid-flight plan edit. "
+                            "Records the new digest and KEEPS every recorded "
+                            "attempt, so nothing already DONE is re-dispatched. "
+                            "Use when raising a budget ceiling or correcting a "
+                            "pending unit; not to paper over an accidental "
+                            "edit to a unit that is already running.")
 
     v = sub.add_parser("validate", help="acyclic deps, disjoint write scopes")
     v.add_argument("plan")
