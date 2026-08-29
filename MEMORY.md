@@ -27,7 +27,7 @@ bind mount.
 
 ## Status as of 2026-08-28
 
-Built and green: 461 tests.
+Built and green: 466 tests.
 
 | Piece | File | State |
 |---|---|---|
@@ -137,6 +137,51 @@ Not built: steps 6 (tracker drain, blocked on the Linear account) and 7
 `NEEDS_HUMAN`, promotion), per-server install, the project front door, and the
 `grill-with-docs` gate. All three declared kinds now have a working predicate and have been
 run for real.
+
+## The lock: six versions, and why it is now a kernel call
+
+Read this before touching mutual exclusion here. Five versions were
+hand-rolled from atomic file primitives, and two independent multi-model
+reviews each returned a CRITICAL against the then-current one:
+
+- v1-v3: read-then-write races, fixed by O_EXCL, then a re-read inside the
+  takeover's critical section, then hard-link publication (O_EXCL creates a
+  ZERO-LENGTH file, and a rival reading in that window called a live lease
+  stale).
+- v4: renewal re-read ownership then called `os.replace`, so a takeover in
+  that window left TWO controllers holding it. Round 1 CRITICAL, found by
+  three reviewers independently.
+- v5: serialised every mutation behind an atomic mkdir "breaker" plus an
+  ownership token. Round 2 CRITICAL: the breaker was reclaimable by MTIME
+  alone, so a holder merely PAUSED past the TTL had it stolen and then
+  clobbered its successor on resume; and the reclamation was unreachable from
+  `acquire_lease`, so a killed holder wedged the project permanently. An
+  intermediate build of v5 also regressed live on lambda: renewal unlinked the
+  lease before republishing, and two of eight concurrent advances dispatched
+  the same DAG, six jobs for three units.
+- v6: `fcntl.flock`. Every defect in v1-v5 lived in machinery approximating
+  one question a plain file cannot answer, "is the owner still alive". The
+  kernel drops the lock when the process exits however it exits, so the TTL,
+  breaker, token, mtime heuristic and renewal loop are all DELETED.
+  `renew_lease` has nothing to renew.
+
+Measured before adopting, because NFS can silently degrade locking to
+local-only, which would be WORSE than the old scheme by looking like it
+worked: 10 concurrent processes x 3 trials give exactly one winner on lambda
+(nfs), chimera (nfs4) and andromeda (weka). Then 8 concurrent real `advance`
+processes against one live DAG, 3 trials on each of the 3 clusters: one
+dispatcher and one attempt directory every time. The suite re-checks the
+filesystem property wherever it runs.
+
+Two follow-on defects, both mine, both found without a reviewer: a single
+global fd made `acquire_lease` return True for ANY state directory once one
+was acquired (locks are now keyed by project); and a bare `except OSError`
+reported ENOLCK, meaning "this filesystem cannot lock at all", as contention,
+which would have refused every advance forever while blaming a phantom
+controller.
+
+`--force` is gone. You cannot force a live holder off an OS lock and do not
+need to force a dead one.
 
 ## Live validation on lambda, 2026-08-28
 
