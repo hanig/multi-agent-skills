@@ -1111,7 +1111,12 @@ class TestNoStateChangeEscapesTheOutbox(unittest.TestCase):
                             "--state-dir", str(sd)],
                            capture_output=True, text=True, cwd=tmp)
             st = json.loads((sd / "swarm-state.json").read_text())
+            # attempt_dir must be cleared too, or the advance RE-CHECKS prep
+            # and the verdict overwrites FAILED before the DAG is walked. My
+            # first version of this test missed that and asserted against a
+            # scenario that never happened.
             st["units"]["prep"]["state"] = "FAILED"
+            st["units"]["prep"]["attempt_dir"] = None
             (sd / "swarm-state.json").write_text(json.dumps(st))
             (sd / "outbox.jsonl").unlink(missing_ok=True)
             subprocess.run([sys.executable, str(SWARM), "advance",
