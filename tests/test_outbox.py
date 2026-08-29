@@ -1657,5 +1657,48 @@ class TestUnknownIsNotTheSameAsLookItUp(unittest.TestCase):
                          "None must not mean 'look it up' as well as 'unknown'")
 
 
+class TestAUnitCanFindWhatItConsumes(unittest.TestCase):
+    """Found by running a DAG whose downstream unit actually READS its
+    upstream's output, which none of the earlier tests did. Nothing told a
+    unit where its dependency's outputs were: the script cds into the unit's
+    own exclusive directory, so an author had to glob `../../dep/*/file`,
+    which matches two directories the moment that dep retries."""
+
+    def test_each_dependency_is_exported_by_name(self):
+        state = {"units": {
+            "align-reads": {"attempt_dir": "/runs/align-reads/att1"},
+            "index": {"attempt_dir": "/runs/index/att9"}}}
+        got = dict(S._dep_env({"id": "call", "needs": ["align-reads", "index"]},
+                              state))
+        self.assertEqual(got["SWARM_DEP_ALIGN_READS"], "/runs/align-reads/att1")
+        self.assertEqual(got["SWARM_DEP_INDEX"], "/runs/index/att9")
+
+    def test_it_names_the_CURRENT_attempt_not_a_glob(self):
+        """The whole point: after a retry there are two attempt directories,
+        and only the coordinator knows which one is live."""
+        state = {"units": {"prep": {"attempt_dir": "/runs/prep/attempt-2"}}}
+        got = dict(S._dep_env({"id": "x", "needs": ["prep"]}, state))
+        self.assertEqual(got["SWARM_DEP_PREP"], "/runs/prep/attempt-2")
+
+    def test_a_dependency_with_no_attempt_yet_is_omitted(self):
+        """Exporting an empty path would let a command silently read from the
+        wrong place instead of failing."""
+        self.assertEqual(
+            S._dep_env({"id": "x", "needs": ["nothing-yet"]},
+                       {"units": {"nothing-yet": {"attempt_dir": None}}}), [])
+
+    def test_paths_are_quoted_in_the_generated_script(self):
+        """We generate a shell script. A directory with a space in its name
+        must stay one word."""
+        src = SWARM.read_text()
+        self.assertIn("shlex.quote(v)", src)
+        self.assertIn("shlex.quote(str(unit_dir))", src)
+
+    def test_the_unit_learns_its_own_id_and_directory_too(self):
+        src = SWARM.read_text()
+        self.assertIn("SWARM_UNIT_ID", src)
+        self.assertIn("SWARM_UNIT_DIR", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

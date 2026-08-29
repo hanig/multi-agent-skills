@@ -35,6 +35,8 @@ import fcntl
 import hashlib
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -563,7 +565,27 @@ def _allocate(plan, u, root):
     return out.strip().splitlines()[-1], None
 
 
-def _submit(u, unit_dir, dry_run):
+def _dep_env(u, state):
+    """Where each upstream unit's outputs actually are, as environment.
+
+    Without this a downstream unit has no way to find what it consumes: the
+    submitted script cds into the unit's OWN exclusive directory, so authors
+    were reduced to globbing `../../dep/*/file`. That is wrong the moment a
+    unit retries, because a second attempt directory appears and the glob
+    matches both. The coordinator knows which attempt is current, so it says
+    so rather than leaving it to be guessed.
+
+    Ids become env names: `align-reads` -> SWARM_DEP_ALIGN_READS."""
+    out = []
+    for dep in (u.get("needs") or []):
+        d = (state.get("units", {}).get(dep) or {}).get("attempt_dir")
+        if d:
+            name = re.sub(r"[^A-Za-z0-9]", "_", dep).upper()
+            out.append((f"SWARM_DEP_{name}", d))
+    return out
+
+
+def _submit(u, unit_dir, dry_run, state=None):
     """Submit, and return (job_id, error). Dispatch differs per kind; judging
     does not.
 
@@ -574,6 +596,7 @@ def _submit(u, unit_dir, dry_run):
     if dry_run:
         return f"dry-{os.urandom(3).hex()}", None
     if kind == "slurm":
+        deps = _dep_env(u, state or {})
         script = Path(unit_dir) / "job.sbatch"
         # The job is NAMED for the attempt. This is what closes the
         # crash-before-bind window: if we die between sbatch and bind, the job
@@ -582,7 +605,13 @@ def _submit(u, unit_dir, dry_run):
         # submitting a second one.
         attempt_id = Path(unit_dir).name
         body = ["#!/bin/bash", f"#SBATCH --job-name=swarm-{attempt_id}",
-                "set -euo pipefail", f"cd {unit_dir}", u["command"], ""]
+                "set -euo pipefail", f"cd {unit_dir}",
+                f"export SWARM_UNIT_ID={shlex.quote(u['id'])}",
+                f"export SWARM_UNIT_DIR={shlex.quote(str(unit_dir))}"]
+        # Quoted: a path is data. A directory with a space in its name must
+        # not become two words in a shell script we generate.
+        body += [f"export {n}={shlex.quote(v)}" for n, v in deps]
+        body += [u["command"], ""]
         for extra in (u.get("sbatch") or []):
             body.insert(1, f"#SBATCH {extra}")
         werr = U.write_json(Path(unit_dir) / "submitted.json",
@@ -609,6 +638,10 @@ def _submit(u, unit_dir, dry_run):
         # block for hours, holding the lease and checking nothing else. The
         # coordinator dispatches and detaches, exactly as it does for sbatch,
         # and unit.py judges the result later from the artifacts.
+        penv = dict(os.environ)
+        penv["SWARM_UNIT_ID"] = str(u["id"])
+        penv["SWARM_UNIT_DIR"] = str(unit_dir)
+        penv.update(dict(_dep_env(u, state or {})))
         log = Path(unit_dir) / "engine.log"
         try:
             fh = open(log, "ab")
@@ -632,7 +665,7 @@ def _submit(u, unit_dir, dry_run):
             wrapped = (f'(\n{u["command"]}\nrc=$?\nwait\nexit $rc\n)\n'
                        f'printf %s "$?" > {U.ENGINE_RC}\n')
             proc = subprocess.Popen(
-                ["sh", "-c", wrapped], cwd=str(unit_dir),
+                ["sh", "-c", wrapped], cwd=str(unit_dir), env=penv,
                 stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                 start_new_session=True)
         except OSError as e:
@@ -1165,7 +1198,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         spent += want
         save_state(state_dir, state)
 
-        job_id, err = _submit(u, unit_dir, dry_run)
+        job_id, err = _submit(u, unit_dir, dry_run, state)
         if err:
             us["state"] = "FAILED"
             report.append(f"{uid}: {err}")
