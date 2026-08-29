@@ -860,5 +860,85 @@ class TestUninstallOnlyRemovesOurOwn(unittest.TestCase):
                          "a symlink is not evidence that we created it")
 
 
+class TestInstallerSymlinkEdgeCases(unittest.TestCase):
+    """The shapes a symlink can take, because getting this wrong already cost
+    two of someone's skills. Attacked before the reviewers reported, since
+    this is the one place in the repo that deletes."""
+
+    def _install(self, prefix, *extra):
+        import subprocess as sp
+        return sp.run(["sh", str(ROOT / "install.sh"), "--prefix", str(prefix),
+                       *extra], capture_output=True, text=True, cwd=ROOT)
+
+    def test_foreign_links_of_every_shape_survive_uninstall(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            prefix, outside = base / "prefix", base / "outside" / "theirs"
+            outside.mkdir(parents=True)
+            (outside / "SKILL.md").write_text("theirs\n")
+            prefix.mkdir()
+            self._install(prefix)
+            os.symlink("../outside/theirs", prefix / "relative")   # relative
+            os.symlink(base / "nope", prefix / "broken")           # dangling
+            (base / "mid").mkdir()
+            os.symlink(base / "mid", prefix / "mid")
+            os.symlink(prefix / "mid", prefix / "nested")          # link->link
+            r = self._install(prefix, "--uninstall")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            for name in ("relative", "broken", "mid", "nested"):
+                self.assertTrue(
+                    (prefix / name).is_symlink(),
+                    f"uninstall removed a foreign {name} symlink")
+            self.assertTrue((outside / "SKILL.md").is_file())
+
+    def test_a_link_into_this_checkout_IS_ours(self):
+        """--mode link installs a symlink into the repo; uninstall must clear
+        it, and must not touch what it points at."""
+        with tempfile.TemporaryDirectory() as d:
+            prefix = Path(d) / "prefix"
+            prefix.mkdir()
+            os.symlink(ROOT / "skills" / "hanig-swarm", prefix / "ours-by-link")
+            self._install(prefix, "--uninstall")
+            self.assertFalse((prefix / "ours-by-link").is_symlink())
+            self.assertTrue((ROOT / "skills" / "hanig-swarm" / "SKILL.md")
+                            .is_file(), "uninstall followed the link and "
+                                        "deleted the real skill")
+
+    def test_prune_leaves_anything_without_our_marker(self):
+        """Prune deletes on a NEGATIVE condition -- absent from this repo --
+        which is the risky direction."""
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            prefix = base / "prefix"
+            prefix.mkdir()
+            self._install(prefix)
+            marker = ".installed-by-multi-agent-skills"
+            (prefix / "hanig-gone").mkdir()
+            (prefix / "hanig-gone" / marker).write_text("stale\n")
+            (prefix / "their-dir").mkdir()
+            (prefix / "their-dir" / "SKILL.md").write_text("theirs\n")
+            (base / "elsewhere").mkdir()
+            os.symlink(base / "elsewhere", prefix / "their-link")
+            r = self._install(prefix)
+            self.assertIn("pruned 1", r.stdout)
+            self.assertFalse((prefix / "hanig-gone").exists())
+            self.assertTrue((prefix / "their-dir" / "SKILL.md").is_file())
+            self.assertTrue((prefix / "their-link").is_symlink())
+
+    def test_prune_does_not_run_under_only(self):
+        """--only narrows the set deliberately; pruning everything else would
+        turn a targeted install into a sweep."""
+        with tempfile.TemporaryDirectory() as d:
+            prefix = Path(d) / "prefix"
+            prefix.mkdir()
+            self._install(prefix)
+            marker = ".installed-by-multi-agent-skills"
+            (prefix / "hanig-gone").mkdir()
+            (prefix / "hanig-gone" / marker).write_text("stale\n")
+            r = self._install(prefix, "--only", "hanig-swarm")
+            self.assertNotIn("prune", r.stdout)
+            self.assertTrue((prefix / "hanig-gone").is_dir())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
