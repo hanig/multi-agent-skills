@@ -1499,26 +1499,62 @@ class TestRound3ReviewFindings(unittest.TestCase):
     read as contention) was already fixed before the verdict landed, which is
     corroboration rather than news. These pin the rest."""
 
-    def test_an_inherited_lock_registry_does_not_grant_a_forked_child(self):
+    def test_a_forked_child_is_not_granted_the_parents_lock(self):
         """CRITICAL. flock is held per OPEN FILE DESCRIPTION, which a fork
-        shares, so a child inherited _LOCK_FDS and was told it already held a
-        lock it never took."""
+        SHARES, so a child inherited _LOCK_FDS and was told it already held a
+        lock it never took.
+
+        Uses a REAL fork. The earlier version simulated one by mutating the
+        owner pid, which stopped being a valid simulation once the guard began
+        closing inherited descriptors: in one process, closing the only fd
+        genuinely releases the lock, so the test failed while the code was
+        right. A property about forking has to fork."""
         import tempfile
         with tempfile.TemporaryDirectory() as d:
             ok, _ = S.acquire_lease(d)
             self.assertTrue(ok)
             try:
-                # Exactly what a fork leaves behind: populated registry, a
-                # different pid.
-                real = S._LOCK_OWNER_PID
-                S._LOCK_OWNER_PID = os.getpid() + 100000
-                ok2, _ = S.acquire_lease(d)
-                self.assertFalse(
-                    ok2, "a process that did not take the lock was told it "
-                         "holds it, purely from inherited memory")
-                self.assertFalse(S.renew_lease(d))
+                r, w = os.pipe()
+                pid = os.fork()
+                if pid == 0:                       # child
+                    try:
+                        os.close(r)
+                        got, _why = S.acquire_lease(d)
+                        os.write(w, b"GRANTED" if got else b"refused")
+                        os.close(w)
+                    finally:
+                        os._exit(0)
+                os.close(w)
+                verdict = os.read(r, 32).decode()
+                os.close(r)
+                os.waitpid(pid, 0)
+                self.assertEqual(
+                    verdict, "refused",
+                    "a forked child was granted its parent's lock, so two "
+                    "controllers could advance the same DAG")
             finally:
-                S._LOCK_OWNER_PID = real
+                S.release_lease(d)
+
+    def test_the_parent_keeps_its_lock_after_the_child_exits(self):
+        """The counter-claim to the fix. Closing inherited descriptors in the
+        child must NOT release the parent's lock: they share one open file
+        description, and the parent still references it."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            self.assertTrue(S.acquire_lease(d)[0])
+            try:
+                pid = os.fork()
+                if pid == 0:
+                    try:
+                        S.acquire_lease(d)          # triggers the fd close
+                    finally:
+                        os._exit(0)
+                os.waitpid(pid, 0)
+                self.assertTrue(
+                    S.renew_lease(d),
+                    "the parent lost its lock because a child closed an "
+                    "inherited descriptor")
+            finally:
                 S.release_lease(d)
 
     def test_a_replaced_lock_file_is_detected(self):

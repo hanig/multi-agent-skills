@@ -22,6 +22,7 @@ from pathlib import Path
 
 MAX_TREE_ENTRIES = 4000
 MAX_DEPTH = 6
+MAX_DIRS = 20_000        # a fan-out can leave hundreds of thousands of empty dirs
 WALK_SECONDS = 20        # a survey that hangs is worse than a partial one
 RUN_TIMEOUT = 30
 MAX_OUTPUT = 200_000     # a child cannot inflate the survey without limit
@@ -33,19 +34,42 @@ MAX_OUTPUT = 200_000     # a child cannot inflate the survey without limit
 # credential ends up in a repo, and this script would have written it verbatim.
 _URL_CREDS = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)"
                         r"(?P<user>[^/@\s]+)@")
+# A credential also travels in a QUERY STRING (?private_token=...), which the
+# userinfo pattern alone did not touch. A reviewer found that.
+_URL_QUERY_SECRET = re.compile(
+    r"([?&](?:private_token|access_token|token|api_key|apikey|password|"
+    r'auth|key|secret)=)[^&\s"\']+', re.I)
+# Token shapes. Deliberately a LIST OF FAMILIES rather than a claim of
+# completeness: reviewers pointed out glpat- and github_pat_ were missing, and
+# the honest lesson is that a closed list can never be complete. It catches
+# the common shapes; it is not a guarantee, and the docstring says so.
 _TOKENISH = re.compile(
-    r"\b(gh[pousr]_[A-Za-z0-9]{16,}"          # GitHub
+    r"(gh[pousr]_[A-Za-z0-9]{16,}"             # GitHub classic
+    r"|github_pat_[A-Za-z0-9_]{20,}"           # GitHub fine-grained
+    r"|glpat-[A-Za-z0-9_-]{16,}"               # GitLab
+    r"|gls-[A-Za-z0-9_-]{16,}"                 # GitLab shared runner
     r"|sk-[A-Za-z0-9_-]{16,}"                  # OpenAI-style
+    r"|sk-ant-[A-Za-z0-9_-]{16,}"              # Anthropic
     r"|xox[baprs]-[A-Za-z0-9-]{10,}"           # Slack
     r"|AKIA[0-9A-Z]{12,}"                      # AWS key id
-    r"|lin_api_[A-Za-z0-9]{16,})\b")          # Linear
+    r"|ASIA[0-9A-Z]{12,}"                      # AWS session
+    r"|lin_api_[A-Za-z0-9]{16,}"               # Linear
+    r"|hf_[A-Za-z0-9]{16,}"                    # HuggingFace
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----)")   # a key pasted anywhere
 
 
 def redact(text):
-    """Strip credentials from a string bound for the survey file."""
+    """Strip credentials from a string bound for the survey file.
+
+    NOT a guarantee. It removes URL userinfo, common query-string secret
+    parameters, and a list of known token families. A secret that matches none
+    of those -- a passphrase in a commit subject, a bespoke internal token --
+    passes through, and no pattern list can fix that. Treat the survey as
+    sensitive, not as sanitised."""
     if not isinstance(text, str):
         return text
     out = _URL_CREDS.sub(lambda m: f"{m.group('scheme')}<redacted>@", text)
+    out = _URL_QUERY_SECRET.sub(r"\1<redacted>", out)
     return _TOKENISH.sub("<redacted>", out)
 
 
@@ -54,7 +78,9 @@ def scrub(obj):
     field added later is covered without anyone remembering to think about it.
     Fail closed: a new key is scrubbed by default, not exempt by default."""
     if isinstance(obj, dict):
-        return {k: scrub(v) for k, v in obj.items()}
+        # KEYS TOO. A file named `x.sk-aaaaaaaaaaaaaaaa` becomes a key in the
+        # extension map, and scrubbing only values let it through.
+        return {scrub(k): scrub(v) for k, v in obj.items()}
     if isinstance(obj, list):
         return [scrub(v) for v in obj]
     return redact(obj)
@@ -73,22 +99,52 @@ _CHILD_ENV = {
 }
 
 
+# A repo's OWN .git/config can make git execute arbitrary commands:
+# core.fsmonitor and core.hooksPath run on `git status`, core.pager and
+# core.sshCommand and the filter/diff drivers on other operations. Surveying a
+# repo you did not write therefore runs its author's code, which a reviewer
+# pointed out and which matters precisely because this tool exists to study
+# repos you did not write. These -c flags neutralise the known vectors.
+#
+# This is mitigation, NOT a sandbox. git has a large surface and only a
+# container can make that claim; what is bounded here is the set of hooks git
+# consults during the read-only commands below.
+_GIT_SAFETY = ["-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null",
+               "-c", "core.pager=cat", "-c", "core.sshCommand=false",
+               "-c", "protocol.ext.allow=never", "-c", "uploadpack.allowFilter=false"]
+
+
 def run(argv, cwd=None, timeout=RUN_TIMEOUT):
     """Never shell=True: argv is a list, so a path containing metacharacters
     is data. stdin is closed, because a child that reads stdin would otherwise
-    block until the timeout and turn a survey into a stall."""
+    block until the timeout and turn a survey into a stall.
+
+    Output is read through a BOUNDED pipe rather than captured whole. A repo
+    with a 500MB commit subject would otherwise be buffered entirely into this
+    process before being truncated, on a login node shared by everyone."""
+    if argv and argv[0] == "git":
+        argv = [argv[0]] + _GIT_SAFETY + list(argv[1:])
     env = dict(os.environ)
     env.update(_CHILD_ENV)
     try:
-        p = subprocess.run(argv, cwd=cwd, capture_output=True, text=True,
-                           timeout=timeout, env=env,
-                           stdin=subprocess.DEVNULL)
-        # Bound what a child can hand back. `git log` in a repo with enormous
-        # commit messages, or scontrol on a large cluster, should not be able
-        # to inflate the survey without limit.
-        return p.returncode, (p.stdout or "")[:MAX_OUTPUT], (p.stderr or "")[:2000]
-    except (OSError, subprocess.SubprocessError):
+        proc = subprocess.Popen(
+            argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL, env=env)
+    except OSError:
         return 127, "", "could not run"
+    try:
+        # errors="replace": a commit message in ISO-8859-1 must not crash a
+        # survey with a UnicodeDecodeError traceback.
+        out = proc.stdout.read(MAX_OUTPUT).decode("utf-8", "replace")
+        err = proc.stderr.read(2000).decode("utf-8", "replace")
+        proc.stdout.close()
+        proc.stderr.close()
+        rc = proc.wait(timeout=timeout)
+    except (subprocess.SubprocessError, OSError, ValueError):
+        proc.kill()
+        proc.wait()
+        return 127, "", "timed out or could not be read"
+    return rc, out, err
 
 
 def machine():
@@ -211,7 +267,17 @@ def repo(root):
             "miniconda3", "miniforge3", ".local", ".rustup", ".cargo"}
     deadline = time.time() + WALK_SECONDS
     base_depth = len(root.parts)
+    dirs_seen = 0
     for dirpath, dirnames, filenames in os.walk(root):
+        # CHECKED PER DIRECTORY. Both guards used to sit inside the filename
+        # loop, so 300,000 EMPTY directories -- exactly what a failed fan-out
+        # leaves behind -- were walked without ever consulting either, and the
+        # partial result was then reported as a complete count. Two reviewers
+        # found this independently.
+        dirs_seen += 1
+        if dirs_seen > MAX_DIRS or time.time() > deadline:
+            truncated = True
+            break
         if len(Path(dirpath).parts) - base_depth >= MAX_DEPTH:
             dirnames[:] = []
         dirnames[:] = [d for d in dirnames
@@ -256,10 +322,24 @@ def repo(root):
         cand = root / rel / "swarm-state.json"
         if cand.is_file():
             out.setdefault("existing_swarm_state", []).append(rel)
-    for child in sorted(root.iterdir())[:60] if root.is_dir() else []:
-        if child.is_dir() and (child / ".swarm/state/swarm-state.json").is_file():
-            out.setdefault("existing_swarm_state", []).append(
-                f"{child.name}/.swarm/state")
+    # scandir + break, not sorted(iterdir())[:60]: sorting materialises every
+    # child first, so a root with a million entries was enumerated in full
+    # despite the slice that looks like a bound.
+    try:
+        with os.scandir(root) as it:
+            for i, child in enumerate(it):
+                if i >= 200:
+                    break
+                try:
+                    if child.is_dir() and (Path(child.path) /
+                                           ".swarm/state/swarm-state.json"
+                                           ).is_file():
+                        out.setdefault("existing_swarm_state", []).append(
+                            f"{child.name}/.swarm/state")
+                except OSError:
+                    continue
+    except OSError:
+        pass
     return out
 
 

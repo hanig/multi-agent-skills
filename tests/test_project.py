@@ -177,8 +177,6 @@ class TestTicketsMapBothWays(unittest.TestCase):
                                  "httpx"}, set())
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
 
 
 class TestTheSurveyLeaksNothing(unittest.TestCase):
@@ -305,7 +303,12 @@ class TestSurveyIsSafeInSomeoneElsesDirectory(unittest.TestCase):
         inflate the survey without limit."""
         src = SURVEY.read_text()
         self.assertIn("MAX_OUTPUT", src)
-        self.assertIn("[:MAX_OUTPUT]", src)
+        # Bounded at the READ, not sliced after the fact. capture_output=True
+        # buffers the whole thing into this process first, so a 500MB commit
+        # subject was already in memory before any truncation ran.
+        self.assertIn("read(MAX_OUTPUT)", src)
+        self.assertNotIn("capture_output=True", src,
+                         "capture_output buffers without limit")
 
     def test_every_child_has_a_timeout(self):
         src = SURVEY.read_text()
@@ -332,3 +335,165 @@ class TestSurveyIsSafeInSomeoneElsesDirectory(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertLess(_t.time() - t0, 30,
                             "the survey stalled on an unreachable remote")
+
+
+class TestThisFileRunsAllOfItself(unittest.TestCase):
+    """A reviewer found the __main__ block sitting ABOVE two later classes, so
+    `python3 tests/test_project.py` collected 15 tests, printed a green OK and
+    exited before the 13 security tests were even defined. Only `discover`
+    ever ran them, which is why the green looked real."""
+
+    def test_no_test_class_is_defined_after_the_main_block(self):
+        import re
+        src = Path(__file__).read_text()
+        i = src.index('if __name__ == "__main__":')
+        orphaned = re.findall(r"^class (\w+)", src[i:], re.M)
+        self.assertEqual(orphaned, [],
+                         f"these classes never run when this file is executed "
+                         f"directly: {orphaned}")
+
+    def test_collection_reaches_every_class_in_the_file(self):
+        """Compare what the loader COLLECTS against what the file DECLARES.
+
+        The obvious version of this test re-executes the file, which makes it
+        run itself, which re-executes the file: I wrote that and hung the
+        suite. Asking the loader is the same question without the recursion."""
+        import re
+        src = Path(__file__).read_text()
+        declared = set(re.findall(r"^class (\w+)\(unittest\.TestCase\)",
+                                  src, re.M))
+        loaded = set()
+        suite = unittest.defaultTestLoader.loadTestsFromName(__name__)
+
+        def walk(s):
+            for t in s:
+                if isinstance(t, unittest.TestSuite):
+                    walk(t)
+                else:
+                    loaded.add(type(t).__name__)
+        walk(suite)
+        self.assertEqual(declared - loaded, set(),
+                         f"declared but never collected: {declared - loaded}")
+
+
+
+
+class TestSurveyAgainstAHostileRepo(unittest.TestCase):
+    """It exists to study repos its author did not write, so a repo's own
+    .git/config is untrusted input."""
+
+    def test_repo_configured_hooks_do_not_execute(self):
+        """core.fsmonitor and core.hooksPath run on `git status`. Surveying a
+        repo therefore ran its author's code."""
+        import subprocess as sp
+        with tempfile.TemporaryDirectory() as d:
+            root, marker = Path(d) / "r", Path(d) / "HOOK_RAN"
+            root.mkdir()
+            sp.run(["git", "init", "-q", "."], cwd=root, capture_output=True)
+            (root / "f.txt").write_text("x\n")
+            sp.run(["git", "add", "-A"], cwd=root, capture_output=True)
+            sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "i"], cwd=root, capture_output=True)
+            hooks = root / "evil"
+            hooks.mkdir()
+            for hook in ("post-index-change", "pre-auto-gc", "post-checkout"):
+                h = hooks / hook
+                h.write_text(f"#!/bin/sh\ntouch {marker}\n")
+                h.chmod(0o755)
+            sp.run(["git", "config", "core.hooksPath", str(hooks)], cwd=root,
+                   capture_output=True)
+            sp.run(["git", "config", "core.fsmonitor", f"touch {marker}"],
+                   cwd=root, capture_output=True)
+            r = run(SURVEY, "--repo", str(root), "--json")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertFalse(marker.exists(),
+                             "the repo's own git config executed code")
+
+    def test_the_safety_flags_are_actually_passed_to_git(self):
+        src = SURVEY.read_text()
+        for key in ("core.fsmonitor=", "core.hooksPath=/dev/null",
+                    "core.sshCommand=false"):
+            self.assertIn(key, src)
+
+    def test_the_mitigation_is_not_described_as_a_sandbox(self):
+        """git's surface is large and only a container could make that claim.
+        Overstating it is how someone points this at a genuinely hostile repo."""
+        src = SURVEY.read_text()
+        self.assertIn("NOT a sandbox", src)
+
+    def test_a_directory_heavy_tree_cannot_outrun_the_bounds(self):
+        """Both guards used to sit inside the per-file loop, so a subtree of
+        EMPTY directories -- what a failed fan-out leaves -- was walked without
+        limit and then reported as a complete count."""
+        import time as _t
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "r"
+            for i in range(3000):
+                (root / f"run-{i}").mkdir(parents=True)
+            t0 = _t.time()
+            r = run(SURVEY, "--repo", str(root), "--json")
+            elapsed = _t.time() - t0
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertLess(elapsed, 60, "the walk outran its own deadline")
+            data = json.loads(r.stdout)
+            self.assertIn("MAX_DIRS", SURVEY.read_text())
+            self.assertEqual(data["repo"]["file_count"], 0)
+
+    def test_non_utf8_output_does_not_crash_the_survey(self):
+        """A commit message in ISO-8859-1 raised UnicodeDecodeError and the
+        survey exited with a traceback instead of a result."""
+        self.assertIn('decode("utf-8", "replace")', SURVEY.read_text())
+
+    def test_a_credential_in_a_query_string_is_redacted(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import survey as S2
+        got = S2.redact("https://gl.example.com/o/r.git?private_token=7f3a9b2c1d4e")
+        self.assertNotIn("7f3a9b2c1d4e", got)
+        self.assertIn("gl.example.com/o/r.git", got)
+
+    def test_a_credential_shaped_dict_KEY_is_redacted(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import survey as S2
+        got = S2.scrub({".sk-aaaaaaaaaaaaaaaaaaaa": 3})
+        self.assertNotIn("sk-aaaaaaaaaaaaaaaaaaaa", json.dumps(got))
+
+    def test_the_redaction_claim_is_scoped_honestly(self):
+        """A closed pattern list can never be complete, and saying otherwise
+        would invite someone to treat the survey as sanitised."""
+        sys.path.insert(0, str(SCRIPTS))
+        import survey as S2
+        doc = S2.redact.__doc__ or ""
+        self.assertIn("NOT a guarantee", doc)
+        self.assertIn("sensitive, not as sanitised", doc)
+
+
+class TestTicketsFailClosed(unittest.TestCase):
+    def test_a_corrupt_existing_draft_refuses_rather_than_duplicating(self):
+        """The blast radius is a live shared workspace: dropping the ids
+        silently would file a second project and a duplicate of every issue."""
+        with tempfile.TemporaryDirectory() as d:
+            plan = Path(d) / "plan.json"
+            plan.write_text(json.dumps(PLAN))
+            (Path(d) / "tickets.json").write_text("{ truncated")
+            r = run(TICKETS, "draft", str(plan))
+            self.assertEqual(r.returncode, 2, r.stdout)
+            self.assertIn("REFUSING", r.stdout)
+            self.assertIn("duplicate", r.stdout.lower())
+
+    def test_a_changed_unit_makes_its_existing_issue_stale(self):
+        """Comparing ids alone said "no drift" while a unit's declared outputs
+        had changed underneath the issue that describes them."""
+        d = T.draft(PLAN)
+        changed = json.loads(json.dumps(PLAN))
+        changed["units"][0]["outputs"] = ["something-else.txt"]
+        problems = T.check(changed, d)
+        self.assertTrue(any("no longer the work" in p for p in problems),
+                        problems)
+
+    def test_an_unchanged_plan_reports_no_drift(self):
+        """The counter-claim: a checker that always complains gets ignored."""
+        self.assertEqual(T.check(PLAN, T.draft(PLAN)), [])
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

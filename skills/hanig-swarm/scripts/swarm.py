@@ -366,7 +366,18 @@ def acquire_lease(state_dir):
     Path(state_dir).mkdir(parents=True, exist_ok=True)
     key = str(Path(state_dir).resolve())
     if _LOCK_OWNER_PID is not None and _LOCK_OWNER_PID != os.getpid():
-        _LOCK_FDS.clear()                     # inherited across a fork
+        # Inherited across a fork. Forgetting the fds is not enough: the child
+        # holds real descriptors on the same open file description, so a
+        # long-lived child would keep the project locked after the parent
+        # exited and block honest work. Closing them here is safe -- the lock
+        # lives on the OFD, and the parent's own descriptor still references
+        # it -- and it is what actually releases the child's grip.
+        for fd in list(_LOCK_FDS.values()):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        _LOCK_FDS.clear()
         _LOCK_OWNER_PID = None
     if key in _LOCK_FDS and _holds_the_path(_LOCK_FDS[key], Path(state_dir)):
         return True, None                     # already ours, in this process
@@ -438,7 +449,15 @@ def _holds_the_path(fd, state_dir):
     A flock is on an inode. If lease.lock is deleted or replaced, another
     process creates a NEW inode at that name and locks it successfully, and
     both controllers then believe they are alone. Comparing the fd's
-    (device, inode) with the path's is the only way to notice."""
+    (device, inode) with the path's is the only way to notice.
+
+    SCOPE, after a reviewer called the claim too strong: this is a check, and
+    a check cannot be atomic with the work that follows it. Replacement in the
+    instant after it returns is undetectable until the next call. What it
+    genuinely buys is that a lock file deleted or replaced BETWEEN advances,
+    which is the way this actually happens, is caught at the next renewal
+    rather than never. It narrows the window; it does not close it. Nothing
+    short of not deleting the lock file closes it."""
     try:
         a = os.fstat(fd)
         b = os.stat(str(Path(state_dir) / LOCK))

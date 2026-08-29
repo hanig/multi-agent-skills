@@ -17,6 +17,7 @@ Two properties it exists to enforce, from the plan's step 6:
 Standard library only, no network.
 """
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -32,6 +33,19 @@ def read_json(path):
         return None, "missing"
     except (OSError, ValueError) as e:
         return None, str(e)
+
+
+# The fields whose change makes an existing issue body WRONG. Comparing ids
+# alone said "no drift" when a unit's declared outputs had changed underneath
+# the issue that describes them, which a reviewer caught.
+BODY_FIELDS = ("kind", "command", "prompt", "outputs", "needs", "gpu_hours",
+               "promote_to", "description")
+
+
+def unit_digest(u):
+    payload = json.dumps({k: u.get(k) for k in BODY_FIELDS},
+                         sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 def issue_for_unit(u, plan_name):
@@ -83,6 +97,7 @@ def issue_for_unit(u, plan_name):
     ]
     return {
         "unit": u["id"],
+        "unit_digest": unit_digest(u),
         "title": f"{u['id']}: {u.get('description') or u.get('title') or u['id']}",
         "body": "\n".join(body),
         "blocked_by": needs,
@@ -136,10 +151,21 @@ def check(plan, tickets):
     for d in sorted(dupes):
         problems.append(f"unit {d!r} has more than one issue")
 
+    by_unit = {i.get("unit"): i for i in (tickets.get("issues") or [])}
     for u in (plan.get("units") or []):
         if not (u.get("outputs") or []):
             problems.append(f"unit {u['id']!r} declares no outputs, so its "
                             f"issue can never be closed by a predicate")
+        issue = by_unit.get(u["id"])
+        if issue is None:
+            continue
+        recorded = issue.get("unit_digest")
+        if recorded and recorded != unit_digest(u):
+            problems.append(
+                f"unit {u['id']!r} has changed since its issue was written "
+                f"({recorded} -> {unit_digest(u)}), so the issue now "
+                f"describes work that is no longer the work. Re-run `draft` "
+                f"to refresh the body; ids are carried forward.")
     return problems
 
 
@@ -149,7 +175,19 @@ def cmd_draft(args):
         sys.exit(f"error: no readable plan at {args.plan}: {err}")
     brief, _ = read_json(args.brief) if args.brief else (None, None)
     out_path = Path(args.out or (Path(args.plan).parent / DRAFT))
-    existing, _ = read_json(out_path)
+    existing, eerr = read_json(out_path)
+    if eerr and eerr != "missing":
+        # FAIL CLOSED. Discarding this error treated a present-but-corrupt
+        # draft as absent, dropped every tracker id, and the next one-click
+        # approval created a SECOND project and a duplicate of every issue in
+        # a live shared workspace. Two reviewers found it; the blast radius is
+        # someone else's tracker, so it refuses rather than guesses.
+        print(f"REFUSING: {out_path} exists but cannot be read ({eerr}).")
+        print("  It holds the tracker ids that make a re-run an UPDATE rather "
+              "than a duplicate.")
+        print("  Fix or remove it deliberately. Removing it means the next "
+              "approval files everything again.")
+        return 2
     d = draft(plan, brief, existing)
 
     problems = check(plan, d)
