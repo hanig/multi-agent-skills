@@ -204,7 +204,10 @@ def validate_plan(plan):
 #
 # A human typing `advance` notices all four. A cron job does not.
 LEASE = "lease.json"
-LEASE_TTL_S = 900          # a stale lease must expire, or one crash blocks forever
+LEASE_TTL_S = 900
+# A breaker is held across a few filesystem calls only, so one
+# older than this was abandoned by a controller that died.
+BREAKER_STALE_S = 120          # a stale lease must expire, or one crash blocks forever
 SETTLE_S = 600             # accounting lag before a missing row becomes terminal
 
 
@@ -322,7 +325,24 @@ def acquire_lease(state_dir, force=False):
     try:
         breaker.mkdir()
     except FileExistsError:
-        return False, "another controller is taking over the stale lease"
+        # A controller SIGKILLed between mkdir and the finally leaves this
+        # behind, and every later takeover then fails forever: one crash
+        # blocking the project, which is precisely what LEASE_TTL_S exists to
+        # prevent. Found by three reviewers, one rating it critical. A breaker
+        # is only ever held across a few filesystem calls, so one older than
+        # BREAKER_STALE_S was abandoned.
+        try:
+            age = time.time() - breaker.stat().st_mtime
+        except OSError:
+            return False, "another controller is taking over the stale lease"
+        if age < BREAKER_STALE_S:
+            return False, "another controller is taking over the stale lease"
+        try:
+            breaker.rmdir()
+            breaker.mkdir()
+        except OSError:
+            return False, ("a takeover breaker is abandoned but could not be "
+                           f"cleared: remove {breaker} by hand")
     except OSError as e:
         return False, f"cannot arbitrate the stale lease: {e}"
     try:
@@ -361,21 +381,43 @@ def acquire_lease(state_dir, force=False):
 
 
 def renew_lease(state_dir):
-    """Push the expiry out. An honest advance can legitimately outlive
-    LEASE_TTL_S -- a synchronous pipeline engine, or many `sacct` calls each
-    up to their own timeout -- and losing the lease mid-run is how ONE unit
-    becomes two jobs. Called between units, so progress is what renews it.
+    """Push the expiry out. Returns False if we no longer hold it.
 
-    Refuses to renew a lease this process no longer holds: if we were taken
-    over, the correct response is to stop, not to steal it back."""
+    Publishes by the same hard-link route as acquisition, so renewal cannot
+    overwrite a successor's lease: an earlier version read, checked ownership,
+    then wrote, and three reviewers pointed out that a takeover completing in
+    that window let the deposed controller clobber the new holder. Here the
+    old lease is removed and the new one linked into place only while we still
+    own it, and the link fails outright if someone else published first."""
     path = Path(state_dir) / LEASE
     held, err = U.read_json(path)
     if err or not isinstance(held, dict):
         return False
     if held.get("pid") != os.getpid() or held.get("host") != os.uname().nodename:
         return False
-    held["expires_at"] = time.time() + LEASE_TTL_S
-    return not U.write_json(path, held)
+    body = json.dumps({**held, "expires_at": time.time() + LEASE_TTL_S},
+                      sort_keys=True)
+    tmp = path.with_suffix(f".renew.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        with open(tmp, "w") as fh:
+            fh.write(body)
+            fh.flush()
+            os.fsync(fh.fileno())
+        # Re-check ownership as late as possible, then swap.
+        again, aerr = U.read_json(path)
+        if (aerr or not isinstance(again, dict)
+                or again.get("pid") != os.getpid()
+                or again.get("host") != os.uname().nodename):
+            return False
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 def release_lease(state_dir):
@@ -506,7 +548,12 @@ def _submit(u, unit_dir, dry_run):
             # false. The subshell contains the exit so the status is always
             # recorded. Newlines, not semicolons, so a trailing comment in the
             # command cannot swallow the closing paren.
-            wrapped = (f'(\n{u["command"]}\n)\n'
+            # `wait` before recording the status: a command ending in
+            # `... &` returns 0 immediately while a child keeps writing, so
+            # the unit could reach DONE and the declared output change
+            # afterwards. Waiting makes the recorded status cover the whole
+            # job the command started.
+            wrapped = (f'(\n{u["command"]}\nrc=$?\nwait\nexit $rc\n)\n'
                        f'printf %s "$?" > {U.ENGINE_RC}\n')
             proc = subprocess.Popen(
                 ["sh", "-c", wrapped], cwd=str(unit_dir),
@@ -628,6 +675,19 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None):
     if not action:
         return None
     verb, why = action
+    if verb == "close" and not evidence:
+        # Three reviewers found this: the caller built evidence as
+        # `{"receipt": rp} if rp else None`, so an NFS blip on the read
+        # microseconds after the verdict produced a close intent with
+        # evidence null. A drain following the rule must then refuse it and
+        # the issue never closes; a lax drain closes on nothing. Refusing HERE
+        # keeps the rule in the one place that cannot be forgotten, and the
+        # next advance re-reads the receipt and emits it properly.
+        print(f"WARNING: not recording a close intent for {uid}: the "
+              f"predicate's receipt could not be read, and nothing closes on "
+              f"a self-report. It will be retried on the next advance.",
+              file=sys.stderr)
+        return None
     key = outbox_key(project, uid, unit_state, us.get("attempt_dir"))
     path = Path(state_dir) / OUTBOX
     try:
@@ -741,7 +801,7 @@ def reconcile_orphan(unit_dir, allocated_at=None, kind=None):
         # created for this attempt.
         rc, out, _ = U.run(["paseo", "ls", "--json"], timeout=60)
         if rc != 0:
-            return None, None
+            return None, "UNKNOWN"
         try:
             for a in json.loads(out or "[]"):
                 if attempt_id in str(a.get("name") or ""):
@@ -752,7 +812,7 @@ def reconcile_orphan(unit_dir, allocated_at=None, kind=None):
                             f"it had been created but was never bound. Not "
                             f"re-run.")
         except (ValueError, AttributeError):
-            pass
+            return None, "UNKNOWN"
         return None, None
     name = f"swarm-{attempt_id}"
     # `sacct` WITHOUT -S defaults to jobs that started today. A crash at 23:50
@@ -761,17 +821,24 @@ def reconcile_orphan(unit_dir, allocated_at=None, kind=None):
     # when the attempt was allocated, an hour early for clock skew.
     since = (allocated_at - 3600) if allocated_at else (time.time() - 7 * 86400)
     start = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(since))
+    asked = 0
     for argv in (["squeue", "-h", "-n", name, "-o", "%i"],
                  ["sacct", "-n", "-P", "-X", "--name", name,
                   "-S", start, "-o", "JobID"]):
         rc, out, _ = U.run(argv, timeout=60)
-        if rc == 0 and (out or "").strip():
+        if rc != 0:
+            continue                       # the tool failed; it proved nothing
+        asked += 1
+        if (out or "").strip():
             job = out.strip().splitlines()[0].split("|")[0].strip()
             if job:
                 return job, (f"recovered job {job} for attempt {attempt_id}: it "
                              f"had reached the scheduler but was never bound. "
                              f"Not resubmitted.")
-    return None, None
+    # "Both tools answered and neither knows it" is proof of absence.
+    # "squeue was down" is not, and treating the two alike would release a
+    # live attempt and dispatch a second job for one unit.
+    return None, (None if asked == 2 else "UNKNOWN")
 
 
 def advance(plan, state, state_dir, root, dry_run, max_new=None,
@@ -838,6 +905,12 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             us["state"] = "SUBMITTED"
             report.append(f"{uid}: {note}")
             save_state(state_dir, state)
+        elif note == "UNKNOWN":
+            report.append(f"{uid}: allocated at {us['attempt_dir']} with no "
+                          f"binding, and the scheduler could not be asked "
+                          f"(the query itself failed). NOT releasing the "
+                          f"attempt: a failed query is not evidence that "
+                          f"nothing is running. Retrying next advance.")
         elif us["state"] == "ALLOCATED":
             # Allocated, then the coordinator died before `sbatch`. The
             # scheduler has never heard of it, so nothing is running and the
@@ -859,8 +932,20 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         # engine takes far longer. Renewing between units keeps mutual
         # exclusion for as long as we are actually making progress, instead of
         # losing it on a fixed clock while still running.
-        if not dry_run:
-            renew_lease(state_dir)
+        if not dry_run and not renew_lease(state_dir):
+            # We LOST the lease. Three reviewers found this discarded, which
+            # is the worst outcome in the file: a controller deposed mid-run
+            # keeps checking, dispatching and writing swarm-state.json
+            # alongside its successor, which is the "one unit becomes two
+            # jobs" that renewal exists to prevent.
+            report.append("STOPPING: this controller no longer holds the "
+                          "lease; another has taken it over. Nothing further "
+                          "is dispatched from here. Whatever is already "
+                          "submitted keeps running and will be judged by "
+                          "whoever holds the lease.")
+            state["halted"] = "lease lost mid-advance"
+            save_state(state_dir, state)
+            return report, dispatched, state["halted"]
         us = _unit_state(state, uid)
         if not us["attempt_dir"] or us["state"] == "DONE":
             continue
@@ -1082,7 +1167,7 @@ def cmd_advance(args):
 PROMOTIONS = "promotions.jsonl"
 
 
-def _redigest(attempt_dir, rel, recorded):
+def _redigest(attempt_dir, rel, recorded, accept_weak=False):
     """Re-derive one output's fingerprint NOW and compare with the receipt.
 
     The receipt is evidence about a moment; promotion happens later. Comparing
@@ -1094,6 +1179,36 @@ def _redigest(attempt_dir, rel, recorded):
     except OSError as e:
         return False, f"{rel}: cannot stat it now ({e})"
     method = str(recorded.get("method") or "")
+    # PROMOTION REFUSES WEAK EVIDENCE. Everywhere else a weak fingerprint is
+    # reported as weak and allowed through; here it is not, because this is
+    # the one place the tool writes to a path other people read. Four
+    # reviewers found the old fallback: a size+mtime match cannot see a file
+    # edited in place within the same mtime second, and for a DIRECTORY output
+    # it cannot see anything at all.
+    if "WEAK" in method or not recorded.get("sha256"):
+        shown = method or "an unknown fingerprint"
+        if not accept_weak:
+            return False, (f"{rel}: the receipt holds only {shown}, which "
+                           f"cannot establish that the content is unchanged. "
+                           f"Promotion will not publish on that basis. "
+                           f"Re-check the attempt to mint a stronger receipt, "
+                           f"or pass --accept-weak-evidence to publish on "
+                           f"size and mtime alone, which is recorded.")
+        # Refusing outright would make any output over the digest limit
+        # permanently unpromotable, and a 40GB checkpoint is exactly the thing
+        # worth publishing. So the refusal names an escape hatch rather than
+        # being a dead end, the approver has to type it, and the promotion
+        # record says the evidence was weak.
+        return True, (f"{rel}: matches on size and mtime only ({shown}). This "
+                      f"does NOT establish the content is unchanged; accepted "
+                      f"because --accept-weak-evidence was passed.")
+    if recorded.get("sha256") and method.startswith("tree-digest"):
+        now = U._tree_digest(src)
+        if now.get("sha256") != recorded["sha256"]:
+            return False, (f"{rel}: the directory tree changed since the "
+                           f"verdict ({recorded['sha256'][:12]} -> "
+                           f"{now.get('sha256','?')[:12]})")
+        return True, f"{rel}: directory tree digest matches"
     if recorded.get("sha256") and method.startswith("content-digest"):
         try:
             digest, truncated = U.sha256_file(src)
@@ -1106,17 +1221,13 @@ def _redigest(attempt_dir, rel, recorded):
             return False, (f"{rel}: CONTENT CHANGED since the verdict "
                            f"({recorded['sha256'][:12]} -> {digest[:12]})")
         return True, f"{rel}: content digest matches"
-    if st.st_size != recorded.get("size"):
-        return False, (f"{rel}: size changed since the verdict "
-                       f"({recorded.get('size')} -> {st.st_size})")
-    if int(st.st_mtime) != recorded.get("mtime"):
-        return False, f"{rel}: mtime changed since the verdict"
-    return True, (f"{rel}: size and mtime match, but the receipt holds no "
-                  f"content digest ({method or 'unknown method'}), so this "
-                  f"does NOT establish the content is unchanged")
+    shown = method or "no usable fingerprint"
+    return False, (f"{rel}: the receipt records {shown}, which promotion "
+                   f"cannot verify against.")
 
 
-def promote(plan, state, state_dir, uid, approver, approve):
+def promote(plan, state, state_dir, uid, approver, approve,
+            accept_weak=False):
     """Returns (lines, ok). Refuses loudly; copies only on explicit approval."""
     units = {u["id"]: u for u in plan["units"]}
     u = units.get(uid)
@@ -1154,7 +1265,7 @@ def promote(plan, state, state_dir, uid, approver, approve):
     lines, ok = [f"unit {uid}, attempt {Path(attempt).name}", ""], True
     weak = False
     for rel, rec in sorted(recorded.items()):
-        good, why = _redigest(attempt, rel, rec)
+        good, why = _redigest(attempt, rel, rec, accept_weak)
         lines.append(f"  {'ok ' if good else 'NO '} {why}")
         ok = ok and good
         weak = weak or (good and "does NOT establish" in why)
@@ -1188,21 +1299,32 @@ def promote(plan, state, state_dir, uid, approver, approve):
 
     try:
         version.parent.mkdir(parents=True, exist_ok=True)
-        staging = dest / f".staging-{Path(attempt).name}"
-        if staging.exists():
-            shutil.rmtree(staging)
-        staging.mkdir(parents=True)
-        for rel in sorted(recorded):
-            src, dst = Path(attempt) / rel, staging / rel
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            if src.is_dir():
-                shutil.copytree(src, dst)
-            else:
-                shutil.copy2(src, dst)
         if version.exists():
-            shutil.rmtree(version)
-        os.replace(staging, version)          # same directory: atomic
+            # ALREADY PUBLISHED. The earlier version of this deleted it and
+            # recopied, which destroys data other people may already be
+            # reading and leaves `current` pointing at nothing during the gap.
+            # A version directory is named by attempt id and its contents were
+            # digest-verified when it was written, so re-promoting the same
+            # attempt is a no-op. Re-point and stop.
+            lines.append(f"  already published at {version}; not rewriting it")
+        else:
+            staging = dest / f".staging-{Path(attempt).name}-{os.getpid()}"
+            if staging.exists():
+                shutil.rmtree(staging)
+            staging.mkdir(parents=True)
+            for rel in sorted(recorded):
+                src, dst = Path(attempt) / rel, staging / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if src.is_dir():
+                    shutil.copytree(src, dst)
+                else:
+                    shutil.copy2(src, dst)
+            # Fully populated before it takes the canonical name, so a reader
+            # never sees a partial version directory.
+            os.replace(staging, version)      # same directory: atomic
         tmp_link = dest / f".current-{os.getpid()}"
+        if tmp_link.is_symlink() or tmp_link.exists():
+            tmp_link.unlink()
         os.symlink(Path(attempt).name, tmp_link)
         os.replace(tmp_link, current)         # atomic pointer swap
     except OSError as e:
@@ -1232,7 +1354,8 @@ def cmd_promote(args):
         sys.exit(f"error: no readable plan at {args.plan}: {err}")
     state = load_state(args.state_dir)
     lines, ok = promote(plan, state, args.state_dir, args.unit,
-                        args.approver, args.approve)
+                        args.approver, args.approve,
+                        getattr(args, "accept_weak_evidence", False))
     for line in lines:
         print(f"  {line}" if line else "")
     return EXIT_OK if ok else EXIT_FAILED_UNIT
@@ -1416,6 +1539,11 @@ def main():
     pr.add_argument("--state-dir", default=".swarm/state")
     pr.add_argument("--approve", action="store_true",
                     help="actually copy. Without it this is a dry run.")
+    pr.add_argument("--accept-weak-evidence", action="store_true",
+                    help="publish an output whose receipt holds only size and "
+                         "mtime, which cannot establish unchanged content. "
+                         "Needed for outputs too large to digest. Recorded in "
+                         "the promotion record as weak.")
     pr.add_argument("--approver", default=None,
                     help="who accepted this result; recorded permanently")
     pr.set_defaults(fn=cmd_promote)

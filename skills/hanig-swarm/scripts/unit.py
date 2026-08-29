@@ -743,6 +743,44 @@ def _outputs_present(unit_dir, spec):
 DIGEST_LIMIT_BYTES = 256 * 1024 * 1024
 
 
+def _tree_digest(root):
+    """Digest a directory output: every file's relative path and content.
+
+    Walks in sorted order so the result is deterministic. Bounded by the same
+    entry cap as the freshness walk, and says so when it hits it, because a
+    digest over a truncated walk must not read as a digest over the tree."""
+    h = hashlib.sha256()
+    seen, truncated, unreadable = 0, False, 0
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames.sort()
+        for name in sorted(filenames):
+            if seen >= MAX_DIR_ENTRIES_SCANNED:
+                truncated = True
+                break
+            f = Path(dirpath) / name
+            rel = str(f.relative_to(root))
+            h.update(rel.encode() + b"\0")
+            try:
+                digest, part = sha256_file(f)
+                h.update(digest.encode() + b"\0")
+                truncated = truncated or part
+            except OSError:
+                unreadable += 1
+                h.update(b"<unreadable>\0")
+            seen += 1
+        if truncated:
+            break
+    rec = {"sha256": h.hexdigest(), "entries": seen}
+    if truncated or unreadable:
+        rec["method"] = (f"tree-digest (WEAK: "
+                         f"{'truncated walk' if truncated else ''}"
+                         f"{' and ' if truncated and unreadable else ''}"
+                         f"{f'{unreadable} unreadable' if unreadable else ''})")
+    else:
+        rec["method"] = "tree-digest"
+    return rec
+
+
 def fingerprint_outputs(unit_dir, present):
     """Record what each declared output looked like at check time.
 
@@ -771,27 +809,47 @@ def fingerprint_outputs(unit_dir, present):
             except OSError as e:
                 rec["method"] = "size-mtime"
                 rec["error"] = str(e)
+        elif p.is_dir():
+            # A directory's own size and mtime say NOTHING about a nested
+            # file: editing results/table.csv changes neither. Recording only
+            # those made every directory output silently unverifiable, and
+            # promotion accepted the match. Digest the tree instead: the names
+            # and the digest of every file under it.
+            rec.update(_tree_digest(p))
         else:
             # Named as weak so nothing downstream reads it as a content match.
-            rec["method"] = "size-mtime (WEAK: over the digest limit)" \
-                if p.is_file() else "size-mtime (directory)"
+            rec["method"] = "size-mtime (WEAK: over the digest limit)"
         out[rel] = rec
     return out
 
 
-def _proc_alive(pid, launched_at):
-    """Is the process we launched STILL the process at that pid?
-
-    Pids are reused, so a bare kill(pid, 0) can report a stranger's process as
-    our engine. On Linux, field 22 of /proc/<pid>/stat is the process start
-    time in clock ticks since boot; a process that started before we launched
-    ours cannot be ours. Returns True, False, or None when it cannot be told."""
-    try:
-        os.kill(int(pid), 0)
-    except ProcessLookupError:
-        return False
-    except (PermissionError, ValueError, TypeError, OverflowError):
+def _parse_etime(text):
+    """`ps -o etime=` gives [[dd-]hh:]mm:ss. Returns seconds, or None."""
+    t = (text or "").strip()
+    if not t:
         return None
+    days = 0
+    if "-" in t:
+        d, _, t = t.partition("-")
+        try:
+            days = int(d)
+        except ValueError:
+            return None
+    parts = t.split(":")
+    try:
+        nums = [int(x) for x in parts]
+    except ValueError:
+        return None
+    while len(nums) < 3:
+        nums.insert(0, 0)
+    h, m, sec = nums[-3:]
+    return days * 86400 + h * 3600 + m * 60 + sec
+
+
+def _proc_elapsed(pid):
+    """Seconds since the process at `pid` started, or None if it cannot be
+    told. Tries /proc first because it costs no subprocess, then falls back to
+    `ps`, which exists on macOS too."""
     try:
         with open(f"/proc/{int(pid)}/stat") as fh:
             fields = fh.read().rsplit(") ", 1)[-1].split()
@@ -799,11 +857,50 @@ def _proc_alive(pid, launched_at):
         hz = os.sysconf("SC_CLK_TCK")
         with open("/proc/uptime") as fh:
             uptime = float(fh.read().split()[0])
-        started = time.time() - uptime + (ticks / hz)
-        if launched_at and started < float(launched_at) - 60:
-            return False                                # a different process
+        return uptime - (ticks / hz)
     except (OSError, ValueError, IndexError, ZeroDivisionError):
-        return True                                     # alive; identity unsure
+        pass
+    for spec in ("etimes=", "etime="):
+        rc, out, _ = run(["ps", "-p", str(int(pid)), "-o", spec], timeout=15)
+        if rc != 0 or not (out or "").strip():
+            continue
+        raw = out.strip().splitlines()[0].strip()
+        if spec == "etimes=":
+            try:
+                return float(raw)
+            except ValueError:
+                continue
+        secs = _parse_etime(raw)
+        if secs is not None:
+            return secs
+    return None
+
+
+def _proc_alive(pid, launched_at):
+    """Is the process we launched STILL the process at that pid?
+
+    Pids are reused, so a bare kill(pid, 0) can report a stranger's process as
+    our engine. A process that started before we launched ours cannot be ours.
+
+    The identity check MUST degrade to "cannot tell" rather than to "yes".
+    An earlier version read /proc only, and macOS has no /proc, so every live
+    pid read as ours: a reused pid would have held a unit at RUNNING forever,
+    which is the wedge class this coordinator keeps having to close.
+    Returns True, False, or None when it genuinely cannot be told."""
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, ValueError, TypeError, OverflowError):
+        return None
+    if not launched_at:
+        return True
+    elapsed = _proc_elapsed(pid)
+    if elapsed is None:
+        return None                                   # alive, identity unsure
+    started = time.time() - elapsed
+    if started < float(launched_at) - 60:
+        return False                                  # a different process
     return True
 
 
@@ -845,7 +942,14 @@ def _pipeline_state(unit_dir, spec, present, missing, notes):
                          f"{ENGINE_RC} to appear.")
             return "INCOMPLETE"
         alive = _proc_alive(pid, rec.get("launched_at"))
-        if alive is not False:
+        if alive is None:
+            notes.append(f"a process is alive at pid {pid} on {here}, but "
+                         f"whether it is OUR engine cannot be established "
+                         f"here, and pids are reused. Not calling this "
+                         f"running. Check engine.log in the attempt "
+                         f"directory, or re-dispatch the unit.")
+            return "INCOMPLETE"
+        if alive:
             notes.append(f"engine pid {pid} is still running on {here}.")
             return "RUNNING"
         notes.append(f"engine pid {pid} is gone and no {ENGINE_RC} was "
@@ -920,6 +1024,13 @@ def _code_state(unit_dir, spec, present, missing, notes):
         return "INCOMPLETE"
 
     status = str(rec.get("Status") or rec.get("status") or "").lower()
+    if not status:
+        # Falling through an empty status reached DONE on outputs alone,
+        # which throws away the lifecycle half of this predicate entirely.
+        notes.append(f"paseo returned no lifecycle status for agent {agent}, "
+                     f"so whether it has finished cannot be told. Check "
+                     f"`paseo inspect {agent}`.")
+        return "INCOMPLETE"
     pending = rec.get("PendingPermissions") or rec.get("pendingPermissions") or []
     if pending:
         # Distinct from every other state: nothing is wrong and nothing will

@@ -271,8 +271,6 @@ class TestThePlanDigestCoversDispatch(unittest.TestCase):
         self.assertEqual(S.plan_digest(one), S.plan_digest(two))
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
 
 
 class TestTheWedges(unittest.TestCase):
@@ -419,11 +417,26 @@ class TestThePipelinePredicate(unittest.TestCase):
 
     def test_a_live_engine_reads_as_running_not_failed(self):
         """The honest-work case. Reporting a running engine as failed holds
-        its dependents and ends work that was fine."""
+        its dependents and ends work that was fine.
+
+        Spawns a REAL child. The fixture used to point at the test runner's
+        own pid while claiming it was launched a moment ago, which the
+        stricter identity check correctly rejects: a process alive for minutes
+        cannot be one launched seconds back. It passed alone and failed in the
+        full suite, purely because the runner had been alive longer by then.
+        The fixture was lying, not the code."""
+        import subprocess as sp
         import tempfile
         with tempfile.TemporaryDirectory() as t:
-            d = self._attempt(t, rc=None, outputs=["o.txt"])  # our own live pid
-            rc, out = self._check(d)
+            child = sp.Popen(["sleep", "20"])
+            time.sleep(0.3)
+            try:
+                d = self._attempt(t, rc=None, outputs=["o.txt"],
+                                  pid=child.pid)
+                rc, out = self._check(d)
+            finally:
+                child.kill()
+                child.wait()
             self.assertIn("still running", out, out)
 
     def test_the_wrapper_survives_an_explicit_exit_in_the_command(self):
@@ -727,22 +740,44 @@ class TestGatedPromotion(unittest.TestCase):
             self.assertTrue((shared / "w" / "current").is_symlink())
             self.assertTrue((shared / "w" / "att1" / "o.txt").is_file())
 
-    def test_a_weak_fingerprint_is_named_as_weak(self):
-        """A size-mtime match cannot certify content, and a promotion record
-        that did not say so would read as stronger than it is."""
+    def test_a_weak_fingerprint_is_REFUSED_by_default(self):
+        """Promotion is the one place this tool writes where other people
+        read, so it does not publish on evidence that cannot establish
+        unchanged content. A size+mtime match cannot see a file edited in
+        place within the same mtime second."""
         import tempfile
         with tempfile.TemporaryDirectory() as t:
-            plan, st, sd, attempt, _ = self._project(t)
+            plan, st, sd, attempt, shared = self._project(t)
             r = json.loads((attempt / "receipt.json").read_text())
             r["outputs"]["o.txt"].pop("sha256")
             r["outputs"]["o.txt"]["method"] = "size-mtime (WEAK: over limit)"
             (attempt / "receipt.json").write_text(json.dumps(r))
             lines, ok = S.promote(plan, st, sd, "w", "hani", True)
-            self.assertTrue(ok)
+            self.assertFalse(ok, "published on evidence that cannot establish "
+                                 "unchanged content")
+            self.assertFalse(shared.exists())
+            self.assertIn("--accept-weak-evidence", "\n".join(lines),
+                          "the refusal must name the way through; refusing "
+                          "outright would make any output over the digest "
+                          "limit permanently unpromotable, and a 40GB "
+                          "checkpoint is exactly what is worth publishing")
+
+    def test_weak_evidence_can_be_accepted_explicitly_and_is_recorded(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            plan, st, sd, attempt, shared = self._project(t)
+            r = json.loads((attempt / "receipt.json").read_text())
+            r["outputs"]["o.txt"].pop("sha256")
+            r["outputs"]["o.txt"]["method"] = "size-mtime (WEAK: over limit)"
+            (attempt / "receipt.json").write_text(json.dumps(r))
+            lines, ok = S.promote(plan, st, sd, "w", "hani", True,
+                                  accept_weak=True)
+            self.assertTrue(ok, "\n".join(lines))
             self.assertIn("does NOT establish", "\n".join(lines))
             rec = json.loads((Path(sd) / S.PROMOTIONS).read_text().strip())
-            self.assertIn("size-mtime only", rec["digest_basis"])
-
+            self.assertIn("size-mtime", rec["digest_basis"],
+                          "the record must say the evidence was weak, or it "
+                          "reads as stronger than it is")
 
 class TestStatusIsTheNotificationChannel(unittest.TestCase):
     def _st(self, state, halted=None):
@@ -813,3 +848,91 @@ class TestStatusIsTheNotificationChannel(unittest.TestCase):
                 self.assertNotIn(forbidden, code,
                                  f"{name} calls {forbidden}: status must read "
                                  f"durable state only")
+
+
+class TestTheThreeWeakPointsIFlagged(unittest.TestCase):
+    """Written by attacking my own least-confident code before the review came
+    back. Two of the three were real."""
+
+    def test_re_promoting_does_not_destroy_published_data(self):
+        """REAL. It did `rmtree(version)` then recopied, which destroys data
+        other people may already be reading and leaves `current` pointing at
+        nothing during the gap. A shared canonical tree is the one place this
+        tool leaves its own sandbox."""
+        src = SWARM.read_text()
+        seg = src[src.index("def promote("):]
+        seg = seg[:seg.index("\ndef ")]
+        self.assertNotIn("shutil.rmtree(version)", seg,
+                         "promotion deletes an already-published version")
+        self.assertIn("already published", seg,
+                      "re-promoting the same attempt must be a no-op, not a "
+                      "destroy-and-recopy")
+
+    def test_pid_identity_degrades_to_cannot_tell_not_to_yes(self):
+        """REAL. `_proc_alive` read /proc only. macOS has no /proc, so the
+        except branch returned True and EVERY live pid read as our engine: a
+        reused pid would hold a unit at RUNNING forever."""
+        sys.path.insert(0, str(SWARM.parent))
+        import unit as U2
+        import subprocess as sp
+        proc = sp.Popen(["sleep", "8"])
+        time.sleep(0.3)
+        try:
+            self.assertIs(U2._proc_alive(proc.pid, time.time() - 1), True)
+            # The hazard, on any platform: alive, but it predates our launch,
+            # so it is somebody else's process wearing a recycled pid.
+            self.assertIs(U2._proc_alive(proc.pid, time.time() + 3600), False,
+                          "a process that started before we launched ours was "
+                          "accepted as ours")
+        finally:
+            proc.kill()
+            proc.wait()
+        self.assertIs(U2._proc_alive(proc.pid, time.time()), False)
+
+    def test_etime_parsing_covers_the_formats_ps_actually_emits(self):
+        sys.path.insert(0, str(SWARM.parent))
+        import unit as U2
+        for text, want in (("00:05", 5), ("01:00", 60), ("12:34:56", 45296),
+                           ("2-03:04:05", 183845), ("", None), ("junk", None)):
+            self.assertEqual(U2._parse_etime(text), want, f"for {text!r}")
+
+    def test_an_unjudgeable_engine_is_not_reported_running(self):
+        """The caller must treat "cannot tell" as unjudgeable. Reporting it as
+        RUNNING is how a unit sits live forever."""
+        src = (SWARM.parent / "unit.py").read_text()
+        seg = src[src.index("def _pipeline_state("):]
+        seg = seg[:seg.index("\ndef ")]
+        self.assertIn("if alive is None:", seg)
+        i, j = seg.index("if alive is None:"), seg.index("if alive:")
+        self.assertLess(i, j, "the None case must be handled before the "
+                              "truthy case, or None falls through as running")
+
+    def test_the_engine_wrapper_records_a_status_for_awkward_commands(self):
+        """NOT a defect, checked because it looked like one: `exit`, `set -e`,
+        a trap, `exec`, a backgrounded child and an unbalanced paren in the
+        command all still produce an exit status, because the subshell
+        contains them."""
+        import subprocess as sp
+        import tempfile
+        cases = {
+            "printf ok > out.txt": "0",
+            "printf ok > out.txt; exit 0": "0",
+            "exit 7": "7",
+            "set -e; false; printf never > out.txt": "1",
+            'trap "echo t" EXIT; printf ok > out.txt': "0",
+            "sleep 3 & printf ok > out.txt": "0",
+            'printf "a)b" > out.txt': "0",
+        }
+        for cmd, want in cases.items():
+            with tempfile.TemporaryDirectory() as d:
+                wrapped = f'(\n{cmd}\n)\nprintf %s "$?" > engine.rc\n'
+                sp.run(["sh", "-c", wrapped], cwd=d,
+                       stdout=sp.DEVNULL, stderr=sp.DEVNULL)
+                got = (Path(d) / "engine.rc")
+                self.assertTrue(got.is_file(),
+                                f"no exit status recorded for {cmd!r}")
+                self.assertEqual(got.read_text().strip(), want, f"for {cmd!r}")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
