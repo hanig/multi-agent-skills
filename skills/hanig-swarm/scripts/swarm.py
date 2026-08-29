@@ -986,13 +986,33 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             if first is None:
                 us["incomplete_since"] = time.time()
             elif time.time() - float(first) > SETTLE_S:
-                us["state"] = "FAILED_EVIDENCE"
-                report.append(
-                    f"{uid}: no verdict {int(time.time() - float(first))}s "
-                    f"after the first INCOMPLETE, past the {SETTLE_S}s "
-                    f"accounting settle window. Treating as terminal: the "
-                    f"evidence never arrived. Check `sacct -j "
-                    f"{us.get('job_id')}` by hand.")
+                waited = int(time.time() - float(first))
+                # TWO DIFFERENT FAILURES, and they need opposite actions.
+                # Calling both "the evidence never arrived" sent an operator
+                # to `sacct` for a job whose sacct row says COMPLETED 0:0 --
+                # the one place that hides the problem, and precisely the
+                # confusion this whole tool exists to prevent.
+                rp, _ = U.read_json(Path(us["attempt_dir"]) / "receipt.json")
+                reason = ""
+                for note in ((rp or {}).get("notes") or []):
+                    if str(note).startswith("REASON="):
+                        reason = str(note).split("=", 1)[1]
+                if reason == U.REASON_NO_OUTPUTS:
+                    us["state"] = "FAILED"
+                    report.append(
+                        f"{uid}: the job finished cleanly and its declared "
+                        f"outputs never appeared, {waited}s on. This is a "
+                        f"FAILED unit, not missing evidence: the scheduler "
+                        f"will tell you it succeeded. Read the job's own log "
+                        f"in {us['attempt_dir']}.")
+                else:
+                    us["state"] = "FAILED_EVIDENCE"
+                    report.append(
+                        f"{uid}: no verdict {waited}s after the first "
+                        f"INCOMPLETE, past the {SETTLE_S}s accounting settle "
+                        f"window. Treating as terminal: the evidence never "
+                        f"arrived. Check `sacct -j {us.get('job_id')}` by "
+                        f"hand.")
         else:
             us.pop("incomplete_since", None)
         if rc in RETRYABLE:

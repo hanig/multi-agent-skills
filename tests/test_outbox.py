@@ -1038,3 +1038,42 @@ class TestDirectoryOutputs(unittest.TestCase):
                 (root / "canonical" / "w" / "att1" / "results" / "sub"
                  / "n.txt").read_text().strip(), "nested",
                 "the published tree was overwritten by the tampered one")
+
+
+class TestTheTwoWaysAUnitCanBeUnjudgeable(unittest.TestCase):
+    """A clean exit with no output, and no accounting row at all, are
+    different failures needing opposite actions from an operator. Calling both
+    "the evidence never arrived" sent someone to `sacct` for a job whose row
+    says COMPLETED 0:0, which is the one place that hides the problem."""
+
+    def test_the_reason_is_machine_readable_not_grepped_prose(self):
+        sys.path.insert(0, str(SWARM.parent))
+        import unit as U2
+        self.assertTrue(hasattr(U2, "REASON_NO_OUTPUTS"))
+        self.assertTrue(hasattr(U2, "REASON_NO_EVIDENCE"))
+        self.assertNotEqual(U2.REASON_NO_OUTPUTS, U2.REASON_NO_EVIDENCE)
+        src = SWARM.read_text()
+        self.assertIn("U.REASON_NO_OUTPUTS", src,
+                      "the coordinator must branch on the reason code, not on "
+                      "the wording of a note")
+
+    def test_a_clean_exit_with_no_output_becomes_FAILED_not_FAILED_EVIDENCE(self):
+        """Verified live on lambda: a job that exited 0 and wrote nothing."""
+        src = SWARM.read_text()
+        seg = src[src.index("elif time.time() - float(first) > SETTLE_S:"):]
+        seg = seg[:seg.index("else:\n            us.pop")]
+        self.assertIn('us["state"] = "FAILED"', seg)
+        self.assertIn('us["state"] = "FAILED_EVIDENCE"', seg)
+        i = seg.index("REASON_NO_OUTPUTS")
+        j = seg.index('us["state"] = "FAILED"')
+        self.assertLess(i, j, "FAILED must be chosen BECAUSE of the reason "
+                              "code, not by falling through to it")
+
+    def test_the_message_does_not_send_the_operator_to_sacct_for_a_clean_job(self):
+        src = SWARM.read_text()
+        seg = src[src.index("if reason == U.REASON_NO_OUTPUTS:"):]
+        seg = seg[:seg.index("else:")]
+        self.assertNotIn("sacct", seg,
+                         "sacct will say this job succeeded; pointing there "
+                         "is the exact confusion this tool exists to prevent")
+        self.assertIn("log", seg, "it must name where the real answer is")

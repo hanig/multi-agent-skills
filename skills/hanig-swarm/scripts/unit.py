@@ -1064,6 +1064,13 @@ def _code_state(unit_dir, spec, present, missing, notes):
     return "DONE"
 
 
+# Why a check came back INCOMPLETE. The coordinator needs to tell these apart
+# because they call for OPPOSITE actions from an operator, and grepping the
+# prose notes to find out would be a stringly-typed contract.
+REASON_NO_EVIDENCE = "no-accounting-row"   # nothing shows whether it ran
+REASON_NO_OUTPUTS = "outputs-absent"       # it ran cleanly and produced nothing
+
+
 def check_unit(unit_dir, spec, notes):
     """The done predicate. Returns a state name.
 
@@ -1106,6 +1113,7 @@ def check_unit(unit_dir, spec, notes):
     if sstate is None:
         if why_not:
             notes.append(f"sacct row(s) for job {job_id} discarded: {why_not}")
+        notes.append(f"REASON={REASON_NO_EVIDENCE}")
         notes.append(f"no usable accounting row for job {job_id}, so its "
                      f"terminal state is unknown. Wait, or check `sacct -j "
                      f"{job_id}` by hand.")
@@ -1142,6 +1150,7 @@ def check_unit(unit_dir, spec, notes):
                      "step produced which intermediate are not established.")
 
     if missing:
+        notes.append(f"REASON={REASON_NO_OUTPUTS}")
         notes.append(f"job {job_id} finished cleanly but {len(missing)} declared "
                      f"output(s) are absent from the exclusive write root: "
                      f"{', '.join(missing[:3])}. The job ended; it did not "
