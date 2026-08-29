@@ -387,12 +387,13 @@ backend is abstraction before one proven backend, so GitHub Issues wait.
 
 Acceptance criteria:
 
-- a. From a grilled project brief, the orchestrator DRAFTS the project and every
-  issue, and creates them all after ONE approval. No per-issue prompting.
-- b. The draft is shown in full before anything is created, and a dry run prints
-  exactly what would be created while creating nothing.
-- c. Every issue maps to one or more unit predicates, and every unit maps back
-  to one issue, so neither can drift silently from the other.
+- a. BUILT. `tickets.py draft` writes the project and every issue; the
+  session shows them and creates on ONE approval. No per-issue prompting.
+- b. BUILT. `tickets.py` talks to no tracker at all, so drafting IS the dry
+  run: it writes a file and sends nothing.
+- c. BUILT. `tickets.py check` fails on a unit with no issue, an issue with no
+  unit, a duplicate, or a unit declaring no outputs (which could never be
+  closed by a predicate, so it is refused an issue at all).
 - d. BUILT. Issue state follows unit state, never the reverse. Swarm durable
   state stays authoritative; the tracker is a view. Enforced structurally: the
   coordinator imports no network module, checked by AST in `test_outbox.py`.
@@ -405,8 +406,8 @@ Acceptance criteria:
   of duplicating, and an unwritable outbox warns rather than stalling the DAG.
   See `docs/tracker-outbox.md`. No drain is written yet: the registry offers no
   Linear connector, so that half waits on the account.
-- g. Re-running against an existing project updates rather than duplicating,
-  keyed on the project and unit ids.
+- g. BUILT. The draft carries tracker ids forward keyed on unit id, so a
+  re-run updates; a unit added later correctly gets no stale id.
 
 **7. `grill-with-docs`: interrogate the HUMAN before dispatching anything.**
 
@@ -462,10 +463,13 @@ asked for by name.
 
 Acceptance criteria:
 
-- a. Before a swarm plan is dispatched for the first time, its open decisions
+- a. BUILT via `hanig-project`, which runs survey then grill then plan then
+  tickets then dispatch, in that order. Before a swarm plan is dispatched for the first time, its open decisions
   have been grilled: every `NEEDS A DECISION` and every `ASSUMPTION:` line is
   either answered by Hani or explicitly deferred by him, not by me.
-- b. **A question answerable by inspection is never asked.** Cluster limits, ssh
+- b. BUILT and enforced by `survey.py`, which reports host, python, tools,
+  partitions, accounts, whether `--mem` is required, disk, git history and
+  existing docs BEFORE the interview starts. **A question answerable by inspection is never asked.** Cluster limits, ssh
   config, partition names, what a colleague's skill contains -- check, do not
   ask. Today's `--mem` correction and this skill's own location were both one
   command away.
