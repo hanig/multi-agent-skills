@@ -449,3 +449,168 @@ class TestThePipelinePredicate(unittest.TestCase):
             self.assertEqual(basis["exit_status_attested_by"],
                              "launcher wrapper (no scheduler)")
             self.assertFalse(basis["os_enforced_isolation"])
+
+
+FAKE_PASEO = """#!/bin/sh
+# Fake paseo. $PASEO_FIXTURE holds the JSON `inspect` should return.
+case "$1" in
+  inspect) cat "$PASEO_FIXTURE" ;;
+  ls)      cat "${PASEO_LS:-/dev/null}" ;;
+  run)     echo "Created workspace wks_deadbeef - fixture"
+           echo "Tip: pass --workspace <id> to run in an existing workspace."
+           cat "$PASEO_FIXTURE" ;;
+esac
+exit 0
+"""
+
+
+class TestTheCodePredicate(unittest.TestCase):
+    """The `code` path had never run either. Running it for real found four
+    separate breaks in one dispatch: the agent ran in the coordinator's
+    directory instead of its write root, the agent id was read from the wrong
+    JSON key, `bind` rejected a UUID outright, and the coordinator skipped
+    binding any non-numeric id. Each alone made the kind unusable."""
+
+    UNIT = SWARM.parent / "unit.py"
+
+    def _env(self, tmp, fixture):
+        import os as _os
+        bindir = Path(tmp) / "bin"
+        bindir.mkdir(parents=True, exist_ok=True)
+        fake = bindir / "paseo"
+        fake.write_text(FAKE_PASEO)
+        fake.chmod(0o755)
+        fx = Path(tmp) / "fixture.json"
+        fx.write_text(json.dumps(fixture))
+        env = dict(_os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        env["PASEO_FIXTURE"] = str(fx)
+        return env
+
+    def _attempt(self, tmp, agent="a1b2c3d4-0000-1111-2222-333344445555",
+                 outputs=("o.txt",)):
+        d = Path(tmp) / "attempt"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "unit.json").write_text(json.dumps({
+            "schema_version": 1, "attempt_id": "attempt", "task_id": "u",
+            "kind": "code", "job_id": agent, "declared_outputs": list(outputs),
+            "created_at": "2026-08-28T00:00:00+0000"}))
+        return d
+
+    def _check(self, d, env):
+        r = subprocess.run([sys.executable, str(self.UNIT), "check", str(d)],
+                           capture_output=True, text=True, env=env)
+        return r.returncode, r.stdout + r.stderr
+
+    def test_idle_without_the_output_is_not_done(self):
+        """THE point. `idle` is a lifecycle state exactly as `COMPLETED` is
+        for Slurm, and an agent finishing its turn is not the work being
+        done. Verified against a real agent too: it went idle having written
+        nothing, and the predicate said INCOMPLETE."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            env = self._env(t, {"Status": "idle", "PendingPermissions": []})
+            rc, out = self._check(self._attempt(t), env)
+            self.assertNotEqual(rc, 0, f"an idle agent with no output must "
+                                       f"not be DONE:\n{out}")
+            self.assertIn("not the same as the work being done", out)
+
+    def test_idle_with_every_output_is_done(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            env = self._env(t, {"Status": "idle", "PendingPermissions": []})
+            d = self._attempt(t)
+            (d / "o.txt").write_text("real\n")
+            rc, out = self._check(d, env)
+            self.assertEqual(rc, 0, out)
+
+    def test_a_pending_permission_is_its_own_state(self):
+        """Found live: an agent under default permissions stopped at its first
+        Write and sat `running` forever. Reporting that as RUNNING hides it
+        until the settle window turns it into a failure; reporting it FAILED
+        is untrue and discards the agent's context."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            env = self._env(t, {"Status": "running",
+                                "PendingPermissions": [{"tool": "Write"}]})
+            d = self._attempt(t)
+            (d / "o.txt").write_text("even with the output present\n")
+            rc, out = self._check(d, env)
+            self.assertEqual(rc, 5, f"expected NEEDS_HUMAN:\n{out}")
+            self.assertIn("until a person answers", out)
+
+    def test_needs_human_does_not_decay_into_a_failure(self):
+        """Waiting for a person must not become FAILED_EVIDENCE because
+        nobody was at the keyboard for ten minutes."""
+        src = SWARM.read_text()
+        i = src.index("if rc == NEEDS_HUMAN:")
+        j = src.index("if rc == INCOMPLETE:")
+        self.assertLess(i, j, "NEEDS_HUMAN must be handled before the settle "
+                              "window logic")
+        self.assertIn('us.pop("incomplete_since", None)', src[i:j])
+
+    def test_the_agent_runs_in_its_exclusive_write_root(self):
+        """Without --cwd the agent runs in the coordinator's directory, so it
+        writes nowhere near its write root and its declared outputs can never
+        be found: the isolation premise silently void for this one kind."""
+        src = SWARM.read_text()
+        seg = src[src.index('if kind == "code":'):]
+        seg = seg[:seg.index("return str(agent), None")]
+        self.assertIn('"--cwd", str(unit_dir)', seg)
+
+    def test_bind_accepts_an_agent_id_for_a_code_unit(self):
+        """`bind` demanded a numeric scheduler id, so a code unit could never
+        be bound and its predicate reported 'no agent bound' forever."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            d = self._attempt(t, agent=None)
+            spec = json.loads((d / "unit.json").read_text())
+            spec.pop("job_id")
+            (d / "unit.json").write_text(json.dumps(spec))
+            r = subprocess.run(
+                [sys.executable, str(self.UNIT), "bind", str(d), "--job-id",
+                 "a1b2c3d4-0000-1111-2222-333344445555"],
+                capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("bound agent", r.stdout)
+
+    def test_a_slurm_unit_still_refuses_a_uuid(self):
+        """The counter-claim: relaxing the shape for code must not relax it
+        for slurm, where a numeric id is what sacct can be asked about."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t) / "s"
+            d.mkdir()
+            (d / "unit.json").write_text(json.dumps({
+                "schema_version": 1, "attempt_id": "s", "task_id": "u",
+                "kind": "slurm", "declared_outputs": [],
+                "created_at": "2026-08-28T00:00:00+0000"}))
+            r = subprocess.run(
+                [sys.executable, str(self.UNIT), "bind", str(d), "--job-id",
+                 "a1b2c3d4-0000-1111-2222-333344445555"],
+                capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0)
+
+    def test_paseo_notices_do_not_break_the_id_parse(self):
+        """paseo prints "Created workspace ..." and "Tip: ..." to stdout
+        BEFORE its JSON, so json.loads on the whole stream fails and a live
+        agent is left running, unbound."""
+        sys.path.insert(0, str(SWARM.parent))
+        import swarm as S2
+        out = ('Created workspace wks_abc - foo\nTip: pass --workspace <id>.\n'
+               '{\n "agentId": "the-id",\n "cwd": "/x/{nested}"\n}\n')
+        self.assertEqual((S2._paseo_json(out) or {}).get("agentId"), "the-id")
+
+    def test_paseos_own_diagnostic_survives(self):
+        """An invalid mode comes back naming every mode the provider accepts.
+        Truncating the combined stream threw that away and left the operator
+        reading a workspace notice."""
+        sys.path.insert(0, str(SWARM.parent))
+        import swarm as S2
+        out = ("Created workspace wks_abc - foo\nTip: something.\n"
+               '{"error": {"code": "AGENT_CREATE_FAILED", "message": '
+               '"Invalid mode. Available modes: plan, default, acceptEdits, '
+               'auto, bypassPermissions"}}')
+        msg = S2._paseo_error(out, "")
+        self.assertIn("Available modes", msg)
+        self.assertNotIn("Created workspace", msg)

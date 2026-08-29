@@ -33,6 +33,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -46,8 +47,9 @@ STATE_FILE = "swarm-state.json"
 KINDS = U.KINDS
 
 # unit.py's exit codes are the ONLY judgement this coordinator consumes.
-DONE, RUNNING, FAILED, PREEMPTED, INCOMPLETE = 0, 1, 2, 3, 4
-NAME = {0: "DONE", 1: "RUNNING", 2: "FAILED", 3: "PREEMPTED", 4: "INCOMPLETE"}
+DONE, RUNNING, FAILED, PREEMPTED, INCOMPLETE, NEEDS_HUMAN = 0, 1, 2, 3, 4, 5
+NAME = {0: "DONE", 1: "RUNNING", 2: "FAILED", 3: "PREEMPTED",
+        4: "INCOMPLETE", 5: "NEEDS_HUMAN"}
 
 EXIT_OK = 0
 EXIT_HALTED = 1          # budget or runaway stopped new dispatch
@@ -86,6 +88,27 @@ def validate_plan(plan):
     units = plan.get("units")
     if not isinstance(units, list) or not units:
         raise PlanError("the plan declares no units; add a 'units' list")
+
+    # A `code` unit needs paseo ON THIS HOST, because that is where the
+    # coordinator dispatches it. Refusing here, before anything is dispatched,
+    # beats failing at `paseo run` with half a DAG already live.
+    #
+    # This is normally a signal that the unit is on the wrong machine rather
+    # than that paseo is missing: a code unit runs a coding agent as a local
+    # process, and a cluster login node is not where that belongs.
+    if any(isinstance(u, dict) and u.get("kind") == "code" for u in units):
+        if not shutil.which("paseo"):
+            ids = ", ".join(sorted(u.get("id", "?") for u in units
+                                   if isinstance(u, dict)
+                                   and u.get("kind") == "code"))
+            raise PlanError(
+                f"unit(s) {ids} are kind=code, which runs a coding agent "
+                f"through paseo, and paseo is not on PATH on "
+                f"{os.uname().nodename}. Either run this plan from a machine "
+                f"where you run agents, or declare the work as kind=pipeline "
+                f"or kind=slurm and invoke the tool directly. Installing "
+                f"paseo on a shared login node is usually the wrong answer: "
+                f"it would run the agent processes there.")
 
     seen, by_id = set(), {}
     for i, u in enumerate(units):
@@ -502,17 +525,47 @@ def _submit(u, unit_dir, dry_run):
             return None, f"launched pid {proc.pid} but {werr}"
         return f"engine-{proc.pid}", None
     if kind == "code":
-        # Shreshth's path, unchanged: Paseo owns the agent lifecycle.
-        rc, out, err = U.run(
-            ["paseo", "run", "--background", "--provider",
-             u.get("provider", "claude"), "--title", f"[swarm] {u['id']}",
-             u.get("prompt") or u.get("command") or u["id"]], timeout=180)
+        # Paseo owns the agent lifecycle; we own the write root.
+        #
+        # --cwd is REQUIRED, not optional. Without it the agent runs in the
+        # coordinator's directory, so it writes nowhere near its exclusive
+        # root and the declared outputs can never be found there: the whole
+        # isolation premise, silently void for this one kind.
+        argv = ["paseo", "run", "--background", "--json",
+                "--cwd", str(unit_dir),
+                "--provider", u.get("provider", "claude"),
+                # The title carries the ATTEMPT id, mirroring the Slurm job
+                # name, so an agent created just before a crash can be found
+                # again and is never confused with a later attempt of the same
+                # unit.
+                "--title", f"[swarm] {u['id']} {Path(unit_dir).name}"]
+        # An agent under default permissions stops at the first Write and
+        # waits for a person, which is correct behaviour and fatal to an
+        # unattended DAG. The plan must therefore say what it wants, and say
+        # it EXPLICITLY: a coordinator that silently bypassed permissions on
+        # the user's behalf would be a worse bug than a stalled unit.
+        if u.get("mode"):
+            argv += ["--mode", str(u["mode"])]
+        if u.get("model"):
+            argv += ["--model", str(u["model"])]
+        for kv in (u.get("env") or []):
+            argv += ["--env", str(kv)]
+        argv.append(u.get("prompt") or u.get("command") or u["id"])
+        rc, out, err = U.run(argv, timeout=180)
         if rc != 0:
-            return None, f"paseo run failed: {(err or out).strip()[:200]}"
-        for tok in (out or "").split():
-            if len(tok) >= 32 and "-" in tok:
-                return tok, None
-        return None, "could not read an agent id from paseo run output"
+            return None, f"paseo run failed: {_paseo_error(out, err)}"
+        # Read the id from JSON. Scanning output tokens for "something long
+        # with a dash in it" would happily return a branch name or a path.
+        # paseo names this field `agentId`. Reading `id` found nothing and
+        # left a live agent running, unbound and unjudgeable: the orphan class
+        # the Slurm path has a reconcile net for.
+        rec = _paseo_json(out) or {}
+        agent = (rec.get("agentId") or rec.get("AgentId")
+                 or rec.get("id") or rec.get("Id"))
+        if not agent:
+            return None, (f"paseo run returned no agent id: "
+                          f"{_paseo_error(out, err)}")
+        return str(agent), None
     return None, f"unknown kind {kind!r}"
 
 
@@ -555,6 +608,7 @@ TRACKER_EVENTS = {
     "FAILED_EVIDENCE": ("reopen", "no verdict arrived; evidence never landed"),
     "PREEMPTED": ("note", "preempted; a new attempt will be minted"),
     "HELD": ("block", "an upstream unit will not complete"),
+    "NEEDS_HUMAN": ("block", "blocked on a person, not on compute"),
 }
 
 
@@ -625,7 +679,56 @@ RETRYABLE = {PREEMPTED}          # a preemption is not a failure
 TERMINAL_BAD = {FAILED}
 
 
-def reconcile_orphan(unit_dir, allocated_at=None):
+def _paseo_json(out):
+    """paseo prints human notices ("Created workspace ...", "Tip: ...") to
+    stdout BEFORE its JSON, so json.loads on the whole stream fails. Take the
+    first balanced object instead."""
+    if not out:
+        return None
+    i = out.find("{")
+    if i < 0:
+        return None
+    depth, instr, esc = 0, False, False
+    for j, ch in enumerate(out[i:], i):
+        if instr:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                instr = False
+            continue
+        if ch == '"':
+            instr = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(out[i:j + 1])
+                except ValueError:
+                    return None
+    return None
+
+
+def _paseo_error(out, err):
+    """paseo's own diagnostics are good and specific: an invalid mode comes
+    back naming every mode the provider accepts. Truncating the combined
+    stream at 200 chars threw that away and left the workspace notice, which
+    tells the operator nothing."""
+    rec = _paseo_json(out) or _paseo_json(err)
+    if isinstance(rec, dict) and isinstance(rec.get("error"), dict):
+        msg = rec["error"].get("message") or rec["error"].get("code")
+        if msg:
+            return str(msg)[:400]
+    text = "\n".join(l for l in ((err or "") + "\n" + (out or "")).splitlines()
+                      if l.strip() and not l.startswith(("Created workspace",
+                                                         "Tip:")))
+    return text.strip()[:400] or "no diagnostic"
+
+
+def reconcile_orphan(unit_dir, allocated_at=None, kind=None):
     """Did a job for this attempt reach the scheduler even though we never
     recorded its id? Returns (job_id, note).
 
@@ -633,6 +736,24 @@ def reconcile_orphan(unit_dir, allocated_at=None):
     resubmitting after a crash is how one unit becomes two jobs writing the
     same directory -- the exact thing the exclusive write root is for."""
     attempt_id = Path(unit_dir).name
+    if kind == "code":
+        # Same question, different registry: paseo knows whether an agent was
+        # created for this attempt.
+        rc, out, _ = U.run(["paseo", "ls", "--json"], timeout=60)
+        if rc != 0:
+            return None, None
+        try:
+            for a in json.loads(out or "[]"):
+                if attempt_id in str(a.get("name") or ""):
+                    aid = a.get("id") or a.get("agentId")
+                    if aid:
+                        return str(aid), (
+                            f"recovered agent {aid} for attempt {attempt_id}: "
+                            f"it had been created but was never bound. Not "
+                            f"re-run.")
+        except (ValueError, AttributeError):
+            pass
+        return None, None
     name = f"swarm-{attempt_id}"
     # `sacct` WITHOUT -S defaults to jobs that started today. A crash at 23:50
     # whose job finished at 23:55 is invisible to a 00:10 reconcile, and the
@@ -709,7 +830,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             continue
         if us.get("job_id"):
             continue
-        job, note = reconcile_orphan(us["attempt_dir"], us.get("allocated_at"))
+        job, note = reconcile_orphan(us["attempt_dir"], us.get("allocated_at"),
+                                     kind=u.get("kind"))
         if job:
             us["job_id"] = job
             _bind(us["attempt_dir"], job)
@@ -760,6 +882,12 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         # to settle, an attempt still lacking a verdict IS a failure -- of
         # evidence, which is a different thing from the command failing, so it
         # gets its own name rather than being called FAILED.
+        if rc == NEEDS_HUMAN:
+            # Nothing is wrong and nothing will progress until a person acts.
+            # It must NOT accrue toward the settle window: turning "waiting for
+            # you" into FAILED_EVIDENCE after ten minutes would discard a live
+            # agent and its context because nobody was at the keyboard.
+            us.pop("incomplete_since", None)
         if rc == INCOMPLETE:
             first = us.get("incomplete_since")
             if first is None:
@@ -853,8 +981,13 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             report.append(f"{uid}: {err}")
             save_state(state_dir, state)
             continue
-        berr = _bind(unit_dir, job_id) if str(job_id).replace("_", "").isdigit() \
-            else None
+        # Bind EVERY kind that has an id. The old guard bound only numeric
+        # ids, so a code unit's agent id never reached unit.json and its
+        # predicate could never see an agent at all. A dry run still has no
+        # real id to bind.
+        berr = (_bind(unit_dir, job_id)
+                if job_id and not str(job_id).startswith(("dry-", "engine-"))
+                else None)
         if berr:
             # The job is REAL and running; only the binding write failed, on an
             # NFS blip say. Recording job_id without this flag was a wedge: the

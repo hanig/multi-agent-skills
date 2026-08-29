@@ -78,7 +78,7 @@ import time
 from pathlib import Path
 
 STATES = {"DONE": 0, "RUNNING": 1, "FAILED": 2, "PREEMPTED": 3,
-          "INCOMPLETE": 4}
+          "INCOMPLETE": 4, "NEEDS_HUMAN": 5}
 USAGE_ERROR = 64
 
 UNIT = "unit.json"
@@ -693,7 +693,16 @@ def cmd_bind(args):
         sys.exit(f"error: this attempt is already bound to job "
                  f"{spec['job_id']}. Allocate a new attempt rather than "
                  f"rebinding one.")
-    if not re.fullmatch(r"\d+(_\d+)?", str(args.job_id)):
+    # The id's SHAPE depends on the kind. A slurm unit is bound to a numeric
+    # scheduler id; a code unit is bound to a paseo agent UUID. Requiring the
+    # numeric form for every kind meant a code unit could never be bound at
+    # all, so its predicate reported "no agent bound" forever.
+    if spec.get("kind") == "code":
+        if not re.fullmatch(r"[0-9a-fA-F-]{8,64}", str(args.job_id)):
+            sys.exit(f"error: implausible agent id {args.job_id!r} for a "
+                     f"kind=code unit. Pass the agent id paseo printed, as "
+                     f"shown by `paseo ls`.")
+    elif not re.fullmatch(r"\d+(_\d+)?", str(args.job_id)):
         sys.exit(f"error: implausible job id {args.job_id!r}. Pass the numeric "
                  f"id the scheduler printed.")
     spec["job_id"] = str(args.job_id)
@@ -702,7 +711,8 @@ def cmd_bind(args):
     if err:
         sys.exit(f"error: cannot record the binding: {err}")
     event(unit_dir, "bound", job_id=spec["job_id"])
-    print(f"bound job {spec['job_id']} to attempt {spec['attempt_id']}")
+    noun = "agent" if spec.get("kind") == "code" else "job"
+    print(f"bound {noun} {spec['job_id']} to attempt {spec['attempt_id']}")
     return 0
 
 
@@ -825,6 +835,80 @@ def _pipeline_state(unit_dir, spec, present, missing, notes):
     return "DONE"
 
 
+def _code_state(unit_dir, spec, present, missing, notes):
+    """The done predicate for an agent run by Paseo.
+
+    DELEGATES lifecycle, judges artifacts. Paseo knows whether the agent
+    process is still working; it does not know whether the work is right, and
+    `idle` is a lifecycle state exactly as `COMPLETED` is for Slurm. So the
+    agent's own claim of success is not an input here, and neither is `idle`
+    on its own: the declared outputs must also be present in the exclusive
+    write root.
+
+    What this does NOT judge is the agent's git worktree. Shreshth's `bus
+    await --base HEAD --require-clean` covers that, and reimplementing it here
+    would be the mistake this plan exists to undo. The receipt says so."""
+    agent = spec.get("job_id")
+    if not agent:
+        notes.append("no agent id is bound to this attempt, so nothing shows "
+                     "an agent ever ran. Dispatch it with `swarm.py advance`.")
+        return "INCOMPLETE"
+
+    if not shutil.which("paseo"):
+        notes.append(f"paseo is not on PATH on {os.uname().nodename}, so the "
+                     f"agent's lifecycle cannot be read and this attempt "
+                     f"cannot be judged. Install paseo on this host, or "
+                     f"declare the unit as kind=pipeline and run the tool "
+                     f"directly.")
+        return "INCOMPLETE"
+
+    rc, out, err = run(["paseo", "inspect", "--json", str(agent)], timeout=60)
+    if rc != 0:
+        notes.append(f"paseo could not inspect agent {agent}: "
+                     f"{(err or out).strip()[:160]}. If the agent was deleted, "
+                     f"re-dispatch this unit.")
+        return "INCOMPLETE"
+    try:
+        rec = json.loads(out)
+    except ValueError:
+        notes.append(f"paseo returned output for agent {agent} that is not "
+                     f"JSON, so its lifecycle cannot be read.")
+        return "INCOMPLETE"
+
+    status = str(rec.get("Status") or rec.get("status") or "").lower()
+    pending = rec.get("PendingPermissions") or rec.get("pendingPermissions") or []
+    if pending:
+        # Distinct from every other state: nothing is wrong and nothing will
+        # progress until a person answers. Reporting this as RUNNING hides it
+        # until the settle window turns it into a failure; reporting it as
+        # FAILED is untrue and throws away the agent's context.
+        notes.append(f"agent {agent} is blocked on {len(pending)} pending "
+                     f"permission request(s) and will not progress until a "
+                     f"person answers. Run `paseo inspect {agent}` and "
+                     f"respond, or `paseo permit`.")
+        return "NEEDS_HUMAN"
+    if status and status not in ("idle", "done", "complete", "completed",
+                                "stopped", "error", "failed"):
+        notes.append(f"agent {agent} status {status!r}: still working.")
+        return "RUNNING"
+    if status in ("error", "failed"):
+        notes.append(f"agent {agent} status {status!r}. See `paseo logs "
+                     f"{agent}`.")
+        return "FAILED"
+    if missing:
+        # `idle` is lifecycle, not completion. This is the whole point.
+        notes.append(f"agent {agent} is {status or 'idle'}, but {len(missing)} "
+                     f"declared output(s) are absent: "
+                     f"{', '.join(sorted(missing))}. An agent finishing its "
+                     f"turn is not the same as the work being done.")
+        return "INCOMPLETE"
+    notes.append(f"agent {agent} is {status or 'idle'} and all {len(present)} "
+                 f"declared output(s) are present in the exclusive write root. "
+                 f"The agent's own report of success is NOT an input here, and "
+                 f"its git worktree is not judged by this module.")
+    return "DONE"
+
+
 def check_unit(unit_dir, spec, notes):
     """The done predicate. Returns a state name.
 
@@ -842,12 +926,7 @@ def check_unit(unit_dir, spec, notes):
         return "INCOMPLETE"
 
     if kind == "code":
-        # Shreshth's artifact contract over a git worktree, taken unchanged.
-        # Reimplementing it here would be the mistake this plan exists to undo.
-        notes.append("kind=code: the done predicate is `bus await` over the "
-                     "agent's worktree (--base HEAD advanced, --require-clean). "
-                     "Run that; this module does not duplicate it.")
-        return "INCOMPLETE"
+        return _code_state(unit_dir, spec, present, missing, notes)
 
     if kind == "pipeline":
         return _pipeline_state(unit_dir, spec, present, missing, notes)
@@ -952,9 +1031,13 @@ def cmd_check(args):
             # A pipeline unit has no scheduler behind it, so its exit status
             # comes from our own launcher wrapper rather than from Slurm's
             # accounting database. Weaker evidence, named as such.
-            "exit_status_attested_by": (
-                "launcher wrapper (no scheduler)"
-                if spec.get("kind") == "pipeline" else "slurm accounting"),
+            "exit_status_attested_by": {
+                "pipeline": "launcher wrapper (no scheduler)",
+                "code": "paseo agent lifecycle (no exit status exists)",
+            }.get(spec.get("kind"), "slurm accounting"),
+            # Named so nobody later reads a DONE on a code unit as covering
+            # the agent's commits.
+            "worktree_judged": False if spec.get("kind") == "code" else None,
             "note": "not isolated from other processes running as the same "
                     "Unix user. OS-enforced isolation would need a container "
                     "or mount namespace with this directory as the only "

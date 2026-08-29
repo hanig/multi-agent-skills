@@ -27,7 +27,7 @@ bind mount.
 
 ## Status as of 2026-08-28
 
-Built and green: 399 tests.
+Built and green: 417 tests.
 
 | Piece | File | State |
 |---|---|---|
@@ -69,12 +69,38 @@ to FAILED_EVIDENCE, holding its dependents. It now has its own predicate
 wrapper (no scheduler)`, because a login node offers no third party equivalent
 to Slurm's accounting database. Weaker evidence, named as such.
 
+The `code` path (paseo agents) also ran for the FIRST time and was broken in
+four independent ways, each alone enough to make the kind unusable: the agent
+ran in the coordinator's directory because `--cwd` was never passed (the
+isolation premise silently void for that kind); the agent id was read from
+`id` when paseo calls it `agentId`, leaving a live agent orphaned; `bind`
+rejected a UUID outright, demanding a numeric scheduler id; and the
+coordinator skipped binding any non-numeric id, so the agent id never reached
+unit.json. All fixed and verified end to end on the Mac.
+
+Its predicate delegates lifecycle to paseo and judges artifacts itself. It
+does NOT reimplement the git-worktree contract, and the receipt says so
+(`worktree_judged: false`). Verified live in both directions: an agent that
+went idle having written nothing returns INCOMPLETE, not DONE.
+
+NEEDS_HUMAN (exit 5) is a sixth unit state, added because a real agent under
+default permissions stopped at its first Write and sat `running` forever. It
+does not accrue toward the settle window: waiting for a person must never
+become FAILED_EVIDENCE because nobody was at the keyboard. For unattended
+runs a code unit must set `"mode": "bypassPermissions"` EXPLICITLY in the
+plan; the coordinator will never bypass permissions on its own.
+
+Paseo is NOT on lambda or chimera and should probably stay that way: it runs
+agent sessions as local processes, and lambda's own guidance is not to run
+heavy processes on a login node. `validate` therefore refuses a code unit on
+a host without paseo and says to run it where you run agents, or to declare
+the work as kind=pipeline. Agents on the Mac, slurm and pipeline units on the
+clusters.
+
 Not built: plan steps 4-7. Operator controls (`status --json`, notifications,
 `NEEDS_HUMAN`, promotion), per-server install, the project front door, and the
-`grill-with-docs` gate. The `code` dispatch path (paseo) has never run for real, and its
-check_unit branch still returns INCOMPLETE by design, deferring to
-`bus await`. Expect it to need the same treatment the pipeline path
-just got.
+`grill-with-docs` gate. All three declared kinds now have a working predicate and have been
+run for real.
 
 ## The open decision: which tracker
 
