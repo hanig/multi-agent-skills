@@ -27,7 +27,7 @@ bind mount.
 
 ## Status as of 2026-08-28
 
-Built and green: 466 tests.
+Built and green: 471 tests.
 
 | Piece | File | State |
 |---|---|---|
@@ -42,9 +42,11 @@ correctly and all reached DONE; two concurrent advances, one refused by the
 lease; `job_id` wiped from state while job 187880 was RUNNING and advance
 recovered it by job name rather than resubmitting; cron fired unattended.
 
-Live on lambda right now: a crontab line `*/5 * * * *` tagged
-`# hanig-swarm`, and test directories under `~/swarm-live/dag/`. Remove with
-`crontab -e` when done.
+Nothing of mine is left running. The lambda crontab entry and every test
+project directory were removed on 2026-08-28; what remains on each of the
+three clusters is `~/swarm-live/scripts/` holding the deployed coordinator
+(`swarm.py`, `unit.py`, `converge.py`, plus `swarm-cron.sh` on lambda). No
+queued jobs, no cron entries.
 
 Live re-validation on lambda after the review fixes (2026-08-28), all on the
 real cluster and its NFS home, not locally:
