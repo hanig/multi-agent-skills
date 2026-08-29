@@ -1077,3 +1077,66 @@ class TestTheTwoWaysAUnitCanBeUnjudgeable(unittest.TestCase):
                          "sacct will say this job succeeded; pointing there "
                          "is the exact confusion this tool exists to prevent")
         self.assertIn("log", seg, "it must name where the real answer is")
+
+
+class TestNoStateChangeEscapesTheOutbox(unittest.TestCase):
+    """Found by running a real failing DAG on lambda and then reading the
+    outbox. A unit that exited 0 and wrote nothing reached FAILED through the
+    settle branch and told the tracker NOTHING, because emission happened at
+    three specific sites and that transition was made at a fourth. Its issue
+    would have sat on "work started" forever."""
+
+    def test_intents_come_from_the_final_state_not_from_call_sites(self):
+        src = SWARM.read_text()
+        self.assertLessEqual(src.count("emit_intent("), 2,
+                             "emitting at each place a state is set will miss "
+                             "whichever path is added next; emit once from the "
+                             "final state")
+        i = src.index("before_states = {")
+        j = src.index("for uid in sorted(units):\n        us = _unit_state")
+        self.assertLess(i, j, "the before-snapshot must precede the diff")
+
+    def test_a_terminal_state_reached_late_in_an_advance_still_emits(self):
+        """The exact escape: state set in the settle branch, long after the
+        point where emission used to happen."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            (tmp / "plan.json").write_text(json.dumps(PLAN))
+            sd = tmp / "st"
+            # Dispatch, then force both units terminal the way the settle
+            # branch does: by writing state directly, not via _check.
+            subprocess.run([sys.executable, str(SWARM), "run",
+                            str(tmp / "plan.json"), "--dry-run",
+                            "--state-dir", str(sd)],
+                           capture_output=True, text=True, cwd=tmp)
+            st = json.loads((sd / "swarm-state.json").read_text())
+            st["units"]["prep"]["state"] = "FAILED"
+            (sd / "swarm-state.json").write_text(json.dumps(st))
+            (sd / "outbox.jsonl").unlink(missing_ok=True)
+            subprocess.run([sys.executable, str(SWARM), "advance",
+                            str(tmp / "plan.json"), "--dry-run",
+                            "--state-dir", str(sd)],
+                           capture_output=True, text=True, cwd=tmp)
+            emitted = {(i["unit"], i["unit_state"])
+                       for i in S.read_outbox(sd)}
+            self.assertIn(("train", "HELD"), emitted,
+                          f"a state reached during the advance did not emit: "
+                          f"{emitted}")
+
+    def test_an_unchanged_unit_does_not_re_emit_every_advance(self):
+        """The counter-claim. A diff against the previous state must not turn
+        a quiet DAG into a stream of duplicate tracker updates."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            (tmp / "plan.json").write_text(json.dumps(PLAN))
+            sd = tmp / "st"
+            for _ in range(3):
+                subprocess.run([sys.executable, str(SWARM), "advance",
+                                str(tmp / "plan.json"), "--dry-run",
+                                "--state-dir", str(sd)],
+                               capture_output=True, text=True, cwd=tmp)
+            keys = [i["key"] for i in S.read_outbox(sd)]
+            self.assertEqual(len(keys), len(set(keys)),
+                             "an unchanged unit emitted twice")

@@ -858,6 +858,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     acts."""
     units = {u["id"]: u for u in plan["units"]}
     report, dispatched, halted = [], 0, state.get("halted")
+    before_states = {uid: (_unit_state(state, uid) or {}).get("state")
+                     for uid in units}
 
     # The plan must not change under a live run. A mid-flight edit silently
     # redefines what the recorded attempts were for.
@@ -961,14 +963,6 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         previous = us.get("state")
         us["state"] = NAME.get(rc, f"rc={rc}")
         report.append(f"{uid}: {us['state']}")
-        if us["state"] != previous:
-            evidence = None
-            if us["state"] == "DONE":
-                # The verdict itself, so a drain never closes on a self-report.
-                rp, _ = U.read_json(Path(us["attempt_dir"]) / "receipt.json")
-                evidence = {"receipt": rp} if rp else None
-            emit_intent(state_dir, plan.get("name") or "swarm", uid,
-                        us["state"], us, evidence)
 
         # INCOMPLETE could stay live forever, so a job that vanished was never
         # terminal and the DAG never moved. Once Slurm accounting has had time
@@ -1050,7 +1044,6 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                            ("FAILED", "HELD", "FAILED_EVIDENCE")]
         if failed_upstream:
             us["state"] = "HELD"
-            emit_intent(state_dir, plan.get("name") or "swarm", uid, "HELD", us)
             report.append(f"{uid}: held, upstream "
                           f"{', '.join(failed_upstream)} will not complete")
             save_state(state_dir, state)
@@ -1114,13 +1107,32 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             us.pop("bind_pending", None)
         us["job_id"] = str(job_id)
         us["state"] = "SUBMITTED"
-        emit_intent(state_dir, plan.get("name") or "swarm", uid, "SUBMITTED", us)
         dispatched += 1
         report.append(f"{uid}: submitted {job_id} -> {unit_dir}")
         save_state(state_dir, state)
 
     state["halted"] = halted
     save_state(state_dir, state)
+
+    # Emit tracker intents from the FINAL state of the advance, not at each
+    # place a state happens to be set. Three sites used to emit, and they
+    # missed every transition made later in the same pass: a unit that exited
+    # 0 and wrote nothing reached FAILED through the settle branch and told
+    # the tracker NOTHING, so its issue would have sat on "work started"
+    # forever. Comparing before-and-after cannot miss a path, including paths
+    # added later.
+    project = plan.get("name") or "swarm"
+    for uid in sorted(units):
+        us = _unit_state(state, uid)
+        now = us.get("state")
+        if not now or now == before_states.get(uid):
+            continue
+        evidence = None
+        if now == "DONE" and us.get("attempt_dir"):
+            # The verdict itself, so a drain never closes on a self-report.
+            rp, _ = U.read_json(Path(us["attempt_dir"]) / "receipt.json")
+            evidence = {"receipt": rp} if rp else None
+        emit_intent(state_dir, project, uid, now, us, evidence)
     return report, dispatched, halted
 
 
