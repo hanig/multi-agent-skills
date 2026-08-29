@@ -346,8 +346,13 @@ class TestThisFileRunsAllOfItself(unittest.TestCase):
     def test_no_test_class_is_defined_after_the_main_block(self):
         import re
         src = Path(__file__).read_text()
-        i = src.index('if __name__ == "__main__":')
-        orphaned = re.findall(r"^class (\w+)", src[i:], re.M)
+        # Anchor to a TOP-LEVEL statement. Searching for the literal found the
+        # copy inside this test's own source, which sits above the classes it
+        # was meant to check, so the guard reported a problem that was its own
+        # reflection. A test that can match itself is testing the wrong file.
+        m = list(re.finditer(r'^if __name__ == "__main__":', src, re.M))
+        self.assertEqual(len(m), 1, "expected exactly one top-level __main__")
+        orphaned = re.findall(r"^class (\w+)", src[m[0].start():], re.M)
         self.assertEqual(orphaned, [],
                          f"these classes never run when this file is executed "
                          f"directly: {orphaned}")
