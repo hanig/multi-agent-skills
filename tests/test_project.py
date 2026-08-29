@@ -223,8 +223,13 @@ class TestTheSurveyLeaksNothing(unittest.TestCase):
         fn = next(n for n in tree.body
                   if isinstance(n, ast.FunctionDef) and n.name == "scrub")
         code = "\n".join(ast.unparse(x) for x in fn.body)
-        self.assertIn("for k, v in obj.items()", code,
-                      "scrub must recurse over dicts, not name known keys")
+        # Structure, not text: ast.unparse renders this as "for (k, v) in",
+        # so matching the source literally was brittle while the property held.
+        self.assertIn("obj.items()", code,
+                      "scrub must walk every key, not name known ones")
+        self.assertIn("scrub(v)", code, "scrub must recurse")
+        self.assertIn("isinstance(obj, list)", code,
+                      "a secret inside a list must be scrubbed too")
 
     def test_known_token_shapes_are_caught_anywhere_they_appear(self):
         sys.path.insert(0, str(SCRIPTS))
