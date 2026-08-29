@@ -987,3 +987,54 @@ class TestThePromotionDestination(unittest.TestCase):
                 {"id": "w", "kind": "slurm", "command": "true",
                  "outputs": ["o"], "promote_to": "relative/path"}]})
         self.assertIn("relative", str(cm.exception))
+
+
+class TestDirectoryOutputs(unittest.TestCase):
+    def test_a_nested_edit_is_caught_where_size_and_mtime_are_blind(self):
+        """A directory's own size and mtime say NOTHING about a nested file:
+        editing results/sub/n.txt changes neither, demonstrated below. Without
+        a tree digest, promotion would have published a tampered tree while
+        reporting that the outputs matched the receipt."""
+        import tempfile
+        sys.path.insert(0, str(SWARM.parent))
+        import unit as U2
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            att = root / "runs" / "w" / "att1"
+            att.mkdir(parents=True)
+            res = att / "results"
+            (res / "sub").mkdir(parents=True)
+            (res / "table.csv").write_text("a,b\n1,2\n")
+            (res / "sub" / "n.txt").write_text("nested\n")
+
+            before = res.stat()
+            fp = U2.fingerprint_outputs(str(att), ["results"])
+            self.assertIn("tree-digest", fp["results"]["method"])
+            (att / "receipt.json").write_text(json.dumps(
+                {"state": "DONE", "attempt_id": "att1", "outputs": fp}))
+            plan = {"name": "p", "units": [
+                {"id": "w", "kind": "slurm", "command": "true",
+                 "outputs": ["results"],
+                 "promote_to": str(root / "canonical")}]}
+            state = {"schema_version": 1, "halted": None, "units": {
+                "w": {"state": "DONE", "attempt_dir": str(att),
+                      "attempts": [str(att)], "gpu_hours": 0}}}
+            sd = root / "state"
+            sd.mkdir()
+            _, ok = S.promote(plan, state, str(sd), "w", "hani", True)
+            self.assertTrue(ok)
+
+            (res / "sub" / "n.txt").write_text("TAMPERED\n")
+            after = res.stat()
+            # The premise of the whole branch, asserted rather than assumed.
+            self.assertEqual((before.st_size, int(before.st_mtime)),
+                             (after.st_size, int(after.st_mtime)),
+                             "this test is vacuous unless the directory's own "
+                             "size and mtime really are unchanged")
+            lines, ok = S.promote(plan, state, str(sd), "w", "hani", True)
+            self.assertFalse(ok, "a tampered directory tree was published")
+            self.assertIn("tree changed", "\n".join(lines))
+            self.assertEqual(
+                (root / "canonical" / "w" / "att1" / "results" / "sub"
+                 / "n.txt").read_text().strip(), "nested",
+                "the published tree was overwritten by the tampered one")
