@@ -220,25 +220,37 @@ been created -- so today the "autonomous" swarm only advances when a human types
 A stdlib-only module (Python 3.8+, login-node safe). Allocate an exclusive, never-reused run-dir per attempt; record command, declared outputs, pinned read-only inputs, env identity, Slurm job-id, budget charge; append-only event log. `check` returns {RUNNING, DONE, FAILED, PREEMPTED, INCOMPLETE} using ONLY the surviving functions lifted from `contract.py:61-80,582-636,646-918` plus the watchdog `87-116`. Per-kind done: Slurm job = terminal-OK owned row + output-exists; pipeline = engine terminal exit + final-output-exists, receipt marks interior unjudged; code agent = delegate to `bus await`.
 
 Acceptance criteria:
-- a. Two units cannot be allocated the same run-dir; the allocator/validator rejects it (reuse `validate_sprint_plan.py` overlap logic).
-- b. A CANCELLED job with ExitCode `0:0` returns FAILED, not DONE.
-- c. An output present in the exclusive dir, mtime after job start, with a terminal-OK OWNED sacct row returns DONE.
-- d. Under simulated job-id reuse (a later Submit inside/after the interval), the wrong row is not bound: DONE is not returned for a reused id.
-- e. `End == "Unknown"` and states like `CANCELLED by 10025` parse correctly.
-- f. The same UTC instant rendered `+0000`, `-0700`, `+0200` yields one epoch.
-- g. Runs under Python 3.8 stdlib only, no network, on a login node.
-- h. Module executable core is <= ~300 lines and contains no production-window or foreign-write code (grep-checkable).
+- a. DONE. Two units cannot be allocated the same run-dir; the allocator/validator rejects it (reuse `validate_sprint_plan.py` overlap logic).
+- b. DONE. A CANCELLED job with ExitCode `0:0` returns FAILED, not DONE.
+- c. DONE, verified live on three clusters. An output present in the exclusive dir, mtime after job start, with a terminal-OK OWNED sacct row returns DONE.
+- d. DONE. Under simulated job-id reuse (a later Submit inside/after the interval), the wrong row is not bound: DONE is not returned for a reused id.
+- e. DONE. `End == "Unknown"` and states like `CANCELLED by 10025` parse correctly.
+- f. DONE. The same UTC instant rendered `+0000`, `-0700`, `+0200` yields one epoch.
+- g. SUPERSEDED. The floor is **3.10**, not 3.8: andromeda and chimera run
+  3.10.12 and lambda 3.12.3, so 3.8 was never the constraint. Stdlib-only and
+  no-network are DONE and enforced by an AST test.
+- h. PARTIALLY. The no-attribution half is DONE and checked structurally. The
+  size guard was RAISED twice, 340 -> 400 -> 480, with the reason recorded in
+  the test: `KINDS` always declared three kinds and only `slurm` had a working
+  predicate. Tightened where it counts instead: no single predicate may exceed
+  85 lines, and there must be one predicate per declared kind (grep-checkable).
 
 **2. Coordinator: dispatch, bound, detach, gate the DAG (the swarm).**
 Adapt `start-a-sprint`. Read a plan of polymorphic units (kind, command/spec, declared outputs, deps, pinned inputs, resource budget, optional promotion, optional review). Validate exclusive namespaces + acyclic deps (`validate_sprint_plan.py` shape). Per ready unit: allocate namespace, submit (Slurm via sbatch, pipeline via engine, code via `bus launch-worker`), write durable state, DETACH. A checker (Paseo schedule per ASSUMPTION) resumes, runs the unit contract check, advances the DAG when upstream predicates pass, mints a new attempt on retryable failure per the taxonomy, and halts new dispatch on budget/runaway.
 
 Acceptance criteria:
-- a. Given a 3-unit DAG (A -> B, A -> C), B and C submit only after A's predicate returns DONE.
-- b. Killing the coordinator process and re-running resumes from durable state without resubmitting completed units and without minting duplicate attempts.
-- c. Exceeding the declared GPU-hour budget halts new dispatch and reports which units were skipped.
-- d. A runaway unit hitting its Slurm `--time` is classified TIMEOUT/FAILED, its downstream units are held, and a retry (if policy allows) mints a NEW run-dir rather than reusing the old one.
-- e. A preempted unit is classified PREEMPTED and requeued/re-attempted per policy, not marked FAILED.
-- f. A pipeline unit whose engine exits non-zero is FAILED regardless of any partial outputs in the publish dir.
+- a. DONE, verified live on lambda, chimera and andromeda.
+- b. DONE, by crash injection on lambda: allocated-but-never-submitted, and
+  bind-failed-after-sbatch, both recovered without resubmitting completed units and without minting duplicate attempts.
+- c. DONE. Retry charges accumulate, so retries cannot walk through the ceiling.
+- d. DONE for the FAILED half (verified live: exit 9 -> FAILED, downstream
+  HELD naming it). TIMEOUT is in SLURM_FAILED but no real job has hit its
+  wall-clock yet, and a retry (if policy allows) mints a NEW run-dir rather than reusing the old one.
+- e. UNPROVEN IN THE WILD. The classification and retry are implemented and
+  unit-tested, but no real preemption has happened yet, so this is the largest
+  untested path on the Slurm side.
+- f. DONE, verified live: exit 3 -> FAILED, and exit 0 with a missing output ->
+  INCOMPLETE, regardless of any partial outputs in the publish dir.
 
 **3. Human monitor + gated promotion (what keeps it switched on).**
 
@@ -291,10 +303,12 @@ Acceptance criteria:
   what to use instead).
 - c. A failing `advance` does not silently stop the schedule; the failure is
   visible on the monitor page from step 3.
-- d. Two `advance` runs that overlap do not double-dispatch a unit. Either a lock
+- d. DONE, and it took six versions of the lock plus three review rounds.
+  Verified with 8 concurrent real advances x 3 trials on each of the three
+  clusters. Either a lock
   or the existing persist-before-act ordering must be shown to cover it, with a
   test that runs two advances concurrently against one state dir.
-- e. The cadence is declared in the plan, not hardcoded, and a unit kind whose
+- e. NOT DONE. The cadence lives in the crontab line, not the plan. A unit kind whose
   jobs run for days does not get polled every minute.
 - f. Stopping the schedule leaves the DAG resumable by hand: no state lives only
   in the scheduler.
