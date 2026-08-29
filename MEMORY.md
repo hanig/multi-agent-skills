@@ -27,7 +27,7 @@ bind mount.
 
 ## Status as of 2026-08-28
 
-Built and green: 417 tests.
+Built and green: 410 tests.
 
 | Piece | File | State |
 |---|---|---|
