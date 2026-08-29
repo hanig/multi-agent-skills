@@ -798,5 +798,67 @@ class TestRamificationsOfTheRoundTwoFixes(unittest.TestCase):
                           "as forgotten")
 
 
+class TestUninstallOnlyRemovesOurOwn(unittest.TestCase):
+    """I ran `install.sh --uninstall` on chimera to clear my own test install
+    and it deleted two of Hani's skills. Its ownership test was
+    `[ -L "$d" ] || [ -f "$d/$MARKER" ]`, so ANY symlink counted as ours.
+    Ownership must come from something we recorded, never from a file's shape."""
+
+    def _install_into(self, prefix):
+        import subprocess as sp
+        return sp.run(["sh", str(ROOT / "install.sh"), "--prefix", str(prefix)],
+                      capture_output=True, text=True, cwd=ROOT)
+
+    def test_a_foreign_symlink_survives_uninstall(self):
+        import subprocess as sp
+        with tempfile.TemporaryDirectory() as d:
+            prefix, elsewhere = Path(d) / "prefix", Path(d) / "elsewhere"
+            (elsewhere / "their-skill").mkdir(parents=True)
+            (elsewhere / "their-skill" / "SKILL.md").write_text("theirs\n")
+            prefix.mkdir()
+            self._install_into(prefix)
+            os.symlink(elsewhere / "their-skill", prefix / "their-skill")
+            r = sp.run(["sh", str(ROOT / "install.sh"), "--prefix", str(prefix),
+                        "--uninstall"], capture_output=True, text=True, cwd=ROOT)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertTrue((prefix / "their-skill").exists(),
+                            "uninstall removed a skill it did not install")
+            self.assertTrue((elsewhere / "their-skill" / "SKILL.md").is_file())
+            self.assertIn("left 1 skill", r.stdout)
+
+    def test_our_own_skills_are_still_removed(self):
+        """The counter-claim: an uninstall that removes nothing is useless."""
+        import subprocess as sp
+        with tempfile.TemporaryDirectory() as d:
+            prefix = Path(d) / "prefix"
+            prefix.mkdir()
+            self._install_into(prefix)
+            self.assertTrue((prefix / "hanig-swarm").is_dir())
+            sp.run(["sh", str(ROOT / "install.sh"), "--prefix", str(prefix),
+                    "--uninstall"], capture_output=True, text=True, cwd=ROOT)
+            self.assertFalse((prefix / "hanig-swarm").exists())
+
+    def test_install_does_not_clobber_a_foreign_symlink_either(self):
+        """The same inference lived in the install path's replace check."""
+        import subprocess as sp
+        with tempfile.TemporaryDirectory() as d:
+            prefix, elsewhere = Path(d) / "prefix", Path(d) / "elsewhere"
+            (elsewhere / "hanig-swarm").mkdir(parents=True)
+            (elsewhere / "hanig-swarm" / "SKILL.md").write_text("not ours\n")
+            prefix.mkdir()
+            os.symlink(elsewhere / "hanig-swarm", prefix / "hanig-swarm")
+            r = self._install_into(prefix)
+            self.assertIn("skip hanig-swarm", r.stdout,
+                          "install replaced a symlink it did not create")
+            self.assertEqual(
+                (elsewhere / "hanig-swarm" / "SKILL.md").read_text(),
+                "not ours\n")
+
+    def test_ownership_is_never_inferred_from_being_a_symlink(self):
+        src = (ROOT / "install.sh").read_text()
+        self.assertNotIn('if [ -L "$d" ] || [ -f "$d/$MARKER" ]', src,
+                         "a symlink is not evidence that we created it")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

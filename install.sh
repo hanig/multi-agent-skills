@@ -63,15 +63,38 @@ fi
 if [ "$UNINSTALL" -eq 1 ]; then
   [ -d "$PREFIX" ] || { say "nothing installed at $PREFIX"; exit 0; }
   removed=0
+  kept=0
   for d in "$PREFIX"/*; do
-    [ -e "$d" ] || continue
-    if [ -L "$d" ] || [ -f "$d/$MARKER" ]; then
+    [ -e "$d" ] || [ -L "$d" ] || continue
+    name=$(basename "$d")
+    ours=0
+    # OURS means one of exactly two things:
+    #   - a real directory carrying our marker file, or
+    #   - a symlink that points INTO THIS CHECKOUT (a --mode link install).
+    #
+    # It used to mean "a marker OR ANY SYMLINK", and that removed two skills
+    # belonging to someone else, because they happened to be symlinks to
+    # elsewhere. rm -rf on a symlink takes only the link, but the skills were
+    # gone from the skills directory just the same. Ownership is a property we
+    # record, never a shape we infer.
+    if [ -L "$d" ]; then
+      target=$(cd "$(dirname "$d")" && cd "$(readlink "$d")" 2>/dev/null && pwd) || target=""
+      case "$target" in
+        "$REPO"/skills/*) ours=1 ;;
+      esac
+    elif [ -f "$d/$MARKER" ]; then
+      ours=1
+    fi
+    if [ "$ours" -eq 1 ]; then
       step "remove $d"
       [ "$DRY" -eq 1 ] || rm -rf "$d"
       removed=$((removed + 1))
+    else
+      kept=$((kept + 1))
     fi
   done
   say "removed $removed skill(s) from $PREFIX"
+  [ "$kept" -gt 0 ] && say "left $kept skill(s) alone: not installed by this repo"
   exit 0
 fi
 
@@ -146,7 +169,17 @@ for src in "$REPO"/skills/*; do
 
   # Never clobber something we did not put there.
   if [ -e "$dest" ] || [ -L "$dest" ]; then
-    if [ -L "$dest" ] || [ -f "$dest/$MARKER" ] || [ "$FORCE" -eq 1 ]; then
+    # A symlink is NOT proof of ownership here either; see the uninstall
+    # comment above. Only our marker, a link into this checkout, or an
+    # explicit --force may replace what is already there.
+    ours_dest=0
+    if [ -L "$dest" ]; then
+      dtarget=$(cd "$(dirname "$dest")" && cd "$(readlink "$dest")" 2>/dev/null && pwd) || dtarget=""
+      case "$dtarget" in "$REPO"/skills/*) ours_dest=1 ;; esac
+    elif [ -f "$dest/$MARKER" ]; then
+      ours_dest=1
+    fi
+    if [ "$ours_dest" -eq 1 ] || [ "$FORCE" -eq 1 ]; then
       step "replace $dest"
       [ "$DRY" -eq 1 ] || rm -rf "$dest"
     else
