@@ -179,3 +179,75 @@ class TestTicketsMapBothWays(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestTheSurveyLeaksNothing(unittest.TestCase):
+    """The survey file is read into a session, often committed, sometimes
+    pasted. The first version wrote a git remote verbatim, and a remote can
+    carry a token in its userinfo."""
+
+    def _survey_of(self, remote):
+        import subprocess as sp
+        with tempfile.TemporaryDirectory() as d:
+            sp.run(["git", "init", "-q", "."], cwd=d, capture_output=True)
+            sp.run(["git", "remote", "add", "origin", remote], cwd=d,
+                   capture_output=True)
+            (Path(d) / "f.txt").write_text("x\n")
+            sp.run(["git", "add", "-A"], cwd=d, capture_output=True)
+            sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "i"], cwd=d, capture_output=True)
+            r = run(SURVEY, "--repo", d, "--json")
+            return json.loads(r.stdout)
+
+    def test_a_token_in_a_remote_url_never_reaches_the_file(self):
+        data = self._survey_of(
+            "https://hani:ghp_AAAABBBBCCCCDDDDEEEE@github.com/h/private.git")
+        blob = json.dumps(data)
+        self.assertNotIn("ghp_AAAABBBBCCCCDDDDEEEE", blob)
+        self.assertIn("<redacted>", data["repo"]["remote"])
+        # The useful part must survive: redaction that destroys the host would
+        # make the survey useless for the thing it exists for.
+        self.assertIn("github.com/h/private.git", data["repo"]["remote"])
+
+    def test_an_ordinary_remote_is_left_alone(self):
+        data = self._survey_of("git@github.com:hanig/multi-agent-skills.git")
+        self.assertEqual(data["repo"]["remote"],
+                         "git@github.com:hanig/multi-agent-skills.git")
+
+    def test_scrubbing_happens_at_the_boundary_not_per_field(self):
+        """A field added next year must be covered without anyone remembering.
+        Fail closed: scrub recurses over everything on the way out."""
+        src = SURVEY.read_text()
+        self.assertIn("data = scrub(data)", src)
+        tree = ast.parse(src)
+        fn = next(n for n in tree.body
+                  if isinstance(n, ast.FunctionDef) and n.name == "scrub")
+        code = "\n".join(ast.unparse(x) for x in fn.body)
+        self.assertIn("for k, v in obj.items()", code,
+                      "scrub must recurse over dicts, not name known keys")
+
+    def test_known_token_shapes_are_caught_anywhere_they_appear(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import survey as S2
+        for secret in ("ghp_AAAABBBBCCCCDDDDEEEE",
+                       "sk-AAAABBBBCCCCDDDDEEEEFFFF",
+                       "xoxb-1234567890-abcdefghij",
+                       "lin_api_AAAABBBBCCCCDDDDEEEE"):
+            self.assertNotIn(secret, S2.redact(f"leaked {secret} here"),
+                             f"{secret[:6]}... survived redaction")
+
+    def test_it_collects_no_environment_variable_values(self):
+        """Env values are where secrets actually live. The survey records USER
+        and nothing else, and that has to stay true."""
+        tree = ast.parse(SURVEY.read_text())
+        got = set()
+        for n in ast.walk(tree):
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                    and n.func.attr == "get"
+                    and isinstance(n.func.value, ast.Attribute)
+                    and n.func.value.attr == "environ"):
+                if n.args and isinstance(n.args[0], ast.Constant):
+                    got.add(n.args[0].value)
+        self.assertTrue(got <= {"USER"},
+                        f"the survey reads environment values beyond USER: "
+                        f"{sorted(got - {'USER'})}")

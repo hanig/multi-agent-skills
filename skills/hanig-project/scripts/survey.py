@@ -26,6 +26,39 @@ WALK_SECONDS = 20        # a survey that hangs is worse than a partial one
 RUN_TIMEOUT = 30
 
 
+# Things that must never reach the survey file. It is read into a session,
+# often committed, and sometimes pasted. A git remote can carry a token in its
+# userinfo (https://user:TOKEN@host/...), which is exactly how a private
+# credential ends up in a repo, and this script would have written it verbatim.
+_URL_CREDS = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)"
+                        r"(?P<user>[^/@\s]+)@")
+_TOKENISH = re.compile(
+    r"\b(gh[pousr]_[A-Za-z0-9]{16,}"          # GitHub
+    r"|sk-[A-Za-z0-9_-]{16,}"                  # OpenAI-style
+    r"|xox[baprs]-[A-Za-z0-9-]{10,}"           # Slack
+    r"|AKIA[0-9A-Z]{12,}"                      # AWS key id
+    r"|lin_api_[A-Za-z0-9]{16,})\b")          # Linear
+
+
+def redact(text):
+    """Strip credentials from a string bound for the survey file."""
+    if not isinstance(text, str):
+        return text
+    out = _URL_CREDS.sub(lambda m: f"{m.group('scheme')}<redacted>@", text)
+    return _TOKENISH.sub("<redacted>", out)
+
+
+def scrub(obj):
+    """Redact recursively. Applied to the WHOLE survey on the way out, so a
+    field added later is covered without anyone remembering to think about it.
+    Fail closed: a new key is scrubbed by default, not exempt by default."""
+    if isinstance(obj, dict):
+        return {k: scrub(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [scrub(v) for v in obj]
+    return redact(obj)
+
+
 def run(argv, cwd=None, timeout=RUN_TIMEOUT):
     try:
         p = subprocess.run(argv, cwd=cwd, capture_output=True, text=True,
@@ -222,6 +255,11 @@ def main():
     data = {"schema_version": 1, "machine": machine(),
             "scheduler": scheduler(), "repo": repo(args.repo)}
     data["storage"] = storage([Path.home(), Path(args.repo).resolve()])
+    # Scrub at the BOUNDARY, once, rather than at each field that might carry
+    # a secret. Verified with a remote of the form
+    # https://user:ghp_...@github.com/... , which the first version wrote out
+    # verbatim into a file meant to be read, committed and pasted.
+    data = scrub(data)
 
     if args.out:
         Path(args.out).write_text(json.dumps(data, indent=2, sort_keys=True))
