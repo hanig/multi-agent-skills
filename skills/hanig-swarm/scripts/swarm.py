@@ -30,6 +30,7 @@ Python 3.8+, stdlib only, login-node safe.
 """
 
 import argparse
+import errno
 import fcntl
 import hashlib
 import json
@@ -348,16 +349,37 @@ def acquire_lease(state_dir, force=False):
         fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
     except OSError as e:
         return False, f"cannot open the lock at {path}: {e}"
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+    # CONTENTION IS ONE ERRNO. A bare `except OSError` here reported every
+    # failure as "another controller holds it", including ENOLCK, which means
+    # this filesystem cannot lock AT ALL. On such a mount every advance would
+    # refuse forever, blaming a controller that does not exist -- a verifier
+    # crying wolf, which is the failure this repo weights equally with a false
+    # pass. EINTR is a signal, not a verdict, so it is retried.
+    for _ in range(3):
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError as e:
+            if e.errno == errno.EINTR:
+                continue
+            os.close(fd)
+            if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
+                held, rerr = U.read_json(Path(state_dir) / LEASE)
+                if not rerr and isinstance(held, dict):
+                    age = int(time.time()
+                              - float(held.get("acquired_at") or 0))
+                    return False, (f"{held.get('owner')}@{held.get('host')} "
+                                   f"pid {held.get('pid')}, {age}s ago")
+                return False, "another controller holds it"
+            return False, (
+                f"this filesystem cannot lock {path} ({e.strerror}, errno "
+                f"{e.errno}), so nothing can guarantee that only one "
+                f"controller runs. This is NOT contention. Put the state "
+                f"directory on a filesystem that supports advisory locking, "
+                f"or run the coordinator somewhere that can reach one.")
+    else:
         os.close(fd)
-        held, err = U.read_json(Path(state_dir) / LEASE)
-        if not err and isinstance(held, dict):
-            age = int(time.time() - float(held.get("acquired_at") or 0))
-            return False, (f"{held.get('owner')}@{held.get('host')} "
-                           f"pid {held.get('pid')}, {age}s ago")
-        return False, "another controller holds it"
+        return False, f"repeatedly interrupted while locking {path}"
     _LOCK_FDS[key] = fd
     # Descriptive only. Nothing decides anything from this file; it exists so a
     # human blocked by the lock can see who has it.

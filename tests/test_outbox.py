@@ -1424,3 +1424,71 @@ class TestPlanIsRefusedForTheWrongCluster(unittest.TestCase):
 
     def test_a_unit_with_no_sbatch_flags_is_not_refused(self):
         self.assertEqual(S.partition_problems([{"id": "a"}], known={"cpu"}), [])
+
+
+class TestLockErrorsAreNotAllContention(unittest.TestCase):
+    """Found by following the instruction I gave the reviewers rather than
+    waiting for their answer. A bare `except OSError` reported every failure
+    as contention, including one that means the opposite."""
+
+    def _fail_with(self, err):
+        import errno as E
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch("fcntl.flock",
+                            side_effect=OSError(err, os.strerror(err))):
+                return S.acquire_lease(d)
+
+    def test_a_filesystem_that_cannot_lock_is_not_reported_as_contention(self):
+        """ENOLCK means nothing can guarantee single-controller operation. On
+        such a mount every advance would refuse forever, blaming a controller
+        that does not exist: a verifier crying wolf, which this repo weights
+        equally with a false pass."""
+        import errno as E
+        ok, why = self._fail_with(E.ENOLCK)
+        self.assertFalse(ok)
+        self.assertIn("cannot lock", why)
+        self.assertIn("NOT contention", why)
+        self.assertNotIn("another controller holds it", why)
+
+    def test_real_contention_still_reads_as_contention(self):
+        import errno as E
+        ok, why = self._fail_with(E.EAGAIN)
+        self.assertFalse(ok)
+        self.assertIn("another controller", why)
+
+    def test_the_refusal_names_an_action(self):
+        import errno as E
+        _, why = self._fail_with(E.ENOLCK)
+        self.assertTrue(
+            any(w in why for w in ("Put the state directory", "run the "
+                                   "coordinator")),
+            f"a refusal must name what the operator can do: {why}")
+
+    def test_an_interrupted_lock_is_retried_not_judged(self):
+        """EINTR is a signal, not a verdict."""
+        import ast
+        src = SWARM.read_text()
+        fn = next(n for n in ast.parse(src).body
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == "acquire_lease")
+        code = "\n".join(ast.unparse(x) for x in fn.body)
+        self.assertIn("EINTR", code)
+
+    def test_the_lock_fd_is_not_inherited_by_spawned_children(self):
+        """The coordinator spawns sbatch, unit.py and paseo. If any inherited
+        the lock fd, a long-lived child would hold the project after the
+        coordinator exited. Python 3.4+ makes fds non-inheritable by default;
+        asserted rather than assumed, because it is load-bearing here."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            ok, _ = S.acquire_lease(d)
+            self.assertTrue(ok)
+            try:
+                fd = S._LOCK_FDS[str(Path(d).resolve())]
+                self.assertFalse(os.get_inheritable(fd),
+                                 "the lock fd would be inherited by sbatch, "
+                                 "unit.py and paseo children")
+            finally:
+                S.release_lease(d)
