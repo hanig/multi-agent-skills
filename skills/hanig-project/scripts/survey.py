@@ -24,6 +24,7 @@ MAX_TREE_ENTRIES = 4000
 MAX_DEPTH = 6
 WALK_SECONDS = 20        # a survey that hangs is worse than a partial one
 RUN_TIMEOUT = 30
+MAX_OUTPUT = 200_000     # a child cannot inflate the survey without limit
 
 
 # Things that must never reach the survey file. It is read into a session,
@@ -59,11 +60,33 @@ def scrub(obj):
     return redact(obj)
 
 
+# Environment for every child. This runs inside a directory somebody else
+# controls, and the failure to avoid is a survey that HANGS rather than one
+# that returns nothing: git will happily block forever asking for credentials
+# or waiting on a pager, and a blocked survey blocks the whole interview.
+_CHILD_ENV = {
+    "GIT_TERMINAL_PROMPT": "0",     # never ask for credentials
+    "GIT_PAGER": "cat",             # never start a pager
+    "GIT_OPTIONAL_LOCKS": "0",      # do not take a lock in someone's repo
+    "GCM_INTERACTIVE": "never",
+    "SLURM_TIME_FORMAT": "standard",
+}
+
+
 def run(argv, cwd=None, timeout=RUN_TIMEOUT):
+    """Never shell=True: argv is a list, so a path containing metacharacters
+    is data. stdin is closed, because a child that reads stdin would otherwise
+    block until the timeout and turn a survey into a stall."""
+    env = dict(os.environ)
+    env.update(_CHILD_ENV)
     try:
         p = subprocess.run(argv, cwd=cwd, capture_output=True, text=True,
-                           timeout=timeout)
-        return p.returncode, p.stdout, p.stderr
+                           timeout=timeout, env=env,
+                           stdin=subprocess.DEVNULL)
+        # Bound what a child can hand back. `git log` in a repo with enormous
+        # commit messages, or scontrol on a large cluster, should not be able
+        # to inflate the survey without limit.
+        return p.returncode, (p.stdout or "")[:MAX_OUTPUT], (p.stderr or "")[:2000]
     except (OSError, subprocess.SubprocessError):
         return 127, "", "could not run"
 

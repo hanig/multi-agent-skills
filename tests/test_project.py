@@ -256,3 +256,79 @@ class TestTheSurveyLeaksNothing(unittest.TestCase):
         self.assertTrue(got <= {"USER"},
                         f"the survey reads environment values beyond USER: "
                         f"{sorted(got - {'USER'})}")
+
+
+class TestSurveyIsSafeInSomeoneElsesDirectory(unittest.TestCase):
+    """It runs against a repo its author does not own, on a shared login node.
+    The failure to avoid is not exotic: it is git blocking forever on a
+    credential prompt or a pager, which stalls the whole interview."""
+
+    def test_children_never_run_through_a_shell(self):
+        """A repo path containing shell metacharacters must be data."""
+        tree = ast.parse(SURVEY.read_text())
+        for n in ast.walk(tree):
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                    and n.func.attr == "run"):
+                for kw in n.keywords:
+                    if kw.arg == "shell":
+                        self.fail("survey passes shell= to subprocess")
+
+    def test_a_path_with_metacharacters_executes_nothing(self):
+        import subprocess as sp
+        with tempfile.TemporaryDirectory() as base:
+            # No slash in the component: a directory name cannot contain one,
+            # so the payload writes into the cwd the child is given instead.
+            d = Path(base) / "we ird;$(touch PWNED)`touch PWNED2`repo"
+            d.mkdir()
+            sp.run(["git", "init", "-q", "."], cwd=d, capture_output=True)
+            r = run(SURVEY, "--repo", str(d), "--json")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            for marker in ("PWNED", "PWNED2"):
+                self.assertFalse(
+                    (d / marker).exists() or (Path(base) / marker).exists(),
+                    f"a path with metacharacters caused execution ({marker})")
+
+    def test_git_can_neither_prompt_nor_page(self):
+        """Either one blocks until the timeout and turns a survey into a stall."""
+        src = SURVEY.read_text()
+        self.assertIn("GIT_TERMINAL_PROMPT", src)
+        self.assertIn("GIT_PAGER", src)
+        self.assertIn("GIT_OPTIONAL_LOCKS", src,
+                      "the survey must not take a lock in someone's repo")
+
+    def test_children_get_no_stdin(self):
+        """A child that reads stdin would block until the timeout."""
+        self.assertIn("stdin=subprocess.DEVNULL", SURVEY.read_text())
+
+    def test_child_output_is_bounded(self):
+        """Enormous commit messages, or scontrol on a large cluster, must not
+        inflate the survey without limit."""
+        src = SURVEY.read_text()
+        self.assertIn("MAX_OUTPUT", src)
+        self.assertIn("[:MAX_OUTPUT]", src)
+
+    def test_every_child_has_a_timeout(self):
+        src = SURVEY.read_text()
+        tree = ast.parse(src)
+        for n in ast.walk(tree):
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                    and n.func.attr == "run"
+                    and isinstance(n.func.value, ast.Name)
+                    and n.func.value.id == "subprocess"):
+                self.assertTrue(
+                    any(kw.arg == "timeout" for kw in n.keywords),
+                    "a subprocess call without a timeout can hang the survey")
+
+    def test_an_unreachable_remote_does_not_stall_it(self):
+        import subprocess as sp
+        import time as _t
+        with tempfile.TemporaryDirectory() as d:
+            sp.run(["git", "init", "-q", "."], cwd=d, capture_output=True)
+            sp.run(["git", "remote", "add", "origin",
+                    "https://example.invalid/private.git"], cwd=d,
+                   capture_output=True)
+            t0 = _t.time()
+            r = run(SURVEY, "--repo", d, "--json")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertLess(_t.time() - t0, 30,
+                            "the survey stalled on an unreachable remote")
