@@ -27,7 +27,7 @@ bind mount.
 
 ## Status as of 2026-08-28
 
-Built and green: 410 tests.
+Built and green: 424 tests.
 
 | Piece | File | State |
 |---|---|---|
@@ -97,7 +97,29 @@ a host without paseo and says to run it where you run agents, or to declare
 the work as kind=pipeline. Agents on the Mac, slurm and pipeline units on the
 clusters.
 
-Not built: plan steps 4-7. Operator controls (`status --json`, notifications,
+Plan step 3 (human monitor + gated promotion) is BUILT. `status` and
+`status --json` read durable state only, so they render with the coordinator
+stopped; a HELD unit names what holds it; budget shows spent-of-declared. Exit
+codes are the notification channel, since the coordinator has no network: 2
+when a unit needs a person, 1 when halted, 0 otherwise. A cron wrapper reads
+that and decides whether to wake anyone.
+
+`swarm.py promote --unit X --approve --approver <name>` is the only way an
+output reaches a shared path. It is a dry run without `--approve`, refuses
+without `--approver`, refuses anything not DONE, and re-derives every output's
+fingerprint before copying: a tampered output is refused and the canonical
+pointer does not move. Promotion copies into a staging dir, renames into a
+VERSIONED directory, then swaps one symlink, because rename is not atomic
+across filesystems and a shared tree is usually a different mount from the run
+root. A unit declaring no `promote_to` creates no shared path at all.
+
+This required changing the receipt: it recorded no output fingerprints, so
+criterion (f) was unimplementable. `check` now records size, mtime and a
+content digest for files under 256MB, and names the method, so a size-mtime
+match is reported as NOT establishing unchanged content rather than passing as
+one.
+
+Not built: plan steps 4 (install per server), 5-7. Operator controls (`status --json`, notifications,
 `NEEDS_HUMAN`, promotion), per-server install, the project front door, and the
 `grill-with-docs` gate. All three declared kinds now have a working predicate and have been
 run for real.

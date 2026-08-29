@@ -735,6 +735,50 @@ def _outputs_present(unit_dir, spec):
     return present, missing, escaped
 
 
+# Above this, a declared output is fingerprinted by size+mtime rather than
+# content. Hashing a 40GB checkpoint on every check would make the predicate
+# too slow to run often, and a predicate nobody runs prevents nothing. The
+# receipt always says WHICH method was used, so a later promotion knows how
+# much its comparison is worth.
+DIGEST_LIMIT_BYTES = 256 * 1024 * 1024
+
+
+def fingerprint_outputs(unit_dir, present):
+    """Record what each declared output looked like at check time.
+
+    Evidence about a MOMENT. Promotion happens later, so it re-derives these
+    and refuses on a mismatch rather than trusting that nothing moved."""
+    root = Path(unit_dir).resolve()
+    out = {}
+    for rel in present:
+        p = (root / rel)
+        try:
+            st = p.stat()
+        except OSError as e:
+            out[rel] = {"error": str(e)}
+            continue
+        rec = {"size": st.st_size, "mtime": int(st.st_mtime)}
+        if st.st_size <= DIGEST_LIMIT_BYTES and p.is_file():
+            try:
+                # Returns (digest, truncated). I assumed a bare string and
+                # wrote a tuple into the receipt, which promotion would then
+                # have compared as a list. Same class as read_text_bounded:
+                # assuming a signature rather than reading it.
+                digest, truncated = sha256_file(p)
+                rec["sha256"] = digest
+                rec["method"] = ("prefix-digest (WEAK: truncated)"
+                                 if truncated else "content-digest")
+            except OSError as e:
+                rec["method"] = "size-mtime"
+                rec["error"] = str(e)
+        else:
+            # Named as weak so nothing downstream reads it as a content match.
+            rec["method"] = "size-mtime (WEAK: over the digest limit)" \
+                if p.is_file() else "size-mtime (directory)"
+        out[rel] = rec
+    return out
+
+
 def _proc_alive(pid, launched_at):
     """Is the process we launched STILL the process at that pid?
 
@@ -1013,6 +1057,8 @@ def cmd_check(args):
         "task_id": spec.get("task_id"), "attempt_id": spec.get("attempt_id"),
         "kind": spec.get("kind"), "job_id": spec.get("job_id"),
         "state": state, "exit_code": STATES[state], "notes": notes,
+        "outputs": fingerprint_outputs(unit_dir, _outputs_present(
+            unit_dir, spec)[0]),
         # What this receipt does and does not establish, machine-readable, so a
         # consumer sees the boundary without parsing prose.
         # What this receipt establishes, and its BOUNDARY. Corrected after an

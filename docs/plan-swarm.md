@@ -250,21 +250,30 @@ shared canonical path on explicit human approval, atomically, recorded.
 
 Acceptance criteria:
 
-- a. Loopback only (127.0.0.1), read-only, no daemon beyond the page server, and
-  it renders correctly while the coordinator process is stopped.
-- b. Every unit in the plan appears with a live verdict, including HELD units and
-  the reason they are held.
-- c. Budget is shown as spent-of-declared, and a halted swarm says so on the page
-  rather than only in a log.
-- d. No output reaches a shared canonical path without explicit approval; a unit
-  that declares no promotion never touches a shared path at all.
-- e. Promotion is ATOMIC (rename or link, never a partial copy) and appends a
-  record naming unit, attempt, digest, approver and timestamp.
-- f. A promotion whose source digest no longer matches the receipt is REFUSED,
-  naming the mismatch. The receipt is evidence about a moment, and promotion
-  happens later.
-- g. The page never executes anything: no dispatch, no retry, no cancel. Reading
-  and approving are the only verbs, so a stale page cannot start work.
+- a. DEFERRED, per cut 3 of step 4: no bespoke web page in v1. `status` and
+  `status --json` are the monitor, and they read durable state only, verified
+  by a test that refuses any scheduler or subprocess call in either function.
+  They therefore render with the coordinator stopped, which was the point.
+- b. BUILT. Every unit appears with its verdict, and a HELD unit names what is
+  holding it: "waiting" and "will never run" need different actions.
+- c. BUILT. Budget renders as spent-of-declared with the remainder, and a halted
+  swarm says so in the report. Exit codes carry it too: 2 when a unit needs a
+  person, 1 when halted, 0 otherwise, which is the notification channel a cron
+  wrapper reads since the coordinator has no network.
+- d. BUILT. `swarm.py promote` is a dry run unless `--approve` is passed, and a
+  unit declaring no `promote_to` creates no shared path at all.
+- e. BUILT. Outputs are copied into a staging directory, renamed into a
+  VERSIONED directory, and one symlink is swapped, because rename is not atomic
+  across filesystems and a shared tree is usually a different mount from the run
+  root. The record names unit, attempt, digests, approver and timestamp, and
+  `--approve` without `--approver` is refused.
+- f. BUILT, and it needed the receipt to change: it recorded no output
+  fingerprints at all, so the mismatch was undetectable. `check` now records
+  size, mtime and a content digest under 256MB, naming the method, and a
+  size-mtime match is reported as NOT establishing unchanged content. Verified:
+  a tampered output is refused and the canonical pointer does not move.
+- g. BUILT by construction. `status` reads and `promote` copies; neither can
+  dispatch, retry or cancel.
 
 **4. Scheduling: make `advance` run without a human (what makes it autonomous).**
 

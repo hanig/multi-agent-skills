@@ -5,6 +5,7 @@ tests pin the three properties that make that separation safe rather than
 merely convenient.
 """
 import json
+import os
 import subprocess
 import sys
 import time
@@ -614,3 +615,201 @@ class TestTheCodePredicate(unittest.TestCase):
         msg = S2._paseo_error(out, "")
         self.assertIn("Available modes", msg)
         self.assertNotIn("Created workspace", msg)
+
+
+class TestGatedPromotion(unittest.TestCase):
+    """Plan step 3, criteria d-g. Outputs live in the exclusive write root;
+    reaching a shared canonical tree is a separate, approved, recorded step,
+    because a swarm that silently writes a shared path gets switched off."""
+
+    def _project(self, tmp, promote_to=True, state="DONE", body="real\n"):
+        import os as _os
+        root = Path(tmp)
+        attempt = root / "runs" / "w" / "att1"
+        attempt.mkdir(parents=True)
+        (attempt / "o.txt").write_text(body)
+        st = (attempt / "o.txt").stat()
+        digest = __import__("hashlib").sha256(body.encode()).hexdigest()
+        (attempt / "receipt.json").write_text(json.dumps({
+            "state": "DONE", "attempt_id": "att1",
+            "outputs": {"o.txt": {"size": st.st_size,
+                                  "mtime": int(st.st_mtime),
+                                  "sha256": digest,
+                                  "method": "content-digest"}}}))
+        unit = {"id": "w", "kind": "slurm", "command": "true",
+                "outputs": ["o.txt"], "write_scopes": ["w/"]}
+        if promote_to:
+            unit["promote_to"] = str(root / "shared")
+        plan = {"name": "p", "units": [unit]}
+        state_obj = {"schema_version": 1, "halted": None, "units": {
+            "w": {"state": state, "attempt_dir": str(attempt),
+                  "attempts": [str(attempt)], "gpu_hours": 0}}}
+        sd = root / "state"
+        sd.mkdir()
+        return plan, state_obj, str(sd), attempt, root / "shared"
+
+    def test_a_unit_with_no_destination_never_touches_a_shared_path(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            plan, st, sd, _, shared = self._project(t, promote_to=False)
+            lines, ok = S.promote(plan, st, sd, "w", "hani", True)
+            self.assertFalse(ok)
+            self.assertFalse(shared.exists(),
+                             "a unit declaring no promote_to created a shared "
+                             "path anyway")
+
+    def test_a_dry_run_copies_nothing(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            plan, st, sd, _, shared = self._project(t)
+            lines, ok = S.promote(plan, st, sd, "w", None, False)
+            self.assertTrue(ok)
+            self.assertIn("DRY RUN", "\n".join(lines))
+            self.assertFalse(shared.exists())
+
+    def test_approval_requires_a_named_approver(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            plan, st, sd, _, shared = self._project(t)
+            lines, ok = S.promote(plan, st, sd, "w", None, True)
+            self.assertFalse(ok)
+            self.assertFalse(shared.exists())
+
+    def test_only_a_DONE_unit_may_be_promoted(self):
+        """Promoting on any weaker basis is the false pass this repo exists to
+        prevent."""
+        import tempfile
+        for bad in ("RUNNING", "FAILED", "INCOMPLETE", "FAILED_EVIDENCE",
+                    "NEEDS_HUMAN"):
+            with tempfile.TemporaryDirectory() as t:
+                plan, st, sd, _, shared = self._project(t, state=bad)
+                lines, ok = S.promote(plan, st, sd, "w", "hani", True)
+                self.assertFalse(ok, f"{bad} was promotable")
+                self.assertFalse(shared.exists())
+
+    def test_a_changed_output_is_refused_and_the_pointer_does_not_move(self):
+        """Criterion f. The receipt is evidence about a MOMENT; promotion
+        happens later."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            plan, st, sd, attempt, shared = self._project(t)
+            lines, ok = S.promote(plan, st, sd, "w", "hani", True)
+            self.assertTrue(ok, "\n".join(lines))
+            first = os.readlink(shared / "w" / "current")
+
+            (attempt / "o.txt").write_text("tampered after the verdict\n")
+            lines, ok = S.promote(plan, st, sd, "w", "hani", True)
+            self.assertFalse(ok, "a changed output was promoted")
+            self.assertIn("CONTENT CHANGED", "\n".join(lines))
+            self.assertEqual(os.readlink(shared / "w" / "current"), first,
+                             "the canonical pointer moved on a refused "
+                             "promotion")
+
+    def test_promotion_is_recorded_with_who_approved_it(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            plan, st, sd, _, _ = self._project(t)
+            S.promote(plan, st, sd, "w", "hani", True)
+            rec = json.loads((Path(sd) / S.PROMOTIONS).read_text().strip())
+            for field in ("unit", "attempt", "approver", "at", "promoted_to",
+                          "digest_basis"):
+                self.assertIn(field, rec)
+            self.assertEqual(rec["approver"], "hani")
+
+    def test_the_canonical_name_is_a_pointer_not_a_copy_target(self):
+        """Renaming into place is NOT atomic across filesystems, and a shared
+        tree is usually a different mount from the run root, so a half-copied
+        output would appear under the canonical name."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            plan, st, sd, _, shared = self._project(t)
+            S.promote(plan, st, sd, "w", "hani", True)
+            self.assertTrue((shared / "w" / "current").is_symlink())
+            self.assertTrue((shared / "w" / "att1" / "o.txt").is_file())
+
+    def test_a_weak_fingerprint_is_named_as_weak(self):
+        """A size-mtime match cannot certify content, and a promotion record
+        that did not say so would read as stronger than it is."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            plan, st, sd, attempt, _ = self._project(t)
+            r = json.loads((attempt / "receipt.json").read_text())
+            r["outputs"]["o.txt"].pop("sha256")
+            r["outputs"]["o.txt"]["method"] = "size-mtime (WEAK: over limit)"
+            (attempt / "receipt.json").write_text(json.dumps(r))
+            lines, ok = S.promote(plan, st, sd, "w", "hani", True)
+            self.assertTrue(ok)
+            self.assertIn("does NOT establish", "\n".join(lines))
+            rec = json.loads((Path(sd) / S.PROMOTIONS).read_text().strip())
+            self.assertIn("size-mtime only", rec["digest_basis"])
+
+
+class TestStatusIsTheNotificationChannel(unittest.TestCase):
+    def _st(self, state, halted=None):
+        plan = {"name": "p", "units": [
+            {"id": "a", "kind": "slurm", "command": "true", "outputs": ["o"]},
+            {"id": "b", "kind": "slurm", "command": "true", "outputs": ["o"],
+             "needs": ["a"]}]}
+        st = {"schema_version": 1, "halted": halted, "units": {
+            "a": {"state": state, "attempt_dir": "/x", "attempts": ["/x"],
+                  "gpu_hours": 2},
+            "b": {"state": "HELD", "attempt_dir": None, "attempts": [],
+                  "gpu_hours": 0}}}
+        return plan, st
+
+    def test_a_unit_needing_a_person_is_surfaced(self):
+        import tempfile
+        for s in ("NEEDS_HUMAN", "FAILED", "FAILED_EVIDENCE"):
+            with tempfile.TemporaryDirectory() as t:
+                plan, st = self._st(s)
+                rep = S.status_report(plan, st, t)
+                self.assertIn("a", rep["needs_attention"], f"{s} not surfaced")
+
+    def test_a_healthy_swarm_asks_for_nothing(self):
+        """The counter-claim. A monitor that always says "look at me" is a
+        monitor that gets ignored."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            plan, st = self._st("RUNNING")
+            self.assertEqual(S.status_report(plan, st, t)["needs_attention"],
+                             [])
+
+    def test_a_held_unit_says_what_is_holding_it(self):
+        """"Waiting" and "will never run" need different actions from whoever
+        reads the status."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            plan, st = self._st("FAILED")
+            rows = {r["id"]: r for r in S.status_report(plan, st, t)["units"]}
+            self.assertEqual(rows["b"]["held_by"], ["a"])
+
+    def test_budget_is_spent_of_declared(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            plan, st = self._st("RUNNING")
+            plan["budget"] = {"gpu_hours": 10}
+            b = S.status_report(plan, st, t)["budget"]
+            self.assertEqual((b["spent_gpu_hours"], b["remaining_gpu_hours"]),
+                             (2.0, 8.0))
+
+    def test_a_halted_swarm_says_so_in_the_report(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            plan, st = self._st("RUNNING", halted="budget exceeded")
+            self.assertEqual(S.status_report(plan, st, t)["halted"],
+                             "budget exceeded")
+
+    def test_status_reads_state_only_and_launches_nothing(self):
+        """It must render with the coordinator stopped, which is exactly when
+        someone wants to look."""
+        import ast
+        src = SWARM.read_text()
+        for name in ("_status_rows", "status_report"):
+            fn = next(n for n in ast.parse(src).body
+                      if isinstance(n, ast.FunctionDef) and n.name == name)
+            code = "\n".join(ast.unparse(x) for x in fn.body)
+            for forbidden in ("U.run(", "subprocess", "sbatch", "squeue",
+                              "sacct", "paseo", "_submit", "_check"):
+                self.assertNotIn(forbidden, code,
+                                 f"{name} calls {forbidden}: status must read "
+                                 f"durable state only")

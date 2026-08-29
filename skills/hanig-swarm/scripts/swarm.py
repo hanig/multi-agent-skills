@@ -1073,28 +1073,169 @@ def cmd_advance(args):
     return cmd_run(args)
 
 
-def cmd_status(args):
+# --- gated promotion ------------------------------------------------------
+# Outputs live in the exclusive write root. Getting them into a shared
+# canonical tree is a SEPARATE, human-approved, recorded step, because a swarm
+# that silently writes a shared path is a swarm that gets switched off.
+#
+# A unit that declares no `promote_to` never touches a shared path at all.
+PROMOTIONS = "promotions.jsonl"
+
+
+def _redigest(attempt_dir, rel, recorded):
+    """Re-derive one output's fingerprint NOW and compare with the receipt.
+
+    The receipt is evidence about a moment; promotion happens later. Comparing
+    like for like matters: a size-mtime record cannot certify content, so a
+    match against one is reported as the weak thing it is."""
+    src = Path(attempt_dir) / rel
+    try:
+        st = src.stat()
+    except OSError as e:
+        return False, f"{rel}: cannot stat it now ({e})"
+    method = str(recorded.get("method") or "")
+    if recorded.get("sha256") and method.startswith("content-digest"):
+        try:
+            digest, truncated = U.sha256_file(src)
+        except OSError as e:
+            return False, f"{rel}: cannot digest it now ({e})"
+        if truncated:
+            return False, (f"{rel}: the receipt holds a full content digest "
+                           f"but the file now digests as truncated")
+        if digest != recorded["sha256"]:
+            return False, (f"{rel}: CONTENT CHANGED since the verdict "
+                           f"({recorded['sha256'][:12]} -> {digest[:12]})")
+        return True, f"{rel}: content digest matches"
+    if st.st_size != recorded.get("size"):
+        return False, (f"{rel}: size changed since the verdict "
+                       f"({recorded.get('size')} -> {st.st_size})")
+    if int(st.st_mtime) != recorded.get("mtime"):
+        return False, f"{rel}: mtime changed since the verdict"
+    return True, (f"{rel}: size and mtime match, but the receipt holds no "
+                  f"content digest ({method or 'unknown method'}), so this "
+                  f"does NOT establish the content is unchanged")
+
+
+def promote(plan, state, state_dir, uid, approver, approve):
+    """Returns (lines, ok). Refuses loudly; copies only on explicit approval."""
+    units = {u["id"]: u for u in plan["units"]}
+    u = units.get(uid)
+    if not u:
+        return [f"no unit {uid!r} in this plan"], False
+    dest_root = u.get("promote_to")
+    if not dest_root:
+        return ([f"unit {uid} declares no 'promote_to', so it has no shared "
+                 f"destination and nothing to promote. Its outputs stay in the "
+                 f"exclusive write root, which is the safe default."], False)
+
+    us = state.get("units", {}).get(uid) or {}
+    if us.get("state") != "DONE":
+        return ([f"REFUSING: unit {uid} is {us.get('state') or 'unstarted'}, "
+                 f"not DONE. Only a unit whose predicate returned DONE may be "
+                 f"promoted; promoting on any weaker basis is the false pass "
+                 f"this repo exists to prevent."], False)
+    attempt = us.get("attempt_dir")
+    receipt, err = (U.read_json(Path(attempt) / "receipt.json") if attempt
+                    else (None, "no attempt"))
+    if err or not isinstance(receipt, dict):
+        return ([f"REFUSING: no readable receipt for unit {uid} ({err}). The "
+                 f"receipt is the evidence promotion rests on."], False)
+    if receipt.get("state") != "DONE":
+        return ([f"REFUSING: the receipt for unit {uid} says "
+                 f"{receipt.get('state')!r}, not DONE."], False)
+
+    recorded = receipt.get("outputs") or {}
+    if not recorded:
+        return ([f"REFUSING: the receipt for unit {uid} records no output "
+                 f"fingerprints, so a change since the verdict could not be "
+                 f"detected. Re-run `unit.py check` on the attempt to record "
+                 f"them, then promote."], False)
+
+    lines, ok = [f"unit {uid}, attempt {Path(attempt).name}", ""], True
+    weak = False
+    for rel, rec in sorted(recorded.items()):
+        good, why = _redigest(attempt, rel, rec)
+        lines.append(f"  {'ok ' if good else 'NO '} {why}")
+        ok = ok and good
+        weak = weak or (good and "does NOT establish" in why)
+    if not ok:
+        lines += ["", f"REFUSING to promote {uid}: the outputs are not what "
+                      f"the receipt describes. Re-run the unit, or re-check "
+                      f"the attempt to mint a receipt for what is there now."]
+        return lines, False
+
+    # Versioned directory + one pointer swap. Renaming into place is NOT
+    # atomic across filesystems, and a shared canonical tree is usually a
+    # different mount from the run root, so a half-copied output would appear
+    # under the canonical name. Copy into a version, then swap a symlink.
+    dest = Path(dest_root) / uid
+    version = dest / Path(attempt).name
+    current = dest / "current"
+    lines += ["", f"  destination : {version}",
+              f"  pointer     : {current} -> {Path(attempt).name}"]
+    if weak:
+        lines.append("  NOTE: at least one output matched only on size and "
+                     "mtime, which does not establish unchanged content.")
+    if not approve:
+        lines += ["", "DRY RUN. Nothing was copied. Approve with:",
+                  f"    swarm.py promote <plan> --unit {uid} --approve "
+                  f"--approver <name>"]
+        return lines, True
+    if not approver:
+        lines += ["", "REFUSING: --approve requires --approver <name>. The "
+                      "record must name who accepted this."]
+        return lines, False
+
+    try:
+        version.parent.mkdir(parents=True, exist_ok=True)
+        staging = dest / f".staging-{Path(attempt).name}"
+        if staging.exists():
+            shutil.rmtree(staging)
+        staging.mkdir(parents=True)
+        for rel in sorted(recorded):
+            src, dst = Path(attempt) / rel, staging / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if src.is_dir():
+                shutil.copytree(src, dst)
+            else:
+                shutil.copy2(src, dst)
+        if version.exists():
+            shutil.rmtree(version)
+        os.replace(staging, version)          # same directory: atomic
+        tmp_link = dest / f".current-{os.getpid()}"
+        os.symlink(Path(attempt).name, tmp_link)
+        os.replace(tmp_link, current)         # atomic pointer swap
+    except OSError as e:
+        return lines + ["", f"REFUSING: promotion failed partway ({e}). The "
+                            f"canonical pointer was NOT moved, so nothing "
+                            f"downstream sees a partial result."], False
+
+    record = {"unit": uid, "attempt": Path(attempt).name,
+              "promoted_to": str(version), "approver": approver,
+              "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+              "outputs": recorded,
+              "digest_basis": ("size-mtime only for at least one output" if weak
+                               else "content digest for every output")}
+    try:
+        with (Path(state_dir) / PROMOTIONS).open("a") as fh:
+            fh.write(json.dumps(record, sort_keys=True) + "\n")
+    except OSError as e:
+        lines.append(f"  WARNING: promoted, but the record could not be "
+                     f"appended: {e}")
+    lines += ["", f"PROMOTED {uid} -> {version}", f"approved by {approver}"]
+    return lines, True
+
+
+def cmd_promote(args):
     plan, err = U.read_json(args.plan)
     if err:
         sys.exit(f"error: no readable plan at {args.plan}: {err}")
     state = load_state(args.state_dir)
-    rows, bad = [], False
-    for u in plan.get("units") or []:
-        us = state["units"].get(u["id"]) or {}
-        st = us.get("state") or "-"
-        if st in ("FAILED", "FAILED_EVIDENCE"):
-            bad = True
-        rows.append((u["id"], u.get("kind", "?"), st,
-                     us.get("job_id") or "-",
-                     f"{us.get('gpu_hours', 0):g}",
-                     len(us.get("attempts") or [])))
-    w = max([len(r[0]) for r in rows] + [4])
-    print(f"  {'unit'.ljust(w)}  {'kind':9} {'state':10} {'job':14} {'gpuh':>5} att")
-    for r in rows:
-        print(f"  {r[0].ljust(w)}  {r[1]:9} {r[2]:10} {r[3]:14} {r[4]:>5} {r[5]}")
-    if state.get("halted"):
-        print(f"\n  HALTED: {state['halted']}")
-    return EXIT_FAILED_UNIT if bad else EXIT_OK
+    lines, ok = promote(plan, state, args.state_dir, args.unit,
+                        args.approver, args.approve)
+    for line in lines:
+        print(f"  {line}" if line else "")
+    return EXIT_OK if ok else EXIT_FAILED_UNIT
 
 
 def cmd_outbox(args):
@@ -1124,6 +1265,110 @@ def cmd_outbox(args):
           "intent\n  WITHOUT evidence must be refused: nothing closes on a "
           "self-report.")
     return EXIT_OK
+
+
+def _status_rows(plan, state, state_dir):
+    """Everything an operator needs, derived from DURABLE STATE ONLY.
+
+    Reads no scheduler and launches nothing, so it renders correctly with the
+    coordinator stopped, which is exactly when someone wants to look."""
+    units = {u["id"]: u for u in plan.get("units") or []}
+    promoted = {}
+    try:
+        for line in (Path(state_dir) / PROMOTIONS).read_text().splitlines():
+            if line.strip():
+                r = json.loads(line)
+                promoted[r["unit"]] = r
+    except (OSError, ValueError):
+        pass
+    rows = []
+    for uid, u in units.items():
+        us = state.get("units", {}).get(uid) or {}
+        st = us.get("state") or "-"
+        held_by = []
+        if st == "HELD":
+            held_by = [d for d in (u.get("needs") or [])
+                       if (state.get("units", {}).get(d) or {}).get("state")
+                       in ("FAILED", "HELD", "FAILED_EVIDENCE")]
+        rows.append({
+            "id": uid, "kind": u.get("kind", "?"), "state": st,
+            "job_id": us.get("job_id"), "attempt_dir": us.get("attempt_dir"),
+            "attempts": len(us.get("attempts") or []),
+            "gpu_hours": float(us.get("gpu_hours") or 0),
+            "needs": u.get("needs") or [],
+            "held_by": held_by,
+            "promotable": bool(u.get("promote_to")),
+            "promoted": promoted.get(uid, {}).get("promoted_to"),
+            "promoted_by": promoted.get(uid, {}).get("approver"),
+        })
+    rows.sort(key=lambda r: r["id"])
+    return rows
+
+
+def status_report(plan, state, state_dir):
+    rows = _status_rows(plan, state, state_dir)
+    declared = (plan.get("budget") or {}).get("gpu_hours")
+    spent = sum(r["gpu_hours"] for r in rows)
+    attention = [r for r in rows
+                 if r["state"] in ("NEEDS_HUMAN", "FAILED", "FAILED_EVIDENCE")]
+    return {
+        "project": plan.get("name"),
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "halted": state.get("halted"),
+        "budget": {"declared_gpu_hours": declared, "spent_gpu_hours": spent,
+                   "remaining_gpu_hours": (None if declared is None
+                                           else float(declared) - spent)},
+        "counts": {s: sum(1 for r in rows if r["state"] == s)
+                   for s in sorted({r["state"] for r in rows})},
+        "needs_attention": [r["id"] for r in attention],
+        "units": rows,
+    }
+
+
+def cmd_status(args):
+    plan, err = U.read_json(args.plan)
+    if err:
+        sys.exit(f"error: no readable plan at {args.plan}: {err}")
+    state = load_state(args.state_dir)
+    rep = status_report(plan, state, args.state_dir)
+
+    if args.json:
+        print(json.dumps(rep, indent=2, sort_keys=True))
+    else:
+        rows = rep["units"]
+        w = max([len(r["id"]) for r in rows] + [4])
+        print(f"  {'unit'.ljust(w)}  {'kind':9} {'state':13} {'job':14} "
+              f"{'gpuh':>5} att")
+        for r in rows:
+            job = str(r["job_id"] or "-")
+            print(f"  {r['id'].ljust(w)}  {r['kind']:9} {r['state']:13} "
+                  f"{job[:14]:14} {r['gpu_hours']:>5g} {r['attempts']}")
+            # A held unit must say WHY, or the operator reads it as "waiting".
+            if r["held_by"]:
+                print(f"  {'':{w}}    held by {', '.join(r['held_by'])}, which "
+                      f"will not complete")
+            if r["promoted"]:
+                print(f"  {'':{w}}    promoted to {r['promoted']} "
+                      f"(approved by {r['promoted_by']})")
+            elif r["promotable"] and r["state"] == "DONE":
+                print(f"  {'':{w}}    NOT promoted; approve with `swarm.py "
+                      f"promote <plan> --unit {r['id']} --approve`")
+        b = rep["budget"]
+        if b["declared_gpu_hours"] is not None:
+            print(f"\n  budget: {b['spent_gpu_hours']:g} of "
+                  f"{b['declared_gpu_hours']:g} GPU-hours committed, "
+                  f"{b['remaining_gpu_hours']:g} left")
+        if rep["halted"]:
+            # On the page, not only in a log.
+            print(f"\n  HALTED: {rep['halted']}")
+        if rep["needs_attention"]:
+            print(f"\n  NEEDS YOU: {', '.join(rep['needs_attention'])}")
+
+    # Exit code is the notification channel. The coordinator has no network by
+    # design, so a cron wrapper reads this and decides whether to wake anyone.
+    if rep["needs_attention"]:
+        return EXIT_FAILED_UNIT
+    return EXIT_HALTED if rep["halted"] else EXIT_OK
 
 
 def main():
@@ -1163,6 +1408,18 @@ def main():
     common(a)
     a.set_defaults(fn=cmd_advance)
 
+    pr = sub.add_parser("promote",
+                        help="copy a DONE unit's outputs to its declared "
+                             "shared path, on explicit approval")
+    pr.add_argument("plan")
+    pr.add_argument("--unit", required=True)
+    pr.add_argument("--state-dir", default=".swarm/state")
+    pr.add_argument("--approve", action="store_true",
+                    help="actually copy. Without it this is a dry run.")
+    pr.add_argument("--approver", default=None,
+                    help="who accepted this result; recorded permanently")
+    pr.set_defaults(fn=cmd_promote)
+
     o = sub.add_parser("outbox", help="tracker intents waiting to be drained")
     o.add_argument("--state-dir", default=".swarm/state")
     o.add_argument("--all", action="store_true", help="include applied ones")
@@ -1170,6 +1427,8 @@ def main():
     o.set_defaults(fn=cmd_outbox)
 
     s = sub.add_parser("status", help="what every unit is doing")
+    s.add_argument("--json", action="store_true",
+                   help="machine-readable; exit 2 if any unit needs a person")
     s.add_argument("plan")
     s.add_argument("--state-dir", default=".swarm/state")
     s.set_defaults(fn=cmd_status)
