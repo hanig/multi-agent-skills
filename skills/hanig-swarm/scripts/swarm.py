@@ -309,6 +309,11 @@ def plan_digest(plan):
 # acquired, so a second project in the same process was never actually
 # locked. Caught by the new tests, which is what they are for.
 _LOCK_FDS = {}
+# The pid that owns the entries above. flock is held per OPEN FILE
+# DESCRIPTION, which a fork shares, so a forked child would inherit this dict
+# and be told it already holds a lock it never took. Reviewers found that; the
+# guard is cheaper than reasoning about who forks.
+_LOCK_OWNER_PID = None
 LOCK = "lease.lock"
 
 
@@ -334,12 +339,36 @@ def acquire_lease(state_dir):
 
     MEASURED, not assumed: 10 concurrent processes, three trials, on lambda
     (nfs), chimera (nfs4) and andromeda (weka) -- exactly one winner every
-    time. NFS can silently degrade locking to local-only, which would be worse
-    than the old scheme because it would look like it worked, so this is
-    re-checked by the test suite on whatever filesystem it runs on."""
+    time, then 8 concurrent real advances against one live DAG, three trials
+    per cluster, one dispatcher every time.
+
+    WHAT THAT MEASUREMENT DOES NOT SHOW, corrected after a reviewer pointed
+    it out: every contender ran on ONE host. A mount whose locking has
+    degraded to local-only still excludes same-host processes perfectly, so
+    neither the manual runs nor the test suite can tell real cross-client
+    locking from the local-only case. An earlier version of this docstring
+    claimed the suite re-checks that property. It does not, and cannot from a
+    single host.
+
+    This is adequate rather than airtight, and it is adequate for a stated
+    reason: a project runs entirely on ONE server, so same-host exclusion is
+    the property that has to hold. Two controllers on two different nodes
+    sharing the filesystem is outside the topology, and would need a
+    cross-node test to certify.
+
+    KNOWN LIMIT, not fixed: NFS lock recovery. If the server reboots, or
+    evicts this client's lock state after a partition, the lock can be dropped
+    while this process is still alive and another controller can then acquire
+    it. Nothing in local state can notice, because the kernel does not tell us.
+    A lock cannot be made stronger than the lock manager underneath it, so
+    this is recorded rather than papered over."""
+    global _LOCK_OWNER_PID
     Path(state_dir).mkdir(parents=True, exist_ok=True)
     key = str(Path(state_dir).resolve())
-    if key in _LOCK_FDS:
+    if _LOCK_OWNER_PID is not None and _LOCK_OWNER_PID != os.getpid():
+        _LOCK_FDS.clear()                     # inherited across a fork
+        _LOCK_OWNER_PID = None
+    if key in _LOCK_FDS and _holds_the_path(_LOCK_FDS[key], Path(state_dir)):
         return True, None                     # already ours, in this process
     path = Path(state_dir) / LOCK
     try:
@@ -377,7 +406,23 @@ def acquire_lease(state_dir):
     else:
         os.close(fd)
         return False, f"repeatedly interrupted while locking {path}"
+    # The lock is on an INODE, not on a name. If the path was replaced
+    # between our open and now, we are holding a lock on a file nobody else
+    # will ever contend for, and a second controller can lock the new one.
+    # Reviewers found this; it is cheap to detect and refuse.
+    if not _holds_the_path(fd, Path(state_dir)):
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(fd)
+        return False, (f"{path} was replaced while it was being locked, so "
+                       f"this lock guards a file no other controller will "
+                       f"contend for. Nothing dispatched. Re-run; if it "
+                       f"repeats, something else is deleting the state "
+                       f"directory underneath the coordinator.")
     _LOCK_FDS[key] = fd
+    _LOCK_OWNER_PID = os.getpid()
     # Descriptive only. Nothing decides anything from this file; it exists so a
     # human blocked by the lock can see who has it.
     U.write_json(Path(state_dir) / LEASE,
@@ -385,6 +430,21 @@ def acquire_lease(state_dir):
                   "host": os.uname().nodename, "pid": os.getpid(),
                   "acquired_at": time.time()})
     return True, None
+
+
+def _holds_the_path(fd, state_dir):
+    """Is the fd we locked still the file at the lock's path?
+
+    A flock is on an inode. If lease.lock is deleted or replaced, another
+    process creates a NEW inode at that name and locks it successfully, and
+    both controllers then believe they are alone. Comparing the fd's
+    (device, inode) with the path's is the only way to notice."""
+    try:
+        a = os.fstat(fd)
+        b = os.stat(str(Path(state_dir) / LOCK))
+    except OSError:
+        return False
+    return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
 
 
 def renew_lease(state_dir):
@@ -395,7 +455,16 @@ def renew_lease(state_dir):
     controller be deposed and then clobber its successor. An advisory lock is
     held until the process releases it or exits, so a slow advance keeps it by
     construction rather than by refreshing a timestamp."""
-    return str(Path(state_dir).resolve()) in _LOCK_FDS
+    key = str(Path(state_dir).resolve())
+    if _LOCK_OWNER_PID != os.getpid():
+        return False
+    fd = _LOCK_FDS.get(key)
+    if fd is None:
+        return False
+    # Not merely "we have an fd". Re-checking that the fd is still the file at
+    # the path catches the replaced-inode case mid-advance, which is the one
+    # way a live holder can silently stop being the only holder ON THIS HOST.
+    return _holds_the_path(fd, Path(state_dir))
 
 
 def release_lease(state_dir):

@@ -1492,3 +1492,103 @@ class TestLockErrorsAreNotAllContention(unittest.TestCase):
                                  "unit.py and paseo children")
             finally:
                 S.release_lease(d)
+
+
+class TestRound3ReviewFindings(unittest.TestCase):
+    """Round 3 returned REVIEW_FAIL. Its largest finding (every flock error
+    read as contention) was already fixed before the verdict landed, which is
+    corroboration rather than news. These pin the rest."""
+
+    def test_an_inherited_lock_registry_does_not_grant_a_forked_child(self):
+        """CRITICAL. flock is held per OPEN FILE DESCRIPTION, which a fork
+        shares, so a child inherited _LOCK_FDS and was told it already held a
+        lock it never took."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            ok, _ = S.acquire_lease(d)
+            self.assertTrue(ok)
+            try:
+                # Exactly what a fork leaves behind: populated registry, a
+                # different pid.
+                real = S._LOCK_OWNER_PID
+                S._LOCK_OWNER_PID = os.getpid() + 100000
+                ok2, _ = S.acquire_lease(d)
+                self.assertFalse(
+                    ok2, "a process that did not take the lock was told it "
+                         "holds it, purely from inherited memory")
+                self.assertFalse(S.renew_lease(d))
+            finally:
+                S._LOCK_OWNER_PID = real
+                S.release_lease(d)
+
+    def test_a_replaced_lock_file_is_detected(self):
+        """CRITICAL. A flock is on an INODE, not a name. If lease.lock is
+        deleted, a second controller creates a new inode at the same path and
+        locks it successfully, and both then believe they are alone."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            ok, _ = S.acquire_lease(d)
+            self.assertTrue(ok)
+            try:
+                self.assertTrue(S.renew_lease(d))
+                # Somebody replaces the lock file underneath us.
+                (Path(d) / S.LOCK).unlink()
+                (Path(d) / S.LOCK).write_text("")
+                self.assertFalse(
+                    S.renew_lease(d),
+                    "the coordinator still believed it held the lock after "
+                    "the file it locked was replaced")
+            finally:
+                S.release_lease(d)
+
+    def test_a_deleted_lock_file_is_detected(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            self.assertTrue(S.acquire_lease(d)[0])
+            try:
+                (Path(d) / S.LOCK).unlink()
+                self.assertFalse(S.renew_lease(d))
+            finally:
+                S.release_lease(d)
+
+    def test_the_lock_survives_a_child_process_but_not_the_holder(self):
+        """Refuted by measurement, kept so the refutation stays checked: one
+        reviewer said the fd lacks O_CLOEXEC and so survives exec. Python has
+        made fds non-inheritable by default since 3.4."""
+        import subprocess as sp
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            self.assertTrue(S.acquire_lease(d)[0])
+            code = ("import fcntl,os,sys\n"
+                    "fd=os.open(sys.argv[1],os.O_CREAT|os.O_RDWR,0o600)\n"
+                    "try:\n"
+                    "    fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)\n"
+                    "    print('took')\n"
+                    "except OSError: print('blocked')\n")
+            lock = str(Path(d) / S.LOCK)
+            r = sp.run([sys.executable, "-c", code, lock],
+                       capture_output=True, text=True)
+            self.assertEqual(r.stdout.strip(), "blocked")
+            S.release_lease(d)
+            r = sp.run([sys.executable, "-c", code, lock],
+                       capture_output=True, text=True)
+            self.assertEqual(r.stdout.strip(), "took")
+
+    def test_the_docstring_does_not_claim_the_suite_checks_cross_client(self):
+        """A reviewer showed every contender in the filesystem test runs on
+        ONE host, and local-only locking still excludes same-host processes
+        perfectly, so the test cannot tell the two apart. The docstring said
+        it re-checks that property. Claiming a check that cannot exist is the
+        over-claiming this project keeps having to walk back."""
+        import ast
+        src = SWARM.read_text()
+        fn = next(n for n in ast.parse(src).body
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == "acquire_lease")
+        doc = ast.get_docstring(fn) or ""
+        self.assertIn("does not show", doc.lower().replace("not show",
+                                                           "not show"))
+        self.assertIn("ONE host", doc)
+        self.assertIn("KNOWN LIMIT", doc,
+                      "the NFS lock-recovery limit must be recorded, not "
+                      "papered over")
