@@ -27,7 +27,7 @@ bind mount.
 
 ## Status as of 2026-08-28
 
-Built and green: 392 tests.
+Built and green: 399 tests.
 
 | Piece | File | State |
 |---|---|---|
@@ -46,10 +46,35 @@ Live on lambda right now: a crontab line `*/5 * * * *` tagged
 `# hanig-swarm`, and test directories under `~/swarm-live/dag/`. Remove with
 `crontab -e` when done.
 
+Live re-validation on lambda after the review fixes (2026-08-28), all on the
+real cluster and its NFS home, not locally:
+
+- the atomic lease: 192 contended acquisitions on NFS, 16 contenders per
+  trial, exactly one winner every time. NFS matters here: `O_EXCL` is
+  unreliable on it, which is why the lease is published by `link()`.
+- crash between the ALLOCATED save and `sbatch`: released and re-dispatched
+  into a fresh directory, stale one left on disk.
+- `sbatch` succeeded but the bind write failed: rebound to the ORIGINAL job
+  187893 rather than resubmitting, then reached DONE.
+- plan freeze: an edit to `gpu_hours` (which the old digest ignored entirely)
+  now refuses, ratifies under `--accept-plan-change`, and does not re-dispatch
+  the DONE unit.
+- retry charges accumulate: 2 attempts, 0.1 GPU-hours, not 0.05.
+
+The `pipeline` path ran for the FIRST time here and was broken: `check_unit`
+demanded a scheduler binding that a pipeline unit never has, so a healthy
+engine with its declared output on disk sat INCOMPLETE and would have decayed
+to FAILED_EVIDENCE, holding its dependents. It now has its own predicate
+(`_pipeline_state`), and its receipt says `exit_status_attested_by: launcher
+wrapper (no scheduler)`, because a login node offers no third party equivalent
+to Slurm's accounting database. Weaker evidence, named as such.
+
 Not built: plan steps 4-7. Operator controls (`status --json`, notifications,
 `NEEDS_HUMAN`, promotion), per-server install, the project front door, and the
-`grill-with-docs` gate. The `pipeline` and `code` dispatch paths have never
-run for real.
+`grill-with-docs` gate. The `code` dispatch path (paseo) has never run for real, and its
+check_unit branch still returns INCOMPLETE by design, deferring to
+`bus await`. Expect it to need the same treatment the pipeline path
+just got.
 
 ## The open decision: which tracker
 

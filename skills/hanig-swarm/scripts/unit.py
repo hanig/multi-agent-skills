@@ -92,6 +92,8 @@ KINDS = ("slurm", "pipeline", "code")
 # on lambda found it immediately. Third variant of one defect class today --
 # missing callee, missing import, now missing constant.
 OWNERSHIP_SLACK_S = 1              # seconds of clock slack when binding a row
+# Written by the launcher wrapper, never by the engine itself.
+ENGINE_RC = "engine.rc"
 MAX_DIR_ENTRIES_SCANNED = 20_000   # bound on a directory freshness walk
 
 # Slurm states that mean "this attempt is over and it did not succeed".
@@ -723,6 +725,106 @@ def _outputs_present(unit_dir, spec):
     return present, missing, escaped
 
 
+def _proc_alive(pid, launched_at):
+    """Is the process we launched STILL the process at that pid?
+
+    Pids are reused, so a bare kill(pid, 0) can report a stranger's process as
+    our engine. On Linux, field 22 of /proc/<pid>/stat is the process start
+    time in clock ticks since boot; a process that started before we launched
+    ours cannot be ours. Returns True, False, or None when it cannot be told."""
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, ValueError, TypeError, OverflowError):
+        return None
+    try:
+        with open(f"/proc/{int(pid)}/stat") as fh:
+            fields = fh.read().rsplit(") ", 1)[-1].split()
+        ticks = float(fields[19])                       # field 22, 1-indexed
+        hz = os.sysconf("SC_CLK_TCK")
+        with open("/proc/uptime") as fh:
+            uptime = float(fh.read().split()[0])
+        started = time.time() - uptime + (ticks / hz)
+        if launched_at and started < float(launched_at) - 60:
+            return False                                # a different process
+    except (OSError, ValueError, IndexError, ZeroDivisionError):
+        return True                                     # alive; identity unsure
+    return True
+
+
+def _pipeline_state(unit_dir, spec, present, missing, notes):
+    """The done predicate for an engine launched OUTSIDE a scheduler.
+
+    Weaker than the Slurm predicate, and it must say so. There is no third
+    party here: Slurm's accounting database is written by Slurm, but a login
+    node offers nothing equivalent, so the exit status is recorded by our own
+    launcher wrapper. That is stronger than the engine asserting its own
+    success and weaker than `sacct`, and the receipt records which.
+
+    Written after the pipeline path ran for the first time and sat INCOMPLETE
+    with its output on disk, because this function demanded a scheduler
+    binding that a pipeline unit never has."""
+    rec, err = read_json(Path(unit_dir) / "engine.json")
+    if err or not isinstance(rec, dict):
+        notes.append("no engine.json in this attempt, so nothing shows an "
+                     "engine was ever launched here. Dispatch it with "
+                     "`swarm.py advance`.")
+        return "INCOMPLETE"
+
+    try:
+        rc_text = (Path(unit_dir) / ENGINE_RC).read_bytes()[:64].decode(
+            "utf-8", "replace")
+        rerr = None
+    except OSError as e:
+        rc_text, rerr = None, e
+    pid, host = rec.get("pid"), rec.get("host")
+    here = os.uname().nodename
+
+    if rerr:
+        # No exit status recorded yet: either still going, or it died in a way
+        # that skipped the wrapper.
+        if host and host != here:
+            notes.append(f"the engine was launched on {host} and this check is "
+                         f"running on {here}, so its liveness cannot be read "
+                         f"from here. Check from {host}, or wait for "
+                         f"{ENGINE_RC} to appear.")
+            return "INCOMPLETE"
+        alive = _proc_alive(pid, rec.get("launched_at"))
+        if alive is not False:
+            notes.append(f"engine pid {pid} is still running on {here}.")
+            return "RUNNING"
+        notes.append(f"engine pid {pid} is gone and no {ENGINE_RC} was "
+                     f"written, so its exit status was never recorded. It was "
+                     f"killed, or the node rebooted. Re-dispatch this unit; "
+                     f"see engine.log in the attempt directory.")
+        return "FAILED"
+
+    try:
+        code = int((rc_text or "").strip())
+    except (TypeError, ValueError):
+        notes.append(f"{ENGINE_RC} holds {(rc_text or '').strip()[:40]!r}, "
+                     f"which is not an exit code, so the attempt cannot be "
+                     f"judged. Re-dispatch it.")
+        return "INCOMPLETE"
+
+    if code != 0:
+        notes.append(f"the engine exited {code}. See engine.log in the attempt "
+                     f"directory.")
+        return "FAILED"
+    if missing:
+        # The failure sacct structurally cannot see either, and the reason a
+        # clean exit is never sufficient on its own.
+        notes.append(f"the engine exited 0 but {len(missing)} declared "
+                     f"output(s) are absent: {', '.join(sorted(missing))}.")
+        return "INCOMPLETE"
+    notes.append(f"the engine exited 0 and all {len(present)} declared "
+                 f"output(s) are present in the exclusive write root. Exit "
+                 f"status is self-recorded by the launcher wrapper, NOT "
+                 f"attested by a scheduler.")
+    return "DONE"
+
+
 def check_unit(unit_dir, spec, notes):
     """The done predicate. Returns a state name.
 
@@ -746,6 +848,9 @@ def check_unit(unit_dir, spec, notes):
                      "agent's worktree (--base HEAD advanced, --require-clean). "
                      "Run that; this module does not duplicate it.")
         return "INCOMPLETE"
+
+    if kind == "pipeline":
+        return _pipeline_state(unit_dir, spec, present, missing, notes)
 
     job_id = spec.get("job_id")
     if not job_id:
@@ -844,6 +949,12 @@ def cmd_check(args):
             "os_enforced_isolation": False,
             "attribution_by_observation": False,
             "interior_judged": spec.get("kind") != "pipeline",
+            # A pipeline unit has no scheduler behind it, so its exit status
+            # comes from our own launcher wrapper rather than from Slurm's
+            # accounting database. Weaker evidence, named as such.
+            "exit_status_attested_by": (
+                "launcher wrapper (no scheduler)"
+                if spec.get("kind") == "pipeline" else "slurm accounting"),
             "note": "not isolated from other processes running as the same "
                     "Unix user. OS-enforced isolation would need a container "
                     "or mount namespace with this directory as the only "

@@ -472,8 +472,21 @@ def _submit(u, unit_dir, dry_run):
         except OSError as e:
             return None, f"cannot open {log}: {e}"
         try:
+            # The wrapper records the exit status, because nothing else
+            # will: a detached child is reparented to init and its code can
+            # never be reaped. Written by OUR wrapper into the exclusive root,
+            # not by the engine, and the receipt says exactly that.
+            # The command runs in a SUBSHELL. An `exit N` inside it is very
+            # common in pipeline wrappers, and it terminated the outer shell
+            # before the status line ran: engine.rc was never written and the
+            # check then reported "killed, or the node rebooted", which was
+            # false. The subshell contains the exit so the status is always
+            # recorded. Newlines, not semicolons, so a trailing comment in the
+            # command cannot swallow the closing paren.
+            wrapped = (f'(\n{u["command"]}\n)\n'
+                       f'printf %s "$?" > {U.ENGINE_RC}\n')
             proc = subprocess.Popen(
-                ["sh", "-c", u["command"]], cwd=str(unit_dir),
+                ["sh", "-c", wrapped], cwd=str(unit_dir),
                 stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                 start_new_session=True)
         except OSError as e:

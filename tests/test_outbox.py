@@ -346,3 +346,106 @@ class TestTheRefusalsNameAnAction(unittest.TestCase):
         seg = seg[:seg.index("plan changed mid-flight\")")]
         self.assertIn("--accept-plan-change", seg)
         self.assertNotIn("start a new state directory", seg)
+
+
+class TestThePipelinePredicate(unittest.TestCase):
+    """The pipeline path had NEVER run for real. Its first live run sat
+    INCOMPLETE with its declared output on disk, because check_unit demanded a
+    scheduler binding that a pipeline unit never has. These pin the predicate
+    written to replace that, and the negative cases that give it meaning."""
+
+    UNIT = SWARM.parent / "unit.py"
+
+    def _attempt(self, tmp, rc=None, outputs=(), engine=True, pid=None):
+        import os as _os
+        d = Path(tmp) / "attempt"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "unit.json").write_text(json.dumps({
+            "schema_version": 1, "attempt_id": "attempt", "task_id": "u",
+            "kind": "pipeline", "declared_outputs": list(outputs),
+            "created_at": "2026-08-28T00:00:00+0000"}))
+        if engine:
+            (d / "engine.json").write_text(json.dumps({
+                "pid": pid if pid is not None else _os.getpid(),
+                "host": _os.uname().nodename, "launched_at": time.time(),
+                "command": "x", "log": "engine.log"}))
+        if rc is not None:
+            (d / "engine.rc").write_text(str(rc))
+        return d
+
+    def _check(self, d):
+        r = subprocess.run([sys.executable, str(self.UNIT), "check", str(d)],
+                           capture_output=True, text=True)
+        return r.returncode, r.stdout + r.stderr
+
+    def test_exit_zero_with_every_output_is_done(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            d = self._attempt(t, rc=0, outputs=["o.txt"])
+            (d / "o.txt").write_text("real\n")
+            rc, out = self._check(d)
+            self.assertEqual(rc, 0, out)
+
+    def test_exit_zero_with_a_missing_output_is_not_done(self):
+        """The failure a scheduler structurally cannot see, and the reason a
+        clean exit is never sufficient on its own."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            d = self._attempt(t, rc=0, outputs=["o.txt"])
+            rc, out = self._check(d)
+            self.assertNotEqual(rc, 0, f"exit 0 with no output must not be "
+                                       f"DONE:\n{out}")
+            self.assertIn("absent", out)
+
+    def test_a_nonzero_exit_is_failed(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            d = self._attempt(t, rc=3, outputs=["o.txt"])
+            (d / "o.txt").write_text("written anyway\n")
+            rc, out = self._check(d)
+            self.assertNotEqual(rc, 0, f"a non-zero exit must not be DONE even "
+                                       f"when the output exists:\n{out}")
+            self.assertIn("exited 3", out)
+
+    def test_an_attempt_with_no_engine_record_is_not_judged_done(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            d = self._attempt(t, rc=None, outputs=["o.txt"], engine=False)
+            (d / "o.txt").write_text("appeared from nowhere\n")
+            rc, out = self._check(d)
+            self.assertNotEqual(rc, 0, f"an output with no launched engine "
+                                       f"must not be DONE:\n{out}")
+
+    def test_a_live_engine_reads_as_running_not_failed(self):
+        """The honest-work case. Reporting a running engine as failed holds
+        its dependents and ends work that was fine."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            d = self._attempt(t, rc=None, outputs=["o.txt"])  # our own live pid
+            rc, out = self._check(d)
+            self.assertIn("still running", out, out)
+
+    def test_the_wrapper_survives_an_explicit_exit_in_the_command(self):
+        """`exit N` is ordinary in pipeline wrappers and it terminated the
+        outer shell before the status line ran, so engine.rc was never written
+        and the check reported 'killed, or the node rebooted': false, and it
+        pointed the operator at the wrong thing entirely."""
+        src = SWARM.read_text()
+        seg = src[src.index("wrapped = "):]
+        seg = seg[:seg.index("proc = subprocess.Popen")]
+        self.assertIn("(\\n", seg,
+                      "the command must run in a subshell so an `exit` inside "
+                      "it cannot skip the status line")
+
+    def test_the_receipt_does_not_borrow_the_schedulers_authority(self):
+        """A pipeline unit has no third party behind it. Saying so is the
+        whole discipline."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            d = self._attempt(t, rc=0, outputs=["o.txt"])
+            (d / "o.txt").write_text("real\n")
+            self._check(d)
+            basis = json.loads((d / "receipt.json").read_text())["basis"]
+            self.assertEqual(basis["exit_status_attested_by"],
+                             "launcher wrapper (no scheduler)")
+            self.assertFalse(basis["os_enforced_isolation"])
