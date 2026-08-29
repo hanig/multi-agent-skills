@@ -1628,5 +1628,34 @@ class TestRound3ReviewFindings(unittest.TestCase):
                       "papered over")
 
 
+class TestUnknownIsNotTheSameAsLookItUp(unittest.TestCase):
+    """Found by running the suite on andromeda, where it failed while passing
+    on a laptop. `known=None` meant BOTH "could not be determined" and "go
+    look it up", and those coincide only on a machine without sinfo."""
+
+    UNITS = [{"id": "a", "sbatch": ["--partition=anything-at-all"]}]
+
+    def test_explicit_unknown_refuses_nothing_even_on_a_slurm_host(self):
+        """This is the assertion that was accidentally host-dependent: on a
+        cluster it triggered a live lookup and reported a problem."""
+        self.assertEqual(S.partition_problems(self.UNITS, known=None), [])
+
+    def test_an_empty_result_also_refuses_nothing(self):
+        """An empty query result is not evidence that a partition is absent."""
+        self.assertEqual(S.partition_problems(self.UNITS, known=set()), [])
+
+    def test_a_real_list_still_refuses_a_foreign_partition(self):
+        self.assertEqual(S.partition_problems(self.UNITS, known={"cpu"}),
+                         [("a", "anything-at-all")])
+
+    def test_the_lookup_default_is_a_distinct_sentinel(self):
+        """If the default were None again, the ambiguity returns and the bug
+        with it."""
+        import inspect
+        default = inspect.signature(S.partition_problems).parameters["known"].default
+        self.assertIsNot(default, None,
+                         "None must not mean 'look it up' as well as 'unknown'")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

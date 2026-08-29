@@ -6,6 +6,7 @@ back". These test the rules, not the plumbing.
 """
 import ast
 import json
+import os
 import re
 import subprocess
 import sys
@@ -727,6 +728,74 @@ class TestTheRedactionGapIsRecorded(unittest.TestCase):
         doc = S2.redact.__doc__ or ""
         self.assertIn("NOT a guarantee", doc)
         self.assertIn("sensitive, not as sanitised", doc)
+
+
+class TestRamificationsOfTheRoundTwoFixes(unittest.TestCase):
+    """Written after Hani pointed out that editing code and running the unit
+    suite is not verification. These are the consequences the suite did not
+    catch, found by running the tool on the machines it is for."""
+
+    def test_a_symlink_is_neither_walked_nor_counted(self):
+        """The scandir rewrite changed classification: os.walk listed a
+        symlink-to-directory under dirnames, and
+        entry.is_dir(follow_symlinks=False) returns False for one, so it fell
+        through to the FILE branch. Home directories are full of symlinks, so
+        every count was inflated and a bogus "(none)" extension row appeared."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "r"
+            (root / "real").mkdir(parents=True)
+            (root / "top.txt").write_text("x\n")
+            (root / "real" / "inner.py").write_text("y\n")
+            os.symlink(root / "real", root / "link-to-dir")
+            os.symlink(root / "top.txt", root / "link-to-file")
+            data = json.loads(run(SURVEY, "--repo", str(root), "--json").stdout)
+            self.assertEqual(data["repo"]["file_count"], 2,
+                             f"symlinks were counted: "
+                             f"{data['repo']['extensions']}")
+            self.assertNotIn("(none)", data["repo"]["extensions"],
+                             "a symlink produced a bogus extension row")
+
+    def test_a_symlink_cycle_does_not_hang_the_walk(self):
+        import time as _t
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "r"
+            root.mkdir()
+            (root / "f.txt").write_text("x\n")
+            os.symlink(root, root / "loop")
+            t0 = _t.time()
+            r = run(SURVEY, "--repo", str(root), "--json")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertLess(_t.time() - t0, 30, "a symlink cycle stalled it")
+
+    def test_the_same_filesystem_is_not_reported_twice(self):
+        """Surveying a home directory printed the same disk twice on every
+        host, because home and the repo resolve to one path."""
+        with tempfile.TemporaryDirectory() as d:
+            out = run(SURVEY, "--repo", str(Path.home())).stdout
+            self.assertEqual(out.count("  disk "), 1, out)
+            out2 = run(SURVEY, "--repo", d).stdout
+            self.assertEqual(out2.count("  disk "), 2, out2)
+
+    def test_dropping_git_status_left_no_stale_reader(self):
+        """`dirty_files` became None for every consumer. Checked repo-wide:
+        nothing else reads it, and the field carries a note saying why it is
+        empty rather than looking forgotten."""
+        readers = []
+        for f in list(ROOT.rglob("*.py")) + list(ROOT.rglob("*.md")):
+            if ".git/" in str(f) or "test_project" in f.name:
+                continue
+            if "dirty_files" in f.read_text():
+                readers.append(str(f.relative_to(ROOT)))
+        self.assertEqual(readers,
+                         ["skills/hanig-project/scripts/survey.py"],
+                         f"a stale reader of dirty_files: {readers}")
+        with tempfile.TemporaryDirectory() as d:
+            import subprocess as sp
+            sp.run(["git", "init", "-q", "."], cwd=d, capture_output=True)
+            data = json.loads(run(SURVEY, "--repo", d, "--json").stdout)
+            self.assertIn("dirty_files_note", data["repo"],
+                          "the field must say why it is empty, or it reads "
+                          "as forgotten")
 
 
 if __name__ == "__main__":

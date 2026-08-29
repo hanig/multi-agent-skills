@@ -101,15 +101,26 @@ def _known_partitions():
     return names or None
 
 
-def partition_problems(units, known=None):
+# A sentinel, because None already means something. `known=None` was doing
+# double duty -- "could not be determined" AND "go and look it up" -- and the
+# two coincide only on a machine WITHOUT sinfo. On a real cluster a caller
+# passing None to mean "unknown" triggered a live lookup instead, so a test
+# asserting "unknown refuses nothing" passed on a laptop and failed on
+# andromeda. Found by running the suite where it will actually run.
+_LOOK_IT_UP = object()
+
+
+def partition_problems(units, known=_LOOK_IT_UP):
     """Which units name a partition this cluster does not have.
 
     A project runs on ONE server and its plan carries that server's sbatch
     flags, so a plan written for lambda and run on chimera names partitions
     that do not exist here. Caught at validate, it is one clear line; caught
     at submit, it is a half-dispatched DAG and an sbatch error per unit."""
-    if known is None:
+    if known is _LOOK_IT_UP:
         known = _known_partitions()
+    # None means UNKNOWN and must refuse nothing. An empty set means the query
+    # came back empty, which is also not evidence that a partition is absent.
     if not known:
         return []
     bad = []

@@ -177,8 +177,33 @@ for src in "$REPO"/skills/*; do
   installed=$((installed + 1))
 done
 
+# --- prune skills this repo used to ship and no longer does -----------------
+#
+# Re-running install did NOT remove a skill deleted upstream, so a machine that
+# installed an older version kept loading it forever. Not hypothetical: this
+# repo has deleted two skills, and both were still sitting on all three
+# clusters. Claude Code loads whatever is in the directory, so a deleted skill
+# stays live until someone notices.
+#
+# Only ever removes a directory carrying OUR marker, so a skill somebody else
+# installed is never touched. Skipped entirely under --only, where the caller
+# has deliberately narrowed the set.
+pruned=0
+if [ -z "$ONLY" ] && [ -d "$PREFIX" ]; then
+  for d in "$PREFIX"/*; do
+    [ -d "$d" ] || continue
+    name=$(basename "$d")
+    [ -f "$d/$MARKER" ] || continue          # not ours: leave it alone
+    [ -d "$REPO/skills/$name" ] && continue  # still shipped
+    step "prune $d (no longer in this repo)"
+    [ "$DRY" -eq 1 ] || rm -rf "$d"
+    pruned=$((pruned + 1))
+  done
+fi
+
 say ""
 say "installed $installed skill(s) to $PREFIX  [mode=$MODE version=$VERSION]"
+[ "$pruned" -gt 0 ] && say "pruned $pruned skill(s) this repo no longer ships"
 [ "$skipped" -gt 0 ] && say "skipped $skipped (pre-existing, not ours)"
 [ "$DRY" -eq 1 ] && say "(dry run — nothing changed)"
 

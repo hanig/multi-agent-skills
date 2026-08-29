@@ -367,6 +367,13 @@ def repo(root):
                         truncated = True
                         break
                     try:
+                        # A SYMLINK is neither walked nor counted. os.walk
+                        # listed a symlink-to-directory under dirnames, so
+                        # this rewrite began counting it as a FILE with no
+                        # extension, inflating the count and inventing a
+                        # "(none)" row. Following one also risks a cycle.
+                        if entry.is_symlink():
+                            continue
                         is_dir = entry.is_dir(follow_symlinks=False)
                     except OSError:
                         continue
@@ -447,7 +454,14 @@ def main():
 
     data = {"schema_version": 1, "machine": machine(),
             "scheduler": scheduler(), "repo": repo(args.repo)}
-    data["storage"] = storage([Path.home(), Path(args.repo).resolve()])
+    # DEDUPE. Surveying a home directory printed the same filesystem twice,
+    # on every host, because home and the repo resolve to the same path.
+    seen, paths = set(), []
+    for cand in (Path.home(), Path(args.repo).resolve()):
+        if str(cand) not in seen:
+            seen.add(str(cand))
+            paths.append(cand)
+    data["storage"] = storage(paths)
     # Scrub at the BOUNDARY, once, rather than at each field that might carry
     # a secret. Verified with a remote of the form
     # https://user:ghp_...@github.com/... , which the first version wrote out
