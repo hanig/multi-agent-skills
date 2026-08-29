@@ -95,6 +95,20 @@ class TestIsolationIsTheMechanism(Base):
         self.assertLess(len(new), 340, f"the predicate has grown to {len(new)} "
                                        f"executable lines; the guard is ~300")
 
+    def test_the_receipt_does_not_claim_os_enforced_isolation(self):
+        """An audit found the isolation claim over-reaching in the same way the
+        ATTRIBUTION claim had: the run dir is unique but not an enforced
+        boundary. A command can write an absolute path outside it and another
+        process as the same Unix user can write into it."""
+        d = self.alloc("claim")
+        run(UNIT, "bind", d, "--job-id", "7", cwd=str(self.tmp))
+        run(UNIT, "check", d, cwd=str(self.tmp))
+        basis = json.loads((Path(d) / "receipt.json").read_text())["basis"]
+        self.assertFalse(basis["os_enforced_isolation"])
+        self.assertIn("trusted-writer convention", basis["conclusive_because"])
+        self.assertIn("same\n                    Unix user".replace("\n                    ", " "),
+                      basis["note"])
+
     def test_a_pipeline_receipt_admits_its_interior_is_unjudged(self):
         d = self.alloc("pipe", "pipeline")
         run(UNIT, "bind", d, "--job-id", "42", cwd=str(self.tmp))

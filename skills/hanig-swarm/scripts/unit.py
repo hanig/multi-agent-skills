@@ -831,10 +831,23 @@ def cmd_check(args):
         "state": state, "exit_code": STATES[state], "notes": notes,
         # What this receipt does and does not establish, machine-readable, so a
         # consumer sees the boundary without parsing prose.
+        # What this receipt establishes, and its BOUNDARY. Corrected after an
+        # audit: the run directory is unique but it is NOT an enforced
+        # boundary. A command can write an absolute path outside it, another
+        # process under the same Unix user can write into it, `write_scopes`
+        # state intent rather than constrain writes, and neither the plan nor
+        # this spec is frozen. Claiming OS-enforced isolation here would be the
+        # third time this project claimed more than its mechanism establishes.
         "basis": {
-            "conclusive_because": "the write root is exclusive to this attempt",
+            "conclusive_because": "exclusive by coordinator allocation under a "
+                                  "trusted-writer convention",
+            "os_enforced_isolation": False,
             "attribution_by_observation": False,
             "interior_judged": spec.get("kind") != "pipeline",
+            "note": "not isolated from other processes running as the same "
+                    "Unix user. OS-enforced isolation would need a container "
+                    "or mount namespace with this directory as the only "
+                    "writable bind mount.",
         },
     }
     werr = write_json(unit_dir / RECEIPT, receipt)
