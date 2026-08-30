@@ -1341,8 +1341,16 @@ def _fsync_append(path, record):
         os.fsync(fh.fileno())
 
 
-def read_receipts(state_dir):
-    """Return (receipts, problems), where a problem is STRUCTURED.
+def _read_receipts_raw(state_dir):
+    """Parse the journal. PRIVATE: everything goes through the chokepoint.
+
+    Do not call this to decide anything. It reports what it found, including
+    what it could not read, and reporting is not refusing. Three review rounds
+    found the same bug in four places because each caller decided for itself
+    whether a problem mattered, and each new caller forgot again. Use
+    `load_acknowledgments`, which cannot be bypassed by forgetting.
+
+    Returns (receipts, problems), where a problem is STRUCTURED.
 
     Problems used to be prose, and the caller decided whether to fail closed
     by looking for the word "corruption" in it. That is the guard-matching-
@@ -1424,6 +1432,34 @@ def fatal_problems(problems):
     return [p for p in problems if p.get("kind") != "truncated_tail"]
 
 
+def load_acknowledgments(state_dir):
+    """THE ONLY WAY to read the receipt journal. Raises OutboxError.
+
+    Three rounds of review found the same defect in four different places: a
+    complete-but-malformed final line, `--record-receipt` appending to a
+    corrupt journal, a record that parsed but asserted nothing, and a
+    fail-closed test that grepped its own prose. None of those were four bugs.
+    They were one bug wearing four hats: detection lived here and the decision
+    to refuse lived in each caller, so every caller got to be wrong
+    separately, and every NEW caller got a fresh chance to be wrong.
+
+    The fix is not another check. It is that reading this journal and refusing
+    a bad one are now the same operation, so a future caller cannot obtain the
+    records without also accepting the refusal. `test_ack` asserts
+    structurally that no other function touches RECEIPTS.
+    """
+    receipts, problems = _read_receipts_raw(state_dir)
+    fatal = fatal_problems(problems)
+    if fatal:
+        raise OutboxError(
+            "the receipt journal cannot be read in full, so no acknowledgment "
+            "status derived from it can be trusted:\n" +
+            "\n".join(f"  [{f['kind']}] {f['detail']}" for f in fatal) +
+            "\n  Repair or remove it, then re-record: intents are keyed, so "
+            "re-recording is safe.")
+    return receipts, problems
+
+
 def record_receipt(state_dir, key, ref, op=None, by=None, at=None):
     """Record the drainer's ATTESTATION that this operation succeeded.
 
@@ -1444,6 +1480,7 @@ def record_receipt(state_dir, key, ref, op=None, by=None, at=None):
     Written only after the tracker confirms to the drainer. A false
     attestation is strictly worse than a missing one: re-draining is safe,
     un-filing is not."""
+    load_acknowledgments(state_dir)      # refuse to extend a broken journal
     rec = {"key": key, "ref": str(ref), "op": op, "attested": True,
            "by": by or os.environ.get("USER") or "?",
            "at": at or time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -1460,7 +1497,7 @@ def acknowledgment_status(state_dir):
     lost a line reports the intents it can still see as attested, and the one
     it lost as unacknowledged, which is precisely the false-negative-turned-
     false-positive this check exists to prevent."""
-    receipts, problems = read_receipts(state_dir)
+    receipts, problems = load_acknowledgments(state_dir)
     by_key = {}
     for r in receipts:
         by_key.setdefault(r.get("key"), []).append(r)
@@ -2399,6 +2436,19 @@ def cmd_outbox(args):
     """
     intents = read_outbox(args.state_dir)
 
+    try:
+        return _cmd_outbox_inner(args, intents)
+    except OutboxError as exc:
+        # One handler for every path into the journal. Previously each branch
+        # decided separately whether to care, and one of them always forgot.
+        if args.json:
+            print(json.dumps({"error": str(exc)}, indent=2, sort_keys=True))
+        else:
+            sys.stderr.write(f"  RECEIPT JOURNAL: {exc}\n")
+        return EXIT_CONFLICT
+
+
+def _cmd_outbox_inner(args, intents):
     if args.record_receipt:
         keys = {i.get("key") for i in intents}
         if args.record_receipt not in keys:
@@ -2413,20 +2463,6 @@ def cmd_outbox(args):
                 "own reference for the operation the drainer watched "
                 "succeed; without it there is nothing to check later.\n")
             return EXIT_USAGE
-        # Do not append to a journal that cannot be read in full. Appending
-        # to it produces a new record whose status is derived alongside
-        # records nobody can parse, and exits zero as though all were well.
-        _, problems = read_receipts(args.state_dir)
-        fatal = fatal_problems(problems)
-        if fatal:
-            for note in fatal:
-                sys.stderr.write(f"  RECEIPT JOURNAL [{note['kind']}]: "
-                                 f"{note['detail']}\n")
-            sys.stderr.write(
-                "  Refusing to append to a journal that cannot be read in "
-                "full. Repair or\n  remove it, then re-record: intents are "
-                "keyed, so re-recording is safe.\n")
-            return EXIT_CONFLICT
         rec = record_receipt(args.state_dir, args.record_receipt, args.ref,
                              op=args.op)
         print(f"  recorded: {rec['key']} -> {rec['ref']}")
@@ -2439,24 +2475,6 @@ def cmd_outbox(args):
     # fixes it. A bad line in the middle means the journal cannot be read in
     # full, so no status derived from it can be trusted, including the
     # comfortable ones.
-    fatal = fatal_problems(problems)
-    if fatal:
-        if args.json:
-            print(json.dumps({"error": "receipt journal unusable",
-                              "problems": problems}, indent=2,
-                             sort_keys=True))
-        else:
-            for note in fatal:
-                sys.stderr.write(
-                    f"  RECEIPT JOURNAL [{note['kind']}]: "
-                    f"{note['detail']}\n")
-            sys.stderr.write(
-                "  Refusing to report acknowledgment status from a journal "
-                "that cannot be\n  read in full. Repair or remove "
-                f"{Path(args.state_dir) / RECEIPTS}, then re-drain: intents "
-                "are\n  keyed, so re-recording is safe.\n")
-        return EXIT_CONFLICT
-
     for i in intents:
         st, rs = status.get(i.get("key"), (UNACKNOWLEDGED, []))
         i["ack_status"] = st

@@ -74,7 +74,7 @@ class TestJournalDurability(unittest.TestCase):
             S.record_receipt(d, "k1", "ARC-1")
             with open(self._path(d), "a") as fh:
                 fh.write('{"key": "k2", "ref": "ARC-2"')   # no newline, cut
-            recs, problems = S.read_receipts(d)
+            recs, problems = S._read_receipts_raw(d)
             self.assertEqual([r["key"] for r in recs], ["k1"])
             self.assertEqual([p["kind"] for p in problems], ["truncated_tail"])
             self.assertEqual(S.fatal_problems(problems), [],
@@ -85,10 +85,13 @@ class TestJournalDurability(unittest.TestCase):
         into a false one."""
         with tempfile.TemporaryDirectory() as d:
             S.record_receipt(d, "k1", "ARC-1")
+            # Append the bad line and the following good one WITHOUT
+            # record_receipt: it now refuses to extend a broken journal, which
+            # is the point. This fixture builds the damaged state directly.
             with open(self._path(d), "a") as fh:
                 fh.write("NOT JSON\n")
-            S.record_receipt(d, "k3", "ARC-3")
-            _, problems = S.read_receipts(d)
+                fh.write('{"key": "k3", "ref": "ARC-3", "attested": true}\n')
+            _, problems = S._read_receipts_raw(d)
             kinds = [p["kind"] for p in problems]
             self.assertIn("corrupt", kinds)
             self.assertNotIn("truncated_tail", kinds)
@@ -97,7 +100,7 @@ class TestJournalDurability(unittest.TestCase):
     def test_the_write_is_fsynced(self):
         src = SWARM.read_text()
         i = src.index("def _fsync_append")
-        j = src.index("def read_receipts")
+        j = src.index("def _read_receipts_raw")
         seg = src[i:j]
         self.assertIn("os.fsync", seg)
         self.assertIn("LOCK_EX", seg)
@@ -106,7 +109,7 @@ class TestJournalDurability(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             for n in range(5):
                 S.record_receipt(d, "k%d" % n, "ARC-%d" % n)
-            recs, problems = S.read_receipts(d)
+            recs, problems = S._read_receipts_raw(d)
             self.assertEqual(len(recs), 5)
             self.assertEqual(problems, [])
 
@@ -193,7 +196,7 @@ class TestReviewFindings(unittest.TestCase):
             S.record_receipt(d, "k1", "ARC-1")
             with open(Path(d) / S.RECEIPTS, "a") as fh:
                 fh.write("NOT JSON\n")
-            S.record_receipt(d, "k2", "ARC-2")
+                fh.write('{"key": "k2", "ref": "ARC-2", "attested": true}\n')
 
             class A:
                 state_dir = d
@@ -291,7 +294,7 @@ class TestRoundThreeFindings(unittest.TestCase):
             S.record_receipt(d, "k1", "ARC-1")
             with open(Path(d) / S.RECEIPTS, "a") as fh:
                 fh.write("NOT JSON\n")           # note: complete line
-            _, problems = S.read_receipts(d)
+            _, problems = S._read_receipts_raw(d)
             self.assertEqual([p["kind"] for p in problems], ["corrupt"])
 
     def test_record_receipt_refuses_to_append_to_a_bad_journal(self):
@@ -308,7 +311,7 @@ class TestRoundThreeFindings(unittest.TestCase):
             with open(Path(d) / S.RECEIPTS, "w") as fh:
                 fh.write(json.dumps({"key": "k1", "ref": "ARC-1",
                                      "attested": False}) + "\n")
-            recs, problems = S.read_receipts(d)
+            recs, problems = S._read_receipts_raw(d)
             self.assertEqual(recs, [])
             self.assertEqual([p["kind"] for p in problems], ["malformed"])
 
@@ -321,7 +324,7 @@ class TestRoundThreeFindings(unittest.TestCase):
             S.record_receipt(d, "k1", "ARC-1")
             with mock.patch.object(Path, "read_text",
                                    side_effect=OSError("EIO")):
-                _, problems = S.read_receipts(d)
+                _, problems = S._read_receipts_raw(d)
                 self.assertEqual([p["kind"] for p in problems], ["unreadable"])
                 self.assertTrue(S.fatal_problems(problems))
 
@@ -332,6 +335,81 @@ class TestRoundThreeFindings(unittest.TestCase):
         self.assertNotIn('"corruption"', src[i:j],
                          "a guard that greps its own prose breaks when the "
                          "prose changes")
+
+
+class TestTheRefusalCannotBeBypassed(unittest.TestCase):
+    """Root cause, after the gate refused a fourth review round.
+
+    Three rounds found the same defect in four places. They were not four
+    bugs: detection lived in the reader and the decision to refuse lived in
+    each caller, so every caller could be wrong separately and every NEW
+    caller got a fresh chance to be wrong. Patching instance five would have
+    changed nothing.
+
+    So the omission is now unrepresentable rather than detectable, and this
+    test checks architecture instead of wording.
+    """
+
+    CHOKEPOINT = "load_acknowledgments"
+    RAW = "_read_receipts_raw"
+
+    def _bodies(self):
+        """Function name -> source of its BODY only.
+
+        The body, not the whole def, because a function's own name appears in
+        its signature and would match itself.
+        """
+        import ast
+        tree = ast.parse(SWARM.read_text())
+        out = {}
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                out[node.name] = "\n".join(ast.unparse(b) for b in node.body)
+        return out
+
+    def test_every_journal_toucher_goes_through_the_chokepoint(self):
+        """The invariant is not an allowlist. It is: touch the journal, and
+        you accept the refusal. A new function added tomorrow either calls
+        the chokepoint or fails this test."""
+        offenders = []
+        for name, body in self._bodies().items():
+            if name in (self.RAW, self.CHOKEPOINT):
+                continue
+            if "RECEIPTS" not in body:
+                continue
+            if self.CHOKEPOINT + "(" not in body:
+                offenders.append(name)
+        self.assertEqual(offenders, [],
+                         "these reach the receipt journal without accepting "
+                         "its refusal, which is how one bug appeared in four "
+                         "places: %s" % sorted(offenders))
+
+    def test_nothing_calls_the_raw_reader_except_the_chokepoint(self):
+        callers = [n for n, b in self._bodies().items()
+                   if self.RAW + "(" in b and n != self.RAW]
+        self.assertEqual(callers, [self.CHOKEPOINT],
+                         "the raw reader reports problems; it does not "
+                         "refuse. Anything deciding on it must go through "
+                         "the chokepoint, got: %s" % sorted(callers))
+
+    def test_reading_and_refusing_are_the_same_operation(self):
+        """You cannot obtain the records without accepting the refusal."""
+        with tempfile.TemporaryDirectory() as d:
+            with open(Path(d) / S.RECEIPTS, "w") as fh:
+                fh.write("NOT JSON\n")
+            with self.assertRaises(S.OutboxError):
+                S.load_acknowledgments(d)
+            with self.assertRaises(S.OutboxError):
+                S.acknowledgment_status(d)
+            with self.assertRaises(S.OutboxError):
+                S.record_receipt(d, "k1", "ARC-1")
+
+    def test_a_healthy_journal_passes_through(self):
+        with tempfile.TemporaryDirectory() as d:
+            S.record_receipt(d, "k1", "ARC-1")
+            recs, problems = S.load_acknowledgments(d)
+            self.assertEqual(len(recs), 1)
+            self.assertEqual(problems, [])
 
 if __name__ == "__main__":
     unittest.main()
