@@ -46,6 +46,7 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 import unit as U  # noqa: E402  same skill, installed together
+import worktree as W  # noqa: E402
 
 STATE_FILE = "swarm-state.json"
 KINDS = U.KINDS
@@ -1348,13 +1349,18 @@ def _write_launch_record(unit_dir, u):
                     f"empty repository gives nothing to transition FROM.")
         rc, tree, _ = _git(repo, "rev-parse", "HEAD^{tree}")
         rc2, branch, _ = _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
-        rc3, status, _ = _git(repo, "status", "--porcelain")
+        # Exclude the coordinator's own state tree: allocate has already
+        # written unit.json under <root>/<unit>/<attempt> by the time we get
+        # here, and if the swarm runs inside the repository it works on, that
+        # would make every launch look dirty.
+        rc3, dirty = W.repo_status(U.run, repo,
+                                   exclude=W.swarm_root_of(unit_dir))
         if rc3 != 0:
             return f"unit {u['id']!r}: cannot read git status in {repo!r}"
         rec.update({"repo": top, "branch": branch if rc2 == 0 else None,
                     "base_commit": head, "base_tree": tree if rc == 0 else None,
-                    "clean_at_launch": status == "",
-                    "dirty_paths_at_launch": len(status.splitlines())})
+                    "clean_at_launch": not dirty,
+                    "dirty_paths_at_launch": len(dirty)})
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "x") as fh:      # x: an anchor is written ONCE

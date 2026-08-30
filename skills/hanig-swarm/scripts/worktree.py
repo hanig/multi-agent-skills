@@ -37,6 +37,33 @@ def _git(runner, repo, *args, timeout=60):
     return rc, (out or "").strip(), (err or "").strip()
 
 
+def repo_status(runner, repo, exclude=None):
+    """(rc, dirty_lines) for `repo`, ignoring the coordinator's own state.
+
+    Running a swarm inside the repository it works on is ordinary, and
+    `allocate` writes `runs/<unit>/<attempt>/unit.json` BEFORE the anchor is
+    taken. Counting that as dirt made `clean_at_launch` false for every code
+    unit in such a layout, so honest work could never satisfy production. The
+    coordinator's own files are attributable to the coordinator; they are not
+    the agent's uncommitted work, which is what this predicate is about.
+    """
+    args = ["status", "--porcelain"]
+    if exclude:
+        try:
+            rel = os.path.relpath(str(exclude), str(repo))
+        except ValueError:
+            rel = None
+        if rel and not rel.startswith(os.pardir) and not os.path.isabs(rel):
+            args += ["--", ".", f":(exclude){rel}"]
+    rc, out, _ = _git(runner, repo, *args)
+    return rc, [l for l in out.splitlines() if l.strip()]
+
+
+def swarm_root_of(unit_dir):
+    """<root>/<unit>/<attempt> -> <root>. The coordinator's state tree."""
+    return str(Path(unit_dir).parent.parent)
+
+
 def read_launch_record(unit_dir):
     """The anchor the coordinator wrote before the agent existed."""
     path = Path(unit_dir).parent / f"launch-{Path(unit_dir).name}.json"
@@ -89,9 +116,12 @@ def judge(runner, unit_dir, spec):
         return False, err
     repo = rec.get("repo")
     if not repo:
-        return False, ("the launch record anchored no repository, but this "
-                       "unit declares one, so the anchor does not match the "
-                       "unit it belongs to")
+        return False, (
+            f"this unit declares repo {spec['repo']!r}, but its launch record "
+            f"anchored no repository. The anchor was written before the unit "
+            f"declared one, or _write_launch_record failed: either way "
+            f"nothing captured a baseline, so re-dispatch this unit rather "
+            f"than reading this as a configuration mistake")
     if not os.path.isdir(repo):
         return False, f"the anchored repository {repo!r} is gone"
 
@@ -110,14 +140,14 @@ def judge(runner, unit_dir, spec):
     # An ignored path is DECLARED not to be part of the artifact, by the
     # repository itself, and production here is a claim about the committed
     # tree. The claim was too broad; the code is right.
-    rc, status, _ = _git(runner, repo, "status", "--porcelain")
+    rc, dirty = repo_status(runner, repo, exclude=swarm_root_of(unit_dir))
     if rc != 0:
         return False, f"cannot read git status in {repo!r}"
-    if status:
+    if dirty:
         return False, (
-            f"{len(status.splitlines())} path(s) are uncommitted. Work left in "
-            f"the working tree is not production: it is recorded nowhere "
-            f"another attempt or reader could find it")
+            f"{len(dirty)} path(s) are uncommitted. Work left in the working "
+            f"tree is not production: it is recorded nowhere another attempt "
+            f"or reader could find it")
 
     rc, branch, _ = _git(runner, repo, "rev-parse", "--abbrev-ref", "HEAD")
     if rc == 0 and rec.get("branch") and branch != rec["branch"]:
