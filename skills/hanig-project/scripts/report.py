@@ -115,7 +115,8 @@ def unit_rows(data):
         rows.append({
             "id": uid,
             "kind": pu.get("kind") or rc.get("kind") or "?",
-            "state": su.get("state") or rc.get("state") or "NOT STARTED",
+            "state": _state_of(su, rc),
+            "state_conflict": _state_conflict(su, rc),
             "job_id": su.get("job_id") or rc.get("job_id"),
             "attempts": len(su.get("attempts") or []),
             "max_attempts": pu.get("max_attempts"),
@@ -130,6 +131,30 @@ def unit_rows(data):
             "runtime": _runtime_of(data["plan"], pu),
         })
     return rows
+
+
+def _state_of(su, rc):
+    """The receipt wins.
+
+    This used to be `su.get("state") or rc.get("state")`, so the coordinator's
+    stored state outranked the receipt that judged the attempt. A unit whose
+    receipt said FAILED but whose state said DONE was reported COMPLETE: a
+    self-report beating evidence, inside the one document whose whole job is
+    to stop that. Reviewer found it; it is the worst defect in this change.
+    """
+    if rc.get("state"):
+        return rc["state"]
+    return su.get("state") or "NOT STARTED"
+
+
+def _state_conflict(su, rc):
+    """Surface a disagreement rather than silently picking a side."""
+    a, b = su.get("state"), rc.get("state")
+    if a and b and a != b:
+        return ("coordinator state says %s; the attempt's receipt says %s. "
+                "The receipt is shown, because it judged the artifacts."
+                % (a, b))
+    return None
 
 
 def _runtime_of(plan, unit):
@@ -174,11 +199,69 @@ def evidence_gaps(rows):
     return gaps
 
 
+# Kept byte-identical in spirit with swarm.py's reader: skills install
+# individually, so a skill cannot import from a sibling.
+RECEIPTS = "outbox-receipts.jsonl"
+
+
+def _read_attestations(project):
+    """(refs_by_key, fatal) from the receipt journal, fail-closed.
+
+    swarm.py stopped writing the `applied` field, because it was always false
+    and nothing ever set it true. This file went on reading it, so every run
+    reported its tracker updates as pending forever no matter what had landed.
+    That is what happens when a field is removed and its consumers are not
+    traced.
+    """
+    path = os.path.join(project, ".swarm", "state", RECEIPTS)
+    if not os.path.exists(path):
+        return {}, []
+    try:
+        raw = open(path).read()
+    except OSError as exc:
+        return {}, ["cannot read the receipt journal: %s" % exc]
+    lines = raw.splitlines()
+    complete_tail = raw.endswith("\n")
+    refs, fatal = {}, []
+    for idx, line in enumerate(lines):
+        if not line.strip():
+            continue
+        last = idx == len(lines) - 1
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            if not (last and not complete_tail):
+                fatal.append("receipt line %d was written in full and does "
+                             "not parse" % (idx + 1))
+            continue
+        if not isinstance(rec, dict) or rec.get("attested") is not True:
+            fatal.append("receipt line %d does not assert success"
+                         % (idx + 1))
+            continue
+        key = rec.get("key")
+        if key:
+            refs.setdefault(key, set()).add(str(rec.get("ref")))
+    return refs, fatal
+
+
 def outbox_summary(data):
-    pending, applied = [], []
+    """(unacknowledged, attested, conflicts, fatal).
+
+    ATTESTED is the drainer's word, never verified: nothing here can ask the
+    tracker. Absence means no confirmation either way, NOT that nothing was
+    filed."""
+    refs, fatal = _read_attestations(data["project"])
+    unack, attested, conflicts = [], [], []
     for i in data["outbox"]:
-        (applied if i.get("applied") else pending).append(i)
-    return pending, applied
+        got = refs.get(i.get("key"))
+        if not got:
+            unack.append(i)
+        elif len(got) > 1:
+            conflicts.append(i)
+        else:
+            i["_ref"] = sorted(got)[0]
+            attested.append(i)
+    return unack, attested, conflicts, fatal
 
 
 def verdict(rows):
@@ -354,7 +437,7 @@ def render(data, title=None):
     name = (title or plan.get("project") or plan.get("name")
             or os.path.basename(os.path.abspath(data["project"])))
     survey = data["survey"] or {}
-    pending, applied = outbox_summary(data)
+    unack, attested, ack_conflicts, ack_fatal = outbox_summary(data)
     gaps = evidence_gaps(rows)
 
     n_out = sum(len(r["outputs"]) for r in rows)
@@ -393,7 +476,7 @@ def render(data, title=None):
     for n, l in ((("%d / %d" % (done, len(rows))), "units closed"),
                  (str(n_out), "declared outputs delivered"),
                  (_fmt_bytes(tot_bytes), "output bytes, digested"),
-                 (str(len(applied)), "tracker updates applied")):
+                 (str(len(attested)), "tracker updates attested")):
         a('<div class="stat"><span class="n mono">%s</span>'
           '<span class="l">%s</span></div>' % (e(n), e(l)))
     a("</div></section>")
@@ -419,7 +502,10 @@ def render(data, title=None):
         a("<tr>")
         a('<td class="mono">%s</td>' % e(r["id"]))
         a("<td>%s</td>" % e(r["kind"]))
-        a("<td>%s</td>" % _pill(r["state"]))
+        a("<td>%s%s</td>" % (
+            _pill(r["state"]),
+            ('<br><span class="digest">%s</span>' % e(r["state_conflict"]))
+            if r["state_conflict"] else ""))
         a('<td class="mono">%s</td>' % e(r["job_id"] or "&mdash;"))
         a('<td class="mono">%s</td>' % e(att))
         rt = r["runtime"] or {}
@@ -516,15 +602,30 @@ def render(data, title=None):
                 a('<td class="wrap-cell">%s</td>' % e(it.get("title") or ""))
                 a("</tr>")
             a("</tbody></table></div>")
-        if pending:
+        if ack_fatal:
             a('<div class="note" style="margin-top:12px">'
-              "<strong>%d tracker intent(s) still read as pending.</strong>"
-              "<p style='margin:6px 0 0'>The outbox records intent, and an "
-              "intent that never advances is not a record of what was "
-              "applied. Re-draining is idempotent by key, so this is safe to "
-              "repeat, but the outbox should not be trusted as the answer to "
-              "&ldquo;what has already been filed?&rdquo;</p></div>"
-              % len(pending))
+              "<strong>The receipt journal cannot be read in full.</strong>"
+              "<p style='margin:6px 0 0'>No acknowledgment status derived "
+              "from it can be trusted, including the reassuring parts, so "
+              "none is shown.</p><ul>")
+            for f in ack_fatal:
+                a("<li>%s</li>" % e(f))
+            a("</ul></div>")
+        if ack_conflicts:
+            a('<div class="note" style="margin-top:12px">'
+              "<strong>%d intent(s) carry conflicting tracker refs.</strong>"
+              "<p style='margin:6px 0 0'>Two attestations name different "
+              "references for one intent, so something was filed twice, in "
+              "two places.</p></div>" % len(ack_conflicts))
+        if unack:
+            a('<div class="note" style="margin-top:12px">'
+              "<strong>%d tracker intent(s) are unacknowledged.</strong>"
+              "<p style='margin:6px 0 0'>That does NOT mean they were never "
+              "filed: it means nothing here has confirmation either way. "
+              "Re-draining is safe, because intents are keyed. And an "
+              "<em>attested</em> intent is the drainer's word, not proof: "
+              "nothing in this project can ask the tracker.</p></div>"
+              % len(unack))
         a("</section>")
 
     # environment

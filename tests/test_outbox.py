@@ -2692,5 +2692,48 @@ class TestListFieldsMustBeLists(unittest.TestCase):
              "outputs": ["out.txt"]}]})
 
 
+
+class TestUnresolvedInputsRoundTwo(unittest.TestCase):
+    """Two holes a reviewer found in the first version of this check."""
+
+    def _plan(self, units):
+        return {"project": "p", "units": units}
+
+    def _u(self, uid, **kw):
+        u = {"id": uid, "kind": "slurm", "command": "true",
+             "runtime": "none", "outputs": ["o-%s" % uid]}
+        u.update(kw)
+        return u
+
+    def test_shell_and_template_placeholders_are_refused(self):
+        for text in ("${CORPUS}", "$CORPUS", "{{corpus}}", "{corpus}",
+                     "%CORPUS%", "@CORPUS@", "%(corpus)s", "XXX", "N/A"):
+            with self.assertRaises(S.PlanError, msg=text):
+                S.validate_plan(self._plan([self._u("a", inputs=[text])]))
+
+    def test_an_ordinary_relative_path_still_passes(self):
+        for text in ("data/in.tsv", "in.tsv", "./x/y.parquet", "a-b_c.txt"):
+            S.validate_plan(self._plan([self._u("a", inputs=[text])]))
+
+    def test_a_producer_that_is_not_upstream_does_not_satisfy_an_input(self):
+        """'Something in this plan makes it' is not 'it exists when I run'."""
+        with self.assertRaises(S.PlanError) as c:
+            S.validate_plan(self._plan([
+                self._u("maker", outputs=["generated.txt"]),
+                self._u("user", inputs=["generated.txt"])]))
+        self.assertIn("not upstream", str(c.exception))
+
+    def test_a_direct_dependency_satisfies_it(self):
+        S.validate_plan(self._plan([
+            self._u("maker", outputs=["generated.txt"]),
+            self._u("user", needs=["maker"], inputs=["generated.txt"])]))
+
+    def test_a_transitive_dependency_satisfies_it(self):
+        S.validate_plan(self._plan([
+            self._u("maker", outputs=["generated.txt"]),
+            self._u("mid", needs=["maker"]),
+            self._u("user", needs=["mid"], inputs=["generated.txt"])]))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

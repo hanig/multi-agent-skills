@@ -138,24 +138,84 @@ class TestFindingsAreLabelledAsClaims(unittest.TestCase):
                              R.render(R.collect(t)))
 
 
-class TestPendingIntentsAreSurfaced(unittest.TestCase):
+class TestAcknowledgmentComesFromTheReceiptJournal(unittest.TestCase):
+    """swarm.py stopped writing `applied`; this file went on reading it, so
+    every run reported its tracker updates as pending forever. That is what
+    happens when a field is removed and its consumers are not traced."""
 
-    def test_a_pending_outbox_is_called_out(self):
+    TICKETS = {"issues": [{"identifier": "ARC-1", "unit": "a", "title": "t"}]}
+
+    def _receipts(self, t, lines):
+        d = os.path.join(t, ".swarm", "state")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, R.RECEIPTS), "w") as fh:
+            for line in lines:
+                fh.write(line + "\n")
+
+    def test_an_intent_with_no_receipt_is_unacknowledged(self):
         with tempfile.TemporaryDirectory() as t:
-            _project(t, outbox=[{"applied": False, "unit": "a",
-                                 "verb": "close"}],
-                     tickets={"issues": [{"identifier": "ARC-1", "unit": "a",
-                                          "title": "t"}]})
+            _project(t, outbox=[{"key": "k1", "unit": "a", "verb": "close"}],
+                     tickets=self.TICKETS)
             body = R.render(R.collect(t))
-            self.assertIn("still read as pending", body)
+            self.assertIn("unacknowledged", body)
+            self.assertIn("does NOT mean they were never", body)
 
-    def test_applied_intents_do_not_raise_the_warning(self):
+    def test_an_attested_intent_is_not_reported_unacknowledged(self):
         with tempfile.TemporaryDirectory() as t:
-            _project(t, outbox=[{"applied": True, "unit": "a",
-                                 "verb": "close"}],
-                     tickets={"issues": [{"identifier": "ARC-1", "unit": "a",
-                                          "title": "t"}]})
-            self.assertNotIn("still read as pending", R.render(R.collect(t)))
+            _project(t, outbox=[{"key": "k1", "unit": "a", "verb": "close"}],
+                     tickets=self.TICKETS)
+            self._receipts(t, [json.dumps({"key": "k1", "ref": "ARC-1",
+                                           "attested": True})])
+            body = R.render(R.collect(t))
+            self.assertNotIn("1 tracker intent(s) are unacknowledged", body)
+
+    def test_conflicting_refs_are_surfaced(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, outbox=[{"key": "k1", "unit": "a", "verb": "close"}],
+                     tickets=self.TICKETS)
+            self._receipts(t, [
+                json.dumps({"key": "k1", "ref": "ARC-1", "attested": True}),
+                json.dumps({"key": "k1", "ref": "ARC-9", "attested": True})])
+            self.assertIn("conflicting tracker refs", R.render(R.collect(t)))
+
+    def test_a_corrupt_journal_shows_no_status_at_all(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, outbox=[{"key": "k1", "unit": "a", "verb": "close"}],
+                     tickets=self.TICKETS)
+            self._receipts(t, ["NOT JSON"])
+            body = R.render(R.collect(t))
+            self.assertIn("cannot be read in full", body)
+
+    def test_attested_is_never_presented_as_verified(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, outbox=[{"key": "k1", "unit": "a", "verb": "close"}],
+                     tickets=self.TICKETS)
+            body = R.render(R.collect(t))
+            self.assertIn("the drainer's word, not proof", body)
+
+
+class TestEvidenceOutranksCoordinatorState(unittest.TestCase):
+    """The worst defect in the change: `su.get("state") or rc.get("state")`
+    let stored state beat the receipt that judged the attempt."""
+
+    def test_a_failed_receipt_beats_a_done_state(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, receipts={"a": {"state": "FAILED", "outputs": {}}})
+            rows = R.unit_rows(R.collect(t))
+            self.assertEqual(rows[0]["state"], "FAILED")
+            self.assertEqual(R.verdict(rows)[0], "FAILED")
+
+    def test_the_disagreement_is_shown_not_hidden(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, receipts={"a": {"state": "FAILED", "outputs": {}}})
+            body = R.render(R.collect(t))
+            self.assertIn("coordinator state says DONE", body)
+            self.assertIn("receipt says FAILED", body)
+
+    def test_state_is_used_when_there_is_no_receipt_yet(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t)
+            self.assertEqual(R.unit_rows(R.collect(t))[0]["state"], "DONE")
 
 
 class TestOutputIsSafeAndSelfContained(unittest.TestCase):

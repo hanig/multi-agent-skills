@@ -195,6 +195,44 @@ def resolve_runtime(plan, unit):
     return rt, None
 
 
+_PLACEHOLDER_EXACT = ("...", "PATH", "TBD", "TODO", "FIXME", "CHANGEME",
+                      "XXX", "N/A", "NA", "-")
+_PLACEHOLDER_PREFIX = ("<", "TODO", "FIXME", "CHANGEME", "XXX")
+
+
+def _looks_unresolved(text):
+    """Is this input still a hole somebody meant to fill in?
+
+    The first version checked four prefixes and three exact strings, so
+    "${CORPUS}" sailed straight through: not one of the exact values, does not
+    begin with "<", and looks like an ordinary relative path to everything
+    else. A plan built on it validates, has tickets filed against it, and then
+    waits for a value nobody was asked for, which is the exact failure this
+    check exists to prevent.
+
+    Shell and template syntax are how these are usually spelled, so they are
+    named here. This cannot be exhaustive, and it is not the real defence: the
+    interview is. Reaching this refusal means the interview already failed.
+    """
+    t = text.strip()
+    if t in _PLACEHOLDER_EXACT or t.startswith(_PLACEHOLDER_PREFIX):
+        return True
+    if t.endswith(">"):
+        return True
+    # ${VAR}, {{VAR}}, %(VAR)s, $VAR, {VAR}, %VAR%, @VAR@: unexpanded here.
+    if "${" in t or "{{" in t or "%(" in t:
+        return True
+    if t.startswith("$"):
+        return True
+    if len(t) > 2 and t.startswith("{") and t.endswith("}"):
+        return True
+    if len(t) > 2 and t.startswith("%") and t.endswith("%"):
+        return True
+    if len(t) > 2 and t.startswith("@") and t.endswith("@"):
+        return True
+    return False
+
+
 def _validate_runtimes(plan, units):
     by_id = {u.get("id"): u for u in units if isinstance(u, dict)}
     catalogue = plan.get("runtimes") or {}
@@ -511,8 +549,19 @@ def validate_plan(plan):
     # So: a declared input must either exist, or be produced by an upstream
     # unit. An unresolved placeholder is a plan that cannot run, and that is a
     # fact available NOW rather than at dispatch.
-    produced = {out for u in units if isinstance(u, dict)
-                for out in (u.get("outputs") or [])}
+    # An output only resolves an input if its producer actually runs FIRST.
+    # This used to be a flat set of every output in the plan, so a consumer
+    # declaring input "generated.txt" validated even with no dependency on the
+    # unit that generates it, and the coordinator was then free to start it
+    # before that file existed. "Something in this plan makes it" is not the
+    # same claim as "it will exist when I run".
+    _by_id = {u.get("id"): u for u in units if isinstance(u, dict)}
+    produced_by = {}
+    for u in units:
+        if not isinstance(u, dict):
+            continue
+        for out in (u.get("outputs") or []):
+            produced_by.setdefault(out, set()).add(u.get("id"))
     unresolved = []
     for u in units:
         if not isinstance(u, dict):
@@ -523,13 +572,20 @@ def validate_plan(plan):
                 unresolved.append((u.get("id", "?"), "<empty>"))
                 continue
             # A placeholder somebody meant to fill in.
-            if (text.startswith(("<", "TODO", "FIXME", "CHANGEME"))
-                    or text.endswith(">")
-                    or text in ("...", "PATH", "TBD")):
+            if _looks_unresolved(text):
                 unresolved.append((u.get("id", "?"), text))
                 continue
-            if text in produced:
-                continue                    # an upstream unit makes it
+            makers = produced_by.get(text)
+            if makers:
+                uid_here = u.get("id")
+                if makers & _ancestors(uid_here, _by_id):
+                    continue                # an UPSTREAM unit makes it
+                named = ", ".join(sorted(m for m in makers if m))
+                unresolved.append((
+                    uid_here,
+                    f"{text} (produced by {named}, which is not upstream of "
+                    f"it, so nothing orders them)"))
+                continue
             # A glob that matches nothing, or a path that is not there, is
             # only knowable locally; skip silently when it is neither, since
             # refusing on an unreadable mount would block honest work.
