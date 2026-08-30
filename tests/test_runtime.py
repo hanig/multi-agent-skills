@@ -166,5 +166,51 @@ class TestNoInferredFacts(unittest.TestCase):
             RT, entrypoint="/definitely/not/here/python"))]))
 
 
+
+class TestACanaryMustExerciseWhatItVouchesFor(unittest.TestCase):
+    """Ordering is not proof: a runtime:none probe on cpu once stood as
+    evidence for a python runtime on gpu."""
+
+    OTHER = {"id": "other", "resolution": "conda", "entrypoint": "/x/py",
+             "verified_by": "unverified: this is only the probe's own runtime"}
+
+    def test_a_canary_with_a_different_runtime_is_refused(self):
+        with self.assertRaises(S.PlanError) as c:
+            S.validate_plan(plan([
+                unit("probe", runtime=self.OTHER),
+                unit("work", needs=["probe"],
+                     runtime=dict(RT, verified_by="canary:probe"))]))
+        self.assertIn("does not run the runtime it vouches for",
+                      str(c.exception))
+
+    def test_a_runtime_none_canary_cannot_vouch_for_a_real_runtime(self):
+        with self.assertRaises(S.PlanError):
+            S.validate_plan(plan([
+                unit("probe", runtime="none"),
+                unit("work", needs=["probe"],
+                     runtime=dict(RT, verified_by="canary:probe"))]))
+
+    def test_a_canary_on_another_partition_is_refused(self):
+        with self.assertRaises(S.PlanError) as c:
+            S.validate_plan(plan([
+                unit("probe", runtime=RT, sbatch=["--partition=cpu"]),
+                unit("work", needs=["probe"], sbatch=["--partition=gpu"],
+                     runtime=dict(RT, verified_by="canary:probe"))]))
+        self.assertIn("has to land where the work lands", str(c.exception))
+
+    def test_the_same_runtime_and_partition_is_accepted(self):
+        S.validate_plan(plan([
+            unit("probe", runtime=RT, sbatch=["--partition=cpu"]),
+            unit("work", needs=["probe"], sbatch=["--partition=cpu"],
+                 runtime=dict(RT, verified_by="canary:probe"))]))
+
+    def test_verified_by_may_differ_between_probe_and_work(self):
+        """A canary cannot be verified by itself, so that field must not be
+        part of what has to match."""
+        S.validate_plan(plan([
+            unit("probe", runtime=RT),
+            unit("work", needs=["probe"],
+                 runtime=dict(RT, verified_by="canary:probe"))]))
+
 if __name__ == "__main__":
     unittest.main()

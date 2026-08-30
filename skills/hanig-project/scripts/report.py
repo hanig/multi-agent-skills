@@ -238,9 +238,16 @@ def _read_attestations(project):
             fatal.append("receipt line %d does not assert success"
                          % (idx + 1))
             continue
-        key = rec.get("key")
-        if key:
-            refs.setdefault(key, set()).add(str(rec.get("ref")))
+        key = str(rec.get("key") or "").strip()
+        ref = str(rec.get("ref") or "").strip()
+        if not key or not ref:
+            # Without a reference there is nothing to check by hand later,
+            # which is the only thing that would ever settle an attestation.
+            # This used to store the literal string "None" as the ref.
+            fatal.append("receipt line %d has no key or no tracker ref"
+                         % (idx + 1))
+            continue
+        refs.setdefault(key, set()).add(ref)
     return refs, fatal
 
 
@@ -251,6 +258,11 @@ def outbox_summary(data):
     tracker. Absence means no confirmation either way, NOT that nothing was
     filed."""
     refs, fatal = _read_attestations(data["project"])
+    if fatal:
+        # Deriving status from the readable half and warning about the rest
+        # produces a report that says "N attested" and "no status here can be
+        # trusted" in the same breath. Fail closed: no counts at all.
+        return list(data["outbox"]), [], [], fatal
     unack, attested, conflicts = [], [], []
     for i in data["outbox"]:
         got = refs.get(i.get("key"))
@@ -424,6 +436,32 @@ def e(x):
     return html.escape("" if x is None else str(x), quote=True)
 
 
+_SAFE_SCHEMES = ("http://", "https://")
+
+
+def _safe_url(url):
+    """Return the URL only if it is safe to put in an href, else None.
+
+    tickets.json is data this program did not write, and these reports get
+    PUBLISHED. A ticket whose url is `javascript:alert(document.domain)` used
+    to become a live anchor, so opening the report ran it. Escaping the string
+    does not help: the danger is the scheme, not the characters.
+
+    Allow-list, not deny-list. `javascript:`, `data:`, `vbscript:` and every
+    scheme invented next are all excluded by not being named here.
+    """
+    if not url:
+        return None
+    text = str(url).strip()
+    # Strip control characters and whitespace first: "java\tscript:x" and
+    # "  javascript:x" both reach a browser as javascript.
+    compact = "".join(c for c in text if c.isprintable()
+                      and not c.isspace()).lower()
+    if not compact.startswith(_SAFE_SCHEMES):
+        return None
+    return text
+
+
 def _pill(state):
     cls = ("p-DONE" if state in TERMINAL_OK
            else "p-BAD" if state in TERMINAL_BAD else "p-OTHER")
@@ -593,9 +631,9 @@ def render(data, title=None):
                 if not isinstance(it, dict):
                     continue
                 ident = it.get("identifier") or it.get("id") or "&mdash;"
-                url = it.get("url")
-                cell = ('<a href="%s">%s</a>' % (e(url), e(ident))
-                        if url else e(ident))
+                url = _safe_url(it.get("url"))
+                cell = ('<a href="%s" rel="noopener noreferrer">%s</a>'
+                        % (e(url), e(ident)) if url else e(ident))
                 a("<tr>")
                 a('<td class="mono">%s</td>' % cell)
                 a('<td class="mono">%s</td>' % e(it.get("unit") or "-"))

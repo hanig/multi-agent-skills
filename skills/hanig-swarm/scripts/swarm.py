@@ -233,6 +233,20 @@ def _looks_unresolved(text):
     return False
 
 
+def _runtime_identity(rt):
+    """What makes two runtimes the same THING to execute in.
+
+    Not the whole profile: a canary's own `verified_by` necessarily differs
+    from the unit it vouches for, because it cannot be verified by itself.
+    What must match is what actually gets run.
+    """
+    if rt == "none":
+        return ("none",)
+    if not isinstance(rt, dict):
+        return (None,)
+    return (rt.get("id"), rt.get("resolution"), rt.get("entrypoint"))
+
+
 def _validate_runtimes(plan, units):
     by_id = {u.get("id"): u for u in units if isinstance(u, dict)}
     catalogue = plan.get("runtimes") or {}
@@ -316,6 +330,27 @@ def _validate_runtimes(plan, units):
                     f"{canary!r} is not an ancestor of it, so nothing stops "
                     f"{uid!r} starting before the probe closes. Add it to "
                     f"'needs' (directly or upstream).")
+
+            # ORDERING IS NOT PROOF. Ancestry alone let a `runtime: "none"`
+            # probe on the cpu partition stand as evidence for a python
+            # runtime on gpu: it ran first, and it established nothing about
+            # the thing it was vouching for. A canary has to exercise the
+            # same runtime, in the same place.
+            crt, _cref = resolve_runtime(plan, by_id[canary])
+            if _runtime_identity(crt) != _runtime_identity(rt):
+                raise PlanError(
+                    f"unit {uid!r} is verified by canary {canary!r}, but "
+                    f"{canary!r} declares a different runtime. A probe that "
+                    f"does not run the runtime it vouches for proves nothing "
+                    f"about it. Give the canary the same runtime.")
+            cpart = declared_partition(by_id[canary])
+            upart = declared_partition(u)
+            if cpart and upart and cpart != upart:
+                raise PlanError(
+                    f"unit {uid!r} runs on partition {upart!r} but its "
+                    f"canary {canary!r} runs on {cpart!r}. A runtime that "
+                    f"resolves on one partition may not resolve on another, "
+                    f"so the probe has to land where the work lands.")
         elif vb == "preflight":
             pass
         elif vb.startswith("unverified:"):

@@ -255,5 +255,62 @@ class TestOutputIsSafeAndSelfContained(unittest.TestCase):
                          "tokens used but not defined on bare :root")
 
 
+
+class TestPublishedReportsCannotCarryAnExploit(unittest.TestCase):
+    """These reports get published as artifacts, and tickets.json is data
+    this program did not write."""
+
+    def _with_url(self, t, url):
+        _project(t, tickets={"issues": [
+            {"identifier": "ARC-1", "unit": "a", "title": "t", "url": url}]},
+            outbox=[{"key": "k1", "unit": "a", "verb": "close"}])
+        return R.render(R.collect(t))
+
+    def test_a_javascript_url_never_becomes_a_link(self):
+        with tempfile.TemporaryDirectory() as t:
+            body = self._with_url(t, "javascript:alert(document.domain)")
+            self.assertNotIn("href=\"javascript", body.lower())
+            self.assertIn("ARC-1", body)          # still shown, as text
+
+    def test_obfuscated_schemes_are_also_refused(self):
+        for bad in ("JaVaScRiPt:alert(1)", "  javascript:alert(1)",
+                    "java\tscript:alert(1)", "data:text/html,<script>x</script>",
+                    "vbscript:msgbox(1)", "\njavascript:alert(1)"):
+            self.assertIsNone(R._safe_url(bad), bad)
+
+    def test_ordinary_links_still_work(self):
+        for good in ("https://linear.app/x/issue/ARC-1",
+                     "http://example.org/a?b=c"):
+            self.assertEqual(R._safe_url(good), good)
+
+    def test_a_receipt_without_a_ref_is_not_an_attestation(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, outbox=[{"key": "k1", "unit": "a", "verb": "close"}],
+                     tickets={"issues": [{"identifier": "ARC-1", "unit": "a",
+                                          "title": "t"}]})
+            d = os.path.join(t, ".swarm", "state")
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, R.RECEIPTS), "w") as fh:
+                fh.write(json.dumps({"key": "k1", "attested": True}) + "\n")
+            body = R.render(R.collect(t))
+            self.assertIn("cannot be read in full", body)
+
+    def test_corruption_suppresses_the_counts_entirely(self):
+        """Saying 'N attested' and 'no status can be trusted' in one report
+        is worse than saying neither."""
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, outbox=[{"key": "k1", "unit": "a", "verb": "close"}],
+                     tickets={"issues": [{"identifier": "ARC-1", "unit": "a",
+                                          "title": "t"}]})
+            d = os.path.join(t, ".swarm", "state")
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, R.RECEIPTS), "w") as fh:
+                fh.write(json.dumps({"key": "k1", "ref": "ARC-1",
+                                     "attested": True}) + "\n")
+                fh.write("NOT JSON\n")
+            unack, attested, conflicts, fatal = R.outbox_summary(R.collect(t))
+            self.assertTrue(fatal)
+            self.assertEqual(attested, [])
+
 if __name__ == "__main__":
     unittest.main()
