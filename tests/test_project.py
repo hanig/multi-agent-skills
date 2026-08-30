@@ -940,5 +940,38 @@ class TestInstallerSymlinkEdgeCases(unittest.TestCase):
             self.assertTrue((prefix / "hanig-gone").is_dir())
 
 
+class TestTheTrackerTeamIsNotAQuestion(unittest.TestCase):
+    """A draft with no team made the session stop and ask, mid-run, with 1.42
+    TiB of hashing already in flight. It also guessed "goodarzilab", which is
+    the SLURM account from the plan's charge_to and not a Linear team at all:
+    two namespaces that look alike."""
+
+    def test_a_draft_carries_the_default_team(self):
+        self.assertEqual(T.draft(PLAN)["project"]["team"], T.DEFAULT_TEAM)
+        self.assertEqual(T.DEFAULT_TEAM, "Arc")
+
+    def test_a_brief_can_still_override_it(self):
+        got = T.draft(PLAN, brief={"team": "peeks"})
+        self.assertEqual(got["project"]["team"], "peeks")
+
+    def test_an_empty_brief_does_not_erase_the_default(self):
+        """A brief with no team key must not produce a null team, which is
+        what sent the session back to the human."""
+        for brief in ({}, {"summary": "x"}, {"team": None}, {"team": ""}):
+            self.assertEqual(T.draft(PLAN, brief=brief)["project"]["team"],
+                             T.DEFAULT_TEAM, f"brief={brief}")
+
+    def test_charge_to_is_never_read_as_a_team(self):
+        """The actual confusion: a SLURM account is not a tracker team."""
+        plan = dict(PLAN)
+        plan["charge_to"] = "goodarzilab"
+        self.assertEqual(T.draft(plan)["project"]["team"], "Arc")
+
+    def test_the_skill_says_not_to_ask(self):
+        doc = (ROOT / "skills" / "hanig-project" / "SKILL.md").read_text()
+        self.assertIn("do not ask", doc.lower())
+        self.assertIn("charge_to", doc)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

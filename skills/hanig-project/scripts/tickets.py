@@ -23,6 +23,14 @@ import sys
 from pathlib import Path
 
 DRAFT = "tickets.json"
+# The Linear team to file under when a brief does not name one.
+#
+# The workspace is "Arc - projects" and its teams are Arc, peeks and SRAgent.
+# Cluster and lab work belongs to Arc, alongside Entwine, CSA-RNA-FM and
+# MultiDep. Without this the drafter asked every time, and once guessed
+# "goodarzilab" -- which is the SLURM ACCOUNT from the plan's charge_to, not a
+# Linear team at all. Two different namespaces that happen to look alike.
+DEFAULT_TEAM = "Arc"
 SCHEMA = 1
 
 
@@ -115,7 +123,7 @@ def draft(plan, brief=None, existing=None):
             "summary": (brief or {}).get("summary")
                        or f"Swarm project with {len(units)} units.",
             "description": (brief or {}).get("description") or "",
-            "team": (brief or {}).get("team"),
+            "team": (brief or {}).get("team") or DEFAULT_TEAM,
             "linear_id": None,
             "url": None,
         },
@@ -184,6 +192,9 @@ def cmd_draft(args):
     if err:
         sys.exit(f"error: no readable plan at {args.plan}: {err}")
     brief, _ = read_json(args.brief) if args.brief else (None, None)
+    if args.team:
+        brief = dict(brief or {})
+        brief["team"] = args.team
     out_path = Path(args.out or (Path(args.plan).parent / DRAFT))
     existing, eerr = read_json(out_path)
     if eerr and eerr != "missing":
@@ -210,7 +221,8 @@ def cmd_draft(args):
     out_path.write_text(json.dumps(d, indent=2))
     known = sum(1 for i in d["issues"] if i["linear_id"])
     print(f"  drafted {len(d['issues'])} issue(s) for project "
-          f"{d['project']['name']!r} -> {out_path}")
+          f"{d['project']['name']!r} under team {d['project']['team']!r} "
+          f"-> {out_path}")
     if known:
         print(f"  {known} already exist in the tracker and will be UPDATED, "
               f"not recreated")
@@ -245,6 +257,9 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     d = sub.add_parser("draft", help="write a tracker draft from a plan")
     d.add_argument("plan")
+    d.add_argument("--team", default=None,
+                   help=f"tracker team to file under (default: "
+                        f"{DEFAULT_TEAM})")
     d.add_argument("--brief", default=None,
                    help="JSON with summary/description/team for the project")
     d.add_argument("--out", default=None)

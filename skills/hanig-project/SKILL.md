@@ -73,6 +73,16 @@ python3 scripts/tickets.py draft plan.json --brief brief.json
 This writes `tickets.json`. It talks to nothing: the coordinator runs on a
 shared login node and a tracker token must not live there.
 
+**Team: `Arc`, and do not ask.** The workspace is `Arc - projects`; its teams
+are `Arc`, `peeks` and `SRAgent`, and cluster and lab work goes to `Arc`
+alongside Entwine, CSA-RNA-FM and MultiDep. `tickets.py` defaults to it, so
+this is not a question for the human. Override only if told to, with
+`--team`.
+
+A plan's `charge_to` is a SLURM ACCOUNT, not a team. They look alike and are
+different namespaces: filing under `goodarzilab` fails, because no such Linear
+team exists.
+
 Then, in this session, holding the Linear MCP connector:
 
 1. Show the human the project and EVERY issue title in full, and the count.
