@@ -198,6 +198,22 @@ class TestACanaryMustExerciseWhatItVouchesFor(unittest.TestCase):
                      runtime=dict(RT, verified_by="canary:probe"))]))
         self.assertIn("has to land where the work lands", str(c.exception))
 
+    def test_an_omitted_partition_does_not_match_a_declared_one(self):
+        """Absence is a value: no partition means the cluster default, which
+        is a specific queue, not a wildcard."""
+        with self.assertRaises(S.PlanError) as c:
+            S.validate_plan(plan([
+                unit("probe", runtime=RT),                 # default queue
+                unit("work", needs=["probe"], sbatch=["--partition=gpu"],
+                     runtime=dict(RT, verified_by="canary:probe"))]))
+        self.assertIn("has to land where the work lands", str(c.exception))
+
+    def test_both_omitting_a_partition_is_fine(self):
+        S.validate_plan(plan([
+            unit("probe", runtime=RT),
+            unit("work", needs=["probe"],
+                 runtime=dict(RT, verified_by="canary:probe"))]))
+
     def test_the_same_runtime_and_partition_is_accepted(self):
         S.validate_plan(plan([
             unit("probe", runtime=RT, sbatch=["--partition=cpu"]),

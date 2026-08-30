@@ -310,7 +310,11 @@ class TestPublishedReportsCannotCarryAnExploit(unittest.TestCase):
                 fh.write("NOT JSON\n")
             unack, attested, conflicts, fatal = R.outbox_summary(R.collect(t))
             self.assertTrue(fatal)
-            self.assertEqual(attested, [])
+            self.assertEqual((unack, attested, conflicts), ([], [], []),
+                             "a count derived from a journal we just said "
+                             "cannot be read is not a safer number")
+            body = R.render(R.collect(t))
+            self.assertNotIn("are unacknowledged", body)
 
 if __name__ == "__main__":
     unittest.main()

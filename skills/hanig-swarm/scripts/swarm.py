@@ -195,6 +195,17 @@ def resolve_runtime(plan, unit):
     return rt, None
 
 
+# ${VAR} $VAR {{VAR}} {VAR} %(VAR)s %VAR% @VAR@ <VAR>, anywhere in the string.
+_PLACEHOLDER_RE = re.compile(
+    r"\$\{[^}]*\}"
+    r"|\$[A-Za-z_][A-Za-z0-9_]*"
+    r"|\{\{[^}]*\}\}"
+    r"|\{[A-Za-z_][A-Za-z0-9_]*\}"
+    r"|%\([^)]*\)"
+    r"|%[A-Za-z_][A-Za-z0-9_]*%"
+    r"|@[A-Za-z_][A-Za-z0-9_]*@"
+    r"|<[^>]*>")
+
 _PLACEHOLDER_EXACT = ("...", "PATH", "TBD", "TODO", "FIXME", "CHANGEME",
                       "XXX", "N/A", "NA", "-")
 _PLACEHOLDER_PREFIX = ("<", "TODO", "FIXME", "CHANGEME", "XXX")
@@ -219,18 +230,11 @@ def _looks_unresolved(text):
         return True
     if t.endswith(">"):
         return True
-    # ${VAR}, {{VAR}}, %(VAR)s, $VAR, {VAR}, %VAR%, @VAR@: unexpanded here.
-    if "${" in t or "{{" in t or "%(" in t:
-        return True
-    if t.startswith("$"):
-        return True
-    if len(t) > 2 and t.startswith("{") and t.endswith("}"):
-        return True
-    if len(t) > 2 and t.startswith("%") and t.endswith("%"):
-        return True
-    if len(t) > 2 and t.startswith("@") and t.endswith("@"):
-        return True
-    return False
+    # EMBEDDED counts. Checking only the string's edges accepted
+    # "data/$CORPUS/shard.fastq" and "samples/{sample}.fastq", which are just
+    # as unresolved as the bare form and are the way people actually write
+    # them. A dispatched command would open that literal path.
+    return bool(_PLACEHOLDER_RE.search(t))
 
 
 def _runtime_identity(rt):
@@ -345,12 +349,20 @@ def _validate_runtimes(plan, units):
                     f"about it. Give the canary the same runtime.")
             cpart = declared_partition(by_id[canary])
             upart = declared_partition(u)
-            if cpart and upart and cpart != upart:
+            # ABSENCE IS A VALUE. "Declares no partition" means "the cluster
+            # default", which is a specific partition, not a wildcard. Writing
+            # `if cpart and upart and cpart != upart` let a canary with no
+            # partition vouch for a unit on gpu: it ran on the default cpu
+            # queue and established nothing. Compare them directly so None
+            # only matches None.
+            if cpart != upart:
                 raise PlanError(
-                    f"unit {uid!r} runs on partition {upart!r} but its "
-                    f"canary {canary!r} runs on {cpart!r}. A runtime that "
-                    f"resolves on one partition may not resolve on another, "
-                    f"so the probe has to land where the work lands.")
+                    f"unit {uid!r} runs on partition "
+                    f"{upart or 'the cluster default'} but its canary "
+                    f"{canary!r} runs on {cpart or 'the cluster default'}. A "
+                    f"runtime that resolves on one partition may not resolve "
+                    f"on another, so the probe has to land where the work "
+                    f"lands. Declare the same partition on both.")
         elif vb == "preflight":
             pass
         elif vb.startswith("unverified:"):
@@ -1602,7 +1614,19 @@ def record_receipt(state_dir, key, ref, op=None, by=None, at=None):
     attestation is strictly worse than a missing one: re-draining is safe,
     un-filing is not."""
     load_acknowledgments(state_dir)      # refuse to extend a broken journal
-    rec = {"key": key, "ref": str(ref), "op": op, "attested": True,
+    # Validated HERE, not only in the CLI. A direct caller passing ref=None
+    # used to store the literal string "None", and a whitespace-only ref
+    # passed a truthiness check and poisoned the journal later.
+    key = str(key or "").strip()
+    ref = str(ref if ref is not None else "").strip()
+    if not key:
+        raise OutboxError("a receipt needs the intent key it acknowledges")
+    if not ref:
+        raise OutboxError(
+            "a receipt needs the tracker's own reference. Without one there "
+            "is nothing to check by hand later, and checking by hand is the "
+            "only thing that ever settles an attestation.")
+    rec = {"key": key, "ref": ref, "op": op, "attested": True,
            "by": by or os.environ.get("USER") or "?",
            "at": at or time.strftime("%Y-%m-%dT%H:%M:%S%z"),
            "schema_version": 1}

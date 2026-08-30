@@ -2711,6 +2711,15 @@ class TestUnresolvedInputsRoundTwo(unittest.TestCase):
             with self.assertRaises(S.PlanError, msg=text):
                 S.validate_plan(self._plan([self._u("a", inputs=[text])]))
 
+    def test_embedded_placeholders_are_refused(self):
+        """Checking only the edges accepted the forms people actually
+        write."""
+        for text in ("data/$CORPUS/shard.fastq", "samples/{sample}.fastq",
+                     "runs/${RUN}/out.tsv", "x/%(name)s/y",
+                     "a/{{tmpl}}/b", "p/%RUN%/q", "r/@VAR@/s"):
+            with self.assertRaises(S.PlanError, msg=text):
+                S.validate_plan(self._plan([self._u("a", inputs=[text])]))
+
     def test_an_ordinary_relative_path_still_passes(self):
         for text in ("data/in.tsv", "in.tsv", "./x/y.parquet", "a-b_c.txt"):
             S.validate_plan(self._plan([self._u("a", inputs=[text])]))

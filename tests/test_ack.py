@@ -504,5 +504,30 @@ class TestTheRefusalCannotBeBypassed(unittest.TestCase):
             self.assertEqual(len(recs), 1)
             self.assertEqual(problems, [])
 
+
+class TestARefIsRequiredWhereItIsWritten(unittest.TestCase):
+    """The CLI checked truthiness; a direct caller and a whitespace-only ref
+    both walked past it and poisoned the journal later."""
+
+    def test_a_none_ref_is_refused_at_the_writer(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(S.OutboxError):
+                S.record_receipt(d, "k1", None)
+
+    def test_a_whitespace_ref_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(S.OutboxError):
+                S.record_receipt(d, "k1", "   ")
+
+    def test_an_empty_key_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(S.OutboxError):
+                S.record_receipt(d, "  ", "ARC-1")
+
+    def test_a_ref_is_stored_stripped(self):
+        with tempfile.TemporaryDirectory() as d:
+            rec = S.record_receipt(d, " k1 ", "  ARC-1  ")
+            self.assertEqual((rec["key"], rec["ref"]), ("k1", "ARC-1"))
+
 if __name__ == "__main__":
     unittest.main()

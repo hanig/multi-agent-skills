@@ -259,10 +259,12 @@ def outbox_summary(data):
     filed."""
     refs, fatal = _read_attestations(data["project"])
     if fatal:
-        # Deriving status from the readable half and warning about the rest
-        # produces a report that says "N attested" and "no status here can be
-        # trusted" in the same breath. Fail closed: no counts at all.
-        return list(data["outbox"]), [], [], fatal
+        # NO COUNTS AT ALL. Returning the intents as "unacknowledged" here
+        # still printed "N tracker intent(s) are unacknowledged" directly
+        # under "no status can be trusted", which is a count derived from the
+        # journal we just said we cannot read. Absence of a number is the
+        # honest output.
+        return [], [], [], fatal
     unack, attested, conflicts = [], [], []
     for i in data["outbox"]:
         got = refs.get(i.get("key"))
