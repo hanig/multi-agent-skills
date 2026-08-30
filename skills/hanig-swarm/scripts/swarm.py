@@ -380,7 +380,16 @@ def validate_plan(plan):
                             f"the done-predicate conclusive. Give them disjoint "
                             f"scopes, or order them with 'needs'.")
     return {"units": len(units),
-            "with_deps": sum(1 for u in units if u.get("needs"))}
+            "with_deps": sum(1 for u in units if u.get("needs")),
+            # Which slurm units say nothing about where they run. The
+            # partition check reads u["sbatch"], so an empty one means it
+            # examined nothing -- and a validator silent about what it skipped
+            # is indistinguishable from one that checked and approved.
+            "without_partition": sorted(
+                u["id"] for u in units
+                if u.get("kind", "slurm") == "slurm"
+                and not any(str(a).startswith(("--partition=", "-p="))
+                            for a in (u.get("sbatch") or [])))}
 
 
 # --- safety for unattended running ----------------------------------------
@@ -1497,6 +1506,21 @@ def cmd_validate(args):
         sys.exit(f"error: invalid plan: {e}")
     print(f"plan is valid: {summary['units']} unit(s), "
           f"{summary['with_deps']} with dependencies")
+    # NAME WHAT WAS NOT VERIFIED, so silence is never read as approval. A real
+    # run declared cpu_preemptible with 32 CPUs in its prose, ran on the
+    # default partition with 2, and this printed "plan is valid" -- because
+    # the partition check reads u["sbatch"], which was empty, so it examined
+    # nothing and said nothing.
+    missing = summary.get("without_partition") or []
+    if missing:
+        known = sorted(_known_partitions() or [])
+        print(f"  NOT CHECKED: {len(missing)} slurm unit(s) declare no "
+              f"partition, so nothing here verified where they run: "
+              f"{', '.join(missing)}")
+        print(f"  They will use this cluster's DEFAULT partition"
+              + (f", of {len(known)} available" if known else "")
+              + ". If the plan's prose names a partition, it is describing "
+                "something this file does not request.")
     return EXIT_OK
 
 

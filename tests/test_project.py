@@ -973,5 +973,68 @@ class TestTheTrackerTeamIsNotAQuestion(unittest.TestCase):
         self.assertIn("charge_to", doc)
 
 
+class TestFilingRequiresApproval(unittest.TestCase):
+    """Asked for after the first real run filed a project and five issues and
+    dispatched 1.42 TiB of work without a separate yes. Creating a tracker
+    project is outward-facing: other people see it and undoing it is manual."""
+
+    def test_a_fresh_draft_requires_approval(self):
+        self.assertEqual(T.draft(PLAN)["approval"]["state"], "required")
+
+    def test_approving_records_who_and_when(self):
+        with tempfile.TemporaryDirectory() as d:
+            plan = Path(d) / "plan.json"
+            plan.write_text(json.dumps(PLAN))
+            run(TICKETS, "draft", str(plan))
+            tk = Path(d) / "tickets.json"
+            r = run(TICKETS, "approve", str(tk), "--approver", "hani")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            a = json.loads(tk.read_text())["approval"]
+            self.assertEqual((a["state"], a["granted_by"]), ("granted", "hani"))
+            self.assertTrue(a["at"])
+
+    def test_the_phrase_is_not_an_everyday_word(self):
+        """"yes" or "go" would appear in ordinary conversation and make the
+        gate meaningless."""
+        self.assertEqual(T.AUTOPILOT_PHRASE, "swarm autopilot")
+        for casual in ("yes", "go", "ok", "sure", "go ahead", "sounds good"):
+            self.assertNotEqual(casual, T.AUTOPILOT_PHRASE)
+            self.assertNotIn(T.AUTOPILOT_PHRASE, casual)
+
+    def test_autopilot_clears_the_gate(self):
+        self.assertEqual(T.draft(PLAN, autopilot=True)["approval"]["state"],
+                         "autopilot")
+
+    def test_an_existing_approval_is_not_re_requested(self):
+        """Re-drafting after a plan edit must not send the human back through
+        a gate for work they already accepted."""
+        first = T.draft(PLAN)
+        first["approval"] = {"state": "granted", "granted_by": "hani",
+                             "at": "2026-08-29T00:00:00+0000"}
+        self.assertEqual(T.draft(PLAN, existing=first)["approval"]["state"],
+                         "granted")
+
+    def test_a_required_gate_is_not_silently_inherited_as_granted(self):
+        """The counter-claim: a prior draft that was NEVER approved must not
+        satisfy the gate."""
+        first = T.draft(PLAN)
+        self.assertEqual(first["approval"]["state"], "required")
+        self.assertEqual(T.draft(PLAN, existing=first)["approval"]["state"],
+                         "required")
+
+    def test_the_draft_output_says_nothing_may_be_created(self):
+        with tempfile.TemporaryDirectory() as d:
+            plan = Path(d) / "plan.json"
+            plan.write_text(json.dumps(PLAN))
+            out = run(TICKETS, "draft", str(plan)).stdout
+            self.assertIn("APPROVAL REQUIRED", out)
+            self.assertIn(T.AUTOPILOT_PHRASE, out)
+
+    def test_the_skill_names_the_gate_and_the_phrase(self):
+        doc = (ROOT / "skills" / "hanig-project" / "SKILL.md").read_text()
+        self.assertIn("swarm autopilot", doc)
+        self.assertIn("DEFAULT IS TO STOP HERE", doc)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

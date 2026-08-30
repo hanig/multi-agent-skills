@@ -90,9 +90,27 @@ A plan's `charge_to` is a SLURM ACCOUNT, not a team. They look alike and are
 different namespaces: filing under `goodarzilab` fails, because no such Linear
 team exists.
 
+**THE DEFAULT IS TO STOP HERE.** The draft carries
+`approval.state: "required"`, and while it says that, you may not create
+anything. Filing a project is outward-facing: other people see it and undoing
+it is manual.
+
+The human clears it by saying so, and you record that:
+
+```sh
+python3 scripts/tickets.py approve tickets.json --approver <name>
+```
+
+**One phrase skips the gate for a whole run: `swarm autopilot`.** If the
+request contains it, pass `--autopilot` to `draft` and go end to end without
+stopping. Nothing else counts: not "yes", not "go ahead", not "sounds good".
+Those appear in ordinary conversation and would make the gate meaningless.
+An approval already granted is not re-requested when the draft is rebuilt.
+
 Then, in this session, holding the Linear MCP connector:
 
 1. Show the human the project and EVERY issue title in full, and the count.
+   Not a summary. The titles are what they are approving.
 2. Ask once. Not per issue.
 3. On yes: create the project, then each issue, writing each returned id back
    into `tickets.json` (`project.linear_id`, `issues[].linear_id`,

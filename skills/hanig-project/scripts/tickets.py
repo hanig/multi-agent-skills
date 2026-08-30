@@ -20,6 +20,7 @@ import argparse
 import hashlib
 import json
 import sys
+import time
 from pathlib import Path
 
 DRAFT = "tickets.json"
@@ -31,6 +32,15 @@ DRAFT = "tickets.json"
 # "goodarzilab" -- which is the SLURM ACCOUNT from the plan's charge_to, not a
 # Linear team at all. Two different namespaces that happen to look alike.
 DEFAULT_TEAM = "Arc"
+
+# Creating a tracker project and filing issues is OUTWARD-FACING: other people
+# see it, and undoing it is manual. So it waits for a human by default, and
+# the draft says so in a field a session cannot overlook.
+#
+# One phrase turns the whole run automatic. It is deliberately not a word
+# anybody types by accident, and not "yes" or "go", which appear in ordinary
+# conversation and would make the gate meaningless.
+AUTOPILOT_PHRASE = "swarm autopilot"
 SCHEMA = 1
 
 
@@ -114,7 +124,7 @@ def issue_for_unit(u, plan_name):
     }
 
 
-def draft(plan, brief=None, existing=None):
+def draft(plan, brief=None, existing=None, autopilot=False):
     units = plan.get("units") or []
     out = {
         "schema_version": SCHEMA,
@@ -127,9 +137,30 @@ def draft(plan, brief=None, existing=None):
             "linear_id": None,
             "url": None,
         },
+        # The gate. A session must not create anything while this says
+        # "required": the human has not seen the project overview or the
+        # issue titles yet.
+        "approval": {
+            "state": "required",
+            "granted_by": None,
+            "at": None,
+            "how_to_skip_next_time": (f"say {AUTOPILOT_PHRASE!r} in the "
+                                      f"request to run end to end without "
+                                      f"stopping here"),
+        },
         "issues": [issue_for_unit(u, plan.get("name") or "?") for u in units],
     }
+    if autopilot:
+        out["approval"] = {"state": "autopilot", "granted_by": "autopilot "
+                           "phrase in the request", "at": None,
+                           "how_to_skip_next_time": None}
     if existing:
+        # An approval already granted is NOT re-requested. Re-drafting after
+        # a plan edit must not force the human through the gate again for
+        # work they have already seen and accepted.
+        prior = (existing.get("approval") or {}).get("state")
+        if prior in ("granted", "autopilot"):
+            out["approval"] = existing["approval"]
         # 6(g): re-running must UPDATE, not duplicate. Carry forward every id
         # we already know, keyed on the unit.
         by_unit = {i.get("unit"): i for i in (existing.get("issues") or [])}
@@ -209,7 +240,7 @@ def cmd_draft(args):
         print("  Fix or remove it deliberately. Removing it means the next "
               "approval files everything again.")
         return 2
-    d = draft(plan, brief, existing)
+    d = draft(plan, brief, existing, autopilot=args.autopilot)
 
     problems = check(plan, d)
     if problems:
@@ -226,9 +257,31 @@ def cmd_draft(args):
     if known:
         print(f"  {known} already exist in the tracker and will be UPDATED, "
               f"not recreated")
-    print("\n  Nothing has been sent anywhere. A session holding the tracker "
-          "connector\n  reads this file, shows it in full, and creates it "
-          "after ONE approval.")
+    state = d["approval"]["state"]
+    if state == "autopilot":
+        print(f"\n  AUTOPILOT: the request said {AUTOPILOT_PHRASE!r}, so this "
+              f"is cleared to file and dispatch without stopping.")
+    else:
+        print(f"\n  APPROVAL REQUIRED. Nothing has been sent anywhere and "
+              f"nothing may be\n  created until a human has seen the project "
+              f"overview and every issue\n  title. Show them in full, then "
+              f"ask ONCE.")
+        print(f"\n  To run end to end without this gate next time, say "
+              f"{AUTOPILOT_PHRASE!r} in the request.")
+    return 0
+
+
+def cmd_approve(args):
+    """Record that a human saw the draft and accepted it."""
+    d, err = read_json(args.tickets)
+    if err:
+        sys.exit(f"error: no readable draft at {args.tickets}: {err}")
+    d.setdefault("approval", {})
+    d["approval"].update({"state": "granted", "granted_by": args.approver,
+                          "at": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
+    Path(args.tickets).write_text(json.dumps(d, indent=2))
+    print(f"  approved by {args.approver}: {len(d.get('issues') or [])} "
+          f"issue(s) may now be created.")
     return 0
 
 
@@ -257,6 +310,9 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     d = sub.add_parser("draft", help="write a tracker draft from a plan")
     d.add_argument("plan")
+    d.add_argument("--autopilot", action="store_true",
+                   help=f"the human said {AUTOPILOT_PHRASE!r}: file and "
+                        f"dispatch without stopping for approval")
     d.add_argument("--team", default=None,
                    help=f"tracker team to file under (default: "
                         f"{DEFAULT_TEAM})")
@@ -264,6 +320,11 @@ def main():
                    help="JSON with summary/description/team for the project")
     d.add_argument("--out", default=None)
     d.set_defaults(fn=cmd_draft)
+    a = sub.add_parser("approve", help="record a human's approval of a draft")
+    a.add_argument("tickets")
+    a.add_argument("--approver", required=True)
+    a.set_defaults(fn=cmd_approve)
+
     c = sub.add_parser("check", help="verify the plan and the draft still agree")
     c.add_argument("plan")
     c.add_argument("tickets")
