@@ -65,6 +65,10 @@ EXIT_USAGE = 64
 EXIT_CONFLICT = 3
 
 
+class OutboxError(Exception):
+    """The receipt journal cannot be written or read safely."""
+
+
 class PlanError(Exception):
     pass
 
@@ -1315,8 +1319,19 @@ def _fsync_append(path, record):
     with open(path, "a") as fh:
         try:
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-        except OSError:
-            pass                      # no flock here; the write still happens
+        except OSError as exc:
+            # Do NOT swallow this. I originally wrote `pass` here with the
+            # comment "no flock here; the write still happens", which is true
+            # and is exactly the problem: the write happens WITHOUT the
+            # serialisation the caller was promised, two concurrent writers
+            # interleave, and both report success. A guarantee that quietly
+            # downgrades itself is worse than one that was never offered.
+            raise OutboxError(
+                f"cannot take an exclusive lock on {path}: {exc}. Receipt "
+                f"writes must be serialised, and this filesystem will not "
+                f"serialise them, so two drainers could interleave and "
+                f"corrupt the journal. Record receipts from a filesystem "
+                f"that supports flock.")
         fh.write(line)
         fh.flush()
         os.fsync(fh.fileno())
@@ -1358,12 +1373,26 @@ def read_receipts(state_dir):
 
 
 def record_receipt(state_dir, key, ref, op=None, by=None, at=None):
-    """Record that the drainer OBSERVED this operation succeed.
+    """Record the drainer's ATTESTATION that this operation succeeded.
 
-    Written only after the tracker confirms. A false acknowledgment is
-    strictly worse than a missing one: re-draining is safe, un-filing is
-    not."""
-    rec = {"key": key, "ref": str(ref), "op": op,
+    Read that word carefully, because a reviewer caught me overclaiming here.
+    This is NOT verified evidence and cannot be. The coordinator has no
+    network imports, so it cannot ask the tracker whether ARC-171 really
+    closed; anyone who can run this command can write any reference they like.
+    What the record establishes is only: this identified writer, at this time,
+    said this operation succeeded and returned this reference.
+
+    That is the same class of claim as an agent reporting "done", and this
+    repo exists to refuse exactly that when it is dressed up as proof. So the
+    mechanism stays (there is no other one available across the network gap)
+    and the LABEL carries the weakness: every display says attested, never
+    verified. A reader can then go and check the reference by hand, which is
+    the only thing that would settle it.
+
+    Written only after the tracker confirms to the drainer. A false
+    attestation is strictly worse than a missing one: re-draining is safe,
+    un-filing is not."""
+    rec = {"key": key, "ref": str(ref), "op": op, "attested": True,
            "by": by or os.environ.get("USER") or "?",
            "at": at or time.strftime("%Y-%m-%dT%H:%M:%S%z"),
            "schema_version": 1}
@@ -1372,7 +1401,13 @@ def record_receipt(state_dir, key, ref, op=None, by=None, at=None):
 
 
 def acknowledgment_status(state_dir):
-    """Map key -> (status, receipts). Derived, never stored."""
+    """Map key -> (status, receipts), plus problems. Derived, never stored.
+
+    CALLERS MUST FAIL CLOSED ON `problems`. Detecting corruption and then
+    deriving status from whatever survived is not a safeguard: a journal that
+    lost a line reports the intents it can still see as attested, and the one
+    it lost as unacknowledged, which is precisely the false-negative-turned-
+    false-positive this check exists to prevent."""
     receipts, problems = read_receipts(state_dir)
     by_key = {}
     for r in receipts:
@@ -2332,6 +2367,27 @@ def cmd_outbox(args):
         return EXIT_OK
 
     status, problems = acknowledgment_status(args.state_dir)
+
+    # FAIL CLOSED. Corruption is not the same as an interrupted tail: a
+    # truncated last line is a write that did not finish, and re-draining
+    # fixes it. A bad line in the middle means the journal cannot be read in
+    # full, so no status derived from it can be trusted, including the
+    # comfortable ones.
+    corrupt = [p for p in problems if "corruption" in p]
+    if corrupt:
+        if args.json:
+            print(json.dumps({"error": "receipt journal corrupt",
+                              "problems": problems}, indent=2))
+        else:
+            for note in corrupt:
+                sys.stderr.write(f"  RECEIPT JOURNAL: {note}\n")
+            sys.stderr.write(
+                "  Refusing to report acknowledgment status from a journal "
+                "that cannot be\n  read in full. Repair or remove "
+                f"{Path(args.state_dir) / RECEIPTS}, then re-drain: intents "
+                "are\n  keyed, so re-recording is safe.\n")
+        return EXIT_CONFLICT
+
     for i in intents:
         st, rs = status.get(i.get("key"), (UNACKNOWLEDGED, []))
         i["ack_status"] = st
@@ -2362,7 +2418,7 @@ def cmd_outbox(args):
           + (f", {len(conflicts)} in CONFLICT" if conflicts else "") + "\n")
     for i in show:
         ev = "with evidence" if i.get("evidence") else "no evidence"
-        label = {ACKNOWLEDGED: "ack", CONFLICT: "CONFLICT",
+        label = {ACKNOWLEDGED: "attested", CONFLICT: "CONFLICT",
                  UNACKNOWLEDGED: "unack"}[i["ack_status"]]
         print(f"  [{label:8}] {i['verb']:6} {i['unit']:12} "
               f"{i['unit_state']:16} {ev}")
@@ -2381,6 +2437,8 @@ def cmd_outbox(args):
     print("  UNACKNOWLEDGED does NOT mean 'not filed'. It means this machine "
           "has\n  no confirmation either way. Re-draining is safe: intents "
           "are keyed.")
+    print("  ATTESTED is the drainer's word, not proof. Nothing here can ask "
+          "the\n  tracker; check the reference by hand if it matters.")
     return EXIT_CONFLICT if conflicts else EXIT_OK
 
 

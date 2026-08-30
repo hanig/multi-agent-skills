@@ -253,8 +253,15 @@ extensions.
 outbox; a session that has MCP drains them. A tracker that is unreachable can
 therefore never block dispatch, and draining twice cannot file an issue twice.
 
-Acknowledgment is derived, never stored. The drainer records a success receipt
-carrying the tracker's own reference, and status is computed from it:
+Acknowledgment is an **attestation, not evidence**. The coordinator has no
+network imports, so it cannot ask the tracker whether ARC-171 really closed;
+anyone who can run the command can write any reference. The record establishes
+only that an identified writer said so at a given time, which is the same class
+of claim as an agent reporting "done". The mechanism stays, because across a
+deliberate network gap there is no other one, and the label carries the
+weakness: every display says attested, never verified.
+
+Status is derived from those attestations, never stored:
 `acknowledged`, `conflict` (two receipts, two refs, one intent), or
 `unacknowledged`. The last does **not** mean "not filed": it means this machine
 has no confirmation either way, and claiming otherwise asserts knowledge it does

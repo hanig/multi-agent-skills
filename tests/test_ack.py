@@ -159,6 +159,56 @@ class TestReceiptsRequireAKnownIntent(unittest.TestCase):
             S.record_receipt(d, "abc", "ARC-2")
             self.assertEqual(S.cmd_outbox(self._args(d)), S.EXIT_CONFLICT)
 
+class TestReviewFindings(unittest.TestCase):
+    """Three MAJOR findings from the review panel, each of which was real.
+
+    I had claimed the receipt establishes tracker success, that corruption is
+    never silently skipped, and that writes are serialised. All three claims
+    were stronger than the code.
+    """
+
+    def test_an_flock_failure_is_not_swallowed(self):
+        """I wrote `except OSError: pass` with the comment 'the write still
+        happens'. It does, WITHOUT the serialisation the caller was promised,
+        and both concurrent writers then report success."""
+        import unittest.mock as mock
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(S.fcntl, "flock",
+                                   side_effect=OSError("nolock")):
+                with self.assertRaises(S.OutboxError) as c:
+                    S.record_receipt(d, "k1", "ARC-1")
+            self.assertIn("serialise", str(c.exception))
+
+    def test_corruption_fails_closed_rather_than_reporting_survivors(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(Path(d) / S.OUTBOX, "w") as fh:
+                for k in ("k1", "k2"):
+                    fh.write(json.dumps({
+                        "key": k, "verb": "close", "unit": "u", "why": "w",
+                        "unit_state": "DONE", "evidence": {"x": 1}}) + "\n")
+            S.record_receipt(d, "k1", "ARC-1")
+            with open(Path(d) / S.RECEIPTS, "a") as fh:
+                fh.write("NOT JSON\n")
+            S.record_receipt(d, "k2", "ARC-2")
+
+            class A:
+                state_dir = d
+                all = True
+                json = False
+                record_receipt = None
+                ref = None
+                op = None
+            self.assertEqual(S.cmd_outbox(A()), S.EXIT_CONFLICT)
+
+    def test_the_record_does_not_claim_to_verify_the_tracker(self):
+        """The coordinator has no network imports, so it cannot check that
+        ARC-171 really closed. The label must carry that weakness."""
+        with tempfile.TemporaryDirectory() as d:
+            rec = S.record_receipt(d, "k1", "ARC-1")
+            self.assertTrue(rec["attested"])
+        doc = S.record_receipt.__doc__
+        self.assertIn("NOT verified evidence", doc)
+        self.assertIn("attested, never", doc)
 
 if __name__ == "__main__":
     unittest.main()
