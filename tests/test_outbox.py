@@ -2026,5 +2026,144 @@ class TestPreemptionUnderTheNewDefault(unittest.TestCase):
         self.assertIn("preempted {policy} times, giving up", seg)
 
 
+class TestRetryBudgetBehaviour(unittest.TestCase):
+    """BEHAVIOURAL, not constant-checking. A reviewer showed my earlier test
+    asserted only that DEFAULT_MAX_ATTEMPTS == 1, so reverting the line in
+    advance() that actually consumes it left the suite green -- the flagship
+    fix's runtime half was covered by nothing."""
+
+    def _drive(self, tmp, plan, verdict, prior_attempts=None):
+        """One advance over a unit that already has a REAL attempt, with the
+        predicate forced to a given verdict.
+
+        The attempt is constructed directly rather than produced by a dry run:
+        a dry placeholder is now cleared at the top of advance (correctly), so
+        driving through one would never reach the check at all. My first
+        version of this harness did exactly that and tested nothing."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("sw_drive", SWARM)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        (tmp / "plan.json").write_text(json.dumps(plan))
+        st = tmp / "st"
+        st.mkdir(parents=True, exist_ok=True)
+        att = tmp / "rn" / "h" / "attempt-1"
+        att.mkdir(parents=True, exist_ok=True)
+        attempts = list(prior_attempts or []) + [str(att)]
+        (st / "swarm-state.json").write_text(json.dumps(
+            {"schema_version": 1, "halted": None, "units": {
+                "h": {"state": "SUBMITTED", "job_id": "2868624",
+                      "attempt_dir": str(att), "attempts": attempts,
+                      "gpu_hours": 0}}}))
+        m._check = lambda d: (verdict, "forced")
+        # A real advance renews the lease between units, so the harness has to
+        # hold it exactly as a controller would. Without this it stopped at
+        # "no longer holds the lease" and measured nothing.
+        ok, why = m.acquire_lease(str(st))
+        self.assertTrue(ok, f"harness could not take the lock: {why}")
+        self.addCleanup(m.release_lease, str(st))
+        # dry_run=False, because the dry-run refusal (correctly) blocks a dry
+        # advance over a live attempt -- my first harness tripped exactly that
+        # and measured the refusal instead of the retry. max_new=0 stops it
+        # dispatching afterwards, which would need a real sbatch.
+        rep, _, _ = m.advance(plan, m.load_state(str(st)), str(st),
+                              str(tmp / "rn"), False, max_new=0)
+        return rep, m.load_state(str(st))
+
+    def _plan(self, **over):
+        u = {"id": "h", "kind": "slurm", "command": "true", "outputs": ["o"],
+             "write_scopes": ["h/"]}
+        u.update(over)
+        return {"name": "p", "units": [u]}
+
+    def test_a_preemption_does_not_retry_by_default(self):
+        """THE flagship behaviour: without an explicit max_attempts, one
+        preemption ends the unit rather than silently costing three runs."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            rep, state = self._drive(tmp, self._plan(), 3)   # 3 = PREEMPTED
+            self.assertEqual(state["units"]["h"]["state"], "FAILED",
+                             f"it retried without being asked:\n{rep}")
+            self.assertTrue(any("opt-in" in l for l in rep), rep)
+
+    def test_a_plan_that_asks_for_retries_gets_them(self):
+        """The counter-claim. A default of 1 must not remove retries from
+        plans that declared what an interruption costs."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            plan = self._plan(max_attempts=3,
+                              retry={"mode": "restart",
+                                     "max_lost": {"items": 1}})
+            plan["retry_limits"] = {"items": 5}
+            rep, state = self._drive(tmp, plan, 3)
+            self.assertIsNone(state["units"]["h"]["attempt_dir"],
+                              "the attempt was not released for a re-run")
+            self.assertNotEqual(state["units"]["h"]["state"], "FAILED")
+            self.assertTrue(any("will re-attempt" in l for l in rep), rep)
+
+    def test_a_dry_run_does_not_consume_a_declared_retry(self):
+        """Found by a reviewer as an interaction between two changes that
+        were each correct alone: a dry attempt is appended to us['attempts'],
+        and that list IS the retry budget, so every dry run stole a retry."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            plan = self._plan(max_attempts=2,
+                              retry={"mode": "restart",
+                                     "max_lost": {"items": 1}})
+            plan["retry_limits"] = {"items": 5}
+            # One prior DRY attempt on the record, exactly as a permitted
+            # dry run leaves behind, plus the real attempt being judged.
+            rep, state = self._drive(
+                tmp, plan, 3, prior_attempts=[f"{S.DRY_PREFIX}/somewhere"])
+            self.assertNotEqual(
+                state["units"]["h"]["state"], "FAILED",
+                f"a dry run consumed one of the two declared attempts:\n{rep}")
+            self.assertTrue(any("will re-attempt (1/2)" in l for l in rep),
+                            f"the dry attempt was counted as real:\n{rep}")
+
+    def test_a_terminal_unit_does_not_block_a_dry_run(self):
+        """The refusal counted any non-placeholder job id as live, so a DONE
+        unit blocked every future dry run for the life of the project."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            plan = self._plan()
+            (tmp / "plan.json").write_text(json.dumps(plan))
+            sd = tmp / "st"
+            sd.mkdir(parents=True)
+            (sd / "swarm-state.json").write_text(json.dumps(
+                {"schema_version": 1, "halted": None, "units": {
+                    "h": {"state": "DONE", "job_id": "2868624",
+                          "attempt_dir": "/x", "attempts": ["/x"],
+                          "gpu_hours": 0}}}))
+            r = subprocess.run(
+                [sys.executable, str(SWARM), "run", str(tmp / "plan.json"),
+                 "--dry-run", "--state-dir", str(sd), "--root", str(tmp / "rn")],
+                capture_output=True, text=True, cwd=tmp)
+            self.assertNotIn("REFUSING to dry-run", r.stdout, r.stdout)
+
+    def test_a_LIVE_unit_still_blocks_a_dry_run(self):
+        """The property the refusal exists for must survive the narrowing."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            (tmp / "plan.json").write_text(json.dumps(self._plan()))
+            sd = tmp / "st"
+            sd.mkdir(parents=True)
+            (sd / "swarm-state.json").write_text(json.dumps(
+                {"schema_version": 1, "halted": None, "units": {
+                    "h": {"state": "SUBMITTED", "job_id": "2868624",
+                          "attempt_dir": "/x", "attempts": ["/x"],
+                          "gpu_hours": 0}}}))
+            r = subprocess.run(
+                [sys.executable, str(SWARM), "run", str(tmp / "plan.json"),
+                 "--dry-run", "--state-dir", str(sd), "--root", str(tmp / "rn")],
+                capture_output=True, text=True, cwd=tmp)
+            self.assertIn("REFUSING to dry-run", r.stdout, r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

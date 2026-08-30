@@ -185,7 +185,13 @@ def validate_plan(plan):
     # fan-out: none of those establishes how much work is lost, and a warning
     # built on them cries wolf until it is switched off.
     limits = (plan.get("retry_limits") or {})
-    for k in limits:
+    for k, v in limits.items():
+        # A string limit reached the `value > cap` comparison and raised
+        # TypeError, crashing the validator rather than refusing the plan.
+        if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                or v != v or v in (float("inf"), float("-inf")) or v < 0:
+            raise PlanError(f"retry_limits[{k!r}]={v!r}; a limit must be a "
+                            f"non-negative, finite number.")
         if k not in CHARGE_METRICS:
             raise PlanError(
                 f"retry_limits names {k!r}, which is not a known metric. "
@@ -195,10 +201,16 @@ def validate_plan(plan):
             continue
         uid = u.get("id", "?")
         attempts = u.get("max_attempts", DEFAULT_MAX_ATTEMPTS)
-        if not isinstance(attempts, int) or isinstance(attempts, bool) \
-                or attempts < 1:
+        # 2.0 is 2. JSON has one number type, so refusing a float here
+        # rejected plans that were previously fine and said nothing useful
+        # about their retry exposure -- a refusal earning nothing.
+        if isinstance(attempts, bool) or not isinstance(attempts, (int, float)) \
+                or attempts != attempts or attempts in (float("inf"),
+                                                        float("-inf")) \
+                or attempts != int(attempts) or int(attempts) < 0:
             raise PlanError(f"unit {uid!r} has max_attempts={attempts!r}; it "
-                            f"must be an integer of at least 1.")
+                            f"must be a whole number of at least 0.")
+        attempts = max(1, int(attempts))     # 0 and 1 both mean "run once"
         retry = u.get("retry")
         if attempts == 1:
             continue
@@ -234,8 +246,12 @@ def validate_plan(plan):
                 raise PlanError(f"unit {uid!r} max_lost names {metric!r}, "
                                 f"which is not a known metric. Use one of: "
                                 f"{', '.join(CHARGE_METRICS)}.")
-            if not isinstance(value, (int, float)) or isinstance(value, bool) \
-                    or value < 0:
+            # NaN slipped through every comparison: NaN < 0 is False and
+            # NaN > cap is False, so a unit could declare an unbounded loss
+            # and pass the check that exists to bound it.
+            if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                    or value != value \
+                    or value in (float("inf"), float("-inf")) or value < 0:
                 raise PlanError(f"unit {uid!r} max_lost[{metric!r}]="
                                 f"{value!r}; it must be a non-negative number.")
             cap = limits.get(metric)
@@ -380,6 +396,7 @@ def validate_plan(plan):
 # A human typing `advance` notices all four. A cron job does not.
 LEASE = "lease.json"
 # older than this was abandoned by a controller that died.
+DRY_PREFIX = "dry-attempt-"
 SETTLE_S = 600             # accounting lag before a missing row becomes terminal
 
 # Repetition is OPT-IN. This defaulted to 3, so every unit silently carried
@@ -1091,10 +1108,15 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     # ago; I recorded it and did not fix it, and it then bit the first real
     # user on their first run, whose only way out was to discard all state.
     if dry_run:
+        # LIVE attempts only. A terminal unit cannot be contaminated, and
+        # refusing because a DONE unit still records the job id that finished
+        # it would block every dry run for the rest of a project's life.
         real = sorted(uid for uid in units
                       if (_unit_state(state, uid).get("job_id")
                           and not str(_unit_state(state, uid)["job_id"])
-                          .startswith("dry-")))
+                          .startswith("dry-")
+                          and _unit_state(state, uid).get("state")
+                          in LIVE_STATES))
         if real:
             return ([f"REFUSING to dry-run against a state directory that "
                      f"holds REAL attempts ({', '.join(real)}).",
@@ -1273,12 +1295,20 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             us.pop("incomplete_since", None)
         if rc in RETRYABLE:
             policy = u.get("max_attempts", DEFAULT_MAX_ATTEMPTS)
-            if len(us["attempts"]) < policy:
+            # Count REAL attempts only. A dry run appends to this list, and
+            # this list is the retry budget, so every dry run silently stole
+            # one of the retries the plan had declared: a unit promised two
+            # attempts got one, and two prior dry runs left a three-attempt
+            # unit with none. Found by a reviewer as an interaction between
+            # two changes that were each correct alone.
+            real_attempts = [a for a in us["attempts"]
+                             if not str(a).startswith(DRY_PREFIX)]
+            if len(real_attempts) < policy:
                 # A retry mints a NEW write root. Reusing one is precisely what
                 # makes the predicate inconclusive.
                 us["attempt_dir"] = None
                 report.append(f"{uid}: preempted, will re-attempt "
-                              f"({len(us['attempts'])}/{policy})")
+                              f"({len(real_attempts)}/{policy})")
             else:
                 us["state"] = "FAILED"
                 if policy == 1 and "max_attempts" not in u:
@@ -1375,7 +1405,10 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         # Persist the allocation BEFORE submitting: a crash between the two
         # must leave an orphaned directory, never an unrecorded job.
         us["attempt_dir"] = unit_dir
-        us["attempts"].append(unit_dir)
+        # A dry attempt is TAGGED, so it can never be mistaken for real work
+        # when counting the retry budget.
+        us["attempts"].append(f"{DRY_PREFIX}{unit_dir}" if dry_run
+                              else unit_dir)
         us["state"] = "ALLOCATED"
         us["allocated_at"] = time.time()
         # ACCUMULATE. Overwriting meant a unit preempted twice was charged
