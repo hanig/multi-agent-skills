@@ -2425,5 +2425,72 @@ class TestBothPartitionSpellings(unittest.TestCase):
                                      known={"cpu"}), [("a", "nope")], sbatch)
 
 
+class TestAStalledDAGIsDiagnosable(unittest.TestCase):
+    """I claimed to the reviewers that a READY_FOR_PR unit is diagnosable from
+    `status` alone. It was not: the dependent showed a bare "-" and the code
+    unit gave no hint that nothing can move it. A DAG that stalls
+    undiagnosably is worse than one that fails."""
+
+    PLAN = {"name": "p", "units": [
+        {"id": "writer", "kind": "code", "prompt": "x", "outputs": ["r.txt"],
+         "write_scopes": ["w/"]},
+        {"id": "after", "kind": "slurm", "command": "true", "outputs": ["o"],
+         "needs": ["writer"], "write_scopes": ["a/"]}]}
+
+    def _status(self, tmp, extra=None):
+        (tmp / "plan.json").write_text(json.dumps(self.PLAN))
+        st = tmp / "st"
+        st.mkdir(parents=True, exist_ok=True)
+        units = {"writer": {"state": "READY_FOR_PR", "job_id": "agent-1",
+                            "attempt_dir": "/x", "attempts": ["/x"],
+                            "gpu_hours": 0}}
+        units.update(extra or {})
+        (st / "swarm-state.json").write_text(json.dumps(
+            {"schema_version": 1, "halted": None, "units": units}))
+        return subprocess.run(
+            [sys.executable, str(SWARM), "status", str(tmp / "plan.json"),
+             "--state-dir", str(st)], capture_output=True, text=True)
+
+    def test_it_says_why_the_unit_cannot_advance(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            out = self._status(Path(d)).stdout
+            self.assertIn("MERGED PULL REQUEST", out)
+            self.assertIn("Nothing records merges yet", out,
+                          "a human must not need to know that stage 3 is "
+                          "unbuilt to understand why nothing is happening")
+
+    def test_it_names_what_a_waiting_unit_is_waiting_on(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            out = self._status(Path(d)).stdout
+            self.assertIn("waiting on writer", out)
+
+    def test_a_stalled_dag_asks_for_a_person(self):
+        """Exit 0 would let a cron wrapper poll a permanently stalled project
+        and report it healthy forever."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            r = self._status(Path(d))
+            self.assertEqual(r.returncode, 2, r.stdout)
+            self.assertIn("NEEDS YOU: writer", r.stdout)
+
+    def test_a_healthy_dag_still_exits_zero(self):
+        """The counter-claim: a monitor that always says look at me is one
+        nobody looks at."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            r = self._status(tmp, extra={
+                "writer": {"state": "DONE", "job_id": "a",
+                           "attempt_dir": "/x", "attempts": ["/x"],
+                           "gpu_hours": 0},
+                "after": {"state": "RUNNING", "job_id": "b",
+                          "attempt_dir": "/y", "attempts": ["/y"],
+                          "gpu_hours": 0}})
+            self.assertEqual(r.returncode, 0, r.stdout)
+            self.assertNotIn("NEEDS YOU", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

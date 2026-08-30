@@ -1991,6 +1991,14 @@ def _status_rows(plan, state, state_dir):
             "gpu_hours": float(us.get("gpu_hours") or 0),
             "needs": u.get("needs") or [],
             "held_by": held_by,
+            # Why a unit that has not started is not starting. A bare "-" in
+            # the status table left a human unable to tell a DAG that is
+            # waiting from one that has stalled forever.
+            "waiting_on": ([d for d in (u.get("needs") or [])
+                            if (state.get("units", {}).get(d) or {}).get(
+                                "state") != "DONE"]
+                           if not us.get("attempt_dir") and st in ("-", None)
+                           else []),
             "promotable": bool(u.get("promote_to")),
             "promoted": promoted.get(uid, {}).get("promoted_to"),
             "promoted_by": promoted.get(uid, {}).get("approver"),
@@ -2003,8 +2011,12 @@ def status_report(plan, state, state_dir):
     rows = _status_rows(plan, state, state_dir)
     declared = (plan.get("budget") or {}).get("gpu_hours")
     spent = sum(r["gpu_hours"] for r in rows)
+    # READY_FOR_PR belongs here: no mechanism can leave that state today, so
+    # a DAG parked in it is stalled, not progressing. Without this, `status`
+    # exits 0 and a cron wrapper polling it reports a healthy project forever.
     attention = [r for r in rows
-                 if r["state"] in ("NEEDS_HUMAN", "FAILED", "FAILED_EVIDENCE")]
+                 if r["state"] in ("NEEDS_HUMAN", "FAILED", "FAILED_EVIDENCE",
+                                   "READY_FOR_PR")]
     return {
         "project": plan.get("name"),
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -2041,6 +2053,20 @@ def cmd_status(args):
             if r["held_by"]:
                 print(f"  {'':{w}}    held by {', '.join(r['held_by'])}, which "
                       f"will not complete")
+            if r["state"] == "READY_FOR_PR":
+                # Say plainly that this cannot advance on its own. A unit
+                # parked in a state no mechanism can leave is a stalled DAG,
+                # and a human reading `status` must not have to know that.
+                print(f"  {'':{w}}    the agent finished and its outputs "
+                      f"exist, but a code unit is closed by a MERGED PULL "
+                      f"REQUEST.")
+                print(f"  {'':{w}}    Nothing records merges yet, so this "
+                      f"will not advance on its own and anything below it "
+                      f"waits. Open the PR and close it by hand, or make "
+                      f"this a kind=slurm or kind=pipeline unit.")
+            if r["waiting_on"]:
+                print(f"  {'':{w}}    waiting on "
+                      f"{', '.join(r['waiting_on'])}")
             if r["promoted"]:
                 print(f"  {'':{w}}    promoted to {r['promoted']} "
                       f"(approved by {r['promoted_by']})")
