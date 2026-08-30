@@ -7,6 +7,7 @@ merely convenient.
 import json
 import os
 import subprocess
+import tempfile
 import sys
 import time
 import unittest
@@ -2648,6 +2649,47 @@ class TestAPlanThatCannotRunIsRefused(unittest.TestCase):
             (ROOT / "skills" / "hanig-project" / "SKILL.md").read_text().split())
         self.assertIn("Stop when the plan can RUN", doc)
         self.assertIn("that is a QUESTION, not a detail to settle later", doc)
+
+
+
+class TestListFieldsMustBeLists(unittest.TestCase):
+    """A string where a list belongs is iterated character by character.
+
+    `"sbatch": "--partition=cpu_batch"` used to validate clean, report
+    "declares no partition", and silently run on the cluster default: the
+    reader does [str(a) for a in ...], so it saw '-', '-', 'p', 'a', ...
+    """
+
+    def _plan(self, field, value):
+        unit = {"id": "u1", "kind": "slurm", "command": "true",
+                "outputs": ["out.txt"]}
+        unit[field] = value
+        return {"project": "p", "units": [unit]}
+
+    def test_a_string_sbatch_is_refused_not_misread(self):
+        with self.assertRaises(S.PlanError) as ctx:
+            S.validate_plan(self._plan("sbatch", "--partition=cpu_batch"))
+        msg = str(ctx.exception)
+        self.assertIn("must be a list", msg)
+        self.assertIn("one character at a time", msg)
+
+    def test_every_iterated_field_is_checked(self):
+        for field in ("needs", "inputs", "outputs", "sbatch"):
+            with self.assertRaises(S.PlanError, msg=field):
+                S.validate_plan(self._plan(field, "a-string"))
+
+    def test_a_real_list_still_validates_and_is_read(self):
+        plan = self._plan("sbatch", ["--partition=cpu_batch"])
+        S.validate_plan(plan)
+        self.assertEqual(S.declared_partition(plan["units"][0]), "cpu_batch")
+
+    def test_absent_field_is_not_an_error(self):
+        # No needs, inputs or sbatch at all. outputs is required separately,
+        # so it stays: this test is about absence being allowed, not about
+        # relaxing the done-predicate.
+        S.validate_plan({"project": "p", "units": [
+            {"id": "u1", "kind": "slurm", "command": "true",
+             "outputs": ["out.txt"]}]})
 
 
 if __name__ == "__main__":

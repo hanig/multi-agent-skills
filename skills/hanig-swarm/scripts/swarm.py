@@ -167,6 +167,33 @@ def validate_plan(plan):
     if not isinstance(units, list) or not units:
         raise PlanError("the plan declares no units; add a 'units' list")
 
+    # --- list fields must BE lists ---------------------------------------
+    #
+    # `sbatch` is read as [str(a) for a in (u.get("sbatch") or [])]. Hand it
+    # the string "--partition=cpu_batch" and Python iterates it CHARACTER by
+    # character, so declared_partition() finds nothing, the unit silently
+    # lands on the cluster default, and validate prints "declares no
+    # partition" about a unit that plainly declares one. That turns the
+    # validator's own honesty message into a false statement, which is the
+    # third time that exact failure has been paid for in this function.
+    #
+    # A string is the natural thing to write here, so it must be refused
+    # loudly rather than misread quietly. Same for the other iterated fields.
+    for u in units:
+        if not isinstance(u, dict):
+            continue
+        for field in ("needs", "inputs", "outputs", "sbatch"):
+            val = u.get(field)
+            if val is None or isinstance(val, list):
+                continue
+            raise PlanError(
+                f"unit {u.get('id','?')!r} has {field}={val!r}, a "
+                f"{type(val).__name__}, but {field} must be a list. A string "
+                f"here is not rejected by the code that reads it: it is "
+                f"iterated one character at a time, so the value is silently "
+                f"lost and the unit runs with a default instead. Write "
+                f'["--partition=cpu_batch"], not "--partition=cpu_batch".')
+
     # A `code` unit needs paseo ON THIS HOST, because that is where the
     # coordinator dispatches it. Refusing here, before anything is dispatched,
     # beats failing at `paseo run` with half a DAG already live.
