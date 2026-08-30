@@ -369,5 +369,59 @@ class TestUnknownStatesAreNotProgress(unittest.TestCase):
             _project(t)
             self.assertNotIn("&amp;mdash;", R.render(R.collect(t)))
 
+
+class TestEvidenceIntegrity(unittest.TestCase):
+    """A receipt that cannot be read used to be skipped, leaving the stored
+    DONE state as the only thing claiming the unit finished."""
+
+    def _break_receipt(self, t, uid="a"):
+        d = os.path.join(t, ".swarm", "runs", uid, "att1")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "receipt.json"), "w") as fh:
+            fh.write("{ NOT JSON")
+
+    def test_an_unreadable_receipt_blocks_a_verdict(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t)
+            self._break_receipt(t)
+            v, why = R.verdict(R.unit_rows(R.collect(t)))
+            self.assertEqual(v, "NO VERDICT")
+            self.assertIn("self-report", why)
+
+    def test_the_unreadable_receipt_is_not_silently_dropped(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t)
+            self._break_receipt(t)
+            self.assertTrue(R.collect(t)["unreadable_receipts"])
+
+    def test_delivering_something_other_than_declared_is_a_mismatch(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, receipts={"a": {"state": "DONE", "outputs": {
+                "wrong.dat": {"sha256": "x" * 64, "size": 1,
+                              "method": "content-digest"}}}})
+            v, why = R.verdict(R.unit_rows(R.collect(t)))
+            self.assertEqual(v, "EVIDENCE MISMATCH")
+
+    def test_a_missing_declared_output_is_a_mismatch(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, receipts={"a": {"state": "DONE", "outputs": {}}})
+            self.assertEqual(R.verdict(R.unit_rows(R.collect(t)))[0],
+                             "EVIDENCE MISMATCH")
+
+    def test_delivering_exactly_what_was_declared_is_complete(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, receipts={"a": {"state": "DONE", "outputs": {
+                "out.txt": {"sha256": "y" * 64, "size": 2,
+                            "method": "content-digest"}}}})
+            self.assertEqual(R.verdict(R.unit_rows(R.collect(t)))[0],
+                             "COMPLETE")
+
+    def test_no_receipt_yet_is_not_a_mismatch(self):
+        """"Has not reported yet" is not "delivered the wrong thing"."""
+        with tempfile.TemporaryDirectory() as t:
+            _project(t)
+            self.assertEqual(R.verdict(R.unit_rows(R.collect(t)))[0],
+                             "COMPLETE")
+
 if __name__ == "__main__":
     unittest.main()

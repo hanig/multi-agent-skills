@@ -78,9 +78,18 @@ def collect(project):
     plan = _load(p("plan.json"), {}) or {}
 
     receipts = {}
+    unreadable = {}
     for path in sorted(glob.glob(p(DEFAULT_RUNS, "*", "*", "receipt.json"))):
         r = _load(path)
         if not isinstance(r, dict):
+            # DO NOT SKIP. A receipt that exists but cannot be read is the
+            # single most dangerous thing here: skipping it let the unit fall
+            # back to its stored DONE state, and the report then said
+            # COMPLETE on the strength of a self-report with no evidence
+            # behind it. That is the exact substitution this whole tool
+            # exists to refuse.
+            uid = os.path.basename(os.path.dirname(os.path.dirname(path)))
+            unreadable.setdefault(uid, []).append(path)
             continue
         uid = r.get("task_id") or os.path.basename(
             os.path.dirname(os.path.dirname(path)))
@@ -96,6 +105,7 @@ def collect(project):
         "plan": plan,
         "state": state,
         "receipts": receipts,
+        "unreadable_receipts": unreadable,
         "outbox": _load_lines(p(DEFAULT_STATE, "outbox.jsonl")),
         "tickets": _load(p("tickets.json"), {}) or {},
         "survey": _load(p(".swarm", "survey.json"), {}) or {},
@@ -135,6 +145,18 @@ def unit_rows(data):
             "checked_at": rc.get("checked_at"),
             "attempt_dir": su.get("attempt_dir"),
             "runtime": _runtime_of(data["plan"], pu),
+            "unreadable_receipts": (data.get("unreadable_receipts")
+                                    or {}).get(uid) or [],
+            # Only meaningful once a receipt exists. With none, there is
+            # nothing to compare against, and calling that a MISMATCH would
+            # confuse "delivered the wrong thing" with "has not reported yet".
+            "has_receipt": bool(rc),
+            "missing_outputs": sorted(
+                set(pu.get("outputs") or []) - set(rc.get("outputs") or {})
+            ) if rc else [],
+            "undeclared_outputs": sorted(
+                set(rc.get("outputs") or {}) - set(pu.get("outputs") or [])
+            ) if (rc and (pu.get("outputs") or [])) else [],
         })
     return rows
 
@@ -297,6 +319,19 @@ def verdict(rows):
     live = [r for r in rows if r["state"] in LIVE]
     unknown = [r for r in rows if r["state"] not in TERMINAL_BAD
                and r["state"] not in TERMINAL_OK and r["state"] not in LIVE]
+    blind = [r for r in rows if r["unreadable_receipts"]]
+    if blind:
+        return "NO VERDICT", (
+            "%d unit(s) have a receipt that cannot be read, so their stored "
+            "state is the only thing left saying they finished. A stored "
+            "state is a self-report." % len(blind))
+    mismatched = [r for r in rows
+                  if r["state"] in TERMINAL_OK and r["has_receipt"]
+                  and (r["missing_outputs"] or r["undeclared_outputs"])]
+    if mismatched:
+        return "EVIDENCE MISMATCH", (
+            "%d closed unit(s) delivered something other than what they "
+            "declared." % len(mismatched))
     if unknown:
         names = ", ".join(sorted({r["state"] for r in unknown}))
         return "UNKNOWN", (
@@ -575,6 +610,31 @@ def render(data, title=None):
           % e(", ".join(r["declared"]) or "-"))
         a("</tr>")
     a("</tbody></table></div></section>")
+
+    blind = [r for r in rows if r["unreadable_receipts"]]
+    mismatch = [r for r in rows if r["has_receipt"]
+                and (r["missing_outputs"] or r["undeclared_outputs"])]
+    if blind or mismatch:
+        a("<section>")
+        a('<div class="sec-head"><h2>Evidence problems</h2>'
+          "<p>Read before anything below. These are cases where the stored "
+          "state and the artifacts on disk do not agree, and the stored "
+          "state is the weaker of the two.</p></div>")
+        a('<div class="note"><ul>')
+        for r in blind:
+            a("<li><code>%s</code> has %d receipt(s) that cannot be read, so "
+              "only its stored state says it finished, and a stored state is "
+              "a self-report.</li>" % (e(r["id"]), len(r["unreadable_receipts"])))
+        for r in mismatch:
+            if r["missing_outputs"]:
+                a("<li><code>%s</code> declared %s but no digest was recorded "
+                  "for %s.</li>" % (e(r["id"]), e(", ".join(r["declared"])),
+                                    e(", ".join(r["missing_outputs"]))))
+            if r["undeclared_outputs"]:
+                a("<li><code>%s</code> delivered %s, which it never "
+                  "declared.</li>" % (e(r["id"]),
+                                      e(", ".join(r["undeclared_outputs"]))))
+        a("</ul></div></section>")
 
     # evidence
     a("<section>")
