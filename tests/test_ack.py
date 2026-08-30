@@ -210,5 +210,51 @@ class TestReviewFindings(unittest.TestCase):
         self.assertIn("NOT verified evidence", doc)
         self.assertIn("attested, never", doc)
 
+
+class TestTheWireValueCarriesTheWeakness(unittest.TestCase):
+    """Round 2: I relabelled only the text output, so --json still said
+    "acknowledged" and a machine consumer read an attestation as verified."""
+
+    def _fixture(self, d):
+        with open(Path(d) / S.OUTBOX, "w") as fh:
+            fh.write(json.dumps({
+                "key": "k1", "verb": "close", "unit": "u", "why": "w",
+                "unit_state": "DONE", "evidence": {"x": 1}}) + "\n")
+        S.record_receipt(d, "k1", "ARC-1")
+
+    def test_the_status_value_itself_says_attested(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._fixture(d)
+            st, _ = S.acknowledgment_status(d)
+            self.assertEqual(st["k1"][0], "attested")
+
+    def test_no_output_path_ever_says_acknowledged(self):
+        src = SWARM.read_text()
+        i = src.index("UNACKNOWLEDGED = ")
+        j = src.index("def _status_rows")
+        self.assertNotIn('"acknowledged"', src[i:j],
+                         "a consumer reading 'acknowledged' would take an "
+                         "attestation for verified tracker state")
+
+    def test_json_carries_the_caveat_not_just_the_value(self):
+        import io
+        import contextlib
+        with tempfile.TemporaryDirectory() as d:
+            self._fixture(d)
+
+            class A:
+                state_dir = d
+                all = True
+                json = True
+                record_receipt = None
+                ref = None
+                op = None
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                S.cmd_outbox(A())
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(payload["intents"][0]["ack_status"], "attested")
+            self.assertIn("not verified tracker state", payload["note"])
+
 if __name__ == "__main__":
     unittest.main()

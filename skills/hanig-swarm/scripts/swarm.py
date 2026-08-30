@@ -1302,8 +1302,12 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
 #    Saying "not applied" claims knowledge this machine does not have.
 RECEIPTS = "outbox-receipts.jsonl"
 
+# The WIRE VALUES matter as much as the printed ones. Round 2 caught me
+# relabelling only the text output: --json still emitted "acknowledged", so a
+# machine consumer read an attestation as verified tracker success. The value
+# itself now carries the weakness, so both paths say the same thing.
 UNACKNOWLEDGED = "unacknowledged"
-ACKNOWLEDGED = "acknowledged"
+ACKNOWLEDGED = "attested"
 CONFLICT = "conflict"
 
 
@@ -2397,8 +2401,13 @@ def cmd_outbox(args):
     conflicts = [i for i in intents if i["ack_status"] == CONFLICT]
 
     if args.json:
-        print(json.dumps(intents if args.all else unack, indent=2,
-                         sort_keys=True))
+        print(json.dumps(
+            {"note": "ack_status 'attested' is the drainer's claim, not "
+                     "verified tracker state: this process cannot reach the "
+                     "tracker. 'unacknowledged' means no confirmation either "
+                     "way, NOT that nothing was filed.",
+             "intents": intents if args.all else unack},
+            indent=2, sort_keys=True))
         return EXIT_CONFLICT if conflicts else EXIT_OK
 
     if not intents:
@@ -2420,6 +2429,7 @@ def cmd_outbox(args):
         ev = "with evidence" if i.get("evidence") else "no evidence"
         label = {ACKNOWLEDGED: "attested", CONFLICT: "CONFLICT",
                  UNACKNOWLEDGED: "unack"}[i["ack_status"]]
+        # same string in both modes; see the note on ACKNOWLEDGED
         print(f"  [{label:8}] {i['verb']:6} {i['unit']:12} "
               f"{i['unit_state']:16} {ev}")
         print(f"      {i['why']}  key={i['key']}")
