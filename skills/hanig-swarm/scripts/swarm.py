@@ -347,6 +347,27 @@ def _validate_runtimes(plan, units):
                     f"{canary!r} declares a different runtime. A probe that "
                     f"does not run the runtime it vouches for proves nothing "
                     f"about it. Give the canary the same runtime.")
+            # A canary whose command is `true` exercises nothing. We cannot
+            # tell from arbitrary shell whether a command runs a runtime, and
+            # parsing it is the move already rejected here. So compare
+            # DECLARED to DECLARED: the profile states its probe, and the
+            # canary must be running exactly that.
+            probe = str((rt or {}).get("probe") or "").strip()
+            if not probe:
+                raise PlanError(
+                    f"runtime for unit {uid!r} is verified by canary "
+                    f"{canary!r} but declares no 'probe'. State the command "
+                    f"that establishes this runtime works, so the canary can "
+                    f"be checked against it rather than trusted.")
+            ccmd = str(by_id[canary].get("command") or "").strip()
+            if ccmd != probe:
+                raise PlanError(
+                    f"canary {canary!r} does not run the runtime's declared "
+                    f"probe. Its command is {ccmd!r}; the probe is {probe!r}. "
+                    f"A canary that closes without exercising the runtime "
+                    f"proves the runtime works exactly as much as `true` "
+                    f"does.")
+
             cpart = declared_partition(by_id[canary])
             upart = declared_partition(u)
             # ABSENCE IS A VALUE. "Declares no partition" means "the cluster

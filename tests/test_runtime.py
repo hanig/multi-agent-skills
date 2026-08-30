@@ -19,7 +19,9 @@ SWARM = ROOT / "skills" / "hanig-swarm" / "scripts" / "swarm.py"
 sys.path.insert(0, str(SWARM.parent))
 import swarm as S  # noqa: E402
 
+PROBE = "/abs/python -c 'import h5py'"
 RT = {"id": "py", "resolution": "direct", "entrypoint": "/abs/python",
+      "probe": PROBE,
       "verified_by": "unverified: shared homogeneous partition, checked "
                      "by hand this morning"}
 
@@ -109,7 +111,7 @@ class TestCanaryMustActuallyGate(unittest.TestCase):
         self.assertIn("must not be its own probe", str(c.exception))
 
     def test_a_canary_that_is_not_an_ancestor_is_refused(self):
-        p = plan([unit("probe", runtime=RT),
+        p = plan([unit("probe", runtime=RT, command=PROBE),
                   unit("work", runtime=dict(RT, verified_by="canary:probe"))])
         with self.assertRaises(S.PlanError) as c:
             S.validate_plan(p)
@@ -117,13 +119,13 @@ class TestCanaryMustActuallyGate(unittest.TestCase):
 
     def test_a_direct_dependency_satisfies_it(self):
         S.validate_plan(plan([
-            unit("probe", runtime=RT),
+            unit("probe", runtime=RT, command=PROBE),
             unit("work", needs=["probe"],
                  runtime=dict(RT, verified_by="canary:probe"))]))
 
     def test_a_transitive_dependency_satisfies_it(self):
         S.validate_plan(plan([
-            unit("probe", runtime=RT),
+            unit("probe", runtime=RT, command=PROBE),
             unit("mid", needs=["probe"], runtime=RT),
             unit("work", needs=["mid"],
                  runtime=dict(RT, verified_by="canary:probe"))]))
@@ -177,7 +179,7 @@ class TestACanaryMustExerciseWhatItVouchesFor(unittest.TestCase):
     def test_a_canary_with_a_different_runtime_is_refused(self):
         with self.assertRaises(S.PlanError) as c:
             S.validate_plan(plan([
-                unit("probe", runtime=self.OTHER),
+                unit("probe", runtime=self.OTHER, command=PROBE),
                 unit("work", needs=["probe"],
                      runtime=dict(RT, verified_by="canary:probe"))]))
         self.assertIn("does not run the runtime it vouches for",
@@ -186,14 +188,15 @@ class TestACanaryMustExerciseWhatItVouchesFor(unittest.TestCase):
     def test_a_runtime_none_canary_cannot_vouch_for_a_real_runtime(self):
         with self.assertRaises(S.PlanError):
             S.validate_plan(plan([
-                unit("probe", runtime="none"),
+                unit("probe", runtime="none", command=PROBE),
                 unit("work", needs=["probe"],
                      runtime=dict(RT, verified_by="canary:probe"))]))
 
     def test_a_canary_on_another_partition_is_refused(self):
         with self.assertRaises(S.PlanError) as c:
             S.validate_plan(plan([
-                unit("probe", runtime=RT, sbatch=["--partition=cpu"]),
+                unit("probe", runtime=RT, command=PROBE,
+                     sbatch=["--partition=cpu"]),
                 unit("work", needs=["probe"], sbatch=["--partition=gpu"],
                      runtime=dict(RT, verified_by="canary:probe"))]))
         self.assertIn("has to land where the work lands", str(c.exception))
@@ -203,20 +206,21 @@ class TestACanaryMustExerciseWhatItVouchesFor(unittest.TestCase):
         is a specific queue, not a wildcard."""
         with self.assertRaises(S.PlanError) as c:
             S.validate_plan(plan([
-                unit("probe", runtime=RT),                 # default queue
+                unit("probe", runtime=RT, command=PROBE),                 # default queue
                 unit("work", needs=["probe"], sbatch=["--partition=gpu"],
                      runtime=dict(RT, verified_by="canary:probe"))]))
         self.assertIn("has to land where the work lands", str(c.exception))
 
     def test_both_omitting_a_partition_is_fine(self):
         S.validate_plan(plan([
-            unit("probe", runtime=RT),
+            unit("probe", runtime=RT, command=PROBE),
             unit("work", needs=["probe"],
                  runtime=dict(RT, verified_by="canary:probe"))]))
 
     def test_the_same_runtime_and_partition_is_accepted(self):
         S.validate_plan(plan([
-            unit("probe", runtime=RT, sbatch=["--partition=cpu"]),
+            unit("probe", runtime=RT, command=PROBE,
+                     sbatch=["--partition=cpu"]),
             unit("work", needs=["probe"], sbatch=["--partition=cpu"],
                  runtime=dict(RT, verified_by="canary:probe"))]))
 
@@ -224,7 +228,37 @@ class TestACanaryMustExerciseWhatItVouchesFor(unittest.TestCase):
         """A canary cannot be verified by itself, so that field must not be
         part of what has to match."""
         S.validate_plan(plan([
-            unit("probe", runtime=RT),
+            unit("probe", runtime=RT, command=PROBE),
+            unit("work", needs=["probe"],
+                 runtime=dict(RT, verified_by="canary:probe"))]))
+
+
+class TestACanaryMustRunTheDeclaredProbe(unittest.TestCase):
+    """`true` closes cleanly and establishes nothing. We cannot tell from
+    arbitrary shell whether a command exercises a runtime, so the check is
+    declared-to-declared."""
+
+    def test_a_canary_running_something_else_is_refused(self):
+        with self.assertRaises(S.PlanError) as c:
+            S.validate_plan(plan([
+                unit("probe", runtime=RT, command="true"),
+                unit("work", needs=["probe"],
+                     runtime=dict(RT, verified_by="canary:probe"))]))
+        self.assertIn("proves the runtime works exactly as much as `true`",
+                      str(c.exception))
+
+    def test_a_runtime_verified_by_canary_must_declare_a_probe(self):
+        rt = {k: v for k, v in RT.items() if k != "probe"}
+        with self.assertRaises(S.PlanError) as c:
+            S.validate_plan(plan([
+                unit("probe", runtime=rt, command="anything"),
+                unit("work", needs=["probe"],
+                     runtime=dict(rt, verified_by="canary:probe"))]))
+        self.assertIn("declares no 'probe'", str(c.exception))
+
+    def test_running_the_probe_is_accepted(self):
+        S.validate_plan(plan([
+            unit("probe", runtime=RT, command=PROBE),
             unit("work", needs=["probe"],
                  runtime=dict(RT, verified_by="canary:probe"))]))
 

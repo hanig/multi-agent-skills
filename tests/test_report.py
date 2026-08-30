@@ -316,5 +316,58 @@ class TestPublishedReportsCannotCarryAnExploit(unittest.TestCase):
             body = R.render(R.collect(t))
             self.assertNotIn("are unacknowledged", body)
 
+
+class TestUnknownStatesAreNotProgress(unittest.TestCase):
+    """A USAGE_ERROR unit used to make a finished run read IN FLIGHT
+    forever: a stall dressed as progress."""
+
+    def _state(self, t, state):
+        p = os.path.join(t, ".swarm", "state", "swarm-state.json")
+        s = json.load(open(p))
+        s["units"]["a"]["state"] = state
+        json.dump(s, open(p, "w"))
+
+    def test_usage_error_is_a_failure_not_a_live_unit(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t)
+            self._state(t, "USAGE_ERROR")
+            self.assertEqual(R.verdict(R.unit_rows(R.collect(t)))[0], "FAILED")
+
+    def test_an_unrecognised_state_is_reported_as_unknown(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t)
+            self._state(t, "WAT")
+            v, why = R.verdict(R.unit_rows(R.collect(t)))
+            self.assertEqual(v, "UNKNOWN")
+            self.assertIn("WAT", why)
+
+    def test_preempted_is_still_live(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t)
+            self._state(t, "PREEMPTED")
+            self.assertEqual(R.verdict(R.unit_rows(R.collect(t)))[0],
+                             "IN FLIGHT")
+
+    def test_a_corrupt_journal_shows_no_number_at_all(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, outbox=[{"key": "k1", "unit": "a", "verb": "close"}])
+            d = os.path.join(t, ".swarm", "state")
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, R.RECEIPTS), "w") as fh:
+                fh.write("NOT JSON\n")
+            body = R.render(R.collect(t))
+            # The attested counter specifically, not every zero on the page:
+            # "0 declared outputs" is a real count and belongs there.
+            i = body.index("tracker updates attested")
+            card = body[max(0, i - 200):i]
+            self.assertIn("unknown", card)
+            self.assertNotIn(">0<", card.replace(" ", ""))
+
+    def test_no_html_entity_is_double_escaped(self):
+        """`e("&mdash;")` renders the literal text "&mdash;" on the page."""
+        with tempfile.TemporaryDirectory() as t:
+            _project(t)
+            self.assertNotIn("&amp;mdash;", R.render(R.collect(t)))
+
 if __name__ == "__main__":
     unittest.main()

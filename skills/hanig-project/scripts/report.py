@@ -32,7 +32,13 @@ DEFAULT_STATE = os.path.join(".swarm", "state")
 DEFAULT_RUNS = os.path.join(".swarm", "runs")
 
 TERMINAL_OK = ("DONE",)
-TERMINAL_BAD = ("FAILED", "INCOMPLETE", "NEEDS_HUMAN")
+TERMINAL_BAD = ("FAILED", "INCOMPLETE", "NEEDS_HUMAN", "USAGE_ERROR")
+# States that genuinely mean "still going". Anything NOT listed anywhere is
+# unknown, and unknown must not quietly read as "running": a USAGE_ERROR unit
+# used to make a finished run report IN FLIGHT forever, which is a stall
+# dressed as progress.
+LIVE = ("RUNNING", "SUBMITTED", "PENDING", "PREEMPTED", "READY_FOR_PR",
+        "NOT STARTED")
 
 
 # --------------------------------------------------------------------------
@@ -282,9 +288,16 @@ def verdict(rows):
     if not rows:
         return "NO UNITS", "A plan with no units cannot have produced anything."
     bad = [r for r in rows if r["state"] in TERMINAL_BAD]
-    live = [r for r in rows if r["state"] not in TERMINAL_BAD
-            and r["state"] not in TERMINAL_OK]
     done = [r for r in rows if r["state"] in TERMINAL_OK]
+    live = [r for r in rows if r["state"] in LIVE]
+    unknown = [r for r in rows if r["state"] not in TERMINAL_BAD
+               and r["state"] not in TERMINAL_OK and r["state"] not in LIVE]
+    if unknown:
+        names = ", ".join(sorted({r["state"] for r in unknown}))
+        return "UNKNOWN", (
+            "%d unit(s) are in a state this report does not recognise (%s), "
+            "so it cannot say whether the run finished." % (len(unknown),
+                                                            names))
     if bad:
         return "FAILED", ("%d of %d unit(s) did not produce their declared "
                           "outputs." % (len(bad), len(rows)))
@@ -516,7 +529,8 @@ def render(data, title=None):
     for n, l in ((("%d / %d" % (done, len(rows))), "units closed"),
                  (str(n_out), "declared outputs delivered"),
                  (_fmt_bytes(tot_bytes), "output bytes, digested"),
-                 (str(len(attested)), "tracker updates attested")):
+                 ("unknown" if ack_fatal else str(len(attested)),
+                  "tracker updates attested")):
         a('<div class="stat"><span class="n mono">%s</span>'
           '<span class="l">%s</span></div>' % (e(n), e(l)))
     a("</div></section>")
@@ -546,11 +560,11 @@ def render(data, title=None):
             _pill(r["state"]),
             ('<br><span class="digest">%s</span>' % e(r["state_conflict"]))
             if r["state_conflict"] else ""))
-        a('<td class="mono">%s</td>' % e(r["job_id"] or "&mdash;"))
+        a('<td class="mono">%s</td>' % e(r["job_id"] or "-"))
         a('<td class="mono">%s</td>' % e(att))
         rt = r["runtime"] or {}
-        a('<td class="mono">%s</td>' % e(rt.get("entrypoint") or "&mdash;"))
-        vb = rt.get("verified_by") or "&mdash;"
+        a('<td class="mono">%s</td>' % e(rt.get("entrypoint") or "-"))
+        vb = rt.get("verified_by") or "not declared"
         a('<td class="mono">%s</td>' % e(vb))
         a('<td class="wrap-cell mono">%s</td>'
           % e(", ".join(r["declared"]) or "-"))
@@ -575,7 +589,7 @@ def render(data, title=None):
                 a('<td class="mono">%s</td>' % e(fname))
                 a('<td class="mono">%s</td>' % e(_fmt_bytes(o.get("size"))))
                 a('<td class="mono digest">%s</td>'
-                  % e(str(o.get("sha256") or "")[:16] or "&mdash;"))
+                  % e(str(o.get("sha256") or "")[:16] or "-"))
                 a("<td>%s</td>" % e(o.get("method") or "?"))
                 a("</tr>")
         a("</tbody></table></div>")
@@ -596,7 +610,7 @@ def render(data, title=None):
             if text in seen:
                 continue
             seen.add(text)
-            a("<li><code>%s</code> &mdash; %s</li>" % (e(uid), e(text)))
+            a("<li><code>%s</code>: %s</li>" % (e(uid), e(text)))
         a("</ul></div></section>")
 
     # project findings, clearly labelled as claims
@@ -613,7 +627,7 @@ def render(data, title=None):
                 t = item.get("title") or ""
                 d = item.get("detail") or ""
                 a("<li><strong>%s</strong>%s</li>"
-                  % (e(t), (" &mdash; " + e(d)) if d else ""))
+                  % (e(t), (": " + e(d)) if d else ""))
             else:
                 a("<li>%s</li>" % e(item))
         a("</ul></div></section>")
@@ -632,7 +646,7 @@ def render(data, title=None):
             for it in issues:
                 if not isinstance(it, dict):
                     continue
-                ident = it.get("identifier") or it.get("id") or "&mdash;"
+                ident = it.get("identifier") or it.get("id") or "-"
                 url = _safe_url(it.get("url"))
                 cell = ('<a href="%s" rel="noopener noreferrer">%s</a>'
                         % (e(url), e(ident)) if url else e(ident))
