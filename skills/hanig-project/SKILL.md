@@ -35,6 +35,32 @@ directly, which is the rule that matters:
 > If a question can be answered by exploring the codebase, explore the
 > codebase instead.
 
+### Where code lives: decide from the survey, not from the human
+
+The survey already reported whether this directory is a git repo, its remote
+and its branch. So this is mostly NOT a question:
+
+| what the survey found | what you do |
+|---|---|
+| a repo WITH a remote | **Adopt it. Do not ask.** Say which remote and branch you are using, in one line, and move on. |
+| a repo with NO remote | Ask once whether the work should be pushed, and where. Recommend staying local. |
+| no repo at all | Ask once: does this produce code someone else will run or review? Existing repo, a new one, or nowhere. Recommend nowhere. |
+
+Staying local is a first-class answer, not a fallback. Most compute projects
+never need a repo, and the ones that do usually already are one.
+
+The test is not "does this produce code". It is **does anything here need to
+outlive the attempt directory as SOURCE**. Compute outputs never do: a
+manifest, a checkpoint, a TSV is DATA, it lives in an exclusive write root,
+and it reaches a shared path only through `swarm.py promote` with a named
+approver. Nothing in this workflow may commit a swarm output to a repo.
+
+Creating a new repo is outward-facing and sits behind the same gate as filing
+a tracker project: default is to stop and ask, and `swarm autopilot` in the
+request runs it end to end.
+
+### The interview itself
+
 Ask ONLY about judgment: what counts as done, what the scientific claim is,
 what may be thrown away, what the budget is, what must never be overwritten,
 and **the most work they are willing to repeat after one interruption**. That

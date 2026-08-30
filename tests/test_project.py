@@ -1036,5 +1036,58 @@ class TestFilingRequiresApproval(unittest.TestCase):
         self.assertIn("DEFAULT IS TO STOP HERE", doc)
 
 
+class TestTheRepoDecisionComesFromTheSurvey(unittest.TestCase):
+    """An existing repo with a remote is ADOPTED, not asked about. The survey
+    already knows; asking would be the tedium the survey exists to remove."""
+
+    def _survey(self, d):
+        return json.loads(run(SURVEY, "--repo", str(d), "--json").stdout)
+
+    def test_a_repo_with_a_remote_is_fully_identified(self):
+        """Everything the front door needs to adopt silently and say which."""
+        import subprocess as sp
+        with tempfile.TemporaryDirectory() as d:
+            sp.run(["git", "init", "-q", "."], cwd=d, capture_output=True)
+            sp.run(["git", "remote", "add", "origin",
+                    "git@github.com:goodarzilab/example.git"], cwd=d,
+                   capture_output=True)
+            (Path(d) / "f.py").write_text("x = 1\n")
+            sp.run(["git", "add", "-A"], cwd=d, capture_output=True)
+            sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "i"], cwd=d, capture_output=True)
+            r = self._survey(d)["repo"]
+            self.assertTrue(r["git"])
+            self.assertEqual(r["remote"],
+                             "git@github.com:goodarzilab/example.git")
+            self.assertTrue(r.get("branch"))
+
+    def test_a_repo_without_a_remote_is_distinguishable(self):
+        """A different answer is needed here: local-only is legitimate, so
+        this is the one case worth a question."""
+        import subprocess as sp
+        with tempfile.TemporaryDirectory() as d:
+            sp.run(["git", "init", "-q", "."], cwd=d, capture_output=True)
+            r = self._survey(d)["repo"]
+            self.assertTrue(r["git"])
+            self.assertIsNone(r.get("remote"))
+
+    def test_a_plain_directory_is_distinguishable(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = self._survey(d)["repo"]
+            self.assertFalse(r["git"])
+
+    def test_the_skill_says_adopt_without_asking(self):
+        doc = (ROOT / "skills" / "hanig-project" / "SKILL.md").read_text()
+        self.assertIn("Adopt it. Do not ask", doc)
+        self.assertIn("first-class answer", doc)
+
+    def test_the_skill_forbids_committing_swarm_outputs(self):
+        """Outputs are DATA. They reach a shared path through promote, with a
+        named approver, and never through a repo."""
+        doc = (ROOT / "skills" / "hanig-project" / "SKILL.md").read_text()
+        self.assertIn("may commit a swarm output to a repo", doc)
+        self.assertIn("outlive the attempt directory as SOURCE", doc)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
