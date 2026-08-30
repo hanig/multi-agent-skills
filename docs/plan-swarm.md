@@ -409,6 +409,76 @@ Acceptance criteria:
 - g. BUILT. The draft carries tracker ids forward keyed on unit id, so a
   re-run updates; a unit added later correctly gets no stale id.
 
+**9. Code delivery: two kinds of evidence that must never be confused.**
+
+Designed with sol after the first real project. Linear is connected to GitHub
+(org `goodarzilab` plus a personal account), but "automatically link issues on
+merge" is Business-tier and unavailable, so linking works only when the
+identifier is EXPLICIT in a branch name or PR title.
+
+The danger is not the plumbing. It is that a merged PR is the right evidence
+for CODE and the wrong evidence for a 1.42 TiB hash. If GitHub closes an issue
+the swarm also closes on a receipt, the tracker starts lying about what was
+verified.
+
+THE RULE, hard-coded and NOT configurable per plan, because configurable means
+configurable wrong:
+
+| kind | may be closed by |
+|---|---|
+| `code` | a merged PR |
+| `slurm`, `pipeline` | a predicate receipt |
+
+A code unit's lifecycle receipt may emit `open_pr`. It may NEVER emit `close`
+or set DONE. It reaches DONE only on a merge receipt matching the recorded
+repo, branch, head SHA and Linear identifier. That needs a new state:
+READY_FOR_PR, which is not DONE.
+
+Sol's second insight is that separation must be STRUCTURAL, not semantic. The
+git worktree lives at `<attempt-dir>/repo`, swarm artifacts at
+`<attempt-dir>/artifacts`, and a declared data output may not resolve inside
+the worktree. Do NOT ban file extensions: "no TSVs in a repo" blocks honest
+code work, and semantic classification of a file is not checkable while
+structural placement is.
+
+BUILD IN THREE STAGES, because `code` units have exactly one real run behind
+them, on a five-line task, and this adds branches, worktrees, PRs, a new state
+and a second closure path on top of that.
+
+Stage 1, the closure matrix. Small, prevents the contradiction, useful before
+any of the rest exists.
+
+- a. The kind-to-evidence matrix is hard-coded and has no plan-level override.
+- b. A `code` unit cannot emit a `close` intent; its receipt emits `open_pr`.
+- c. A `slurm` or `pipeline` unit cannot be closed by a merge receipt.
+- d. An intent carrying the wrong authority for its kind is REFUSED at the
+  point of emission, not left for the drainer to notice.
+- e. The drainer, finding an issue closed WITHOUT its authorised evidence,
+  raises a visible integrity violation. It never silently marks the intent
+  applied.
+
+Stage 2, structural separation.
+
+- f. A `code` unit gets `<attempt-dir>/repo`; non-code units never do.
+- g. A declared output resolving inside `repo/` is refused at validate time.
+- h. No extension-based rules anywhere.
+
+Stage 3, the branch and PR flow, once the code path has more real use.
+
+- i. Order is enforced: issues exist and carry identifiers BEFORE a code unit
+  dispatches, since the branch name is derived from the identifier.
+- j. The COORDINATOR creates the branch and worktree from a recorded base
+  commit; the agent never chooses its own branch.
+- k. Publication is refused for a wrong branch or a detached HEAD rather than
+  guessing which commits belong to the unit.
+- l. No commits and a clean worktree is NO_CHANGE, not a PR. No commits and a
+  dirty worktree is NEEDS_HUMAN.
+- m. One attempt produces at most one PR intent, idempotently keyed.
+
+Stays prose, not checkable: whether code should be pushed at all, which repo
+should own new work, whether the commits actually solve the problem, and
+whether a clean no-change result is acceptable.
+
 **8. Retry exposure: a unit is the retry boundary, and nothing says so.**
 
 Found in the FIRST real use, 2026-08-29. A provenance manifest over 6,195

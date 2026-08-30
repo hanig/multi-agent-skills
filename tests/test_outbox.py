@@ -2165,5 +2165,64 @@ class TestRetryBudgetBehaviour(unittest.TestCase):
             self.assertIn("REFUSING to dry-run", r.stdout, r.stdout)
 
 
+class TestClosureAuthorityIsFixedByKind(unittest.TestCase):
+    """Plan step 9, stage 1. A merged PR is the right evidence for CODE and
+    the wrong evidence for a 1.42 TiB hash. If GitHub closes an issue the
+    swarm also closes on a receipt, the tracker starts lying about what was
+    verified."""
+
+    def _emit(self, kind, state="DONE"):
+        import tempfile
+        d = tempfile.mkdtemp()
+        S.emit_intent(d, "p", "u", state, {"attempt_dir": None},
+                      evidence={"receipt": {"state": state}}, kind=kind)
+        return S.read_outbox(d)[0]
+
+    def test_a_code_unit_cannot_close_its_own_issue(self):
+        """Its receipt establishes that an agent went idle and files exist.
+        The accepted form of that work is a merged PR, and nothing here has
+        seen one."""
+        i = self._emit("code")
+        self.assertEqual(i["verb"], "open_pr")
+        self.assertIn("not done", i["why"])
+
+    def test_compute_units_still_close_on_a_receipt(self):
+        """The counter-claim: the path that worked must keep working."""
+        for kind in ("slurm", "pipeline"):
+            i = self._emit(kind)
+            self.assertEqual(i["verb"], "close", kind)
+            self.assertEqual(i["closing_evidence"], "predicate_receipt")
+
+    def test_every_intent_names_its_authority(self):
+        """So a drainer never has to infer which evidence would justify it."""
+        for kind, want in (("code", "merged_pr"),
+                           ("slurm", "predicate_receipt"),
+                           ("pipeline", "predicate_receipt")):
+            self.assertEqual(self._emit(kind)["closing_evidence"], want)
+
+    def test_the_matrix_has_no_plan_level_override(self):
+        """Configurable means configurable wrong, and the failure is silent."""
+        import ast
+        src = SWARM.read_text()
+        fn = next(n for n in ast.parse(src).body
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == "closing_evidence_for")
+        code = "\n".join(ast.unparse(x) for x in fn.body)
+        for override in ("plan", "u.get", "retry", "limits"):
+            self.assertNotIn(override, code,
+                             f"closure authority can be overridden via "
+                             f"{override!r}")
+
+    def test_an_unknown_kind_defaults_to_the_stricter_evidence(self):
+        """A kind nobody has thought about must not inherit the weaker rule."""
+        self.assertEqual(S.closing_evidence_for("something-new"),
+                         "predicate_receipt")
+
+    def test_the_skill_tells_a_drainer_what_to_do_with_a_violation(self):
+        doc = (ROOT / "skills" / "hanig-project" / "SKILL.md").read_text()
+        self.assertIn("integrity", doc.lower())
+        self.assertIn("Never mark the intent applied", doc)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

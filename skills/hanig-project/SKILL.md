@@ -173,6 +173,16 @@ mark it applied. The rules are not negotiable:
 
 - **Nothing closes on a self-report.** A `close` intent carries the unit's
   receipt. An intent without evidence must be REFUSED, not applied.
+- **Two kinds of evidence, and they are not interchangeable.** Every intent
+  names its `closing_evidence`. A `slurm` or `pipeline` unit closes on a
+  predicate receipt. A `code` unit closes on a MERGED PULL REQUEST and never
+  on a receipt: its receipt says an agent went idle and files exist, which is
+  `open_pr`, not done. Apply an `open_pr` intent by opening or linking a PR
+  and leaving the issue open.
+- **An issue closed without its authorised evidence is an integrity
+  violation.** Say so loudly and reopen it. Never mark the intent applied
+  because the issue "looks done": that is the tracker being believed over the
+  verdict, which is the whole failure this system exists to prevent.
 - A `block` intent means an upstream unit will not complete. Say which one.
 - Draining twice is safe: every intent has an idempotency key.
 - A tracker outage must never alter swarm state. The swarm is authoritative;

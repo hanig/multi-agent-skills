@@ -904,6 +904,30 @@ TRACKER_EVENTS = {
     "NEEDS_HUMAN": ("block", "blocked on a person, not on compute"),
 }
 
+# WHICH EVIDENCE MAY CLOSE WHICH KIND. Hard-coded and deliberately not
+# configurable per plan: a configurable authority is one somebody can
+# configure wrong, and the failure is silent -- the tracker would report work
+# as verified on evidence that never established it.
+#
+# A merged PR is the right evidence for CODE and the wrong evidence for a
+# 1.42 TiB hash. A predicate receipt is the reverse.
+# READY_FOR_PR is deliberately NOT a unit state yet. The closure-by-exclusion
+# guard caught me declaring one that nothing produces, which is the same error
+# as accepting retry.mode "resume" before cross-attempt handoff exists: a name
+# for a mechanism that is not built. Stage 1 needs no new state, because the
+# rewrite below turns a code unit's close into open_pr at the point of
+# emission. The state arrives with stage 3, alongside the branch and PR flow
+# that can actually reach it.
+CLOSING_EVIDENCE = {
+    "code": "merged_pr",
+    "slurm": "predicate_receipt",
+    "pipeline": "predicate_receipt",
+}
+
+
+def closing_evidence_for(kind):
+    return CLOSING_EVIDENCE.get(kind or "slurm", "predicate_receipt")
+
 
 def outbox_key(project, uid, state, attempt_dir):
     """Idempotency key. Same project, unit, state and attempt yields the same
@@ -912,7 +936,8 @@ def outbox_key(project, uid, state, attempt_dir):
     return hashlib.sha256(basis.encode()).hexdigest()[:16]
 
 
-def emit_intent(state_dir, project, uid, unit_state, us, evidence=None):
+def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
+                kind=None):
     """Append one tracker intent. Returns the key, or None if already emitted.
 
     Deterministic from state: replaying the same transitions produces the same
@@ -921,6 +946,18 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None):
     if not action:
         return None
     verb, why = action
+
+    # A CODE UNIT MAY NOT CLOSE ITS OWN ISSUE. Its receipt establishes that an
+    # agent went idle and files exist; the accepted form of that work is a
+    # merged PR, and nothing here has seen one. So a code unit reaches
+    # READY_FOR_PR and emits `open_pr`, never `close`. Refusing at the point
+    # of emission rather than leaving it for the drainer means the wrong
+    # intent never exists to be applied by mistake.
+    if verb == "close" and closing_evidence_for(kind) != "predicate_receipt":
+        verb = "open_pr"
+        why = ("the agent finished and its declared outputs exist, which "
+               "makes this READY FOR A PR. It is not done: a code unit is "
+               "closed by a merged pull request, and no merge has been seen.")
     if verb == "close" and not evidence:
         # Three reviewers found this: the caller built evidence as
         # `{"receipt": rp} if rp else None`, so an NFS blip on the read
@@ -945,6 +982,10 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None):
         pass
     intent = {
         "key": key, "project": project, "unit": uid, "verb": verb,
+        # Named on every intent so a drainer never has to infer which kind of
+        # evidence would justify acting on it.
+        "closing_evidence": closing_evidence_for(kind),
+        "kind": kind,
         "unit_state": unit_state, "why": why,
         "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "job_id": us.get("job_id"), "attempt_dir": us.get("attempt_dir"),
@@ -1478,7 +1519,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             # The verdict itself, so a drain never closes on a self-report.
             rp, _ = U.read_json(Path(us["attempt_dir"]) / "receipt.json")
             evidence = {"receipt": rp} if rp else None
-        emit_intent(state_dir, project, uid, now, us, evidence)
+        emit_intent(state_dir, project, uid, now, us, evidence,
+                    kind=(units.get(uid) or {}).get("kind"))
     return report, dispatched, halted
 
 
