@@ -203,7 +203,18 @@ class TestEvidenceOutranksCoordinatorState(unittest.TestCase):
             _project(t, receipts={"a": {"state": "FAILED", "outputs": {}}})
             rows = R.unit_rows(R.collect(t))
             self.assertEqual(rows[0]["state"], "FAILED")
-            self.assertEqual(R.verdict(rows)[0], "FAILED")
+            # The receipt declares FAILED and delivers none of the declared
+            # outputs, so the disagreement is now surfaced ahead of the
+            # failure itself: previously it was invisible because mismatch
+            # was only computed for DONE units.
+            self.assertEqual(R.verdict(rows)[0], "EVIDENCE MISMATCH")
+
+    def test_a_failed_unit_whose_receipt_agrees_reports_failed(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, units=[{"id": "a", "kind": "slurm", "outputs": [],
+                                "needs": []}],
+                     receipts={"a": {"state": "FAILED", "outputs": {}}})
+            self.assertEqual(R.verdict(R.unit_rows(R.collect(t)))[0], "FAILED")
 
     def test_the_disagreement_is_shown_not_hidden(self):
         with tempfile.TemporaryDirectory() as t:
@@ -392,7 +403,8 @@ class TestEvidenceIntegrity(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             _project(t)
             self._break_receipt(t)
-            self.assertTrue(R.collect(t)["unreadable_receipts"])
+            ev = R.collect(t)["evidence"]
+            self.assertEqual(ev["a"]["status"], "unreadable")
 
     def test_delivering_something_other_than_declared_is_a_mismatch(self):
         with tempfile.TemporaryDirectory() as t:
@@ -416,10 +428,76 @@ class TestEvidenceIntegrity(unittest.TestCase):
             self.assertEqual(R.verdict(R.unit_rows(R.collect(t)))[0],
                              "COMPLETE")
 
-    def test_no_receipt_yet_is_not_a_mismatch(self):
-        """"Has not reported yet" is not "delivered the wrong thing"."""
+    def test_no_receipt_is_not_a_mismatch_but_is_not_complete_either(self):
+        """"Has not reported yet" is not "delivered the wrong thing". It is
+        also not "finished": a stored DONE with no receipt means nothing here
+        judged the artifacts."""
         with tempfile.TemporaryDirectory() as t:
             _project(t)
+            rows = R.unit_rows(R.collect(t))
+            self.assertEqual(rows[0]["missing_outputs"], [])
+            v, why = R.verdict(rows)
+            self.assertEqual(v, "NO VERDICT")
+            self.assertIn("no receipt", why)
+
+
+class TestTheCommitteePlan(unittest.TestCase):
+    """The four findings the step-back committee scoped as ONE invariant:
+    COMPLETE must require evidence, and every way of not having evidence must
+    prevent it."""
+
+    def test_a_stored_done_with_no_receipt_is_not_complete(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t)
+            v, why = R.verdict(R.unit_rows(R.collect(t)))
+            self.assertEqual(v, "NO VERDICT")
+            self.assertIn("self-report", why)
+
+    def test_an_untraversable_attempt_directory_is_not_silently_lost(self):
+        """glob returned nothing for both 'absent' and 'cannot look'."""
+        import stat
+        with tempfile.TemporaryDirectory() as t:
+            _project(t)
+            d = os.path.join(t, ".swarm", "runs", "a", "att1")
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "receipt.json"), "w") as fh:
+                json.dump({"state": "DONE", "outputs": {}}, fh)
+            os.chmod(os.path.join(t, ".swarm", "runs", "a"), 0)
+            try:
+                ev = R.collect(t)["evidence"]
+                self.assertEqual(ev["a"]["status"], "unavailable")
+                self.assertEqual(R.verdict(R.unit_rows(R.collect(t)))[0],
+                                 "NO VERDICT")
+            finally:
+                os.chmod(os.path.join(t, ".swarm", "runs", "a"),
+                         stat.S_IRWXU)
+
+    def test_extra_outputs_count_even_when_none_were_declared(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, units=[{"id": "a", "kind": "slurm", "outputs": [],
+                                "needs": []}],
+                     receipts={"a": {"state": "DONE", "outputs": {
+                         "surprise.txt": {"sha256": "c" * 64, "size": 1,
+                                          "method": "content-digest"}}}})
+            rows = R.unit_rows(R.collect(t))
+            self.assertEqual(rows[0]["undeclared_outputs"], ["surprise.txt"])
+            self.assertEqual(R.verdict(rows)[0], "EVIDENCE MISMATCH")
+
+    def test_a_mismatch_on_a_failed_unit_is_visible(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, receipts={"a": {"state": "FAILED", "outputs": {
+                "unexpected.dat": {"sha256": "d" * 64, "size": 1,
+                                   "method": "content-digest"}}}})
+            rows = R.unit_rows(R.collect(t))
+            self.assertEqual(R.verdict(rows)[0], "EVIDENCE MISMATCH")
+            self.assertEqual(rows[0]["state"], "FAILED",
+                             "the stored failure must not be rewritten")
+
+    def test_a_matching_receipt_still_reaches_complete(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, receipts={"a": {"state": "DONE", "outputs": {
+                "out.txt": {"sha256": "e" * 64, "size": 3,
+                            "method": "content-digest"}}}})
             self.assertEqual(R.verdict(R.unit_rows(R.collect(t)))[0],
                              "COMPLETE")
 

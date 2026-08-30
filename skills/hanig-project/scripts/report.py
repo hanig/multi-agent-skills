@@ -21,7 +21,6 @@ stdlib only, like the rest of the repo.
 """
 import argparse
 import datetime as _dt
-import glob
 import html
 import json
 import os
@@ -70,6 +69,77 @@ def _load_lines(path):
     return out
 
 
+def _discover_receipts(runs_root):
+    """Find each unit's newest receipt, and say what happened when we could not.
+
+    glob.glob() returns an empty list both when nothing is there and when a
+    directory cannot be traversed. Those are opposite facts, and conflating
+    them let a unit with an unreachable receipt fall back to its stored DONE
+    state and be reported COMPLETE. Every failure is now propagated as an
+    explicit status instead of vanishing.
+
+    Returns (receipts, evidence) where evidence[uid]["status"] is one of:
+      present     a receipt was read
+      missing     the unit has no receipt at all
+      unreadable  a receipt exists and could not be parsed
+      unavailable the directory could not be traversed or read
+    """
+    receipts, evidence = {}, {}
+    try:
+        unit_entries = sorted(os.scandir(runs_root), key=lambda e: e.name)
+    except FileNotFoundError:
+        return receipts, evidence
+    except OSError as exc:
+        # The whole tree is unreachable: say so rather than reporting a run
+        # with no evidence as a run that needed none.
+        evidence["*"] = {"status": "unavailable",
+                         "detail": "cannot read %s: %s" % (runs_root, exc)}
+        return receipts, evidence
+
+    for ue in unit_entries:
+        uid = ue.name
+        try:
+            if not ue.is_dir():
+                continue
+            attempts = sorted(os.scandir(ue.path), key=lambda e: e.name)
+        except OSError as exc:
+            evidence[uid] = {"status": "unavailable",
+                             "detail": "cannot read %s: %s" % (ue.path, exc)}
+            continue
+
+        best, unreadable = None, []
+        for ae in attempts:
+            try:
+                if not ae.is_dir():
+                    continue
+                path = os.path.join(ae.path, "receipt.json")
+                with open(path) as fh:
+                    rec = json.load(fh)
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError) as exc:
+                unreadable.append("%s: %s" % (
+                    os.path.join(ae.path, "receipt.json"), exc))
+                continue
+            if not isinstance(rec, dict):
+                unreadable.append("%s: not a JSON object" % path)
+                continue
+            if best is None or str(rec.get("checked_at", "")) >= str(
+                    best.get("checked_at", "")):
+                best = rec
+
+        if best is not None:
+            receipts[uid] = best
+        if unreadable:
+            evidence[uid] = {"status": "unreadable",
+                             "detail": "; ".join(unreadable)}
+        elif best is not None:
+            evidence[uid] = {"status": "present"}
+        else:
+            evidence[uid] = {"status": "missing"}
+    return receipts, evidence
+
+
 def collect(project):
     """Gather every evidence source. Missing ones are absences, not errors:
     a report on a half-finished run is exactly when this is most useful."""
@@ -77,35 +147,14 @@ def collect(project):
     state = _load(p(DEFAULT_STATE, "swarm-state.json"), {}) or {}
     plan = _load(p("plan.json"), {}) or {}
 
-    receipts = {}
-    unreadable = {}
-    for path in sorted(glob.glob(p(DEFAULT_RUNS, "*", "*", "receipt.json"))):
-        r = _load(path)
-        if not isinstance(r, dict):
-            # DO NOT SKIP. A receipt that exists but cannot be read is the
-            # single most dangerous thing here: skipping it let the unit fall
-            # back to its stored DONE state, and the report then said
-            # COMPLETE on the strength of a self-report with no evidence
-            # behind it. That is the exact substitution this whole tool
-            # exists to refuse.
-            uid = os.path.basename(os.path.dirname(os.path.dirname(path)))
-            unreadable.setdefault(uid, []).append(path)
-            continue
-        uid = r.get("task_id") or os.path.basename(
-            os.path.dirname(os.path.dirname(path)))
-        # Keep the newest receipt per unit: attempts are ordered on disk, and
-        # an earlier failed attempt must not shadow the one that closed.
-        prev = receipts.get(uid)
-        if prev is None or str(r.get("checked_at", "")) >= str(
-                prev.get("checked_at", "")):
-            receipts[uid] = r
+    receipts, evidence = _discover_receipts(p(DEFAULT_RUNS))
 
     return {
         "project": project,
         "plan": plan,
         "state": state,
         "receipts": receipts,
-        "unreadable_receipts": unreadable,
+        "evidence": evidence,
         "outbox": _load_lines(p(DEFAULT_STATE, "outbox.jsonl")),
         "tickets": _load(p("tickets.json"), {}) or {},
         "survey": _load(p(".swarm", "survey.json"), {}) or {},
@@ -128,6 +177,7 @@ def unit_rows(data):
         pu = plan_units.get(uid, {})
         su = state_units.get(uid, {}) or {}
         rc = data["receipts"].get(uid, {}) or {}
+        ev = (data.get("evidence") or {}).get(uid) or {"status": "missing"}
         rows.append({
             "id": uid,
             "kind": pu.get("kind") or rc.get("kind") or "?",
@@ -145,18 +195,19 @@ def unit_rows(data):
             "checked_at": rc.get("checked_at"),
             "attempt_dir": su.get("attempt_dir"),
             "runtime": _runtime_of(data["plan"], pu),
-            "unreadable_receipts": (data.get("unreadable_receipts")
-                                    or {}).get(uid) or [],
-            # Only meaningful once a receipt exists. With none, there is
-            # nothing to compare against, and calling that a MISMATCH would
-            # confuse "delivered the wrong thing" with "has not reported yet".
+            "evidence": ev,
             "has_receipt": bool(rc),
+            # Compared in BOTH directions whenever a receipt exists, with no
+            # guard on the declared list being non-empty: a unit that declared
+            # nothing and delivered something is exactly as much of a
+            # disagreement as the reverse. Missing evidence is handled by the
+            # evidence status, not by pretending it is a mismatch.
             "missing_outputs": sorted(
                 set(pu.get("outputs") or []) - set(rc.get("outputs") or {})
             ) if rc else [],
             "undeclared_outputs": sorted(
                 set(rc.get("outputs") or {}) - set(pu.get("outputs") or [])
-            ) if (rc and (pu.get("outputs") or [])) else [],
+            ) if rc else [],
         })
     return rows
 
@@ -312,39 +363,66 @@ def outbox_summary(data):
 
 
 def verdict(rows):
+    """The headline, computed so that COMPLETE requires evidence.
+
+    Every clause here exists because its absence let a stored state stand in
+    for a judged artifact. The order matters: what we could not SEE outranks
+    what we did see, because a verdict formed over unreadable evidence is
+    worse than no verdict.
+    """
     if not rows:
         return "NO UNITS", "A plan with no units cannot have produced anything."
-    bad = [r for r in rows if r["state"] in TERMINAL_BAD]
-    done = [r for r in rows if r["state"] in TERMINAL_OK]
-    live = [r for r in rows if r["state"] in LIVE]
-    unknown = [r for r in rows if r["state"] not in TERMINAL_BAD
-               and r["state"] not in TERMINAL_OK and r["state"] not in LIVE]
-    blind = [r for r in rows if r["unreadable_receipts"]]
+
+    blind = [r for r in rows
+             if r["evidence"].get("status") in ("unreadable", "unavailable")]
     if blind:
         return "NO VERDICT", (
-            "%d unit(s) have a receipt that cannot be read, so their stored "
-            "state is the only thing left saying they finished. A stored "
-            "state is a self-report." % len(blind))
-    mismatched = [r for r in rows
-                  if r["state"] in TERMINAL_OK and r["has_receipt"]
-                  and (r["missing_outputs"] or r["undeclared_outputs"])]
-    if mismatched:
-        return "EVIDENCE MISMATCH", (
-            "%d closed unit(s) delivered something other than what they "
-            "declared." % len(mismatched))
+            "%d unit(s) have evidence this report could not read, so their "
+            "stored state is the only thing left saying what happened, and a "
+            "stored state is a self-report." % len(blind))
+
+    unknown = [r for r in rows if r["state"] not in TERMINAL_BAD
+               and r["state"] not in TERMINAL_OK and r["state"] not in LIVE]
     if unknown:
         names = ", ".join(sorted({r["state"] for r in unknown}))
         return "UNKNOWN", (
             "%d unit(s) are in a state this report does not recognise (%s), "
             "so it cannot say whether the run finished." % (len(unknown),
                                                             names))
+
+    # Independent of execution state: a receipt that disagrees with the plan
+    # is a disagreement whether the unit is DONE or FAILED. Gating this on
+    # DONE hid it exactly where it is most interesting.
+    mismatched = [r for r in rows if r["has_receipt"]
+                  and (r["missing_outputs"] or r["undeclared_outputs"])]
+    if mismatched:
+        return "EVIDENCE MISMATCH", (
+            "%d unit(s) delivered something other than what they declared."
+            % len(mismatched))
+
+    bad = [r for r in rows if r["state"] in TERMINAL_BAD]
     if bad:
         return "FAILED", ("%d of %d unit(s) did not produce their declared "
                           "outputs." % (len(bad), len(rows)))
+
+    live = [r for r in rows if r["state"] in LIVE]
+    done = [r for r in rows if r["state"] in TERMINAL_OK]
     if live:
         return "IN FLIGHT", ("%d of %d unit(s) closed; the rest have not "
                              "reached a terminal state." % (len(done),
                                                             len(rows)))
+
+    # THE LAST GATE. A unit can be stored as DONE with no receipt at all, and
+    # calling that COMPLETE is the whole failure this report exists to
+    # prevent: the coordinator's own word, with nothing judged.
+    unevidenced = [r for r in rows if r["state"] in TERMINAL_OK
+                   and not r["has_receipt"]]
+    if unevidenced:
+        return "NO VERDICT", (
+            "%d unit(s) are stored as DONE with no receipt, so nothing here "
+            "judged their artifacts. A stored state is a self-report."
+            % len(unevidenced))
+
     return "COMPLETE", ("All %d unit(s) closed on evidence." % len(rows))
 
 
@@ -611,10 +689,13 @@ def render(data, title=None):
         a("</tr>")
     a("</tbody></table></div></section>")
 
-    blind = [r for r in rows if r["unreadable_receipts"]]
+    blind = [r for r in rows
+             if r["evidence"].get("status") in ("unreadable", "unavailable")]
+    unevidenced = [r for r in rows if r["state"] in TERMINAL_OK
+                   and not r["has_receipt"]]
     mismatch = [r for r in rows if r["has_receipt"]
                 and (r["missing_outputs"] or r["undeclared_outputs"])]
-    if blind or mismatch:
+    if blind or mismatch or unevidenced:
         a("<section>")
         a('<div class="sec-head"><h2>Evidence problems</h2>'
           "<p>Read before anything below. These are cases where the stored "
@@ -622,9 +703,14 @@ def render(data, title=None):
           "state is the weaker of the two.</p></div>")
         a('<div class="note"><ul>')
         for r in blind:
-            a("<li><code>%s</code> has %d receipt(s) that cannot be read, so "
-              "only its stored state says it finished, and a stored state is "
-              "a self-report.</li>" % (e(r["id"]), len(r["unreadable_receipts"])))
+            a("<li><code>%s</code>: evidence is %s (%s). Only its stored "
+              "state says what happened, and a stored state is a "
+              "self-report.</li>"
+              % (e(r["id"]), e(r["evidence"].get("status")),
+                 e(r["evidence"].get("detail") or "no detail recorded")))
+        for r in unevidenced:
+            a("<li><code>%s</code> is stored as DONE with no receipt at all, "
+              "so nothing here judged its artifacts.</li>" % e(r["id"]))
         for r in mismatch:
             if r["missing_outputs"]:
                 a("<li><code>%s</code> declared %s but no digest was recorded "
