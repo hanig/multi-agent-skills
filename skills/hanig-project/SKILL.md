@@ -204,6 +204,51 @@ mark it applied. The rules are not negotiable:
 - A tracker outage must never alter swarm state. The swarm is authoritative;
   the tracker is a view of it.
 
+## Last step, every run: the report
+
+**A run is not finished until it has produced a report.** Not when the last
+unit reaches DONE, and not when the issues close.
+
+```sh
+python3 scripts/report.py . --out report.html            # standalone
+python3 scripts/report.py . --fragment --out frag.html   # to publish
+python3 scripts/report.py . --json                       # for a machine
+```
+
+Then publish the fragment as an artifact and give the human the link.
+
+It is assembled from `plan.json`, the coordinator state and each attempt's
+`receipt.json`. It is NEVER written from your account of what happened: a
+narrative summary of a run is the same self-assertion as an agent reporting
+"done", and it is inadmissible for the same reason. If a fact is not on disk,
+it does not go in the report.
+
+Three sections carry most of the value, and two of them are easy to leave out:
+
+- **Evidence.** Every delivered artifact with the digest recorded when it was
+  judged, so the claim stays checkable by re-hashing months later.
+- **What this evidence does not establish.** Read from each receipt's own
+  `basis` block. A receipt records that isolation is by convention rather than
+  OS-enforced, and that nothing observed attributes those bytes to that
+  process. A report that prints DONE and drops this has silently upgraded a
+  hedged claim to an unhedged one.
+- **Findings reported by this project.** Rendered only if the run wrote
+  `findings.json`, and labelled as the project's claims, because the
+  coordinator cannot verify them: it has no idea what a column means.
+
+**So the final unit must emit `findings.json`.** Declare it as one of that
+unit's outputs, in this shape:
+
+```json
+{"findings": [{"title": "one sentence a reader can act on",
+               "detail": "the numbers, and what they do NOT prove"}]}
+```
+
+State the bound, not the wish. "A clean 3.6% sample bounds the defect rate near
+0.15%" is a finding; "no defects found" is a claim the sample cannot support.
+Write what was deliberately not done and why, so an omission is declared rather
+than discovered later by someone trusting a gap that was never flagged.
+
 ## Adopting a half-finished repo
 
 Steps 1 and 2 change, the rest does not. Survey, read the docs, read the
@@ -223,3 +268,5 @@ unit; a unit is something with a declared artifact, and a TODO usually is not.
 - Write to a shared canonical path. That is `swarm.py promote`, and it needs a
   named approver.
 - Ask a question the survey already answered.
+- Report a run as finished without a report, or write that report from
+  recollection rather than from the receipts.

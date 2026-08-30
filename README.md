@@ -57,7 +57,7 @@ every issue title for approval, files them in Linear, and dispatches.
 
 | Skill | One line |
 |---|---|
-| `hanig-project` | The front door: survey, interview, plan, approve, file, dispatch. |
+| `hanig-project` | The front door: survey, interview, plan, approve, file, dispatch, report. |
 | `hanig-swarm` | The coordinator: validate a DAG, isolate each attempt, dispatch, advance, judge. |
 | `hanig-verified-workflow` | Declare and verify what "done" means for one batch job. |
 | `hanig-review-gate` | Adversarial multi-model review of code and of the claims made about it. |
@@ -77,6 +77,9 @@ python3 scripts/survey.py --repo . --out .swarm/survey.json
 python3 scripts/tickets.py draft   plan.json --team Arc --out .swarm/tickets.json
 python3 scripts/tickets.py check   plan.json .swarm/tickets.json
 python3 scripts/tickets.py approve .swarm/tickets.json --approver hani
+
+python3 scripts/report.py  .          --out report.html      # ends every run
+python3 scripts/report.py  . --fragment --out frag.html      # to publish
 ```
 
 `draft` takes the plan positionally and accepts `--brief` and `--autopilot`.
@@ -327,6 +330,9 @@ Per-attempt files: `unit.json`, `events.jsonl`, `receipt.json`.
    scheduler job is bound to the attempt.
 9. **Close on evidence.** A predicate receipt for `slurm` and `pipeline`, a
    merged PR for `code`. Never on a self-report.
+10. **Report.** `report.py` assembles the run from `plan.json`, the
+    coordinator state and every `receipt.json`, and publishes it. A run is not
+    finished until it has one.
 
 Worked example: `vitrine-provenance-manifest` ran 2,406 files and 1.42 TiB
 across five Linear issues, each closed only on a predicate receipt.
