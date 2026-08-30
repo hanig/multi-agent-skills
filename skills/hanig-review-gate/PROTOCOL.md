@@ -106,6 +106,28 @@ rather than patching it again.
 The signal is not "the reviewers are still finding things." It is "the
 reviewers are finding things about my last fix."
 
+## Verify a finding before acting on it
+
+A CONFIRMED finding is a reviewer's claim, not a fact. Check the code it names
+before you change anything.
+
+Measured, 2026-08-30. A round-3 escalation returned seven MAJOR findings
+against `swarm.py`. Five were spot-checked and **none survived**: one named a
+line that does something else entirely, one described a limitation already
+documented in the comment directly above it, and three reported defects that
+had been found by earlier rounds and FIXED, where the comment explaining the
+old bug was still in place.
+
+That last group is the failure mode to know. The reviewer read our own prose
+describing a defect we had already closed, and reported the defect. It is the
+mirror of the bug this repo has made four times in its own guards: matching the
+comment that explains an absence. Detailed comments about past defects are
+worth keeping, and they will produce stale findings; the answer is verification,
+not thinner comments.
+
+Cost of not verifying: seven fixes to code that was already correct, each one a
+new chance to break something that worked.
+
 ## Convergence
 
 Convergence is when arriving findings are **out of scope, minor, or taste**.
