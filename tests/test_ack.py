@@ -320,16 +320,22 @@ class TestRoundThreeFindings(unittest.TestCase):
 
     def test_an_unreadable_journal_fails_closed(self):
         """Keying the failure on the word 'corruption' meant an OSError
-        matched nothing and the command exited zero."""
-        import unittest.mock as mock
+        matched nothing and the command exited zero.
+
+        A real unreadable journal (a directory where a file belongs) rather
+        than a mock, so this also pins that absence and unreadability are
+        told apart by errno instead of by is_file().
+        """
         with tempfile.TemporaryDirectory() as d:
             self._intent(d)
-            S.record_receipt(d, "k1", "ARC-1")
-            with mock.patch.object(Path, "read_text",
-                                   side_effect=OSError("EIO")):
-                problems = S._read_receipts_raw(d).problems
-                self.assertEqual([p["kind"] for p in problems], ["unreadable"])
-                self.assertTrue(S.fatal_problems(problems))
+            os.makedirs(Path(d) / S.RECEIPTS)
+            problems = S._read_receipts_raw(d).problems
+            self.assertEqual([p["kind"] for p in problems], ["unreadable"])
+            self.assertTrue(S.fatal_problems(problems))
+
+    def test_an_absent_journal_is_not_an_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(S._read_receipts_raw(d).problems, [])
 
     def test_fatal_problems_is_structural_not_textual(self):
         src = SWARM.read_text()
@@ -562,6 +568,53 @@ class TestAppendingAfterACrashDoesNotDestroyTwoRecords(unittest.TestCase):
             S.record_receipt(d, "k2", "ARC-2")
             recs, problems = S.load_acknowledgments(d)
             self.assertEqual([r["key"] for r in recs], ["k2"])
+            self.assertEqual(problems, [])
+
+
+class TestHealingHappensUnderTheLock(unittest.TestCase):
+    """Healing ran BEFORE the lock was taken, so two writers could interleave:
+    A reads a partial tail, B truncates it and appends, then A truncates using
+    its stale view and deletes B's receipt. The repair for one crash ate a
+    good record."""
+
+    def test_the_lock_is_taken_before_anything_is_truncated(self):
+        """Compares CALL positions, not text.
+
+        The first version searched the unparsed source for the words, and the
+        docstring explaining the race says "truncates" before any code runs,
+        so it failed on prose. That is the guard-matching-its-own-message bug
+        appearing inside a test written to prevent it, which is funny once and
+        instructive twice.
+        """
+        import ast
+        fn = next(n for n in ast.parse(SWARM.read_text()).body
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == "_fsync_append")
+        calls = {}
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call):
+                name = (getattr(node.func, "attr", None)
+                        or getattr(node.func, "id", None))
+                if name in ("flock", "truncate"):
+                    calls.setdefault(name, node.lineno)
+        self.assertIn("flock", calls)
+        self.assertIn("truncate", calls)
+        self.assertLess(calls["flock"], calls["truncate"],
+                        "the tail is repaired before the lock is held, so a "
+                        "concurrent writer's receipt can be truncated away")
+
+    def test_there_is_no_unlocked_healing_helper(self):
+        self.assertFalse(hasattr(S, "_heal_truncated_tail"),
+                         "a standalone healer can be called without the lock")
+
+    def test_healing_still_works_through_the_locked_path(self):
+        with tempfile.TemporaryDirectory() as d:
+            S.record_receipt(d, "k1", "ARC-1")
+            with open(Path(d) / S.RECEIPTS, "a") as fh:
+                fh.write('{"key": "k2", "ref": "ARC')
+            S.record_receipt(d, "k3", "ARC-3")
+            recs, problems = S.load_acknowledgments(d)
+            self.assertEqual(sorted(r["key"] for r in recs), ["k1", "k3"])
             self.assertEqual(problems, [])
 
 if __name__ == "__main__":

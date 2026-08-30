@@ -1461,65 +1461,53 @@ ACKNOWLEDGED = "attested"
 CONFLICT = "conflict"
 
 
-def _heal_truncated_tail(path):
-    """Drop a half-written final line before appending after it.
-
-    A crash can leave the journal ending mid-record with no newline. Appending
-    to that concatenates the new receipt onto the broken one, producing a
-    single malformed line: the truncated tail was RECOVERABLE on its own, and
-    appending turned it into corruption that takes the following receipt down
-    with it. So one interrupted write cost two records.
-
-    An incomplete record has no meaning, so dropping it loses nothing. It is
-    exactly what the reader already does with it.
-    """
-    path = Path(path)
-    if not path.is_file():
-        return
-    try:
-        with open(path, "r+b") as fh:
-            fh.seek(0, os.SEEK_END)
-            if fh.tell() == 0:
-                return
-            fh.seek(-1, os.SEEK_END)
-            if fh.read(1) == b"\n":
-                return                      # ends cleanly, nothing to heal
-            data = path.read_bytes()
-            cut = data.rfind(b"\n")
-            fh.truncate(0 if cut < 0 else cut + 1)
-            fh.flush()
-            os.fsync(fh.fileno())
-    except OSError:
-        # Leave it alone rather than half-repair it; the reader fails closed.
-        return
-
-
 def _fsync_append(path, record):
     """Append one JSON line durably, serialised against other writers.
 
+    Everything happens under ONE lock on ONE handle. Healing the tail used to
+    run before the lock was taken, so two writers could interleave: A reads a
+    partial tail, B truncates it and appends its receipt, then A truncates
+    using its stale view and deletes B's record before appending its own. The
+    repair for one crash silently ate a good receipt.
+
     The lock is advisory and process-scoped: the kernel drops it when this
     process exits, including when it is killed, so a crash cannot wedge the
-    journal."""
+    journal.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps(record, sort_keys=True) + "\n"
-    _heal_truncated_tail(path)
-    with open(path, "a") as fh:
+    line = (json.dumps(record, sort_keys=True) + "\n").encode()
+
+    # r+b keeps existing content and allows truncate; a+b cannot truncate
+    # portably. Create it first if absent.
+    if not path.exists():
+        path.touch()
+    with open(path, "r+b") as fh:
         try:
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
         except OSError as exc:
-            # Do NOT swallow this. I originally wrote `pass` here with the
-            # comment "no flock here; the write still happens", which is true
-            # and is exactly the problem: the write happens WITHOUT the
-            # serialisation the caller was promised, two concurrent writers
-            # interleave, and both report success. A guarantee that quietly
-            # downgrades itself is worse than one that was never offered.
             raise OutboxError(
                 f"cannot take an exclusive lock on {path}: {exc}. Receipt "
                 f"writes must be serialised, and this filesystem will not "
                 f"serialise them, so two drainers could interleave and "
                 f"corrupt the journal. Record receipts from a filesystem "
                 f"that supports flock.")
+
+        # HEAL, now that nobody else can be writing. A crash can leave the
+        # journal ending mid-record with no newline; appending onto that fuses
+        # the new receipt to the broken one, turning a recoverable interrupted
+        # write into corruption that takes the next record with it. An
+        # incomplete record has no meaning, so dropping it loses nothing.
+        fh.seek(0, os.SEEK_END)
+        if fh.tell():
+            fh.seek(-1, os.SEEK_END)
+            if fh.read(1) != b"\n":
+                fh.seek(0)
+                data = fh.read()
+                cut = data.rfind(b"\n")
+                fh.truncate(0 if cut < 0 else cut + 1)
+
+        fh.seek(0, os.SEEK_END)
         fh.write(line)
         fh.flush()
         os.fsync(fh.fileno())
@@ -1531,18 +1519,17 @@ class _RawJournal:
     Six review findings chased name-level bypasses of a static test (nested
     functions, lambdas, aliases, same-named methods). That arms race is not
     winnable: no static check over a shared module namespace can stop
-    deliberate indirection, and a test that claims otherwise is the overclaim
+    deliberate indirection, and a test claiming otherwise is the overclaim
     this repo keeps catching.
 
     So the barrier moved from the NAME to the DATA. The raw reader hands back
-    this box. The records are behind a private attribute that only
+    this box. The records sit behind a private attribute that only
     `load_acknowledgments` opens, and it opens it only after refusing a bad
-    journal. A caller who wants the records without the check must reach into
+    journal. A caller who wants them without the check must reach into
     `_records` deliberately, in a line that says exactly what it is doing.
 
     The threat model is an honest maintainer in a hurry, not an adversary.
-    Against a slip this is airtight; against someone determined to smuggle,
-    nothing at this layer would be.
+    Against a slip this is airtight; against smuggling, nothing here would be.
     """
 
     __slots__ = ("_records", "problems")
@@ -1576,10 +1563,20 @@ def _read_receipts_raw(state_dir):
       malformed       parsed as JSON but not a receipt; fail closed
     """
     p = Path(state_dir) / RECEIPTS
-    if not p.is_file():
-        return _RawJournal([], [])
+    # is_file() answers False both for "not there" and for "cannot look",
+    # which are opposite facts: absent means nothing was ever attested,
+    # unreadable means we do not know. It can also raise outright on some
+    # platforms. Ask to open it and read the errno instead. report.py's copy
+    # of this reader was fixed first and this one was left behind, which is
+    # the same copy-drift that put the removed `applied` field in two states.
     try:
-        raw_text = p.read_text()
+        with open(p) as fh:
+            raw_text = fh.read()
+    except FileNotFoundError:
+        return _RawJournal([], [])
+    except IsADirectoryError as exc:
+        return _RawJournal(
+            [], [{"kind": "unreadable", "detail": f"{p} is not a file: {exc}"}])
     except OSError as exc:
         return _RawJournal(
             [], [{"kind": "unreadable", "detail": f"cannot read {p}: {exc}"}])
