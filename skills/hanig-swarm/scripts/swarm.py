@@ -385,6 +385,14 @@ def validate_plan(plan):
             # partition check reads u["sbatch"], so an empty one means it
             # examined nothing -- and a validator silent about what it skipped
             # is indistinguishable from one that checked and approved.
+            # Units that will make exactly ONE attempt because they said
+            # nothing. Reported as a FACT about the policy being applied, not
+            # as a guess about whether that is wise: inferring "you probably
+            # wanted retries" from a partition name is precisely what this
+            # code refuses to do elsewhere.
+            "default_attempts": sorted(
+                u["id"] for u in units
+                if isinstance(u, dict) and "max_attempts" not in u),
             "without_partition": sorted(
                 u["id"] for u in units
                 if u.get("kind", "slurm") == "slurm"
@@ -1553,6 +1561,17 @@ def cmd_validate(args):
     # default partition with 2, and this printed "plan is valid" -- because
     # the partition check reads u["sbatch"], which was empty, so it examined
     # nothing and said nothing.
+    # A DEFAULT CHANGED UNDER EXISTING PLANS. max_attempts was 3 and is now
+    # 1, so a plan that still validates may behave differently than it used
+    # to. Say which units that applies to rather than letting it be
+    # discovered by a preemption.
+    once = summary.get("default_attempts") or []
+    if once:
+        print(f"  retry policy: {len(once)} unit(s) declare no max_attempts "
+              f"and will make ONE attempt each. A retry starts in a fresh "
+              f"empty directory, so repetition is opt-in: declare "
+              f"max_attempts with a 'retry' contract if a redo is acceptable.")
+
     missing = summary.get("without_partition") or []
     if missing:
         known = sorted(_known_partitions() or [])

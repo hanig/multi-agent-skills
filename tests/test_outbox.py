@@ -2224,5 +2224,49 @@ class TestClosureAuthorityIsFixedByKind(unittest.TestCase):
         self.assertIn("Never mark the intent applied", doc)
 
 
+class TestADefaultChangeIsMadeVisible(unittest.TestCase):
+    """max_attempts went from 3 to 1, so a plan that still VALIDATES may
+    behave differently than it used to. Validating is not the same as
+    behaving identically, and a silent behaviour change discovered by a
+    preemption is the worst way to learn about one."""
+
+    def _validate(self, plan):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "p.json"
+            f.write_text(json.dumps(plan))
+            return subprocess.run(
+                [sys.executable, str(SWARM), "validate", str(f)],
+                capture_output=True, text=True).stdout
+
+    def test_units_relying_on_the_default_are_named(self):
+        out = self._validate({"name": "p", "units": [
+            {"id": "a", "kind": "slurm", "command": "true", "outputs": ["o"]}]})
+        self.assertIn("retry policy", out)
+        self.assertIn("ONE attempt", out)
+
+    def test_a_plan_that_declares_its_intent_is_not_lectured(self):
+        """The counter-claim: output that always appears is output nobody
+        reads."""
+        out = self._validate({
+            "name": "p", "retry_limits": {"items": 9},
+            "units": [{"id": "a", "kind": "slurm", "command": "true",
+                       "outputs": ["o"], "max_attempts": 3,
+                       "retry": {"mode": "restart",
+                                 "max_lost": {"items": 1}}}]})
+        self.assertNotIn("retry policy", out)
+
+    def test_it_reports_policy_and_does_not_guess_at_intent(self):
+        """Saying "you probably wanted retries" would be inferring from a
+        proxy, which this code refuses to do everywhere else."""
+        import ast
+        src = SWARM.read_text()
+        fn = next(n for n in ast.parse(src).body
+                  if isinstance(n, ast.FunctionDef) and n.name == "cmd_validate")
+        code = "\n".join(ast.unparse(x) for x in fn.body)
+        for proxy in ("preemptible", "gpu_hours", "--time"):
+            self.assertNotIn(proxy, code)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
