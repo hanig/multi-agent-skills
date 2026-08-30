@@ -2571,5 +2571,84 @@ class TestEveryPartitionSpelling(unittest.TestCase):
         self.assertIsNone(S.declared_partition({"sbatch": ["--time", "5"]}))
 
 
+class TestAPlanThatCannotRunIsRefused(unittest.TestCase):
+    """The best finding of the whole project, and it came from Hani watching a
+    real run rather than from any reviewer.
+
+    The interview asked four questions, called them "the four things the
+    machine cannot tell me", and then stalled on a fifth it never asked: the
+    corpus path. It had even written "I'll need the subpath and the glob" in
+    an earlier answer. Five Linear issues were filed for work it already knew
+    could not start. The interview's stopping condition was "I ran out of
+    prepared questions", not "the plan can run"."""
+
+    def _plan(self, inputs, **over):
+        u = {"id": "qc", "kind": "slurm", "command": "true",
+             "outputs": ["o"], "inputs": inputs}
+        u.update(over)
+        return {"name": "p", "units": [u]}
+
+    def test_a_placeholder_input_is_refused(self):
+        for placeholder in ("<corpus_globs>", "TODO: set the corpus",
+                            "FIXME", "...", "TBD", ""):
+            with self.assertRaises(S.PlanError, msg=placeholder) as cm:
+                S.validate_plan(self._plan([placeholder]))
+            self.assertIn("cannot run", str(cm.exception))
+
+    def test_the_refusal_explains_the_cost_of_deferring(self):
+        with self.assertRaises(S.PlanError) as cm:
+            S.validate_plan(self._plan(["<corpus>"]))
+        msg = str(cm.exception)
+        self.assertIn("issues will be filed", msg)
+        self.assertIn("nobody was asked for", msg)
+
+    def test_an_absolute_glob_matching_nothing_is_refused(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(S.PlanError) as cm:
+                S.validate_plan(self._plan([f"{d}/*.fastq.gz"]))
+            self.assertIn("matches nothing", str(cm.exception))
+
+    def test_an_input_that_exists_is_accepted(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "a.fastq.gz"
+            f.touch()
+            S.validate_plan(self._plan([str(f)]))
+            S.validate_plan(self._plan([f"{d}/*.fastq.gz"]))
+
+    def test_an_input_produced_upstream_is_accepted(self):
+        """The commonest legitimate case: a downstream unit reads what an
+        earlier one writes, and it does not exist yet."""
+        plan = {"name": "p", "units": [
+            {"id": "m", "kind": "slurm", "command": "true",
+             "outputs": ["manifest.tsv"]},
+            {"id": "q", "kind": "slurm", "command": "true",
+             "inputs": ["manifest.tsv"], "outputs": ["o"], "needs": ["m"]}]}
+        S.validate_plan(plan)
+
+    def test_a_relative_path_is_not_refused(self):
+        """Only ABSOLUTE paths are checked. A relative one is resolved against
+        a working directory this validator does not know, and refusing it
+        would block honest plans on an unreadable mount."""
+        S.validate_plan(self._plan(["data/shard-01.fastq.gz"]))
+
+    def test_declaring_no_inputs_is_still_fine(self):
+        """The counter-claim: most units declare none, and requiring them
+        would be a gate that blocks everything."""
+        S.validate_plan({"name": "p", "units": [
+            {"id": "a", "kind": "slurm", "command": "true",
+             "outputs": ["o"]}]})
+
+    def test_the_skill_says_the_interview_ends_when_the_plan_can_run(self):
+        # Normalise whitespace: the doc is hard-wrapped, so matching a
+        # sentence that spans a line break fails on the newline rather than
+        # on the content.
+        doc = " ".join(
+            (ROOT / "skills" / "hanig-project" / "SKILL.md").read_text().split())
+        self.assertIn("Stop when the plan can RUN", doc)
+        self.assertIn("that is a QUESTION, not a detail to settle later", doc)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

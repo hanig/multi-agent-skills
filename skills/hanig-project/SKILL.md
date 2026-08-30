@@ -69,7 +69,23 @@ planner that invents it produces a readable DAG whose units are larger than
 the failures they will meet.
 Every question carries your recommended answer so the default costs one word.
 
-Stop when you can state, without hedging, what each unit must produce.
+**Stop when the plan can RUN, not when you run out of questions.** These are
+different, and getting it wrong is expensive: a plan was once built, validated
+and had five tracker issues filed for it before anyone noticed the corpus path
+had never been asked for. The planner had even written "I'll need the subpath
+and the glob" in an earlier answer, and then never came back for it. It sat
+waiting for a value nobody had been asked to give.
+
+So before you finish the interview, list every value the plan needs to
+dispatch, and check each one is settled: input paths and globs, output
+destinations, the account, the partition, any config file the command reads.
+If a value is still a placeholder, that is a QUESTION, not a detail to settle
+later. `swarm.py validate` refuses a plan whose declared inputs are empty,
+still placeholders, or match nothing, so this is enforced rather than
+remembered -- but reaching that refusal means the interview already failed.
+
+Stop when you can state, without hedging, what each unit must produce AND
+what it will read.
 
 ## 3. Plan. Units are defined by their OUTPUTS, not their commands.
 

@@ -306,6 +306,56 @@ def validate_plan(plan):
                 f"unit {u.get('id','?')!r} joins pool {pool!r}, which is not "
                 f"declared in limits.pools. A pool with no cap bounds nothing.")
 
+    # --- can this plan actually RUN? -------------------------------------
+    #
+    # A plan was built, validated, and had five tracker issues filed for it,
+    # and only then did anyone discover that the one value it needed -- the
+    # corpus path -- had never been asked for. The planner had even written
+    # "I'll need the subpath and the glob" in an earlier answer and then never
+    # came back for it. The interview stopped when the planner ran out of
+    # prepared questions, not when the plan could run.
+    #
+    # So: a declared input must either exist, or be produced by an upstream
+    # unit. An unresolved placeholder is a plan that cannot run, and that is a
+    # fact available NOW rather than at dispatch.
+    produced = {out for u in units if isinstance(u, dict)
+                for out in (u.get("outputs") or [])}
+    unresolved = []
+    for u in units:
+        if not isinstance(u, dict):
+            continue
+        for raw in (u.get("inputs") or []):
+            text = str(raw).strip()
+            if not text:
+                unresolved.append((u.get("id", "?"), "<empty>"))
+                continue
+            # A placeholder somebody meant to fill in.
+            if (text.startswith(("<", "TODO", "FIXME", "CHANGEME"))
+                    or text.endswith(">")
+                    or text in ("...", "PATH", "TBD")):
+                unresolved.append((u.get("id", "?"), text))
+                continue
+            if text in produced:
+                continue                    # an upstream unit makes it
+            # A glob that matches nothing, or a path that is not there, is
+            # only knowable locally; skip silently when it is neither, since
+            # refusing on an unreadable mount would block honest work.
+            if any(ch in text for ch in "*?[") :
+                import glob as _glob
+                if os.path.isabs(text) and not _glob.glob(text):
+                    unresolved.append((u.get("id", "?"),
+                                       f"{text} (matches nothing)"))
+            elif os.path.isabs(text) and not os.path.exists(text):
+                unresolved.append((u.get("id", "?"), f"{text} (does not exist)"))
+    if unresolved:
+        listed = "; ".join(f"{uid} needs {what}" for uid, what in unresolved)
+        raise PlanError(
+            f"this plan cannot run: {listed}.\n"
+            f"    An input that is missing, empty or still a placeholder is "
+            f"not a detail to settle later: the plan will be built, issues "
+            f"will be filed for it, and it will then sit waiting for a value "
+            f"nobody was asked for. Settle it before dispatching.")
+
     bad_parts = partition_problems(units)
     if bad_parts:
         known = sorted(_known_partitions() or [])
