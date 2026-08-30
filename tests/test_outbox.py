@@ -1700,5 +1700,65 @@ class TestAUnitCanFindWhatItConsumes(unittest.TestCase):
         self.assertIn("SWARM_UNIT_DIR", src)
 
 
+class TestADryRunCannotWedgeARealProject(unittest.TestCase):
+    """A reviewer flagged this weeks ago and I recorded it without fixing it.
+    It then bit the first real user on their first run: a dry run against the
+    live state directory recorded a placeholder job id, the reconcile net
+    skips anything holding a job id, and the unit could never be judged or
+    re-dispatched. Their only way out was to discard all state."""
+
+    PLAN = {"name": "dw", "units": [
+        {"id": "a", "kind": "slurm", "command": "true", "outputs": ["o"],
+         "write_scopes": ["d/a/"]}]}
+
+    def _run(self, tmp, *argv):
+        (tmp / "plan.json").write_text(json.dumps(self.PLAN))
+        return subprocess.run(
+            [sys.executable, str(SWARM), *argv, str(tmp / "plan.json"),
+             "--state-dir", str(tmp / "st"), "--root", str(tmp / "rn")],
+            capture_output=True, text=True, cwd=tmp)
+
+    def test_a_dry_placeholder_is_cleared_not_treated_as_bound(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            self._run(tmp, "run", "--dry-run")
+            st = json.loads((tmp / "st" / "swarm-state.json").read_text())
+            self.assertTrue(str(st["units"]["a"]["job_id"]).startswith("dry-"))
+            r = self._run(tmp, "advance")
+            self.assertIn("clearing a dry-run placeholder", r.stdout,
+                          f"the unit stayed wedged:\n{r.stdout}")
+
+    def test_a_dry_run_refuses_a_state_dir_holding_real_attempts(self):
+        """The prevention, not just the cure: a dry run must not contaminate
+        a project that is genuinely running."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            self._run(tmp, "run", "--dry-run")
+            st_path = tmp / "st" / "swarm-state.json"
+            st = json.loads(st_path.read_text())
+            st["units"]["a"] = {"state": "SUBMITTED", "job_id": "2868624",
+                                "attempt_dir": "/x", "attempts": ["/x"],
+                                "gpu_hours": 0}
+            st_path.write_text(json.dumps(st))
+            r = self._run(tmp, "run", "--dry-run")
+            self.assertIn("REFUSING to dry-run", r.stdout)
+            self.assertIn("--state-dir", r.stdout,
+                          "the refusal must name the way through")
+            after = json.loads(st_path.read_text())
+            self.assertEqual(after["units"]["a"]["job_id"], "2868624",
+                             "the dry run modified live state anyway")
+
+    def test_a_dry_run_on_a_clean_directory_still_works(self):
+        """The counter-claim. Refusing every dry run would remove the only way
+        to check a DAG's shape without a scheduler."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            r = self._run(tmp, "run", "--dry-run")
+            self.assertIn("submitted dry-", r.stdout, r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

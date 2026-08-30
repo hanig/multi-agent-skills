@@ -27,7 +27,7 @@ bind mount.
 
 ## Status as of 2026-08-28
 
-Built and green: 471 tests.
+Built and green: 553 tests.
 
 | Piece | File | State |
 |---|---|---|
@@ -213,6 +213,17 @@ Two defects that only running found, both invisible to local tests:
    that failure. It is now FAILED and points at the job's own log. `unit.py`
    records a machine-readable REASON so the coordinator branches on a code
    rather than on the wording of a note.
+
+## Tracker: Linear, live
+
+Workspace `Arc - projects`, teams `Arc` / `peeks` / `SRAgent`. Cluster work is
+filed under **Arc**, and `tickets.py` defaults to it: this is not a question
+for a human. A plan's `charge_to` is a SLURM ACCOUNT and never a team; a
+session guessed `goodarzilab` from it and had to stop and ask.
+
+First real project filed 2026-08-29: `vitrine-provenance-manifest`, five
+issues ARC-161..165 with `blocked_by` mirroring the unit DAG, ids written back
+into `tickets.json` so a re-run updates rather than duplicates.
 
 ## The open decision: which tracker
 

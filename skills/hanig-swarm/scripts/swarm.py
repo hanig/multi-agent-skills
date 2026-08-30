@@ -972,6 +972,27 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     acts."""
     units = {u["id"]: u for u in plan["units"]}
     report, dispatched, halted = [], 0, state.get("halted")
+
+    # A DRY RUN MUST NOT CONTAMINATE A REAL PROJECT. Recording a fake
+    # `dry-...` job id into a live state directory wedges that unit forever:
+    # the reconcile net skips anything holding a job id, so the attempt can
+    # never be judged and never re-dispatched. A reviewer found this weeks
+    # ago; I recorded it and did not fix it, and it then bit the first real
+    # user on their first run, whose only way out was to discard all state.
+    if dry_run:
+        real = sorted(uid for uid in units
+                      if (_unit_state(state, uid).get("job_id")
+                          and not str(_unit_state(state, uid)["job_id"])
+                          .startswith("dry-")))
+        if real:
+            return ([f"REFUSING to dry-run against a state directory that "
+                     f"holds REAL attempts ({', '.join(real)}).",
+                     f"A dry run records placeholder job ids, and a unit that "
+                     f"has one can never be judged or re-dispatched, so this "
+                     f"would wedge work that is genuinely running.",
+                     f"Use a throwaway state directory instead:",
+                     f"    swarm.py run <plan> --dry-run --state-dir "
+                     f"$(mktemp -d)/state --root $(mktemp -d)/runs"], 0, None)
     before_states = {uid: (_unit_state(state, uid) or {}).get("state")
                      for uid in units}
 
@@ -1018,6 +1039,19 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 report.append(f"{uid}: binding to job {us['job_id']} succeeded "
                               f"on retry; the unit can now be judged.")
                 save_state(state_dir, state)
+            continue
+        if str(us.get("job_id") or "").startswith("dry-"):
+            # A placeholder from an earlier dry run. Nothing was ever
+            # submitted, so there is nothing to recover and nothing to lose:
+            # release it so the unit can dispatch for real. Previously this
+            # was indistinguishable from a bound job and wedged the unit.
+            report.append(f"{uid}: clearing a dry-run placeholder "
+                          f"({us['job_id']}); nothing was ever submitted for "
+                          f"it, so the unit will dispatch normally.")
+            us["job_id"] = None
+            us["attempt_dir"] = None
+            us["state"] = None
+            save_state(state_dir, state)
             continue
         if us.get("job_id"):
             continue
