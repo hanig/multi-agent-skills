@@ -353,44 +353,71 @@ class TestTheRefusalCannotBeBypassed(unittest.TestCase):
     CHOKEPOINT = "load_acknowledgments"
     RAW = "_read_receipts_raw"
 
-    def _bodies(self):
-        """Function name -> source of its BODY only.
+    def _analyse(self):
+        """name -> (references_journal, calls_chokepoint, calls_raw).
 
-        The body, not the whole def, because a function's own name appears in
-        its signature and would match itself.
+        AST, not text. A reviewer broke the text version with
+        `def bypass(state_dir, name=RECEIPTS)`: the constant sits in the
+        SIGNATURE, so a body-only substring scan never saw it, and the bypass
+        passed. Scanning the whole node for real Name references and real Call
+        targets closes that, and does not care how the source is spelled.
         """
         import ast
         tree = ast.parse(SWARM.read_text())
         out = {}
         for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                out[node.name] = "\n".join(ast.unparse(b) for b in node.body)
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            refs = calls_choke = calls_raw = False
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Name) and sub.id == "RECEIPTS":
+                    refs = True
+                elif isinstance(sub, ast.Call):
+                    fn = sub.func
+                    name = getattr(fn, "id", None) or getattr(fn, "attr", None)
+                    if name == self.CHOKEPOINT:
+                        calls_choke = True
+                    elif name == self.RAW:
+                        calls_raw = True
+            out[node.name] = (refs, calls_choke, calls_raw)
         return out
 
     def test_every_journal_toucher_goes_through_the_chokepoint(self):
-        """The invariant is not an allowlist. It is: touch the journal, and
-        you accept the refusal. A new function added tomorrow either calls
-        the chokepoint or fails this test."""
-        offenders = []
-        for name, body in self._bodies().items():
-            if name in (self.RAW, self.CHOKEPOINT):
-                continue
-            if "RECEIPTS" not in body:
-                continue
-            if self.CHOKEPOINT + "(" not in body:
-                offenders.append(name)
+        """Not an allowlist: a rule. Touch the journal, accept the refusal.
+        A function added tomorrow either calls the chokepoint or fails."""
+        offenders = sorted(
+            name for name, (refs, choke, _) in self._analyse().items()
+            if refs and not choke and name not in (self.RAW, self.CHOKEPOINT))
         self.assertEqual(offenders, [],
                          "these reach the receipt journal without accepting "
-                         "its refusal, which is how one bug appeared in four "
-                         "places: %s" % sorted(offenders))
+                         "its refusal, which is how one cause produced four "
+                         "separate bugs: %s" % offenders)
 
     def test_nothing_calls_the_raw_reader_except_the_chokepoint(self):
-        callers = [n for n, b in self._bodies().items()
-                   if self.RAW + "(" in b and n != self.RAW]
+        callers = sorted(name for name, (_, _, raw) in self._analyse().items()
+                         if raw and name != self.RAW)
         self.assertEqual(callers, [self.CHOKEPOINT],
                          "the raw reader reports problems; it does not "
                          "refuse. Anything deciding on it must go through "
-                         "the chokepoint, got: %s" % sorted(callers))
+                         "the chokepoint, got: %s" % callers)
+
+    def test_a_signature_default_cannot_smuggle_the_constant_past(self):
+        """The exact bypass a reviewer used to break the text-based test."""
+        import ast
+        src = SWARM.read_text().replace(
+            "def fatal_problems(problems):",
+            "def bypass(state_dir, name=RECEIPTS):\n"
+            "    return (Path(state_dir) / name).read_text()\n\n\n"
+            "def fatal_problems(problems):", 1)
+        found = False
+        for node in ast.walk(ast.parse(src)):
+            if (isinstance(node, ast.FunctionDef)
+                    and node.name == "bypass"):
+                found = any(isinstance(sub, ast.Name) and sub.id == "RECEIPTS"
+                            for sub in ast.walk(node))
+        self.assertTrue(found,
+                        "a constant in a default argument must still count "
+                        "as touching the journal")
 
     def test_reading_and_refusing_are_the_same_operation(self):
         """You cannot obtain the records without accepting the refusal."""
