@@ -70,6 +70,7 @@ import json
 import os
 import re
 import shutil
+import worktree as W
 import signal
 import stat
 import subprocess
@@ -1096,10 +1097,22 @@ def _code_state(unit_dir, spec, present, missing, notes):
                      f"{', '.join(sorted(missing))}. An agent finishing its "
                      f"turn is not the same as the work being done.")
         return "INCOMPLETE"
-    notes.append(f"agent {agent} is {status or 'idle'} and all {len(present)} "
-                 f"declared output(s) are present in the exclusive write root. "
-                 f"The agent's own report of success is NOT an input here, and "
-                 f"its git worktree is not judged by this module.")
+    # THE TREE TRANSITION. Declared outputs present in the write root is not
+    # production for a code unit: an agent can write a file it was told to
+    # write and change nothing in the repository it was asked to change. This
+    # module used to say the worktree was "not judged here" and point at
+    # `bus await`, which was never called, so nothing judged it at all.
+    produced, why = W.judge(run, unit_dir, spec)
+    head = (f"agent {agent} is {status or 'idle'} and all {len(present)} "
+            f"declared output(s) are present")
+    if produced is False:
+        notes.append(f"{head}, but the repository shows no produced change: "
+                     f"{why}")
+        return "INCOMPLETE"
+    notes.append(
+        f"{head}. {why}. The agent's own report of success is NOT an input "
+        f"here, and this does NOT establish that the work is correct, tested, "
+        f"reviewed or merged.")
     return "DONE"
 
 
@@ -1240,9 +1253,14 @@ def cmd_check(args):
                 "pipeline": "launcher wrapper (no scheduler)",
                 "code": "paseo agent lifecycle (no exit status exists)",
             }.get(spec.get("kind"), "slurm accounting"),
-            # Named so nobody later reads a DONE on a code unit as covering
-            # the agent's commits.
-            "worktree_judged": False if spec.get("kind") == "code" else None,
+            # Was False with a pointer to a tool we never called. Now it
+            # records what was actually established, and PRODUCTION_DENIES
+            # spells out the reach: "a change was produced" is not "the change
+            # is any good".
+            "worktree_judged": (W.basis(run, unit_dir, spec)
+                                if spec.get("kind") == "code" else None),
+            "production_denies": (list(W.PRODUCTION_DENIES)
+                                  if spec.get("kind") == "code" else None),
             "note": "not isolated from other processes running as the same "
                     "Unix user. OS-enforced isolation would need a container "
                     "or mount namespace with this directory as the only "

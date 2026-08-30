@@ -134,6 +134,10 @@ class TestIsolationIsTheMechanism(Base):
         i = src.index("# The unit contract. Everything above")
         new = [l for l in src[i:].splitlines()
                if l.strip() and not l.strip().startswith("#")]
+        # The limit is NOT raised for new capability: the tree-transition
+        # judging went to worktree.py rather than being allowed to push this
+        # number up. Raising a guard because you tripped it is how a guard
+        # dies.
         self.assertLess(len(new), 600, f"unit.py is {len(new)} executable "
                                        f"lines below the marker")
 
@@ -228,10 +232,13 @@ class TestIsolationIsTheMechanism(Base):
         # Assert on the emitted NOTE, not the docstring. The note goes in the
         # receipt, which is what an operator reads; a docstring only reaches
         # whoever opens the file.
-        self.assertIn("worktree is not judged", code,
-                      "the receipt note must SAY what this predicate does not "
-                      "cover, so a DONE on a code unit is never read as "
-                      "covering the agent's commits")
+        # The old assertion required the note to say the worktree is NOT
+        # judged. It is judged now, so the disclaimer moved rather than
+        # vanished: a DONE on a code unit must still not read as covering
+        # correctness, tests, review or merge.
+        self.assertIn("does NOT establish", code,
+                      "a DONE on a code unit must still say what it does not "
+                      "cover, or it will be read as covering everything")
 
     def test_an_unbound_attempt_is_incomplete_not_done(self):
         d = self.alloc()
