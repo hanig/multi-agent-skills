@@ -898,6 +898,25 @@ class _ArgParser(argparse.ArgumentParser):
 LADDER = ["fast", "standard", "deep"]
 
 
+def in_profile(rev, profile):
+    """THE eligibility rule. Both selection paths must call this one.
+
+    An UNDECLARED reviewer is in NO profile. It used to be in every profile,
+    so adding an entry without a `profiles` key silently put a third model on
+    the two-model plan panel. That was fixed once, in the normal selection
+    path, and NOT in escalate(), which kept
+    `not r.get("profiles") or tier in r["profiles"]`: the exact inclusive
+    spelling, still live on the path every escalated review takes. One fix,
+    two call sites, one of them missed, which is this repo's most repeated
+    defect.
+
+    An EMPTY list is treated the same as a missing key. "profiles": [] is a
+    reviewer who declared membership in nothing, and reading that as
+    membership in everything is the same inversion.
+    """
+    return profile in (rev.get("profiles") or [])
+
+
 def escalate(all_reviewers, prompt, args, truncated, label, body_len):
     """Cheapest-first with early exit.
 
@@ -911,11 +930,25 @@ def escalate(all_reviewers, prompt, args, truncated, label, body_len):
     # earlier tier was forgotten once a later tier came back clean with quorum
     # met, so the ladder fell through to the dearest reviewer with a defect
     # already on the table (glm-5.1, MAJOR).
+    # An escalation over an empty ladder used to run zero reviewers and
+    # return four empty lists, which reads downstream as "nobody found
+    # anything". Tightening in_profile() makes that reachable: a roster whose
+    # entries all lack a `profiles` key now matches no tier at all. Refuse it
+    # here, where the cause is still visible.
+    if not any(in_profile(r, tier) for tier in LADDER for r in all_reviewers):
+        config_error(
+            "no reviewer is in any escalation tier "
+            f"({', '.join(LADDER)}). A reviewer with no 'profiles' key, or an "
+            f"empty one, is in NO profile, so --escalate would run nobody "
+            f"and report no findings, which is indistinguishable from a "
+            f"clean review. Name one or more tiers in that reviewer's "
+            f"'profiles' in reviewers.json, or pass --only to select "
+            f"reviewers directly.")
+
     bad_so_far = False
     for tier in LADDER:
         panel = [r for r in all_reviewers
-                 if (not r.get("profiles") or tier in r["profiles"])
-                 and r["name"] not in seen]
+                 if in_profile(r, tier) and r["name"] not in seen]
         runnable, tier_unavail = [], []
         for rev in panel:
             why = availability(rev)
@@ -1166,8 +1199,7 @@ def main():
         # profile, so adding an entry without a `profiles` key silently put a
         # third model on the two-model plan panel (sol). The residual must be
         # exclusion, not inclusion.
-        reviewers = [r for r in reviewers
-                     if profile in (r.get("profiles") or [])]
+        reviewers = [r for r in reviewers if in_profile(r, profile)]
         if not reviewers:
             config_error(f"no reviewers in profile {profile!r}")
     # --escalate deliberately keeps the full roster: the ladder filters per
