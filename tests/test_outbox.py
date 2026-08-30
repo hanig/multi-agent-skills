@@ -1760,5 +1760,166 @@ class TestADryRunCannotWedgeARealProject(unittest.TestCase):
             self.assertIn("submitted dry-", r.stdout, r.stdout)
 
 
+class TestRetryExposureIsDeclared(unittest.TestCase):
+    """Plan step 8. A unit is the retry boundary and nothing said so, which
+    produced a five-unit plan whose hash stage risked ~4 TiB of re-reading.
+    Exposure is now DECLARED and checked arithmetically; it is never inferred
+    from a partition name or a walltime, because none of those establishes how
+    much work is lost and a warning built on them cries wolf."""
+
+    def _plan(self, **unit):
+        u = {"id": "hash", "kind": "slurm", "command": "true",
+             "outputs": ["o"], "write_scopes": ["h/"]}
+        u.update(unit)
+        p = {"name": "p", "units": [u]}
+        return p
+
+    def test_the_default_is_one_attempt(self):
+        """It was 3, so every unit silently carried three times its stated
+        exposure and nobody had asked for that."""
+        self.assertEqual(S.DEFAULT_MAX_ATTEMPTS, 1)
+        S.validate_plan(self._plan())          # no contract needed at 1
+
+    def test_repetition_without_a_contract_is_refused(self):
+        with self.assertRaises(S.PlanError) as cm:
+            S.validate_plan(self._plan(max_attempts=3))
+        self.assertIn("retry", str(cm.exception))
+        self.assertIn("FRESH EMPTY", str(cm.exception))
+
+    def test_exposure_needs_a_project_limit_to_be_judged_against(self):
+        with self.assertRaises(S.PlanError) as cm:
+            S.validate_plan(self._plan(
+                max_attempts=3,
+                retry={"mode": "restart", "max_lost": {"read_bytes": 10**12}}))
+        self.assertIn("no retry_limits", str(cm.exception))
+
+    def test_exposure_over_the_limit_is_refused(self):
+        p = self._plan(max_attempts=3,
+                       retry={"mode": "restart",
+                              "max_lost": {"read_bytes": 10**12}})
+        p["retry_limits"] = {"read_bytes": 10**11}
+        with self.assertRaises(S.PlanError) as cm:
+            S.validate_plan(p)
+        self.assertIn("over the project limit", str(cm.exception))
+
+    def test_exposure_within_the_limit_passes(self):
+        """The counter-claim: the sharded plan this rule exists to produce
+        must actually validate."""
+        p = self._plan(max_attempts=3,
+                       retry={"mode": "restart",
+                              "max_lost": {"read_bytes": 9 * 10**10}})
+        p["retry_limits"] = {"read_bytes": 10**11}
+        S.validate_plan(p)
+
+    def test_resume_is_refused_as_unsupported(self):
+        """Cross-attempt handoff is not built. Accepting the declaration would
+        ship a claim ahead of the mechanism."""
+        p = self._plan(max_attempts=3,
+                       retry={"mode": "resume", "max_lost": {"items": 1}})
+        p["retry_limits"] = {"items": 1}
+        with self.assertRaises(S.PlanError) as cm:
+            S.validate_plan(p)
+        self.assertIn("NOT SUPPORTED", str(cm.exception))
+
+    def test_a_typo_in_a_metric_is_caught(self):
+        p = self._plan(max_attempts=2,
+                       retry={"mode": "restart",
+                              "max_lost": {"read_byte": 1}})
+        p["retry_limits"] = {"read_bytes": 10}
+        with self.assertRaises(S.PlanError):
+            S.validate_plan(p)
+
+    def test_exposure_is_never_inferred_from_a_proxy(self):
+        """Sol's correction to my first draft, and the mistake this repo keeps
+        making: a partition name and a walltime do not establish how much work
+        is lost."""
+        # EXECUTABLE code only. Grepping the source matched the comment that
+        # explains these are not used -- the third time in this project a
+        # guard has matched the prose describing its own absence. ast.unparse
+        # drops comments, so only real code is examined.
+        import ast
+        src = SWARM.read_text()
+        fn = next(n for n in ast.parse(src).body
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == "validate_plan")
+        code = "\n".join(ast.unparse(x) for x in fn.body)
+        i = code.index("retry_limits")
+        j = code.index("partition_problems")
+        seg = code[i:j]
+        for proxy in ("preemptible", "--time", "gpu_hours", "sbatch"):
+            self.assertNotIn(proxy, seg,
+                             f"exposure is being inferred from {proxy!r}")
+
+
+class TestLiveConcurrencyIsBounded(unittest.TestCase):
+    """Splitting a unit for retry safety turns one reader into sixteen. Sol
+    caught that my own advice, taken alone, traded one problem for a worse one
+    on a filesystem shared by ~18 people."""
+
+    def _sharded(self, n=16, **limits):
+        units = [{"id": f"hash-{i:02d}", "kind": "slurm", "command": "true",
+                  "outputs": ["o"], "pool": "shared-fs-read",
+                  "write_scopes": [f"h/{i}/"]} for i in range(n)]
+        return {"name": "p", "limits": limits, "units": units}
+
+    def test_a_pool_caps_simultaneous_dispatch(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            (tmp / "plan.json").write_text(json.dumps(
+                self._sharded(max_running=8, pools={"shared-fs-read": 2})))
+            r = subprocess.run(
+                [sys.executable, str(SWARM), "run", str(tmp / "plan.json"),
+                 "--dry-run", "--state-dir", str(tmp / "st"),
+                 "--root", str(tmp / "rn")],
+                capture_output=True, text=True, cwd=tmp)
+            self.assertEqual(r.stdout.count("submitted dry-"), 2,
+                             f"pool cap not enforced:\n{r.stdout}")
+            self.assertIn("pool 'shared-fs-read' full", r.stdout)
+
+    def test_max_running_caps_the_whole_project(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            plan = self._sharded(max_running=3)
+            for u in plan["units"]:
+                u.pop("pool")
+            (tmp / "plan.json").write_text(json.dumps(plan))
+            r = subprocess.run(
+                [sys.executable, str(SWARM), "run", str(tmp / "plan.json"),
+                 "--dry-run", "--state-dir", str(tmp / "st"),
+                 "--root", str(tmp / "rn")],
+                capture_output=True, text=True, cwd=tmp)
+            self.assertEqual(r.stdout.count("submitted dry-"), 3, r.stdout)
+            self.assertIn("slots in use", r.stdout)
+
+    def test_an_undeclared_pool_is_refused(self):
+        """A pool with no cap bounds nothing, so a typo would silently remove
+        the limit rather than apply it."""
+        plan = self._sharded(max_running=8, pools={"shared-fs-read": 2})
+        plan["units"][0]["pool"] = "typo"
+        with self.assertRaises(S.PlanError) as cm:
+            S.validate_plan(plan)
+        self.assertIn("not declared", str(cm.exception))
+
+    def test_no_limits_means_no_cap(self):
+        """The counter-claim: a plan that declares no limits must not suddenly
+        stop dispatching."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            plan = self._sharded(n=5)
+            for u in plan["units"]:
+                u.pop("pool")
+            plan.pop("limits")
+            (tmp / "plan.json").write_text(json.dumps(plan))
+            r = subprocess.run(
+                [sys.executable, str(SWARM), "run", str(tmp / "plan.json"),
+                 "--dry-run", "--state-dir", str(tmp / "st"),
+                 "--root", str(tmp / "rn")],
+                capture_output=True, text=True, cwd=tmp)
+            self.assertEqual(r.stdout.count("submitted dry-"), 5, r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

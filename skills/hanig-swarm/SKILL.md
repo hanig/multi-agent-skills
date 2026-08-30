@@ -14,6 +14,54 @@ description: >-
 
 Step 1 of `docs/plan-swarm.md`: the unit contract.
 
+## How big should a unit be?
+
+**A unit is the retry boundary.** A retry starts in a FRESH, EMPTY attempt
+directory, so it redoes the whole unit. The quantity that matters is therefore
+maximum unrecoverable work, not unit size, and it is the human's to set: what
+is the most work you are willing to repeat after one interruption?
+
+Absent an answer, the conservative default is one independently executable
+shard per unit.
+
+A larger unit is only safe when a fresh attempt can find and validate durable
+progress from a previous one. A checkpoint counts only if it survives the
+failed attempt, is made available to the new attempt, has an atomic completion
+marker, is validated before reuse, actually causes completed work to be
+skipped, and still yields the complete declared outputs. An engine that
+"can resume in principle" does not count, and `retry.mode: "resume"` is
+REFUSED today because that handoff is not built.
+
+Declare the exposure; the coordinator will not guess it:
+
+```json
+"retry_limits": {"read_bytes": 100000000000},
+"units": [{"id": "hash-00", "max_attempts": 3,
+           "retry": {"mode": "restart",
+                     "max_lost": {"read_bytes": 97559511040}}}]
+```
+
+`max_attempts` defaults to **1**. Repetition is opt-in, because a silent
+default of 3 multiplies exposure by three without anyone asking for it.
+
+Nothing infers exposure from a partition name, a walltime, `gpu_hours` or DAG
+fan-out. None of those establishes how much work is lost, and a warning built
+on them cries wolf until somebody switches it off.
+
+**Splitting has a cost of its own.** Sixteen individually recoverable shards
+are also sixteen simultaneous readers of a filesystem other people share.
+Bound it:
+
+```json
+"limits": {"max_running": 8, "pools": {"shared-fs-read": 2}}
+```
+
+Counted across every live attempt, not per invocation: `--max-new-dispatches`
+bounds one run, and cron starts another.
+
+**Presentation is separate.** Keep the readable five-stage DAG in `PLAN.md`;
+execution granularity does not have to match how a human reads the work.
+
 ## The one idea
 
 **Isolation replaces attribution.** The coordinator allocates an exclusive,

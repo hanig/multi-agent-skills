@@ -179,6 +179,100 @@ def validate_plan(plan):
                     f"unit {u.get('id', '?')!r} declares promote_to "
                     f"{u['promote_to']!r}, but {derr}")
 
+    # --- retry exposure ---------------------------------------------------
+    # Enforce only DECLARED facts. Exposure is NOT inferred from output count,
+    # command text, gpu_hours, a partition named "preemptible", walltime or
+    # fan-out: none of those establishes how much work is lost, and a warning
+    # built on them cries wolf until it is switched off.
+    limits = (plan.get("retry_limits") or {})
+    for k in limits:
+        if k not in CHARGE_METRICS:
+            raise PlanError(
+                f"retry_limits names {k!r}, which is not a known metric. "
+                f"Use one of: {', '.join(CHARGE_METRICS)}.")
+    for u in units:
+        if not isinstance(u, dict):
+            continue
+        uid = u.get("id", "?")
+        attempts = u.get("max_attempts", DEFAULT_MAX_ATTEMPTS)
+        if not isinstance(attempts, int) or isinstance(attempts, bool) \
+                or attempts < 1:
+            raise PlanError(f"unit {uid!r} has max_attempts={attempts!r}; it "
+                            f"must be an integer of at least 1.")
+        retry = u.get("retry")
+        if attempts == 1:
+            continue
+        if not isinstance(retry, dict):
+            raise PlanError(
+                f"unit {uid!r} asks for {attempts} attempts but declares no "
+                f"'retry' contract. A retry starts in a FRESH EMPTY attempt "
+                f"directory, so it redoes the whole unit unless a tested "
+                f"resume path says otherwise. Declare what an interruption "
+                f"costs:\n"
+                f'      "retry": {{"mode": "restart", '
+                f'"max_lost": {{"read_bytes": <n>}}}}\n'
+                f"    or set max_attempts to 1.")
+        mode = retry.get("mode")
+        if mode not in RETRY_MODES:
+            raise PlanError(f"unit {uid!r} has retry.mode={mode!r}; use "
+                            f"{' or '.join(repr(m) for m in RETRY_MODES)}.")
+        if mode == "resume":
+            raise PlanError(
+                f"unit {uid!r} declares retry.mode='resume', which is NOT "
+                f"SUPPORTED yet. Cross-attempt handoff is not built and has "
+                f"not passed a forced-preemption test, and shipping the claim "
+                f"before the mechanism is how a false pass gets made. Use "
+                f"'restart' with a max_lost you can afford, or split the unit.")
+        lost = retry.get("max_lost")
+        if not isinstance(lost, dict) or not lost:
+            raise PlanError(
+                f"unit {uid!r} declares retry.mode='restart' without "
+                f"'max_lost'. State what ONE interruption costs, in a metric "
+                f"the project also limits: {', '.join(CHARGE_METRICS)}.")
+        for metric, value in lost.items():
+            if metric not in CHARGE_METRICS:
+                raise PlanError(f"unit {uid!r} max_lost names {metric!r}, "
+                                f"which is not a known metric. Use one of: "
+                                f"{', '.join(CHARGE_METRICS)}.")
+            if not isinstance(value, (int, float)) or isinstance(value, bool) \
+                    or value < 0:
+                raise PlanError(f"unit {uid!r} max_lost[{metric!r}]="
+                                f"{value!r}; it must be a non-negative number.")
+            cap = limits.get(metric)
+            if cap is None:
+                raise PlanError(
+                    f"unit {uid!r} declares it can lose {value} {metric} per "
+                    f"interruption, but the plan sets no retry_limits for "
+                    f"{metric!r}, so nothing says whether that is acceptable. "
+                    f"Add: \"retry_limits\": {{\"{metric}\": <n>}}")
+            if value > cap:
+                raise PlanError(
+                    f"unit {uid!r} can lose {value} {metric} per interruption, "
+                    f"over the project limit of {cap}. Split it into smaller "
+                    f"units, or raise the limit deliberately.")
+
+    lim = plan.get("limits") or {}
+    if not isinstance(lim, dict):
+        raise PlanError("'limits' must be an object")
+    mr = lim.get("max_running")
+    if mr is not None and (not isinstance(mr, int) or isinstance(mr, bool)
+                           or mr < 1):
+        raise PlanError(f"limits.max_running={mr!r}; it must be an integer of "
+                        f"at least 1.")
+    pools = lim.get("pools") or {}
+    if not isinstance(pools, dict):
+        raise PlanError("limits.pools must be an object of name -> integer")
+    for name, cap in pools.items():
+        if not isinstance(cap, int) or isinstance(cap, bool) or cap < 1:
+            raise PlanError(f"limits.pools[{name!r}]={cap!r}; it must be an "
+                            f"integer of at least 1.")
+    for u in units:
+        pool = isinstance(u, dict) and u.get("pool")
+        if pool and pool not in pools:
+            raise PlanError(
+                f"unit {u.get('id','?')!r} joins pool {pool!r}, which is not "
+                f"declared in limits.pools. A pool with no cap bounds nothing.")
+
     bad_parts = partition_problems(units)
     if bad_parts:
         known = sorted(_known_partitions() or [])
@@ -287,6 +381,23 @@ def validate_plan(plan):
 LEASE = "lease.json"
 # older than this was abandoned by a controller that died.
 SETTLE_S = 600             # accounting lag before a missing row becomes terminal
+
+# Repetition is OPT-IN. This defaulted to 3, so every unit silently carried
+# three times its stated exposure: a 1.42 TiB read on a preemptible partition
+# was really a 4 TiB worst case, and nobody had asked for that. A retry starts
+# in a FRESH EMPTY attempt directory, so a retry is a redo unless a tested
+# resume contract says otherwise.
+DEFAULT_MAX_ATTEMPTS = 1
+
+# Metrics a plan may budget or declare as retry exposure. A small fixed
+# vocabulary, so "read_bytes" means one thing everywhere and a typo is caught
+# rather than silently ignored.
+CHARGE_METRICS = ("gpu_hours", "cpu_hours", "read_bytes", "wall_seconds",
+                  "items")
+RETRY_MODES = ("restart", "resume")
+
+# States in which a unit is occupying a slot on the cluster right now.
+LIVE_STATES = ("ALLOCATED", "SUBMITTED", "RUNNING")
 
 
 # Fields that cannot change what a dispatch DOES. Everything else is
@@ -1161,7 +1272,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         else:
             us.pop("incomplete_since", None)
         if rc in RETRYABLE:
-            policy = u.get("max_attempts", 3)
+            policy = u.get("max_attempts", DEFAULT_MAX_ATTEMPTS)
             if len(us["attempts"]) < policy:
                 # A retry mints a NEW write root. Reusing one is precisely what
                 # makes the predicate inconclusive.
@@ -1212,6 +1323,29 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         if max_new is not None and dispatched >= max_new:
             report.append(f"{uid}: skipped, --max-new-dispatches reached")
             continue
+
+        # BOUND LIVE CONCURRENCY, counted across every attempt currently on
+        # the cluster rather than per invocation. --max-new-dispatches limits
+        # ONE run, and cron adds another batch on its next pass, so it never
+        # bounded the total. This matters most immediately after splitting a
+        # unit for retry safety: sixteen shards that are individually
+        # recoverable are also sixteen simultaneous readers of a filesystem
+        # shared by everyone else.
+        live = [x for x in units
+                if _unit_state(state, x).get("state") in LIVE_STATES]
+        cap_all = (plan.get("limits") or {}).get("max_running")
+        if cap_all is not None and len(live) >= cap_all:
+            report.append(f"{uid}: waiting, {len(live)} of {cap_all} slots in "
+                          f"use")
+            continue
+        pool = u.get("pool")
+        if pool:
+            caps = ((plan.get("limits") or {}).get("pools") or {})
+            in_pool = [x for x in live if units[x].get("pool") == pool]
+            if len(in_pool) >= caps.get(pool, 10**9):
+                report.append(f"{uid}: waiting, pool {pool!r} full "
+                              f"({len(in_pool)} of {caps[pool]})")
+                continue
 
         unit_dir, err = _allocate(plan, u, root)
         if err:

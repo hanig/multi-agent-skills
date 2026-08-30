@@ -36,14 +36,21 @@ directly, which is the rule that matters:
 > codebase instead.
 
 Ask ONLY about judgment: what counts as done, what the scientific claim is,
-what may be thrown away, what the budget is, what must never be overwritten.
+what may be thrown away, what the budget is, what must never be overwritten,
+and **the most work they are willing to repeat after one interruption**. That
+last one sets the retry boundary and cannot be inferred from anything; a
+planner that invents it produces a readable DAG whose units are larger than
+the failures they will meet.
 Every question carries your recommended answer so the default costs one word.
 
 Stop when you can state, without hedging, what each unit must produce.
 
 ## 3. Plan. Units are defined by their OUTPUTS, not their commands.
 
-Write two files.
+Write two files. Size units by the retry answer from step 2, not by what
+reads nicely: see "How big should a unit be?" in `hanig-swarm/SKILL.md`. A
+unit with `max_attempts > 1` must declare a `retry` contract or validation
+refuses it.
 
 `plan.json` for the coordinator. Every unit needs `id`, `kind`, `command`,
 and **`outputs`** -- a unit with no declared outputs can never be judged done,

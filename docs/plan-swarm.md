@@ -409,6 +409,65 @@ Acceptance criteria:
 - g. BUILT. The draft carries tracker ids forward keyed on unit id, so a
   re-run updates; a unit added later correctly gets no stale id.
 
+**8. Retry exposure: a unit is the retry boundary, and nothing says so.**
+
+Found in the FIRST real use, 2026-08-29. A provenance manifest over 6,195
+files and 1.42 TiB produced a clean five-unit chain, every unit declaring
+outputs, disjoint write scopes, correctly filed. But `hash` was ONE unit
+covering 16 shards on `cpu_preemptible`. A preempted unit gets a FRESH EMPTY
+attempt directory, so a preemption at 90% discards the lot; with the default
+`max_attempts: 3` the worst case is ~4 TiB read to produce one manifest.
+
+The plan was not careless. Neither SKILL.md said anything about how big a unit
+should be, so the planner optimised for a readable DAG. That is a gap in the
+guidance, not a mistake by the planner.
+
+The operative quantity is **maximum unrecoverable work**, not unit size. A
+retry loses everything from the previous attempt unless a TESTED resume
+contract says otherwise, and a checkpoint counts only if it survives the
+failed attempt, is made available to the new one, has an atomic completion
+marker, is validated before reuse, actually causes completed work to be
+skipped, and still yields the complete declared outputs. An engine that can
+resume "in principle" does not count.
+
+The acceptable-loss threshold is the HUMAN'S to supply; the planner must not
+invent it. Absent one, the conservative default is one natural shard per unit.
+
+ENFORCE ONLY DECLARED FACTS. Sol's correction to my first draft, and it is the
+mistake this repo keeps making: do NOT infer exposure from output count,
+command text, gpu_hours, a partition name containing "preemptible", requested
+walltime, or DAG fan-out. None of them establishes how much work is lost, and
+a warning built on them cries wolf until someone switches it off.
+
+Acceptance criteria:
+
+- a. `max_attempts` defaults to **1**. Repetition is opt-in, because the
+  silent default was multiplying exposure by three.
+- b. A unit with `max_attempts > 1` and no `retry` contract is REFUSED, naming
+  the missing declaration.
+- c. `retry.mode: restart` requires a `max_lost` metric with a matching
+  project limit, and is refused when it exceeds it. Arithmetic on declared
+  numbers only.
+- d. `retry.mode: resume` is REFUSED AS UNSUPPORTED until cross-attempt
+  handoff exists and has passed a forced-preemption test. Do not ship a claim
+  that is not built.
+- e. Live concurrency is bounded across ALL attempts, not per invocation:
+  `limits.max_running` and named pools. Without this, fixing granularity turns
+  one disastrous reader into sixteen simultaneous ones on a shared filesystem.
+- f. The budget accumulates any DECLARED metric (`read_bytes`, `cpu_hours`,
+  `items`), not only GPU-hours. A plan with `gpu_hours: 0` throughout is
+  currently unbudgeted.
+- g. `validate` PRINTS declared exposure and the worst-case
+  `max_attempts x max_lost` projection before dispatch, and refuses only
+  missing or arithmetically contradictory declarations.
+- h. Retained attempt storage is declared: failed attempts are kept
+  deliberately and promotion copies again. Live free-space checks are
+  ADVISORY only, since shared free space is volatile and not grounds for
+  refusal.
+- i. A cosmetic `stage` groups units in PLAN.md, so sixteen retry boundaries
+  still read as one human stage. Presentation and retry granularity are
+  different concerns.
+
 **7. `grill-with-docs`: interrogate the HUMAN before dispatching anything.**
 
 FOUND on chimera, byte-identical in three colleagues' skill directories
