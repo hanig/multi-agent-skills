@@ -381,8 +381,14 @@ class TestTheRefusalCannotBeBypassed(unittest.TestCase):
         import ast
         tree = ast.parse(SWARM.read_text())
         out = {}
+        # Lambdas get their OWN entry. Excluding them from a parent's credits
+        # without listing them separately meant a journal read inside a lambda
+        # was attributed to nobody and the lint missed it entirely, which the
+        # old whole-subtree walk did at least flag. glm-5.3 caught the
+        # regression; it is small, and it is still a regression.
         defs = [n for n in ast.walk(tree)
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.Lambda))]
         for node in defs:
             nested = set()
             for sub in ast.walk(node):
@@ -404,7 +410,8 @@ class TestTheRefusalCannotBeBypassed(unittest.TestCase):
                         calls_choke = True
                     elif name == self.RAW:
                         calls_raw = True
-            out[(node.name, node.lineno)] = (refs, calls_choke, calls_raw)
+            name = getattr(node, "name", "<lambda>")
+            out[(name, node.lineno)] = (refs, calls_choke, calls_raw)
         return out
 
     def test_every_journal_toucher_goes_through_the_chokepoint(self):
@@ -461,6 +468,16 @@ class TestTheRefusalCannotBeBypassed(unittest.TestCase):
                     for sub in ast.walk(node) if id(sub) not in nested)
         self.assertFalse(choke, "the parent was credited with its child's "
                                 "call to the chokepoint")
+
+    def test_a_lambda_is_attributed_to_itself_not_to_nobody(self):
+        """Excluding lambdas from a parent's credits without giving them
+        entries of their own left a hole the previous version did not have."""
+        import ast
+        tree = ast.parse("f = lambda d: (Path(d) / RECEIPTS).read_text()\n")
+        lams = [n for n in ast.walk(tree) if isinstance(n, ast.Lambda)]
+        self.assertEqual(len(lams), 1)
+        self.assertTrue(any(isinstance(sub, ast.Name) and sub.id == "RECEIPTS"
+                            for sub in ast.walk(lams[0])))
 
     def test_same_named_functions_do_not_hide_each_other(self):
         keys = list(self._analyse())
