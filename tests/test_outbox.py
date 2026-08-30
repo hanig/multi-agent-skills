@@ -19,9 +19,9 @@ sys.path.insert(0, str(SWARM.parent))
 import swarm as S  # noqa: E402
 
 PLAN = {"name": "rna-bench", "units": [
-    {"id": "prep", "kind": "slurm", "command": "true", "outputs": ["o"],
+    {"id": "prep", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
      "write_scopes": ["r/p/"]},
-    {"id": "train", "kind": "slurm", "command": "true", "outputs": ["o"],
+    {"id": "train", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
      "needs": ["prep"], "write_scopes": ["r/t/"]}]}
 
 
@@ -239,7 +239,7 @@ class TestThePlanDigestCoversDispatch(unittest.TestCase):
     """Four reviewers broke the inclusion list by naming fields it forgot."""
 
     def _p(self, **over):
-        u = {"id": "a", "kind": "slurm", "command": "true", "outputs": ["o"],
+        u = {"id": "a", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
              "inputs": ["ref.fa"], "gpu_hours": 4, "charge_to": "acct1",
              "write_scopes": ["r/"], "max_attempts": 3, "timeout_s": 60}
         u.update(over)
@@ -366,7 +366,7 @@ class TestThePipelinePredicate(unittest.TestCase):
         d.mkdir(parents=True, exist_ok=True)
         (d / "unit.json").write_text(json.dumps({
             "schema_version": 1, "attempt_id": "attempt", "task_id": "u",
-            "kind": "pipeline", "declared_outputs": list(outputs),
+            "kind": "pipeline", "runtime": "none", "declared_outputs": list(outputs),
             "created_at": "2026-08-28T00:00:00+0000"}))
         if engine:
             (d / "engine.json").write_text(json.dumps({
@@ -602,7 +602,7 @@ class TestTheCodePredicate(unittest.TestCase):
             d.mkdir()
             (d / "unit.json").write_text(json.dumps({
                 "schema_version": 1, "attempt_id": "s", "task_id": "u",
-                "kind": "slurm", "declared_outputs": [],
+                "kind": "slurm", "runtime": "none", "declared_outputs": [],
                 "created_at": "2026-08-28T00:00:00+0000"}))
             r = subprocess.run(
                 [sys.executable, str(self.UNIT), "bind", str(d), "--job-id",
@@ -654,7 +654,7 @@ class TestGatedPromotion(unittest.TestCase):
                                   "mtime": int(st.st_mtime),
                                   "sha256": digest,
                                   "method": "content-digest"}}}))
-        unit = {"id": "w", "kind": "slurm", "command": "true",
+        unit = {"id": "w", "kind": "slurm", "runtime": "none", "command": "true",
                 "outputs": ["o.txt"], "write_scopes": ["w/"]}
         if promote_to:
             unit["promote_to"] = str(root / "shared")
@@ -787,8 +787,8 @@ class TestGatedPromotion(unittest.TestCase):
 class TestStatusIsTheNotificationChannel(unittest.TestCase):
     def _st(self, state, halted=None):
         plan = {"name": "p", "units": [
-            {"id": "a", "kind": "slurm", "command": "true", "outputs": ["o"]},
-            {"id": "b", "kind": "slurm", "command": "true", "outputs": ["o"],
+            {"id": "a", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"]},
+            {"id": "b", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
              "needs": ["a"]}]}
         st = {"schema_version": 1, "halted": halted, "units": {
             "a": {"state": state, "attempt_dir": "/x", "attempts": ["/x"],
@@ -987,7 +987,7 @@ class TestThePromotionDestination(unittest.TestCase):
         """A plan that cannot publish should not half-run first."""
         with self.assertRaises(S.PlanError) as cm:
             S.validate_plan({"units": [
-                {"id": "w", "kind": "slurm", "command": "true",
+                {"id": "w", "kind": "slurm", "runtime": "none", "command": "true",
                  "outputs": ["o"], "promote_to": "relative/path"}]})
         self.assertIn("relative", str(cm.exception))
 
@@ -1016,7 +1016,7 @@ class TestDirectoryOutputs(unittest.TestCase):
             (att / "receipt.json").write_text(json.dumps(
                 {"state": "DONE", "attempt_id": "att1", "outputs": fp}))
             plan = {"name": "p", "units": [
-                {"id": "w", "kind": "slurm", "command": "true",
+                {"id": "w", "kind": "slurm", "runtime": "none", "command": "true",
                  "outputs": ["results"],
                  "promote_to": str(root / "canonical")}]}
             state = {"schema_version": 1, "halted": None, "units": {
@@ -1230,9 +1230,9 @@ class TestRound2ReviewFindings(unittest.TestCase):
                 + json.dumps({"unit": "b", "promoted_to": "/y",
                               "approver": "h"}) + "\n")
             plan = {"name": "p", "units": [
-                {"id": "a", "kind": "slurm", "command": "true",
+                {"id": "a", "kind": "slurm", "runtime": "none", "command": "true",
                  "outputs": ["o"], "promote_to": "/x"},
-                {"id": "b", "kind": "slurm", "command": "true",
+                {"id": "b", "kind": "slurm", "runtime": "none", "command": "true",
                  "outputs": ["o"], "promote_to": "/y"}]}
             state = {"schema_version": 1, "halted": None, "units": {}}
             rows = {r["id"]: r for r in S._status_rows(plan, state, t)}
@@ -1729,7 +1729,7 @@ class TestADryRunCannotWedgeARealProject(unittest.TestCase):
     re-dispatched. Their only way out was to discard all state."""
 
     PLAN = {"name": "dw", "units": [
-        {"id": "a", "kind": "slurm", "command": "true", "outputs": ["o"],
+        {"id": "a", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
          "write_scopes": ["d/a/"]}]}
 
     def _run(self, tmp, *argv):
@@ -1789,7 +1789,7 @@ class TestRetryExposureIsDeclared(unittest.TestCase):
     much work is lost and a warning built on them cries wolf."""
 
     def _plan(self, **unit):
-        u = {"id": "hash", "kind": "slurm", "command": "true",
+        u = {"id": "hash", "kind": "slurm", "runtime": "none", "command": "true",
              "outputs": ["o"], "write_scopes": ["h/"]}
         u.update(unit)
         p = {"name": "p", "units": [u]}
@@ -1878,7 +1878,7 @@ class TestLiveConcurrencyIsBounded(unittest.TestCase):
     on a filesystem shared by ~18 people."""
 
     def _sharded(self, n=16, **limits):
-        units = [{"id": f"hash-{i:02d}", "kind": "slurm", "command": "true",
+        units = [{"id": f"hash-{i:02d}", "kind": "slurm", "runtime": "none", "command": "true",
                   "outputs": ["o"], "pool": "shared-fs-read",
                   "write_scopes": [f"h/{i}/"]} for i in range(n)]
         return {"name": "p", "limits": limits, "units": units}
@@ -1950,38 +1950,38 @@ class TestTheNewRefusalsDoNotCryWolf(unittest.TestCase):
 
     LEGITIMATE = {
         "plain unit, no retries, no limits":
-            {"units": [{"id": "a", "kind": "slurm", "command": "true",
+            {"units": [{"id": "a", "kind": "slurm", "runtime": "none", "command": "true",
                         "outputs": ["o"]}]},
         "explicit single attempt":
-            {"units": [{"id": "a", "kind": "slurm", "command": "true",
+            {"units": [{"id": "a", "kind": "slurm", "runtime": "none", "command": "true",
                         "outputs": ["o"], "max_attempts": 1}]},
         "retry_limits declared but unused":
             {"retry_limits": {"read_bytes": 100},
-             "units": [{"id": "a", "kind": "slurm", "command": "true",
+             "units": [{"id": "a", "kind": "slurm", "runtime": "none", "command": "true",
                         "outputs": ["o"]}]},
         "limits block with no pools used":
             {"limits": {"max_running": 4},
-             "units": [{"id": "a", "kind": "slurm", "command": "true",
+             "units": [{"id": "a", "kind": "slurm", "runtime": "none", "command": "true",
                         "outputs": ["o"]}]},
         "pool declared but unused":
             {"limits": {"max_running": 4, "pools": {"io": 2}},
-             "units": [{"id": "a", "kind": "slurm", "command": "true",
+             "units": [{"id": "a", "kind": "slurm", "runtime": "none", "command": "true",
                         "outputs": ["o"]}]},
         "float max_lost":
             {"retry_limits": {"cpu_hours": 10},
-             "units": [{"id": "a", "kind": "slurm", "command": "true",
+             "units": [{"id": "a", "kind": "slurm", "runtime": "none", "command": "true",
                         "outputs": ["o"], "max_attempts": 2,
                         "retry": {"mode": "restart",
                                   "max_lost": {"cpu_hours": 1.5}}}]},
         "zero max_lost":
             {"retry_limits": {"items": 5},
-             "units": [{"id": "a", "kind": "slurm", "command": "true",
+             "units": [{"id": "a", "kind": "slurm", "runtime": "none", "command": "true",
                         "outputs": ["o"], "max_attempts": 3,
                         "retry": {"mode": "restart",
                                   "max_lost": {"items": 0}}}]},
         "max_lost exactly at the limit":
             {"retry_limits": {"items": 5},
-             "units": [{"id": "a", "kind": "slurm", "command": "true",
+             "units": [{"id": "a", "kind": "slurm", "runtime": "none", "command": "true",
                         "outputs": ["o"], "max_attempts": 3,
                         "retry": {"mode": "restart",
                                   "max_lost": {"items": 5}}}]},
@@ -2006,9 +2006,9 @@ class TestConcurrencyDoesNotDeadlock(unittest.TestCase):
             capture_output=True, text=True, cwd=tmp)
 
     PLAN = {"name": "p", "limits": {"max_running": 1}, "units": [
-        {"id": "a", "kind": "slurm", "command": "true", "outputs": ["o"],
+        {"id": "a", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
          "write_scopes": ["a/"]},
-        {"id": "b", "kind": "slurm", "command": "true", "outputs": ["o"],
+        {"id": "b", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
          "write_scopes": ["b/"]}]}
 
     def test_a_finished_unit_frees_its_slot(self):
@@ -2092,7 +2092,7 @@ class TestRetryBudgetBehaviour(unittest.TestCase):
         return rep, m.load_state(str(st))
 
     def _plan(self, **over):
-        u = {"id": "h", "kind": "slurm", "command": "true", "outputs": ["o"],
+        u = {"id": "h", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
              "write_scopes": ["h/"]}
         u.update(over)
         return {"name": "p", "units": [u]}
@@ -2262,7 +2262,7 @@ class TestADefaultChangeIsMadeVisible(unittest.TestCase):
 
     def test_units_relying_on_the_default_are_named(self):
         out = self._validate({"name": "p", "units": [
-            {"id": "a", "kind": "slurm", "command": "true", "outputs": ["o"]}]})
+            {"id": "a", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"]}]})
         self.assertIn("retry policy", out)
         self.assertIn("ONE attempt", out)
 
@@ -2271,7 +2271,7 @@ class TestADefaultChangeIsMadeVisible(unittest.TestCase):
         reads."""
         out = self._validate({
             "name": "p", "retry_limits": {"items": 9},
-            "units": [{"id": "a", "kind": "slurm", "command": "true",
+            "units": [{"id": "a", "kind": "slurm", "runtime": "none", "command": "true",
                        "outputs": ["o"], "max_attempts": 3,
                        "retry": {"mode": "restart",
                                  "max_lost": {"items": 1}}}]})
@@ -2319,7 +2319,7 @@ class TestACodeUnitIsNotDoneUntilMerged(unittest.TestCase):
     PLAN = {"name": "p", "units": [
         {"id": "c", "kind": "code", "prompt": "x", "outputs": ["r"],
          "write_scopes": ["c/"]},
-        {"id": "after", "kind": "slurm", "command": "true", "outputs": ["o"],
+        {"id": "after", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
          "needs": ["c"], "write_scopes": ["a/"]}]}
 
     def test_a_passing_code_predicate_does_not_reach_DONE(self):
@@ -2369,7 +2369,7 @@ class TestApprovalDoesNotCarryOntoChangedWork(unittest.TestCase):
         sys.path.insert(0, str((ROOT / "skills" / "hanig-project" / "scripts")))
         import tickets as T2
         plan = {"name": "p", "units": [
-            {"id": "a", "kind": "slurm", "command": "true", "outputs": ["o"]}]}
+            {"id": "a", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"]}]}
         first = T2.draft(plan)
         first["approval"] = {"state": "granted", "granted_by": "hani",
                              "at": "x"}
@@ -2380,7 +2380,7 @@ class TestApprovalDoesNotCarryOntoChangedWork(unittest.TestCase):
         sys.path.insert(0, str((ROOT / "skills" / "hanig-project" / "scripts")))
         import tickets as T2
         plan = {"name": "p", "units": [
-            {"id": "a", "kind": "slurm", "command": "true", "outputs": ["o"]}]}
+            {"id": "a", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"]}]}
         first = T2.draft(plan)
         first["approval"] = {"state": "granted", "granted_by": "hani",
                              "at": "x"}
@@ -2394,12 +2394,12 @@ class TestApprovalDoesNotCarryOntoChangedWork(unittest.TestCase):
         sys.path.insert(0, str((ROOT / "skills" / "hanig-project" / "scripts")))
         import tickets as T2
         plan = {"name": "p", "units": [
-            {"id": "a", "kind": "slurm", "command": "true", "outputs": ["o"]}]}
+            {"id": "a", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"]}]}
         first = T2.draft(plan)
         first["approval"] = {"state": "autopilot", "granted_by": "phrase",
                              "at": None}
         grown = json.loads(json.dumps(plan))
-        grown["units"].append({"id": "b", "kind": "slurm", "command": "true",
+        grown["units"].append({"id": "b", "kind": "slurm", "runtime": "none", "command": "true",
                                "outputs": ["p"]})
         self.assertEqual(T2.draft(grown, existing=first)["approval"]["state"],
                          "required")
@@ -2435,7 +2435,7 @@ class TestAStalledDAGIsDiagnosable(unittest.TestCase):
     PLAN = {"name": "p", "units": [
         {"id": "writer", "kind": "code", "prompt": "x", "outputs": ["r.txt"],
          "write_scopes": ["w/"]},
-        {"id": "after", "kind": "slurm", "command": "true", "outputs": ["o"],
+        {"id": "after", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
          "needs": ["writer"], "write_scopes": ["a/"]}]}
 
     def _status(self, tmp, extra=None):
@@ -2504,7 +2504,7 @@ class TestAPersistedDoneIsCorrected(unittest.TestCase):
     PLAN = {"name": "p", "units": [
         {"id": "c", "kind": "code", "prompt": "x", "outputs": ["r"],
          "write_scopes": ["c/"]},
-        {"id": "after", "kind": "slurm", "command": "true", "outputs": ["o"],
+        {"id": "after", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
          "needs": ["c"], "write_scopes": ["a/"]}]}
 
     def _advance(self, tmp, plan, persisted):
@@ -2584,7 +2584,7 @@ class TestAPlanThatCannotRunIsRefused(unittest.TestCase):
     prepared questions", not "the plan can run"."""
 
     def _plan(self, inputs, **over):
-        u = {"id": "qc", "kind": "slurm", "command": "true",
+        u = {"id": "qc", "kind": "slurm", "runtime": "none", "command": "true",
              "outputs": ["o"], "inputs": inputs}
         u.update(over)
         return {"name": "p", "units": [u]}
@@ -2622,9 +2622,9 @@ class TestAPlanThatCannotRunIsRefused(unittest.TestCase):
         """The commonest legitimate case: a downstream unit reads what an
         earlier one writes, and it does not exist yet."""
         plan = {"name": "p", "units": [
-            {"id": "m", "kind": "slurm", "command": "true",
+            {"id": "m", "kind": "slurm", "runtime": "none", "command": "true",
              "outputs": ["manifest.tsv"]},
-            {"id": "q", "kind": "slurm", "command": "true",
+            {"id": "q", "kind": "slurm", "runtime": "none", "command": "true",
              "inputs": ["manifest.tsv"], "outputs": ["o"], "needs": ["m"]}]}
         S.validate_plan(plan)
 
@@ -2638,7 +2638,7 @@ class TestAPlanThatCannotRunIsRefused(unittest.TestCase):
         """The counter-claim: most units declare none, and requiring them
         would be a gate that blocks everything."""
         S.validate_plan({"name": "p", "units": [
-            {"id": "a", "kind": "slurm", "command": "true",
+            {"id": "a", "kind": "slurm", "runtime": "none", "command": "true",
              "outputs": ["o"]}]})
 
     def test_the_skill_says_the_interview_ends_when_the_plan_can_run(self):
@@ -2661,7 +2661,7 @@ class TestListFieldsMustBeLists(unittest.TestCase):
     """
 
     def _plan(self, field, value):
-        unit = {"id": "u1", "kind": "slurm", "command": "true",
+        unit = {"id": "u1", "kind": "slurm", "runtime": "none", "command": "true",
                 "outputs": ["out.txt"]}
         unit[field] = value
         return {"project": "p", "units": [unit]}
@@ -2688,7 +2688,7 @@ class TestListFieldsMustBeLists(unittest.TestCase):
         # so it stays: this test is about absence being allowed, not about
         # relaxing the done-predicate.
         S.validate_plan({"project": "p", "units": [
-            {"id": "u1", "kind": "slurm", "command": "true",
+            {"id": "u1", "kind": "slurm", "runtime": "none", "command": "true",
              "outputs": ["out.txt"]}]})
 
 

@@ -21,9 +21,9 @@ sys.path.insert(0, str(SCRIPTS))
 import tickets as T  # noqa: E402
 
 PLAN = {"name": "p", "units": [
-    {"id": "a", "kind": "slurm", "command": "true", "outputs": ["o.txt"],
+    {"id": "a", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o.txt"],
      "description": "first"},
-    {"id": "b", "kind": "slurm", "command": "true", "outputs": ["p.txt"],
+    {"id": "b", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["p.txt"],
      "needs": ["a"]}]}
 
 
@@ -111,7 +111,7 @@ class TestTicketsMapBothWays(unittest.TestCase):
         disagree about. A unit with no declared outputs can never be closed by
         a predicate, so it must not get an issue at all."""
         plan = {"name": "p", "units": [
-            {"id": "vague", "kind": "slurm", "command": "true", "outputs": []}]}
+            {"id": "vague", "kind": "slurm", "runtime": "none", "command": "true", "outputs": []}]}
         problems = T.check(plan, T.draft(plan))
         self.assertTrue(any("no outputs" in p for p in problems), problems)
         with tempfile.TemporaryDirectory() as d:
@@ -133,7 +133,7 @@ class TestTicketsMapBothWays(unittest.TestCase):
         exit status at all. An issue that implied otherwise would borrow
         authority the verdict does not have."""
         plan = {"name": "p", "units": [
-            {"id": "pipe", "kind": "pipeline", "command": "nf run",
+            {"id": "pipe", "kind": "pipeline", "runtime": "none", "command": "nf run",
              "outputs": ["out/"]},
             {"id": "agent", "kind": "code", "prompt": "do it",
              "outputs": ["r.txt"]}]}
@@ -159,7 +159,7 @@ class TestTicketsMapBothWays(unittest.TestCase):
         first = T.draft(PLAN)
         first["issues"][0]["linear_id"] = "iss-0"
         grown = {"name": "p", "units": PLAN["units"] + [
-            {"id": "c", "kind": "slurm", "command": "true", "outputs": ["q"]}]}
+            {"id": "c", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["q"]}]}
         second = T.draft(grown, existing=first)
         by_unit = {i["unit"]: i for i in second["issues"]}
         self.assertEqual(by_unit["a"]["linear_id"], "iss-0")

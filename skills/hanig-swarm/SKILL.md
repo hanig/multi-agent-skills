@@ -14,6 +14,47 @@ description: >-
 
 Step 1 of `docs/plan-swarm.md`: the unit contract.
 
+## Declare the runtime; prove it where the job lands
+
+Every `slurm` and `pipeline` unit declares what it executes in. Not because a
+validator can check it, but because nothing else can:
+
+```json
+"runtimes": {"py": {"id": "py", "resolution": "direct",
+                    "entrypoint": "/home/me/envs/x/bin/python3",
+                    "probe": "python3 -c 'import h5py'",
+                    "verified_by": "canary:runtime-probe"}},
+"units": [{"id": "runtime-probe", "kind": "slurm", "runtime": "py", ...},
+          {"id": "work", "kind": "slurm", "runtime": "py",
+           "needs": ["runtime-probe"], ...}]
+```
+
+`resolution` is one of `direct`, `path`, `conda`, `container`, `module`, `uv`,
+`wrapper`. `verified_by` is `canary:<unit-id>`, `preflight`, or
+`unverified:<why>`. A unit running only base-image tools declares
+`"runtime": "none"`, which is a claim, not an omission.
+
+**The validator does not read your command and does not stat your
+entrypoint.** There is no reliable static shell chokepoint: `srun python`,
+`conda run -n e python`, `apptainer exec img python`, `uv run` and `bash -lc`
+with modules are all legitimate, and shell hides the rest behind variables,
+functions, wrappers and namespace changes. A submit-host stat is worse than
+useless: it is an observed fact about the login node, and concluding from it
+that the path resolves on a compute node is exactly the inferred-not-declared
+move this system refuses. It fails both ways, accepting a path that exists
+only on the login node and refusing one that exists only inside the container.
+
+So the proof is a **canary**: an ordinary cheap Slurm unit that runs the probe
+through the same launcher, in the same partition and account, and closes on a
+normal predicate receipt. It must be an ancestor of everything it verifies, or
+it is not gating anything. A unit may not be its own canary: by the time the
+workload fails, the fan-out has already been dispatched.
+
+A canary proves the runtime worked on one node at one time. For a homogeneous
+partition on shared storage that is a reasonable declared assurance level. For
+node-local paths, heterogeneous partitions, or containers assembled at run
+time, use `preflight` and check inside each allocation.
+
 ## How big should a unit be?
 
 **A unit is the retry boundary.** A retry starts in a FRESH, EMPTY attempt

@@ -119,6 +119,8 @@ python3 scripts/swarm.py run      plan.json --state-dir .swarm [--dry-run]
 python3 scripts/swarm.py status   plan.json --state-dir .swarm [--json]
 python3 scripts/swarm.py advance  plan.json --state-dir .swarm
 python3 scripts/swarm.py outbox            --state-dir .swarm [--all] [--json]
+python3 scripts/swarm.py outbox --state-dir .swarm \
+        --record-receipt KEY --ref ARC-171     # after the tracker confirms
 python3 scripts/swarm.py promote  plan.json --unit ID --approve --approver hani
 
 python3 scripts/unit.py allocate --root ROOT --task ID --kind slurm \
@@ -251,6 +253,14 @@ extensions.
 outbox; a session that has MCP drains them. A tracker that is unreachable can
 therefore never block dispatch, and draining twice cannot file an issue twice.
 
+Acknowledgment is derived, never stored. The drainer records a success receipt
+carrying the tracker's own reference, and status is computed from it:
+`acknowledged`, `conflict` (two receipts, two refs, one intent), or
+`unacknowledged`. The last does **not** mean "not filed": it means this machine
+has no confirmation either way, and claiming otherwise asserts knowledge it does
+not have. A false acknowledgment is strictly worse than a missing one, because
+re-draining is safe and un-filing is not.
+
 **Non-vacuity by mutation.** A test that passes proves nothing until reverting
 the fix makes it fail. A broken test once gave a false negative on a CRITICAL
 finding: bad quoting meant a git filter never installed, and only a positive
@@ -279,6 +289,7 @@ A plan is JSON with a `units` list. Fields the coordinator reads:
 | `max_attempts` | retry budget; the attempts list *is* the budget |
 | `retry` | `{"mode": "restart"}`; `resume` is refused |
 | `promote_to` | where verified outputs are promoted after closure |
+| `runtime` | what this executes in, and what checks it (see below) |
 | `pool`, `gpu_hours`, `env` | declared resource facts |
 
 **`needs`, `inputs`, `outputs` and `sbatch` must be JSON lists.** A string is
@@ -286,6 +297,21 @@ refused, because the code that reads them iterates character by character: for
 one release `"sbatch": "--partition=cpu_batch"` validated clean, reported
 "declares no partition", and silently ran on the cluster default. Write
 `["--partition=cpu_batch"]`.
+
+**Every `slurm` and `pipeline` unit must declare a `runtime`**, either inline,
+as a reference into the plan's `runtimes` catalogue, or the literal `"none"`
+meaning it runs only tools the base image guarantees. A profile declares
+`resolution` (one of direct, path, conda, container, module, uv, wrapper),
+an `entrypoint`, and `verified_by`: `canary:<unit-id>`, `preflight`, or
+`unverified:<why>`. A canary must be an ancestor of every unit it verifies, and
+a unit may not be its own canary.
+
+The validator deliberately does NOT parse the command or stat the entrypoint.
+There is no reliable static shell chokepoint (`srun python`, `conda run`,
+`apptainer exec`, `uv run` and `bash -lc` with modules are all legitimate and
+unparseable), and a submit-host stat is an observed submit-host fact: concluding
+from it that the path resolves on a compute node would be inferring an
+undeclared fact, with both a false-accept and a false-refuse mode.
 
 `validate` refuses a plan that cannot run. Refused: empty inputs, placeholders
 (`<...>`, `TODO`, `FIXME`, `TBD`, `...`), and absolute paths or globs matching

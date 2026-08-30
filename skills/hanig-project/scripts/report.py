@@ -127,8 +127,31 @@ def unit_rows(data):
             "notes": rc.get("notes") or [],
             "checked_at": rc.get("checked_at"),
             "attempt_dir": su.get("attempt_dir"),
+            "runtime": _runtime_of(data["plan"], pu),
         })
     return rows
+
+
+def _runtime_of(plan, unit):
+    """What the unit declared it would execute in, and what checked it.
+
+    A declaration nobody reads is worth as much as no declaration, so this is
+    rendered next to the unit rather than left in the plan file. The
+    verification label is copied verbatim: 'declared' and 'probe passed' are
+    different claims and must not be flattened into one word."""
+    rt = unit.get("runtime")
+    if rt in (None, ""):
+        return None
+    if rt == "none":
+        return {"entrypoint": "base image only", "verified_by": "declared none",
+                "resolution": "none"}
+    if isinstance(rt, str):
+        rt = (plan.get("runtimes") or {}).get(rt) or {"id": rt}
+    if not isinstance(rt, dict):
+        return None
+    return {"entrypoint": rt.get("entrypoint") or rt.get("id") or "?",
+            "resolution": rt.get("resolution") or "?",
+            "verified_by": rt.get("verified_by") or "UNDECLARED"}
 
 
 def evidence_gaps(rows):
@@ -380,10 +403,13 @@ def render(data, title=None):
     a('<div class="sec-head"><h2>Units</h2>'
       "<p>What was dispatched, and what closed it. A unit is the retry "
       "boundary: a retry starts in a fresh empty directory, so attempts "
-      "count against redoing the whole unit.</p></div>")
+      "count against redoing the whole unit. <strong>Verified by</strong> is "
+      "copied from the plan verbatim: a runtime that a compute-node probe "
+      "closed is a different claim from one merely declared, and the two "
+      "must not read alike.</p></div>")
     a('<div class="tablewrap"><table><thead><tr>')
-    for h in ("unit", "kind", "state", "job", "attempts", "needs",
-              "declared outputs"):
+    for h in ("unit", "kind", "state", "job", "attempts", "runtime",
+              "verified by", "declared outputs"):
         a("<th>%s</th>" % h)
     a("</tr></thead><tbody>")
     for r in rows:
@@ -396,7 +422,10 @@ def render(data, title=None):
         a("<td>%s</td>" % _pill(r["state"]))
         a('<td class="mono">%s</td>' % e(r["job_id"] or "&mdash;"))
         a('<td class="mono">%s</td>' % e(att))
-        a('<td class="mono">%s</td>' % e(", ".join(r["needs"]) or "-"))
+        rt = r["runtime"] or {}
+        a('<td class="mono">%s</td>' % e(rt.get("entrypoint") or "&mdash;"))
+        vb = rt.get("verified_by") or "&mdash;"
+        a('<td class="mono">%s</td>' % e(vb))
         a('<td class="wrap-cell mono">%s</td>'
           % e(", ".join(r["declared"]) or "-"))
         a("</tr>")

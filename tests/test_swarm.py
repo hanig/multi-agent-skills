@@ -269,40 +269,40 @@ class TestPlanValidation(Base):
 
     def test_a_cycle_is_refused(self):
         self.bad({"units": [
-            {"id": "A", "kind": "slurm", "command": "x", "outputs": ["o"],
+            {"id": "A", "kind": "slurm", "runtime": "none", "command": "x", "outputs": ["o"],
              "needs": ["B"]},
-            {"id": "B", "kind": "slurm", "command": "x", "outputs": ["o"],
+            {"id": "B", "kind": "slurm", "runtime": "none", "command": "x", "outputs": ["o"],
              "needs": ["A"]}]}, "cycle")
 
     def test_concurrent_units_may_not_share_a_write_scope(self):
         self.bad({"units": [
-            {"id": "A", "kind": "slurm", "command": "x", "outputs": ["o"],
+            {"id": "A", "kind": "slurm", "runtime": "none", "command": "x", "outputs": ["o"],
              "write_scopes": ["r/"]},
-            {"id": "B", "kind": "slurm", "command": "x", "outputs": ["o"],
+            {"id": "B", "kind": "slurm", "runtime": "none", "command": "x", "outputs": ["o"],
              "write_scopes": ["r/sub/"]}]}, "overlap")
 
     def test_ordered_units_MAY_share_a_write_scope(self):
         """They cannot run concurrently, so exclusivity is not threatened.
         Refusing this would block honest plans."""
         r = self.swarm("validate", self.plan({"units": [
-            {"id": "A", "kind": "slurm", "command": "x", "outputs": ["o"],
+            {"id": "A", "kind": "slurm", "runtime": "none", "command": "x", "outputs": ["o"],
              "write_scopes": ["r/"]},
-            {"id": "B", "kind": "slurm", "command": "x", "outputs": ["o"],
+            {"id": "B", "kind": "slurm", "runtime": "none", "command": "x", "outputs": ["o"],
              "needs": ["A"], "write_scopes": ["r/sub/"]}]}))
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_a_unit_with_no_outputs_is_refused(self):
-        self.bad({"units": [{"id": "A", "kind": "slurm", "command": "x",
+        self.bad({"units": [{"id": "A", "kind": "slurm", "runtime": "none", "command": "x",
                              "outputs": []}]}, "no outputs")
 
     def test_duplicate_ids_are_refused(self):
         self.bad({"units": [
-            {"id": "A", "kind": "slurm", "command": "x", "outputs": ["o"]},
-            {"id": "A", "kind": "slurm", "command": "x", "outputs": ["o"]}]},
+            {"id": "A", "kind": "slurm", "runtime": "none", "command": "x", "outputs": ["o"]},
+            {"id": "A", "kind": "slurm", "runtime": "none", "command": "x", "outputs": ["o"]}]},
             "duplicate")
 
     def test_a_missing_dependency_is_refused(self):
-        self.bad({"units": [{"id": "A", "kind": "slurm", "command": "x",
+        self.bad({"units": [{"id": "A", "kind": "slurm", "runtime": "none", "command": "x",
                              "outputs": ["o"], "needs": ["Z"]}]}, "not in the plan")
 
 
@@ -310,11 +310,11 @@ class TestCoordinator(Base):
     """Step 2's acceptance criteria."""
 
     THREE = {"name": "t", "budget": {"gpu_hours": 100}, "units": [
-        {"id": "A", "kind": "slurm", "command": "true", "outputs": ["o"],
+        {"id": "A", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
          "gpu_hours": 1, "write_scopes": ["r/A/"]},
-        {"id": "B", "kind": "slurm", "command": "true", "outputs": ["o"],
+        {"id": "B", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
          "needs": ["A"], "gpu_hours": 1, "write_scopes": ["r/B/"]},
-        {"id": "C", "kind": "slurm", "command": "true", "outputs": ["o"],
+        {"id": "C", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
          "needs": ["A"], "gpu_hours": 1, "write_scopes": ["r/C/"]}]}
 
     def state(self):
@@ -370,9 +370,9 @@ class TestCoordinator(Base):
         """2(c). Charged on DISPATCH: a budget counting only finished work
         cannot stop a runaway."""
         p = self.plan({"name": "b", "budget": {"gpu_hours": 5}, "units": [
-            {"id": "X", "kind": "slurm", "command": "true", "outputs": ["o"],
+            {"id": "X", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
              "gpu_hours": 4, "write_scopes": ["r/X/"]},
-            {"id": "Y", "kind": "slurm", "command": "true", "outputs": ["o"],
+            {"id": "Y", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
              "gpu_hours": 4, "write_scopes": ["r/Y/"]}]})
         r = self.swarm("run", p, "--dry-run")
         self.assertEqual(r.returncode, swarm.EXIT_HALTED)
@@ -384,11 +384,11 @@ class TestCoordinator(Base):
         `unmet` was non-empty and the loop skipped past HELD every time.
         "Waiting" and "will never run" need different actions from a reader."""
         p = self.plan({"name": "h", "units": [
-            {"id": "P", "kind": "slurm", "command": "true", "outputs": ["o"],
+            {"id": "P", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
              "write_scopes": ["r/P/"]},
-            {"id": "Q", "kind": "slurm", "command": "true", "outputs": ["o"],
+            {"id": "Q", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
              "needs": ["P"], "write_scopes": ["r/Q/"]},
-            {"id": "R", "kind": "slurm", "command": "true", "outputs": ["o"],
+            {"id": "R", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
              "needs": ["Q"], "write_scopes": ["r/R/"]}]})
         self.swarm("run", p, "--dry-run")
         self.mark("P", "FAILED")
@@ -696,9 +696,9 @@ class TestSafeUnattendedAdvance(Base):
     immediately before sbatch, immediately after sbatch, and after bind."""
 
     PLAN = {"name": "safe", "units": [
-        {"id": "A", "kind": "slurm", "command": "true", "outputs": ["o"],
+        {"id": "A", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
          "write_scopes": ["r/A/"]},
-        {"id": "B", "kind": "slurm", "command": "true", "outputs": ["o"],
+        {"id": "B", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
          "write_scopes": ["r/B/"]}]}
 
     def state(self):
@@ -746,7 +746,7 @@ class TestSafeUnattendedAdvance(Base):
         self.swarm("run", p, "--dry-run")
         edited = dict(self.PLAN)
         edited["units"] = list(self.PLAN["units"]) + [
-            {"id": "C", "kind": "slurm", "command": "true", "outputs": ["o"],
+            {"id": "C", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
              "write_scopes": ["r/C/"]}]
         Path(p).write_text(json.dumps(edited))
         r = self.swarm("advance", p, "--dry-run")

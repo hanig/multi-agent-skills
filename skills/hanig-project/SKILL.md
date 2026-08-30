@@ -200,6 +200,12 @@ mark it applied. The rules are not negotiable:
   because the issue "looks done": that is the tracker being believed over the
   verdict, which is the whole failure this system exists to prevent.
 - A `block` intent means an upstream unit will not complete. Say which one.
+- **After the tracker confirms, record what landed**:
+  `swarm.py outbox --state-dir DIR --record-receipt KEY --ref ARC-171`.
+  Only after it confirms. A false acknowledgment is worse than a missing one,
+  because re-draining is safe and un-filing is not. An intent with no receipt
+  reads `unacknowledged`, which means this machine has no confirmation either
+  way -- it does NOT mean the issue was never filed.
 - Draining twice is safe: every intent has an idempotency key.
 - A tracker outage must never alter swarm state. The swarm is authoritative;
   the tracker is a view of it.

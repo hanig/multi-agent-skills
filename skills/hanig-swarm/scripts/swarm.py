@@ -59,6 +59,10 @@ EXIT_OK = 0
 EXIT_HALTED = 1          # budget or runaway stopped new dispatch
 EXIT_FAILED_UNIT = 2     # at least one unit is terminally failed
 EXIT_USAGE = 64
+# Two receipts claim different tracker refs for one intent, so something was
+# filed twice, in two places. Not a usage error and not a clean run, so it
+# gets its own code and a script can branch on it.
+EXIT_CONFLICT = 3
 
 
 class PlanError(Exception):
@@ -156,6 +160,138 @@ def partition_problems(units, known=_LOOK_IT_UP):
         if name and name not in known:
             bad.append((u.get("id", "?"), name))
     return bad
+
+
+RESOLUTIONS = ("direct", "path", "conda", "container", "module", "uv",
+               "wrapper")
+
+# Kinds whose work runs somewhere else, so the runtime there is not knowable
+# from here and must be declared.
+_NEEDS_RUNTIME = ("slurm", "pipeline")
+
+
+def _ancestors(uid, units_by_id, seen=None):
+    """Every unit that must close before `uid` starts."""
+    seen = seen if seen is not None else set()
+    for dep in (units_by_id.get(uid, {}).get("needs") or []):
+        if dep in seen:
+            continue
+        seen.add(dep)
+        _ancestors(dep, units_by_id, seen)
+    return seen
+
+
+def resolve_runtime(plan, unit):
+    """A unit's runtime profile, whether inline or referenced by id."""
+    rt = unit.get("runtime")
+    if rt == "none":
+        return "none", "none"
+    if isinstance(rt, str):
+        return (plan.get("runtimes") or {}).get(rt), rt
+    return rt, None
+
+
+def _validate_runtimes(plan, units):
+    by_id = {u.get("id"): u for u in units if isinstance(u, dict)}
+    catalogue = plan.get("runtimes") or {}
+    if catalogue and not isinstance(catalogue, dict):
+        raise PlanError("'runtimes' must be an object of id -> profile")
+
+    for u in units:
+        if not isinstance(u, dict) or u.get("kind") not in _NEEDS_RUNTIME:
+            continue
+        uid = u.get("id", "?")
+        # "none" is a DECLARATION, not an omission: this unit runs only tools
+        # the base image guarantees (coreutils, tar, the scheduler itself).
+        # Without it a unit running `sha256sum` would have to invent a runtime
+        # profile, and a required field that is noise for a third of its uses
+        # becomes a rubber stamp: everyone pastes "unverified: n/a" and the
+        # declaration stops meaning anything. "none" is a specific claim, and
+        # it stays visible at the approval gate and in the report.
+        if u.get("runtime") == "none":
+            continue
+
+        rt, ref = resolve_runtime(plan, u)
+
+        # A dangling reference must be reported AS a dangling reference. It
+        # resolves to None, so an ordering slip here reports "declares no
+        # runtime" about a unit that plainly declares one, which is the same
+        # false-honesty bug the partition message had.
+        if isinstance(u.get("runtime"), str) and not isinstance(rt, dict):
+            raise PlanError(
+                f"unit {uid!r} references runtime {ref!r}, which is not "
+                f"defined in the plan's 'runtimes'.")
+
+        if rt is None:
+            raise PlanError(
+                f"unit {uid!r} is kind={u.get('kind')!r} and declares no "
+                f"'runtime'. Which interpreter or image runs this, and what "
+                f"establishes that it works where the job lands? That is not "
+                f"discoverable from the command: shell hides it behind "
+                f"wrappers, modules, containers and variables. Declare it:\n"
+                f'    "runtime": {{"id": "...", "resolution": "direct", '
+                f'"entrypoint": "/abs/path", "verified_by": "canary:<unit>"}}'
+                f"\n  or reference a profile from the plan's 'runtimes', "
+                f'or declare "runtime": "none" if this runs only tools the '
+                f"base image guarantees.")
+        if not isinstance(rt, dict):
+            raise PlanError(f"unit {uid!r} has a 'runtime' that is not an "
+                            f"object")
+
+        res = rt.get("resolution")
+        if res not in RESOLUTIONS:
+            raise PlanError(
+                f"unit {uid!r} runtime.resolution={res!r}; use one of: "
+                f"{', '.join(RESOLUTIONS)}. This says HOW the runtime is "
+                f"reached, which is the part a reader cannot infer.")
+        if not str(rt.get("entrypoint") or "").strip():
+            raise PlanError(
+                f"unit {uid!r} runtime declares no 'entrypoint'. Name the "
+                f"interpreter, image or wrapper this actually executes.")
+
+        vb = str(rt.get("verified_by") or "").strip()
+        if not vb:
+            raise PlanError(
+                f"unit {uid!r} runtime declares no 'verified_by'. A declared "
+                f"runtime that nothing checks is a hope. Use "
+                f"'canary:<unit-id>', 'preflight', or "
+                f"'unverified:<why that is acceptable here>'.")
+
+        if vb.startswith("canary:"):
+            canary = vb.split(":", 1)[1].strip()
+            if canary not in by_id:
+                raise PlanError(
+                    f"unit {uid!r} says its runtime is verified by canary "
+                    f"{canary!r}, which is not a unit in this plan.")
+            if canary == uid:
+                raise PlanError(
+                    f"unit {uid!r} names ITSELF as its runtime canary. The "
+                    f"workload must not be its own probe: by the time it "
+                    f"fails, the fan-out has already been dispatched.")
+            if canary not in _ancestors(uid, by_id):
+                raise PlanError(
+                    f"unit {uid!r} is verified by canary {canary!r}, but "
+                    f"{canary!r} is not an ancestor of it, so nothing stops "
+                    f"{uid!r} starting before the probe closes. Add it to "
+                    f"'needs' (directly or upstream).")
+        elif vb == "preflight":
+            pass
+        elif vb.startswith("unverified:"):
+            why = vb.split(":", 1)[1].strip()
+            if len(why) < 12:
+                raise PlanError(
+                    f"unit {uid!r} declares its runtime unverified but gives "
+                    f"no real reason. An unverified runtime is allowed and "
+                    f"is sometimes right; it has to be a decision somebody "
+                    f"made on purpose and can be held to.")
+        else:
+            raise PlanError(
+                f"unit {uid!r} runtime.verified_by={vb!r}; use "
+                f"'canary:<unit-id>', 'preflight', or 'unverified:<why>'.")
+
+    # NOTE what is deliberately absent: no stat of the entrypoint, and no
+    # parsing of the command. Both would assert facts about a machine this
+    # one cannot see.
 
 
 def validate_plan(plan):
@@ -332,6 +468,32 @@ def validate_plan(plan):
             raise PlanError(
                 f"unit {u.get('id','?')!r} joins pool {pool!r}, which is not "
                 f"declared in limits.pools. A pool with no cap bounds nothing.")
+
+    # --- the runtime a unit will actually execute in -----------------------
+    #
+    # Nothing validated this, and it is the likeliest reason a scientific unit
+    # dies on first contact. In a real run the plan artifact could not answer
+    # "which python runs this?"; it took interrogating the planner.
+    #
+    # My first design was to refuse a bare `python` and stat absolute
+    # interpreter paths. Sol rejected both, correctly:
+    #
+    #   There is no reliable static shell-text chokepoint. Shell allows
+    #   variables, aliases, functions, nested shells, here-documents,
+    #   wrappers, and container namespace changes. `srun python`,
+    #   `conda run -n e python`, `apptainer exec img python`, `uv run` and
+    #   `bash -lc` with modules are all legitimate and unparseable.
+    #
+    #   And a submit-host stat is an observed SUBMIT-HOST fact. Concluding
+    #   from it that the path exists inside a compute node, container or
+    #   module shell would be inferring an undeclared fact, which is the one
+    #   thing this validator must never do. It has both failure modes: the
+    #   path can exist on the login node and not the compute node, or exist
+    #   only inside the container.
+    #
+    # So: DECLARE the runtime, uniformly, and prove it where it actually
+    # runs. Refusal never depends on spotting the word "python".
+    _validate_runtimes(plan, units)
 
     # --- can this plan actually RUN? -------------------------------------
     #
@@ -1089,12 +1251,15 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
         "closing_evidence": closing_evidence_for(kind),
         "kind": kind,
         "unit_state": unit_state, "why": why,
+        # `applied` is deliberately NOT written any more. It was always
+        # false, nothing ever set it true, and a permanently false field reads
+        # as "this was not filed" when the truth is "this machine does not
+        # know". Status is derived from outbox-receipts.jsonl instead.
         "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "job_id": us.get("job_id"), "attempt_dir": us.get("attempt_dir"),
         # A close intent MUST carry the verdict that justifies it. A drain that
         # cannot see the evidence must refuse to close.
         "evidence": evidence,
-        "applied": False,
     }
     try:
         with path.open("a") as fh:
@@ -1104,6 +1269,119 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
               file=sys.stderr)
         return None
     return key
+
+
+# --- acknowledgment: did the drain actually land? -------------------------
+#
+# Every intent was written {"applied": false} and NOTHING ever set it true, so
+# after a clean run all eight intents still read pending. Re-draining is a
+# no-op (idempotent by key), so this was never a correctness bug. It was worse
+# in a quieter way: the outbox could not answer the one question it exists to
+# answer, and a record that never advances is not a record.
+#
+# Sol's three corrections to my first design, each of which I had wrong:
+#
+# 1. Append-only JSONL is NOT automatically crash-safe. A process can die
+#    having written half a line. So: flock, fsync, and a DEFINED rule for a
+#    truncated tail (drop it, say so) versus a malformed record in the middle
+#    (fail closed; that is corruption, not an interrupted write).
+#
+# 2. Do not store an authoritative `applied: true`. Store a success receipt
+#    carrying the tracker's own reference and DERIVE status. An issue id by
+#    itself proves nothing: an update or close intent already contains the
+#    target id, and holding an id does not establish that the mutation ran.
+#    The receipt means "the drainer observed THIS operation succeed and got
+#    reference X".
+#
+# 3. Absence of a receipt is `unacknowledged`, never "not applied". The
+#    operation may well have happened and the acknowledgment been lost.
+#    Saying "not applied" claims knowledge this machine does not have.
+RECEIPTS = "outbox-receipts.jsonl"
+
+UNACKNOWLEDGED = "unacknowledged"
+ACKNOWLEDGED = "acknowledged"
+CONFLICT = "conflict"
+
+
+def _fsync_append(path, record):
+    """Append one JSON line durably, serialised against other writers.
+
+    The lock is advisory and process-scoped: the kernel drops it when this
+    process exits, including when it is killed, so a crash cannot wedge the
+    journal."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(record, sort_keys=True) + "\n"
+    with open(path, "a") as fh:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        except OSError:
+            pass                      # no flock here; the write still happens
+        fh.write(line)
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
+def read_receipts(state_dir):
+    """Return (receipts, problems).
+
+    A truncated FINAL line is an interrupted write: drop it and report it. A
+    malformed line anywhere else is corruption, and corruption must not be
+    silently skipped, because skipping it is how a missing acknowledgment
+    turns into a false one."""
+    p = Path(state_dir) / RECEIPTS
+    if not p.is_file():
+        return [], []
+    try:
+        raw = p.read_text().splitlines()
+    except OSError as exc:
+        return [], [f"cannot read {p}: {exc}"]
+    out, problems = [], []
+    for idx, line in enumerate(raw):
+        if not line.strip():
+            continue
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            if idx == len(raw) - 1:
+                problems.append(
+                    "the last receipt line is truncated, which is what an "
+                    "interrupted write looks like. It was dropped; re-drain "
+                    "to re-acknowledge that key.")
+            else:
+                problems.append(
+                    f"receipt line {idx + 1} is malformed, and it is NOT the "
+                    f"last line, so this is corruption rather than an "
+                    f"interrupted write. Refusing to derive status from a "
+                    f"journal that cannot be read in full.")
+    return out, problems
+
+
+def record_receipt(state_dir, key, ref, op=None, by=None, at=None):
+    """Record that the drainer OBSERVED this operation succeed.
+
+    Written only after the tracker confirms. A false acknowledgment is
+    strictly worse than a missing one: re-draining is safe, un-filing is
+    not."""
+    rec = {"key": key, "ref": str(ref), "op": op,
+           "by": by or os.environ.get("USER") or "?",
+           "at": at or time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+           "schema_version": 1}
+    _fsync_append(Path(state_dir) / RECEIPTS, rec)
+    return rec
+
+
+def acknowledgment_status(state_dir):
+    """Map key -> (status, receipts). Derived, never stored."""
+    receipts, problems = read_receipts(state_dir)
+    by_key = {}
+    for r in receipts:
+        by_key.setdefault(r.get("key"), []).append(r)
+    status = {}
+    for key, rs in by_key.items():
+        refs = {r.get("ref") for r in rs}
+        status[key] = (CONFLICT if len(refs) > 1 else ACKNOWLEDGED, rs)
+    return status, problems
 
 
 def read_outbox(state_dir):
@@ -2026,32 +2304,84 @@ def cmd_promote(args):
 
 
 def cmd_outbox(args):
-    """Show pending tracker intents. Draining happens elsewhere, on a machine
-    that can reach the tracker -- this command exists so a human on the cluster
-    can see exactly what WOULD be sent, before anything is."""
+    """Show tracker intents and whether each was acknowledged.
+
+    Draining happens elsewhere, on a machine that can reach the tracker. This
+    command exists so a human on the cluster can see exactly what WOULD be
+    sent before anything is, and afterwards what the drainer confirmed landed.
+    """
     intents = read_outbox(args.state_dir)
-    pending = [i for i in intents if not i.get("applied")]
-    if args.json:
-        print(json.dumps(pending if not args.all else intents, indent=2,
-                         sort_keys=True))
+
+    if args.record_receipt:
+        keys = {i.get("key") for i in intents}
+        if args.record_receipt not in keys:
+            sys.stderr.write(
+                f"error: no intent with key {args.record_receipt!r} in this "
+                f"outbox. A receipt for an unknown key would acknowledge "
+                f"something that was never intended.\n")
+            return EXIT_USAGE
+        if not args.ref:
+            sys.stderr.write(
+                "error: --ref is required. The receipt records the tracker's "
+                "own reference for the operation the drainer watched "
+                "succeed; without it there is nothing to check later.\n")
+            return EXIT_USAGE
+        rec = record_receipt(args.state_dir, args.record_receipt, args.ref,
+                             op=args.op)
+        print(f"  recorded: {rec['key']} -> {rec['ref']}")
         return EXIT_OK
+
+    status, problems = acknowledgment_status(args.state_dir)
+    for i in intents:
+        st, rs = status.get(i.get("key"), (UNACKNOWLEDGED, []))
+        i["ack_status"] = st
+        i["ack_refs"] = sorted({r.get("ref") for r in rs})
+
+    unack = [i for i in intents if i["ack_status"] == UNACKNOWLEDGED]
+    conflicts = [i for i in intents if i["ack_status"] == CONFLICT]
+
+    if args.json:
+        print(json.dumps(intents if args.all else unack, indent=2,
+                         sort_keys=True))
+        return EXIT_CONFLICT if conflicts else EXIT_OK
+
     if not intents:
         print("  no tracker intents recorded")
         print("  Intents appear as units change state. Nothing is ever sent "
               "from here:\n  the coordinator runs on a login node and cannot "
               "reach a tracker.")
         return EXIT_OK
-    show = intents if args.all else pending
-    print(f"  {len(pending)} pending of {len(intents)} total\n")
+
+    for note in problems:
+        print(f"  RECEIPT JOURNAL: {note}")
+    if problems:
+        print()
+
+    show = intents if args.all else unack
+    print(f"  {len(unack)} unacknowledged of {len(intents)} intent(s)"
+          + (f", {len(conflicts)} in CONFLICT" if conflicts else "") + "\n")
     for i in show:
         ev = "with evidence" if i.get("evidence") else "no evidence"
-        print(f"  [{'applied' if i.get('applied') else 'PENDING'}] "
-              f"{i['verb']:6} {i['unit']:12} {i['unit_state']:16} {ev}")
+        label = {ACKNOWLEDGED: "ack", CONFLICT: "CONFLICT",
+                 UNACKNOWLEDGED: "unack"}[i["ack_status"]]
+        print(f"  [{label:8}] {i['verb']:6} {i['unit']:12} "
+              f"{i['unit_state']:16} {ev}")
         print(f"      {i['why']}  key={i['key']}")
-    print("\n  Drain these from a machine that can reach the tracker. A close "
-          "intent\n  WITHOUT evidence must be refused: nothing closes on a "
-          "self-report.")
-    return EXIT_OK
+        if i["ack_refs"]:
+            print(f"      tracker ref: {', '.join(i['ack_refs'])}")
+
+    if conflicts:
+        print("\n  CONFLICT means two receipts claim different tracker refs "
+              "for one\n  intent. Something was filed twice, in two places. "
+              "Resolve by hand;\n  this tool will not pick a winner.")
+
+    print("\n  Drain from a machine that can reach the tracker, then record "
+          "what\n  landed:  swarm.py outbox --state-dir DIR "
+          "--record-receipt KEY --ref ID")
+    print("  UNACKNOWLEDGED does NOT mean 'not filed'. It means this machine "
+          "has\n  no confirmation either way. Re-draining is safe: intents "
+          "are keyed.")
+    return EXIT_CONFLICT if conflicts else EXIT_OK
 
 
 def _status_rows(plan, state, state_dir):
@@ -2243,10 +2573,19 @@ def main():
                     help="who accepted this result; recorded permanently")
     pr.set_defaults(fn=cmd_promote)
 
-    o = sub.add_parser("outbox", help="tracker intents waiting to be drained")
+    o = sub.add_parser("outbox", help="tracker intents, and what landed")
     o.add_argument("--state-dir", default=".swarm/state")
-    o.add_argument("--all", action="store_true", help="include applied ones")
+    o.add_argument("--all", action="store_true",
+                   help="include already-acknowledged intents")
     o.add_argument("--json", action="store_true")
+    o.add_argument("--record-receipt", metavar="KEY",
+                   help="record that the drainer OBSERVED this intent's "
+                        "operation succeed. Only after the tracker confirms: "
+                        "a false acknowledgment is worse than a missing one, "
+                        "because re-draining is safe and un-filing is not.")
+    o.add_argument("--ref", help="the tracker's own reference for the "
+                                 "operation that succeeded, e.g. ARC-171")
+    o.add_argument("--op", help="optional: which operation was performed")
     o.set_defaults(fn=cmd_outbox)
 
     s = sub.add_parser("status", help="what every unit is doing")
