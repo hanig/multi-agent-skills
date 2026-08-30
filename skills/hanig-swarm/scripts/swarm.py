@@ -1341,6 +1341,33 @@ def _fsync_append(path, record):
         os.fsync(fh.fileno())
 
 
+class _RawJournal:
+    """What the raw reader returns: records you cannot reach by accident.
+
+    Six review findings chased name-level bypasses of a static test (nested
+    functions, lambdas, aliases, same-named methods). That arms race is not
+    winnable: no static check over a shared module namespace can stop
+    deliberate indirection, and a test that claims otherwise is the overclaim
+    this repo keeps catching.
+
+    So the barrier moved from the NAME to the DATA. The raw reader hands back
+    this box. The records are behind a private attribute that only
+    `load_acknowledgments` opens, and it opens it only after refusing a bad
+    journal. A caller who wants the records without the check must reach into
+    `_records` deliberately, in a line that says exactly what it is doing.
+
+    The threat model is an honest maintainer in a hurry, not an adversary.
+    Against a slip this is airtight; against someone determined to smuggle,
+    nothing at this layer would be.
+    """
+
+    __slots__ = ("_records", "problems")
+
+    def __init__(self, records, problems):
+        self._records = records
+        self.problems = problems
+
+
 def _read_receipts_raw(state_dir):
     """Parse the journal. PRIVATE: everything goes through the chokepoint.
 
@@ -1366,11 +1393,12 @@ def _read_receipts_raw(state_dir):
     """
     p = Path(state_dir) / RECEIPTS
     if not p.is_file():
-        return [], []
+        return _RawJournal([], [])
     try:
         raw_text = p.read_text()
     except OSError as exc:
-        return [], [{"kind": "unreadable", "detail": f"cannot read {p}: {exc}"}]
+        return _RawJournal(
+            [], [{"kind": "unreadable", "detail": f"cannot read {p}: {exc}"}])
 
     lines = raw_text.splitlines()
     # A final line WITHOUT a trailing newline is an interrupted write. One
@@ -1407,7 +1435,7 @@ def _read_receipts_raw(state_dir):
                              "detail": f"receipt line {idx + 1}: {bad}"})
             continue
         out.append(rec)
-    return out, problems
+    return _RawJournal(out, problems)
 
 
 def _receipt_shape_problem(rec):
@@ -1448,7 +1476,8 @@ def load_acknowledgments(state_dir):
     records without also accepting the refusal. `test_ack` asserts
     structurally that no other function touches RECEIPTS.
     """
-    receipts, problems = _read_receipts_raw(state_dir)
+    journal = _read_receipts_raw(state_dir)
+    problems = journal.problems
     fatal = fatal_problems(problems)
     if fatal:
         raise OutboxError(
@@ -1457,7 +1486,8 @@ def load_acknowledgments(state_dir):
             "\n".join(f"  [{f['kind']}] {f['detail']}" for f in fatal) +
             "\n  Repair or remove it, then re-record: intents are keyed, so "
             "re-recording is safe.")
-    return receipts, problems
+    # Opened ONLY here, and only after the refusal above.
+    return journal._records, problems
 
 
 def record_receipt(state_dir, key, ref, op=None, by=None, at=None):

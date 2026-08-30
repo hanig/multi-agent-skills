@@ -74,7 +74,8 @@ class TestJournalDurability(unittest.TestCase):
             S.record_receipt(d, "k1", "ARC-1")
             with open(self._path(d), "a") as fh:
                 fh.write('{"key": "k2", "ref": "ARC-2"')   # no newline, cut
-            recs, problems = S._read_receipts_raw(d)
+            j = S._read_receipts_raw(d)
+            recs, problems = j._records, j.problems
             self.assertEqual([r["key"] for r in recs], ["k1"])
             self.assertEqual([p["kind"] for p in problems], ["truncated_tail"])
             self.assertEqual(S.fatal_problems(problems), [],
@@ -91,7 +92,7 @@ class TestJournalDurability(unittest.TestCase):
             with open(self._path(d), "a") as fh:
                 fh.write("NOT JSON\n")
                 fh.write('{"key": "k3", "ref": "ARC-3", "attested": true}\n')
-            _, problems = S._read_receipts_raw(d)
+            problems = S._read_receipts_raw(d).problems
             kinds = [p["kind"] for p in problems]
             self.assertIn("corrupt", kinds)
             self.assertNotIn("truncated_tail", kinds)
@@ -109,7 +110,8 @@ class TestJournalDurability(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             for n in range(5):
                 S.record_receipt(d, "k%d" % n, "ARC-%d" % n)
-            recs, problems = S._read_receipts_raw(d)
+            j = S._read_receipts_raw(d)
+            recs, problems = j._records, j.problems
             self.assertEqual(len(recs), 5)
             self.assertEqual(problems, [])
 
@@ -294,7 +296,7 @@ class TestRoundThreeFindings(unittest.TestCase):
             S.record_receipt(d, "k1", "ARC-1")
             with open(Path(d) / S.RECEIPTS, "a") as fh:
                 fh.write("NOT JSON\n")           # note: complete line
-            _, problems = S._read_receipts_raw(d)
+            problems = S._read_receipts_raw(d).problems
             self.assertEqual([p["kind"] for p in problems], ["corrupt"])
 
     def test_record_receipt_refuses_to_append_to_a_bad_journal(self):
@@ -311,7 +313,8 @@ class TestRoundThreeFindings(unittest.TestCase):
             with open(Path(d) / S.RECEIPTS, "w") as fh:
                 fh.write(json.dumps({"key": "k1", "ref": "ARC-1",
                                      "attested": False}) + "\n")
-            recs, problems = S._read_receipts_raw(d)
+            j = S._read_receipts_raw(d)
+            recs, problems = j._records, j.problems
             self.assertEqual(recs, [])
             self.assertEqual([p["kind"] for p in problems], ["malformed"])
 
@@ -324,7 +327,7 @@ class TestRoundThreeFindings(unittest.TestCase):
             S.record_receipt(d, "k1", "ARC-1")
             with mock.patch.object(Path, "read_text",
                                    side_effect=OSError("EIO")):
-                _, problems = S._read_receipts_raw(d)
+                problems = S._read_receipts_raw(d).problems
                 self.assertEqual([p["kind"] for p in problems], ["unreadable"])
                 self.assertTrue(S.fatal_problems(problems))
 
@@ -354,22 +357,44 @@ class TestTheRefusalCannotBeBypassed(unittest.TestCase):
     RAW = "_read_receipts_raw"
 
     def _analyse(self):
-        """name -> (references_journal, calls_chokepoint, calls_raw).
+        """(name, lineno) -> (references_journal, calls_chokepoint, calls_raw).
 
-        AST, not text. A reviewer broke the text version with
-        `def bypass(state_dir, name=RECEIPTS)`: the constant sits in the
-        SIGNATURE, so a body-only substring scan never saw it, and the bypass
-        passed. Scanning the whole node for real Name references and real Call
-        targets closes that, and does not care how the source is spelled.
+        Two corrections a reviewer earned, both reachable by an honest
+        maintainer rather than only by someone smuggling:
+
+        - Keyed by name AND line. Keying by name alone meant `Second.get`
+          overwrote `First.get`, so an offending method vanished behind a
+          well-behaved namesake.
+        - Nested definitions are NOT credited to their parent. Walking the
+          whole subtree let an enclosing function that reads RECEIPTS look
+          compliant because some inner helper called the chokepoint.
+
+        WHAT THIS TEST IS. A lint against forgetting, not a proof. It reads
+        literal names, so an alias, a lambda, a getattr or a same-named method
+        on an unrelated object all slip past, and a reviewer demonstrated
+        every one of them. Chasing those is an arms race no static check over
+        a shared namespace wins. The real barrier against accidental misuse is
+        `_RawJournal`, which does not hand over records at all; this test
+        catches the ordinary slip of adding a function that reads the journal
+        and forgets the gate.
         """
         import ast
         tree = ast.parse(SWARM.read_text())
         out = {}
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
+        defs = [n for n in ast.walk(tree)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        for node in defs:
+            nested = set()
+            for sub in ast.walk(node):
+                if sub is node:
+                    continue
+                if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                    ast.Lambda)):
+                    nested.update(id(x) for x in ast.walk(sub))
             refs = calls_choke = calls_raw = False
             for sub in ast.walk(node):
+                if id(sub) in nested:
+                    continue
                 if isinstance(sub, ast.Name) and sub.id == "RECEIPTS":
                     refs = True
                 elif isinstance(sub, ast.Call):
@@ -379,14 +404,15 @@ class TestTheRefusalCannotBeBypassed(unittest.TestCase):
                         calls_choke = True
                     elif name == self.RAW:
                         calls_raw = True
-            out[node.name] = (refs, calls_choke, calls_raw)
+            out[(node.name, node.lineno)] = (refs, calls_choke, calls_raw)
         return out
 
     def test_every_journal_toucher_goes_through_the_chokepoint(self):
         """Not an allowlist: a rule. Touch the journal, accept the refusal.
         A function added tomorrow either calls the chokepoint or fails."""
         offenders = sorted(
-            name for name, (refs, choke, _) in self._analyse().items()
+            name for (name, _line), (refs, choke, _) in
+            self._analyse().items()
             if refs and not choke and name not in (self.RAW, self.CHOKEPOINT))
         self.assertEqual(offenders, [],
                          "these reach the receipt journal without accepting "
@@ -394,30 +420,53 @@ class TestTheRefusalCannotBeBypassed(unittest.TestCase):
                          "separate bugs: %s" % offenders)
 
     def test_nothing_calls_the_raw_reader_except_the_chokepoint(self):
-        callers = sorted(name for name, (_, _, raw) in self._analyse().items()
+        callers = sorted(name for (name, _line), (_, _, raw) in
+                         self._analyse().items()
                          if raw and name != self.RAW)
         self.assertEqual(callers, [self.CHOKEPOINT],
                          "the raw reader reports problems; it does not "
                          "refuse. Anything deciding on it must go through "
                          "the chokepoint, got: %s" % callers)
 
-    def test_a_signature_default_cannot_smuggle_the_constant_past(self):
-        """The exact bypass a reviewer used to break the text-based test."""
+    def test_the_records_are_not_reachable_without_the_refusal(self):
+        """The real barrier. `_RawJournal` hands back no records at all, so
+        a caller cannot obtain them by forgetting to check; it has to reach
+        into a private attribute on purpose."""
+        with tempfile.TemporaryDirectory() as d:
+            with open(Path(d) / S.RECEIPTS, "w") as fh:
+                fh.write("NOT JSON\n")
+            box = S._read_receipts_raw(d)
+            self.assertFalse(hasattr(box, "records"))
+            self.assertTrue(box.problems)
+            with self.assertRaises(S.OutboxError):
+                S.load_acknowledgments(d)
+
+    def test_a_nested_helper_does_not_launder_its_parent(self):
+        """An enclosing function that reads the journal must not look
+        compliant because some inner function calls the chokepoint."""
         import ast
-        src = SWARM.read_text().replace(
-            "def fatal_problems(problems):",
-            "def bypass(state_dir, name=RECEIPTS):\n"
-            "    return (Path(state_dir) / name).read_text()\n\n\n"
-            "def fatal_problems(problems):", 1)
-        found = False
-        for node in ast.walk(ast.parse(src)):
-            if (isinstance(node, ast.FunctionDef)
-                    and node.name == "bypass"):
-                found = any(isinstance(sub, ast.Name) and sub.id == "RECEIPTS"
-                            for sub in ast.walk(node))
-        self.assertTrue(found,
-                        "a constant in a default argument must still count "
-                        "as touching the journal")
+        src = ("def bypass(state_dir, name=RECEIPTS):\n"
+               "    def helper():\n"
+               "        load_acknowledgments(state_dir)\n"
+               "    return (Path(state_dir) / name).read_text()\n")
+        node = ast.parse(src).body[0]
+        nested = set()
+        for sub in ast.walk(node):
+            if sub is node:
+                continue
+            if isinstance(sub, (ast.FunctionDef, ast.Lambda)):
+                nested.update(id(x) for x in ast.walk(sub))
+        choke = any(isinstance(sub, ast.Call)
+                    and getattr(sub.func, "id", None) == self.CHOKEPOINT
+                    for sub in ast.walk(node) if id(sub) not in nested)
+        self.assertFalse(choke, "the parent was credited with its child's "
+                                "call to the chokepoint")
+
+    def test_same_named_functions_do_not_hide_each_other(self):
+        keys = list(self._analyse())
+        self.assertEqual(len(keys), len(set(keys)),
+                         "keying by name alone lets a compliant namesake "
+                         "overwrite an offender")
 
     def test_reading_and_refusing_are_the_same_operation(self):
         """You cannot obtain the records without accepting the refusal."""
