@@ -18,7 +18,10 @@ import json
 import os
 from pathlib import Path
 
-LAUNCH_RECORD = "launch.json"
+# One per ATTEMPT: `launch-<attempt-id>.json`, beside the attempt rather than
+# inside it. A single shared record let a retry inherit the previous attempt's
+# baseline, so the previous attempt's commits satisfied the new attempt.
+LAUNCH_RECORD = "launch.json"        # legacy name; see path construction
 
 # What a produced-tree receipt does NOT claim. Written out because a reader
 # six weeks later sees a production verdict and needs to know its exact reach.
@@ -36,7 +39,7 @@ def _git(runner, repo, *args, timeout=60):
 
 def read_launch_record(unit_dir):
     """The anchor the coordinator wrote before the agent existed."""
-    path = Path(unit_dir).parent / LAUNCH_RECORD
+    path = Path(unit_dir).parent / f"launch-{Path(unit_dir).name}.json"
     try:
         with open(path) as fh:
             rec = json.load(fh)
@@ -73,6 +76,10 @@ def judge(runner, unit_dir, spec):
     # The SPEC decides whether there is anything to judge. Asking the launch
     # record first conflated "declared no repository" with "was never
     # anchored", and those call for opposite responses.
+    # A missing `repo` key and an explicit `"repo": null` are deliberately
+    # the SAME answer. A reviewer wanted them distinguished; there is no
+    # action a reader would take differently, and inventing a distinction
+    # nobody acts on is how a vocabulary starts lying.
     if not spec.get("repo"):
         return None, ("this unit declared no repository, so no git transition "
                       "is judged for it")
@@ -95,6 +102,14 @@ def judge(runner, unit_dir, spec):
             f"no clean state to transition FROM and any change now is "
             f"unattributable to this attempt")
 
+    # `--porcelain` without `--ignored` ON PURPOSE. A reviewer read the
+    # omission as a hole: an agent can leave an uncommitted file that
+    # .gitignore covers, and both cleanliness checks still pass. True, and
+    # taking `--ignored` would fail every repository with a venv, a build
+    # directory or __pycache__, which is a nuisance failure on honest work.
+    # An ignored path is DECLARED not to be part of the artifact, by the
+    # repository itself, and production here is a claim about the committed
+    # tree. The claim was too broad; the code is right.
     rc, status, _ = _git(runner, repo, "status", "--porcelain")
     if rc != 0:
         return False, f"cannot read git status in {repo!r}"

@@ -1105,6 +1105,8 @@ def _allocate(plan, u, root):
             "--root", str(root), "--task", u["id"], "--kind", u["kind"]]
     if u.get("command"):
         argv += ["--command", u["command"]]
+    if u.get("repo"):
+        argv += ["--repo", str(u["repo"])]
     for o in (u.get("outputs") or []):
         argv += ["--output", o]
     for i in (u.get("inputs") or []):
@@ -1313,7 +1315,17 @@ def _write_launch_record(unit_dir, u):
     directory: a worker that can rewrite its own baseline can manufacture a
     transition, and the whole point of the anchor is that it cannot.
     """
-    path = Path(unit_dir).parent / LAUNCH_RECORD
+    # PER ATTEMPT, and outside the attempt directory.
+    #
+    # It was `<unit>/launch.json`, shared by every attempt of the unit, and
+    # written with "x" so a retry left the first attempt's baseline in place.
+    # A retry then inherited an anchor from before the previous attempt's
+    # commits, so THOSE commits satisfied the new attempt's transition and a
+    # retry that produced nothing passed. One anchor per attempt.
+    #
+    # Still not inside `unit_dir`: that is the agent's --cwd, so a worker
+    # could rewrite its own baseline there.
+    path = Path(unit_dir).parent / f"launch-{Path(unit_dir).name}.json"
     repo = u.get("repo")
     rec = {"schema_version": 1, "unit": u.get("id"),
            "attempt": Path(unit_dir).name,

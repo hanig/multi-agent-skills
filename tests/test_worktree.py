@@ -55,7 +55,7 @@ class Base(unittest.TestCase):
                "base_tree": tree, "clean_at_launch": True,
                "dirty_paths_at_launch": 0}
         rec.update(over)
-        with open(Path(self.unit_dir).parent / W.LAUNCH_RECORD, "w") as fh:
+        with open(Path(self.unit_dir).parent / ("launch-%s.json" % Path(self.unit_dir).name), "w") as fh:
             json.dump(rec, fh)
         return rec
 
@@ -213,6 +213,85 @@ class TestTheReceiptSaysWhatItDoesNotCover(Base):
         for denied in ("tests-pass", "review", "merge", "quality"):
             self.assertIn(denied, W.PRODUCTION_DENIES)
 
+
+
+class TestTheFeatureIsReachableAtAll(Base):
+    """It was not. `unit.json` had no `repo` field and `allocate` had no
+    `--repo`, so `spec.get("repo")` was always None and judge() always said
+    "declared no repository". The whole transition check was dead code.
+
+    Every earlier test passed because it hand-built a spec dict with `repo`
+    in it. A fixture that cannot diverge from what production writes is the
+    only kind that would have caught this, so these go through allocate.
+    """
+
+    def _allocate(self, repo=None):
+        root = os.path.join(self.tmp, "root")
+        argv = [sys.executable, str(SCRIPTS / "unit.py"), "allocate",
+                "--root", root, "--task", "u1", "--kind", "code",
+                "--output", "out.txt"]
+        if repo:
+            argv += ["--repo", repo]
+        r = subprocess.run(argv, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        unit_dir = r.stdout.strip().splitlines()[-1].strip()
+        return unit_dir, json.load(open(os.path.join(unit_dir, "unit.json")))
+
+    def test_allocate_records_the_repo_in_the_spec(self):
+        _dir, spec = self._allocate(self.repo)
+        self.assertEqual(spec["repo"], self.repo)
+
+    def test_a_spec_written_by_allocate_reaches_the_judge(self):
+        unit_dir, spec = self._allocate(self.repo)
+        produced, why = W.judge(U.run, unit_dir, spec)
+        self.assertIsNot(produced, None,
+                         "the judge saw no repository in a spec that "
+                         "declares one, so the check is dead code")
+
+    def test_without_repo_the_spec_says_so(self):
+        _dir, spec = self._allocate()
+        self.assertIsNone(spec["repo"])
+
+
+class TestARetryDoesNotInheritTheLastAttemptsBaseline(Base):
+    """One shared `launch.json` per unit meant a retry kept the FIRST
+    attempt's anchor, so the first attempt's commits satisfied the second."""
+
+    def test_each_attempt_anchors_separately(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import swarm as S
+
+        att1 = self.unit_dir                       # runs/u1/att1
+        att2 = os.path.join(self.tmp, "runs", "u1", "att2")
+        os.makedirs(att2)
+        u = {"id": "u1", "repo": self.repo}
+
+        self.assertIsNone(S._write_launch_record(att1, u))
+        # att1 commits, then is interrupted.
+        self.write("b.txt", "from att1\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "att1 work")
+        # att2 starts here and produces NOTHING.
+        self.assertIsNone(S._write_launch_record(att2, u))
+
+        produced, why = W.judge(U.run, att2, {"id": "u1", "kind": "code",
+                                              "repo": self.repo})
+        self.assertFalse(produced,
+                         "att2 produced nothing, but inherited att1's anchor "
+                         "so att1's commit counted as att2's production")
+        self.assertIn("HEAD has not moved", why)
+
+    def test_the_first_attempts_verdict_is_unaffected(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import swarm as S
+        att1 = self.unit_dir
+        S._write_launch_record(att1, {"id": "u1", "repo": self.repo})
+        self.write("b.txt", "real work\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "att1 work")
+        produced, _ = W.judge(U.run, att1, {"id": "u1", "kind": "code",
+                                            "repo": self.repo})
+        self.assertTrue(produced)
 
 if __name__ == "__main__":
     unittest.main()

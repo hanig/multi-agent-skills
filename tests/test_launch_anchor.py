@@ -52,7 +52,7 @@ class TestTheAnchorIsCapturedBeforeDispatch(unittest.TestCase):
             d = self._attempt(t)
             self.assertIsNone(S._write_launch_record(d, {"id": "u1",
                                                          "repo": repo}))
-            rec = json.load(open(Path(d).parent / S.LAUNCH_RECORD))
+            rec = json.load(open(Path(d).parent / ("launch-%s.json" % Path(d).name)))
             self.assertTrue(rec["base_commit"])
             self.assertTrue(rec["base_tree"])
             self.assertTrue(rec["clean_at_launch"])
@@ -68,7 +68,7 @@ class TestTheAnchorIsCapturedBeforeDispatch(unittest.TestCase):
             d = self._attempt(t)
             self.assertIsNone(S._write_launch_record(d, {"id": "u1",
                                                          "repo": repo}))
-            rec = json.load(open(Path(d).parent / S.LAUNCH_RECORD))
+            rec = json.load(open(Path(d).parent / ("launch-%s.json" % Path(d).name)))
             self.assertFalse(rec["clean_at_launch"])
             self.assertEqual(rec["dirty_paths_at_launch"], 1)
 
@@ -76,7 +76,7 @@ class TestTheAnchorIsCapturedBeforeDispatch(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             d = self._attempt(t)
             self.assertIsNone(S._write_launch_record(d, {"id": "u1"}))
-            rec = json.load(open(Path(d).parent / S.LAUNCH_RECORD))
+            rec = json.load(open(Path(d).parent / ("launch-%s.json" % Path(d).name)))
             self.assertIsNone(rec["repo"])
             self.assertIn("no git transition", rec["note"])
 
@@ -113,7 +113,7 @@ class TestTheAnchorCannotBeMovedAfterwards(unittest.TestCase):
             d = os.path.join(t, "runs", "u1", "att1")
             os.makedirs(d)
             S._write_launch_record(d, {"id": "u1", "repo": repo})
-            first = json.load(open(Path(d).parent / S.LAUNCH_RECORD))
+            first = json.load(open(Path(d).parent / ("launch-%s.json" % Path(d).name)))
 
             env = dict(os.environ, GIT_AUTHOR_NAME="t",
                        GIT_AUTHOR_EMAIL="t@x", GIT_COMMITTER_NAME="t",
@@ -126,7 +126,7 @@ class TestTheAnchorCannotBeMovedAfterwards(unittest.TestCase):
                            check=True, env=env)
 
             S._write_launch_record(d, {"id": "u1", "repo": repo})
-            again = json.load(open(Path(d).parent / S.LAUNCH_RECORD))
+            again = json.load(open(Path(d).parent / ("launch-%s.json" % Path(d).name)))
             self.assertEqual(first["base_commit"], again["base_commit"],
                              "the anchor moved after the repository advanced")
 
@@ -137,9 +137,9 @@ class TestTheAnchorCannotBeMovedAfterwards(unittest.TestCase):
             d = os.path.join(t, "runs", "u1", "att1")
             os.makedirs(d)
             S._write_launch_record(d, {"id": "u1", "repo": repo})
-            self.assertFalse(os.path.exists(os.path.join(d, S.LAUNCH_RECORD)))
+            self.assertFalse(os.path.exists(os.path.join(d, "launch-%s.json" % Path(d).name)))
             self.assertTrue(os.path.exists(
-                os.path.join(t, "runs", "u1", S.LAUNCH_RECORD)))
+                os.path.join(t, "runs", "u1", "launch-att1.json")))
 
 
 class TestDispatchAnchorsFirst(unittest.TestCase):

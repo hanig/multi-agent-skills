@@ -643,6 +643,10 @@ def cmd_allocate(args):
         "created_at": now_iso(),
         "created_at_epoch": time.time(),
         "command": args.command,
+        # Carried into the spec, NOT read from the plan at judge time: the
+        # judge sees only unit.json, and a field that never reaches it makes
+        # the whole check dead code that still passes its tests.
+        "repo": args.repo,
         # Relative to the run-dir on purpose: an absolute path outside it would
         # be a write the coordinator did not isolate.
         "declared_outputs": list(args.output),
@@ -1106,13 +1110,12 @@ def _code_state(unit_dir, spec, present, missing, notes):
     head = (f"agent {agent} is {status or 'idle'} and all {len(present)} "
             f"declared output(s) are present")
     if produced is False:
-        notes.append(f"{head}, but the repository shows no produced change: "
-                     f"{why}")
+        notes.append(f"{head}, but the repository shows no produced "
+                     f"change: {why}")
         return "INCOMPLETE"
-    notes.append(
-        f"{head}. {why}. The agent's own report of success is NOT an input "
-        f"here, and this does NOT establish that the work is correct, tested, "
-        f"reviewed or merged.")
+    notes.append(f"{head}. {why}. The agent's own report of success is NOT an "
+                 f"input here, and this does NOT establish that the work is "
+                 f"correct, tested, reviewed or merged.")
     return "DONE"
 
 
@@ -1292,6 +1295,8 @@ def main():
     a.add_argument("--task", required=True)
     a.add_argument("--kind", required=True, choices=KINDS)
     a.add_argument("--command", default=None)
+    # Without this the transition check silently does not apply.
+    a.add_argument("--repo", default=None)
     a.add_argument("--output", action="append", default=[],
                    help="declared output, RELATIVE to the run-dir; repeatable")
     a.add_argument("--input", action="append", default=[],
