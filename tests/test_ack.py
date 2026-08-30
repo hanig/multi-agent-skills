@@ -529,5 +529,40 @@ class TestARefIsRequiredWhereItIsWritten(unittest.TestCase):
             rec = S.record_receipt(d, " k1 ", "  ARC-1  ")
             self.assertEqual((rec["key"], rec["ref"]), ("k1", "ARC-1"))
 
+
+class TestAppendingAfterACrashDoesNotDestroyTwoRecords(unittest.TestCase):
+    """A truncated tail is recoverable on its own. Appending onto it made one
+    malformed line and took the next receipt down with it."""
+
+    def test_a_half_written_tail_is_dropped_before_appending(self):
+        with tempfile.TemporaryDirectory() as d:
+            S.record_receipt(d, "k1", "ARC-1")
+            with open(Path(d) / S.RECEIPTS, "a") as fh:
+                fh.write('{"key": "k2", "ref": "ARC')     # crash mid-write
+            S.record_receipt(d, "k3", "ARC-3")
+            recs, problems = S.load_acknowledgments(d)
+            self.assertEqual(sorted(r["key"] for r in recs), ["k1", "k3"])
+            self.assertEqual(problems, [],
+                             "the interrupted write should be gone, not "
+                             "fused to the record that followed it")
+
+    def test_a_clean_journal_is_untouched(self):
+        with tempfile.TemporaryDirectory() as d:
+            S.record_receipt(d, "k1", "ARC-1")
+            before = (Path(d) / S.RECEIPTS).read_bytes()
+            S.record_receipt(d, "k2", "ARC-2")
+            after = (Path(d) / S.RECEIPTS).read_bytes()
+            self.assertTrue(after.startswith(before))
+
+    def test_a_journal_that_is_only_a_partial_line_is_emptied(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(d, exist_ok=True)
+            with open(Path(d) / S.RECEIPTS, "w") as fh:
+                fh.write('{"key": "k1"')
+            S.record_receipt(d, "k2", "ARC-2")
+            recs, problems = S.load_acknowledgments(d)
+            self.assertEqual([r["key"] for r in recs], ["k2"])
+            self.assertEqual(problems, [])
+
 if __name__ == "__main__":
     unittest.main()

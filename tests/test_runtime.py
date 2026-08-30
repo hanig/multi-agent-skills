@@ -217,6 +217,22 @@ class TestACanaryMustExerciseWhatItVouchesFor(unittest.TestCase):
             unit("work", needs=["probe"],
                  runtime=dict(RT, verified_by="canary:probe"))]))
 
+    def test_a_canary_on_another_account_is_refused(self):
+        """Access to a runtime and its files can differ by account."""
+        with self.assertRaises(S.PlanError) as c:
+            S.validate_plan(plan([
+                unit("probe", runtime=RT, command=PROBE,
+                     sbatch=["--account=A"]),
+                unit("work", needs=["probe"], sbatch=["--account=B"],
+                     runtime=dict(RT, verified_by="canary:probe"))]))
+        self.assertIn("does not establish this one works", str(c.exception))
+
+    def test_the_same_account_is_accepted(self):
+        S.validate_plan(plan([
+            unit("probe", runtime=RT, command=PROBE, sbatch=["--account=A"]),
+            unit("work", needs=["probe"], sbatch=["--account=A"],
+                 runtime=dict(RT, verified_by="canary:probe"))]))
+
     def test_the_same_runtime_and_partition_is_accepted(self):
         S.validate_plan(plan([
             unit("probe", runtime=RT, command=PROBE,

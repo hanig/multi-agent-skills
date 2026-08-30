@@ -92,6 +92,21 @@ def _scopes_overlap(a, b):
     return na == nb or na.startswith(nb) or nb.startswith(na)
 
 
+def declared_account(u):
+    """The account a unit charges, or None. Same five spellings as partition."""
+    args = [str(a) for a in (u.get("sbatch") or [])]
+    for i, a in enumerate(args):
+        if a.startswith("--account="):
+            return a.split("=", 1)[1]
+        if a.startswith("-A="):
+            return a.split("=", 1)[1]
+        if a in ("--account", "-A") and i + 1 < len(args):
+            return args[i + 1]
+        if a.startswith("-A") and len(a) > 2 and not a.startswith("--"):
+            return a[2:]
+    return None
+
+
 def declared_partition(u):
     """The partition a unit asks for, or None.
 
@@ -367,6 +382,17 @@ def _validate_runtimes(plan, units):
                     f"A canary that closes without exercising the runtime "
                     f"proves the runtime works exactly as much as `true` "
                     f"does.")
+
+            cacct = declared_account(by_id[canary])
+            uacct = declared_account(u)
+            if cacct != uacct:
+                raise PlanError(
+                    f"unit {uid!r} is charged to "
+                    f"{uacct or 'the default account'} but its canary "
+                    f"{canary!r} runs under "
+                    f"{cacct or 'the default account'}. Access to a runtime "
+                    f"and its files can differ by account, so a probe under "
+                    f"another one does not establish this one works.")
 
             cpart = declared_partition(by_id[canary])
             upart = declared_partition(u)
@@ -1435,6 +1461,39 @@ ACKNOWLEDGED = "attested"
 CONFLICT = "conflict"
 
 
+def _heal_truncated_tail(path):
+    """Drop a half-written final line before appending after it.
+
+    A crash can leave the journal ending mid-record with no newline. Appending
+    to that concatenates the new receipt onto the broken one, producing a
+    single malformed line: the truncated tail was RECOVERABLE on its own, and
+    appending turned it into corruption that takes the following receipt down
+    with it. So one interrupted write cost two records.
+
+    An incomplete record has no meaning, so dropping it loses nothing. It is
+    exactly what the reader already does with it.
+    """
+    path = Path(path)
+    if not path.is_file():
+        return
+    try:
+        with open(path, "r+b") as fh:
+            fh.seek(0, os.SEEK_END)
+            if fh.tell() == 0:
+                return
+            fh.seek(-1, os.SEEK_END)
+            if fh.read(1) == b"\n":
+                return                      # ends cleanly, nothing to heal
+            data = path.read_bytes()
+            cut = data.rfind(b"\n")
+            fh.truncate(0 if cut < 0 else cut + 1)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError:
+        # Leave it alone rather than half-repair it; the reader fails closed.
+        return
+
+
 def _fsync_append(path, record):
     """Append one JSON line durably, serialised against other writers.
 
@@ -1444,6 +1503,7 @@ def _fsync_append(path, record):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(record, sort_keys=True) + "\n"
+    _heal_truncated_tail(path)
     with open(path, "a") as fh:
         try:
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX)

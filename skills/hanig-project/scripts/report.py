@@ -220,10 +220,15 @@ def _read_attestations(project):
     traced.
     """
     path = os.path.join(project, ".swarm", "state", RECEIPTS)
-    if not os.path.exists(path):
-        return {}, []
+    # os.path.exists() is False both when the file is absent and when this
+    # process cannot traverse the directory to find out. Those are opposite
+    # facts: absent means nothing was ever attested, unreadable means we do
+    # not know. Distinguished by asking to open it and reading the errno.
     try:
-        raw = open(path).read()
+        with open(path) as fh:
+            raw = fh.read()
+    except FileNotFoundError:
+        return {}, []
     except OSError as exc:
         return {}, ["cannot read the receipt journal: %s" % exc]
     lines = raw.splitlines()
