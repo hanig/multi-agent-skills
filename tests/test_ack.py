@@ -76,7 +76,9 @@ class TestJournalDurability(unittest.TestCase):
                 fh.write('{"key": "k2", "ref": "ARC-2"')   # no newline, cut
             recs, problems = S.read_receipts(d)
             self.assertEqual([r["key"] for r in recs], ["k1"])
-            self.assertTrue(any("truncated" in p for p in problems))
+            self.assertEqual([p["kind"] for p in problems], ["truncated_tail"])
+            self.assertEqual(S.fatal_problems(problems), [],
+                             "an interrupted write is recoverable")
 
     def test_corruption_mid_journal_is_not_silently_skipped(self):
         """Skipping a bad middle line is how a missing acknowledgment turns
@@ -87,8 +89,10 @@ class TestJournalDurability(unittest.TestCase):
                 fh.write("NOT JSON\n")
             S.record_receipt(d, "k3", "ARC-3")
             _, problems = S.read_receipts(d)
-            self.assertTrue(any("corruption" in p for p in problems))
-            self.assertFalse(any("truncated" in p for p in problems))
+            kinds = [p["kind"] for p in problems]
+            self.assertIn("corrupt", kinds)
+            self.assertNotIn("truncated_tail", kinds)
+            self.assertTrue(S.fatal_problems(problems))
 
     def test_the_write_is_fsynced(self):
         src = SWARM.read_text()
@@ -255,6 +259,79 @@ class TestTheWireValueCarriesTheWeakness(unittest.TestCase):
             payload = json.loads(buf.getvalue())
             self.assertEqual(payload["intents"][0]["ack_status"], "attested")
             self.assertIn("not verified tracker state", payload["note"])
+
+
+class TestRoundThreeFindings(unittest.TestCase):
+    """Four more MAJOR findings, all real. Every one of them let a journal
+    that could not be read in full still produce a comfortable answer."""
+
+    def _intent(self, d, key="k1"):
+        with open(Path(d) / S.OUTBOX, "w") as fh:
+            fh.write(json.dumps({
+                "key": key, "verb": "close", "unit": "u", "why": "w",
+                "unit_state": "DONE", "evidence": {"x": 1}}) + "\n")
+
+    def _args(self, d, **kw):
+        class A:
+            state_dir = d
+            all = True
+            json = False
+            record_receipt = None
+            ref = None
+            op = None
+        a = A()
+        for k, v in kw.items():
+            setattr(a, k, v)
+        return a
+
+    def test_a_complete_but_malformed_last_line_is_corruption(self):
+        """splitlines() cannot tell an interrupted write from a finished one.
+        A trailing newline means the line was written in full."""
+        with tempfile.TemporaryDirectory() as d:
+            S.record_receipt(d, "k1", "ARC-1")
+            with open(Path(d) / S.RECEIPTS, "a") as fh:
+                fh.write("NOT JSON\n")           # note: complete line
+            _, problems = S.read_receipts(d)
+            self.assertEqual([p["kind"] for p in problems], ["corrupt"])
+
+    def test_record_receipt_refuses_to_append_to_a_bad_journal(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._intent(d)
+            with open(Path(d) / S.RECEIPTS, "w") as fh:
+                fh.write("NOT JSON\n")
+            rc = S.cmd_outbox(self._args(d, record_receipt="k1",
+                                         ref="ARC-1"))
+            self.assertEqual(rc, S.EXIT_CONFLICT)
+
+    def test_valid_json_is_not_automatically_a_valid_receipt(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(Path(d) / S.RECEIPTS, "w") as fh:
+                fh.write(json.dumps({"key": "k1", "ref": "ARC-1",
+                                     "attested": False}) + "\n")
+            recs, problems = S.read_receipts(d)
+            self.assertEqual(recs, [])
+            self.assertEqual([p["kind"] for p in problems], ["malformed"])
+
+    def test_an_unreadable_journal_fails_closed(self):
+        """Keying the failure on the word 'corruption' meant an OSError
+        matched nothing and the command exited zero."""
+        import unittest.mock as mock
+        with tempfile.TemporaryDirectory() as d:
+            self._intent(d)
+            S.record_receipt(d, "k1", "ARC-1")
+            with mock.patch.object(Path, "read_text",
+                                   side_effect=OSError("EIO")):
+                _, problems = S.read_receipts(d)
+                self.assertEqual([p["kind"] for p in problems], ["unreadable"])
+                self.assertTrue(S.fatal_problems(problems))
+
+    def test_fatal_problems_is_structural_not_textual(self):
+        src = SWARM.read_text()
+        i = src.index("def fatal_problems")
+        j = src.index("def record_receipt")
+        self.assertNotIn('"corruption"', src[i:j],
+                         "a guard that greps its own prose breaks when the "
+                         "prose changes")
 
 if __name__ == "__main__":
     unittest.main()

@@ -1342,38 +1342,86 @@ def _fsync_append(path, record):
 
 
 def read_receipts(state_dir):
-    """Return (receipts, problems).
+    """Return (receipts, problems), where a problem is STRUCTURED.
 
-    A truncated FINAL line is an interrupted write: drop it and report it. A
-    malformed line anywhere else is corruption, and corruption must not be
-    silently skipped, because skipping it is how a missing acknowledgment
-    turns into a false one."""
+    Problems used to be prose, and the caller decided whether to fail closed
+    by looking for the word "corruption" in it. That is the guard-matching-
+    its-own-message bug this repo has now paid for four times: an OSError
+    produced "cannot read ...", matched nothing, and the command cheerfully
+    reported every intent as unacknowledged and exited zero.
+
+    So the KIND is data:
+      truncated_tail  an interrupted write; recoverable by re-draining
+      corrupt         a complete but unreadable record; fail closed
+      unreadable      the journal itself cannot be read; fail closed
+      malformed       parsed as JSON but not a receipt; fail closed
+    """
     p = Path(state_dir) / RECEIPTS
     if not p.is_file():
         return [], []
     try:
-        raw = p.read_text().splitlines()
+        raw_text = p.read_text()
     except OSError as exc:
-        return [], [f"cannot read {p}: {exc}"]
+        return [], [{"kind": "unreadable", "detail": f"cannot read {p}: {exc}"}]
+
+    lines = raw_text.splitlines()
+    # A final line WITHOUT a trailing newline is an interrupted write. One
+    # WITH a trailing newline was written in full, so if it does not parse it
+    # is corruption, not a crash. Reviewer round 3 caught this: splitlines()
+    # cannot tell the two apart, and every malformed last line was being
+    # forgiven.
+    complete_tail = raw_text.endswith("\n")
+
     out, problems = [], []
-    for idx, line in enumerate(raw):
+    for idx, line in enumerate(lines):
         if not line.strip():
             continue
+        is_last = idx == len(lines) - 1
         try:
-            out.append(json.loads(line))
+            rec = json.loads(line)
         except ValueError:
-            if idx == len(raw) - 1:
-                problems.append(
-                    "the last receipt line is truncated, which is what an "
-                    "interrupted write looks like. It was dropped; re-drain "
-                    "to re-acknowledge that key.")
+            if is_last and not complete_tail:
+                problems.append({
+                    "kind": "truncated_tail",
+                    "detail": "the last receipt line is truncated, which is "
+                              "what an interrupted write looks like. It was "
+                              "dropped; re-drain to re-record that key."})
             else:
-                problems.append(
-                    f"receipt line {idx + 1} is malformed, and it is NOT the "
-                    f"last line, so this is corruption rather than an "
-                    f"interrupted write. Refusing to derive status from a "
-                    f"journal that cannot be read in full.")
+                problems.append({
+                    "kind": "corrupt",
+                    "detail": f"receipt line {idx + 1} was written in full "
+                              f"and does not parse, so this is corruption "
+                              f"rather than an interrupted write."})
+            continue
+        bad = _receipt_shape_problem(rec)
+        if bad:
+            problems.append({"kind": "malformed",
+                             "detail": f"receipt line {idx + 1}: {bad}"})
+            continue
+        out.append(rec)
     return out, problems
+
+
+def _receipt_shape_problem(rec):
+    """Valid JSON is not a valid receipt.
+
+    Round 3: {"key": "k1", "ref": "ARC-1", "attested": false} parsed fine and
+    produced an ATTESTED status, because nothing looked past json.loads."""
+    if not isinstance(rec, dict):
+        return "not an object"
+    if not str(rec.get("key") or "").strip():
+        return "no key"
+    if not str(rec.get("ref") or "").strip():
+        return "no tracker ref"
+    if rec.get("attested") is not True:
+        return ("attested is not true, so this record does not assert that "
+                "anything succeeded")
+    return None
+
+
+def fatal_problems(problems):
+    """Everything except an interrupted tail. Structured, never grepped."""
+    return [p for p in problems if p.get("kind") != "truncated_tail"]
 
 
 def record_receipt(state_dir, key, ref, op=None, by=None, at=None):
@@ -2365,6 +2413,20 @@ def cmd_outbox(args):
                 "own reference for the operation the drainer watched "
                 "succeed; without it there is nothing to check later.\n")
             return EXIT_USAGE
+        # Do not append to a journal that cannot be read in full. Appending
+        # to it produces a new record whose status is derived alongside
+        # records nobody can parse, and exits zero as though all were well.
+        _, problems = read_receipts(args.state_dir)
+        fatal = fatal_problems(problems)
+        if fatal:
+            for note in fatal:
+                sys.stderr.write(f"  RECEIPT JOURNAL [{note['kind']}]: "
+                                 f"{note['detail']}\n")
+            sys.stderr.write(
+                "  Refusing to append to a journal that cannot be read in "
+                "full. Repair or\n  remove it, then re-record: intents are "
+                "keyed, so re-recording is safe.\n")
+            return EXIT_CONFLICT
         rec = record_receipt(args.state_dir, args.record_receipt, args.ref,
                              op=args.op)
         print(f"  recorded: {rec['key']} -> {rec['ref']}")
@@ -2377,14 +2439,17 @@ def cmd_outbox(args):
     # fixes it. A bad line in the middle means the journal cannot be read in
     # full, so no status derived from it can be trusted, including the
     # comfortable ones.
-    corrupt = [p for p in problems if "corruption" in p]
-    if corrupt:
+    fatal = fatal_problems(problems)
+    if fatal:
         if args.json:
-            print(json.dumps({"error": "receipt journal corrupt",
-                              "problems": problems}, indent=2))
+            print(json.dumps({"error": "receipt journal unusable",
+                              "problems": problems}, indent=2,
+                             sort_keys=True))
         else:
-            for note in corrupt:
-                sys.stderr.write(f"  RECEIPT JOURNAL: {note}\n")
+            for note in fatal:
+                sys.stderr.write(
+                    f"  RECEIPT JOURNAL [{note['kind']}]: "
+                    f"{note['detail']}\n")
             sys.stderr.write(
                 "  Refusing to report acknowledgment status from a journal "
                 "that cannot be\n  read in full. Repair or remove "
@@ -2418,7 +2483,7 @@ def cmd_outbox(args):
         return EXIT_OK
 
     for note in problems:
-        print(f"  RECEIPT JOURNAL: {note}")
+        print(f"  RECEIPT JOURNAL [{note['kind']}]: {note['detail']}")
     if problems:
         print()
 
