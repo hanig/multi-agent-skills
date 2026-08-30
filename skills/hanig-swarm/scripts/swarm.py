@@ -1281,7 +1281,26 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                               f"({len(us['attempts'])}/{policy})")
             else:
                 us["state"] = "FAILED"
-                report.append(f"{uid}: preempted {policy} times, giving up")
+                if policy == 1 and "max_attempts" not in u:
+                    # The default is now 1, so a SINGLE preemption ends the
+                    # unit. "preempted 1 times, giving up" reads like a bug
+                    # rather than a policy, so say which policy and how to
+                    # change it deliberately. Retrying costs a full redo, and
+                    # that is the decision the plan has to make explicitly.
+                    report.append(
+                        f"{uid}: preempted once and not retried, because "
+                        f"max_attempts defaults to 1. A retry starts in a "
+                        f"FRESH EMPTY directory and redoes the whole unit, so "
+                        f"repetition is opt-in: set max_attempts with a "
+                        f"'retry' contract stating what one interruption "
+                        f"costs, or split the unit smaller.")
+                elif policy == 1:
+                    report.append(
+                        f"{uid}: preempted, and the plan allows one attempt, "
+                        f"so it is not retried. Raise max_attempts with a "
+                        f"'retry' contract, or split the unit smaller.")
+                else:
+                    report.append(f"{uid}: preempted {policy} times, giving up")
     save_state(state_dir, state)
 
     # 2. Budget. Charged on DISPATCH, not on completion: a budget that only

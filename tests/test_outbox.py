@@ -1921,5 +1921,110 @@ class TestLiveConcurrencyIsBounded(unittest.TestCase):
             self.assertEqual(r.stdout.count("submitted dry-"), 5, r.stdout)
 
 
+class TestTheNewRefusalsDoNotCryWolf(unittest.TestCase):
+    """This range added four ways to reject a plan, the largest single
+    increase in refusals the validator has had. A gate that blocks honest work
+    is weighted as seriously here as a false pass, so these are the plans that
+    must still run."""
+
+    LEGITIMATE = {
+        "plain unit, no retries, no limits":
+            {"units": [{"id": "a", "kind": "slurm", "command": "true",
+                        "outputs": ["o"]}]},
+        "explicit single attempt":
+            {"units": [{"id": "a", "kind": "slurm", "command": "true",
+                        "outputs": ["o"], "max_attempts": 1}]},
+        "retry_limits declared but unused":
+            {"retry_limits": {"read_bytes": 100},
+             "units": [{"id": "a", "kind": "slurm", "command": "true",
+                        "outputs": ["o"]}]},
+        "limits block with no pools used":
+            {"limits": {"max_running": 4},
+             "units": [{"id": "a", "kind": "slurm", "command": "true",
+                        "outputs": ["o"]}]},
+        "pool declared but unused":
+            {"limits": {"max_running": 4, "pools": {"io": 2}},
+             "units": [{"id": "a", "kind": "slurm", "command": "true",
+                        "outputs": ["o"]}]},
+        "float max_lost":
+            {"retry_limits": {"cpu_hours": 10},
+             "units": [{"id": "a", "kind": "slurm", "command": "true",
+                        "outputs": ["o"], "max_attempts": 2,
+                        "retry": {"mode": "restart",
+                                  "max_lost": {"cpu_hours": 1.5}}}]},
+        "zero max_lost":
+            {"retry_limits": {"items": 5},
+             "units": [{"id": "a", "kind": "slurm", "command": "true",
+                        "outputs": ["o"], "max_attempts": 3,
+                        "retry": {"mode": "restart",
+                                  "max_lost": {"items": 0}}}]},
+        "max_lost exactly at the limit":
+            {"retry_limits": {"items": 5},
+             "units": [{"id": "a", "kind": "slurm", "command": "true",
+                        "outputs": ["o"], "max_attempts": 3,
+                        "retry": {"mode": "restart",
+                                  "max_lost": {"items": 5}}}]},
+    }
+
+    def test_every_legitimate_shape_still_validates(self):
+        for name, plan in self.LEGITIMATE.items():
+            plan = dict(plan, name="p")
+            try:
+                S.validate_plan(plan)
+            except S.PlanError as e:
+                self.fail(f"refused a legitimate plan ({name}): {e}")
+
+
+class TestConcurrencyDoesNotDeadlock(unittest.TestCase):
+    def _run(self, tmp, plan, *argv):
+        (tmp / "plan.json").write_text(json.dumps(plan))
+        return subprocess.run(
+            [sys.executable, str(SWARM), *argv, str(tmp / "plan.json"),
+             "--dry-run", "--state-dir", str(tmp / "st"),
+             "--root", str(tmp / "rn")],
+            capture_output=True, text=True, cwd=tmp)
+
+    PLAN = {"name": "p", "limits": {"max_running": 1}, "units": [
+        {"id": "a", "kind": "slurm", "command": "true", "outputs": ["o"],
+         "write_scopes": ["a/"]},
+        {"id": "b", "kind": "slurm", "command": "true", "outputs": ["o"],
+         "write_scopes": ["b/"]}]}
+
+    def test_a_finished_unit_frees_its_slot(self):
+        """A cap that never releases is a deadlock, not a limit."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            r = self._run(tmp, self.PLAN, "run")
+            self.assertEqual(r.stdout.count("submitted dry-"), 1, r.stdout)
+            self.assertIn("slots in use", r.stdout)
+            st_path = tmp / "st" / "swarm-state.json"
+            st = json.loads(st_path.read_text())
+            st["units"]["a"]["state"] = "DONE"
+            st_path.write_text(json.dumps(st))
+            r = self._run(tmp, self.PLAN, "advance")
+            self.assertIn("b: submitted dry-", r.stdout,
+                          f"the slot was never released:\n{r.stdout}")
+
+
+class TestPreemptionUnderTheNewDefault(unittest.TestCase):
+    """max_attempts now defaults to 1, so a SINGLE preemption ends a unit.
+    That is the intended policy, but the old message said "preempted 1 times,
+    giving up", which reads as a bug rather than a decision."""
+
+    def test_the_message_explains_the_policy_and_names_the_way_out(self):
+        import ast
+        src = SWARM.read_text()
+        i = src.index("if rc in RETRYABLE:")
+        seg = src[i:src.index("save_state(state_dir, state)", i)]
+        self.assertIn("max_attempts defaults to 1", seg)
+        self.assertIn("opt-in", seg)
+        self.assertNotIn('preempted {policy} times, giving up"\n'
+                         '                    )', seg)
+        # And the plain repeated-preemption message survives for plans that
+        # genuinely asked for several attempts.
+        self.assertIn("preempted {policy} times, giving up", seg)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
