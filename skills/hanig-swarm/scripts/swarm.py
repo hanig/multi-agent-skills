@@ -1261,6 +1261,21 @@ def _submit(u, unit_dir, dry_run, state=None):
         for kv in (u.get("env") or []):
             argv += ["--env", str(kv)]
         argv.append(u.get("prompt") or u.get("command") or u["id"])
+
+        # ANCHOR BEFORE DISPATCH. Everything that later judges whether this
+        # agent produced anything compares against this record, so it must be
+        # written before the agent can run and must not be caller-supplied.
+        #
+        # `bus await --base HEAD --require-clean` is what unit.py used to
+        # delegate this to, and it is not production evidence: the caller
+        # picks the base, so HEAD may already have advanced past the work, and
+        # a clean tree is clean precisely when nobody touched it. Anchoring to
+        # the repository state observed here, before the agent exists, is what
+        # makes a later transition mean something.
+        anchor_err = _write_launch_record(unit_dir, u)
+        if anchor_err:
+            return None, anchor_err
+
         rc, out, err = U.run(argv, timeout=180)
         if rc != 0:
             return None, f"paseo run failed: {_paseo_error(out, err)}"
@@ -1277,6 +1292,67 @@ def _submit(u, unit_dir, dry_run, state=None):
                           f"{_paseo_error(out, err)}")
         return str(agent), None
     return None, f"unknown kind {kind!r}"
+
+
+LAUNCH_RECORD = "launch.json"
+
+
+def _git(repo, *args, timeout=60):
+    rc, out, err = U.run(["git", "-C", str(repo)] + list(args), timeout=timeout)
+    return rc, (out or "").strip(), (err or "").strip()
+
+
+def _write_launch_record(unit_dir, u):
+    """Capture the repository state BEFORE the agent exists.
+
+    Returns an error string, or None. A code unit that declares a `repo` gets
+    anchored; one that does not is recorded as having no repository to judge,
+    which is a declaration rather than a silence.
+
+    The record lives beside the attempt, NOT inside the agent's working
+    directory: a worker that can rewrite its own baseline can manufacture a
+    transition, and the whole point of the anchor is that it cannot.
+    """
+    path = Path(unit_dir).parent / LAUNCH_RECORD
+    repo = u.get("repo")
+    rec = {"schema_version": 1, "unit": u.get("id"),
+           "attempt": Path(unit_dir).name,
+           "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+
+    if not repo:
+        rec["repo"] = None
+        rec["note"] = ("this unit declared no 'repo', so no git transition "
+                       "can be judged for it")
+    else:
+        repo = str(repo)
+        if not os.path.isdir(repo):
+            return f"unit {u['id']!r} declares repo {repo!r}, which is not a directory"
+        rc, top, _ = _git(repo, "rev-parse", "--show-toplevel")
+        if rc != 0:
+            return f"unit {u['id']!r} declares repo {repo!r}, which is not a git repository"
+        rc, head, _ = _git(repo, "rev-parse", "HEAD")
+        if rc != 0:
+            return (f"unit {u['id']!r}: {repo!r} has no HEAD to anchor to. An "
+                    f"empty repository gives nothing to transition FROM.")
+        rc, tree, _ = _git(repo, "rev-parse", "HEAD^{tree}")
+        rc2, branch, _ = _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+        rc3, status, _ = _git(repo, "status", "--porcelain")
+        if rc3 != 0:
+            return f"unit {u['id']!r}: cannot read git status in {repo!r}"
+        rec.update({"repo": top, "branch": branch if rc2 == 0 else None,
+                    "base_commit": head, "base_tree": tree if rc == 0 else None,
+                    "clean_at_launch": status == "",
+                    "dirty_paths_at_launch": len(status.splitlines())})
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "x") as fh:      # x: an anchor is written ONCE
+            json.dump(rec, fh, indent=1, sort_keys=True)
+            fh.write("\n")
+    except FileExistsError:
+        return None                      # already anchored; do not re-anchor
+    except OSError as exc:
+        return f"cannot write the launch record for {u['id']!r}: {exc}"
+    return None
 
 
 def _bind(unit_dir, job_id):
