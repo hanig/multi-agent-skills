@@ -449,6 +449,12 @@ Stage 1, the closure matrix. Small, prevents the contradiction, useful before
 any of the rest exists.
 
 - a. The kind-to-evidence matrix is hard-coded and has no plan-level override.
+- a2. A code unit whose predicate passes reaches **READY_FOR_PR, not DONE**,
+  so its dependents do not dispatch. Rewriting only the tracker intent while
+  leaving the unit DONE made the fix cosmetic: the DAG and the tracker
+  disagreed, and a reviewer caught it. KNOWN LIMIT until stage 3: nothing
+  records a merge, so a code unit stays READY_FOR_PR and anything depending
+  on it waits.
 - b. A `code` unit cannot emit a `close` intent; its receipt emits `open_pr`.
 - c. A `slurm` or `pipeline` unit cannot be closed by a merge receipt.
 - d. An intent carrying the wrong authority for its kind is REFUSED at the

@@ -89,8 +89,28 @@ class TestNothingClosesOnASelfReport(unittest.TestCase):
     def test_every_declared_state_maps_to_a_real_unit_state(self):
         """Closure by exclusion: a state in TRACKER_EVENTS that swarm.py can
         never produce is dead code that will silently stop firing."""
-        produced = set(S.NAME.values()) | {
-            "SUBMITTED", "HELD", "PREEMPTED", "FAILED_EVIDENCE"}
+        # DERIVE both sides. This list used to be hand-written, so adding a
+        # state that the coordinator genuinely produces failed the guard until
+        # somebody remembered to edit it here too -- a guard that cries wolf
+        # about correct code is one that gets edited away rather than heeded.
+        # Every literal assigned to us["state"] counts as produced.
+        import ast
+        src = SWARM.read_text()
+        produced = set(S.NAME.values())
+        for node in ast.walk(ast.parse(src)):
+            if not isinstance(node, ast.Assign):
+                continue
+            for tgt in node.targets:
+                if (isinstance(tgt, ast.Subscript)
+                        and isinstance(tgt.value, ast.Name)
+                        and tgt.value.id == "us"
+                        and isinstance(tgt.slice, ast.Constant)
+                        and tgt.slice.value == "state"
+                        and isinstance(node.value, ast.Constant)
+                        and isinstance(node.value.value, str)):
+                    produced.add(node.value.value)
+        self.assertIn("READY_FOR_PR", produced,
+                      "the deriver missed a state the coordinator sets")
         unreachable = set(S.TRACKER_EVENTS) - produced
         self.assertEqual(unreachable, set(),
                          f"TRACKER_EVENTS names states nothing produces: "
@@ -2266,6 +2286,143 @@ class TestADefaultChangeIsMadeVisible(unittest.TestCase):
         code = "\n".join(ast.unparse(x) for x in fn.body)
         for proxy in ("preemptible", "gpu_hours", "--time"):
             self.assertNotIn(proxy, code)
+
+
+class TestACodeUnitIsNotDoneUntilMerged(unittest.TestCase):
+    """A reviewer showed my stage-1 fix was COSMETIC: I rewrote the tracker
+    intent but left the unit DONE in durable state, so dependents dispatched
+    before any merge and the DAG contradicted the tracker."""
+
+    def _advance(self, tmp, plan, verdict):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("sw_pr", SWARM)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        st = tmp / "st"
+        st.mkdir(parents=True, exist_ok=True)
+        att = tmp / "rn" / "c" / "a1"
+        att.mkdir(parents=True, exist_ok=True)
+        (st / "swarm-state.json").write_text(json.dumps(
+            {"schema_version": 1, "halted": None, "units": {
+                "c": {"state": "SUBMITTED", "job_id": "agent-1",
+                      "attempt_dir": str(att), "attempts": [str(att)],
+                      "gpu_hours": 0}}}))
+        ok, _ = m.acquire_lease(str(st))
+        self.assertTrue(ok)
+        self.addCleanup(m.release_lease, str(st))
+        m._check = lambda d: (verdict, "forced")
+        rep, disp, _ = m.advance(plan, m.load_state(str(st)), str(st),
+                                 str(tmp / "rn"), False, max_new=0)
+        return rep, disp, m.load_state(str(st)), m
+
+    PLAN = {"name": "p", "units": [
+        {"id": "c", "kind": "code", "prompt": "x", "outputs": ["r"],
+         "write_scopes": ["c/"]},
+        {"id": "after", "kind": "slurm", "command": "true", "outputs": ["o"],
+         "needs": ["c"], "write_scopes": ["a/"]}]}
+
+    def test_a_passing_code_predicate_does_not_reach_DONE(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            _, _, state, _ = self._advance(tmp, self.PLAN, 0)   # 0 = DONE
+            self.assertEqual(state["units"]["c"]["state"], "READY_FOR_PR")
+
+    def test_a_dependent_does_not_dispatch_before_a_merge(self):
+        """The consequence that made the cosmetic fix dangerous."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            _, dispatched, state, _ = self._advance(tmp, self.PLAN, 0)
+            self.assertEqual(dispatched, 0)
+            self.assertNotEqual(state["units"].get("after", {}).get("state"),
+                                "SUBMITTED")
+
+    def test_the_intent_is_open_pr_not_close(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            _, _, _, m = self._advance(tmp, self.PLAN, 0)
+            verbs = [i["verb"] for i in m.read_outbox(str(tmp / "st"))]
+            self.assertIn("open_pr", verbs)
+            self.assertNotIn("close", verbs)
+
+    def test_a_compute_unit_still_reaches_DONE(self):
+        """The counter-claim: the path that works must keep working."""
+        import tempfile
+        plan = json.loads(json.dumps(self.PLAN))
+        plan["units"][0]["kind"] = "slurm"
+        plan["units"][0]["command"] = "true"
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            _, _, state, _ = self._advance(tmp, plan, 0)
+            self.assertEqual(state["units"]["c"]["state"], "DONE")
+
+
+class TestApprovalDoesNotCarryOntoChangedWork(unittest.TestCase):
+    """An approval covers the work the human SAW. Carrying it forward
+    unconditionally let a changed plan be filed on a yes given for something
+    else, including a one-run autopilot."""
+
+    def test_an_unchanged_redraft_keeps_the_approval(self):
+        sys.path.insert(0, str((ROOT / "skills" / "hanig-project" / "scripts")))
+        import tickets as T2
+        plan = {"name": "p", "units": [
+            {"id": "a", "kind": "slurm", "command": "true", "outputs": ["o"]}]}
+        first = T2.draft(plan)
+        first["approval"] = {"state": "granted", "granted_by": "hani",
+                             "at": "x"}
+        self.assertEqual(T2.draft(plan, existing=first)["approval"]["state"],
+                         "granted")
+
+    def test_a_changed_command_re_arms_the_gate(self):
+        sys.path.insert(0, str((ROOT / "skills" / "hanig-project" / "scripts")))
+        import tickets as T2
+        plan = {"name": "p", "units": [
+            {"id": "a", "kind": "slurm", "command": "true", "outputs": ["o"]}]}
+        first = T2.draft(plan)
+        first["approval"] = {"state": "granted", "granted_by": "hani",
+                             "at": "x"}
+        changed = json.loads(json.dumps(plan))
+        changed["units"][0]["command"] = "rm -rf /"
+        got = T2.draft(changed, existing=first)["approval"]
+        self.assertEqual(got["state"], "required")
+        self.assertIn("changed since approval", got["how_to_skip_next_time"])
+
+    def test_an_added_unit_re_arms_the_gate(self):
+        sys.path.insert(0, str((ROOT / "skills" / "hanig-project" / "scripts")))
+        import tickets as T2
+        plan = {"name": "p", "units": [
+            {"id": "a", "kind": "slurm", "command": "true", "outputs": ["o"]}]}
+        first = T2.draft(plan)
+        first["approval"] = {"state": "autopilot", "granted_by": "phrase",
+                             "at": None}
+        grown = json.loads(json.dumps(plan))
+        grown["units"].append({"id": "b", "kind": "slurm", "command": "true",
+                               "outputs": ["p"]})
+        self.assertEqual(T2.draft(grown, existing=first)["approval"]["state"],
+                         "required")
+
+
+class TestBothPartitionSpellings(unittest.TestCase):
+    def test_a_separate_argument_partition_is_recognised(self):
+        """Reading only `--partition=cpu` reported a unit that plainly
+        declares one as declaring none, making the validator's own honesty
+        message a false statement."""
+        self.assertEqual(
+            S.declared_partition({"sbatch": ["--partition", "cpu", "--time",
+                                             "5"]}), "cpu")
+        self.assertEqual(
+            S.declared_partition({"sbatch": ["--partition=cpu"]}), "cpu")
+        self.assertEqual(S.declared_partition({"sbatch": ["-p", "gpu"]}), "gpu")
+        self.assertIsNone(S.declared_partition({"sbatch": ["--time", "5"]}))
+
+    def test_both_spellings_are_checked_against_the_cluster(self):
+        for sbatch in (["--partition=nope"], ["--partition", "nope"],
+                       ["-p", "nope"]):
+            self.assertEqual(
+                S.partition_problems([{"id": "a", "sbatch": sbatch}],
+                                     known={"cpu"}), [("a", "nope")], sbatch)
 
 
 if __name__ == "__main__":

@@ -84,6 +84,24 @@ def _scopes_overlap(a, b):
     return na == nb or na.startswith(nb) or nb.startswith(na)
 
 
+def declared_partition(u):
+    """The partition a unit asks for, or None.
+
+    Handles BOTH spellings: `--partition=cpu` and `--partition cpu`. Reading
+    only the equals form reported a unit that plainly declares a partition as
+    declaring none, which would make the validator's own honesty message a
+    false statement."""
+    args = [str(a) for a in (u.get("sbatch") or [])]
+    for i, a in enumerate(args):
+        if a.startswith("--partition="):
+            return a.split("=", 1)[1]
+        if a.startswith("-p="):
+            return a.split("=", 1)[1]
+        if a in ("--partition", "-p") and i + 1 < len(args):
+            return args[i + 1]
+    return None
+
+
 def _known_partitions():
     """Partition names this cluster actually has, or None if it cannot be told.
 
@@ -129,15 +147,9 @@ def partition_problems(units, known=_LOOK_IT_UP):
     for u in units:
         if not isinstance(u, dict):
             continue
-        for arg in (u.get("sbatch") or []):
-            text = str(arg)
-            name = None
-            if text.startswith("--partition="):
-                name = text.split("=", 1)[1]
-            elif text.startswith("-p="):
-                name = text.split("=", 1)[1]
-            if name and name not in known:
-                bad.append((u.get("id", "?"), name))
+        name = declared_partition(u)
+        if name and name not in known:
+            bad.append((u.get("id", "?"), name))
     return bad
 
 
@@ -396,8 +408,7 @@ def validate_plan(plan):
             "without_partition": sorted(
                 u["id"] for u in units
                 if u.get("kind", "slurm") == "slurm"
-                and not any(str(a).startswith(("--partition=", "-p="))
-                            for a in (u.get("sbatch") or [])))}
+                and not declared_partition(u))}
 
 
 # --- safety for unattended running ----------------------------------------
@@ -910,6 +921,9 @@ TRACKER_EVENTS = {
     "PREEMPTED": ("note", "preempted; a new attempt will be minted"),
     "HELD": ("block", "an upstream unit will not complete"),
     "NEEDS_HUMAN": ("block", "blocked on a person, not on compute"),
+    "READY_FOR_PR": ("open_pr", "the agent finished and its declared outputs "
+                                "exist. That is not done: a code unit is "
+                                "closed by a merged pull request."),
 }
 
 # WHICH EVIDENCE MAY CLOSE WHICH KIND. Hard-coded and deliberately not
@@ -955,12 +969,10 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
         return None
     verb, why = action
 
-    # A CODE UNIT MAY NOT CLOSE ITS OWN ISSUE. Its receipt establishes that an
-    # agent went idle and files exist; the accepted form of that work is a
-    # merged PR, and nothing here has seen one. So a code unit reaches
-    # READY_FOR_PR and emits `open_pr`, never `close`. Refusing at the point
-    # of emission rather than leaving it for the drainer means the wrong
-    # intent never exists to be applied by mistake.
+    # BELT AND BRACES. The state machine now yields READY_FOR_PR for a code
+    # unit rather than DONE, so this should be unreachable; it stays because
+    # a close intent for a kind that cannot be closed by a receipt must never
+    # exist, however it was reached.
     if verb == "close" and closing_evidence_for(kind) != "predicate_receipt":
         verb = "open_pr"
         why = ("the agent finished and its declared outputs exist, which "
@@ -1304,6 +1316,19 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         rc, text = _check(us["attempt_dir"])
         previous = us.get("state")
         us["state"] = NAME.get(rc, f"rc={rc}")
+        # A CODE UNIT IS NOT DONE WHEN ITS PREDICATE PASSES. The receipt says
+        # an agent went idle and files exist; the accepted form of that work
+        # is a merged PR. Rewriting only the tracker intent left the unit
+        # DONE in durable state, so dependents dispatched before any merge and
+        # the DAG contradicted the tracker -- the fix was cosmetic. Found by a
+        # reviewer.
+        #
+        # KNOWN LIMIT, stated rather than hidden: nothing records a merge yet,
+        # so a code unit stays READY_FOR_PR and anything depending on it
+        # waits. That is honest until stage 3 exists.
+        if (us["state"] == "DONE"
+                and closing_evidence_for(u.get("kind")) != "predicate_receipt"):
+            us["state"] = "READY_FOR_PR"
         report.append(f"{uid}: {us['state']}")
 
         # INCOMPLETE could stay live forever, so a job that vanished was never

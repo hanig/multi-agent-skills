@@ -158,9 +158,25 @@ def draft(plan, brief=None, existing=None, autopilot=False):
         # An approval already granted is NOT re-requested. Re-drafting after
         # a plan edit must not force the human through the gate again for
         # work they have already seen and accepted.
+        # An approval covers the work the human SAW. If any unit's digest
+        # changed, or units were added or removed, this is different work and
+        # the gate re-arms. Carrying the approval forward unconditionally --
+        # which is what I first built -- let a changed plan be filed on a yes
+        # given for something else, including a one-run autopilot.
         prior = (existing.get("approval") or {}).get("state")
-        if prior in ("granted", "autopilot"):
+        was = {i.get("unit"): i.get("unit_digest")
+               for i in (existing.get("issues") or [])}
+        now = {i["unit"]: i.get("unit_digest") for i in out["issues"]}
+        if prior in ("granted", "autopilot") and was == now:
             out["approval"] = existing["approval"]
+        elif prior in ("granted", "autopilot"):
+            changed = sorted(set(was) ^ set(now)) or sorted(
+                u for u in now if was.get(u) != now[u])
+            out["approval"] = {
+                "state": "required", "granted_by": None, "at": None,
+                "how_to_skip_next_time": (
+                    f"the plan changed since approval ({', '.join(changed)}), "
+                    f"so this is different work and needs a new yes")}
         # 6(g): re-running must UPDATE, not duplicate. Carry forward every id
         # we already know, keyed on the unit.
         by_unit = {i.get("unit"): i for i in (existing.get("issues") or [])}
