@@ -10,6 +10,39 @@
 > tool is run by its own author, who can edit the state anyway. The bound
 > stays an honest number.
 
+## STANDALONE (Hani, 2026-08-30). This supersedes the framing below.
+
+The committee planned items 2-4 as changes to `bus await` in the other repo.
+That is off: this system is ours and must stand alone. We keep shelling out to
+`paseo run` / `paseo ls` / `paseo inspect` to drive agents, because that is a
+CLI dependency like `sbatch`. We do not edit `bin/bus`, and we do not depend
+on it.
+
+**This resolves both divergences.** Code-unit delivery is not "now or later":
+it is the only vehicle, because the production gating has nowhere else to
+live. And adopting from the other repo reduces to the paseo CLI we already
+call.
+
+`unit.py` currently states that judging the agent's git worktree is delegated
+to `bus await --base HEAD --require-clean`, and that reimplementing it "would
+be the mistake this plan exists to undo". Standalone reverses that, and the
+fusion's own analysis says the delegation was never sound: a caller-supplied
+`--base` is not production evidence because HEAD may have advanced earlier,
+and a clean tree is clean if you never touched it. So we are not duplicating
+`bus`. We are building the anchored predicate it does not have.
+
+Restated for our code:
+
+| Was | Becomes |
+|---|---|
+| 2. Type `bus await` predicates | Type the predicates `_code_state` judges; declared-outputs-present alone is not production |
+| 3. Launch-anchored Git transition | Capture the launch record before `paseo run`, judge the transition in `unit.py` |
+| 4. Verifier admission | Same, over our receipts, landed atomically |
+| 8. Code-unit delivery | The container for all of the above; closure stays merged-PR |
+
+Order is unchanged: the launch record comes first, because nothing downstream
+can judge a transition that was never anchored.
+
 ## The organising defect
 
 `bus await` can return `ARTIFACT READY` today on `--require-clean` plus
@@ -166,9 +199,14 @@ Sol: four specific things.
 - Direct Linear or Slack integration in the coordinator: violates the
   network-free boundary. Use outbox intents or content-digested snapshots.
 
-## The two questions for Hani
+## The two questions, ANSWERED
 
-1. **Item 5 timing.** Build code-unit delivery now as part of this arc (sol),
-   or write it as its own plan document first (deepseek)?
-2. **Repo B adoption.** Take sol's four (probes, richer outcomes, diagnostic
-   links, deferred stop), or deepseek's nothing?
+Both were settled by the standalone decision at the top.
+
+1. **Item 5 timing:** now. Code-unit delivery is the only place the production
+   gating can live once we are not extending someone else's await.
+2. **Repo B adoption:** the paseo CLI we already shell out to, and nothing
+   else. `bus check` as a runtime probe becomes moot because our own launch
+   record establishes identity; the richer outcome vocabulary
+   (AWAITING PERMISSION, INVALID LAUNCH CONTRACT) is worth reproducing in our
+   own verdicts, which costs a mapping and no dependency.
