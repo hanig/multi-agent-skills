@@ -99,6 +99,11 @@ def declared_partition(u):
             return a.split("=", 1)[1]
         if a in ("--partition", "-p") and i + 1 < len(args):
             return args[i + 1]
+        # `-pcpu`, the attached short form. Missing it made the advisory line
+        # claim a unit declared no partition when it plainly did, which turns
+        # an honesty message into a false one.
+        if a.startswith("-p") and len(a) > 2 and not a.startswith("--"):
+            return a[2:]
     return None
 
 
@@ -1198,6 +1203,25 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                      f"$(mktemp -d)/state --root $(mktemp -d)/runs"], 0, None)
     before_states = {uid: (_unit_state(state, uid) or {}).get("state")
                      for uid in units}
+
+    # NORMALISE PERSISTED STATE FIRST. Converting DONE to READY_FOR_PR only in
+    # the fresh-check path left every ALREADY-persisted DONE untouched: a
+    # state file written before this rule existed, or a unit whose kind
+    # changed from slurm to code, kept a DONE that the re-check loop skips by
+    # design. Its dependents then dispatched on evidence this system says
+    # cannot close a code unit. Three reviewers found it independently, and it
+    # is the third time in a row I have fixed a forward path and left the
+    # stored state alone.
+    for uid, u in sorted(units.items()):
+        us = _unit_state(state, uid)
+        if (us.get("state") == "DONE"
+                and closing_evidence_for(u.get("kind")) != "predicate_receipt"):
+            us["state"] = "READY_FOR_PR"
+            report.append(
+                f"{uid}: recorded DONE, but a {u.get('kind')} unit is closed "
+                f"by a merged pull request, not by its own receipt. Corrected "
+                f"to READY_FOR_PR; anything depending on it waits.")
+            save_state(state_dir, state)
 
     # The plan must not change under a live run. A mid-flight edit silently
     # redefines what the recorded attempts were for.

@@ -2492,5 +2492,84 @@ class TestAStalledDAGIsDiagnosable(unittest.TestCase):
             self.assertNotIn("NEEDS YOU", r.stdout)
 
 
+class TestAPersistedDoneIsCorrected(unittest.TestCase):
+    """Three reviewers found this independently, and it is the THIRD time in a
+    row I fixed a forward path and left the stored state alone. Converting
+    DONE to READY_FOR_PR only in the fresh-check path left every already
+    persisted DONE untouched -- from a state file written before the rule
+    existed, or a unit whose kind changed -- and the re-check loop skips DONE
+    by design, so it stayed and its dependents dispatched."""
+
+    PLAN = {"name": "p", "units": [
+        {"id": "c", "kind": "code", "prompt": "x", "outputs": ["r"],
+         "write_scopes": ["c/"]},
+        {"id": "after", "kind": "slurm", "command": "true", "outputs": ["o"],
+         "needs": ["c"], "write_scopes": ["a/"]}]}
+
+    def _advance(self, tmp, plan, persisted):
+        (tmp / "plan.json").write_text(json.dumps(plan))
+        st = tmp / "st"
+        st.mkdir(parents=True, exist_ok=True)
+        (st / "swarm-state.json").write_text(json.dumps(
+            {"schema_version": 1, "halted": None, "units": {
+                "c": {"state": persisted, "job_id": "agent-1",
+                      "attempt_dir": "/x", "attempts": ["/x"],
+                      "gpu_hours": 0}}}))
+        r = subprocess.run(
+            [sys.executable, str(SWARM), "advance", str(tmp / "plan.json"),
+             "--dry-run", "--state-dir", str(st), "--root", str(tmp / "rn")],
+            capture_output=True, text=True, cwd=tmp)
+        return r, json.loads((st / "swarm-state.json").read_text())
+
+    def test_a_persisted_DONE_code_unit_does_not_release_dependents(self):
+        """The consequence that mattered: dependents dispatching on evidence
+        this system says cannot close a code unit."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            r, state = self._advance(tmp, self.PLAN, "DONE")
+            self.assertNotIn("after: submitted", r.stdout,
+                             f"a dependent dispatched on a persisted DONE:"
+                             f"\n{r.stdout}")
+            self.assertNotEqual(state["units"]["c"]["state"], "DONE",
+                                "the persisted DONE was left uncorrected")
+
+    def test_the_correction_says_why(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            r, _ = self._advance(Path(d), self.PLAN, "DONE")
+            self.assertIn("closed by a merged pull request", r.stdout)
+
+    def test_a_persisted_DONE_compute_unit_is_left_alone(self):
+        """The counter-claim. Rewriting a legitimate DONE would restart
+        finished work."""
+        import tempfile
+        plan = json.loads(json.dumps(self.PLAN))
+        plan["units"][0]["kind"] = "slurm"
+        plan["units"][0]["command"] = "true"
+        with tempfile.TemporaryDirectory() as d:
+            r, state = self._advance(Path(d), plan, "DONE")
+            self.assertEqual(state["units"]["c"]["state"], "DONE")
+            self.assertNotIn("closed by a merged pull request", r.stdout)
+
+
+class TestEveryPartitionSpelling(unittest.TestCase):
+    def test_all_five_forms_parse(self):
+        """`-pcpu` was missed, which made the advisory line claim a unit
+        declared no partition when it plainly did."""
+        for sbatch, want in ((["-pcpu"], "cpu"),
+                             (["--partition=cpu"], "cpu"),
+                             (["--partition", "cpu"], "cpu"),
+                             (["-p", "cpu"], "cpu"),
+                             (["-p=cpu"], "cpu")):
+            self.assertEqual(S.declared_partition({"sbatch": sbatch}), want,
+                             sbatch)
+
+    def test_an_unrelated_dash_p_flag_is_not_mistaken_for_one(self):
+        """The counter-claim: over-eager matching would invent a partition."""
+        self.assertIsNone(S.declared_partition({"sbatch": ["--parsable"]}))
+        self.assertIsNone(S.declared_partition({"sbatch": ["--time", "5"]}))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
