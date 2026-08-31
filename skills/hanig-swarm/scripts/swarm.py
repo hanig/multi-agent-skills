@@ -47,6 +47,7 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 import unit as U  # noqa: E402  same skill, installed together
 import worktree as W  # noqa: E402
+import verify as V  # noqa: E402
 
 STATE_FILE = "swarm-state.json"
 KINDS = U.KINDS
@@ -455,7 +456,8 @@ def validate_plan(plan):
     for u in units:
         if not isinstance(u, dict):
             continue
-        for field in ("needs", "inputs", "outputs", "sbatch"):
+        for field in ("needs", "inputs", "outputs", "sbatch",
+                      "requires_verification"):
             val = u.get(field)
             if val is None or isinstance(val, list):
                 continue
@@ -605,6 +607,22 @@ def validate_plan(plan):
             raise PlanError(
                 f"unit {u.get('id','?')!r} joins pool {pool!r}, which is not "
                 f"declared in limits.pools. A pool with no cap bounds nothing.")
+
+    for u in units:
+        if not isinstance(u, dict):
+            continue
+        for claim in (u.get("requires_verification") or []):
+            if not str(claim).strip():
+                raise PlanError(
+                    f"unit {u.get('id','?')!r} declares an empty entry in "
+                    f"'requires_verification'. Name the claim a verifier must "
+                    f"establish, e.g. \"tests-pass\".")
+        if u.get("requires_verification") and u.get("kind") != "code":
+            raise PlanError(
+                f"unit {u.get('id','?')!r} is kind={u.get('kind')!r} and "
+                f"declares 'requires_verification'. Verification binds to a "
+                f"produced commit, which only a code unit has. A slurm or "
+                f"pipeline unit is judged by its declared outputs.")
 
     # --- the runtime a unit will actually execute in -----------------------
     #
@@ -1972,6 +1990,118 @@ def _same_repo(a, b):
     return ha == hb
 
 
+VERIFY_RECEIPTS = "verify-receipts.jsonl"
+
+_VERIFY_REQUIRED = ("unit", "claim", "verifier", "verifier_sha256",
+                    "policy_sha256", "subject_head", "result")
+
+
+def _verify_shape_problem(rec):
+    if not isinstance(rec, dict):
+        return "not an object"
+    for f in _VERIFY_REQUIRED:
+        if not str(rec.get(f) or "").strip():
+            return f"no {f}"
+    if rec.get("result") not in ("pass", "fail"):
+        return f"result {rec.get('result')!r} is not 'pass' or 'fail'"
+    return None
+
+
+def _read_verify_raw(state_dir):
+    p = Path(state_dir) / VERIFY_RECEIPTS
+    try:
+        with open(p) as fh:
+            raw = fh.read()
+    except FileNotFoundError:
+        return [], []
+    except OSError as exc:
+        return [], [{"kind": "unreadable", "detail": f"cannot read {p}: {exc}"}]
+    lines = raw.splitlines()
+    complete = raw.endswith("\n")
+    out, problems = [], []
+    for idx, line in enumerate(lines):
+        if not line.strip():
+            continue
+        last = idx == len(lines) - 1
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            problems.append({"kind": "truncated_tail" if (last and not complete)
+                             else "corrupt",
+                             "detail": f"verification receipt line {idx + 1}"})
+            continue
+        bad = _verify_shape_problem(rec)
+        if bad:
+            problems.append({"kind": "malformed",
+                             "detail": f"verification receipt line "
+                                       f"{idx + 1}: {bad}"})
+            continue
+        out.append(rec)
+    return out, problems
+
+
+def load_verifications(state_dir):
+    """THE ONLY way to read verification receipts. Raises OutboxError."""
+    recs, problems = _read_verify_raw(state_dir)
+    fatal = fatal_problems(problems)
+    if fatal:
+        raise OutboxError(
+            "the verification journal cannot be read in full, so no claim "
+            "derived from it can be trusted:\n" +
+            "\n".join(f"  [{f['kind']}] {f['detail']}" for f in fatal))
+    return recs, problems
+
+
+def admit_verification(state_dir, unit, claim, produced, policy_digest):
+    """(receipt, refusal) for one required claim.
+
+    Four bindings, and all of them must hold. Any one missing turns the
+    verifier's word into a self-report with extra steps:
+
+      subject   the head it verified is the head this attempt produced
+      policy    the authorization it ran under is the one at the anchored base
+      claim     it is the claim the unit requires
+      result    it passed
+    """
+    if not produced:
+        return None, ("this attempt has no produced commit, so there is "
+                      "nothing a verification could be about")
+    recs, _p = load_verifications(state_dir)
+    mine = [r for r in recs if r.get("unit") == unit
+            and r.get("claim") == claim]
+    if not mine:
+        return None, (f"no verification receipt for {unit!r} claiming "
+                      f"{claim!r}, which the unit declares it requires. Run "
+                      f"it:\n  swarm.py verify --unit {unit} --claim {claim} "
+                      f"--verifier NAME --path PATH")
+    stale, wrong_policy, failed = [], [], []
+    for r in mine:
+        if str(r.get("subject_head")) != str(produced):
+            stale.append(str(r.get("subject_head"))[:12])
+            continue
+        if policy_digest and r.get("policy_sha256") != policy_digest:
+            wrong_policy.append(str(r.get("policy_sha256"))[:12])
+            continue
+        if r.get("result") != "pass":
+            failed.append(r)
+            continue
+        return r, None
+    if failed:
+        return None, (f"the verifier ran against the produced commit and "
+                      f"returned FAIL for {claim!r}. That is a result, not a "
+                      f"missing receipt: fix the work rather than re-running "
+                      f"until it passes.")
+    if wrong_policy:
+        return None, (f"verification for {unit!r} ran under policy "
+                      f"{', '.join(sorted(set(wrong_policy)))}, but this "
+                      f"attempt was anchored to {str(policy_digest)[:12]}. "
+                      f"The rules changed after the check.")
+    return None, (f"verification for {unit!r} names head(s) "
+                  f"{', '.join(sorted(set(stale)))}, but this attempt "
+                  f"produced {produced[:12]}. A pass for another commit is "
+                  f"not a pass for this one.")
+
+
 def _head_from_receipt(attempt_dir):
     """The head recorded when the attempt was JUDGED.
 
@@ -2391,7 +2521,23 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 us["produced_head"] = produced
             anchor_rec, _ = W.read_launch_record(attempt) if attempt else (None,
                                                                            None)
-            receipt, refusal = admit_merge(
+            # A DECLARED verification requirement gates closure. Undeclared,
+            # nothing changes: a unit that never asked for a verifier is not
+            # improved by demanding one, and a requirement everybody must
+            # satisfy is one everybody learns to satisfy trivially.
+            vrefusal = None
+            for claim in (u.get("requires_verification") or []):
+                policy_digest = None
+                if anchor_rec and anchor_rec.get("repo"):
+                    _pol, policy_digest, _perr = V.read_policy(
+                        U.run, anchor_rec["repo"],
+                        anchor_rec.get("base_commit"))
+                _vr, vrefusal = admit_verification(
+                    state_dir, uid, claim, produced, policy_digest)
+                if vrefusal:
+                    break
+
+            receipt, refusal = (None, vrefusal) if vrefusal else admit_merge(
                 state_dir, uid, produced,
                 expect_repo=(anchor_rec or {}).get("remote"))
             if receipt:
@@ -3003,6 +3149,78 @@ def cmd_promote(args):
     return EXIT_OK if ok else EXIT_FAILED_UNIT
 
 
+def cmd_verify(args):
+    """Run an authorized, content-pinned verifier and record what it said.
+
+    Everything that makes this admissible happens HERE, in one place, and the
+    receipt records all of it: the policy came from the anchored base commit,
+    the verifier's bytes hashed to what the policy authorized, those exact
+    bytes ran, and the head it ran against is the one this attempt produced.
+    """
+    try:
+        load_verifications(args.state_dir)
+    except OutboxError as exc:
+        sys.stderr.write(f"  VERIFICATION JOURNAL: {exc}\n")
+        return EXIT_CONFLICT
+
+    anchor_rec, err = W.read_launch_record(args.attempt)
+    if err:
+        sys.stderr.write(f"error: {err}\n")
+        return EXIT_USAGE
+    repo = (anchor_rec or {}).get("repo")
+    base = (anchor_rec or {}).get("base_commit")
+    if not repo:
+        sys.stderr.write("error: this attempt anchored no repository, so "
+                         "there is no base to read a policy from.\n")
+        return EXIT_USAGE
+
+    policy, policy_digest, perr = V.read_policy(U.run, repo, base)
+    if perr:
+        sys.stderr.write(f"error: {perr}\n")
+        return EXIT_USAGE
+
+    digest, _size, derr = V.digest_file(args.path)
+    if derr:
+        sys.stderr.write(f"error: {derr}\n")
+        return EXIT_USAGE
+
+    entry, refusal = V.authorized(policy, args.verifier, digest, args.claim)
+    if refusal:
+        sys.stderr.write(f"error: {refusal}\n")
+        return EXIT_USAGE
+
+    produced = _head_from_receipt(args.attempt)
+    if not produced:
+        sys.stderr.write("error: this attempt has no judged produced commit, "
+                         "so a verification would have nothing to bind to.\n")
+        return EXIT_USAGE
+
+    outcome, rerr = V.run_pinned(U.run, args.path, digest,
+                                 args=args.arg, timeout=args.timeout)
+    if rerr:
+        sys.stderr.write(f"error: {rerr}\n")
+        return EXIT_FAILED_UNIT
+
+    rec = {"unit": args.unit, "claim": args.claim, "verifier": args.verifier,
+           "verifier_sha256": digest, "policy_sha256": policy_digest,
+           "subject_head": produced,
+           "result": "pass" if outcome["exit_code"] == 0 else "fail",
+           "exit_code": outcome["exit_code"],
+           "stdout_tail": outcome["stdout"], "stderr_tail": outcome["stderr"],
+           "by": os.environ.get("USER") or "?",
+           "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "schema_version": 1}
+    bad = _verify_shape_problem(rec)
+    if bad:
+        sys.stderr.write(f"error: this would not be admissible: {bad}\n")
+        return EXIT_USAGE
+    _fsync_append(Path(args.state_dir) / VERIFY_RECEIPTS, rec)
+    print(f"  {args.claim}: {rec['result'].upper()} (exit "
+          f"{outcome['exit_code']}) for {produced[:12]}")
+    print(f"  verifier {args.verifier} {digest[:12]}, policy "
+          f"{policy_digest[:12]} from base {str(base)[:12]}")
+    return EXIT_OK if rec["result"] == "pass" else EXIT_FAILED_UNIT
+
+
 def cmd_merge(args):
     """Record that a PR for this unit was observed merged.
 
@@ -3331,6 +3549,24 @@ def main():
     pr.add_argument("--approver", default=None,
                     help="who accepted this result; recorded permanently")
     pr.set_defaults(fn=cmd_promote)
+
+    v = sub.add_parser("verify", help="run an authorized pinned verifier")
+    v.add_argument("--state-dir", default=".swarm/state")
+    v.add_argument("--unit", required=True)
+    v.add_argument("--attempt", required=True,
+                   help="the attempt directory whose produced commit is "
+                        "being verified")
+    v.add_argument("--claim", required=True,
+                   help="what this verifier is asserting, e.g. tests-pass. "
+                        "It must be a claim the policy allows it to make.")
+    v.add_argument("--verifier", required=True,
+                   help="the name the policy authorizes")
+    v.add_argument("--path", required=True,
+                   help="the file to run. Its bytes must hash to what the "
+                        "policy recorded.")
+    v.add_argument("--arg", action="append", default=[])
+    v.add_argument("--timeout", type=int, default=900)
+    v.set_defaults(fn=cmd_verify)
 
     m = sub.add_parser("merge", help="record an observed merged PR for a "
                                      "code unit")
