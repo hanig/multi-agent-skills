@@ -1106,7 +1106,12 @@ def _code_state(unit_dir, spec, present, missing, notes):
     # write and change nothing in the repository it was asked to change. This
     # module used to say the worktree was "not judged here" and point at
     # `bus await`, which was never called, so nothing judged it at all.
-    produced, why = W.judge(run, unit_dir, spec)
+    # Into the RECEIPT, the durable record of what was judged. Recording it
+    # only later, during merge admission, asked the agent-owned repository a
+    # second time; if it had moved on, the head actually validated was gone
+    # and a correct receipt for it was refused.
+    produced, judged_head, why = W.judge_detail(run, unit_dir, spec)
+    spec["produced_head"] = judged_head
     head = (f"agent {agent} is {status or 'idle'} and all {len(present)} "
             f"declared output(s) are present")
     if produced is False:
@@ -1260,10 +1265,8 @@ def cmd_check(args):
             # records what was actually established, and PRODUCTION_DENIES
             # spells out the reach: "a change was produced" is not "the change
             # is any good".
-            "worktree_judged": (W.basis(run, unit_dir, spec)
-                                if spec.get("kind") == "code" else None),
-            "production_denies": (list(W.PRODUCTION_DENIES)
-                                  if spec.get("kind") == "code" else None),
+            # The three code-only facts, assembled where they belong.
+            **W.code_basis(run, unit_dir, spec),
             "note": "not isolated from other processes running as the same "
                     "Unix user. OS-enforced isolation would need a container "
                     "or mount namespace with this directory as the only "

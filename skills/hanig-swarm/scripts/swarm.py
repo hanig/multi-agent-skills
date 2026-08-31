@@ -1964,9 +1964,31 @@ def _same_repo(a, b):
     # so a PR in a lookalike repository could close a unit. Compared only
     # when both sides carry one: a bare "owner/name" receipt is a legitimate
     # shorthand, not a mismatch.
-    if ha and hb and ha != hb:
-        return False
-    return True
+    # BOTH parts, including both being absent. Comparing hosts only when
+    # each side had one let a hostless anchor (`acme/app`) match a
+    # host-bearing lookalike (`https://evil.example/acme/app`). Accepting
+    # shorthand is what the hole was made of, so it is not accepted: two names
+    # for the same repository must agree on where it lives.
+    return ha == hb
+
+
+def _head_from_receipt(attempt_dir):
+    """The head recorded when the attempt was JUDGED.
+
+    Preferred over asking the repository again: the receipt was written at the
+    moment the judgment was true, and the repository has been under the
+    agent's control ever since.
+    """
+    if not attempt_dir:
+        return None
+    try:
+        with open(Path(attempt_dir) / U.RECEIPT) as fh:
+            rec = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(rec, dict):
+        return None
+    return (rec.get("basis") or {}).get("produced_head")
 
 
 def admit_merge(state_dir, unit, produced, expect_repo=None):
@@ -2362,11 +2384,11 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             # is then refused because the question was asked again. Every
             # finding across three review rounds has been a version of this,
             # so the fact is captured when it is true and read thereafter.
-            produced = us.get("produced_head")
+            produced = us.get("produced_head") or _head_from_receipt(attempt)
             if not produced:
                 produced = W.produced_head(U.run, attempt, u)
-                if produced:
-                    us["produced_head"] = produced
+            if produced:
+                us["produced_head"] = produced
             anchor_rec, _ = W.read_launch_record(attempt) if attempt else (None,
                                                                            None)
             receipt, refusal = admit_merge(

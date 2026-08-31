@@ -231,11 +231,15 @@ class TestRoundOneFindings(unittest.TestCase):
             self.assertIn("not to decide which repository", refusal)
 
     def test_equivalent_spellings_of_the_same_repo_match(self):
+        """Same host, different transport, still the same repository."""
         for spelling in ("git@github.com:hanig/demo.git",
                          "https://github.com/hanig/demo",
                          "https://github.com/hanig/demo.git",
-                         "hanig/demo", "HANIG/DEMO"):
-            self.assertTrue(S._same_repo(spelling, "hanig/demo"), spelling)
+                         "ssh://git@github.com/hanig/demo",
+                         "HTTPS://GITHUB.COM/HANIG/DEMO"):
+            self.assertTrue(
+                S._same_repo(spelling, "https://github.com/hanig/demo"),
+                spelling)
 
     def test_unrelated_names_do_not_match(self):
         for other in ("hanig/other", "someone/demo", "", None):
@@ -315,10 +319,17 @@ class TestRoundTwoFindings(unittest.TestCase):
         self.assertTrue(S._same_repo("ssh://git@github.com/acme/app",
                                      "https://github.com/acme/app"))
 
-    def test_a_bare_owner_name_is_shorthand_not_a_mismatch(self):
-        """Compared only when BOTH sides carry a host."""
-        self.assertTrue(S._same_repo("acme/app",
-                                     "https://github.com/acme/app.git"))
+    def test_a_bare_owner_name_no_longer_matches_a_full_url(self):
+        """Shorthand WAS accepted, and that permissiveness was the hole: a
+        hostless anchor matched a host-bearing lookalike. Identity needs both
+        parts, including both being absent."""
+        self.assertFalse(S._same_repo("acme/app",
+                                      "https://github.com/acme/app.git"))
+        self.assertTrue(S._same_repo("acme/app", "acme/app"))
+
+    def test_a_hostless_anchor_does_not_match_a_lookalike(self):
+        self.assertFalse(S._same_repo("https://evil.example/acme/app",
+                                      "acme/app"))
 
     def test_a_different_owner_never_matches(self):
         self.assertFalse(S._same_repo("https://github.com/other/app",
@@ -424,6 +435,44 @@ class TestTheProducedHeadIsRecordedNotRederived(unittest.TestCase):
         self.assertLess(j, k,
                         "the repository is re-judged before the recorded "
                         "head is consulted, so a moved branch still wins")
+
+
+class TestTheJudgedHeadIsInTheReceipt(unittest.TestCase):
+    """Recording it during merge admission was still a second question to a
+    repository the agent owns. The receipt is written at the moment the
+    judgment is true."""
+
+    def test_the_receipt_carries_the_judged_head(self):
+        import ast
+        src = (SCRIPTS / "worktree.py").read_text()
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef) and n.name == "code_basis")
+        self.assertIn("produced_head", ast.unparse(fn))
+
+    def test_admission_prefers_the_receipt_over_rejudging(self):
+        import ast
+        src = (SCRIPTS / "swarm.py").read_text()
+        i = src.index('produced = us.get("produced_head")')
+        seg = src[i:i + 300]
+        self.assertIn("_head_from_receipt", seg)
+        self.assertLess(seg.index("_head_from_receipt"),
+                        seg.index("W.produced_head("),
+                        "the repository is re-judged before the receipt is "
+                        "consulted")
+
+    def test_head_from_receipt_reads_the_basis(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(Path(d) / "receipt.json", "w") as fh:
+                json.dump({"basis": {"produced_head": HEAD}}, fh)
+            self.assertEqual(S._head_from_receipt(d), HEAD)
+
+    def test_a_missing_or_unreadable_receipt_is_not_a_crash(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(S._head_from_receipt(d))
+            with open(Path(d) / "receipt.json", "w") as fh:
+                fh.write("NOT JSON")
+            self.assertIsNone(S._head_from_receipt(d))
+        self.assertIsNone(S._head_from_receipt(""))
 
 if __name__ == "__main__":
     unittest.main()

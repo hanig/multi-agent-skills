@@ -224,3 +224,19 @@ def basis(runner, unit_dir, spec):
     if produced is None:
         return "no-repository-declared"
     return "produced-committed-change" if produced else "no-produced-change"
+
+
+def code_basis(runner, unit_dir, spec):
+    """The code-only fields of a receipt's `basis`.
+
+    Assembled here rather than spelled out in unit.py, which has a size guard
+    whose job is to stop it accreting other modules' concerns. `produced_head`
+    is the head that was JUDGED: a merge attestation is bound to it, and
+    re-deriving it later asks a repository the agent owns a second question.
+    """
+    if spec.get("kind") != "code":
+        return {"worktree_judged": None, "produced_head": None,
+                "production_denies": None}
+    return {"worktree_judged": basis(runner, unit_dir, spec),
+            "produced_head": spec.get("produced_head"),
+            "production_denies": list(PRODUCTION_DENIES)}
