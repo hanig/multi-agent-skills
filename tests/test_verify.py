@@ -451,6 +451,45 @@ class TestTheBaseComesFromCoordinatorState(unittest.TestCase):
                           "error leaves the caller with no base to record")
 
 
+class TestThePolicyIsNotOptional(unittest.TestCase):
+    """`if policy is not None` made the whole re-check skippable, and every
+    test I had passed a policy, so the skippable path was never exercised and
+    the non-vacuity check came back green on a real regression."""
+
+    def _write(self, d, rec):
+        os.makedirs(d, exist_ok=True)
+        with open(Path(d) / S.VERIFY_RECEIPTS, "w") as fh:
+            fh.write(json.dumps(rec) + "\n")
+
+    REC = {"unit": "u1", "claim": "tests-pass", "verifier": "anything",
+           "verifier_sha256": "z" * 64, "policy_sha256": "p" * 64,
+           "subject_head": "a" * 40, "result": "pass"}
+
+    def test_no_policy_refuses_rather_than_skipping_the_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, self.REC)
+            got, refusal = S.admit_verification(d, "u1", "tests-pass",
+                                                "a" * 40, "p" * 64, None)
+            self.assertIsNone(got)
+            self.assertIn("cannot be checked against anything", refusal)
+
+    def test_a_non_dict_policy_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, self.REC)
+            for bad in ("", [], 0, "policy"):
+                got, refusal = S.admit_verification(
+                    d, "u1", "tests-pass", "a" * 40, "p" * 64, bad)
+                self.assertIsNone(got, repr(bad))
+
+    def test_the_signature_has_no_default_for_policy(self):
+        """An optional guard is not a guard: a caller that forgets it gets
+        the receipt's own word for which verifier ran."""
+        import inspect
+        sig = inspect.signature(S.admit_verification)
+        self.assertIs(sig.parameters["policy"].default,
+                      inspect.Parameter.empty)
+
+
 class TestAdmissionRechecksTheVerifier(unittest.TestCase):
     """Checking authorization only when the receipt was WRITTEN meant the
     receipt's own claim about which verifier ran was then taken on trust."""
