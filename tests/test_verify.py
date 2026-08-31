@@ -173,6 +173,13 @@ class TestPinningIsByContent(Base):
 
 class TestAdmissionIsBound(unittest.TestCase):
 
+    # Admission requires an anchored policy; there is no policy=None path any
+    # more, because that path took the receipt's own word for which verifier
+    # ran.
+    POLICY = {"verifiers": [{"name": "tests", "sha256": "v" * 64,
+                             "claims": ["tests-pass"]}]}
+
+
     def _write(self, d, *recs):
         os.makedirs(d, exist_ok=True)
         with open(Path(d) / S.VERIFY_RECEIPTS, "w") as fh:
@@ -190,7 +197,7 @@ class TestAdmissionIsBound(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             self._write(d, self._rec())
             got, refusal = S.admit_verification(d, "u1", "tests-pass", HEAD,
-                                                "p" * 64)
+                                                "p" * 64, self.POLICY)
             self.assertIsNone(refusal)
             self.assertIsNotNone(got)
 
@@ -198,7 +205,7 @@ class TestAdmissionIsBound(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             self._write(d, self._rec(subject_head="b" * 40))
             got, refusal = S.admit_verification(d, "u1", "tests-pass", HEAD,
-                                                "p" * 64)
+                                                "p" * 64, self.POLICY)
             self.assertIsNone(got)
             self.assertIn("not a pass for this one", refusal)
 
@@ -206,7 +213,7 @@ class TestAdmissionIsBound(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             self._write(d, self._rec(policy_sha256="q" * 64))
             got, refusal = S.admit_verification(d, "u1", "tests-pass", HEAD,
-                                                "p" * 64)
+                                                "p" * 64, self.POLICY)
             self.assertIsNone(got)
             self.assertIn("rules changed after the check", refusal)
 
@@ -214,7 +221,7 @@ class TestAdmissionIsBound(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             self._write(d, self._rec(result="fail"))
             got, refusal = S.admit_verification(d, "u1", "tests-pass", HEAD,
-                                                "p" * 64)
+                                                "p" * 64, self.POLICY)
             self.assertIsNone(got)
             self.assertIn("fix the work rather than re-running", refusal)
 
@@ -222,7 +229,7 @@ class TestAdmissionIsBound(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             self._write(d, self._rec(claim="lint-clean"))
             got, refusal = S.admit_verification(d, "u1", "tests-pass", HEAD,
-                                                "p" * 64)
+                                                "p" * 64, self.POLICY)
             self.assertIsNone(got)
             self.assertIn("no verification receipt", refusal)
 
@@ -238,7 +245,7 @@ class TestAdmissionIsBound(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             self._write(d, self._rec(subject_head="b" * 40), self._rec())
             got, refusal = S.admit_verification(d, "u1", "tests-pass", HEAD,
-                                                "p" * 64)
+                                                "p" * 64, self.POLICY)
             self.assertIsNone(refusal)
             self.assertIsNotNone(got)
 
@@ -310,23 +317,51 @@ class TestRoundOneFindings(Base):
         self.assertIsNone(entry)
         self.assertIn("not a list", refusal)
 
-    def test_the_verifier_must_run_at_the_produced_commit(self):
-        """Test failing commit A, move to passing commit B, verify from B,
-        and the receipt used to say A passed."""
+    def test_the_verifier_runs_in_a_checkout_we_create(self):
+        """Verifying in the agent's own tree was two problems in one coat: a
+        HEAD that could move A-to-B-to-A around the observations, and a
+        tracked file editable mid-run with HEAD never moving. A detached
+        worktree at the produced commit is clean by construction and is not
+        where the agent is working."""
         head = git(self.repo, "rev-parse", "HEAD").stdout.strip()
-        ok, why = V.head_matches(U.run, self.repo, head)
-        self.assertTrue(ok, why)
-        ok, why = V.head_matches(U.run, self.repo, "b" * 40)
-        self.assertFalse(ok)
-        self.assertIn("says nothing about this one", why)
+        out, err = V.run_in_checkout(U.run, self.repo, head, self.script,
+                                     self.digest)
+        self.assertIsNone(err, err)
+        self.assertEqual(out["exit_code"], 0)
 
-    def test_a_dirty_tree_is_not_the_commit_being_claimed_about(self):
+    def test_a_dirty_agent_tree_does_not_affect_the_run(self):
         head = git(self.repo, "rev-parse", "HEAD").stdout.strip()
-        with open(os.path.join(self.repo, "scratch.txt"), "w") as fh:
-            fh.write("uncommitted\n")
-        ok, why = V.head_matches(U.run, self.repo, head)
-        self.assertFalse(ok)
-        self.assertIn("uncommitted", why)
+        with open(os.path.join(self.repo, "a.txt"), "w") as fh:
+            fh.write("the agent is still editing\n")
+        out, err = V.run_in_checkout(U.run, self.repo, head, self.script,
+                                     self.digest)
+        self.assertIsNone(err, err)
+        self.assertEqual(out["exit_code"], 0)
+
+    def test_the_checkout_holds_the_named_commit(self):
+        probe = os.path.join(self.tmp, "probe.sh")
+        with open(probe, "w") as fh:
+            fh.write("#!/bin/sh\ntest -f verifiers.json\n")
+        os.chmod(probe, 0o755)
+        d = V.digest_file(probe)[0]
+        head = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        out, err = V.run_in_checkout(U.run, self.repo, head, probe, d)
+        self.assertIsNone(err, err)
+        self.assertEqual(out["exit_code"], 0,
+                         "the checkout does not contain the commit's files")
+
+    def test_an_unknown_commit_refuses(self):
+        out, err = V.run_in_checkout(U.run, self.repo, "b" * 40, self.script,
+                                     self.digest)
+        self.assertIsNone(out)
+        self.assertIn("cannot check out", err)
+
+    def test_the_worktree_is_removed_afterwards(self):
+        head = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        V.run_in_checkout(U.run, self.repo, head, self.script, self.digest)
+        listed = git(self.repo, "worktree", "list").stdout
+        self.assertEqual(listed.count("\n"), 1,
+                         "a verification worktree was left behind")
 
 
 class TestAnUnreadablePolicyRefuses(unittest.TestCase):
@@ -472,40 +507,24 @@ class TestTheBoundaryIsStated(unittest.TestCase):
         self.assertIn("A HOSTILE agent is out of scope",
                       " ".join(doc.split()))
 
-    def test_a_failed_status_is_not_a_clean_tree(self):
+    def test_verification_never_inspects_the_agents_working_tree(self):
+        """Stronger than the check it replaces. There used to be a
+        head_matches() reading the agent's HEAD and status, with all the
+        race and staleness that implies. Making our own checkout means those
+        questions are not asked at all."""
+        self.assertFalse(hasattr(V, "head_matches"))
+        import ast
         src = (SCRIPTS / "verify.py").read_text()
-        self.assertIn('"could not look" is not "nothing there"',
-                      src.replace("\n", " ").replace("    ", " "))
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == "run_in_checkout")
+        body = ast.unparse(fn)
+        self.assertIn("worktree", body)
+        self.assertIn("--detach", body)
+        self.assertNotIn("status", body,
+                         "verification is asking the agent's tree questions "
+                         "again")
 
-
-class TestHeadCannotMoveDuringTheRun(Base):
-    """head_matches and run_pinned were separate observations: check HEAD is
-    A, let the agent reset to B, run the verifier on B, and the receipt says A
-    passed."""
-
-    def test_a_head_move_during_the_run_is_refused(self):
-        mover = os.path.join(self.tmp, "mover.sh")
-        # The verifier itself moves HEAD while it runs.
-        with open(mover, "w") as fh:
-            fh.write("#!/bin/sh\n"
-                     "git -C %s commit -q --allow-empty -m moved\n"
-                     "exit 0\n" % self.repo)
-        os.chmod(mover, 0o755)
-        d = V.digest_file(mover)[0]
-        out, err = V.run_pinned(U.run, mover, d, cwd=self.repo)
-        self.assertIsNone(out)
-        self.assertIn("HEAD moved from", err)
-
-    def test_a_stable_head_still_passes(self):
-        out, err = V.run_pinned(U.run, self.script, self.digest,
-                                cwd=self.repo)
-        self.assertIsNone(err)
-        self.assertEqual(out["exit_code"], 0)
-
-    def test_without_a_cwd_the_check_does_not_apply(self):
-        out, err = V.run_pinned(U.run, self.script, self.digest)
-        self.assertIsNone(err)
-        self.assertEqual(out["exit_code"], 0)
 
 
 class TestOneWayToGetTheBase(unittest.TestCase):

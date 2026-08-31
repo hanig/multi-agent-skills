@@ -2096,7 +2096,7 @@ def load_verifications(state_dir):
 
 
 def admit_verification(state_dir, unit, claim, produced, policy_digest,
-                       policy=None):
+                       policy):
     """(receipt, refusal) for one required claim.
 
     Four bindings, and all of them must hold. Any one missing turns the
@@ -2110,6 +2110,11 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
     if not produced:
         return None, ("this attempt has no produced commit, so there is "
                       "nothing a verification could be about")
+    if not isinstance(policy, dict):
+        return None, ("no anchored policy was supplied to admission, so the "
+                      "verifier a receipt names cannot be checked against "
+                      "anything. Refusing rather than taking the receipt's "
+                      "word for which verifier ran.")
     recs, _p = load_verifications(state_dir)
     mine = [r for r in recs if r.get("unit") == unit
             and r.get("claim") == claim]
@@ -2129,17 +2134,16 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
         if r.get("result") != "pass":
             failed.append(r)
             continue
-        # RE-CHECK the verifier against the policy, here, at admission.
-        # Checking it only when the receipt was written meant the receipt's
-        # own claim about which verifier ran was taken on trust: a record
-        # naming any verifier and any digest, with the right head and policy
-        # digest, was admitted without anything having run.
-        if policy is not None:
-            entry, refusal = V.authorized(policy, r.get("verifier"),
-                                          r.get("verifier_sha256"), claim)
-            if refusal:
-                unauthorized.append(refusal)
-                continue
+        # RE-CHECK the verifier against the policy, here, at admission, with
+        # NO way to skip it. `if policy is not None` made the whole check
+        # optional: a caller that passed nothing got the receipt's own word
+        # about which verifier ran, which is the self-authorization this
+        # exists to refuse. The argument is required and None is refused.
+        entry, refusal = V.authorized(policy, r.get("verifier"),
+                                      r.get("verifier_sha256"), claim)
+        if refusal:
+            unauthorized.append(refusal)
+            continue
         return r, None
     if failed:
         return None, (f"the verifier ran against the produced commit and "
@@ -3406,13 +3410,9 @@ def cmd_verify(args):
                          "so a verification would have nothing to bind to.\n")
         return EXIT_USAGE
 
-    ok, why = V.head_matches(U.run, repo, produced)
-    if not ok:
-        sys.stderr.write(f"error: {why}\n")
-        return EXIT_USAGE
-
-    outcome, rerr = V.run_pinned(U.run, args.path, digest, args=args.arg,
-                                 timeout=args.timeout, cwd=repo)
+    outcome, rerr = V.run_in_checkout(U.run, repo, produced, args.path,
+                                      digest, args=args.arg,
+                                      timeout=args.timeout)
     if rerr:
         sys.stderr.write(f"error: {rerr}\n")
         return EXIT_FAILED_UNIT

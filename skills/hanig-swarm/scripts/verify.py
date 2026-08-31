@@ -151,37 +151,36 @@ def authorized(policy, name, digest, claim):
         f"approved.")
 
 
-def head_matches(runner, repo, expect_head):
-    """(ok, detail). Is the working tree at the commit being claimed about?
+def run_in_checkout(runner, repo, commit, path, expect_digest, args=None,
+                    timeout=900):
+    """Run a pinned verifier against a checkout WE create, at `commit`.
 
-    The verifier used to run wherever the operator happened to be standing,
-    while the receipt recorded the produced head regardless. Test failing
-    commit A, move to passing commit B, run verify from B, and the receipt
-    says A passed.
+    Verifying in the agent's own working tree was two problems wearing one
+    coat. Checking HEAD before the run and again after left a window: move to
+    B, let the verifier test B, move back to A, and both observations agree.
+    And nothing stopped a tracked file being edited mid-run with HEAD never
+    moving at all.
+
+    Both dissolve if we stop asking the agent's tree anything. A detached
+    worktree at the produced commit is clean by construction, is not where the
+    agent is working, and cannot drift underneath the run. It also makes the
+    question honest: what was tested IS the commit named, rather than whatever
+    happened to be checked out when somebody typed the command.
     """
-    rc, head, _ = _git(runner, repo, "rev-parse", "HEAD")
+    tmp = tempfile.mkdtemp(prefix="verify-checkout-")
+    tree = os.path.join(tmp, "tree")
+    rc, _out, err = _git(runner, repo, "worktree", "add", "--detach",
+                         "--quiet", tree, str(commit), timeout=300)
     if rc != 0:
-        return False, f"cannot read HEAD in {repo!r}"
-    head = head.strip()
-    if head != str(expect_head):
-        return False, (
-            f"the working tree is at {head[:12]} but this attempt produced "
-            f"{str(expect_head)[:12]}. A verifier run against a different "
-            f"commit says nothing about this one: check out the produced "
-            f"commit before verifying.")
-    rc, status, err = _git(runner, repo, "status", "--porcelain")
-    if rc != 0:
-        # "could not look" is not "nothing there". Treating a failed status
-        # as clean let a modified working tree through whenever git happened
-        # to be unhappy.
-        return False, (f"cannot read git status in {repo!r} ({err[:100]}), so "
-                       f"whether the tree matches the commit being claimed "
-                       f"about is unknown")
-    if status.strip():
-        return False, ("the working tree has uncommitted changes, so what "
-                       "the verifier tests is not the commit being claimed "
-                       "about")
-    return True, None
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None, (f"cannot check out {str(commit)[:12]} to verify it: "
+                      f"{err[:200]}")
+    try:
+        return run_pinned(runner, path, expect_digest, args=args,
+                          timeout=timeout, cwd=tree)
+    finally:
+        _git(runner, repo, "worktree", "remove", "--force", tree, timeout=120)
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def run_pinned(runner, path, expect_digest, args=None, timeout=900,
@@ -206,23 +205,10 @@ def run_pinned(runner, path, expect_digest, args=None, timeout=900,
         if err2 or after != expect_digest:
             return None, "the verified bytes changed while being copied"
         os.chmod(copy, 0o500)
-        before = None
-        if cwd:
-            _rc, before, _e = _git(runner, cwd, "rev-parse", "HEAD")
+        # No before/after dance here any more. `run_in_checkout` gives this a
+        # worktree the agent is not working in, so there is nothing to drift.
         rc, out, errout = runner([copy] + list(args or []), timeout=timeout,
                                  cwd=cwd)
-        if cwd:
-            # The HEAD check and the run were separate observations, so the
-            # tree could be reset between them and the verifier would test a
-            # commit the receipt does not name. Re-observing afterwards does
-            # not make the pair atomic, but it turns a silent substitution
-            # into a refusal.
-            _rc2, after, _e2 = _git(runner, cwd, "rev-parse", "HEAD")
-            if before and after and before.strip() != after.strip():
-                return None, (
-                    f"HEAD moved from {before.strip()[:12]} to "
-                    f"{after.strip()[:12]} while the verifier ran, so what it "
-                    f"tested is not the commit this would claim about")
         return {"exit_code": rc, "stdout": (out or "")[-4000:],
                 "stderr": (errout or "")[-2000:]}, None
     except OSError as exc:
