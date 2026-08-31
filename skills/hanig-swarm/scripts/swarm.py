@@ -1357,6 +1357,11 @@ def _write_launch_record(unit_dir, u):
                                    exclude=W.swarm_root_of(unit_dir))
         if rc3 != 0:
             return f"unit {u['id']!r}: cannot read git status in {repo!r}"
+        # The remote, so a merge receipt naming a DIFFERENT repository can be
+        # refused. The receipt says "owner/name"; the anchor knows what this
+        # working copy actually pushes to.
+        rc4, remote, _ = _git(repo, "remote", "get-url", "origin")
+        rec["remote"] = remote if rc4 == 0 else None
         rec.update({"repo": top, "branch": branch if rc2 == 0 else None,
                     "base_commit": head, "base_tree": tree if rc == 0 else None,
                     "clean_at_launch": not dirty,
@@ -1922,7 +1927,23 @@ def load_merge_receipts(state_dir):
     return recs, problems
 
 
-def admit_merge(state_dir, unit, produced):
+def _same_repo(a, b):
+    """Do two repository names refer to the same place?
+
+    Compares the last two path segments, so `git@github.com:o/r.git`,
+    `https://github.com/o/r` and `o/r` all match. Anything that cannot be
+    reduced to owner/name compares literally rather than being waved through.
+    """
+    def key(x):
+        s = str(x or "").strip().rstrip("/")
+        if s.endswith(".git"):
+            s = s[:-4]
+        parts = [p for p in s.replace(":", "/").split("/") if p]
+        return "/".join(parts[-2:]).lower() if len(parts) >= 2 else s.lower()
+    return bool(a) and bool(b) and key(a) == key(b)
+
+
+def admit_merge(state_dir, unit, produced, expect_repo=None):
     """(receipt, refusal). A merged-PR attestation, admitted or refused.
 
     `produced` is the commit this coordinator judged the attempt to have
@@ -1942,8 +1963,16 @@ def admit_merge(state_dir, unit, produced):
                       f"--unit {unit} --pr URL --head {produced[:12]} "
                       f"--target BRANCH --merged-as SHA --method merge")
     for r in mine:
-        if str(r.get("head")) == str(produced):
-            return r, None
+        if str(r.get("head")) != str(produced):
+            continue
+        if expect_repo and not _same_repo(r.get("repo"), expect_repo):
+            return None, (
+                f"a merge receipt for {unit!r} pins the right head but names "
+                f"repository {r.get('repo')!r}, and this attempt was anchored "
+                f"to {expect_repo!r}. The attester is trusted to report what "
+                f"it saw, not to decide which repository this unit belongs "
+                f"to.")
+        return r, None
     heads = ", ".join(sorted({str(r.get("head"))[:12] for r in mine}))
     return None, (
         f"{len(mine)} merge receipt(s) for {unit!r} pin head(s) {heads}, but "
@@ -2273,15 +2302,26 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         # KNOWN LIMIT, stated rather than hidden: nothing records a merge yet,
         # so a code unit stays READY_FOR_PR and anything depending on it
         # waits. That is honest until stage 3 exists.
-        if (us["state"] == "DONE"
+        # READY_FOR_PR is included deliberately. Guarding on DONE alone made
+        # the state a dead end: the first advance moved a produced unit to
+        # READY_FOR_PR, and a receipt recorded afterwards was never looked at
+        # again, so the unit could never close no matter what the attester
+        # did. Recording evidence after the fact is the NORMAL order here.
+        if (us["state"] in ("DONE", "READY_FOR_PR")
                 and closing_evidence_for(u.get("kind")) != "predicate_receipt"):
             # STAGE 3. A produced tree is not a closed unit: `code` is closed
             # by a merged PR. The attestation is admitted only when the head
             # it pins is the one this attempt produced, which is the single
             # check available to a coordinator with no network.
-            produced = W.produced_head(U.run, us.get("attempt_dir") or "", u)
-            receipt, refusal = admit_merge(state_dir, uid, produced)
+            attempt = us.get("attempt_dir") or ""
+            produced = W.produced_head(U.run, attempt, u)
+            anchor_rec, _ = W.read_launch_record(attempt) if attempt else (None,
+                                                                           None)
+            receipt, refusal = admit_merge(
+                state_dir, uid, produced,
+                expect_repo=(anchor_rec or {}).get("remote"))
             if receipt:
+                us["state"] = "DONE"
                 us["merged_as"] = receipt.get("merged_as")
                 us["merge_pr"] = receipt.get("pr")
                 report.append(

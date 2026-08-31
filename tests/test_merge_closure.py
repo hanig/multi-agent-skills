@@ -216,5 +216,89 @@ class TestTheCommandCanActuallyBeRun(unittest.TestCase):
                           f"parser but mandatory in the receipt, so the "
                           f"command can only fail")
 
+
+class TestRoundOneFindings(unittest.TestCase):
+    """Three MAJOR findings, all attacking the binding, all real."""
+
+    def test_the_receipts_repository_must_match_the_anchored_remote(self):
+        """The attester reports what it SAW. It does not get to decide which
+        repository this unit belongs to."""
+        with tempfile.TemporaryDirectory() as d:
+            write(d, receipt(repo="someone-else/unrelated"))
+            got, refusal = S.admit_merge(d, "u1", HEAD,
+                                         expect_repo="hanig/demo")
+            self.assertIsNone(got)
+            self.assertIn("not to decide which repository", refusal)
+
+    def test_equivalent_spellings_of_the_same_repo_match(self):
+        for spelling in ("git@github.com:hanig/demo.git",
+                         "https://github.com/hanig/demo",
+                         "https://github.com/hanig/demo.git",
+                         "hanig/demo", "HANIG/DEMO"):
+            self.assertTrue(S._same_repo(spelling, "hanig/demo"), spelling)
+
+    def test_unrelated_names_do_not_match(self):
+        for other in ("hanig/other", "someone/demo", "", None):
+            self.assertFalse(S._same_repo(other, "hanig/demo"), repr(other))
+
+    def test_a_repo_that_cannot_be_reduced_compares_literally(self):
+        self.assertTrue(S._same_repo("weirdname", "weirdname"))
+        self.assertFalse(S._same_repo("weirdname", "otherthing"))
+
+    def test_no_expected_repo_means_the_check_does_not_apply(self):
+        """An anchor with no remote must not block closure outright."""
+        with tempfile.TemporaryDirectory() as d:
+            write(d, receipt(repo="anything/at-all"))
+            got, refusal = S.admit_merge(d, "u1", HEAD, expect_repo=None)
+            self.assertIsNone(refusal)
+            self.assertIsNotNone(got)
+
+
+class TestReadyForPRIsNotADeadEnd(unittest.TestCase):
+    """Guarding admission on DONE alone meant the first advance moved a
+    produced unit to READY_FOR_PR and never looked again, so a receipt
+    recorded afterwards did nothing. Recording after the fact is the NORMAL
+    order: the PR is merged after the unit produced it."""
+
+    def test_advance_reconsiders_a_unit_already_in_ready_for_pr(self):
+        import ast
+        src = (SCRIPTS / "swarm.py").read_text()
+        tree = ast.parse(src)
+        found = False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Compare):
+                continue
+            text = ast.unparse(node)
+            if "admit" in text:
+                continue
+            if "READY_FOR_PR" in text and "DONE" in text and " in " in text:
+                found = True
+        self.assertTrue(found,
+                        "admission is reachable only from DONE, so a unit "
+                        "parked in READY_FOR_PR can never close")
+
+
+class TestTheBindingUsesTheJudgedHead(unittest.TestCase):
+    """produced_head re-read HEAD after judging, so an agent moving HEAD
+    between the two closed the unit for work nothing had validated."""
+
+    def test_produced_head_comes_from_the_judgment_itself(self):
+        import ast
+        src = (SCRIPTS / "worktree.py").read_text()
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef) and n.name == "produced_head")
+        body = ast.unparse(fn)
+        self.assertIn("judge_detail", body)
+        self.assertNotIn("rev-parse", body,
+                         "the head is re-read after judging, which is the "
+                         "time-of-check/time-of-use gap this closed")
+
+    def test_judge_detail_returns_the_head_it_validated(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import worktree as W
+        import inspect
+        src = inspect.getsource(W.judge_detail)
+        self.assertIn("return True, head,", src)
+
 if __name__ == "__main__":
     unittest.main()

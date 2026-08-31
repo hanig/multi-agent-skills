@@ -81,8 +81,14 @@ def read_launch_record(unit_dir):
     return rec, None
 
 
-def judge(runner, unit_dir, spec):
-    """(produced, detail).
+def judge_detail(runner, unit_dir, spec):
+    """(produced, head, detail).
+
+    Returns the head it VALIDATED, not one re-read afterwards. Splitting those
+    was a time-of-check/time-of-use gap: judge() checked commit B, and a
+    second `rev-parse HEAD` a moment later could return C, because the agent
+    owns that repository and nothing stops it moving HEAD. The binding then
+    pinned C, which nothing had judged.
 
     `produced` is None when the unit declared no repository, so there is
     nothing to judge; False when a repository was declared and did not
@@ -108,25 +114,25 @@ def judge(runner, unit_dir, spec):
     # action a reader would take differently, and inventing a distinction
     # nobody acts on is how a vocabulary starts lying.
     if not spec.get("repo"):
-        return None, ("this unit declared no repository, so no git transition "
+        return None, None, ("this unit declared no repository, so no git transition "
                       "is judged for it")
 
     rec, err = read_launch_record(unit_dir)
     if err:
-        return False, err
+        return False, None, err
     repo = rec.get("repo")
     if not repo:
-        return False, (
+        return False, None, (
             f"this unit declares repo {spec['repo']!r}, but its launch record "
             f"anchored no repository. The anchor was written before the unit "
             f"declared one, or _write_launch_record failed: either way "
             f"nothing captured a baseline, so re-dispatch this unit rather "
             f"than reading this as a configuration mistake")
     if not os.path.isdir(repo):
-        return False, f"the anchored repository {repo!r} is gone"
+        return False, None, f"the anchored repository {repo!r} is gone"
 
     if not rec.get("clean_at_launch", False):
-        return False, (
+        return False, None, (
             f"the repository was already dirty at launch "
             f"({rec.get('dirty_paths_at_launch', '?')} path(s)), so there was "
             f"no clean state to transition FROM and any change now is "
@@ -142,46 +148,53 @@ def judge(runner, unit_dir, spec):
     # tree. The claim was too broad; the code is right.
     rc, dirty = repo_status(runner, repo, exclude=swarm_root_of(unit_dir))
     if rc != 0:
-        return False, f"cannot read git status in {repo!r}"
+        return False, None, f"cannot read git status in {repo!r}"
     if dirty:
-        return False, (
+        return False, None, (
             f"{len(dirty)} path(s) are uncommitted. Work left in the working "
             f"tree is not production: it is recorded nowhere another attempt "
             f"or reader could find it")
 
     rc, branch, _ = _git(runner, repo, "rev-parse", "--abbrev-ref", "HEAD")
     if rc == 0 and rec.get("branch") and branch != rec["branch"]:
-        return False, (f"the repository is on branch {branch!r}, but this "
+        return False, None, (f"the repository is on branch {branch!r}, but this "
                        f"attempt was anchored on {rec['branch']!r}")
 
     base = rec.get("base_commit")
     rc, head, _ = _git(runner, repo, "rev-parse", "HEAD")
     if rc != 0:
-        return False, f"cannot read HEAD in {repo!r}"
+        return False, None, f"cannot read HEAD in {repo!r}"
     if head == base:
-        return False, ("HEAD has not moved since launch, so nothing was "
+        return False, None, ("HEAD has not moved since launch, so nothing was "
                        "committed")
 
     rc, _, _ = _git(runner, repo, "merge-base", "--is-ancestor", base, head)
     if rc != 0:
-        return False, (
+        return False, None, (
             f"HEAD {head[:12]} does not descend from the anchored base "
             f"{str(base)[:12]}. The history was replaced rather than extended, "
             f"so what is there now was not built on what we anchored")
 
     rc, tree, _ = _git(runner, repo, "rev-parse", "HEAD^{tree}")
     if rc != 0:
-        return False, f"cannot read HEAD's tree in {repo!r}"
+        return False, None, f"cannot read HEAD's tree in {repo!r}"
     if tree == rec.get("base_tree"):
-        return False, (
+        return False, None, (
             "HEAD advanced but its tree is identical to the anchored base "
             "tree, so the content is unchanged. An empty commit, or a change "
             "reverted before committing, moves HEAD without producing "
             "anything")
 
-    return True, (f"tree {tree[:12]} differs from the anchored base tree "
+    return True, head, (f"tree {tree[:12]} differs from the anchored base tree "
                   f"{str(rec.get('base_tree'))[:12]}, on a commit descending "
                   f"from {str(base)[:12]}, with a clean tree at both ends")
+
+
+def judge(runner, unit_dir, spec):
+    """(produced, detail). The two-value view, for callers that do not need
+    the head."""
+    produced, _head, why = judge_detail(runner, unit_dir, spec)
+    return produced, why
 
 
 def produced_head(runner, unit_dir, spec):
@@ -191,14 +204,8 @@ def produced_head(runner, unit_dir, spec):
     whatever commit it likes and the coordinator has no way to object; with
     it, an attestation about some other branch's work cannot close this unit.
     """
-    produced, _why = judge(runner, unit_dir, spec)
-    if not produced:
-        return None
-    rec, err = read_launch_record(unit_dir)
-    if err or not rec:
-        return None
-    rc, head, _ = _git(runner, rec["repo"], "rev-parse", "HEAD")
-    return head if rc == 0 else None
+    _produced, head, _why = judge_detail(runner, unit_dir, spec)
+    return head
 
 
 def basis(runner, unit_dir, spec):
