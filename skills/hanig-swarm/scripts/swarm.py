@@ -642,6 +642,45 @@ def validate_plan(plan):
                 f"produced commit, which only a code unit has. A slurm or "
                 f"pipeline unit is judged by its declared outputs.")
 
+    # --- an output must land where the predicate will look -----------------
+    #
+    # THE most load-bearing constraint in the model, and it was learned from a
+    # runtime INCOMPLETE receipt after a full dispatch cycle. The done
+    # predicate looks inside the attempt's exclusive write root and nowhere
+    # else, so an output declared as an absolute path somewhere else is
+    # unfindable by construction: the work can succeed completely and the unit
+    # can never close.
+    #
+    # Refused here because it is knowable here, and because a whole
+    # dispatch-and-diagnose cycle is an expensive way to learn a path is
+    # wrong.
+    for u in units:
+        if not isinstance(u, dict):
+            continue
+        for out in (u.get("outputs") or []):
+            text = str(out).strip()
+            if not text:
+                raise PlanError(
+                    f"unit {u.get('id','?')!r} declares an empty output. Name "
+                    f"the artifact, relative to the attempt's write root.")
+            if os.path.isabs(text):
+                raise PlanError(
+                    f"unit {u.get('id','?')!r} declares the output {text!r} as "
+                    f"an ABSOLUTE path. Declared outputs are looked for inside "
+                    f"the attempt's exclusive write root and nowhere else, so "
+                    f"this one can never be found and the unit can never "
+                    f"close, however well the work goes. Declare it relative "
+                    f"to the write root; use $SWARM_UNIT_DIR in the command if "
+                    f"the tool needs an absolute path. To publish somewhere "
+                    f"shared, declare 'promote_to' instead.")
+            if text.startswith("..") or "/../" in text:
+                raise PlanError(
+                    f"unit {u.get('id','?')!r} declares the output {text!r}, "
+                    f"which climbs out of the attempt's write root. The write "
+                    f"root is exclusive so that finding an artifact there is "
+                    f"conclusive; an output above it is neither exclusive nor "
+                    f"findable.")
+
     # --- the runtime a unit will actually execute in -----------------------
     #
     # Nothing validated this, and it is the likeliest reason a scientific unit
@@ -826,6 +865,31 @@ def validate_plan(plan):
                             f"have an exclusive write root, which is what makes "
                             f"the done-predicate conclusive. Give them disjoint "
                             f"scopes, or order them with 'needs'.")
+    # --- a slurm command is the WORK, not a submission --------------------
+    #
+    # `sbatch --wrap='...'` as a unit command: the coordinator wrapped it in
+    # its own sbatch, the outer job submitted an inner job it was not bound
+    # to, and exited in 00:00:00. Slurm reported COMPLETED, ExitCode 0:0. Only
+    # the missing declared output caught it, one dispatch cycle later.
+    #
+    # This is the exact confusion the whole system exists to prevent -- a
+    # scheduler reporting success for work that never ran -- so it is refused
+    # at the one place it is cheap to refuse.
+    for u in units:
+        if not isinstance(u, dict) or u.get("kind") != "slurm":
+            continue
+        cmd = str(u.get("command") or "").strip()
+        first = (cmd.split() or [""])[0]
+        if os.path.basename(first) in ("sbatch", "srun", "salloc"):
+            raise PlanError(
+                f"unit {u.get('id','?')!r} has a command starting with "
+                f"{os.path.basename(first)!r}. The coordinator submits this "
+                f"command ITSELF, so a submission here nests one job inside "
+                f"another: the outer job exits in seconds having queued an "
+                f"inner job nothing is bound to, and Slurm reports COMPLETED "
+                f"with ExitCode 0:0 for work that never ran. Give the command "
+                f"that does the work, and put scheduler flags in 'sbatch'.")
+
     return {"units": len(units),
             "with_deps": sum(1 for u in units if u.get("needs")),
             # Which slurm units say nothing about where they run. The

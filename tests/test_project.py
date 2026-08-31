@@ -82,8 +82,25 @@ class TestSurveyIsBounded(unittest.TestCase):
             if isinstance(n, ast.Attribute) and n.attr in (
                     "write_text", "mkdir", "unlink", "rmtree", "write_bytes"):
                 writes.append(n.attr)
-        self.assertEqual(sorted(set(writes)), ["write_text"],
-                         "survey may only write the file it is given")
+        self.assertEqual(sorted(set(writes)), ["mkdir", "write_text"],
+                         "survey may only write the file it is given, and "
+                         "create that file's parent")
+
+    def test_the_only_directory_it_creates_is_its_output_s_parent(self):
+        """`mkdir` is allowed now because the skill's very first command is
+        `--out .swarm/survey.json` in a directory where .swarm does not exist
+        yet, and it raised FileNotFoundError. Creating the parent of the file
+        you were told to write is part of writing it. Creating anything ELSE
+        is the scattering this guard exists to stop."""
+        tree = ast.parse(SURVEY.read_text())
+        targets = []
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) \
+                    and n.func.attr == "mkdir":
+                targets.append(ast.unparse(n.func.value))
+        self.assertEqual(targets, ["out.parent"],
+                         "survey creates a directory that is not its "
+                         "output's parent: %s" % targets)
 
 
 class TestTicketsMapBothWays(unittest.TestCase):
@@ -806,7 +823,11 @@ class TestUninstallOnlyRemovesOurOwn(unittest.TestCase):
 
     def _install_into(self, prefix):
         import subprocess as sp
-        return sp.run(["sh", str(ROOT / "install.sh"), "--prefix", str(prefix)],
+        # --allow-org-shadow: this repo's own skills now exist in the Arc
+        # org store, so an install without it is refused. These tests are
+        # deliberately installing shadowing copies.
+        return sp.run(["sh", str(ROOT / "install.sh"), "--prefix", str(prefix),
+                       "--allow-org-shadow"],
                       capture_output=True, text=True, cwd=ROOT)
 
     def test_a_foreign_symlink_survives_uninstall(self):
@@ -818,8 +839,9 @@ class TestUninstallOnlyRemovesOurOwn(unittest.TestCase):
             prefix.mkdir()
             self._install_into(prefix)
             os.symlink(elsewhere / "their-skill", prefix / "their-skill")
-            r = sp.run(["sh", str(ROOT / "install.sh"), "--prefix", str(prefix),
-                        "--uninstall"], capture_output=True, text=True, cwd=ROOT)
+            r = sp.run(["sh", str(ROOT / "install.sh"), "--prefix",
+                        str(prefix), "--uninstall", "--allow-org-shadow"],
+                       capture_output=True, text=True, cwd=ROOT)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertTrue((prefix / "their-skill").exists(),
                             "uninstall removed a skill it did not install")
@@ -835,7 +857,8 @@ class TestUninstallOnlyRemovesOurOwn(unittest.TestCase):
             self._install_into(prefix)
             self.assertTrue((prefix / "hanig-swarm").is_dir())
             sp.run(["sh", str(ROOT / "install.sh"), "--prefix", str(prefix),
-                    "--uninstall"], capture_output=True, text=True, cwd=ROOT)
+                    "--uninstall", "--allow-org-shadow"],
+                   capture_output=True, text=True, cwd=ROOT)
             self.assertFalse((prefix / "hanig-swarm").exists())
 
     def test_install_does_not_clobber_a_foreign_symlink_either(self):
@@ -867,8 +890,12 @@ class TestInstallerSymlinkEdgeCases(unittest.TestCase):
 
     def _install(self, prefix, *extra):
         import subprocess as sp
+        # --allow-org-shadow: this repo's own skills now exist in the Arc org
+        # store, so a plain install is refused. These tests deliberately
+        # install shadowing copies into a temp prefix.
         return sp.run(["sh", str(ROOT / "install.sh"), "--prefix", str(prefix),
-                       *extra], capture_output=True, text=True, cwd=ROOT)
+                       "--allow-org-shadow", *extra],
+                      capture_output=True, text=True, cwd=ROOT)
 
     def test_foreign_links_of_every_shape_survive_uninstall(self):
         with tempfile.TemporaryDirectory() as d:

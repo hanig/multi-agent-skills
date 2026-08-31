@@ -24,6 +24,7 @@ PREFIX="${HOME}/.claude/skills"
 MODE=copy
 DRY=0
 FORCE=0
+ALLOW_ORG_SHADOW=0
 UNINSTALL=0
 ONLY=""
 MARKER=".installed-by-multi-agent-skills"
@@ -35,6 +36,7 @@ while [ $# -gt 0 ]; do
     --only)      ONLY="$ONLY $2"; shift 2 ;;
     --dry-run)   DRY=1; shift ;;
     --force)     FORCE=1; shift ;;
+    --allow-org-shadow) ALLOW_ORG_SHADOW=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     -h|--help)   sed -n '2,20p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
@@ -133,21 +135,50 @@ if [ -n "$problems" ]; then
 fi
 
 # --- collision check against an org-managed skill store ----------------------
-# Personal skills are prefixed hanig-* precisely so this never fires, but a
-# clash would shadow an Arc skill in a way that depends on loader precedence.
+# The comment here used to say "personal skills are prefixed hanig-* precisely
+# so this never fires". That premise was falsified on 2026-08-31: all five of
+# this repo's skills appeared in the Arc org store, in versions older than the
+# checkout, and the guard then refused every install with exit 1. The repo
+# became uninstallable, and the documented Quick Start printed an error.
+#
+# The guard is still right about the hazard. Which store wins is not
+# guaranteed, so installing a skill whose name already exists there can mean
+# the copy that loads is not the copy you just installed, silently.
+#
+# What it cannot do is tell "an unrelated Arc skill that happens to share a
+# name" from "a stale snapshot of the very thing I am installing". Both look
+# identical from here, and only the first is dangerous. So it stops being a
+# hard refusal and becomes a refusal WITH AN ACTION: shadowing is allowed, and
+# has to be asked for.
 
+shadowed=""
 for orgdir in "$HOME"/.claude-science/orgs/*/skills; do
   [ -d "$orgdir" ] || continue
   for src in "$REPO"/skills/*; do
     [ -d "$src" ] || continue
     name=$(basename "$src")
     if [ -e "$orgdir/$name" ]; then
-      echo "error: '$name' collides with an org-managed skill at $orgdir" >&2
-      echo "       rename it; precedence between stores is not guaranteed." >&2
-      exit 1
+      shadowed="$shadowed $name"
     fi
   done
 done
+
+if [ -n "$shadowed" ]; then
+  if [ "$ALLOW_ORG_SHADOW" -eq 1 ]; then
+    for name in $shadowed; do
+      echo "note: '$name' also exists in an org-managed store; installing ""anyway (--allow-org-shadow). Which copy loads is not guaranteed." >&2
+    done
+  else
+    echo "error: these skills also exist in an org-managed skill store:" >&2
+    for name in $shadowed; do echo "         $name" >&2; done
+    echo "       Which copy the loader picks is NOT guaranteed, so the one" >&2
+    echo "       that loads may not be the one you just installed." >&2
+    echo "       If those org copies are older snapshots of THIS repo, that" >&2
+    echo "       is expected and harmless: pass --allow-org-shadow." >&2
+    echo "       If they are unrelated Arc skills, rename ours instead." >&2
+    exit 1
+  fi
+fi
 
 # --- install ----------------------------------------------------------------
 

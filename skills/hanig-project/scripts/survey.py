@@ -469,7 +469,12 @@ def main():
     data = scrub(data)
 
     if args.out:
-        Path(args.out).write_text(json.dumps(data, indent=2, sort_keys=True))
+        # The skill's very FIRST command is `--out .swarm/survey.json`, and
+        # .swarm does not exist yet, so this raised FileNotFoundError before
+        # anything else could happen.
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(data, indent=2, sort_keys=True))
         print(f"wrote {args.out}")
         return 0
     if args.json:
