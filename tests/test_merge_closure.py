@@ -368,5 +368,62 @@ class TestTheTreeBelongsToThePinnedCommit(unittest.TestCase):
         self.assertNotIn("'HEAD^{tree}'", body)
         self.assertIn("head + '^{tree}'", body.replace('"', "'"))
 
+
+class TestRoundThreeFindings(unittest.TestCase):
+
+    def test_a_lookalike_path_prefix_is_not_the_host(self):
+        """https://evil.example/github.com/acme/app presented github.com as
+        its host when the host was read as parts[-3]."""
+        self.assertFalse(S._same_repo(
+            "https://evil.example/github.com/acme/app.git",
+            "https://github.com/acme/app.git"))
+
+    def test_the_genuine_host_still_matches_itself(self):
+        self.assertTrue(S._same_repo("https://github.com/acme/app.git",
+                                     "git@github.com:acme/app.git"))
+
+    def test_a_wrong_repository_receipt_does_not_mask_a_later_correct_one(self):
+        """Returning on the first mismatch parked the unit forever on one
+        attester slip."""
+        with tempfile.TemporaryDirectory() as d:
+            write(d,
+                  receipt(repo="git@evil.example:acme/app.git"),
+                  receipt(repo="https://github.com/acme/app.git"))
+            got, refusal = S.admit_merge(
+                d, "u1", HEAD, expect_repo="https://github.com/acme/app.git")
+            self.assertIsNone(refusal)
+            self.assertIsNotNone(got)
+
+    def test_only_wrong_repositories_reports_them_all(self):
+        with tempfile.TemporaryDirectory() as d:
+            write(d, receipt(repo="git@evil.example:acme/app.git"))
+            got, refusal = S.admit_merge(
+                d, "u1", HEAD, expect_repo="https://github.com/acme/app.git")
+            self.assertIsNone(got)
+            self.assertIn("does not block it", refusal)
+
+
+class TestTheProducedHeadIsRecordedNotRederived(unittest.TestCase):
+    """The root cause behind most findings in three rounds: the coordinator
+    kept asking a repository the agent owns what it had produced, and the
+    answer changed between askings."""
+
+    def test_advance_persists_the_produced_head(self):
+        import ast
+        src = (SCRIPTS / "swarm.py").read_text()
+        self.assertIn('us["produced_head"] = produced', src)
+
+    def test_a_recorded_head_is_preferred_over_rejudging(self):
+        import ast
+        src = (SCRIPTS / "swarm.py").read_text()
+        i = src.index("attempt = us.get(\"attempt_dir\") or \"\"")
+        seg = src[i:i + 900]
+        self.assertIn('us.get("produced_head")', seg)
+        j = seg.index('us.get("produced_head")')
+        k = seg.index("W.produced_head(")
+        self.assertLess(j, k,
+                        "the repository is re-judged before the recorded "
+                        "head is consulted, so a moved branch still wins")
+
 if __name__ == "__main__":
     unittest.main()

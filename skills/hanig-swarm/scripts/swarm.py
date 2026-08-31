@@ -1948,7 +1948,11 @@ def _same_repo(a, b):
         if len(parts) < 2:
             return None, s.lower()
         name = "/".join(parts[-2:]).lower()
-        host = parts[-3].lower() if len(parts) >= 3 else None
+        # The host is the FIRST segment, never parts[-3]. Counting back from
+        # the end let https://evil.example/github.com/acme/app present
+        # "github.com" as its host, which is precisely the lookalike this
+        # check exists to catch. A bare "owner/name" has no host at all.
+        host = parts[0].lower() if len(parts) > 2 else None
         return host, name
 
     ha, na = split(a)
@@ -1984,17 +1988,25 @@ def admit_merge(state_dir, unit, produced, expect_repo=None):
                       f"machine that can see the PR:\n  swarm.py merge "
                       f"--unit {unit} --pr URL --head {produced[:12]} "
                       f"--target BRANCH --merged-as SHA --method merge")
+    wrong_repo = []
     for r in mine:
         if str(r.get("head")) != str(produced):
             continue
         if expect_repo and not _same_repo(r.get("repo"), expect_repo):
-            return None, (
-                f"a merge receipt for {unit!r} pins the right head but names "
-                f"repository {r.get('repo')!r}, and this attempt was anchored "
-                f"to {expect_repo!r}. The attester is trusted to report what "
-                f"it saw, not to decide which repository this unit belongs "
-                f"to.")
+            # Collect and keep looking. Returning on the first mismatch let a
+            # single wrong-repository receipt mask every correct one appended
+            # after it, so one attester slip parked the unit forever.
+            wrong_repo.append(str(r.get("repo")))
+            continue
         return r, None
+    if wrong_repo:
+        return None, (
+            f"{len(wrong_repo)} merge receipt(s) for {unit!r} pin the right "
+            f"head but name repositor(y/ies) {', '.join(sorted(set(wrong_repo)))}, "
+            f"and this attempt was anchored to {expect_repo!r}. The attester "
+            f"is trusted to report what it saw, not to decide which "
+            f"repository this unit belongs to. Record a corrected receipt; "
+            f"the wrong one does not block it.")
     heads = ", ".join(sorted({str(r.get("head"))[:12] for r in mine}))
     return None, (
         f"{len(mine)} merge receipt(s) for {unit!r} pin head(s) {heads}, but "
@@ -2343,7 +2355,18 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             # it pins is the one this attempt produced, which is the single
             # check available to a coordinator with no network.
             attempt = us.get("attempt_dir") or ""
-            produced = W.produced_head(U.run, attempt, u)
+            # RECORD IT ONCE. Re-deriving the produced head on every advance
+            # asks a repository the agent owns what it produced, and the
+            # answer changes: validate A, park in READY_FOR_PR, let the agent
+            # move the branch to C, and a receipt for the genuinely produced A
+            # is then refused because the question was asked again. Every
+            # finding across three review rounds has been a version of this,
+            # so the fact is captured when it is true and read thereafter.
+            produced = us.get("produced_head")
+            if not produced:
+                produced = W.produced_head(U.run, attempt, u)
+                if produced:
+                    us["produced_head"] = produced
             anchor_rec, _ = W.read_launch_record(attempt) if attempt else (None,
                                                                            None)
             receipt, refusal = admit_merge(
