@@ -184,6 +184,23 @@ def judge(runner, unit_dir, spec):
                   f"from {str(base)[:12]}, with a clean tree at both ends")
 
 
+def produced_head(runner, unit_dir, spec):
+    """The commit this attempt produced, or None.
+
+    What a merge attestation gets PINNED to. Without it the attester names
+    whatever commit it likes and the coordinator has no way to object; with
+    it, an attestation about some other branch's work cannot close this unit.
+    """
+    produced, _why = judge(runner, unit_dir, spec)
+    if not produced:
+        return None
+    rec, err = read_launch_record(unit_dir)
+    if err or not rec:
+        return None
+    rc, head, _ = _git(runner, rec["repo"], "rev-parse", "HEAD")
+    return head if rc == 0 else None
+
+
 def basis(runner, unit_dir, spec):
     """What the receipt can say about the agent's repository.
 

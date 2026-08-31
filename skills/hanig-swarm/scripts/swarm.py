@@ -1825,6 +1825,133 @@ def acknowledgment_status(state_dir):
     return status, problems
 
 
+# --- merge attestation: how a code unit closes -----------------------------
+#
+# Closure authority for `code` is a merged PR, and the coordinator has no
+# network imports, so it cannot ask GitHub anything. The evidence therefore
+# arrives the way tracker acknowledgment does: a session that CAN reach the
+# network records what it observed.
+#
+# That would be worthless on its own, because an attester naming any commit
+# could close any unit. What makes it admissible is the BINDING: the head the
+# attestation pins must equal the head this coordinator independently judged
+# as produced, from an anchor written before the agent existed. The attester
+# can lie about whether a PR merged. It cannot make this unit's produced
+# commit be some other commit.
+MERGE_RECEIPTS = "merge-receipts.jsonl"
+
+# Every method changes the resulting commit differently, and an unrecorded
+# method means `merged_as` cannot be interpreted at all. Fail closed rather
+# than approximate head identity.
+MERGE_METHODS = ("merge", "squash", "rebase")
+
+_MERGE_REQUIRED = ("unit", "repo", "pr", "target", "head", "merged_as",
+                   "method")
+
+
+def _merge_shape_problem(rec):
+    if not isinstance(rec, dict):
+        return "not an object"
+    for field in _MERGE_REQUIRED:
+        if not str(rec.get(field) or "").strip():
+            return f"no {field}"
+    # NOT checked here: whether `merged` is true. A record saying a PR is
+    # still open is a legitimate observation somebody may want on file, and
+    # treating it as corruption would make the whole journal unreadable over
+    # a record that is merely uninteresting. Shape answers "can this be
+    # read"; admission answers "does this close the unit".
+    if rec.get("method") not in MERGE_METHODS:
+        return (f"method {rec.get('method')!r} is not one of "
+                f"{', '.join(MERGE_METHODS)}; an unrecognised method means "
+                f"`merged_as` cannot be interpreted")
+    return None
+
+
+def _read_merge_raw(state_dir):
+    p = Path(state_dir) / MERGE_RECEIPTS
+    try:
+        with open(p) as fh:
+            raw = fh.read()
+    except FileNotFoundError:
+        return [], []
+    except OSError as exc:
+        return [], [{"kind": "unreadable", "detail": f"cannot read {p}: {exc}"}]
+    lines = raw.splitlines()
+    complete_tail = raw.endswith("\n")
+    out, problems = [], []
+    for idx, line in enumerate(lines):
+        if not line.strip():
+            continue
+        last = idx == len(lines) - 1
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            if last and not complete_tail:
+                problems.append({"kind": "truncated_tail",
+                                 "detail": "the last merge receipt is a "
+                                           "half-written line; re-record it"})
+            else:
+                problems.append({"kind": "corrupt",
+                                 "detail": f"merge receipt line {idx + 1} was "
+                                           f"written in full and does not "
+                                           f"parse"})
+            continue
+        bad = _merge_shape_problem(rec)
+        if bad:
+            problems.append({"kind": "malformed",
+                             "detail": f"merge receipt line {idx + 1}: {bad}"})
+            continue
+        out.append(rec)
+    return out, problems
+
+
+def load_merge_receipts(state_dir):
+    """THE ONLY way to read merge receipts. Raises OutboxError.
+
+    Same chokepoint discipline as the acknowledgment journal, for the same
+    reason: detection in the reader and the decision to refuse in each caller
+    is how one bug appeared in four places.
+    """
+    recs, problems = _read_merge_raw(state_dir)
+    fatal = fatal_problems(problems)
+    if fatal:
+        raise OutboxError(
+            "the merge receipt journal cannot be read in full, so no closure "
+            "derived from it can be trusted:\n" +
+            "\n".join(f"  [{f['kind']}] {f['detail']}" for f in fatal))
+    return recs, problems
+
+
+def admit_merge(state_dir, unit, produced):
+    """(receipt, refusal). A merged-PR attestation, admitted or refused.
+
+    `produced` is the commit this coordinator judged the attempt to have
+    produced. An attestation that pins a different head is refused: that is
+    the whole binding, and without it any attester closes any unit.
+    """
+    if not produced:
+        return None, ("this attempt has no produced commit, so there is "
+                      "nothing a merge could be bound to. A unit reaches "
+                      "READY_FOR_PR only after producing one.")
+    recs, _problems = load_merge_receipts(state_dir)
+    mine = [r for r in recs if r.get("unit") == unit
+            and r.get("merged") is True]
+    if not mine:
+        return None, (f"no merge receipt for {unit!r}. Record one from a "
+                      f"machine that can see the PR:\n  swarm.py merge "
+                      f"--unit {unit} --pr URL --head {produced[:12]} "
+                      f"--target BRANCH --merged-as SHA --method merge")
+    for r in mine:
+        if str(r.get("head")) == str(produced):
+            return r, None
+    heads = ", ".join(sorted({str(r.get("head"))[:12] for r in mine}))
+    return None, (
+        f"{len(mine)} merge receipt(s) for {unit!r} pin head(s) {heads}, but "
+        f"this attempt produced {produced[:12]}. A merge of something else "
+        f"does not close this unit, and re-pointing the receipt would defeat "
+        f"the only check the coordinator can make without a network.")
+
+
 def read_outbox(state_dir):
     out = []
     p = Path(state_dir) / OUTBOX
@@ -2148,7 +2275,25 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         # waits. That is honest until stage 3 exists.
         if (us["state"] == "DONE"
                 and closing_evidence_for(u.get("kind")) != "predicate_receipt"):
-            us["state"] = "READY_FOR_PR"
+            # STAGE 3. A produced tree is not a closed unit: `code` is closed
+            # by a merged PR. The attestation is admitted only when the head
+            # it pins is the one this attempt produced, which is the single
+            # check available to a coordinator with no network.
+            produced = W.produced_head(U.run, us.get("attempt_dir") or "", u)
+            receipt, refusal = admit_merge(state_dir, uid, produced)
+            if receipt:
+                us["merged_as"] = receipt.get("merged_as")
+                us["merge_pr"] = receipt.get("pr")
+                report.append(
+                    f"{uid}: DONE on a merged PR ({receipt.get('pr')}, "
+                    f"{receipt.get('method')} as "
+                    f"{str(receipt.get('merged_as'))[:12]}). The merge itself "
+                    f"is attested, not verified; the head it pins was "
+                    f"produced by this attempt.")
+            else:
+                us["state"] = "READY_FOR_PR"
+                us["merge_refusal"] = refusal
+                report.append(f"{uid}: READY_FOR_PR. {refusal}")
         report.append(f"{uid}: {us['state']}")
 
         # INCOMPLETE could stay live forever, so a job that vanished was never
@@ -2744,6 +2889,38 @@ def cmd_promote(args):
     return EXIT_OK if ok else EXIT_FAILED_UNIT
 
 
+def cmd_merge(args):
+    """Record that a PR for this unit was observed merged.
+
+    Run from a machine that can see the PR. This is an ATTESTATION, like the
+    tracker acknowledgment: nothing here checked GitHub, and nothing can. What
+    the coordinator checks is that the head you pin is the head it judged this
+    attempt to have produced.
+    """
+    try:
+        load_merge_receipts(args.state_dir)     # refuse to extend a bad journal
+    except OutboxError as exc:
+        sys.stderr.write(f"  MERGE JOURNAL: {exc}\n")
+        return EXIT_CONFLICT
+
+    rec = {"unit": args.unit, "repo": args.repo or "", "pr": args.pr,
+           "target": args.target, "head": args.head,
+           "merged_as": args.merged_as, "method": args.method,
+           "merged": True, "attested": True,
+           "by": os.environ.get("USER") or "?",
+           "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "schema_version": 1}
+    bad = _merge_shape_problem(rec)
+    if bad:
+        sys.stderr.write(f"error: this would not be admissible: {bad}\n")
+        return EXIT_USAGE
+    _fsync_append(Path(args.state_dir) / MERGE_RECEIPTS, rec)
+    print(f"  recorded: {args.unit} merged as {args.merged_as[:12]} "
+          f"(head {args.head[:12]}, {args.method})")
+    print("  This is the attester's word. The coordinator will admit it only "
+          "if\n  that head is the one this attempt produced.")
+    return EXIT_OK
+
+
 def cmd_outbox(args):
     """Show tracker intents and whether each was acknowledged.
 
@@ -3040,6 +3217,25 @@ def main():
     pr.add_argument("--approver", default=None,
                     help="who accepted this result; recorded permanently")
     pr.set_defaults(fn=cmd_promote)
+
+    m = sub.add_parser("merge", help="record an observed merged PR for a "
+                                     "code unit")
+    m.add_argument("--state-dir", default=".swarm/state")
+    m.add_argument("--unit", required=True)
+    m.add_argument("--pr", required=True, help="the PR's URL or number")
+    m.add_argument("--head", required=True,
+                   help="the PR head commit. Must be the commit this attempt "
+                        "produced, or the receipt is refused.")
+    m.add_argument("--target", required=True, help="the branch it merged into")
+    m.add_argument("--merged-as", required=True,
+                   help="the resulting commit on the target")
+    m.add_argument("--method", required=True, choices=MERGE_METHODS)
+    # REQUIRED, because _merge_shape_problem requires it: an optional flag
+    # feeding a mandatory field is a command that can only fail, and only the
+    # smoke test found it. Every unit test passed a repo.
+    m.add_argument("--repo", required=True,
+                   help="the repository the PR is in")
+    m.set_defaults(fn=cmd_merge)
 
     o = sub.add_parser("outbox", help="tracker intents, and what landed")
     o.add_argument("--state-dir", default=".swarm/state")

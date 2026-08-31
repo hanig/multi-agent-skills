@@ -122,6 +122,8 @@ python3 scripts/swarm.py outbox            --state-dir .swarm [--all] [--json]
 python3 scripts/swarm.py outbox --state-dir .swarm \
         --record-receipt KEY --ref ARC-171     # after the tracker confirms
 python3 scripts/swarm.py promote  plan.json --unit ID --approve --approver hani
+python3 scripts/swarm.py merge    --state-dir .swarm --unit ID --repo o/r \
+        --pr URL --head SHA --target main --merged-as SHA --method merge
 
 python3 scripts/unit.py allocate --root ROOT --task ID --kind slurm \
                                  --command CMD --output PATH [--gpu-hours N]
@@ -237,9 +239,19 @@ means configurable wrong.
 
 | kind | what closes it |
 |---|---|
-| `code` | a merged PR |
+| `code` | a merged PR, attested and bound (below) |
 | `slurm` | a predicate receipt |
 | `pipeline` | a predicate receipt |
+
+**A `code` unit closes on a merged PR, and the merge is attested, not
+verified.** The coordinator has no network, so it cannot ask GitHub anything: a
+session that can see the PR records what it observed. That alone would let any
+attester close any unit, so the receipt is **bound**. The PR head it pins must
+equal the head the coordinator independently judged this attempt to have
+produced, from an anchor written before the agent existed. The attester can lie
+about whether a PR merged; it cannot make this unit's produced commit be a
+different commit. A merge method outside `merge`/`squash`/`rebase` fails closed,
+because an unrecorded method means `merged_as` cannot be interpreted.
 
 **Enforce only declared facts.** Never infer exposure from a partition name, a
 walltime, a `gpu_hours` figure, or a fan-out width. If the plan does not declare
