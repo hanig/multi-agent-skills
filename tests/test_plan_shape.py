@@ -103,7 +103,7 @@ class TestACodeUnitNeedsItsOwnBranch(unittest.TestCase):
 
     def _code(self, uid="c1", **over):
         u = {"id": uid, "kind": "code", "prompt": "do it",
-             "outputs": ["out.txt"], "repo": "/repo"}
+             "outputs": ["out.txt"], "repo": "/repo", "mode": "bypass"}
         u.update(over)
         return u
 
@@ -134,8 +134,13 @@ class TestACodeUnitNeedsItsOwnBranch(unittest.TestCase):
             self._code("c1", branch="work", repo="/a"),
             self._code("c2", branch="work", repo="/b")))
 
-    def test_a_code_unit_with_no_repo_is_unaffected(self):
-        S.validate_plan(self._plan(self._code(repo=None)))
+    def test_a_code_unit_with_no_repo_is_refused(self):
+        """It used to be SKIPPED, which made "no repo" a way to bypass the
+        branch rule and land in a state nothing can leave: a code unit closes
+        on a merged PR, and with no repository there is nowhere to open one."""
+        with self.assertRaises(S.PlanError) as c:
+            S.validate_plan(self._plan(self._code(repo=None)))
+        self.assertIn("never reach DONE", str(c.exception))
 
     def test_slurm_units_are_unaffected(self):
         S.validate_plan(plan())
@@ -180,7 +185,7 @@ class TestACodePromptIsAPrompt(unittest.TestCase):
     asked to read. Carefully-added paseo flags became instruction text."""
 
     def _plan(self, text, **over):
-        u = {"id": "c1", "kind": "code", "outputs": ["o"], "prompt": text}
+        u = {"id": "c1", "kind": "code", "repo": "/tmp/fixture-repo", "branch": "fx", "mode": "bypass", "outputs": ["o"], "prompt": text}
         u.update(over)
         return {"project": "p", "units": [u]}
 
@@ -226,7 +231,7 @@ class TestACodePromptIsAPrompt(unittest.TestCase):
         """`command` is the fallback the runner uses when prompt is absent."""
         with self.assertRaises(S.PlanError):
             S.validate_plan({"project": "p", "units": [
-                {"id": "c1", "kind": "code", "outputs": ["o"],
+                {"id": "c1", "kind": "code", "repo": "/tmp/fixture-repo", "branch": "fx", "mode": "bypass", "outputs": ["o"],
                  "command": "--provider claude go"}]})
 
     def test_a_slurm_unit_may_pass_flags_in_its_command(self):
@@ -301,7 +306,7 @@ class TestSerialisedUnitsMaySharaABranch(unittest.TestCase):
     unreliable."""
 
     def _c(self, uid, **over):
-        u = {"id": uid, "kind": "code", "prompt": "work",
+        u = {"id": uid, "kind": "code", "prompt": "work", "mode": "bypass",
              "outputs": ["o"], "repo": "/tmp/repo", "branch": "shared"}
         u.update(over)
         return u
@@ -336,7 +341,7 @@ class TestARepoIsAPathNotAString(unittest.TestCase):
 
     def _c(self, uid, repo):
         return {"id": uid, "kind": "code", "prompt": "work", "outputs": ["o"],
-                "repo": repo, "branch": "shared"}
+                "repo": repo, "branch": "shared", "mode": "bypass"}
 
     def test_equivalent_spellings_are_one_repository(self):
         with self.assertRaises(S.PlanError):
@@ -354,6 +359,52 @@ class TestARepoIsAPathNotAString(unittest.TestCase):
         S.validate_plan({"project": "p", "units": [
             self._c("u1", "/tmp/repo-a"),
             self._c("u2", "/tmp/repo-b")]})
+
+
+class TestRoundTwoFindings(unittest.TestCase):
+
+    def _code(self, **over):
+        u = {"id": "c1", "kind": "code", "prompt": "work", "outputs": ["o"],
+             "repo": "/tmp/r", "branch": "b", "mode": "bypass"}
+        u.update(over)
+        return {"project": "p", "units": [u]}
+
+    def test_a_code_unit_must_declare_a_mode(self):
+        """No default on purpose, which made its absence a decision nobody
+        made: unattended, the agent stops at its first write and the unit runs
+        forever doing nothing."""
+        u = self._code()
+        del u["units"][0]["mode"]
+        with self.assertRaises(S.PlanError) as c:
+            S.validate_plan(u)
+        msg = str(c.exception)
+        self.assertIn("runs forever doing nothing", msg)
+        self.assertIn("will not pick permissions on your behalf", msg)
+
+    def test_an_explicit_default_mode_is_accepted(self):
+        """Accepting the stall deliberately is a legitimate choice."""
+        S.validate_plan(self._code(mode="default"))
+
+    def test_a_string_null_thinking_is_refused(self):
+        """paseo answers an unknown id with an errored agent, so this would
+        fail at dispatch for every code unit in the DAG."""
+        for bad in ("null", "none", "None", "NIL", "false"):
+            with self.assertRaises(S.PlanError, msg=bad):
+                S.validate_plan(self._code(thinking=bad))
+
+    def test_json_null_and_empty_string_still_suppress_the_flag(self):
+        """These are the documented way to turn it off and must keep working:
+        the round-2 finding claimed they were broken, and they are not."""
+        for good in (None, ""):
+            S.validate_plan(self._code(thinking=good))
+        for value, expect_flag in ((None, False), ("", False),
+                                   ("high", True), ("low", True)):
+            u = {"thinking": value} if value is not None or True else {}
+            t = u.get("thinking", S.DEFAULT_AGENT_THINKING)
+            self.assertEqual(bool(t), expect_flag, repr(value))
+
+    def test_a_real_thinking_id_is_accepted(self):
+        S.validate_plan(self._code(thinking="high"))
 
 if __name__ == "__main__":
     unittest.main()

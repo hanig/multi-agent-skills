@@ -956,14 +956,51 @@ def validate_plan(plan):
     # be built, dispatched and judged, and the unit can never reach DONE. That
     # is worth refusing at the one point it is cheap.
     by_repo = {}
-    _code_by_id = {u.get("id"): u for u in units
-                   if isinstance(u, dict) and u.get("kind") == "code"}
     for u in units:
         if not isinstance(u, dict) or u.get("kind") != "code":
             continue
-        if not u.get("repo"):
-            continue
         uid = u.get("id", "?")
+
+        # A code unit is closed by a MERGED PR, so one with no repository has
+        # nowhere to open a PR from and cannot reach DONE by any route. The
+        # check used to skip these, which made "no repo" a way to bypass the
+        # branch rule and land in a state nothing can leave.
+        if not u.get("repo"):
+            raise PlanError(
+                f"unit {uid!r} is kind=code and declares no 'repo'. A code "
+                f"unit is closed by a merged pull request, so with no "
+                f"repository there is nothing to open one from and the unit "
+                f"can never reach DONE. Declare the repository it changes, or "
+                f"make it kind=pipeline if it is not changing code.")
+
+        # `mode` has NO default on purpose, and that makes its absence a
+        # decision nobody made. An agent under default permissions stops at
+        # its first write and waits for a person: unattended, that is a unit
+        # that runs forever doing nothing, which is the exact symptom this
+        # costs a session to diagnose. The coordinator must not choose for the
+        # human, so it insists the human chose.
+        if "mode" not in u:
+            raise PlanError(
+                f"unit {uid!r} is kind=code and declares no 'mode'. An agent "
+                f"under default permissions stops at its first write and "
+                f"waits for a person, so unattended it runs forever doing "
+                f"nothing. The coordinator will not pick permissions on your "
+                f"behalf: say what this unit needs, e.g. \"mode\": "
+                f"\"bypass\" for unattended work, or \"mode\": \"default\" "
+                f"to accept the stall deliberately.")
+
+        # "null" and "none" as STRINGS are a JSON slip, not a value. paseo
+        # answers an unknown thinking id with an errored agent, so this would
+        # fail at dispatch for every code unit in the DAG. JSON null and ""
+        # already suppress the flag correctly; these do not.
+        think = u.get("thinking")
+        if isinstance(think, str) and think.strip().lower() in (
+                "null", "none", "nil", "false"):
+            raise PlanError(
+                f"unit {uid!r} has thinking={think!r} as a STRING. paseo would "
+                f"receive that as a thinking id, not find it, and return an "
+                f"errored agent. To suppress the flag write JSON null or an "
+                f"empty string; to set a level write the id, e.g. \"high\".")
         branch = str(u.get("branch") or "").strip()
         if not branch:
             raise PlanError(

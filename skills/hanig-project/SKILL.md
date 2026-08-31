@@ -121,7 +121,7 @@ contract lives in `command`. It does not.
 | `outputs` are | relative to the run-dir | relative to the run-dir | relative to the run-dir |
 | judged by | Slurm accounting + declared outputs | launcher exit + declared outputs | agent lifecycle + outputs + a produced commit |
 | closed by | a predicate receipt | a predicate receipt | a **merged PR** |
-| also needs | `--mem` if the survey says so | a fresh work and publish dir | `repo` and its own `branch` |
+| also needs | `--mem` if the survey says so | a fresh work and publish dir | `repo`, a `branch`, and an explicit `mode` |
 
 Three of those cost a full dispatch cycle each to learn, so they are worth
 reading twice:
@@ -145,8 +145,12 @@ it is a sentence the agent is asked to read. `provider`, `mode`, `model`,
 The default agent is **`codex/gpt-5.6-sol` at `thinking: high`**, the strongest
 one available locally. Override per unit with `provider`, `model` or
 `thinking`; set `thinking` to null for a provider that has no such option.
-`mode` has no default and must still be asked for, since permissions are the
-human's to grant.
+`mode` has no default and `validate` REFUSES a code unit without one, because
+an absent default is otherwise a decision nobody made: unattended, an agent on
+default permissions stops at its first write and the unit runs forever doing
+nothing. Say `"mode": "bypass"` for unattended work, or `"mode": "default"` to
+accept the stall deliberately. A code unit also cannot omit `repo`: it closes
+on a merged PR, so with no repository there is nowhere to open one from.
 
 `validate` refuses all three. Reaching one of those refusals means the plan was
 written from the wrong model of what a unit is, which is what this table is

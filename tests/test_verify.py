@@ -253,7 +253,7 @@ class TestAdmissionIsBound(unittest.TestCase):
 class TestTheRequirementIsDeclared(unittest.TestCase):
 
     def _plan(self, **over):
-        u = {"id": "u1", "kind": "code", "outputs": ["o"],
+        u = {"id": "u1", "kind": "code", "repo": "/tmp/fixture-repo", "branch": "fx", "mode": "bypass", "outputs": ["o"],
              "runtime": "none"}
         u.update(over)
         return {"project": "p", "units": [u]}
