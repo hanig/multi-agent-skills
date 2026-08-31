@@ -1934,13 +1934,35 @@ def _same_repo(a, b):
     `https://github.com/o/r` and `o/r` all match. Anything that cannot be
     reduced to owner/name compares literally rather than being waved through.
     """
-    def key(x):
+    def split(x):
         s = str(x or "").strip().rstrip("/")
         if s.endswith(".git"):
             s = s[:-4]
+        for scheme in ("https://", "http://", "ssh://", "git://"):
+            if s.lower().startswith(scheme):
+                s = s[len(scheme):]
+                break
+        if "@" in s.split("/")[0]:
+            s = s.split("@", 1)[1]
         parts = [p for p in s.replace(":", "/").split("/") if p]
-        return "/".join(parts[-2:]).lower() if len(parts) >= 2 else s.lower()
-    return bool(a) and bool(b) and key(a) == key(b)
+        if len(parts) < 2:
+            return None, s.lower()
+        name = "/".join(parts[-2:]).lower()
+        host = parts[-3].lower() if len(parts) >= 3 else None
+        return host, name
+
+    ha, na = split(a)
+    hb, nb = split(b)
+    if not a or not b or na != nb:
+        return False
+    # The HOST is part of a repository's identity. Reducing to owner/name
+    # alone let github.com/acme/app and evil.example:acme/app compare equal,
+    # so a PR in a lookalike repository could close a unit. Compared only
+    # when both sides carry one: a bare "owner/name" receipt is a legitimate
+    # shorthand, not a mismatch.
+    if ha and hb and ha != hb:
+        return False
+    return True
 
 
 def admit_merge(state_dir, unit, produced, expect_repo=None):
@@ -2307,7 +2329,14 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         # READY_FOR_PR, and a receipt recorded afterwards was never looked at
         # again, so the unit could never close no matter what the attester
         # did. Recording evidence after the fact is the NORMAL order here.
+        # CLOSED IS CLOSED. Adding READY_FOR_PR to this guard, to fix a unit
+        # that could never leave it, created the opposite defect: a unit that
+        # HAD closed on an admitted merge was re-judged on every advance, so
+        # the agent dirtying its repository afterwards drove a DONE unit back
+        # to READY_FOR_PR. Closure is not a property of the repository's
+        # current state; it is a fact about evidence already admitted.
         if (us["state"] in ("DONE", "READY_FOR_PR")
+                and not us.get("merged_as")
                 and closing_evidence_for(u.get("kind")) != "predicate_receipt"):
             # STAGE 3. A produced tree is not a closed unit: `code` is closed
             # by a merged PR. The attestation is admitted only when the head

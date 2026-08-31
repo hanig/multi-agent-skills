@@ -300,5 +300,73 @@ class TestTheBindingUsesTheJudgedHead(unittest.TestCase):
         src = inspect.getsource(W.judge_detail)
         self.assertIn("return True, head,", src)
 
+
+class TestRoundTwoFindings(unittest.TestCase):
+
+    def test_a_lookalike_host_is_refused(self):
+        """github.com/acme/app and evil.example:acme/app both reduce to
+        acme/app, so a PR in a lookalike repository could close a unit."""
+        self.assertFalse(S._same_repo("https://github.com/acme/app.git",
+                                      "git@evil.example:acme/app.git"))
+
+    def test_the_same_host_in_different_spellings_still_matches(self):
+        self.assertTrue(S._same_repo("https://github.com/acme/app.git",
+                                     "git@github.com:acme/app.git"))
+        self.assertTrue(S._same_repo("ssh://git@github.com/acme/app",
+                                     "https://github.com/acme/app"))
+
+    def test_a_bare_owner_name_is_shorthand_not_a_mismatch(self):
+        """Compared only when BOTH sides carry a host."""
+        self.assertTrue(S._same_repo("acme/app",
+                                     "https://github.com/acme/app.git"))
+
+    def test_a_different_owner_never_matches(self):
+        self.assertFalse(S._same_repo("https://github.com/other/app",
+                                      "https://github.com/acme/app"))
+
+
+class TestClosedIsClosed(unittest.TestCase):
+    """Adding READY_FOR_PR to the admission guard, to fix a unit that could
+    never leave it, created the opposite defect: a unit that HAD closed was
+    re-judged every advance, so the agent dirtying its repository afterwards
+    drove a DONE unit back to READY_FOR_PR."""
+
+    def test_an_admitted_merge_is_recorded_on_the_unit(self):
+        import ast
+        src = (SCRIPTS / "swarm.py").read_text()
+        self.assertIn('us["merged_as"] = receipt.get("merged_as")', src)
+
+    def test_the_guard_skips_a_unit_that_already_closed(self):
+        import ast
+        src = (SCRIPTS / "swarm.py").read_text()
+        tree = ast.parse(src)
+        guarded = False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.If):
+                continue
+            text = ast.unparse(node.test)
+            if "READY_FOR_PR" in text and "DONE" in text:
+                self.assertIn("merged_as", text,
+                              "a closed unit is re-judged, so its repository "
+                              "changing later can reopen it")
+                guarded = True
+        self.assertTrue(guarded, "the admission guard was not found")
+
+
+class TestTheTreeBelongsToThePinnedCommit(unittest.TestCase):
+    """Reading HEAD^{tree} was a second look at a moving target: the agent
+    could leave an empty descendant at HEAD for the first read and a
+    content-changing one for the second, so the tree that satisfied the check
+    belonged to a commit other than the one pinned."""
+
+    def test_the_tree_is_read_from_the_captured_head(self):
+        import ast
+        src = (SCRIPTS / "worktree.py").read_text()
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef) and n.name == "judge_detail")
+        body = ast.unparse(fn)
+        self.assertNotIn("'HEAD^{tree}'", body)
+        self.assertIn("head + '^{tree}'", body.replace('"', "'"))
+
 if __name__ == "__main__":
     unittest.main()

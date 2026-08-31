@@ -175,7 +175,12 @@ def judge_detail(runner, unit_dir, spec):
             f"{str(base)[:12]}. The history was replaced rather than extended, "
             f"so what is there now was not built on what we anchored")
 
-    rc, tree, _ = _git(runner, repo, "rev-parse", "HEAD^{tree}")
+    # The tree of the CAPTURED head, not of HEAD. Reading `HEAD^{tree}` was a
+    # second look at a moving target: the agent could leave an empty
+    # descendant at HEAD for the first read and a content-changing one for
+    # this, so the tree that satisfied the check belonged to a commit other
+    # than the one returned and pinned.
+    rc, tree, _ = _git(runner, repo, "rev-parse", head + "^{tree}")
     if rc != 0:
         return False, None, f"cannot read HEAD's tree in {repo!r}"
     if tree == rec.get("base_tree"):
