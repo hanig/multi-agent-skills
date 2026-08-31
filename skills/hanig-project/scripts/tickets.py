@@ -129,7 +129,15 @@ def draft(plan, brief=None, existing=None, autopilot=False):
     out = {
         "schema_version": SCHEMA,
         "project": {
-            "name": plan.get("name") or "unnamed-swarm-project",
+            # A HUMAN title, separate from the identifier. `plan.name` is an
+            # identifier-shaped slug used for state paths and issue bodies, and
+            # using it as the Linear project title forced renaming the plan to
+            # get a readable title, which changes the identifier as a side
+            # effect. The brief carries the title; the slug stays the slug.
+            "name": ((brief or {}).get("name")
+                     or (brief or {}).get("title")
+                     or plan.get("name") or "unnamed-swarm-project"),
+            "slug": plan.get("name") or "unnamed-swarm-project",
             "summary": (brief or {}).get("summary")
                        or f"Swarm project with {len(units)} units.",
             "description": (brief or {}).get("description") or "",
@@ -239,6 +247,9 @@ def cmd_draft(args):
     if err:
         sys.exit(f"error: no readable plan at {args.plan}: {err}")
     brief, _ = read_json(args.brief) if args.brief else (None, None)
+    if args.name:
+        brief = dict(brief or {})
+        brief["name"] = args.name
     if args.team:
         brief = dict(brief or {})
         brief["team"] = args.team
@@ -333,7 +344,13 @@ def main():
                    help=f"tracker team to file under (default: "
                         f"{DEFAULT_TEAM})")
     d.add_argument("--brief", default=None,
-                   help="JSON with summary/description/team for the project")
+                   help="JSON with name/summary/description/team for the "
+                        "project. `name` is the HUMAN title; the plan's own "
+                        "name stays the identifier.")
+    d.add_argument("--name", default=None,
+                   help="the project's human title, e.g. 'scBaseCount shard "
+                        "QC'. Without it the plan's identifier-shaped name is "
+                        "used, which reads badly in a tracker.")
     d.add_argument("--out", default=None)
     d.set_defaults(fn=cmd_draft)
     a = sub.add_parser("approve", help="record a human's approval of a draft")

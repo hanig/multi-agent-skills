@@ -890,6 +890,47 @@ def validate_plan(plan):
                 f"with ExitCode 0:0 for work that never ran. Give the command "
                 f"that does the work, and put scheduler flags in 'sbatch'.")
 
+    # --- a code unit needs a branch of its own ---------------------------
+    #
+    # `write_scopes` names FILES, and it does isolate the attempt directory.
+    # It does not isolate a repository: agents share a checkout, so nine code
+    # units on one repo would run against one working tree, one branch and one
+    # index, and the scopes would say nothing about it.
+    #
+    # And a `code` unit closes on a MERGED PR. A unit with no branch has
+    # nothing to open a PR from, so it is structurally unclosable: the plan can
+    # be built, dispatched and judged, and the unit can never reach DONE. That
+    # is worth refusing at the one point it is cheap.
+    by_repo = {}
+    for u in units:
+        if not isinstance(u, dict) or u.get("kind") != "code":
+            continue
+        if not u.get("repo"):
+            continue
+        uid = u.get("id", "?")
+        branch = str(u.get("branch") or "").strip()
+        if not branch:
+            raise PlanError(
+                f"unit {uid!r} is kind=code on repo {u['repo']!r} and declares "
+                f"no 'branch'. A code unit is closed by a MERGED PULL REQUEST, "
+                f"so with no branch there is nothing to open one from and the "
+                f"unit can never close however good the work is. Agents also "
+                f"share a checkout: write scopes name files and isolate the "
+                f"attempt directory, not a working tree, so two units on one "
+                f"repo without distinct branches run against one index.")
+        by_repo.setdefault(str(u["repo"]), {}).setdefault(branch, []).append(uid)
+
+    for repo, branches in by_repo.items():
+        for branch, ids in branches.items():
+            if len(ids) > 1:
+                raise PlanError(
+                    f"units {', '.join(sorted(ids))} all target branch "
+                    f"{branch!r} of {repo!r}. One branch cannot carry two "
+                    f"units' work as separable changes: their commits "
+                    f"interleave, one PR merges both, and neither unit's "
+                    f"produced tree means what its receipt says. Give each "
+                    f"unit its own branch.")
+
     return {"units": len(units),
             "with_deps": sum(1 for u in units if u.get("needs")),
             # Which slurm units say nothing about where they run. The

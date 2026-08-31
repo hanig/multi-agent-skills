@@ -93,5 +93,85 @@ class TestASlurmCommandIsTheWork(unittest.TestCase):
         self.assertIn("'sbatch'", str(c.exception))
 
 
+
+class TestACodeUnitNeedsItsOwnBranch(unittest.TestCase):
+    """write_scopes names FILES and isolates the attempt directory. It does
+    not isolate a repository: agents share a checkout, so several code units on
+    one repo run against one working tree, one branch and one index. And a code
+    unit closes on a merged PR, so with no branch it is structurally
+    unclosable."""
+
+    def _code(self, uid="c1", **over):
+        u = {"id": uid, "kind": "code", "prompt": "do it",
+             "outputs": ["out.txt"], "repo": "/repo"}
+        u.update(over)
+        return u
+
+    def _plan(self, *units):
+        return {"project": "p", "units": list(units)}
+
+    def test_a_code_unit_with_a_repo_needs_a_branch(self):
+        with self.assertRaises(S.PlanError) as c:
+            S.validate_plan(self._plan(self._code()))
+        msg = str(c.exception)
+        self.assertIn("never close", msg)
+        self.assertIn("share a checkout", msg,
+                      "the refusal must say why scopes do not cover this")
+
+    def test_two_units_may_not_share_a_branch(self):
+        with self.assertRaises(S.PlanError) as c:
+            S.validate_plan(self._plan(
+                self._code("c1", branch="work"),
+                self._code("c2", branch="work")))
+        self.assertIn("interleave", str(c.exception))
+
+    def test_distinct_branches_are_accepted(self):
+        S.validate_plan(self._plan(self._code("c1", branch="c1-work"),
+                                   self._code("c2", branch="c2-work")))
+
+    def test_the_same_branch_in_different_repos_is_fine(self):
+        S.validate_plan(self._plan(
+            self._code("c1", branch="work", repo="/a"),
+            self._code("c2", branch="work", repo="/b")))
+
+    def test_a_code_unit_with_no_repo_is_unaffected(self):
+        S.validate_plan(self._plan(self._code(repo=None)))
+
+    def test_slurm_units_are_unaffected(self):
+        S.validate_plan(plan())
+
+
+class TestTheSurveyFlagsWhatMustNotBeOverwritten(unittest.TestCase):
+    """The skill is told to write PLAN.md. On the adopt path one may already
+    exist, and this repo's own is a 26 KB design document."""
+
+    def test_an_existing_plan_md_is_reported_as_protected(self):
+        import subprocess
+        import tempfile
+        import json as _json
+        survey = (ROOT / "skills" / "hanig-project" / "scripts" / "survey.py")
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "PLAN.md").write_text("someone's design document\n")
+            r = subprocess.run([sys.executable, str(survey), "--repo", d,
+                                "--json"], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            repo = _json.loads(r.stdout).get("repo") or {}
+            names = [x["path"] for x in (repo.get("protected_docs") or [])]
+            self.assertIn("PLAN.md", names)
+            self.assertIn("never replace a PLAN.md you did not create",
+                          repo.get("protected_docs_note", ""))
+
+    def test_an_empty_directory_reports_none(self):
+        import subprocess
+        import tempfile
+        import json as _json
+        survey = (ROOT / "skills" / "hanig-project" / "scripts" / "survey.py")
+        with tempfile.TemporaryDirectory() as d:
+            r = subprocess.run([sys.executable, str(survey), "--repo", d,
+                                "--json"], capture_output=True, text=True)
+            repo = _json.loads(r.stdout).get("repo") or {}
+            self.assertEqual(repo.get("protected_docs"), [])
+            self.assertNotIn("protected_docs_note", repo)
+
 if __name__ == "__main__":
     unittest.main()

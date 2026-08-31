@@ -78,7 +78,12 @@ waiting for a value nobody had been asked to give.
 
 So before you finish the interview, list every value the plan needs to
 dispatch, and check each one is settled: input paths and globs, output
-destinations, the account, the partition, any config file the command reads.
+destinations, the account, the partition, any config file the command reads,
+the **runtime** each unit executes in (resolution, entrypoint, probe command)
+and **how it gets verified** -- and if that is a canary, remember a canary
+must match its unit's partition AND account, so a plan spanning two partitions
+needs one canary per partition. `validate` enforces all of that, so leaving it
+to the interview's end means discovering it after the plan is written.
 If a value is still a placeholder, that is a QUESTION, not a detail to settle
 later. `swarm.py validate` refuses a plan whose declared inputs are empty,
 still placeholders, or match nothing, so this is enforced rather than
@@ -95,14 +100,43 @@ unit with `max_attempts > 1` must declare a `retry` contract or validation
 refuses it.
 
 `plan.json` for the coordinator. Every unit needs `id`, `kind`, `command`,
-and **`outputs`** -- a unit with no declared outputs can never be judged done,
-and `tickets.py` refuses to file an issue for one. Add `needs` for
-dependencies, `gpu_hours` for the budget, `write_scopes`, and this cluster's
-own `sbatch` flags (the survey told you the partitions and whether `--mem` is
-required).
+and **`outputs`**. Add `needs` for dependencies, `gpu_hours` for the budget,
+`write_scopes`, and this cluster's own `sbatch` flags (the survey told you the
+partitions and whether `--mem` is required).
+
+**Outputs are RELATIVE to the attempt's exclusive write root.** This is the
+single most load-bearing constraint in the model, and it is the one most
+easily got wrong: the done-predicate looks inside that root and NOWHERE else.
+An absolute path somewhere else is unfindable by construction, so the work can
+succeed completely and the unit can never close. Use `$SWARM_UNIT_DIR` in the
+command if a tool needs an absolute path, and `promote_to` to publish
+somewhere shared. `validate` refuses an absolute output, but reaching that
+refusal means the plan was written from the wrong mental model.
+
+**A `slurm` unit's `command` is the WORK, never a submission.** The
+coordinator submits it. `sbatch --wrap='...'` here nests one job inside
+another: the outer job queues an inner job nothing is bound to and exits in
+seconds, and Slurm reports COMPLETED with ExitCode 0:0 for work that never
+ran. Scheduler flags go in `sbatch`. `validate` refuses this too.
+
+**A `code` unit needs its own `branch`, and `write_scopes` will not save
+you.** Scopes name files and isolate the attempt directory; they do not
+isolate a repository. Agents share a checkout, so several code units on one
+repo run against one working tree, one branch and one index. And a code unit
+closes on a MERGED PULL REQUEST (step 6), so without a branch there is nothing
+to open one from and the unit is structurally unclosable: it will dispatch,
+run, be judged, and never reach DONE. `validate` refuses a code unit with a
+`repo` and no `branch`, and refuses two units sharing a branch.
 
 `PLAN.md` for humans: what is being built, what was decided in step 2 and by
 whom, and what is deliberately out of scope.
+
+**Never overwrite a PLAN.md you did not write.** On the adopt path a repo may
+already have one, and it may be a large design document. The survey reports
+`protected_docs` for exactly this: if `PLAN.md`, `MEMORY.md` or `README.md`
+already exist, write yours to `.swarm/PLAN.md` instead and say so. Destroying
+the document that explains the project you were asked to adopt is not a
+recoverable mistake.
 
 Then, always:
 
@@ -262,9 +296,12 @@ history. Then bring the human a DRAFT of what you think remains, phrased as
 units with outputs, and grill against that draft rather than from nothing. It
 is far easier to correct a wrong list than to produce one from a blank page.
 
-Two failure modes to avoid. Do not file an issue for work already done: check
-the survey and the outputs on disk first. And do not turn every TODO into a
+Three failure modes to avoid. Do not file an issue for work already done:
+check the survey and the outputs on disk first. Do not turn every TODO into a
 unit; a unit is something with a declared artifact, and a TODO usually is not.
+And do not write over the repo's own documents: step 3's "write PLAN.md" does
+NOT apply when one already exists. The survey's `protected_docs` names them;
+write to `.swarm/PLAN.md` instead.
 
 ## What this never does
 

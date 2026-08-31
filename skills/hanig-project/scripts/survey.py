@@ -412,6 +412,31 @@ def repo(root):
                 docs.append({"path": str(f.relative_to(root)), "bytes": size})
     out["documents"] = docs[:40]
 
+    # DO NOT OVERWRITE THESE. The skill is told to write PLAN.md and MEMORY.md,
+    # and on the adopt path a repo may already have them. This repo's own
+    # PLAN.md is a 66 KB design document; following the instruction literally
+    # would have destroyed it, and the adopt section said steps 1 and 2 change
+    # but "the rest does not", which endorsed exactly that.
+    #
+    # Reported as its own field rather than left inside `documents`, because a
+    # list of forty paths is something you skim and a list of things you are
+    # about to clobber is something you read.
+    protected = []
+    for name in ("PLAN.md", "MEMORY.md", "README.md", "plan.json",
+                 "tickets.json", "findings.json"):
+        f = root / name
+        try:
+            if f.is_file():
+                protected.append({"path": name, "bytes": f.stat().st_size})
+        except OSError:
+            continue
+    out["protected_docs"] = protected
+    if protected:
+        out["protected_docs_note"] = (
+            "these already exist and were NOT written by this run. Write the "
+            "plan to .swarm/ instead of overwriting them, and never replace a "
+            "PLAN.md you did not create.")
+
     # An existing swarm project here? A recursive ** glob is what hung the
     # first version on a cluster home, so look only where state actually
     # lives rather than everywhere it could.
