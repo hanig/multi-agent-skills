@@ -611,6 +611,24 @@ def validate_plan(plan):
     for u in units:
         if not isinstance(u, dict):
             continue
+        cont = u.get("continuation")
+        if cont is not None:
+            if not isinstance(cont, dict):
+                raise PlanError(
+                    f"unit {u.get('id','?')!r} has continuation={cont!r}; it "
+                    f"must be an object with a 'max'.")
+            mx = cont.get("max")
+            if not isinstance(mx, int) or isinstance(mx, bool) or mx < 1:
+                raise PlanError(
+                    f"unit {u.get('id','?')!r} has continuation.max={mx!r}; "
+                    f"it must be a whole number of at least 1. A bound that "
+                    f"is not a number is not a bound.")
+            if u.get("kind") != "code":
+                raise PlanError(
+                    f"unit {u.get('id','?')!r} is kind={u.get('kind')!r} and "
+                    f"declares 'continuation'. A continuation resumes a "
+                    f"conversational turn, which only a code agent has. A "
+                    f"Slurm job that exits is retried, not prodded.")
         for claim in (u.get("requires_verification") or []):
             if not str(claim).strip():
                 raise PlanError(
@@ -2102,6 +2120,73 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest):
                   f"not a pass for this one.")
 
 
+def _receipt_reason(attempt_dir):
+    """The machine-readable REASON a check came back INCOMPLETE."""
+    rp, _ = U.read_json(Path(attempt_dir) / "receipt.json")
+    for note in ((rp or {}).get("notes") or []):
+        if str(note).startswith("REASON="):
+            return str(note).split("=", 1)[1]
+    return ""
+
+
+def maybe_continue(state_dir, uid, u, us, report):
+    """Send a bounded continuation to a code agent that settled empty-handed.
+
+    NOT a unit state, NOT a retry mode, and there is deliberately no Slurm
+    analogue. A conversational turn is not a retry boundary: a planning-only
+    turn can settle while the session, worktree, launch identity, attempt root
+    and budget all remain valid, so minting a fresh attempt would discard the
+    context and spend a retry on what is really a provider liveness defect.
+
+    So this stays INSIDE the attempt: same attempt id, same write root, same
+    anchor. What it must never become is a correction loop. It answers exactly
+    one condition, "settled and produced nothing", and the bound is declared
+    in the plan rather than passed by whoever happens to run advance.
+
+    Returns True if a continuation was sent.
+    """
+    cfg = u.get("continuation") or {}
+    limit = cfg.get("max") or 0
+    if not limit:
+        return False
+    if u.get("kind") != "code":
+        return False
+    # ONLY this reason. A permission block is NEEDS_HUMAN and a person must
+    # answer it; a failure is FAILED and prodding it repeats the failure; a
+    # verifier rejection is a correction loop, which is a different thing
+    # wearing the same clothes.
+    if _receipt_reason(us.get("attempt_dir") or "") != U.REASON_NO_OUTPUTS:
+        return False
+    used = len(us.get("continuations") or [])
+    if used >= limit:
+        return False
+    agent = us.get("job_id")
+    if not agent:
+        return False
+
+    prompt = str(cfg.get("prompt") or
+                 "Your turn ended without producing the declared outputs. "
+                 "Continue the work you planned.")
+    rc, out, err = U.run(["paseo", "send", str(agent), prompt], timeout=120)
+    entry = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+             "n": used + 1, "of": limit,
+             "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest()[:16],
+             "sent": rc == 0}
+    if rc != 0:
+        entry["error"] = (err or out or "").strip()[:200]
+    us.setdefault("continuations", []).append(entry)
+    if rc != 0:
+        report.append(f"{uid}: continuation {used + 1}/{limit} could not be "
+                      f"sent: {entry['error']}")
+        return False
+    us["state"] = "RUNNING"
+    report.append(
+        f"{uid}: settled without producing; sent continuation "
+        f"{used + 1}/{limit} to agent {agent} in the SAME attempt. After "
+        f"{limit} the unit fails for missing production evidence.")
+    return True
+
+
 def _head_from_receipt(attempt_dir):
     """The head recorded when the attempt was JUDGED.
 
@@ -2583,7 +2668,18 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 for note in ((rp or {}).get("notes") or []):
                     if str(note).startswith("REASON="):
                         reason = str(note).split("=", 1)[1]
+                if (reason == U.REASON_NO_OUTPUTS
+                        and maybe_continue(state_dir, uid, u, us, report)):
+                    save_state(state_dir, state)
+                    continue
                 if reason == U.REASON_NO_OUTPUTS:
+                    used = len(us.get("continuations") or [])
+                    if used:
+                        report.append(
+                            f"{uid}: {used} continuation(s) sent and it still "
+                            f"produced nothing. The bound is the point: this "
+                            f"fails for missing production evidence rather "
+                            f"than being prodded again.")
                     us["state"] = "FAILED"
                     report.append(
                         f"{uid}: the job finished cleanly and its declared "

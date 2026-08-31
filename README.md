@@ -323,6 +323,7 @@ A plan is JSON with a `units` list. Fields the coordinator reads:
 | `promote_to` | where verified outputs are promoted after closure |
 | `runtime` | what this executes in, and what checks it (see below) |
 | `requires_verification` | claims an authorized verifier must establish before this closes |
+| `continuation` | `{"max": N}`: bounded nudges to a code agent that settled without producing |
 | `pool`, `gpu_hours`, `env` | declared resource facts |
 
 **`needs`, `inputs`, `outputs` and `sbatch` must be JSON lists.** A string is

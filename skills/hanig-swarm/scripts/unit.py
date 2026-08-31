@@ -1096,6 +1096,10 @@ def _code_state(unit_dir, spec, present, missing, notes):
         return "FAILED"
     if missing:
         # `idle` is lifecycle, not completion. This is the whole point.
+        # The machine-readable reason matters here: "settled and produced
+        # nothing" is the ONLY condition a continuation may answer, and
+        # grepping prose to find it out would be a stringly-typed contract.
+        notes.append(f"REASON={REASON_NO_OUTPUTS}")
         notes.append(f"agent {agent} is {status or 'idle'}, but {len(missing)} "
                      f"declared output(s) are absent: "
                      f"{', '.join(sorted(missing))}. An agent finishing its "
@@ -1115,6 +1119,7 @@ def _code_state(unit_dir, spec, present, missing, notes):
     head = (f"agent {agent} is {status or 'idle'} and all {len(present)} "
             f"declared output(s) are present")
     if produced is False:
+        notes.append(f"REASON={REASON_NO_OUTPUTS}")
         notes.append(f"{head}, but the repository shows no produced "
                      f"change: {why}")
         return "INCOMPLETE"
