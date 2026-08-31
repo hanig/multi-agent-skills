@@ -979,6 +979,24 @@ def validate_plan(plan):
         # that runs forever doing nothing, which is the exact symptom this
         # costs a session to diagnose. The coordinator must not choose for the
         # human, so it insists the human chose.
+        # Presence is not a value. `"mode": null` satisfied `"mode" in u` and
+        # then `if u.get("mode")` omitted the flag, so the unit dispatched on
+        # default permissions and stalled: the exact failure this rule exists
+        # to prevent, through the rule's own hole.
+        #
+        # The distinction that decides what validate should catch: mode fails
+        # SILENTLY, as an agent waiting forever, so it is worth refusing here.
+        # An unknown `thinking` id fails LOUDLY, as an errored agent and a
+        # FAILED unit, and validate cannot know a provider's valid set without
+        # introspecting it. Hard-coding one would refuse ids that become valid
+        # as the provider changes, which is the worse trade.
+        if "mode" in u and not str(u.get("mode") or "").strip():
+            raise PlanError(
+                f"unit {uid!r} declares mode={u.get('mode')!r}, which is not a "
+                f"value. An absent or empty mode omits the flag entirely, so "
+                f"the agent runs on DEFAULT permissions, stops at its first "
+                f"write and waits for a person. Write the mode you want, e.g. "
+                f"\"bypass\" or \"default\".")
         if "mode" not in u:
             raise PlanError(
                 f"unit {uid!r} is kind=code and declares no 'mode'. An agent "

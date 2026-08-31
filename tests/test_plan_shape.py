@@ -406,5 +406,23 @@ class TestRoundTwoFindings(unittest.TestCase):
     def test_a_real_thinking_id_is_accepted(self):
         S.validate_plan(self._code(thinking="high"))
 
+    def test_a_null_or_empty_mode_is_refused(self):
+        """Presence is not a value. `"mode": null` satisfied the presence
+        check and then omitted the flag, so the unit dispatched on default
+        permissions and stalled: the failure the rule exists to prevent,
+        through the rule's own hole."""
+        for bad in (None, "", "   "):
+            with self.assertRaises(S.PlanError, msg=repr(bad)) as c:
+                S.validate_plan(self._code(mode=bad))
+            self.assertIn("waits for a person", str(c.exception))
+
+    def test_an_unknown_thinking_id_is_deliberately_NOT_refused(self):
+        """It fails LOUDLY: paseo returns an errored agent and the unit goes
+        FAILED, which is visible. validate cannot know a provider's valid set
+        without introspecting it, and a hard-coded list would refuse ids that
+        become valid as the provider changes. Catch what fails silently; let
+        what fails loudly fail loudly."""
+        S.validate_plan(self._code(thinking="some-future-effort-level"))
+
 if __name__ == "__main__":
     unittest.main()
