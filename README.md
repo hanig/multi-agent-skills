@@ -124,6 +124,8 @@ python3 scripts/swarm.py outbox --state-dir .swarm \
 python3 scripts/swarm.py promote  plan.json --unit ID --approve --approver hani
 python3 scripts/swarm.py merge    --state-dir .swarm --unit ID --repo o/r \
         --pr URL --head SHA --target main --merged-as SHA --method merge
+python3 scripts/swarm.py verify   --unit ID --attempt DIR --claim tests-pass \
+        --verifier NAME --path ./check.sh
 
 python3 scripts/unit.py allocate --root ROOT --task ID --kind slurm \
                                  --command CMD --output PATH [--gpu-hours N]
@@ -253,6 +255,17 @@ about whether a PR merged; it cannot make this unit's produced commit be a
 different commit. A merge method outside `merge`/`squash`/`rebase` fails closed,
 because an unrecorded method means `merged_as` cannot be interpreted.
 
+**A verifier is admissible only if it is authorized, pinned and bound.** The
+policy naming it is read from the **anchored base commit**, never from the
+agent's branch, so a candidate change cannot authorize its own verifier. The
+policy records the verifier's content digest, and the bytes that run are the
+bytes that hashed, copied to a private temporary file: a path is not an
+identity. The receipt names the head it verified, the policy digest it ran
+under, and the claim it was authorized to make, so a pass for another commit or
+under different rules is refused. A unit gates on this only when it declares
+`requires_verification`, because a requirement everybody must satisfy is one
+everybody learns to satisfy trivially.
+
 **Enforce only declared facts.** Never infer exposure from a partition name, a
 walltime, a `gpu_hours` figure, or a fan-out width. If the plan does not declare
 it, the coordinator does not guess it.
@@ -309,6 +322,7 @@ A plan is JSON with a `units` list. Fields the coordinator reads:
 | `retry` | `{"mode": "restart"}`; `resume` is refused |
 | `promote_to` | where verified outputs are promoted after closure |
 | `runtime` | what this executes in, and what checks it (see below) |
+| `requires_verification` | claims an authorized verifier must establish before this closes |
 | `pool`, `gpu_hours`, `env` | declared resource facts |
 
 **`needs`, `inputs`, `outputs` and `sbatch` must be JSON lists.** A string is
