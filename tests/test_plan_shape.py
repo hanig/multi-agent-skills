@@ -173,5 +173,49 @@ class TestTheSurveyFlagsWhatMustNotBeOverwritten(unittest.TestCase):
             self.assertEqual(repo.get("protected_docs"), [])
             self.assertNotIn("protected_docs_note", repo)
 
+
+class TestACodePromptIsAPrompt(unittest.TestCase):
+    """The prompt is the LAST POSITIONAL argument to the agent runner, so a
+    flag written into it is not configuration: it is a sentence the agent is
+    asked to read. Carefully-added paseo flags became instruction text."""
+
+    def _plan(self, text, **over):
+        u = {"id": "c1", "kind": "code", "outputs": ["o"], "prompt": text}
+        u.update(over)
+        return {"project": "p", "units": [u]}
+
+    def test_a_provider_flag_in_the_prompt_is_refused(self):
+        with self.assertRaises(S.PlanError) as c:
+            S.validate_plan(self._plan("--provider claude fix the parser"))
+        msg = str(c.exception)
+        self.assertIn("a sentence the agent is asked to read", msg)
+        self.assertIn("as a field", msg)
+
+    def test_every_configuration_flag_is_caught(self):
+        for flag in ("--mode", "--model", "--env", "--cwd", "--title"):
+            with self.assertRaises(S.PlanError, msg=flag):
+                S.validate_plan(self._plan("%s x do the work" % flag))
+
+    def test_the_equals_spelling_is_caught(self):
+        with self.assertRaises(S.PlanError):
+            S.validate_plan(self._plan("--mode=bypass do the work"))
+
+    def test_an_ordinary_prompt_passes(self):
+        for good in ("fix the parser and add a test",
+                     "run make check then summarise failures",
+                     "use --verbose when invoking the tool"):
+            S.validate_plan(self._plan(good))
+
+    def test_the_command_field_is_checked_too(self):
+        """`command` is the fallback the runner uses when prompt is absent."""
+        with self.assertRaises(S.PlanError):
+            S.validate_plan({"project": "p", "units": [
+                {"id": "c1", "kind": "code", "outputs": ["o"],
+                 "command": "--provider claude go"}]})
+
+    def test_a_slurm_unit_may_pass_flags_in_its_command(self):
+        """Only code units hand their string to an agent."""
+        S.validate_plan(plan(command="python go.py --mode strict"))
+
 if __name__ == "__main__":
     unittest.main()

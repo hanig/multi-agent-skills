@@ -890,6 +890,35 @@ def validate_plan(plan):
                 f"with ExitCode 0:0 for work that never ran. Give the command "
                 f"that does the work, and put scheduler flags in 'sbatch'.")
 
+    # --- a code unit's prompt is a PROMPT, not a command line -------------
+    #
+    # `argv.append(u.get("prompt") or u.get("command"))` puts this string in
+    # the final positional slot of `paseo run`, so anything flag-shaped in it
+    # is handed to the AGENT as instruction text. Carefully-added paseo flags
+    # became a sentence the model was asked to read.
+    #
+    # The configuration lives in FIELDS: provider, mode, model, env. Nothing
+    # in the prompt reaches paseo, and nothing in paseo's flags reaches the
+    # prompt, and neither fact is visible from the plan file.
+    _AS_FIELDS = ("provider", "mode", "model", "env", "cwd", "title",
+                  "background", "json")
+    for u in units:
+        if not isinstance(u, dict) or u.get("kind") != "code":
+            continue
+        text = str(u.get("prompt") or u.get("command") or "")
+        for tok in text.split():
+            if not tok.startswith("--"):
+                continue
+            flag = tok[2:].split("=")[0].replace("-", "_")
+            if flag in _AS_FIELDS:
+                raise PlanError(
+                    f"unit {u.get('id','?')!r} is kind=code and its prompt "
+                    f"contains {tok!r}. A code unit's prompt is the LAST "
+                    f"positional argument to the agent runner, so a flag "
+                    f"written here is not configuration: it is a sentence the "
+                    f"agent is asked to read. Set {flag!r} as a field on the "
+                    f"unit instead, alongside 'prompt'.")
+
     # --- a code unit needs a branch of its own ---------------------------
     #
     # `write_scopes` names FILES, and it does isolate the attempt directory.

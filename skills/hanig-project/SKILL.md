@@ -79,11 +79,19 @@ waiting for a value nobody had been asked to give.
 So before you finish the interview, list every value the plan needs to
 dispatch, and check each one is settled: input paths and globs, output
 destinations, the account, the partition, any config file the command reads,
-the **runtime** each unit executes in (resolution, entrypoint, probe command)
-and **how it gets verified** -- and if that is a canary, remember a canary
+the agent's **`mode`** and **`provider`** for every code unit, the **runtime**
+each unit executes in (resolution, entrypoint, probe command) and **how it
+gets verified** -- and if that is a canary, remember a canary
 must match its unit's partition AND account, so a plan spanning two partitions
 needs one canary per partition. `validate` enforces all of that, so leaving it
 to the interview's end means discovering it after the plan is written.
+
+`mode` in particular has to be ASKED. An agent under default permissions stops
+at its first write and waits for a person, which is correct behaviour and fatal
+to an unattended DAG; a coordinator that silently bypassed permissions on the
+human's behalf would be a worse bug than a stalled unit. So the plan must say
+what it wants, and the human is the only one who can say it. Discovered any
+later, it presents as an agent that runs forever doing nothing.
 If a value is still a placeholder, that is a QUESTION, not a detail to settle
 later. `swarm.py validate` refuses a plan whose declared inputs are empty,
 still placeholders, or match nothing, so this is enforced rather than
@@ -99,34 +107,59 @@ reads nicely: see "How big should a unit be?" in `hanig-swarm/SKILL.md`. A
 unit with `max_attempts > 1` must declare a `retry` contract or validation
 refuses it.
 
+### The unit contract, by kind. Read this before writing a plan.
+
+Everything that goes wrong here comes from writing a plan as though the
+contract lives in `command`. It does not.
+
+| | `slurm` | `pipeline` | `code` |
+|---|---|---|---|
+| `command` is | the work itself | the engine invocation | **not used** |
+| the prompt goes in | n/a | n/a | `prompt`, and only there |
+| submitted by | the coordinator, so **never** `sbatch`/`srun` here | the coordinator | `paseo run` |
+| configured by | `sbatch` flags | `command` | fields: `provider`, `mode`, `model`, `env` |
+| `outputs` are | relative to the run-dir | relative to the run-dir | relative to the run-dir |
+| judged by | Slurm accounting + declared outputs | launcher exit + declared outputs | agent lifecycle + outputs + a produced commit |
+| closed by | a predicate receipt | a predicate receipt | a **merged PR** |
+| also needs | `--mem` if the survey says so | a fresh work and publish dir | `repo` and its own `branch` |
+
+Three of those cost a full dispatch cycle each to learn, so they are worth
+reading twice:
+
+**`outputs` are relative to the run-dir, for every kind.** The done-predicate
+looks inside the attempt's exclusive write root and NOWHERE else, so an
+absolute path elsewhere is unfindable by construction: the work can succeed
+completely and the unit can never close. Use `$SWARM_UNIT_DIR` if a tool needs
+an absolute path, and `promote_to` to publish somewhere shared.
+
+**A `slurm` command is the work.** `sbatch --wrap='...'` nests one job inside
+another: the outer job queues an inner job nothing is bound to and exits in
+00:00:00, and Slurm reports COMPLETED with ExitCode 0:0 for work that never
+ran. Scheduler flags go in `sbatch`.
+
+**A `code` unit's `prompt` is a prompt.** It becomes the last positional
+argument to the agent runner, so a flag written into it is not configuration,
+it is a sentence the agent is asked to read. `provider`, `mode`, `model` and
+`env` are fields on the unit.
+
+`validate` refuses all three. Reaching one of those refusals means the plan was
+written from the wrong model of what a unit is, which is what this table is
+for.
+
 `plan.json` for the coordinator. Every unit needs `id`, `kind`, `command`,
 and **`outputs`**. Add `needs` for dependencies, `gpu_hours` for the budget,
 `write_scopes`, and this cluster's own `sbatch` flags (the survey told you the
 partitions and whether `--mem` is required).
 
-**Outputs are RELATIVE to the attempt's exclusive write root.** This is the
-single most load-bearing constraint in the model, and it is the one most
-easily got wrong: the done-predicate looks inside that root and NOWHERE else.
-An absolute path somewhere else is unfindable by construction, so the work can
-succeed completely and the unit can never close. Use `$SWARM_UNIT_DIR` in the
-command if a tool needs an absolute path, and `promote_to` to publish
-somewhere shared. `validate` refuses an absolute output, but reaching that
-refusal means the plan was written from the wrong mental model.
-
-**A `slurm` unit's `command` is the WORK, never a submission.** The
-coordinator submits it. `sbatch --wrap='...'` here nests one job inside
-another: the outer job queues an inner job nothing is bound to and exits in
-seconds, and Slurm reports COMPLETED with ExitCode 0:0 for work that never
-ran. Scheduler flags go in `sbatch`. `validate` refuses this too.
-
-**A `code` unit needs its own `branch`, and `write_scopes` will not save
-you.** Scopes name files and isolate the attempt directory; they do not
-isolate a repository. Agents share a checkout, so several code units on one
-repo run against one working tree, one branch and one index. And a code unit
+**`write_scopes` does not isolate a code unit.** It reads like an isolation
+mechanism and it is not one: it names FILES, and the isolation is the attempt
+directory. Code units share the repository, so state it positively and pick
+one of two remedies: give each unit **its own branch**, or **serialise them**
+with `needs` so only one touches the checkout at a time. A code unit also
 closes on a MERGED PULL REQUEST (step 6), so without a branch there is nothing
 to open one from and the unit is structurally unclosable: it will dispatch,
 run, be judged, and never reach DONE. `validate` refuses a code unit with a
-`repo` and no `branch`, and refuses two units sharing a branch.
+`repo` and no `branch`, and refuses two units sharing one.
 
 `PLAN.md` for humans: what is being built, what was decided in step 2 and by
 whom, and what is deliberately out of scope.
