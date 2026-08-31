@@ -52,6 +52,21 @@ import verify as V  # noqa: E402
 STATE_FILE = "swarm-state.json"
 KINDS = U.KINDS
 
+# What a `code` unit runs unless it says otherwise.
+#
+# `codex/gpt-5.6-sol` at `high` is the strongest agent available here: `bus
+# models` puts it top of the local roster on measured intelligence, ahead of
+# claude/opus, and the pairing is the one already in use by hand. Provider,
+# model and thinking id were all read off live agents rather than guessed,
+# because paseo answers an unknown thinking id with an ERRORED agent, and a
+# default that fails at dispatch is worse than no default.
+#
+# A unit overrides any of it with `provider`, `model` or `thinking`. Setting
+# `thinking` to null or "" turns the flag off entirely for a provider that has
+# no such option.
+DEFAULT_AGENT_PROVIDER = "codex/gpt-5.6-sol"
+DEFAULT_AGENT_THINKING = "high"
+
 # unit.py's exit codes are the ONLY judgement this coordinator consumes.
 DONE, RUNNING, FAILED, PREEMPTED, INCOMPLETE, NEEDS_HUMAN = 0, 1, 2, 3, 4, 5
 NAME = {0: "DONE", 1: "RUNNING", 2: "FAILED", 3: "PREEMPTED",
@@ -1416,7 +1431,7 @@ def _submit(u, unit_dir, dry_run, state=None):
         # isolation premise, silently void for this one kind.
         argv = ["paseo", "run", "--background", "--json",
                 "--cwd", str(unit_dir),
-                "--provider", u.get("provider", "claude"),
+                "--provider", u.get("provider") or DEFAULT_AGENT_PROVIDER,
                 # The title carries the ATTEMPT id, mirroring the Slurm job
                 # name, so an agent created just before a crash can be found
                 # again and is never confused with a later attempt of the same
@@ -1431,6 +1446,14 @@ def _submit(u, unit_dir, dry_run, state=None):
             argv += ["--mode", str(u["mode"])]
         if u.get("model"):
             argv += ["--model", str(u["model"])]
+        # Reasoning effort. Declared per unit, else the project default. Passed
+        # for whatever provider is in use: an unknown thinking id makes paseo
+        # return an errored agent rather than quietly ignoring it, so a wrong
+        # value fails loudly at dispatch instead of silently downgrading the
+        # work.
+        thinking = u.get("thinking", DEFAULT_AGENT_THINKING)
+        if thinking:
+            argv += ["--thinking", str(thinking)]
         for kv in (u.get("env") or []):
             argv += ["--env", str(kv)]
         argv.append(u.get("prompt") or u.get("command") or u["id"])

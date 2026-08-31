@@ -117,7 +117,7 @@ contract lives in `command`. It does not.
 | `command` is | the work itself | the engine invocation | **not used** |
 | the prompt goes in | n/a | n/a | `prompt`, and only there |
 | submitted by | the coordinator, so **never** `sbatch`/`srun` here | the coordinator | `paseo run` |
-| configured by | `sbatch` flags | `command` | fields: `provider`, `mode`, `model`, `env` |
+| configured by | `sbatch` flags | `command` | fields: `provider`, `mode`, `model`, `thinking`, `env` |
 | `outputs` are | relative to the run-dir | relative to the run-dir | relative to the run-dir |
 | judged by | Slurm accounting + declared outputs | launcher exit + declared outputs | agent lifecycle + outputs + a produced commit |
 | closed by | a predicate receipt | a predicate receipt | a **merged PR** |
@@ -139,8 +139,14 @@ ran. Scheduler flags go in `sbatch`.
 
 **A `code` unit's `prompt` is a prompt.** It becomes the last positional
 argument to the agent runner, so a flag written into it is not configuration,
-it is a sentence the agent is asked to read. `provider`, `mode`, `model` and
-`env` are fields on the unit.
+it is a sentence the agent is asked to read. `provider`, `mode`, `model`,
+`thinking` and `env` are fields on the unit.
+
+The default agent is **`codex/gpt-5.6-sol` at `thinking: high`**, the strongest
+one available locally. Override per unit with `provider`, `model` or
+`thinking`; set `thinking` to null for a provider that has no such option.
+`mode` has no default and must still be asked for, since permissions are the
+human's to grant.
 
 `validate` refuses all three. Reaching one of those refusals means the plan was
 written from the wrong model of what a unit is, which is what this table is

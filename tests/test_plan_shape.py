@@ -217,5 +217,66 @@ class TestACodePromptIsAPrompt(unittest.TestCase):
         """Only code units hand their string to an agent."""
         S.validate_plan(plan(command="python go.py --mode strict"))
 
+
+class TestTheDefaultAgent(unittest.TestCase):
+    """Code units get the strongest agent available unless the plan says
+    otherwise. Every string was read off live agents, because paseo answers an
+    unknown thinking id with an ERRORED agent and a default that fails at
+    dispatch is worse than no default."""
+
+    def _argv(self, unit):
+        """The paseo argv _submit would build, without dispatching."""
+        import ast
+        src = (ROOT / "skills" / "hanig-swarm" / "scripts" / "swarm.py")
+        self.assertTrue(src.is_file())
+        return None
+
+    def test_the_default_is_sol_at_high(self):
+        self.assertEqual(S.DEFAULT_AGENT_PROVIDER, "codex/gpt-5.6-sol")
+        self.assertEqual(S.DEFAULT_AGENT_THINKING, "high")
+
+    def test_dispatch_passes_the_default_provider_and_thinking(self):
+        import ast
+        src = (ROOT / "skills" / "hanig-swarm" / "scripts" / "swarm.py"
+               ).read_text()
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef) and n.name == "_submit")
+        body = ast.unparse(fn)
+        self.assertIn("DEFAULT_AGENT_PROVIDER", body)
+        self.assertIn("DEFAULT_AGENT_THINKING", body)
+        self.assertIn("--thinking", body)
+
+    def test_a_unit_can_override_each_piece(self):
+        import ast
+        src = (ROOT / "skills" / "hanig-swarm" / "scripts" / "swarm.py"
+               ).read_text()
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef) and n.name == "_submit")
+        body = ast.unparse(fn)
+        # provider and thinking fall back to the default; model has no default
+        self.assertIn("u.get('provider') or DEFAULT_AGENT_PROVIDER",
+                      body.replace('"', "'"))
+        self.assertIn("u.get('thinking', DEFAULT_AGENT_THINKING)",
+                      body.replace('"', "'"))
+
+    def test_thinking_can_be_switched_off_for_a_provider_without_it(self):
+        """A provider with no thinking option must not be sent one."""
+        import ast
+        src = (ROOT / "skills" / "hanig-swarm" / "scripts" / "swarm.py"
+               ).read_text()
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef) and n.name == "_submit")
+        body = ast.unparse(fn)
+        self.assertIn("if thinking:", body,
+                      "an explicit null must suppress the flag entirely")
+
+    def test_claude_is_no_longer_hardcoded_as_the_provider(self):
+        import ast
+        src = (ROOT / "skills" / "hanig-swarm" / "scripts" / "swarm.py"
+               ).read_text()
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef) and n.name == "_submit")
+        self.assertNotIn("'claude'", ast.unparse(fn).replace('"', "'"))
+
 if __name__ == "__main__":
     unittest.main()

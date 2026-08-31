@@ -14,6 +14,27 @@ description: >-
 
 Step 1 of `docs/plan-swarm.md`: the unit contract.
 
+## The default agent
+
+A `code` unit runs `codex/gpt-5.6-sol` at `thinking: high` unless it says
+otherwise: the strongest agent on this machine by `bus models`' measured
+intelligence, ahead of `claude/opus`.
+
+```json
+{"id": "impl", "kind": "code", "repo": "/path", "branch": "impl-work",
+ "prompt": "...", "mode": "bypass"}
+```
+
+Override with `provider`, `model` or `thinking` on the unit. `thinking: null`
+suppresses the flag for a provider that has no such option.
+
+Every one of those strings was read off live agents rather than guessed,
+because paseo answers an unknown thinking id with an ERRORED agent: a default
+that fails at dispatch is worse than no default. `mode` deliberately has none,
+because an agent under default permissions stops at its first write and waits
+for a person, and a coordinator that bypassed that on the human's behalf would
+be a worse bug than a stalled unit.
+
 ## Declare the runtime; prove it where the job lands
 
 Every `slurm` and `pipeline` unit declares what it executes in. Not because a
@@ -178,7 +199,7 @@ reuse, `0:0` on a CANCELLED job not counting as success, `End` arriving as the
 literal `Unknown`, states containing spaces (`CANCELLED by 10025`), and a
 timezone bug that made one instant read as three epochs nine hours apart.
 
-## converge.py — did it converge, or just stop?
+## converge.py: did it converge, or just stop?
 
 `unit.py` answers existence and terminal state. For a training run that is not
 enough: a run that executes 40,000 steps, exits 0 and writes a checkpoint is
