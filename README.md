@@ -424,6 +424,24 @@ destination, aborts on a name collision with an org-managed skill, prunes skills
 that are no longer shipped, and refuses to replace a directory it did not
 install.
 
+### Paseo, per machine
+
+`code` units dispatch a coding agent through the Paseo CLI, so it has to be on
+PATH on the machine that runs them:
+
+```bash
+npm install -g @getpaseo/cli && paseo
+```
+
+`swarm.py validate` refuses a plan containing a `code` unit when `paseo` is
+absent, before anything is dispatched, rather than failing at `paseo run` with
+half a DAG already live.
+
+Install it where you actually run agents. A `code` unit runs a coding agent as
+a local process, so putting Paseo on a shared cluster login node means running
+those processes there, which is usually a sign the unit is on the wrong machine.
+`slurm` and `pipeline` units need none of this.
+
 **`--uninstall` deletes only what this repo installed**, determined by our own
 marker file or by a symlink whose target is inside this checkout. It is written
 that way because an earlier version inferred ownership from shape (`[ -L "$d" ]`,
