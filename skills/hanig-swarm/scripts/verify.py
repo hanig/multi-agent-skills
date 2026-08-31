@@ -19,6 +19,17 @@ none of it means anything:
   BOUND        the receipt names the production receipt and head it verified.
                A pass for some other commit is not a pass for this one.
 
+WHAT THIS DOES NOT ESTABLISH. The agent runs as the same Unix user as the
+coordinator, so it can write any file the coordinator can, including the
+launch record and the attempt receipts. No arrangement of files defends
+against that, and every "the agent could edit X" finding is true for every X
+this module might add. What is defended is an agent that fails to do the work
+and an operator who runs the wrong thing: authorization cannot be granted by a
+candidate branch, a named verifier cannot be swapped for other bytes, and a
+pass cannot be reused for another commit or under other rules. A HOSTILE agent
+is out of scope and would need a container or a separate Unix user, which is
+what the receipts have always said about isolation.
+
 Python 3.8+, standard library only.
 """
 import hashlib
@@ -158,8 +169,15 @@ def head_matches(runner, repo, expect_head):
             f"{str(expect_head)[:12]}. A verifier run against a different "
             f"commit says nothing about this one: check out the produced "
             f"commit before verifying.")
-    rc, status, _ = _git(runner, repo, "status", "--porcelain")
-    if rc == 0 and status.strip():
+    rc, status, err = _git(runner, repo, "status", "--porcelain")
+    if rc != 0:
+        # "could not look" is not "nothing there". Treating a failed status
+        # as clean let a modified working tree through whenever git happened
+        # to be unhappy.
+        return False, (f"cannot read git status in {repo!r} ({err[:100]}), so "
+                       f"whether the tree matches the commit being claimed "
+                       f"about is unknown")
+    if status.strip():
         return False, ("the working tree has uncommitted changes, so what "
                        "the verifier tests is not the commit being claimed "
                        "about")

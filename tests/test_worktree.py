@@ -266,13 +266,13 @@ class TestARetryDoesNotInheritTheLastAttemptsBaseline(Base):
         os.makedirs(att2)
         u = {"id": "u1", "repo": self.repo}
 
-        self.assertIsNone(S._write_launch_record(att1, u))
+        self.assertIsNone(S._write_launch_record(att1, u)[0])
         # att1 commits, then is interrupted.
         self.write("b.txt", "from att1\n")
         git(self.repo, "add", "-A")
         git(self.repo, "commit", "-qm", "att1 work")
         # att2 starts here and produces NOTHING.
-        self.assertIsNone(S._write_launch_record(att2, u))
+        self.assertIsNone(S._write_launch_record(att2, u)[0])
 
         produced, why = W.judge(U.run, att2, {"id": "u1", "kind": "code",
                                               "repo": self.repo})
@@ -338,7 +338,7 @@ class TestASwarmRunningInsideItsOwnRepo(Base):
         sys.path.insert(0, str(SCRIPTS))
         import swarm as S
         u = {"id": "u1", "repo": self.repo}
-        self.assertIsNone(S._write_launch_record(self.inside, u))
+        self.assertIsNone(S._write_launch_record(self.inside, u)[0])
         rec = json.load(open(Path(self.inside).parent
                              / ("launch-%s.json" % Path(self.inside).name)))
         self.assertTrue(rec["clean_at_launch"],

@@ -255,6 +255,14 @@ about whether a PR merged; it cannot make this unit's produced commit be a
 different commit. A merge method outside `merge`/`squash`/`rebase` fails closed,
 because an unrecorded method means `merged_as` cannot be interpreted.
 
+**What the verifier chain does not establish.** The agent runs as the same
+Unix user as the coordinator, so it can write any file the coordinator can,
+including the launch record and the attempt receipts. No arrangement of files
+defends against that. What is defended is an agent that fails to do the work
+and an operator who runs the wrong thing. A hostile agent would need a
+container or a separate Unix user, which is what the receipts have always said
+about isolation.
+
 **A verifier is admissible only if it is authorized, pinned and bound.** The
 policy naming it is read from the **anchored base commit**, never from the
 agent's branch, so a candidate change cannot authorize its own verifier. The

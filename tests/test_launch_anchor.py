@@ -50,8 +50,9 @@ class TestTheAnchorIsCapturedBeforeDispatch(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             repo = _repo(os.path.join(t, "r"))
             d = self._attempt(t)
-            self.assertIsNone(S._write_launch_record(d, {"id": "u1",
-                                                         "repo": repo}))
+            err, base = S._write_launch_record(d, {"id": "u1", "repo": repo})
+            self.assertIsNone(err)
+            self.assertTrue(base)
             rec = json.load(open(Path(d).parent / ("launch-%s.json" % Path(d).name)))
             self.assertTrue(rec["base_commit"])
             self.assertTrue(rec["base_tree"])
@@ -66,8 +67,9 @@ class TestTheAnchorIsCapturedBeforeDispatch(unittest.TestCase):
             with open(os.path.join(repo, "b.txt"), "w") as fh:
                 fh.write("x\n")
             d = self._attempt(t)
-            self.assertIsNone(S._write_launch_record(d, {"id": "u1",
-                                                         "repo": repo}))
+            err, base = S._write_launch_record(d, {"id": "u1", "repo": repo})
+            self.assertIsNone(err)
+            self.assertTrue(base)
             rec = json.load(open(Path(d).parent / ("launch-%s.json" % Path(d).name)))
             self.assertFalse(rec["clean_at_launch"])
             self.assertEqual(rec["dirty_paths_at_launch"], 1)
@@ -75,7 +77,9 @@ class TestTheAnchorIsCapturedBeforeDispatch(unittest.TestCase):
     def test_no_declared_repo_is_a_declaration_not_a_silence(self):
         with tempfile.TemporaryDirectory() as t:
             d = self._attempt(t)
-            self.assertIsNone(S._write_launch_record(d, {"id": "u1"}))
+            err, base = S._write_launch_record(d, {"id": "u1"})
+            self.assertIsNone(err)
+            self.assertIsNone(base)
             rec = json.load(open(Path(d).parent / ("launch-%s.json" % Path(d).name)))
             self.assertIsNone(rec["repo"])
             self.assertIn("no git transition", rec["note"])
@@ -85,21 +89,21 @@ class TestTheAnchorIsCapturedBeforeDispatch(unittest.TestCase):
             plain = os.path.join(t, "plain")
             os.makedirs(plain)
             d = self._attempt(t)
-            err = S._write_launch_record(d, {"id": "u1", "repo": plain})
+            err, _base = S._write_launch_record(d, {"id": "u1", "repo": plain})
             self.assertIn("not a git repository", err or "")
 
     def test_a_missing_directory_is_refused(self):
         with tempfile.TemporaryDirectory() as t:
             d = self._attempt(t)
-            err = S._write_launch_record(d, {"id": "u1",
-                                             "repo": os.path.join(t, "nope")})
+            err, _base = S._write_launch_record(
+                d, {"id": "u1", "repo": os.path.join(t, "nope")})
             self.assertIn("not a directory", err or "")
 
     def test_an_empty_repository_gives_nothing_to_transition_from(self):
         with tempfile.TemporaryDirectory() as t:
             repo = _repo(os.path.join(t, "r"), commit=False)
             d = self._attempt(t)
-            err = S._write_launch_record(d, {"id": "u1", "repo": repo})
+            err, _base = S._write_launch_record(d, {"id": "u1", "repo": repo})
             self.assertIn("nothing to transition FROM", err or "")
 
 

@@ -363,9 +363,90 @@ class TestTheBaseComesFromCoordinatorState(unittest.TestCase):
         self.assertIn("changed after it was written", src)
         self.assertIn("authorization policy from a base", src)
 
-    def test_advance_records_the_base_once(self):
+    def test_the_base_is_recorded_at_dispatch_not_copied_back(self):
+        """Copying the base out of the agent-writable launch record and then
+        storing it as trusted state launders the very value the trust was
+        meant to protect: state would agree with the record because it came
+        FROM the record."""
         src = (SCRIPTS / "swarm.py").read_text()
-        self.assertIn('us.setdefault("base_commit"', src)
+        self.assertIn('.setdefault("base_commit", anchored_base)', src)
+        self.assertNotIn('us.setdefault("base_commit", anchor_rec', src)
+
+    def test_the_writer_returns_the_base_it_observed(self):
+        import ast
+        src = (SCRIPTS / "swarm.py").read_text()
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == "_write_launch_record")
+        returns = [ast.unparse(n.value) for n in ast.walk(fn)
+                   if isinstance(n, ast.Return) and n.value is not None]
+        self.assertTrue(returns)
+        for r in returns:
+            self.assertIn(",", r,
+                          "every return must carry (error, base); a bare "
+                          "error leaves the caller with no base to record")
+
+
+class TestAdmissionRechecksTheVerifier(unittest.TestCase):
+    """Checking authorization only when the receipt was WRITTEN meant the
+    receipt's own claim about which verifier ran was then taken on trust."""
+
+    def _write(self, d, rec):
+        os.makedirs(d, exist_ok=True)
+        with open(Path(d) / S.VERIFY_RECEIPTS, "w") as fh:
+            fh.write(json.dumps(rec) + "\n")
+
+    def _rec(self, **over):
+        r = {"unit": "u1", "claim": "tests-pass", "verifier": "tests",
+             "verifier_sha256": "v" * 64, "policy_sha256": "p" * 64,
+             "subject_head": "a" * 40, "result": "pass"}
+        r.update(over)
+        return r
+
+    POLICY = {"verifiers": [{"name": "tests", "sha256": "v" * 64,
+                             "claims": ["tests-pass"]}]}
+
+    def test_a_receipt_naming_an_unauthorized_verifier_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, self._rec(verifier="mine", verifier_sha256="z" * 64))
+            got, refusal = S.admit_verification(
+                d, "u1", "tests-pass", "a" * 40, "p" * 64, policy=self.POLICY)
+            self.assertIsNone(got)
+            self.assertIn("not authorized by that policy", refusal)
+
+    def test_a_receipt_with_the_wrong_digest_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, self._rec(verifier_sha256="z" * 64))
+            got, refusal = S.admit_verification(
+                d, "u1", "tests-pass", "a" * 40, "p" * 64, policy=self.POLICY)
+            self.assertIsNone(got)
+            self.assertIn("not authorized", refusal)
+
+    def test_an_authorized_receipt_is_admitted(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, self._rec())
+            got, refusal = S.admit_verification(
+                d, "u1", "tests-pass", "a" * 40, "p" * 64, policy=self.POLICY)
+            self.assertIsNone(refusal)
+            self.assertIsNotNone(got)
+
+
+class TestTheBoundaryIsStated(unittest.TestCase):
+    """Four findings in one round were 'the agent can write that file'. That
+    is true of every file, so it is scoped rather than chased."""
+
+    def test_verify_states_what_it_does_not_establish(self):
+        doc = (SCRIPTS / "verify.py").read_text()
+        self.assertIn("WHAT THIS DOES NOT ESTABLISH", doc)
+        # The phrase wraps across a line in the module docstring, so
+        # normalise whitespace before matching prose.
+        self.assertIn("A HOSTILE agent is out of scope",
+                      " ".join(doc.split()))
+
+    def test_a_failed_status_is_not_a_clean_tree(self):
+        src = (SCRIPTS / "verify.py").read_text()
+        self.assertIn('"could not look" is not "nothing there"',
+                      src.replace("\n", " ").replace("    ", " "))
 
 if __name__ == "__main__":
     unittest.main()

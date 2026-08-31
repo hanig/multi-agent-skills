@@ -1311,9 +1311,17 @@ def _submit(u, unit_dir, dry_run, state=None):
         # a clean tree is clean precisely when nobody touched it. Anchoring to
         # the repository state observed here, before the agent exists, is what
         # makes a later transition mean something.
-        anchor_err = _write_launch_record(unit_dir, u)
+        anchor_err, anchored_base = _write_launch_record(unit_dir, u)
         if anchor_err:
             return None, anchor_err
+        if state is not None and anchored_base:
+            # Into COORDINATOR state, from the coordinator's OWN observation,
+            # at the moment it made it. This is the value `verify` checks the
+            # launch record against, so it must never be copied back out of
+            # that record later: state agreeing with a file because it was
+            # copied from that file is not corroboration.
+            ((state.setdefault("units", {}).setdefault(u["id"], {}))
+             .setdefault("base_commit", anchored_base))
 
         rc, out, err = U.run(argv, timeout=180)
         if rc != 0:
@@ -1375,14 +1383,16 @@ def _write_launch_record(unit_dir, u):
     else:
         repo = str(repo)
         if not os.path.isdir(repo):
-            return f"unit {u['id']!r} declares repo {repo!r}, which is not a directory"
+            return (f"unit {u['id']!r} declares repo {repo!r}, which is "
+                    f"not a directory"), None
         rc, top, _ = _git(repo, "rev-parse", "--show-toplevel")
         if rc != 0:
-            return f"unit {u['id']!r} declares repo {repo!r}, which is not a git repository"
+            return (f"unit {u['id']!r} declares repo {repo!r}, which is "
+                    f"not a git repository"), None
         rc, head, _ = _git(repo, "rev-parse", "HEAD")
         if rc != 0:
-            return (f"unit {u['id']!r}: {repo!r} has no HEAD to anchor to. An "
-                    f"empty repository gives nothing to transition FROM.")
+            return (f"unit {u['id']!r}: {repo!r} has no HEAD to anchor to. "
+                    f"An empty repository gives nothing to transition FROM."), None
         rc, tree, _ = _git(repo, "rev-parse", "HEAD^{tree}")
         rc2, branch, _ = _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
         # Exclude the coordinator's own state tree: allocate has already
@@ -1392,7 +1402,8 @@ def _write_launch_record(unit_dir, u):
         rc3, dirty = W.repo_status(U.run, repo,
                                    exclude=W.swarm_root_of(unit_dir))
         if rc3 != 0:
-            return f"unit {u['id']!r}: cannot read git status in {repo!r}"
+            return (f"unit {u['id']!r}: cannot read git status in "
+                    f"{repo!r}"), None
         # The remote, so a merge receipt naming a DIFFERENT repository can be
         # refused. The receipt says "owner/name"; the anchor knows what this
         # working copy actually pushes to.
@@ -1408,10 +1419,14 @@ def _write_launch_record(unit_dir, u):
             json.dump(rec, fh, indent=1, sort_keys=True)
             fh.write("\n")
     except FileExistsError:
-        return None                      # already anchored; do not re-anchor
+        # Already anchored. Read the base back from OUR OWN earlier write so
+        # the caller still gets it; the file is agent-writable, which is why
+        # the value is cross-checked in state rather than believed outright.
+        prior, _ = W.read_launch_record(unit_dir)
+        return None, (prior or {}).get("base_commit")
     except OSError as exc:
-        return f"cannot write the launch record for {u['id']!r}: {exc}"
-    return None
+        return f"cannot write the launch record for {u['id']!r}: {exc}", None
+    return None, rec.get("base_commit")
 
 
 def _bind(unit_dir, job_id):
@@ -2070,7 +2085,8 @@ def load_verifications(state_dir):
     return recs, problems
 
 
-def admit_verification(state_dir, unit, claim, produced, policy_digest):
+def admit_verification(state_dir, unit, claim, produced, policy_digest,
+                       policy=None):
     """(receipt, refusal) for one required claim.
 
     Four bindings, and all of them must hold. Any one missing turns the
@@ -2092,7 +2108,7 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest):
                       f"{claim!r}, which the unit declares it requires. Run "
                       f"it:\n  swarm.py verify --unit {unit} --claim {claim} "
                       f"--verifier NAME --path PATH")
-    stale, wrong_policy, failed = [], [], []
+    stale, wrong_policy, failed, unauthorized = [], [], [], []
     for r in mine:
         if str(r.get("subject_head")) != str(produced):
             stale.append(str(r.get("subject_head"))[:12])
@@ -2103,12 +2119,27 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest):
         if r.get("result") != "pass":
             failed.append(r)
             continue
+        # RE-CHECK the verifier against the policy, here, at admission.
+        # Checking it only when the receipt was written meant the receipt's
+        # own claim about which verifier ran was taken on trust: a record
+        # naming any verifier and any digest, with the right head and policy
+        # digest, was admitted without anything having run.
+        if policy is not None:
+            entry, refusal = V.authorized(policy, r.get("verifier"),
+                                          r.get("verifier_sha256"), claim)
+            if refusal:
+                unauthorized.append(refusal)
+                continue
         return r, None
     if failed:
         return None, (f"the verifier ran against the produced commit and "
                       f"returned FAIL for {claim!r}. That is a result, not a "
                       f"missing receipt: fix the work rather than re-running "
                       f"until it passes.")
+    if unauthorized:
+        return None, (f"a verification receipt for {unit!r} is bound to the "
+                      f"right head and policy, but the verifier it names is "
+                      f"not authorized by that policy: {unauthorized[0]}")
     if wrong_policy:
         return None, (f"verification for {unit!r} ran under policy "
                       f"{', '.join(sorted(set(wrong_policy)))}, but this "
@@ -2606,12 +2637,14 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 us["produced_head"] = produced
             anchor_rec, _ = W.read_launch_record(attempt) if attempt else (None,
                                                                            None)
-            # The base, into COORDINATOR state, the first time it is seen. The
-            # launch record sits where the agent's Unix user can write; this
-            # copy is what `verify` checks against, so moving the anchor after
-            # the fact is detected rather than obeyed.
-            if anchor_rec and anchor_rec.get("base_commit"):
-                us.setdefault("base_commit", anchor_rec["base_commit"])
+            # DELIBERATELY NOT copied from the launch record here. Reading
+            # the base out of an agent-writable file and then storing it as
+            # trusted state launders exactly the value the trust was meant to
+            # protect: state would agree with the record because it was copied
+            # FROM the record. The base is written into state at dispatch, by
+            # the coordinator, from its own observation of the repository. If
+            # it is absent here, the attempt predates that and cannot be
+            # verified, which `verify` reports rather than papering over.
 
             # A DECLARED verification requirement gates closure. Undeclared,
             # nothing changes: a unit that never asked for a verifier is not
@@ -2619,7 +2652,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             # satisfy is one everybody learns to satisfy trivially.
             vrefusal = None
             required = u.get("requires_verification") or []
-            policy_digest, perr = None, None
+            policy_digest, perr, _pol = None, None, None
             if required:
                 base = us.get("base_commit") or (
                     anchor_rec or {}).get("base_commit")
@@ -2640,7 +2673,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                                 f"{perr}")
                     break
                 _vr, vrefusal = admit_verification(
-                    state_dir, uid, claim, produced, policy_digest)
+                    state_dir, uid, claim, produced, policy_digest,
+                    policy=_pol)
                 if vrefusal:
                     break
 
