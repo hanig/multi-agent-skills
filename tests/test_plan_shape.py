@@ -192,9 +192,25 @@ class TestACodePromptIsAPrompt(unittest.TestCase):
         self.assertIn("as a field", msg)
 
     def test_every_configuration_flag_is_caught(self):
-        for flag in ("--mode", "--model", "--env", "--cwd", "--title"):
+        for flag in ("--mode", "--model", "--env", "--cwd", "--title",
+                     "--thinking"):
             with self.assertRaises(S.PlanError, msg=flag):
                 S.validate_plan(self._plan("%s x do the work" % flag))
+
+    def test_thinking_is_in_the_list(self):
+        """I added the `thinking` field and forgot the ban, so
+        `--thinking low` in a prompt was read aloud to the agent while it ran
+        at the default effort."""
+        with self.assertRaises(S.PlanError):
+            S.validate_plan(self._plan("--thinking low fix the parser"))
+
+    def test_a_flag_mid_sentence_is_the_subject_not_configuration(self):
+        """"Implement the application's --mode strict option" is an ordinary
+        request. Refusing it teaches people the validator is noise."""
+        for good in ("Implement the application's --mode strict option",
+                     "Document what --model does in our CLI",
+                     "fix the parser and mention --env in the README"):
+            S.validate_plan(self._plan(good))
 
     def test_the_equals_spelling_is_caught(self):
         with self.assertRaises(S.PlanError):
@@ -277,6 +293,67 @@ class TestTheDefaultAgent(unittest.TestCase):
         fn = next(n for n in ast.walk(ast.parse(src))
                   if isinstance(n, ast.FunctionDef) and n.name == "_submit")
         self.assertNotIn("'claude'", ast.unparse(fn).replace('"', "'"))
+
+
+class TestSerialisedUnitsMaySharaABranch(unittest.TestCase):
+    """The rule refused what the skill's own text recommends. A validator that
+    refuses its own advice is worse than none: it teaches people the advice is
+    unreliable."""
+
+    def _c(self, uid, **over):
+        u = {"id": uid, "kind": "code", "prompt": "work",
+             "outputs": ["o"], "repo": "/tmp/repo", "branch": "shared"}
+        u.update(over)
+        return u
+
+    def test_units_ordered_with_needs_may_share_a_branch(self):
+        S.validate_plan({"project": "p", "units": [
+            self._c("u1"), self._c("u2", needs=["u1"])]})
+
+    def test_a_transitive_order_also_counts(self):
+        S.validate_plan({"project": "p", "units": [
+            self._c("u1"),
+            self._c("mid", needs=["u1"]),
+            self._c("u2", needs=["mid"])]})
+
+    def test_concurrent_units_on_one_branch_are_still_refused(self):
+        with self.assertRaises(S.PlanError) as c:
+            S.validate_plan({"project": "p", "units": [
+                self._c("u1"), self._c("u2")]})
+        msg = str(c.exception)
+        self.assertIn("CONCURRENTLY", msg)
+        self.assertIn("order them with 'needs'", msg,
+                      "the refusal must offer the remedy the skill does")
+
+    def test_a_partial_order_is_not_enough(self):
+        """Three units, only two ordered: the third still runs alongside."""
+        with self.assertRaises(S.PlanError):
+            S.validate_plan({"project": "p", "units": [
+                self._c("u1"), self._c("u2", needs=["u1"]), self._c("u3")]})
+
+
+class TestARepoIsAPathNotAString(unittest.TestCase):
+
+    def _c(self, uid, repo):
+        return {"id": uid, "kind": "code", "prompt": "work", "outputs": ["o"],
+                "repo": repo, "branch": "shared"}
+
+    def test_equivalent_spellings_are_one_repository(self):
+        with self.assertRaises(S.PlanError):
+            S.validate_plan({"project": "p", "units": [
+                self._c("u1", "/tmp/repo"),
+                self._c("u2", "/tmp/repo/.")]})
+
+    def test_a_trailing_slash_does_not_evade_it(self):
+        with self.assertRaises(S.PlanError):
+            S.validate_plan({"project": "p", "units": [
+                self._c("u1", "/tmp/repo"),
+                self._c("u2", "/tmp/repo/")]})
+
+    def test_genuinely_different_repos_are_fine(self):
+        S.validate_plan({"project": "p", "units": [
+            self._c("u1", "/tmp/repo-a"),
+            self._c("u2", "/tmp/repo-b")]})
 
 if __name__ == "__main__":
     unittest.main()

@@ -165,7 +165,9 @@ with `needs` so only one touches the checkout at a time. A code unit also
 closes on a MERGED PULL REQUEST (step 6), so without a branch there is nothing
 to open one from and the unit is structurally unclosable: it will dispatch,
 run, be judged, and never reach DONE. `validate` refuses a code unit with a
-`repo` and no `branch`, and refuses two units sharing one.
+`repo` and no `branch`, and refuses two units sharing one branch
+CONCURRENTLY. Units ordered with `needs` may share a branch, because they
+commit one after another, which is what a branch is for.
 
 `PLAN.md` for humans: what is being built, what was decided in step 2 and by
 whom, and what is deliberately out of scope.

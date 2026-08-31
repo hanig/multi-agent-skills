@@ -915,24 +915,34 @@ def validate_plan(plan):
     # The configuration lives in FIELDS: provider, mode, model, env. Nothing
     # in the prompt reaches paseo, and nothing in paseo's flags reaches the
     # prompt, and neither fact is visible from the plan file.
-    _AS_FIELDS = ("provider", "mode", "model", "env", "cwd", "title",
-                  "background", "json")
+    # `thinking` belongs here and was missing: I added the field and forgot
+    # the ban, so `--thinking low` in a prompt was silently read aloud to the
+    # agent while it ran at the default effort.
+    _AS_FIELDS = ("provider", "mode", "model", "thinking", "env", "cwd",
+                  "title", "background", "json")
     for u in units:
         if not isinstance(u, dict) or u.get("kind") != "code":
             continue
         text = str(u.get("prompt") or u.get("command") or "")
-        for tok in text.split():
-            if not tok.startswith("--"):
-                continue
-            flag = tok[2:].split("=")[0].replace("-", "_")
-            if flag in _AS_FIELDS:
-                raise PlanError(
-                    f"unit {u.get('id','?')!r} is kind=code and its prompt "
-                    f"contains {tok!r}. A code unit's prompt is the LAST "
-                    f"positional argument to the agent runner, so a flag "
-                    f"written here is not configuration: it is a sentence the "
-                    f"agent is asked to read. Set {flag!r} as a field on the "
-                    f"unit instead, alongside 'prompt'.")
+        # ONLY AT THE START. Checking every token refused
+        # "Implement the application's --mode strict option", which is an
+        # ordinary thing to ask an agent to do and has nothing to do with
+        # paseo. The mistake this catches has a shape: flags pasted at the
+        # front, where a command line would have them. Mid-sentence, a flag is
+        # the subject of the request rather than an attempt to configure the
+        # runner, and refusing it teaches people the validator is noise.
+        head = text.split()[:1]
+        if not head or not head[0].startswith("--"):
+            continue
+        flag = head[0][2:].split("=")[0].replace("-", "_")
+        if flag in _AS_FIELDS:
+            raise PlanError(
+                f"unit {u.get('id','?')!r} is kind=code and its prompt BEGINS "
+                f"with {head[0]!r}. A code unit's prompt is the LAST "
+                f"positional argument to the agent runner, so a flag written "
+                f"here is not configuration: it is a sentence the agent is "
+                f"asked to read. Set {flag!r} as a field on the unit instead, "
+                f"alongside 'prompt'.")
 
     # --- a code unit needs a branch of its own ---------------------------
     #
@@ -946,6 +956,8 @@ def validate_plan(plan):
     # be built, dispatched and judged, and the unit can never reach DONE. That
     # is worth refusing at the one point it is cheap.
     by_repo = {}
+    _code_by_id = {u.get("id"): u for u in units
+                   if isinstance(u, dict) and u.get("kind") == "code"}
     for u in units:
         if not isinstance(u, dict) or u.get("kind") != "code":
             continue
@@ -962,18 +974,47 @@ def validate_plan(plan):
                 f"share a checkout: write scopes name files and isolate the "
                 f"attempt directory, not a working tree, so two units on one "
                 f"repo without distinct branches run against one index.")
-        by_repo.setdefault(str(u["repo"]), {}).setdefault(branch, []).append(uid)
+        # Keyed by the RESOLVED path. Two units naming /tmp/repo and
+        # /tmp/repo/. are one repository, and comparing the literal strings
+        # let them share a branch undetected.
+        key = os.path.normpath(os.path.realpath(str(u["repo"])))
+        by_repo.setdefault(key, {}).setdefault(branch, []).append(uid)
 
+    by_id = {u.get("id"): u for u in units if isinstance(u, dict)}
     for repo, branches in by_repo.items():
         for branch, ids in branches.items():
-            if len(ids) > 1:
-                raise PlanError(
-                    f"units {', '.join(sorted(ids))} all target branch "
-                    f"{branch!r} of {repo!r}. One branch cannot carry two "
-                    f"units' work as separable changes: their commits "
-                    f"interleave, one PR merges both, and neither unit's "
-                    f"produced tree means what its receipt says. Give each "
-                    f"unit its own branch.")
+            if len(ids) < 2:
+                continue
+            # SERIALISED UNITS MAY SHARE A BRANCH. The skill offers two
+            # remedies for code units sharing a checkout: give each its own
+            # branch, or order them with `needs` so only one touches it at a
+            # time. Refusing both made the documentation self-contradictory,
+            # and a validator that refuses its own advice is worse than no
+            # validator: it teaches people the advice is unreliable.
+            #
+            # What is actually forbidden is CONCURRENCY on one branch. Ordered
+            # units commit one after another, which is what a branch is for.
+            ordered = True
+            for a in ids:
+                for b in ids:
+                    if a == b:
+                        continue
+                    if (b not in _ancestors(a, by_id)
+                            and a not in _ancestors(b, by_id)):
+                        ordered = False
+                        break
+                if not ordered:
+                    break
+            if ordered:
+                continue
+            raise PlanError(
+                f"units {', '.join(sorted(ids))} target branch {branch!r} of "
+                f"{repo!r} CONCURRENTLY. One branch cannot carry two units' "
+                f"work at once as separable changes: their commits interleave, "
+                f"one PR merges both, and neither unit's produced tree means "
+                f"what its receipt says. Give each its own branch, or order "
+                f"them with 'needs' so only one touches the checkout at a "
+                f"time.")
 
     return {"units": len(units),
             "with_deps": sum(1 for u in units if u.get("needs")),
