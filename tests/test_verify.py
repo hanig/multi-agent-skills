@@ -352,7 +352,7 @@ class TestTheBaseComesFromCoordinatorState(unittest.TestCase):
 
     def test_verify_reads_the_base_from_state(self):
         src = (SCRIPTS / "swarm.py").read_text()
-        self.assertIn('.get("attempt_bases") or {}).get(Path(args.attempt)',
+        self.assertIn("recorded = trusted_base(state, args.unit, args.attempt)",
                       " ".join(src.split()))
 
     def test_a_disagreement_is_refused_not_reconciled(self):
@@ -506,6 +506,68 @@ class TestHeadCannotMoveDuringTheRun(Base):
         out, err = V.run_pinned(U.run, self.script, self.digest)
         self.assertIsNone(err)
         self.assertEqual(out["exit_code"], 0)
+
+
+class TestOneWayToGetTheBase(unittest.TestCase):
+    """Root cause after three rounds: every finding was a caller reaching for
+    the base wherever it was handy, and the handiest place is the file the
+    agent can write. One function, coordinator state only, no fallback."""
+
+    def test_it_reads_only_coordinator_state(self):
+        state = {"units": {"u1": {"attempt_bases": {"att1": "a" * 40}}}}
+        self.assertEqual(S.trusted_base(state, "u1", "/runs/u1/att1"),
+                         "a" * 40)
+
+    def test_an_unrecorded_attempt_has_no_base(self):
+        """'Cannot be verified' is an honest answer; inventing one is not."""
+        state = {"units": {"u1": {"attempt_bases": {"att1": "a" * 40}}}}
+        self.assertIsNone(S.trusted_base(state, "u1", "/runs/u1/att2"))
+        self.assertIsNone(S.trusted_base({}, "u1", "/runs/u1/att1"))
+        self.assertIsNone(S.trusted_base(state, "u1", ""))
+
+    def test_nothing_else_reads_a_base_out_of_a_launch_record(self):
+        import ast
+        src = (SCRIPTS / "swarm.py").read_text()
+        offenders = []
+        for node in ast.walk(ast.parse(src)):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            if node.name in ("trusted_base", "_write_launch_record"):
+                continue
+            body = ast.unparse(node)
+            # cmd_verify reads the record's base to COMPARE against state,
+            # which is corroboration rather than trust. What it must never do
+            # is fall back to it, so the ban is on the fallback spelling.
+            if "recorded or base" in body or "base_commit') or base" in body:
+                offenders.append(node.name)
+        self.assertEqual(offenders, [],
+                         "these fall back to the launch record's base when "
+                         "coordinator state has none, which is exactly the "
+                         "case an attacker arranges: %s" % sorted(offenders))
+
+    def test_every_caller_goes_through_it(self):
+        import ast
+        src = (SCRIPTS / "swarm.py").read_text()
+        readers = []
+        for node in ast.walk(ast.parse(src)):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            # _submit is the WRITER; it must index directly to write.
+            if node.name in ("trusted_base", "_submit"):
+                continue
+            body = ast.unparse(node)
+            if "attempt_bases" in body and "trusted_base(" not in body:
+                readers.append(node.name)
+        self.assertEqual(readers, [],
+                         "these index attempt_bases directly instead of "
+                         "calling trusted_base: %s" % sorted(readers))
+
+    def test_no_base_in_state_refuses_rather_than_falling_back(self):
+        src = " ".join((SCRIPTS / "swarm.py").read_text().split())
+        # Within ONE literal. The message is adjacent f-strings, so a phrase
+        # crossing the boundary has `" f"` in the middle of it. Fifth time.
+        self.assertIn("verify against a base taken from the launch", src)
+        self.assertNotIn("base = recorded or base", src)
 
 if __name__ == "__main__":
     unittest.main()

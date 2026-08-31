@@ -2228,6 +2228,26 @@ def maybe_continue(state_dir, uid, u, us, report):
     return True
 
 
+def trusted_base(state, unit, attempt_dir):
+    """THE ONLY way to obtain the base commit an attempt was anchored to.
+
+    Three rounds of review found the same defect in three places, each time
+    because some caller reached for the base wherever it was handy. The launch
+    record is the handiest place and the wrong one: it sits on a filesystem
+    the agent's Unix user can write, so reading it and then treating the value
+    as trusted launders exactly what the trust was for.
+
+    So there is one function, it reads ONLY coordinator state, and it has no
+    fallback. Returning None means "this attempt cannot be verified", which is
+    an honest answer; inventing a base from a file the agent can edit is not.
+    A test asserts nothing else reads base_commit out of a launch record.
+    """
+    if not attempt_dir:
+        return None
+    us = (state.get("units") or {}).get(unit) or {}
+    return (us.get("attempt_bases") or {}).get(Path(attempt_dir).name)
+
+
 def _head_from_receipt(attempt_dir):
     """The head recorded when the attempt was JUDGED.
 
@@ -2664,9 +2684,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             required = u.get("requires_verification") or []
             policy_digest, perr, _pol = None, None, None
             if required:
-                base = ((us.get("attempt_bases") or {})
-                        .get(Path(attempt).name)
-                        if attempt else None)
+                base = trusted_base(state, uid, attempt)
                 if anchor_rec and anchor_rec.get("repo"):
                     _pol, policy_digest, perr = V.read_policy(
                         U.run, anchor_rec["repo"], base)
@@ -3340,8 +3358,7 @@ def cmd_verify(args):
     # policy it wrote, and every check below is then checking its own work.
     # swarm-state.json is coordinator state, which the threat model trusts.
     state = load_state(args.state_dir) or {}
-    recorded = (((state.get("units") or {}).get(args.unit) or {})
-                .get("attempt_bases") or {}).get(Path(args.attempt).name)
+    recorded = trusted_base(state, args.unit, args.attempt)
     if recorded and base and recorded != base:
         sys.stderr.write(
             f"error: the launch record says base {str(base)[:12]} and "
@@ -3350,7 +3367,19 @@ def cmd_verify(args):
             f"authorization policy from a base this attempt did not "
             f"anchor.\n")
         return EXIT_USAGE
-    base = recorded or base
+    # NO FALLBACK. `recorded or base` quietly reinstated the whole defect:
+    # when coordinator state had nothing, the agent-writable record supplied
+    # the value, which is the case an attacker arranges. Found by the
+    # structural test written for this root cause, one commit after I claimed
+    # the laundering was gone.
+    if not recorded:
+        sys.stderr.write(
+            f"error: coordinator state records no anchored base for attempt "
+            f"{Path(args.attempt).name}, so there is no authorization source "
+            f"this agent could not have written. Re-dispatch the unit; do not "
+            f"verify against a base taken from the launch record.\n")
+        return EXIT_USAGE
+    base = recorded
     if not repo:
         sys.stderr.write("error: this attempt anchored no repository, so "
                          "there is no base to read a policy from.\n")
