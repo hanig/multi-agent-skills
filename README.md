@@ -37,8 +37,8 @@ claim one layer up.
 ```bash
 git clone git@github.com:hanig/multi-agent-skills.git
 cd multi-agent-skills
-./install.sh          # copies into ~/.claude/skills/
-./bin/doctor          # what is installed, from where, and does it still run
+./install.sh --allow-org-shadow   # copies into ~/.claude/skills/
+./bin/doctor                      # what is installed, and does it still run
 ```
 
 Then, on a cluster, in an empty directory or a half-finished repo:
@@ -411,8 +411,17 @@ across five Linear issues, each closed only on a predicate receipt.
 
 ```bash
 ./install.sh [--prefix DIR] [--mode copy|link] [--only NAME] [--dry-run]
-             [--force] [--uninstall]
+             [--force] [--uninstall] [--allow-org-shadow]
 ```
+
+**`--allow-org-shadow` is currently required on this machine.** All five of
+these skills also exist in the Arc org store, in versions older than this
+checkout, and installing a skill whose name is already there means the copy the
+loader picks may not be the one you just installed. The installer refuses by
+default and names the flag, because shadowing should be deliberate: pass it
+when the org copies are stale snapshots of this repo, and rename ours instead
+if they are ever unrelated Arc skills. Pulling does not help, since the org
+store is not fed from this repo.
 
 Copy is the default deliberately. A symlink into a live checkout breaks when the
 checkout sits under a synced folder, when a branch switch silently mutates every
