@@ -275,5 +275,97 @@ class TestTheRequirementIsDeclared(unittest.TestCase):
         S.validate_plan(self._plan())
 
 
+
+class TestRoundOneFindings(Base):
+    """All four attacked the authorization chain, which is where I asked
+    them to look."""
+
+    def test_replacement_refs_cannot_swap_the_anchored_policy(self):
+        """`git show A:f` follows refs/replace/A, and the agent can write
+        one. The anchor is only an anchor if the object it names cannot be
+        swapped underneath it."""
+        # A second commit carrying a policy the agent would prefer.
+        with open(os.path.join(self.repo, V.POLICY_FILE), "w") as fh:
+            json.dump({"schema_version": 1, "verifiers": [
+                {"name": "mine", "sha256": self.digest,
+                 "claims": ["tests-pass"]}]}, fh)
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "agent policy")
+        evil = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        git(self.repo, "replace", self.base, evil)
+
+        policy, _d, err = V.read_policy(U.run, self.repo, self.base)
+        self.assertIsNone(err, err)
+        names = [v["name"] for v in policy["verifiers"]]
+        self.assertNotIn("mine", names,
+                         "a replacement ref swapped the anchored policy")
+        self.assertIn("tests", names)
+
+    def test_a_string_claims_field_does_not_grant_substrings(self):
+        """`claim not in "tests-pass-and-more"` is a substring test."""
+        policy = {"verifiers": [{"name": "tests", "sha256": self.digest,
+                                 "claims": "tests-pass-and-more"}]}
+        entry, refusal = V.authorized(policy, "tests", self.digest,
+                                      "tests-pass")
+        self.assertIsNone(entry)
+        self.assertIn("not a list", refusal)
+
+    def test_the_verifier_must_run_at_the_produced_commit(self):
+        """Test failing commit A, move to passing commit B, verify from B,
+        and the receipt used to say A passed."""
+        head = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        ok, why = V.head_matches(U.run, self.repo, head)
+        self.assertTrue(ok, why)
+        ok, why = V.head_matches(U.run, self.repo, "b" * 40)
+        self.assertFalse(ok)
+        self.assertIn("says nothing about this one", why)
+
+    def test_a_dirty_tree_is_not_the_commit_being_claimed_about(self):
+        head = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        with open(os.path.join(self.repo, "scratch.txt"), "w") as fh:
+            fh.write("uncommitted\n")
+        ok, why = V.head_matches(U.run, self.repo, head)
+        self.assertFalse(ok)
+        self.assertIn("uncommitted", why)
+
+
+class TestAnUnreadablePolicyRefuses(unittest.TestCase):
+    """Leaving the digest None skipped the comparison, so a receipt under any
+    rules at all was admitted the moment `git show` failed. An unreadable
+    authorization source is the strongest reason to refuse."""
+
+    def test_advance_refuses_when_the_policy_cannot_be_read(self):
+        import ast
+        src = (SCRIPTS / "swarm.py").read_text()
+        self.assertIn("the authorizing policy cannot be read", src)
+
+    def test_the_refusal_precedes_admission(self):
+        src = (SCRIPTS / "swarm.py").read_text()
+        i = src.index("the authorizing policy cannot be read")
+        j = src.index("admit_verification(", i)
+        self.assertLess(i, j, "admission runs before the policy-read check")
+
+
+class TestTheBaseComesFromCoordinatorState(unittest.TestCase):
+    """base_commit is the linchpin of the chain, and the launch record sits
+    where the agent's Unix user can write."""
+
+    def test_verify_reads_the_base_from_state(self):
+        src = (SCRIPTS / "swarm.py").read_text()
+        self.assertIn('.get(\n        "base_commit")', src.replace("\r", ""))
+
+    def test_a_disagreement_is_refused_not_reconciled(self):
+        # Each fragment must sit inside ONE string literal. The message is
+        # built from adjacent f-strings, so a phrase spanning two of them is
+        # separated by `" f"` in the source and no amount of whitespace
+        # normalising will join it. Fourth time this shape has caught me.
+        src = (SCRIPTS / "swarm.py").read_text()
+        self.assertIn("changed after it was written", src)
+        self.assertIn("authorization policy from a base", src)
+
+    def test_advance_records_the_base_once(self):
+        src = (SCRIPTS / "swarm.py").read_text()
+        self.assertIn('us.setdefault("base_commit"', src)
+
 if __name__ == "__main__":
     unittest.main()

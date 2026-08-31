@@ -80,7 +80,11 @@ def read_policy(runner, repo, base_commit):
         return None, None, ("no anchored base commit, so there is no "
                             "authorization source an agent could not have "
                             "written")
-    rc, out, err = _git(runner, repo, "show",
+    # --no-replace-objects. `git show A:...` follows refs/replace/A, and the
+    # agent can write a replacement ref pointing at a commit of its own, so
+    # the "anchored" base resolves to a policy it authored. The anchor is only
+    # an anchor if the object it names cannot be swapped underneath it.
+    rc, out, err = _git(runner, repo, "--no-replace-objects", "show",
                         f"{base_commit}:{POLICY_FILE}")
     if rc != 0:
         return None, None, (f"no {POLICY_FILE} at the anchored base "
@@ -116,7 +120,13 @@ def authorized(policy, name, digest, claim):
     for v in entries:
         if v.get("sha256") != digest:
             continue
-        claims = v.get("claims") or []
+        claims = v.get("claims")
+        if not isinstance(claims, list):
+            return None, (
+                f"verifier {name!r} declares claims={claims!r}, which is not "
+                f"a list. `claim not in \"tests-pass-and-more\"` is a "
+                f"substring test, so a string there would grant every claim "
+                f"spelled inside it.")
         if claim not in claims:
             return None, (
                 f"verifier {name!r} is authorized, but not to claim "
@@ -130,7 +140,34 @@ def authorized(policy, name, digest, claim):
         f"approved.")
 
 
-def run_pinned(runner, path, expect_digest, args=None, timeout=900):
+def head_matches(runner, repo, expect_head):
+    """(ok, detail). Is the working tree at the commit being claimed about?
+
+    The verifier used to run wherever the operator happened to be standing,
+    while the receipt recorded the produced head regardless. Test failing
+    commit A, move to passing commit B, run verify from B, and the receipt
+    says A passed.
+    """
+    rc, head, _ = _git(runner, repo, "rev-parse", "HEAD")
+    if rc != 0:
+        return False, f"cannot read HEAD in {repo!r}"
+    head = head.strip()
+    if head != str(expect_head):
+        return False, (
+            f"the working tree is at {head[:12]} but this attempt produced "
+            f"{str(expect_head)[:12]}. A verifier run against a different "
+            f"commit says nothing about this one: check out the produced "
+            f"commit before verifying.")
+    rc, status, _ = _git(runner, repo, "status", "--porcelain")
+    if rc == 0 and status.strip():
+        return False, ("the working tree has uncommitted changes, so what "
+                       "the verifier tests is not the commit being claimed "
+                       "about")
+    return True, None
+
+
+def run_pinned(runner, path, expect_digest, args=None, timeout=900,
+               cwd=None):
     """Execute the bytes that hashed, not the path that was named.
 
     Hashing a file and then executing the path re-reads it, so the bytes that
@@ -151,7 +188,8 @@ def run_pinned(runner, path, expect_digest, args=None, timeout=900):
         if err2 or after != expect_digest:
             return None, "the verified bytes changed while being copied"
         os.chmod(copy, 0o500)
-        rc, out, errout = runner([copy] + list(args or []), timeout=timeout)
+        rc, out, errout = runner([copy] + list(args or []), timeout=timeout,
+                                 cwd=cwd)
         return {"exit_code": rc, "stdout": (out or "")[-4000:],
                 "stderr": (errout or "")[-2000:]}, None
     except OSError as exc:

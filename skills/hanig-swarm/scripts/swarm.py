@@ -2606,17 +2606,39 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 us["produced_head"] = produced
             anchor_rec, _ = W.read_launch_record(attempt) if attempt else (None,
                                                                            None)
+            # The base, into COORDINATOR state, the first time it is seen. The
+            # launch record sits where the agent's Unix user can write; this
+            # copy is what `verify` checks against, so moving the anchor after
+            # the fact is detected rather than obeyed.
+            if anchor_rec and anchor_rec.get("base_commit"):
+                us.setdefault("base_commit", anchor_rec["base_commit"])
+
             # A DECLARED verification requirement gates closure. Undeclared,
             # nothing changes: a unit that never asked for a verifier is not
             # improved by demanding one, and a requirement everybody must
             # satisfy is one everybody learns to satisfy trivially.
             vrefusal = None
-            for claim in (u.get("requires_verification") or []):
-                policy_digest = None
+            required = u.get("requires_verification") or []
+            policy_digest, perr = None, None
+            if required:
+                base = us.get("base_commit") or (
+                    anchor_rec or {}).get("base_commit")
                 if anchor_rec and anchor_rec.get("repo"):
-                    _pol, policy_digest, _perr = V.read_policy(
-                        U.run, anchor_rec["repo"],
-                        anchor_rec.get("base_commit"))
+                    _pol, policy_digest, perr = V.read_policy(
+                        U.run, anchor_rec["repo"], base)
+                else:
+                    perr = "this attempt anchored no repository"
+            for claim in required:
+                # A policy that cannot be READ must refuse. Leaving the digest
+                # None skipped the comparison entirely, so a receipt recorded
+                # under any rules at all was admitted the moment `git show`
+                # failed. An unreadable authorization source is the strongest
+                # reason to refuse, not a reason to stop checking.
+                if perr:
+                    vrefusal = (f"{uid} requires verification of {claim!r}, "
+                                f"and the authorizing policy cannot be read: "
+                                f"{perr}")
+                    break
                 _vr, vrefusal = admit_verification(
                     state_dir, uid, claim, produced, policy_digest)
                 if vrefusal:
@@ -3265,6 +3287,25 @@ def cmd_verify(args):
         return EXIT_USAGE
     repo = (anchor_rec or {}).get("repo")
     base = (anchor_rec or {}).get("base_commit")
+
+    # THE BASE COMES FROM COORDINATOR STATE, not from the launch record alone.
+    # base_commit is the linchpin of the whole authorization chain, and the
+    # launch record sits on a filesystem the agent's Unix user can write. If
+    # the agent can choose the base, it can point at a commit carrying a
+    # policy it wrote, and every check below is then checking its own work.
+    # swarm-state.json is coordinator state, which the threat model trusts.
+    state = load_state(args.state_dir) or {}
+    recorded = ((state.get("units") or {}).get(args.unit) or {}).get(
+        "base_commit")
+    if recorded and base and recorded != base:
+        sys.stderr.write(
+            f"error: the launch record says base {str(base)[:12]} and "
+            f"coordinator state says {str(recorded)[:12]}. The record was "
+            f"changed after it was written; refusing to read an "
+            f"authorization policy from a base this attempt did not "
+            f"anchor.\n")
+        return EXIT_USAGE
+    base = recorded or base
     if not repo:
         sys.stderr.write("error: this attempt anchored no repository, so "
                          "there is no base to read a policy from.\n")
@@ -3291,8 +3332,13 @@ def cmd_verify(args):
                          "so a verification would have nothing to bind to.\n")
         return EXIT_USAGE
 
-    outcome, rerr = V.run_pinned(U.run, args.path, digest,
-                                 args=args.arg, timeout=args.timeout)
+    ok, why = V.head_matches(U.run, repo, produced)
+    if not ok:
+        sys.stderr.write(f"error: {why}\n")
+        return EXIT_USAGE
+
+    outcome, rerr = V.run_pinned(U.run, args.path, digest, args=args.arg,
+                                 timeout=args.timeout, cwd=repo)
     if rerr:
         sys.stderr.write(f"error: {rerr}\n")
         return EXIT_FAILED_UNIT
