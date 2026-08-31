@@ -1316,12 +1316,13 @@ def _submit(u, unit_dir, dry_run, state=None):
             return None, anchor_err
         if state is not None and anchored_base:
             # Into COORDINATOR state, from the coordinator's OWN observation,
-            # at the moment it made it. This is the value `verify` checks the
-            # launch record against, so it must never be copied back out of
-            # that record later: state agreeing with a file because it was
-            # copied from that file is not corroboration.
-            ((state.setdefault("units", {}).setdefault(u["id"], {}))
-             .setdefault("base_commit", anchored_base))
+            # at the moment it made it, keyed BY ATTEMPT. A per-unit key kept
+            # the first attempt's base forever, so a retry anchored at a
+            # different commit was checked against a stale one and a valid
+            # verification for the retry was refused.
+            us = state.setdefault("units", {}).setdefault(u["id"], {})
+            us.setdefault("attempt_bases", {})[Path(unit_dir).name] = (
+                anchored_base)
 
         rc, out, err = U.run(argv, timeout=180)
         if rc != 0:
@@ -1419,11 +1420,20 @@ def _write_launch_record(unit_dir, u):
             json.dump(rec, fh, indent=1, sort_keys=True)
             fh.write("\n")
     except FileExistsError:
-        # Already anchored. Read the base back from OUR OWN earlier write so
-        # the caller still gets it; the file is agent-writable, which is why
-        # the value is cross-checked in state rather than believed outright.
-        prior, _ = W.read_launch_record(unit_dir)
-        return None, (prior or {}).get("base_commit")
+        # Already anchored, so this is a re-dispatch of the SAME attempt.
+        #
+        # Do NOT read the base back out of the file. I removed that laundering
+        # from the main path and left it right here, which two reviewers found
+        # independently: reading an agent-writable value and returning it to
+        # be stored as trusted coordinator state is the exact move the trust
+        # was meant to prevent, and it does not stop being that because it
+        # happens on the second dispatch.
+        #
+        # The coordinator observed the base the FIRST time and wrote it to
+        # state then. If state has it, it stands. If it does not, this attempt
+        # cannot be verified, and `verify` says so rather than inventing a
+        # base from a file the agent can edit.
+        return None, None
     except OSError as exc:
         return f"cannot write the launch record for {u['id']!r}: {exc}", None
     return None, rec.get("base_commit")
@@ -2654,8 +2664,9 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             required = u.get("requires_verification") or []
             policy_digest, perr, _pol = None, None, None
             if required:
-                base = us.get("base_commit") or (
-                    anchor_rec or {}).get("base_commit")
+                base = ((us.get("attempt_bases") or {})
+                        .get(Path(attempt).name)
+                        if attempt else None)
                 if anchor_rec and anchor_rec.get("repo"):
                     _pol, policy_digest, perr = V.read_policy(
                         U.run, anchor_rec["repo"], base)
@@ -3329,8 +3340,8 @@ def cmd_verify(args):
     # policy it wrote, and every check below is then checking its own work.
     # swarm-state.json is coordinator state, which the threat model trusts.
     state = load_state(args.state_dir) or {}
-    recorded = ((state.get("units") or {}).get(args.unit) or {}).get(
-        "base_commit")
+    recorded = (((state.get("units") or {}).get(args.unit) or {})
+                .get("attempt_bases") or {}).get(Path(args.attempt).name)
     if recorded and base and recorded != base:
         sys.stderr.write(
             f"error: the launch record says base {str(base)[:12]} and "

@@ -206,8 +206,23 @@ def run_pinned(runner, path, expect_digest, args=None, timeout=900,
         if err2 or after != expect_digest:
             return None, "the verified bytes changed while being copied"
         os.chmod(copy, 0o500)
+        before = None
+        if cwd:
+            _rc, before, _e = _git(runner, cwd, "rev-parse", "HEAD")
         rc, out, errout = runner([copy] + list(args or []), timeout=timeout,
                                  cwd=cwd)
+        if cwd:
+            # The HEAD check and the run were separate observations, so the
+            # tree could be reset between them and the verifier would test a
+            # commit the receipt does not name. Re-observing afterwards does
+            # not make the pair atomic, but it turns a silent substitution
+            # into a refusal.
+            _rc2, after, _e2 = _git(runner, cwd, "rev-parse", "HEAD")
+            if before and after and before.strip() != after.strip():
+                return None, (
+                    f"HEAD moved from {before.strip()[:12]} to "
+                    f"{after.strip()[:12]} while the verifier ran, so what it "
+                    f"tested is not the commit this would claim about")
         return {"exit_code": rc, "stdout": (out or "")[-4000:],
                 "stderr": (errout or "")[-2000:]}, None
     except OSError as exc:

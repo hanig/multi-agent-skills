@@ -352,7 +352,8 @@ class TestTheBaseComesFromCoordinatorState(unittest.TestCase):
 
     def test_verify_reads_the_base_from_state(self):
         src = (SCRIPTS / "swarm.py").read_text()
-        self.assertIn('.get(\n        "base_commit")', src.replace("\r", ""))
+        self.assertIn('.get("attempt_bases") or {}).get(Path(args.attempt)',
+                      " ".join(src.split()))
 
     def test_a_disagreement_is_refused_not_reconciled(self):
         # Each fragment must sit inside ONE string literal. The message is
@@ -368,9 +369,37 @@ class TestTheBaseComesFromCoordinatorState(unittest.TestCase):
         storing it as trusted state launders the very value the trust was
         meant to protect: state would agree with the record because it came
         FROM the record."""
-        src = (SCRIPTS / "swarm.py").read_text()
-        self.assertIn('.setdefault("base_commit", anchored_base)', src)
+        src = " ".join((SCRIPTS / "swarm.py").read_text().split())
+        self.assertIn('setdefault("attempt_bases", {})[Path(unit_dir).name]',
+                      src)
         self.assertNotIn('us.setdefault("base_commit", anchor_rec', src)
+
+    def test_the_reanchor_path_does_not_launder_the_base(self):
+        """Two reviewers found this independently: I removed the laundering
+        from the main path and left it in the FileExistsError branch, where
+        the base was read back out of the agent-writable record and returned
+        to be stored as trusted state."""
+        import ast
+        src = (SCRIPTS / "swarm.py").read_text()
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == "_write_launch_record")
+        for handler in ast.walk(fn):
+            if not isinstance(handler, ast.ExceptHandler):
+                continue
+            body = ast.unparse(handler)
+            if "FileExistsError" not in ast.unparse(handler.type or ast.Pass()):
+                continue
+            self.assertNotIn("read_launch_record", body,
+                             "the re-anchor path reads the base back out of "
+                             "the file it is supposed to be corroborating")
+
+    def test_the_base_is_keyed_by_attempt(self):
+        """A per-unit key kept the first attempt's base forever, so a retry
+        anchored elsewhere was checked against a stale one."""
+        src = " ".join((SCRIPTS / "swarm.py").read_text().split())
+        self.assertIn("attempt_bases", src)
+        self.assertIn("[Path(unit_dir).name]", src)
 
     def test_the_writer_returns_the_base_it_observed(self):
         import ast
@@ -447,6 +476,36 @@ class TestTheBoundaryIsStated(unittest.TestCase):
         src = (SCRIPTS / "verify.py").read_text()
         self.assertIn('"could not look" is not "nothing there"',
                       src.replace("\n", " ").replace("    ", " "))
+
+
+class TestHeadCannotMoveDuringTheRun(Base):
+    """head_matches and run_pinned were separate observations: check HEAD is
+    A, let the agent reset to B, run the verifier on B, and the receipt says A
+    passed."""
+
+    def test_a_head_move_during_the_run_is_refused(self):
+        mover = os.path.join(self.tmp, "mover.sh")
+        # The verifier itself moves HEAD while it runs.
+        with open(mover, "w") as fh:
+            fh.write("#!/bin/sh\n"
+                     "git -C %s commit -q --allow-empty -m moved\n"
+                     "exit 0\n" % self.repo)
+        os.chmod(mover, 0o755)
+        d = V.digest_file(mover)[0]
+        out, err = V.run_pinned(U.run, mover, d, cwd=self.repo)
+        self.assertIsNone(out)
+        self.assertIn("HEAD moved from", err)
+
+    def test_a_stable_head_still_passes(self):
+        out, err = V.run_pinned(U.run, self.script, self.digest,
+                                cwd=self.repo)
+        self.assertIsNone(err)
+        self.assertEqual(out["exit_code"], 0)
+
+    def test_without_a_cwd_the_check_does_not_apply(self):
+        out, err = V.run_pinned(U.run, self.script, self.digest)
+        self.assertIsNone(err)
+        self.assertEqual(out["exit_code"], 0)
 
 if __name__ == "__main__":
     unittest.main()
