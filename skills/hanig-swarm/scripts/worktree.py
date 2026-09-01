@@ -32,6 +32,20 @@ PRODUCTION_DENIES = (
 )
 
 
+def decode_launch_facts(payload):
+    """Decode coordinator-transported launch facts without consulting disk."""
+    if not payload:
+        return None, ("no trusted launch snapshot was supplied by the "
+                      "coordinator")
+    try:
+        facts = json.loads(payload)
+    except (TypeError, ValueError) as exc:
+        return None, f"trusted launch snapshot is malformed JSON: {exc}"
+    if not isinstance(facts, dict):
+        return None, "trusted launch snapshot is not a JSON object"
+    return facts, None
+
+
 def _git(runner, repo, *args, timeout=60):
     rc, out, err = runner(["git", "-C", str(repo)] + list(args),
                           timeout=timeout)
@@ -71,12 +85,14 @@ def repo_status(runner, repo):
     return rc, entries
 
 
-# Fields whose value DECIDES something. `repo` is deliberately not here: it
-# says where to read a policy from, and the base commit that pins the policy's
-# content comes from coordinator state, so a substituted repository cannot
-# change what the policy says -- only whether the commit is found at all.
-AUTHORITY_KEYS = frozenset({"base_commit", "base_tree", "execution_workspace",
-                            "dirty_paths"})
+# Every launch field that can select or alter a judgment. The launch record is
+# audit-only now, so an unsealed EvidenceRecord must refuse all of them -- in
+# particular `repo`, whose earlier omission let a record choose where verify
+# operated even though the base was later cross-checked against state.
+AUTHORITY_KEYS = frozenset({
+    "repo", "remote", "workspace_identity", "branch", "base_commit",
+    "base_tree", "execution_workspace", "clean_at_launch", "dirty_paths",
+})
 
 
 class AuthorityFromEvidence(KeyError):
@@ -161,27 +177,19 @@ def launch_record_path(unit_dir):
 
 
 def read_sealed_launch_record(unit_dir, seal):
-    """The record, ONLY if it is still the bytes the coordinator sealed.
+    """Read the audit copy when it still matches the coordinator's digest.
 
-    `seal` is the digest the coordinator recorded in its own state at write
-    time, before any agent existed. Without it there is no way to tell a
-    record apart from a record the agent rewrote, and every field in here
-    decides something: repo, branch, base_commit, base_tree and
-    clean_at_launch between them decide whether an attempt PRODUCED anything.
-
-    No seal means no judgment. Falling back to the unsealed record would
-    restore the whole defect for exactly the caller an attacker arranges to
-    be, which is what happened to `recorded or base` in cmd_verify.
+    This is deliberately not an authority accessor. Judging uses the complete
+    per-attempt launch snapshot in coordinator state; deleting or rewriting
+    this file can change only the audit result returned here.
 
     WHAT THIS IS NOT. An unkeyed digest of bytes the agent can read, handed in
     as an argument, is not an authenticator: anyone who can read the record
     can recompute it. I claimed otherwise and a reviewer was right to refuse
     the claim. What it actually provides is narrower and still worth having:
-    it binds the COORDINATOR's own judgment to the bytes the coordinator
-    wrote, so a record edited after launch cannot pass through `advance`'s
-    check. It does nothing about a party that supplies the seal itself, which
-    is why receipt provenance is recorded separately in coordinator state
-    rather than being inferred from a seal.
+    it binds an audit observation to the bytes the coordinator wrote. It does
+    nothing about a party that supplies the seal itself and it does not make
+    any field in the record suitable for a decision.
     """
     path = launch_record_path(unit_dir)
     try:
@@ -258,7 +266,50 @@ def read_launch_record(unit_dir):
     return EvidenceRecord(rec), None
 
 
-def judge_detail(runner, unit_dir, spec, seal=None):
+def launch_facts_problem(facts, unit_dir=None, spec=None):
+    """Return why a trusted launch snapshot is unusable, or ``None``.
+
+    The snapshot is transported to the separate judge as JSON, but its
+    provenance is coordinator state, not the launch record. Validate identity
+    here so an attempt can never be cross-wired to another attempt's facts.
+    """
+    if not isinstance(facts, dict):
+        return ("coordinator state records no launch snapshot for this "
+                "attempt. Re-dispatch it; do not reconstruct one from the "
+                "agent-writable launch record")
+    if unit_dir is not None:
+        attempt = Path(unit_dir).name
+        if facts.get("attempt_id") != attempt:
+            return (f"the trusted launch snapshot belongs to attempt "
+                    f"{facts.get('attempt_id')!r}, not {attempt!r}")
+    expected_unit = (spec or {}).get("task_id") or (spec or {}).get("id")
+    if expected_unit and facts.get("unit_id") != expected_unit:
+        return (f"the trusted launch snapshot belongs to unit "
+                f"{facts.get('unit_id')!r}, not {expected_unit!r}")
+    required = ("repo", "execution_workspace", "workspace_identity",
+                "base_commit", "base_tree", "branch", "clean_at_launch")
+    missing = [key for key in required if key not in facts]
+    if missing:
+        return ("the trusted launch snapshot is incomplete (missing "
+                f"{', '.join(missing)}). Re-dispatch this attempt")
+    if facts.get("repo") != facts.get("execution_workspace"):
+        return "the trusted launch snapshot names two different workspaces"
+    identity = facts.get("workspace_identity")
+    if not isinstance(identity, dict) or identity.get("realpath") != facts.get("repo"):
+        return "the trusted launch snapshot has no matching repository identity"
+    for key in ("base_commit", "base_tree"):
+        value = facts.get(key)
+        if not isinstance(value, str) or len(value) not in (40, 64) or any(
+                c not in "0123456789abcdef" for c in value.lower()):
+            return f"the trusted launch snapshot has an invalid {key}"
+    if facts.get("clean_at_launch") is not True:
+        return ("the repository was already dirty at launch according to "
+                "the trusted launch snapshot, so production is "
+                "unattributable")
+    return None
+
+
+def judge_detail(runner, unit_dir, spec, launch_facts=None):
     """(produced, head, detail).
 
     Returns the head it VALIDATED, not one re-read afterwards. Splitting those
@@ -294,9 +345,10 @@ def judge_detail(runner, unit_dir, spec, seal=None):
         return None, None, ("this unit declared no repository, so no git transition "
                       "is judged for it")
 
-    rec, err = read_sealed_launch_record(unit_dir, seal)
+    err = launch_facts_problem(launch_facts, unit_dir, spec)
     if err:
         return False, None, err
+    rec = launch_facts
     repo = rec.get("repo")
     if not repo:
         return False, None, (
@@ -372,54 +424,85 @@ def judge_detail(runner, unit_dir, spec, seal=None):
                   f"from {str(base)[:12]}, with a clean tree at both ends")
 
 
-def judge(runner, unit_dir, spec, seal=None):
+def judge(runner, unit_dir, spec, launch_facts=None):
     """(produced, detail). The two-value view, for callers that do not need
     the head."""
-    produced, _head, why = judge_detail(runner, unit_dir, spec, seal)
+    produced, _head, why = judge_detail(runner, unit_dir, spec, launch_facts)
     return produced, why
 
 
-def produced_head(runner, unit_dir, spec, seal=None):
+def produced_head(runner, unit_dir, spec, launch_facts=None):
     """The commit this attempt produced, or None.
 
     What a merge attestation gets PINNED to. Without it the attester names
     whatever commit it likes and the coordinator has no way to object; with
     it, an attestation about some other branch's work cannot close this unit.
 
-    Takes the seal because judging takes the seal. Omitting it left this
-    returning None for every attempt once sealing landed, which quietly made
-    the agent-writable receipt the ONLY working source for the very value a
-    merge is pinned to: a fallback promoted to primary by removing its
-    competitor.
+    This is valid only at the one judgment boundary. Later consumers must use
+    the per-attempt head stored in coordinator state, never call this as a
+    recovery path.
     """
-    _produced, head, _why = judge_detail(runner, unit_dir, spec, seal)
+    _produced, head, _why = judge_detail(runner, unit_dir, spec, launch_facts)
     return head
 
 
-def basis(runner, unit_dir, spec, seal=None):
+def basis(runner, unit_dir, spec, launch_facts=None):
     """What the receipt can say about the agent's repository.
 
     A string, not a bool: "we did not look", "there was nothing to look at"
     and "we looked and it produced" are three different claims, and a boolean
     carries only two.
     """
-    produced, _why = judge(runner, unit_dir, spec, seal)
+    produced, _why = judge(runner, unit_dir, spec, launch_facts)
     if produced is None:
         return "no-repository-declared"
     return "produced-committed-change" if produced else "no-produced-change"
 
 
-def code_basis(runner, unit_dir, spec, seal=None):
+def code_basis(runner, unit_dir, spec, launch_facts=None):
     """The code-only fields of a receipt's `basis`.
 
     Assembled here rather than spelled out in unit.py, which has a size guard
     whose job is to stop it accreting other modules' concerns. `produced_head`
     is the head that was JUDGED: a merge attestation is bound to it, and
     re-deriving it later asks a repository the agent owns a second question.
+    `worktree_judged` is captured from that same judgment for the same reason;
+    this formatter performs no repository observation.
     """
     if spec.get("kind") != "code":
         return {"worktree_judged": None, "produced_head": None,
                 "production_denies": None}
-    return {"worktree_judged": basis(runner, unit_dir, spec, seal),
+    return {"worktree_judged": spec.get("worktree_judged"),
             "produced_head": spec.get("produced_head"),
             "production_denies": list(PRODUCTION_DENIES)}
+
+
+def validate_pinned_head(runner, launch_facts, produced):
+    """Validate immutable commit ``produced`` against its pinned launch base.
+
+    This never reads HEAD, a branch, the index, or the worktree. A branch may
+    move after judgment without changing the answer. Object disappearance is
+    an availability failure and fails closed; another ref is never substituted.
+    """
+    problem = launch_facts_problem(launch_facts)
+    if problem:
+        return problem
+    if not isinstance(produced, str) or len(produced) not in (40, 64) or any(
+            c not in "0123456789abcdef" for c in produced.lower()):
+        return "the per-attempt produced commit is not a valid object id"
+    repo, base = launch_facts["repo"], launch_facts["base_commit"]
+    rc, _out, _err = _git(runner, repo, "cat-file", "-e", produced + "^{commit}")
+    if rc != 0:
+        return (f"pinned produced commit {produced[:12]} is no longer "
+                "available; refusing rather than substituting the current ref")
+    rc, _out, _err = _git(runner, repo, "merge-base", "--is-ancestor",
+                           base, produced)
+    if rc != 0:
+        return (f"pinned produced commit {produced[:12]} does not descend "
+                f"from trusted base {base[:12]}")
+    rc, tree, _err = _git(runner, repo, "rev-parse", produced + "^{tree}")
+    if rc != 0:
+        return f"cannot read the tree of pinned commit {produced[:12]}"
+    if tree == launch_facts["base_tree"]:
+        return "the pinned produced commit has the launch base's unchanged tree"
+    return None

@@ -49,8 +49,23 @@ ALLOWED = {
         "reads execution_workspace off the PLAN's units to build the path "
         "containment set; no record is involved",
     ("worktree.py", "judge_detail"):
-        "reads only what read_sealed_launch_record returned, and the seal "
-        "test below is what keeps that true",
+        "reads the launch snapshot transported from coordinator state",
+    ("worktree.py", "launch_facts_problem"):
+        "validates the coordinator-state snapshot schema and identity",
+    ("worktree.py", "validate_pinned_head"):
+        "checks immutable objects named by coordinator state",
+    ("swarm.py", "_submit"):
+        "uses the coordinator-created snapshot for dispatch",
+    ("swarm.py", "_allocate"):
+        "passes repository identity from the trusted plan into allocation",
+    ("swarm.py", "admit_merge"):
+        "compares the merge attestation's repository to trusted state",
+    ("swarm.py", "advance"):
+        "uses repository identity from the coordinator-state snapshot",
+    ("swarm.py", "trusted_base"):
+        "reads the base only from the coordinator-state snapshot",
+    ("swarm.py", "cmd_verify"):
+        "uses repository and base only from the coordinator-state snapshot",
 }
 
 # The UNSEALED reader. This is the sharper invariant: naming a field is not
@@ -59,25 +74,12 @@ ALLOWED = {
 # Functions permitted to call record_claim, i.e. to look at what an unsealed
 # record CLAIMS for an authority field. Each must compare it against the plan
 # or coordinator state and refuse on disagreement; none may act on it.
-CLAIM_ALLOWED = {
-    ("swarm.py", "_submit"):
-        "compares the record's execution_workspace against the plan and "
-        "refuses on disagreement; the plan decides --cwd either way",
-    ("swarm.py", "cmd_verify"):
-        "compares the record's base against trusted_base, refuses on "
-        "disagreement, and refuses outright when state holds no base",
-}
+CLAIM_ALLOWED = {}
 
 RAW_READER = "read_launch_record"
 RAW_ALLOWED = {
-    ("swarm.py", "_submit"):
-        "cross-check against the plan; the plan decides and a mismatch "
-        "refuses",
     ("swarm.py", "advance"):
-        "reads it for the receipt citation and for reporting, and explicitly "
-        "does NOT copy the base into state",
-    ("swarm.py", "cmd_verify"):
-        "cross-check against trusted_base, with no fallback",
+        "reads it only to cite a preflight audit receipt, never for judging",
     ("worktree.py", "refused_launch"):
         "fail-CLOSED: a record saying 'refused' can only cause a refusal, "
         "never permission",
@@ -198,8 +200,8 @@ class TestNoOneReadsAuthorityOutOfTheRecord(unittest.TestCase):
         self.assertEqual(
             offenders, [],
             "These call the UNSEALED launch-record reader. Judging must go "
-            "through read_sealed_launch_record; if this site genuinely only "
-            "cross-checks or fails closed, add it to RAW_ALLOWED with the "
+            "through coordinator state; if this site is genuinely audit-only "
+            "or fail-closed, add it to RAW_ALLOWED with the "
             "reason:\n  " + "\n  ".join(offenders))
 
     def test_judging_does_not_use_the_unsealed_reader(self):
@@ -214,7 +216,8 @@ class TestNoOneReadsAuthorityOutOfTheRecord(unittest.TestCase):
                   and n.name == "judge_detail")
         called = {n.func.id for n in _ast.walk(fn)
                   if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Name)}
-        self.assertIn("read_sealed_launch_record", called)
+        self.assertIn("launch_facts_problem", called)
+        self.assertNotIn("read_sealed_launch_record", called)
         self.assertNotIn(RAW_READER, called)
 
     def test_record_claim_is_called_only_where_declared(self):
@@ -257,9 +260,7 @@ class TestNoOneReadsAuthorityOutOfTheRecord(unittest.TestCase):
                          f"{dead_claim}")
 
 
-class TestTheSealStopsARewrittenRecord(unittest.TestCase):
-    """The behavioural half. The tests above are structural; this one shows
-    the mechanism actually refuses the attack it was built for."""
+class TestTrustedSnapshotMakesTheRecordAuditOnly(unittest.TestCase):
 
     def setUp(self):
         import shutil, subprocess, sys, tempfile
@@ -290,15 +291,15 @@ class TestTheSealStopsARewrittenRecord(unittest.TestCase):
             subprocess.run(["git", "-C", str(self.repo)] + args, check=True,
                            env=self.env, capture_output=True)
 
-    def test_a_real_transition_is_judged_with_the_seal(self):
+    def test_a_real_transition_is_judged_with_trusted_facts(self):
         err, anchor = self.S._write_launch_record(str(self.att), self.spec)
         self.assertIsNone(err)
         self._commit("b.txt")
         produced, _head, why = self.W.judge_detail(
-            self.U.run, str(self.att), self.spec, anchor["seal"])
+            self.U.run, str(self.att), self.spec, anchor["facts"])
         self.assertTrue(produced, why)
 
-    def test_a_rewritten_base_is_refused_not_believed(self):
+    def test_rewriting_the_audit_record_changes_no_judging_input(self):
         err, anchor = self.S._write_launch_record(str(self.att), self.spec)
         self.assertIsNone(err)
         self._commit("b.txt")
@@ -308,18 +309,17 @@ class TestTheSealStopsARewrittenRecord(unittest.TestCase):
         rec["base_commit"] = "0" * 40
         path.write_text(json.dumps(rec))
         produced, _head, why = self.W.judge_detail(
-            self.U.run, str(self.att), self.spec, anchor["seal"])
-        self.assertFalse(produced)
-        self.assertIn("no longer matches the digest", why)
+            self.U.run, str(self.att), self.spec, anchor["facts"])
+        self.assertTrue(produced, why)
 
-    def test_no_seal_means_no_judgment(self):
+    def test_no_trusted_snapshot_means_no_judgment(self):
         err, _anchor = self.S._write_launch_record(str(self.att), self.spec)
         self.assertIsNone(err)
         self._commit("b.txt")
         produced, _head, why = self.W.judge_detail(
             self.U.run, str(self.att), self.spec, None)
         self.assertFalse(produced)
-        self.assertIn("no record seal", why)
+        self.assertIn("no launch snapshot", why)
 
 
 class TestTheSealActuallyTravels(unittest.TestCase):
@@ -379,7 +379,7 @@ class TestTheSealActuallyTravels(unittest.TestCase):
             self.W.launch_record_path(str(self.att)).read_bytes()).hexdigest()
         self.assertEqual(stored, on_disk)
 
-    def test_check_passes_the_seal_to_the_judging_process(self):
+    def test_check_passes_launch_facts_to_the_judging_process(self):
         seen = {}
         real = self.S.U.run
 
@@ -389,12 +389,12 @@ class TestTheSealActuallyTravels(unittest.TestCase):
 
         self.S.U.run = spy
         try:
-            self.S._check(str(self.att), "deadbeef" * 8)
+            self.S._check(str(self.att), {"attempt_id": "att1"})
         finally:
             self.S.U.run = real
-        self.assertIn("--record-seal", seen["argv"])
-        self.assertEqual(seen["argv"][seen["argv"].index("--record-seal") + 1],
-                         "deadbeef" * 8)
+        self.assertIn("--launch-facts", seen["argv"])
+        payload = seen["argv"][seen["argv"].index("--launch-facts") + 1]
+        self.assertEqual(json.loads(payload), {"attempt_id": "att1"})
 
 
 class TestTheRecordItselfRefuses(unittest.TestCase):
@@ -466,7 +466,6 @@ class TestTheRecordItselfRefuses(unittest.TestCase):
 
     def test_non_authority_fields_are_untouched(self):
         # A guard that refuses everything would just move the damage.
-        self.assertEqual(self.rec.get("repo"), "/checkout")
         self.assertEqual(self.rec["preflight"]["status"], "passed")
         self.assertIsNone(self.rec.get("absent"))
         self.assertEqual(self.rec.get("absent", "d"), "d")
@@ -525,14 +524,15 @@ class TestReceiptProvenanceIsActuallyRecorded(unittest.TestCase):
             {"id": "h", "kind": "slurm", "runtime": "none", "command": "true",
              "outputs": ["o"], "write_scopes": ["h/"]}]}
 
-        payload = _json.dumps({"task_id": "h", "state": "DONE"})
+        payload = _json.dumps({"task_id": "h", "attempt_id": "attempt-1",
+                               "state": "DONE"})
 
         def check(unit_dir, seal=None):
             # What the real check does: write the receipt, then report the
             # digest of the receipt it wrote.
             (Path(unit_dir) / "receipt.json").write_text(payload)
             return 0, ("DONE\nRECEIPT_SHA256 %s"
-                       % _h.sha256(payload.encode()).hexdigest())
+                       % _h.sha256(payload.encode()).hexdigest()), ""
 
         m._check = check
         ok, why = m.acquire_lease(str(st))
@@ -596,14 +596,16 @@ class TestOnlyAReceiptTheCheckReportedWritingIsAttested(unittest.TestCase):
         # The agent's pre-written claim is still on disk. The check reports no
         # digest because it wrote no receipt.
         forged = json.dumps({"task_id": "h", "state": "DONE"})
-        seals = self._run(lambda d, seal=None: (1, "check crashed"), forged)
+        seals = self._run(
+            lambda d, facts=None: (1, "check crashed", ""), forged)
         self.assertEqual(seals, {}, "attested a receipt the check did not "
                                     "write")
 
     def test_a_malformed_digest_line_attests_nothing(self):
         forged = json.dumps({"task_id": "h", "state": "DONE"})
         seals = self._run(
-            lambda d, seal=None: (0, "DONE\nRECEIPT_SHA256 not-a-digest"),
+            lambda d, facts=None: (
+                0, "DONE\nRECEIPT_SHA256 not-a-digest", ""),
             forged)
         self.assertEqual(seals, {})
 
@@ -611,12 +613,13 @@ class TestOnlyAReceiptTheCheckReportedWritingIsAttested(unittest.TestCase):
         # The reported digest is of the file the check wrote, so a later edit
         # by the agent no longer matches and the report will say so.
         import hashlib as _h
-        good = json.dumps({"task_id": "h", "state": "FAILED"})
+        good = json.dumps({"task_id": "h", "attempt_id": "attempt-1",
+                           "state": "FAILED"})
 
         def check(unit_dir, seal=None):
             (Path(unit_dir) / "receipt.json").write_text(good)
             return 0, ("FAILED\nRECEIPT_SHA256 %s"
-                       % _h.sha256(good.encode()).hexdigest())
+                       % _h.sha256(good.encode()).hexdigest()), ""
 
         seals = self._run(check, json.dumps({"state": "DONE"}))
         self.assertEqual(seals.get("attempt-1"),
@@ -806,7 +809,7 @@ class TestTheDigestDescribesWhatWasWritten(unittest.TestCase):
                       "the digest must be taken from the bytes this call "
                       "wrote, which it is holding")
 
-    def test_produced_head_can_still_judge_when_given_the_seal(self):
+    def test_produced_head_can_judge_only_when_given_trusted_facts(self):
         # Dropping the seal here made this return None for every attempt,
         # leaving the agent-writable receipt as the only working source for
         # the commit a merge attestation is pinned to.
@@ -836,12 +839,12 @@ class TestTheDigestDescribesWhatWasWritten(unittest.TestCase):
             subprocess.run(["git", "-C", str(repo)] + args, check=True,
                            env=env, capture_output=True)
         head = self.W.produced_head(self.U.run, str(att), unit,
-                                    anchored["seal"])
+                                    anchored["facts"])
         self.assertTrue(head, "produced_head cannot judge, so the only "
                               "remaining source is the agent's receipt")
         self.assertIsNone(
             self.W.produced_head(self.U.run, str(att), unit, None),
-            "judging without a seal must refuse, not guess")
+            "judging without trusted facts must refuse, not guess")
 
 
 class TestAWithdrawnSealDoesNotLingerAsAuthority(unittest.TestCase):
@@ -861,7 +864,8 @@ class TestAWithdrawnSealDoesNotLingerAsAuthority(unittest.TestCase):
         spec.loader.exec_module(m)
         att = tmp / "runs" / "h" / "attempt-1"
         att.mkdir(parents=True)
-        good = _json.dumps({"task_id": "h", "state": "DONE"})
+        good = _json.dumps({"task_id": "h", "attempt_id": "attempt-1",
+                            "state": "DONE"})
         (att / "receipt.json").write_text(good)
         state = {"units": {"h": {"attempt_receipt_seals": {
             "attempt-1": _h.sha256(good.encode()).hexdigest()}}}}

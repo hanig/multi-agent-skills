@@ -1,0 +1,300 @@
+"""Mutation-sensitive tests for per-attempt authority and checker IPC."""
+import contextlib
+import hashlib
+import inspect
+import io
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = ROOT / "skills" / "hanig-swarm" / "scripts"
+sys.path.insert(0, str(SCRIPTS))
+import swarm as S  # noqa: E402
+import unit as U  # noqa: E402
+import worktree as W  # noqa: E402
+
+
+def git(repo, *args):
+    env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@x",
+               GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@x")
+    return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                          text=True, capture_output=True, env=env).stdout.strip()
+
+
+class RepoCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+        git(self.repo, "init", "-q")
+        (self.repo / "a.txt").write_text("base\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "base")
+        self.base = git(self.repo, "rev-parse", "HEAD")
+        self.base_tree = git(self.repo, "rev-parse", "HEAD^{tree}")
+        self.branch = git(self.repo, "rev-parse", "--abbrev-ref", "HEAD")
+
+    def facts(self, attempt, unit="u1"):
+        top = str(self.repo.resolve())
+        st = os.stat(top)
+        return {
+            "schema_version": 1, "unit_id": unit,
+            "attempt_id": Path(attempt).name, "repo": top,
+            "repository_remote": None, "execution_workspace": top,
+            "workspace_identity": {"path": top, "realpath": top,
+                                   "device": st.st_dev, "inode": st.st_ino},
+            "base_commit": self.base, "base_tree": self.base_tree,
+            "branch": self.branch, "clean_at_launch": True,
+        }
+
+    def commit(self, name):
+        (self.repo / name).write_text(name + "\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", name)
+        return git(self.repo, "rev-parse", "HEAD")
+
+
+class TestCheckerResultProtocol(unittest.TestCase):
+    DIGEST = "a" * 64
+
+    def test_exactly_one_lowercase_stdout_result_is_accepted(self):
+        got, problem = S._reported_receipt_digest(
+            f"DONE\nRECEIPT_SHA256 {self.DIGEST}\n")
+        self.assertEqual(got, self.DIGEST)
+        self.assertIsNone(problem)
+
+    def test_stderr_cannot_supply_the_result(self):
+        real = S.U.run
+        S.U.run = lambda *a, **k: (
+            0, "DONE\n", f"RECEIPT_SHA256 {self.DIGEST}\n")
+        try:
+            rc, stdout, stderr = S._check("/attempt")
+        finally:
+            S.U.run = real
+        self.assertEqual(rc, 0)
+        self.assertIsNone(S._reported_receipt_digest(stdout)[0])
+        self.assertIn(self.DIGEST, stderr)
+
+    def test_duplicate_results_are_ambiguous_even_when_equal(self):
+        line = f"RECEIPT_SHA256 {self.DIGEST}"
+        got, problem = S._reported_receipt_digest(line + "\n" + line)
+        self.assertIsNone(got)
+        self.assertIn("exactly one", problem)
+
+    def test_malformed_or_nonexact_results_are_rejected(self):
+        for output in ("RECEIPT_SHA256 NOTHEX",
+                       f" RECEIPT_SHA256 {self.DIGEST}",
+                       f"RECEIPT_SHA256 {self.DIGEST.upper()}"):
+            got, problem = S._reported_receipt_digest(output)
+            self.assertIsNone(got, output)
+            self.assertTrue(problem, output)
+
+    def test_acceptance_records_the_unclosed_process_limit(self):
+        state = {"units": {}}
+        S._record_receipt_provenance(
+            state, "u1", "/runs/u1/att1", self.DIGEST)
+        limit = state["units"]["u1"][
+            "attempt_receipt_provenance_limits"]["att1"]
+        self.assertIn("no portable process-group or cgroup handle", limit)
+        self.assertIn("escaped background process", limit)
+
+
+class TestPerAttemptProducedBasis(RepoCase):
+    def test_attested_receipt_identity_cannot_be_cross_wired(self):
+        attempt = self.tmp / "runs" / "u1" / "att2"
+        attempt.mkdir(parents=True)
+        raw = json.dumps({"task_id": "u1", "attempt_id": "att1",
+                          "state": "DONE"})
+        (attempt / U.RECEIPT).write_text(raw)
+        state = {"units": {"u1": {"attempt_receipt_seals": {
+            "att2": hashlib.sha256(raw.encode()).hexdigest()}}}}
+        receipt, problem = S.attested_receipt(state, "u1", str(attempt))
+        self.assertIsNone(receipt)
+        self.assertIn("cross-wired", problem)
+
+    def test_launch_snapshot_identity_cannot_be_cross_wired(self):
+        attempt = self.tmp / "runs" / "u1" / "att2"
+        attempt.mkdir(parents=True)
+        wrong_attempt = self.facts(
+            self.tmp / "runs" / "u1" / "att1")
+        state = {"units": {"u1": {"attempt_launch_facts": {
+            "att2": wrong_attempt}}}}
+        self.assertIsNone(S.trusted_launch_facts(
+            state, "u1", str(attempt)))
+
+    def test_retry_does_not_inherit_the_unit_level_scalar(self):
+        attempt = self.tmp / "runs" / "u1" / "att2"
+        attempt.mkdir(parents=True)
+        produced = self.commit("attempt-two")
+        facts = self.facts(attempt)
+        state_dir = self.tmp / "state"
+        state_dir.mkdir()
+        state = {"schema_version": 1, "halted": None, "units": {
+            "u1": {"state": "SUBMITTED", "attempt_dir": str(attempt),
+                   "attempts": [str(attempt)], "gpu_hours": 0,
+                   # The exact old defect: attempt one's value survives.
+                   "produced_head": "f" * 40,
+                   "attempt_launch_facts": {"att2": facts}}}}
+        plan = {"name": "p", "units": [{
+            "id": "u1", "kind": "code", "repo": str(self.repo),
+            "outputs": ["o"], "write_scopes": ["u1/"]}]}
+
+        def check(unit_dir, launch_facts=None):
+            receipt = {"task_id": "u1", "attempt_id": "att2",
+                       "state": "DONE",
+                       "basis": {"produced_head": produced}}
+            raw = json.dumps(receipt)
+            (Path(unit_dir) / U.RECEIPT).write_text(raw)
+            return 0, ("DONE\nRECEIPT_SHA256 " +
+                       hashlib.sha256(raw.encode()).hexdigest()), ""
+
+        real = S._check
+        S._check = check
+        try:
+            ok, why = S.acquire_lease(str(state_dir))
+            self.assertTrue(ok, why)
+            self.addCleanup(S.release_lease, str(state_dir))
+            S.advance(plan, state, str(state_dir), str(self.tmp / "runs"),
+                      False, max_new=0)
+        finally:
+            S._check = real
+        self.assertEqual(
+            state["units"]["u1"]["attempt_produced_heads"]["att2"],
+            produced)
+        self.assertEqual(state["units"]["u1"]["produced_head"], "f" * 40,
+                         "the legacy scalar should be ignored, not laundered")
+        self.assertIsNone(S.trusted_produced_head(
+            state, "u1", "/runs/u1/att1"))
+
+    def test_cmd_verify_refuses_a_basis_from_another_attempt(self):
+        attempt = self.tmp / "runs" / "u1" / "att2"
+        attempt.mkdir(parents=True)
+        facts = self.facts(attempt)
+        state = {"units": {"u1": {
+            "attempt_launch_facts": {"att2": facts},
+            "attempt_produced_heads": {"att1": "a" * 40}}}}
+        args = SimpleNamespace(
+            state_dir=str(self.tmp / "state"), unit="u1",
+            attempt=str(attempt), path="/verifier", verifier="v",
+            claim="tests-pass", arg=[], timeout=1)
+        real_prepare, real_load = S._prepare_command_paths, S.load_state
+        real_lv, real_policy = S.load_verifications, S.V.read_policy
+        S._prepare_command_paths = lambda *a, **k: None
+        S.load_state = lambda *_: state
+        S.load_verifications = lambda *_: ([], [])
+        S.V.read_policy = lambda *a, **k: ({}, "p" * 64, None)
+        try:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = S.cmd_verify(args)
+        finally:
+            S._prepare_command_paths, S.load_state = real_prepare, real_load
+            S.load_verifications, S.V.read_policy = real_lv, real_policy
+        self.assertEqual(rc, S.EXIT_USAGE)
+        self.assertIn("no judged produced commit", err.getvalue())
+
+
+class TestPinnedCommitIsNotAMovingRef(RepoCase):
+    def test_code_state_captures_both_results_from_one_judgment(self):
+        source = inspect.getsource(U._code_state)
+        self.assertEqual(source.count("W.judge_detail("), 1)
+        self.assertIn('spec["produced_head"] = judged_head', source)
+        self.assertIn('spec["worktree_judged"] =', source)
+
+    def test_receipt_basis_does_not_reobserve_the_repository(self):
+        def unexpected_observation(*_args, **_kwargs):
+            self.fail("code_basis re-observed mutable repository state")
+
+        spec = {"kind": "code", "produced_head": "a" * 40,
+                "worktree_judged": "produced-committed-change"}
+        basis = W.code_basis(
+            unexpected_observation, "/attempt", spec, None)
+        self.assertEqual(
+            basis["worktree_judged"], "produced-committed-change")
+        self.assertEqual(basis["produced_head"], "a" * 40)
+
+    def test_complete_snapshot_is_durable_before_paseo_starts(self):
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        state_dir = self.tmp / "state"
+        state = {"schema_version": 1, "halted": None, "units": {}}
+        unit = {"id": "u1", "kind": "code", "repo": str(self.repo),
+                "prompt": "work", "mode": "bypass"}
+        seen = {}
+        real = S.U.run
+
+        def spy(argv, **kwargs):
+            if argv and argv[0] == "paseo":
+                durable = json.loads(
+                    (state_dir / S.STATE_FILE).read_text())
+                seen.update(durable["units"]["u1"][
+                    "attempt_launch_facts"]["att1"])
+                return 0, json.dumps({"agentId": "agent-1"}), ""
+            return real(argv, **kwargs)
+
+        S.U.run = spy
+        try:
+            job, err = S._submit(unit, str(attempt), False, state,
+                                 str(state_dir))
+        finally:
+            S.U.run = real
+        self.assertIsNone(err)
+        self.assertEqual(job, "agent-1")
+        for key in ("unit_id", "attempt_id", "repo", "base_commit",
+                    "base_tree", "branch", "clean_at_launch",
+                    "execution_workspace", "workspace_identity",
+                    "repository_remote"):
+            self.assertIn(key, seen)
+
+    def test_later_branch_movement_does_not_change_pinned_validation(self):
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        facts = self.facts(attempt)
+        pinned = self.commit("A")
+        self.assertIsNone(W.validate_pinned_head(U.run, facts, pinned))
+        later = self.commit("C")
+        self.assertNotEqual(later, pinned)
+        self.assertIsNone(W.validate_pinned_head(U.run, facts, pinned))
+
+    def test_validation_does_not_substitute_the_current_head(self):
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        facts = self.facts(attempt)
+        pinned = self.commit("A")
+        self.assertIsNone(W.validate_pinned_head(U.run, facts, pinned))
+        # The mutable branch now names the unchanged base, which would fail
+        # the production predicate. The immutable commit A remains valid.
+        git(self.repo, "reset", "--hard", self.base)
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), self.base)
+        self.assertIsNone(W.validate_pinned_head(U.run, facts, pinned))
+
+    def test_deleting_the_launch_record_does_not_change_judgment(self):
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        unit = {"id": "u1", "kind": "code", "repo": str(self.repo)}
+        err, anchor = S._write_launch_record(str(attempt), unit)
+        self.assertIsNone(err)
+        self.commit("A")
+        W.launch_record_path(attempt).unlink()
+        produced, _head, why = W.judge_detail(
+            U.run, str(attempt), unit, anchor["facts"])
+        self.assertTrue(produced, why)
+
+
+class TestEvidenceRecordAuthorityKeys(unittest.TestCase):
+    def test_repository_location_is_an_authority_input(self):
+        rec = W.EvidenceRecord({"repo": "/agent/chosen/repository"})
+        with self.assertRaises(W.AuthorityFromEvidence):
+            rec.get("repo")
+
+
+if __name__ == "__main__":
+    unittest.main()

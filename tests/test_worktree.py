@@ -52,20 +52,27 @@ class Base(unittest.TestCase):
         rc, tree, _ = W._git(U.run, self.repo, "rev-parse", "HEAD^{tree}")
         rc, br, _ = W._git(U.run, self.repo, "rev-parse", "--abbrev-ref",
                            "HEAD")
-        rec = {"repo": self.repo, "branch": br, "base_commit": head,
-               "base_tree": tree, "clean_at_launch": True,
-               "dirty_paths_at_launch": 0}
+        top = str(Path(self.repo).resolve())
+        st = os.stat(top)
+        rec = {"schema_version": 1, "unit_id": "u1",
+               "attempt_id": Path(self.unit_dir).name,
+               "repo": top, "execution_workspace": top,
+               "workspace_identity": {"path": top, "realpath": top,
+                                      "device": st.st_dev, "inode": st.st_ino},
+               "repository_remote": None, "branch": br,
+               "base_commit": head, "base_tree": tree,
+               "clean_at_launch": True, "dirty_paths_at_launch": 0}
         rec.update(over)
         # Seal what was WRITTEN, the way the coordinator does: it digests the
         # bytes it wrote and keeps the digest in its own state.
         payload = json.dumps(rec)
         W.launch_record_path(self.unit_dir).write_text(payload)
-        self.seal = hashlib.sha256(payload.encode()).hexdigest()
+        self.facts = rec
         return rec
 
     def judge(self):
         return W.judge(U.run, self.unit_dir, self.spec,
-                       getattr(self, "seal", None))
+                       getattr(self, "facts", None))
 
 
 class TestWorkThatDidNotHappen(Base):
@@ -160,7 +167,7 @@ class TestWorkThatDidNotHappen(Base):
         git(self.repo, "commit", "-qm", "c2")
         produced, why = self.judge()
         self.assertFalse(produced)
-        self.assertIn("no launch record", why)
+        self.assertIn("no launch snapshot", why)
 
 
 class TestWorkThatDidHappen(Base):
@@ -206,12 +213,12 @@ class TestTheReceiptSaysWhatItDoesNotCover(Base):
         self.assertEqual(W.basis(U.run, self.unit_dir, {"id": "u"}),
                          "no-repository-declared")
         self.anchor()
-        self.assertEqual(W.basis(U.run, self.unit_dir, self.spec, self.seal),
+        self.assertEqual(W.basis(U.run, self.unit_dir, self.spec, self.facts),
                          "no-produced-change")
         self.write("b.txt", "new\n")
         git(self.repo, "add", "-A")
         git(self.repo, "commit", "-qm", "c2")
-        self.assertEqual(W.basis(U.run, self.unit_dir, self.spec, self.seal),
+        self.assertEqual(W.basis(U.run, self.unit_dir, self.spec, self.facts),
                          "produced-committed-change")
 
     def test_production_denies_the_claims_it_cannot_make(self):
@@ -286,7 +293,7 @@ class TestARetryDoesNotInheritTheLastAttemptsBaseline(Base):
 
         produced, why = W.judge(U.run, att2, {"id": "u1", "kind": "code",
                                               "repo": self.repo},
-                                anchor2["seal"])
+                                anchor2["facts"])
         self.assertFalse(produced,
                          "att2 produced nothing, but inherited att1's anchor "
                          "so att1's commit counted as att2's production")
@@ -303,7 +310,7 @@ class TestARetryDoesNotInheritTheLastAttemptsBaseline(Base):
         git(self.repo, "commit", "-qm", "att1 work")
         produced, _ = W.judge(U.run, att1, {"id": "u1", "kind": "code",
                                             "repo": self.repo},
-                              anchor["seal"])
+                              anchor["facts"])
         self.assertTrue(produced)
 
 
@@ -350,7 +357,7 @@ class TestCoordinatorFilesAreNeverBlanketExcluded(Base):
                                 {"id": "u1", "kind": "code",
                                  "repo": self.repo})
         self.assertFalse(produced)
-        self.assertIn("no launch record", why)
+        self.assertIn("no launch snapshot", why)
 
 if __name__ == "__main__":
     unittest.main()

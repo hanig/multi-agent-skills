@@ -1597,7 +1597,7 @@ def _dep_env(u, state):
     return out
 
 
-def _submit(u, unit_dir, dry_run, state=None):
+def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
     """Submit, and return (job_id, error). Dispatch differs per kind; judging
     does not.
 
@@ -1622,44 +1622,6 @@ def _submit(u, unit_dir, dry_run, state=None):
         anchor_err, anchored_base = _write_launch_record(unit_dir, u)
         if anchor_err:
             return None, anchor_err
-    # UNJUDGEABLE-FOREVER, closed. Two ways the seal could be missing while
-    # dispatch went ahead anyway: the coordinator crashed between writing the
-    # record and storing the seal, or the record predates sealing entirely.
-    # Either way `_write_launch_record` returns no seal on the re-dispatch
-    # path, the attempt used to launch, and nothing could ever judge it: a
-    # legitimate unit stuck with no way out but hand-editing state.
-    #
-    # Re-deriving the seal from the file here is NOT the fix. That is exactly
-    # the laundering the seal exists to prevent, and it would be worse than
-    # having no seal because it would look like one. So the attempt fails now,
-    # loudly, and a retry starts in a fresh attempt directory with a fresh
-    # record and a fresh seal, which is what the retry boundary is for.
-    if _requires_clean_workspace(u) and not dry_run:
-        has_seal = bool((anchored_base or {}).get("seal"))
-        if not has_seal and state is not None:
-            has_seal = bool(trusted_record_seal(state, u["id"], unit_dir))
-        if not has_seal:
-            return None, (
-                f"unit {u['id']!r}: attempt {Path(unit_dir).name!r} has a "
-                f"launch record but coordinator state holds no seal for it, "
-                f"so nothing could later tell that record apart from one the "
-                f"agent rewrote, and the attempt could never be judged. This "
-                f"attempt is abandoned rather than started; retry to get a "
-                f"fresh attempt directory, record and seal.")
-        # And while we hold both: verify the record still matches its seal
-        # BEFORE dispatching, not only when judging. On a first dispatch this
-        # is trivially true, having just been written. On a re-dispatch it is
-        # the general form of the workspace cross-check below: any field the
-        # agent edited between the two dispatches is caught here, rather than
-        # only the one field a reviewer happened to name.
-        if state is not None:
-            stored = trusted_record_seal(state, u["id"], unit_dir)
-            if stored:
-                _rec, seal_err = W.read_sealed_launch_record(unit_dir, stored)
-                if seal_err:
-                    return None, (f"unit {u['id']!r}: refusing to dispatch "
-                                  f"attempt {Path(unit_dir).name!r}: "
-                                  f"{seal_err}")
     if state is not None and anchored_base:
         # Trusted coordinator observation, keyed by attempt. Historical
         # attempts retain the base they actually launched from.
@@ -1679,9 +1641,37 @@ def _submit(u, unit_dir, dry_run, state=None):
         if anchored_base.get("base"):
             us.setdefault("attempt_bases", {})[Path(unit_dir).name] = (
                 anchored_base["base"])
+        if anchored_base.get("facts"):
+            us.setdefault("attempt_launch_facts", {})[
+                Path(unit_dir).name] = anchored_base["facts"]
         if anchored_base.get("seal"):
             us.setdefault("attempt_record_seals", {})[Path(unit_dir).name] = (
                 anchored_base["seal"])
+    if _requires_clean_workspace(u) and not dry_run:
+        facts = trusted_launch_facts(state or {}, u["id"], unit_dir)
+        if not facts:
+            return None, (
+                f"unit {u['id']!r}: coordinator state has no complete launch "
+                f"snapshot for attempt {Path(unit_dir).name!r}. Re-dispatch "
+                f"into a fresh attempt; do not reconstruct trusted facts "
+                f"from the agent-writable launch record.")
+        # The seal now audits the human-readable copy only. A mismatch is
+        # retained for inspection and cannot alter the facts used below.
+        stored = trusted_record_seal(state or {}, u["id"], unit_dir)
+        if stored:
+            _audit, audit_err = W.read_sealed_launch_record(unit_dir, stored)
+            audit = (state.setdefault("units", {}).setdefault(u["id"], {})
+                     .setdefault("attempt_record_audit", {}))
+            if audit_err:
+                audit[Path(unit_dir).name] = audit_err
+            else:
+                audit.pop(Path(unit_dir).name, None)
+        # Authority must be durable before an agent exists. Saving only after
+        # `paseo run` leaves a crash window in which the audit record survives
+        # but the trusted snapshot does not, and recovery is forbidden from
+        # laundering the former back into the latter.
+        if state_dir is not None:
+            save_state(state_dir, state)
     if dry_run:
         return f"dry-{os.urandom(3).hex()}", None
     if kind == "slurm":
@@ -1775,30 +1765,11 @@ def _submit(u, unit_dir, dry_run, state=None):
         # execution checkout, so --cwd must name the same path preflight
         # checked and the anchor recorded.
         #
-        workspace, ws_err = _plan_workspace(u)
-        if ws_err:
-            return None, ws_err
-        anchor, anchor_read_err = W.read_launch_record(unit_dir)
-        if anchor_read_err:
-            return None, anchor_read_err
-        recorded = W.record_claim(anchor, "execution_workspace")
-        if not recorded:
-            return None, (
-                f"unit {u.get('id')!r}: launch record for attempt "
-                f"{Path(unit_dir).name!r} records no execution_workspace; "
-                f"refusing to launch outside the Git workspace preflight "
-                f"checked")
-        # Disagreement means the record no longer describes the tree the
-        # coordinator checked. The plan decides --cwd either way; refusing
-        # rather than quietly preferring it is what makes an edit visible.
-        if str(recorded) != str(workspace):
-            return None, (
-                f"unit {u.get('id')!r}: the launch record for attempt "
-                f"{Path(unit_dir).name!r} names execution workspace "
-                f"{str(recorded)!r}, but the plan resolves to "
-                f"{str(workspace)!r}. That record is writable by the agent "
-                f"this unit launches, so a disagreement is not a tie to "
-                f"break: nothing is dispatched until they agree.")
+        facts = trusted_launch_facts(state or {}, u["id"], unit_dir)
+        workspace = facts.get("execution_workspace") if facts else None
+        if not workspace:
+            return None, (f"unit {u.get('id')!r}: trusted coordinator state "
+                          "records no execution workspace for this attempt")
         argv = ["paseo", "run", "--background", "--json",
                 "--cwd", str(workspace),
                 "--provider", u.get("provider") or DEFAULT_AGENT_PROVIDER,
@@ -2100,7 +2071,21 @@ def _write_launch_record(unit_dir, u):
         return f"cannot write the launch record for {u['id']!r}: {exc}", None
     if dirty:
         return _dirty_refusal(u.get("id"), resolved_top, dirty), None
-    return None, {"base": rec.get("base_commit"), "seal": seal}
+    facts = {
+        "schema_version": 1,
+        "unit_id": rec.get("unit"),
+        "attempt_id": rec.get("attempt"),
+        "repo": rec.get("repo"),
+        "repository_remote": rec.get("remote"),
+        "workspace_identity": rec.get("workspace_identity"),
+        "execution_workspace": rec.get("execution_workspace"),
+        "base_commit": rec.get("base_commit"),
+        "base_tree": rec.get("base_tree"),
+        "branch": rec.get("branch"),
+        "clean_at_launch": rec.get("clean_at_launch"),
+    }
+    return None, {"base": rec.get("base_commit"), "seal": seal,
+                  "facts": facts}
 
 
 def _bind(unit_dir, job_id):
@@ -2109,15 +2094,15 @@ def _bind(unit_dir, job_id):
     return None if rc == 0 else f"bind failed: {(err or out).strip()[:200]}"
 
 
-def _check(unit_dir, seal=None):
+def _check(unit_dir, launch_facts=None):
     argv = [sys.executable, str(_HERE / "unit.py"), "check", str(unit_dir)]
-    # Judging a code unit means reading the launch record, and that record is
-    # not authority on its own. The seal travels from coordinator state so the
-    # judging process can tell whether the record is still what we wrote.
-    if seal:
-        argv += ["--record-seal", str(seal)]
+    # The separate judge receives the complete authority snapshot directly
+    # from coordinator state. It never opens the launch audit record.
+    if launch_facts:
+        argv += ["--launch-facts", json.dumps(
+            launch_facts, sort_keys=True, separators=(",", ":"))]
     rc, out, err = U.run(argv, timeout=300)
-    return rc, (out or "") + (err or "")
+    return rc, out or "", err or ""
 
 
 # --- tracker outbox -------------------------------------------------------
@@ -2923,27 +2908,70 @@ def trusted_base(state, unit, attempt_dir):
     """
     if not attempt_dir:
         return None
+    facts = trusted_launch_facts(state, unit, attempt_dir)
+    return facts.get("base_commit") if facts else None
+
+
+def trusted_launch_facts(state, unit, attempt_dir):
+    """Complete per-attempt launch authority, from coordinator state only."""
+    if not attempt_dir:
+        return None
+    attempt = Path(attempt_dir).name
     us = (state.get("units") or {}).get(unit) or {}
-    return (us.get("attempt_bases") or {}).get(Path(attempt_dir).name)
+    facts = (us.get("attempt_launch_facts") or {}).get(attempt)
+    if W.launch_facts_problem(facts, attempt_dir,
+                              {"id": unit, "task_id": unit}):
+        return None
+    return facts
+
+
+def trusted_produced_head(state, unit, attempt_dir):
+    """The one judgment basis pinned for this exact attempt; no fallback."""
+    if not attempt_dir:
+        return None
+    us = (state.get("units") or {}).get(unit) or {}
+    return (us.get("attempt_produced_heads") or {}).get(
+        Path(attempt_dir).name)
 
 
 RECEIPT_DIGEST_PREFIX = "RECEIPT_SHA256"
 
 
-def _reported_receipt_digest(text):
-    """The digest `unit.py check` said it wrote, or None.
+def _reported_receipt_digest(stdout):
+    """Parse the sole exact receipt result line from checker stdout.
 
     Taken from the check's own output rather than from the directory, because
     a digest taken by looking attests whatever is there -- including a receipt
     the agent wrote before the check ran and the check then failed to replace.
+
+    Returns ``(digest, problem)``. Stderr is intentionally not an input. More
+    than one result line is ambiguous even when both values happen to agree.
     """
-    for line in reversed((text or "").splitlines()):
-        parts = line.strip().split()
-        if len(parts) == 2 and parts[0] == RECEIPT_DIGEST_PREFIX:
-            if len(parts[1]) == 64 and all(
-                    c in "0123456789abcdef" for c in parts[1].lower()):
-                return parts[1].lower()
-    return None
+    candidates = [line for line in (stdout or "").splitlines()
+                  if line.strip().startswith(RECEIPT_DIGEST_PREFIX)]
+    if not candidates:
+        return None, None
+    if len(candidates) != 1:
+        return None, (f"checker stdout contained {len(candidates)} "
+                      f"{RECEIPT_DIGEST_PREFIX} result lines; exactly one is "
+                      "required")
+    match = re.fullmatch(
+        RECEIPT_DIGEST_PREFIX + r" ([0-9a-f]{64})", candidates[0])
+    if not match:
+        return None, (f"malformed checker result {candidates[0]!r}; expected "
+                      f"'{RECEIPT_DIGEST_PREFIX} ' followed by 64 lowercase "
+                      "hexadecimal characters")
+    return match.group(1), None
+
+
+RECEIPT_PROVENANCE_LIMIT = (
+    "The coordinator has no portable process-group or cgroup handle that "
+    "proves every same-UID descendant of a Paseo agent or scheduler job is "
+    "dead. The digest binds the trusted checker's receipt bytes, but does "
+    "not prove that an escaped background process stopped mutating other "
+    "artifacts during or after the check. OS-enforced isolation requires a "
+    "different principal, container, or scheduler-exposed cgroup barrier."
+)
 
 
 def _record_receipt_provenance(state, unit, attempt_dir, digest):
@@ -2973,8 +3001,16 @@ def _record_receipt_provenance(state, unit, attempt_dir, digest):
         # Withdrawing the seal is the whole point of holding it.
         (us.get("attempt_receipt_seals") or {}).pop(Path(attempt_dir).name,
                                                     None)
+        (us.get("attempt_receipt_provenance_limits") or {}).pop(
+            Path(attempt_dir).name, None)
         return
     us.setdefault("attempt_receipt_seals", {})[Path(attempt_dir).name] = digest
+    # DECLARED LIMIT AT THE ACCEPTANCE POINT. Slurm terminal accounting and a
+    # terminal/idle Paseo lifecycle do not expose one portable handle with
+    # which this coordinator can prove every escaped same-UID descendant is
+    # gone. Do not silently upgrade this byte binding into process isolation.
+    us.setdefault("attempt_receipt_provenance_limits", {})[
+        Path(attempt_dir).name] = RECEIPT_PROVENANCE_LIMIT
 
 
 def attested_receipt(state, unit, attempt_dir):
@@ -3017,6 +3053,12 @@ def attested_receipt(state, unit, attempt_dir):
         return None, f"the receipt at {path} is not readable JSON: {exc}"
     if not isinstance(rec, dict):
         return None, f"the receipt at {path} is not a JSON object"
+    attempt = Path(attempt_dir).name
+    if rec.get("task_id") != unit or rec.get("attempt_id") != attempt:
+        return None, (f"the attested receipt identifies unit "
+                      f"{rec.get('task_id')!r}, attempt "
+                      f"{rec.get('attempt_id')!r}, not unit {unit!r}, "
+                      f"attempt {attempt!r}; cross-wired evidence is refused")
     return rec, None
 
 
@@ -3351,16 +3393,63 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         us = _unit_state(state, uid)
         if not us["attempt_dir"] or us["state"] == "DONE":
             continue
-        rc, text = _check(us["attempt_dir"],
-                          trusted_record_seal(state, uid, us["attempt_dir"]))
-        # Whatever the verdict: the receipt this check REPORTED WRITING is
-        # attributable to us. Only that one. A check that failed to write
-        # leaves whatever was there before, and attesting that would attest
-        # the agent's own file.
-        _record_receipt_provenance(state, uid, us["attempt_dir"],
-                                   _reported_receipt_digest(text))
+        attempt = us["attempt_dir"]
+        pinned_before = trusted_produced_head(state, uid, attempt)
+        ran_check = not (u.get("kind") == "code" and pinned_before)
+        protocol_problem = None
+        if ran_check:
+            check_result = _check(
+                attempt, trusted_launch_facts(state, uid, attempt))
+            # Some embedders predate stderr becoming a distinct diagnostic
+            # stream. The real checker always returns three values; accepting
+            # a two-value test double does not merge stderr into authority.
+            if len(check_result) == 3:
+                rc, stdout, stderr = check_result
+            else:
+                rc, stdout = check_result
+                stderr = ""
+            digest, protocol_problem = _reported_receipt_digest(stdout)
+            if rc == DONE and not digest and not protocol_problem:
+                protocol_problem = (
+                    "a successful checker emitted no RECEIPT_SHA256 result "
+                    "on stdout, so its receipt cannot be attributed")
+            if protocol_problem:
+                digest = None
+                report.append(f"{uid}: CHECK RESULT REFUSED -- "
+                              f"{protocol_problem}")
+            _record_receipt_provenance(state, uid, attempt, digest)
+
+            # The one permitted production observation happened inside this
+            # check. Bind its attested result to this attempt immediately.
+            # Nothing later may recover a missing basis by reading HEAD, a
+            # branch, the launch record, or even the receipt again.
+            if digest:
+                checked, receipt_problem = attested_receipt(
+                    state, uid, attempt)
+                if receipt_problem:
+                    protocol_problem = receipt_problem
+                    report.append(f"{uid}: CHECK RESULT REFUSED -- "
+                                  f"{receipt_problem}")
+                elif u.get("kind") == "code" and rc == DONE:
+                    produced = ((checked.get("basis") or {})
+                                .get("produced_head"))
+                    basis_problem = W.validate_pinned_head(
+                        U.run, trusted_launch_facts(state, uid, attempt),
+                        produced)
+                    if basis_problem:
+                        protocol_problem = basis_problem
+                        report.append(f"{uid}: CHECK RESULT REFUSED -- "
+                                      f"{basis_problem}")
+                    else:
+                        us.setdefault("attempt_produced_heads", {})[
+                            Path(attempt).name] = produced
+        else:
+            # Judgment already crossed the boundary for this attempt. Asking
+            # the mutable ref again could replace pinned A with later C.
+            rc, stdout, stderr = DONE, "", ""
         previous = us.get("state")
-        us["state"] = NAME.get(rc, f"rc={rc}")
+        us["state"] = ("FAILED_EVIDENCE" if protocol_problem
+                       else NAME.get(rc, f"rc={rc}"))
         # A CODE UNIT IS NOT DONE WHEN ITS PREDICATE PASSES. The receipt says
         # an agent went idle and files exist; the accepted form of that work
         # is a merged PR. Rewriting only the tracker intent left the unit
@@ -3390,30 +3479,13 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             # it pins is the one this attempt produced, which is the single
             # check available to a coordinator with no network.
             attempt = us.get("attempt_dir") or ""
-            # RECORD IT ONCE, and read state, then the ATTESTED receipt,
-            # then the repository. Re-deriving asks a repository the agent
-            # owns what it produced, and the answer moves: validate A, park in
-            # READY_FOR_PR, let the agent move the branch to C, and a receipt
-            # for the genuinely produced A is refused because the question was
-            # asked twice. So the receipt is preferred over re-judging on
-            # purpose -- it caught the head when it was judged.
-            #
-            # The ORDER was already right; the TRUST was not. Read unattested,
-            # the agent supplied the very value its own merge attestation is
-            # checked against, and the result was stored as coordinator state.
-            produced = us.get("produced_head")
-            if not produced:
-                rec, _why = attested_receipt(state, uid, attempt)
-                produced = ((rec or {}).get("basis") or {}).get(
-                    "produced_head")
-            if not produced:
-                produced = W.produced_head(
-                    U.run, attempt, u,
-                    trusted_record_seal(state, uid, attempt))
-            if produced:
-                us["produced_head"] = produced
-            anchor_rec, _ = W.read_launch_record(attempt) if attempt else (None,
-                                                                           None)
+            produced = trusted_produced_head(state, uid, attempt)
+            launch_facts = trusted_launch_facts(state, uid, attempt)
+            immutable_problem = W.validate_pinned_head(
+                U.run, launch_facts, produced) if produced else (
+                    "coordinator state records no produced commit for this "
+                    "attempt. Re-run the attempt; do not recover a basis from "
+                    "its receipt or current branch")
             # DELIBERATELY NOT copied from the launch record here. Reading
             # the base out of an agent-writable file and then storing it as
             # trusted state launders exactly the value the trust was meant to
@@ -3432,9 +3504,11 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             policy_digest, perr, _pol = None, None, None
             if required:
                 base = trusted_base(state, uid, attempt)
-                if anchor_rec and anchor_rec.get("repo"):
+                if immutable_problem:
+                    perr = immutable_problem
+                elif launch_facts and launch_facts.get("repo"):
                     _pol, policy_digest, perr = V.read_policy(
-                        U.run, anchor_rec["repo"], base)
+                        U.run, launch_facts["repo"], base)
                 else:
                     perr = "this attempt anchored no repository"
             for claim in required:
@@ -3454,9 +3528,11 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 if vrefusal:
                     break
 
+            if immutable_problem and not vrefusal:
+                vrefusal = immutable_problem
             receipt, refusal = (None, vrefusal) if vrefusal else admit_merge(
                 state_dir, uid, produced,
-                expect_repo=(anchor_rec or {}).get("remote"))
+                expect_repo=(launch_facts or {}).get("repository_remote"))
             if receipt:
                 us["state"] = "DONE"
                 us["merged_as"] = receipt.get("merged_as")
@@ -3651,7 +3727,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         spent += want
         save_state(state_dir, state)
 
-        job_id, err = _submit(u, unit_dir, dry_run, state)
+        job_id, err = _submit(u, unit_dir, dry_run, state, state_dir)
         if err:
             # Classified from what `_submit` OBSERVED, not from re-reading
             # the launch record. On a re-dispatch the record was written while
@@ -4282,51 +4358,45 @@ def cmd_verify(args):
     the verifier's bytes hashed to what the policy authorized, those exact
     bytes ran, and the head it ran against is the one this attempt produced.
     """
-    anchor_rec, err = W.read_launch_record(args.attempt)
-    if err:
-        sys.stderr.write(f"error: {err}\n")
+    _prepare_command_paths(args)
+    state = load_state(args.state_dir) or {}
+    launch_facts = trusted_launch_facts(
+        state, args.unit, args.attempt)
+    if not launch_facts:
+        sys.stderr.write(
+            f"error: coordinator state records no complete launch snapshot "
+            f"for unit {args.unit!r}, attempt {Path(args.attempt).name!r}. "
+            f"Re-dispatch it; verification may not reconstruct repository "
+            f"identity or a base from the launch record.\n")
         return EXIT_USAGE
-    repo = (anchor_rec or {}).get("repo")
-    base = W.record_claim(anchor_rec, "base_commit")
-    _prepare_command_paths(args, extra_repos=([repo] if repo else []))
+    repo = launch_facts["repo"]
+    base = launch_facts["base_commit"]
+    _prepare_command_paths(args, extra_repos=[repo])
     try:
         load_verifications(args.state_dir)
     except OutboxError as exc:
         sys.stderr.write(f"  VERIFICATION JOURNAL: {exc}\n")
         return EXIT_CONFLICT
 
-    # THE BASE COMES FROM COORDINATOR STATE, not from the launch record alone.
-    # base_commit is the linchpin of the whole authorization chain, and the
-    # launch record sits on a filesystem the agent's Unix user can write. If
-    # the agent can choose the base, it can point at a commit carrying a
-    # policy it wrote, and every check below is then checking its own work.
-    # swarm-state.json is coordinator state, which the threat model trusts.
-    state = load_state(args.state_dir) or {}
-    recorded = trusted_base(state, args.unit, args.attempt)
-    if recorded and base and recorded != base:
-        sys.stderr.write(
-            f"error: the launch record says base {str(base)[:12]} and "
-            f"coordinator state says {str(recorded)[:12]}. The record was "
-            f"changed after it was written; refusing to read an "
-            f"authorization policy from a base this attempt did not "
-            f"anchor.\n")
-        return EXIT_USAGE
-    # NO FALLBACK. `recorded or base` quietly reinstated the whole defect:
-    # when coordinator state had nothing, the agent-writable record supplied
-    # the value, which is the case an attacker arranges. Found by the
-    # structural test written for this root cause, one commit after I claimed
-    # the laundering was gone.
-    if not recorded:
-        sys.stderr.write(
-            f"error: coordinator state records no anchored base for attempt "
-            f"{Path(args.attempt).name}, so there is no authorization source "
-            f"this agent could not have written. Re-dispatch the unit; do not "
-            f"verify against a base taken from the launch record.\n")
-        return EXIT_USAGE
-    base = recorded
     if not repo:
         sys.stderr.write("error: this attempt anchored no repository, so "
                          "there is no base to read a policy from.\n")
+        return EXIT_USAGE
+
+    # Attempt identity is part of the lookup. Check it before touching a
+    # verifier path so a request for the wrong attempt fails for the actual
+    # authority defect and cannot be obscured by an unrelated file error.
+    produced = trusted_produced_head(state, args.unit, args.attempt)
+    if not produced:
+        sys.stderr.write(
+            f"error: coordinator state records no judged produced commit for "
+            f"attempt {Path(args.attempt).name!r}. Re-run that attempt; do "
+            f"not recover a basis from another attempt, its receipt, or the "
+            f"current branch.\n")
+        return EXIT_USAGE
+    basis_problem = W.validate_pinned_head(U.run, launch_facts, produced)
+    if basis_problem:
+        sys.stderr.write(f"error: {basis_problem}\n")
         return EXIT_USAGE
 
     policy, policy_digest, perr = V.read_policy(U.run, repo, base)
@@ -4342,23 +4412,6 @@ def cmd_verify(args):
     entry, refusal = V.authorized(policy, args.verifier, digest, args.claim)
     if refusal:
         sys.stderr.write(f"error: {refusal}\n")
-        return EXIT_USAGE
-
-    # The commit the verifier will be RUN AT. Taken from coordinator state
-    # first and otherwise from an ATTESTED receipt: read unattested, this let
-    # the agent choose the commit its own verification would be performed
-    # against, inside the one chain this repo is most careful about.
-    produced = ((state.get("units") or {}).get(args.unit) or {}).get(
-        "produced_head")
-    if not produced:
-        rec, why = attested_receipt(state, args.unit, args.attempt)
-        produced = ((rec or {}).get("basis") or {}).get("produced_head")
-        if not produced and why:
-            sys.stderr.write(f"error: {why}\n")
-            return EXIT_USAGE
-    if not produced:
-        sys.stderr.write("error: this attempt has no judged produced commit, "
-                         "so a verification would have nothing to bind to.\n")
         return EXIT_USAGE
 
     outcome, rerr = V.run_in_checkout(U.run, repo, produced, args.path,

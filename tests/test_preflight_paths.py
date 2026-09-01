@@ -51,10 +51,12 @@ class Base(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
 
 
-def _state_with_seal(uid, attempt, seal):
+def _state_with_seal(uid, attempt, seal, facts=None):
     """Coordinator state as it stands after a first dispatch."""
-    return {"units": {uid: {"attempt_record_seals": {
-        Path(attempt).name: seal}}}}
+    us = {"attempt_record_seals": {Path(attempt).name: seal}}
+    if facts:
+        us["attempt_launch_facts"] = {Path(attempt).name: facts}
+    return {"units": {uid: us}}
 
 class TestExternalPathPolicy(Base):
 
@@ -571,7 +573,7 @@ class TestRefusalIsCarriedNotRederived(unittest.TestCase):
     def test_advance_believes_the_observation_over_the_record(self):
         # No launch record on disk at all: the old classifier read nothing,
         # found no "refused", and charged the unit as a plain failure.
-        def stub(u, unit_dir, dry_run, state=None):
+        def stub(u, unit_dir, dry_run, state=None, state_dir=None):
             refusal = S.PreflightRefusal("dirty at dispatch")
             refusal.workspace = "/checkout"
             refusal.dirty_count = 3
@@ -593,7 +595,7 @@ class TestRefusalIsCarriedNotRederived(unittest.TestCase):
     def test_a_record_saying_refused_does_not_make_a_failure_a_refusal(self):
         # The mutation in the other direction: authority is the observation,
         # so a launch record alone must not restore a retry budget.
-        def stub(u, unit_dir, dry_run, state=None):
+        def stub(u, unit_dir, dry_run, state=None, state_dir=None):
             anchor = Path(unit_dir).parent / f"launch-{Path(unit_dir).name}.json"
             anchor.write_text(json.dumps(
                 {"preflight": {"status": "refused"},
@@ -630,7 +632,7 @@ class TestTheRecordIsNotTrustedForDispatch(unittest.TestCase):
             return real(argv, **kwargs)
         return real, spy, launched
 
-    def test_an_edited_workspace_is_refused_not_obeyed(self):
+    def test_an_edited_audit_record_is_ignored_for_dispatch(self):
         good = repo_at(self.tmp / "good")
         evil = repo_at(self.tmp / "evil")
         unit = code_unit(good)
@@ -638,7 +640,8 @@ class TestTheRecordIsNotTrustedForDispatch(unittest.TestCase):
         attempt.mkdir(parents=True)
         err, anchored = S._write_launch_record(str(attempt), unit)
         self.assertIsNone(err)
-        state = _state_with_seal(unit["id"], attempt, anchored["seal"])
+        state = _state_with_seal(unit["id"], attempt, anchored["seal"],
+                                 anchored["facts"])
 
         anchor = W.launch_record_path(str(attempt))
         rec = json.loads(anchor.read_text())
@@ -651,11 +654,13 @@ class TestTheRecordIsNotTrustedForDispatch(unittest.TestCase):
             job, refusal = S._submit(unit, str(attempt), False, state)
         finally:
             S.U.run = real
-        self.assertIsNone(job)
-        self.assertEqual(launched, [])
-        # The seal catches the edit before the field-level cross-check does,
-        # which is the point: it does not depend on a reviewer naming a field.
-        self.assertIn("no longer matches the digest", refusal)
+        self.assertIsNone(refusal)
+        self.assertTrue(job)
+        self.assertEqual(len(launched), 1)
+        cwd = launched[0][launched[0].index("--cwd") + 1]
+        self.assertEqual(cwd, str(Path(good).resolve()))
+        audit = state["units"]["code"]["attempt_record_audit"]["attempt"]
+        self.assertIn("no longer matches the digest", audit)
 
     def test_a_clean_untouched_attempt_still_dispatches(self):
         # The other direction: the check must not refuse an honest launch.
@@ -674,7 +679,7 @@ class TestTheRecordIsNotTrustedForDispatch(unittest.TestCase):
         cwd = launched[0][launched[0].index("--cwd") + 1]
         self.assertEqual(cwd, str(Path(good).resolve()))
 
-    def test_a_cleaned_workspace_is_no_longer_refused_by_an_old_record(self):
+    def test_a_refused_attempt_without_trusted_facts_stays_abandoned(self):
         # _existing_preflight_refusal refused on a stale recorded refusal even
         # after the workspace was cleaned. The current predicate decides.
         repo = repo_at(self.tmp / "repo")
@@ -698,8 +703,9 @@ class TestTheRecordIsNotTrustedForDispatch(unittest.TestCase):
             job, err = S._submit(unit, str(attempt), False, state)
         finally:
             S.U.run = real
-        self.assertIsNone(err, "a cleaned workspace must dispatch")
-        self.assertEqual(len(launched), 1)
+        self.assertIsNone(job)
+        self.assertIn("no complete launch snapshot", err)
+        self.assertEqual(launched, [])
 
 
 class TestARefusedAttemptCannotBeBound(unittest.TestCase):
@@ -824,8 +830,8 @@ class TestASealLessAttemptIsAbandonedNotStarted(unittest.TestCase):
         self.assertIsNone(job)
         self.assertEqual(launched, [], "dispatched an attempt nothing could "
                                        "ever judge")
-        self.assertIn("holds no seal", refusal)
-        self.assertIn("retry", refusal)
+        self.assertIn("no complete launch snapshot", refusal)
+        self.assertIn("Re-dispatch", refusal)
 
     def test_a_record_predating_sealing_abandons_the_attempt(self):
         # A v1-era record, written by hand, with no seal anywhere.
@@ -837,7 +843,7 @@ class TestASealLessAttemptIsAbandonedNotStarted(unittest.TestCase):
         (job, refusal), launched = self._submit_with({"units": {}})
         self.assertIsNone(job)
         self.assertEqual(launched, [])
-        self.assertIn("holds no seal", refusal)
+        self.assertIn("no complete launch snapshot", refusal)
 
     def test_the_seal_is_not_re_derived_from_the_file(self):
         # The tempting "fix": digest whatever is on disk now and call it the

@@ -666,7 +666,7 @@ class TestGatedPromotion(unittest.TestCase):
         st = (attempt / "o.txt").stat()
         digest = __import__("hashlib").sha256(body.encode()).hexdigest()
         receipt_raw = json.dumps({
-            "state": "DONE", "attempt_id": "att1",
+            "state": "DONE", "task_id": "w", "attempt_id": "att1",
             "outputs": {"o.txt": {"size": st.st_size,
                                   "mtime": int(st.st_mtime),
                                   "sha256": digest,
@@ -1039,7 +1039,8 @@ class TestDirectoryOutputs(unittest.TestCase):
             fp = U2.fingerprint_outputs(str(att), ["results"])
             self.assertIn("tree-digest", fp["results"]["method"])
             (att / "receipt.json").write_text(json.dumps(
-                {"state": "DONE", "attempt_id": "att1", "outputs": fp}))
+                {"state": "DONE", "task_id": "w", "attempt_id": "att1",
+                 "outputs": fp}))
             plan = {"name": "p", "units": [
                 {"id": "w", "kind": "slurm", "runtime": "none", "command": "true",
                  "outputs": ["results"],
@@ -2329,17 +2330,41 @@ class TestACodeUnitIsNotDoneUntilMerged(unittest.TestCase):
         st.mkdir(parents=True, exist_ok=True)
         att = tmp / "rn" / "c" / "a1"
         att.mkdir(parents=True, exist_ok=True)
+        facts = {"unit_id": "c", "attempt_id": "a1",
+                 "repo": "/tmp/fixture-repo",
+                 "execution_workspace": "/tmp/fixture-repo",
+                 "workspace_identity": {"realpath": "/tmp/fixture-repo"},
+                 "base_commit": "a" * 40, "base_tree": "b" * 40,
+                 "branch": "fx", "clean_at_launch": True,
+                 "repository_remote": None}
+        extra = ({"attempt_launch_facts": {"a1": facts},
+                  "attempt_produced_heads": {"a1": "c" * 40}}
+                 if plan["units"][0]["kind"] == "code" and verdict == 0
+                 else {})
         (st / "swarm-state.json").write_text(json.dumps(
             {"schema_version": 1, "halted": None, "units": {
                 "c": {"state": "SUBMITTED", "job_id": "agent-1",
                       "attempt_dir": str(att), "attempts": [str(att)],
-                      "gpu_hours": 0}}}))
+                      "gpu_hours": 0, **extra}}}))
         ok, _ = m.acquire_lease(str(st))
         self.assertTrue(ok)
         self.addCleanup(m.release_lease, str(st))
-        m._check = lambda d, seal=None: (verdict, "forced")
-        rep, disp, _ = m.advance(plan, m.load_state(str(st)), str(st),
-                                 str(tmp / "rn"), False, max_new=0)
+        def forced_check(unit_dir, facts=None):
+            if verdict != 0:
+                return verdict, "forced", ""
+            receipt = json.dumps({"task_id": "c", "attempt_id": "a1",
+                                  "state": "DONE", "basis": {}})
+            (Path(unit_dir) / "receipt.json").write_text(receipt)
+            digest = __import__("hashlib").sha256(receipt.encode()).hexdigest()
+            return verdict, f"RECEIPT_SHA256 {digest}", ""
+        m._check = forced_check
+        real_validate = m.W.validate_pinned_head
+        m.W.validate_pinned_head = lambda *a, **k: None
+        try:
+            rep, disp, _ = m.advance(plan, m.load_state(str(st)), str(st),
+                                     str(tmp / "rn"), False, max_new=0)
+        finally:
+            m.W.validate_pinned_head = real_validate
         return rep, disp, m.load_state(str(st)), m
 
     PLAN = {"name": "p", "units": [

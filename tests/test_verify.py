@@ -387,17 +387,17 @@ class TestTheBaseComesFromCoordinatorState(unittest.TestCase):
 
     def test_verify_reads_the_base_from_state(self):
         src = (SCRIPTS / "swarm.py").read_text()
-        self.assertIn("recorded = trusted_base(state, args.unit, args.attempt)",
+        self.assertIn("launch_facts = trusted_launch_facts(",
                       " ".join(src.split()))
 
-    def test_a_disagreement_is_refused_not_reconciled(self):
-        # Each fragment must sit inside ONE string literal. The message is
-        # built from adjacent f-strings, so a phrase spanning two of them is
-        # separated by `" f"` in the source and no amount of whitespace
-        # normalising will join it. Fourth time this shape has caught me.
-        src = (SCRIPTS / "swarm.py").read_text()
-        self.assertIn("changed after it was written", src)
-        self.assertIn("authorization policy from a base", src)
+    def test_verify_never_reads_the_launch_record(self):
+        import ast
+        tree = ast.parse((SCRIPTS / "swarm.py").read_text())
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == "cmd_verify")
+        body = ast.unparse(fn)
+        self.assertNotIn("read_launch_record", body)
+        self.assertNotIn("read_sealed_launch_record", body)
 
     def test_the_base_is_recorded_at_dispatch_not_copied_back(self):
         """Copying the base out of the agent-writable launch record and then
@@ -572,7 +572,13 @@ class TestOneWayToGetTheBase(unittest.TestCase):
     agent can write. One function, coordinator state only, no fallback."""
 
     def test_it_reads_only_coordinator_state(self):
-        state = {"units": {"u1": {"attempt_bases": {"att1": "a" * 40}}}}
+        facts = {"unit_id": "u1", "attempt_id": "att1", "repo": "/repo",
+                 "execution_workspace": "/repo",
+                 "workspace_identity": {"realpath": "/repo"},
+                 "base_commit": "a" * 40, "base_tree": "b" * 40,
+                 "branch": "main", "clean_at_launch": True}
+        state = {"units": {"u1": {"attempt_launch_facts": {
+            "att1": facts}}}}
         self.assertEqual(S.trusted_base(state, "u1", "/runs/u1/att1"),
                          "a" * 40)
 
@@ -622,9 +628,7 @@ class TestOneWayToGetTheBase(unittest.TestCase):
 
     def test_no_base_in_state_refuses_rather_than_falling_back(self):
         src = " ".join((SCRIPTS / "swarm.py").read_text().split())
-        # Within ONE literal. The message is adjacent f-strings, so a phrase
-        # crossing the boundary has `" f"` in the middle of it. Fifth time.
-        self.assertIn("verify against a base taken from the launch", src)
+        self.assertIn("may not reconstruct repository", src)
         self.assertNotIn("base = recorded or base", src)
 
 if __name__ == "__main__":

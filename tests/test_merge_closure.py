@@ -420,23 +420,18 @@ class TestTheProducedHeadIsRecordedNotRederived(unittest.TestCase):
     answer changed between askings."""
 
     def test_advance_persists_the_produced_head(self):
-        import ast
         src = (SCRIPTS / "swarm.py").read_text()
-        self.assertIn('us["produced_head"] = produced', src)
+        self.assertIn('setdefault("attempt_produced_heads", {})', src)
+        self.assertNotIn('us["produced_head"] = produced', src)
 
-    def test_a_recorded_head_is_preferred_over_rejudging(self):
+    def test_there_is_no_rejudging_fallback(self):
         import ast
-        src = (SCRIPTS / "swarm.py").read_text()
-        i = src.index("attempt = us.get(\"attempt_dir\") or \"\"")
-        # Wide enough for THREE sources: state, the attested receipt, then
-        # re-judging. It was 900 when there were two.
-        seg = src[i:i + 1500]
-        self.assertIn('us.get("produced_head")', seg)
-        j = seg.index('us.get("produced_head")')
-        k = seg.index("W.produced_head(")
-        self.assertLess(j, k,
-                        "the repository is re-judged before the recorded "
-                        "head is consulted, so a moved branch still wins")
+        tree = ast.parse((SCRIPTS / "swarm.py").read_text())
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == "advance")
+        body = ast.unparse(fn)
+        self.assertIn("trusted_produced_head", body)
+        self.assertNotIn("W.produced_head", body)
 
 
 class TestTheJudgedHeadIsInTheReceipt(unittest.TestCase):
@@ -451,24 +446,19 @@ class TestTheJudgedHeadIsInTheReceipt(unittest.TestCase):
                   if isinstance(n, ast.FunctionDef) and n.name == "code_basis")
         self.assertIn("produced_head", ast.unparse(fn))
 
-    def test_admission_prefers_the_receipt_over_rejudging(self):
-        # The ORDER is the point and it survives attestation: the receipt
-        # recorded the head at the moment it was judged, while asking the
-        # repository again later asks something the agent owns, and the answer
-        # moves. What changed is that the receipt is now read through
-        # attested_receipt rather than opened directly.
-        src = (SCRIPTS / "swarm.py").read_text()
-        i = src.index('produced = us.get("produced_head")')
-        seg = src[i:i + 400]
-        self.assertIn("attested_receipt(", seg)
-        self.assertLess(seg.index("attested_receipt("),
-                        seg.index("W.produced_head("),
-                        "the repository is re-judged before the receipt is "
-                        "consulted")
+    def test_admission_uses_only_the_per_attempt_state_basis(self):
+        import ast
+        tree = ast.parse((SCRIPTS / "swarm.py").read_text())
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == "advance")
+        body = ast.unparse(fn)
+        self.assertIn("produced = trusted_produced_head", body)
+        self.assertNotIn("produced = ((rec", body)
 
     def _att(self, d, receipt):
         """State as it stands after a coordinator-caused check wrote this."""
         import hashlib
+        receipt = dict(receipt, task_id="u1", attempt_id=Path(d).name)
         raw = json.dumps(receipt)
         (Path(d) / "receipt.json").write_text(raw)
         return {"units": {"u1": {"attempt_receipt_seals": {
