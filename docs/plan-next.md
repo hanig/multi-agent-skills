@@ -1,5 +1,10 @@
 # Plan: what remains after the report/runtime/acknowledgment work
 
+> **Status 2026-09-01:** this is the 2026-08-30 committee plan. Its items 1-8
+> are largely delivered. It uses its OWN numbering, unrelated to the field
+> reports' items. Current work is tracked in `plan-field-reports.md`; read
+> that first, and do not treat the two numbering schemes as one.
+
 > Committee 2026-08-30: gpt-5.6-sol (xhigh) + deepseek-v4-pro, both verdicts
 > in. This synthesises them. Two REAL DIVERGENCES are marked and are the
 > human's to settle, per the committee rule.

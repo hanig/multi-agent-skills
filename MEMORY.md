@@ -25,9 +25,19 @@ the same Unix user can write into the directory. Real isolation would need a
 container or mount namespace with the attempt directory as the only writable
 bind mount.
 
-## Status as of 2026-08-28
+## Status as of 2026-09-01
 
-Built and green: 553 tests.
+Built and green: **1030 tests**. Unmerged work sits in a linked worktree at
+`/private/tmp/swarm-sol-impl` (detached, off `413baca`), four commits deep, and
+`main` is untouched. That worktree holds field-report items C10 and C13, three
+rounds of review fixes, and the launch-record sealing work. **It is not pushed:
+its round 1 review came back with 3 MAJOR, listed in
+`docs/plan-field-reports.md`.** Do not merge before those are settled. If the
+worktree is gone, its commits are still in `.git` (linked worktree, shared
+object store) -- find them with `git reflog` or `git fsck --lost-found`.
+
+Current plan: `docs/plan-field-reports.md`. It supersedes `docs/plan-next.md`
+as the live plan; that older doc uses its own item numbering.
 
 | Piece | File | State |
 |---|---|---|
@@ -270,8 +280,29 @@ standard library only, must be safe on a login node.
 The `--mem` requirement is lambda-specific; do not write it down as a fact
 about clusters generally.
 
+## The lesson worth carrying, 2026-09-01
+
+A three-round review cycle was stopped by the gate for not converging: each
+round was finding defects in the previous round's fixes. Four separate defects
+turned out to be one move, reading a trust-deciding value back out of the
+agent-writable launch record. The invariant against it already existed -- in a
+docstring, claiming a test enforced it. No such test existed.
+
+So: an invariant that is written in prose is not an invariant. Write the
+enforcement, or expect to rediscover the violation one instance at a time. The
+same applies one level up: the field-report plan lived only in a conversation
+until 2026-09-01, which is why `docs/plan-field-reports.md` now exists.
+
+Two habits earned the same way. Check every fix by mutation, because reverting
+it must fail a test; a green suite after a fix proves nothing on its own. And
+when fixing an instance, sweep for its siblings mechanically rather than
+fixing the one in front of you -- the sweep test for unclassified unit states
+found three more the targeted fix would have missed.
+
 ## Files
 
+- `docs/plan-field-reports.md` — **the live plan.** Field-report items by list (A/B/C), what is done, what is open, and the 3 open MAJOR in the sealing work.
+- `docs/plan-next.md` — older 2026-08-30 committee plan, own numbering, largely delivered.
 - `docs/plan-swarm.md` — 7 steps, 45 acceptance criteria. Step 6 d/e/f now BUILT.
 - `docs/tracker-outbox.md` — the outbox and how to write a drain.
 - `docs/scenario-mach1-zebrafish.md` — end-to-end walkthrough. Its multi-cluster DAG is NOT the intended topology; annotated as such.
