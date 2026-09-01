@@ -70,6 +70,7 @@ import json
 import os
 import re
 import shutil
+import paseo_io as PIO
 import worktree as W
 import coordinator_paths as CP
 import signal
@@ -699,6 +700,9 @@ def cmd_bind(args):
         sys.exit(f"error: this attempt is already bound to job "
                  f"{spec['job_id']}. Allocate a new attempt rather than "
                  f"rebinding one.")
+    refused = W.refused_launch(unit_dir)
+    if refused:
+        sys.exit(f"error: {refused}")
     # The id's SHAPE depends on the kind. A slurm unit is bound to a numeric
     # scheduler id; a code unit is bound to a paseo agent UUID. Requiring the
     # numeric form for every kind meant a code unit could never be bound at
@@ -883,38 +887,8 @@ def _proc_elapsed(pid):
 
 
 def _json_object_in(text):
-    """First balanced JSON object in `text`, ignoring human preamble.
-
-    Shared shape with swarm.py's _paseo_json: a tool that prints "Created
-    workspace ..." before its JSON defeats a bare json.loads, and every brace
-    has to be tried because the preamble can contain one too."""
-    if not text:
-        return None
-    for i, ch in enumerate(text):
-        if ch != "{":
-            continue
-        depth, instr, esc = 0, False, False
-        for j, c in enumerate(text[i:], i):
-            if instr:
-                if esc:
-                    esc = False
-                elif c == "\\":
-                    esc = True
-                elif c == '"':
-                    instr = False
-                continue
-            if c == '"':
-                instr = True
-            elif c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(text[i:j + 1])
-                    except ValueError:
-                        break
-    return None
+    """One implementation, in paseo_io. See that module for why."""
+    return PIO.first_json_object(text)
 
 
 def _proc_alive(pid, launched_at):

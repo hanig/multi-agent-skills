@@ -600,5 +600,176 @@ class TestRefusalIsCarriedNotRederived(unittest.TestCase):
         self.assertEqual(us.get("preflight_refusals"), None)
 
 
+class TestTheRecordIsNotTrustedForDispatch(unittest.TestCase):
+    """The launch record is agent-writable; the plan is not.
+
+    `SWARM_UNIT_DIR` is handed to a code agent running with write
+    permissions, and the record sits one level above it. Reading
+    `execution_workspace` back out of it and passing it to `paseo --cwd` let
+    the agent pick its own working tree while `preflight.status` still said
+    "passed" for the tree the coordinator actually checked.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _spy(self):
+        real, launched = S.U.run, []
+
+        def spy(argv, **kwargs):
+            if argv and argv[0] == "paseo":
+                launched.append(argv)
+                return 0, '{"agentId":"11111111-2222-3333-4444-555555555555"}', ""
+            return real(argv, **kwargs)
+        return real, spy, launched
+
+    def test_an_edited_workspace_is_refused_not_obeyed(self):
+        good = repo_at(self.tmp / "good")
+        evil = repo_at(self.tmp / "evil")
+        unit = code_unit(good)
+        attempt = self.tmp / "runs" / "code" / "attempt"
+        attempt.mkdir(parents=True)
+        err, _base = S._write_launch_record(str(attempt), unit)
+        self.assertIsNone(err)
+
+        anchor = W.launch_record_path(str(attempt))
+        rec = json.loads(anchor.read_text())
+        rec["execution_workspace"] = str(evil)      # the agent's edit
+        anchor.write_text(json.dumps(rec))
+
+        real, spy, launched = self._spy()
+        S.U.run = spy
+        try:
+            job, refusal = S._submit(unit, str(attempt), False, {})
+        finally:
+            S.U.run = real
+        self.assertIsNone(job)
+        self.assertEqual(launched, [])
+        self.assertIn(str(evil), refusal)
+        self.assertIn("writable by the agent", refusal)
+
+    def test_a_clean_untouched_attempt_still_dispatches(self):
+        # The other direction: the check must not refuse an honest launch.
+        good = repo_at(self.tmp / "good")
+        unit = code_unit(good)
+        attempt = self.tmp / "runs" / "code" / "attempt"
+        attempt.mkdir(parents=True)
+        real, spy, launched = self._spy()
+        S.U.run = spy
+        try:
+            job, err = S._submit(unit, str(attempt), False, {})
+        finally:
+            S.U.run = real
+        self.assertIsNone(err)
+        self.assertEqual(len(launched), 1)
+        cwd = launched[0][launched[0].index("--cwd") + 1]
+        self.assertEqual(cwd, str(Path(good).resolve()))
+
+    def test_a_cleaned_workspace_is_no_longer_refused_by_an_old_record(self):
+        # _existing_preflight_refusal refused on a stale recorded refusal even
+        # after the workspace was cleaned. The current predicate decides.
+        repo = repo_at(self.tmp / "repo")
+        (repo / "dirty.txt").write_text("x\n")
+        unit = code_unit(repo)
+        attempt = self.tmp / "runs" / "code" / "attempt"
+        attempt.mkdir(parents=True)
+        job, refusal = S._submit(unit, str(attempt), False, {})
+        self.assertIsNone(job)
+        self.assertIsInstance(refusal, S.PreflightRefusal)
+
+        (repo / "dirty.txt").unlink()               # cleaned
+        real, spy, launched = self._spy()
+        S.U.run = spy
+        try:
+            job, err = S._submit(unit, str(attempt), False, {})
+        finally:
+            S.U.run = real
+        self.assertIsNone(err, "a cleaned workspace must dispatch")
+        self.assertEqual(len(launched), 1)
+
+
+class TestARefusedAttemptCannotBeBound(unittest.TestCase):
+    """Round 2 refuted this on 'no recovery scan exists'. That was wrong.
+
+    There is no scan, but `unit.py bind <dir> --job-id` is a documented
+    command that takes a directory path, and the refused directory is still
+    on disk with its spec intact.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _attempt(self, refused):
+        att = self.tmp / "runs" / "u" / "abc123"
+        att.mkdir(parents=True)
+        (att / "unit.json").write_text(json.dumps(
+            {"schema_version": 1, "task_id": "u", "attempt_id": "abc123",
+             "kind": "code", "declared_outputs": ["x"], "job_id": None}))
+        status = "refused" if refused else "passed"
+        W.launch_record_path(str(att)).write_text(json.dumps(
+            {"preflight": {"status": status, "workspace": "/checkout"}}))
+        return att
+
+    def _bind(self, att, job_id):
+        return S.U.run([sys.executable, str(SCRIPTS / "unit.py"), "bind",
+                        str(att), "--job-id", job_id], timeout=60)
+
+    def test_bind_refuses_a_refused_attempt(self):
+        att = self._attempt(refused=True)
+        rc, out, err = self._bind(att, "11111111-2222-3333-4444-555555555555")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("REFUSED at launch preflight", (err or out))
+        spec = json.loads((att / "unit.json").read_text())
+        self.assertIsNone(spec["job_id"])
+
+    def test_bind_still_works_for_a_permitted_attempt(self):
+        att = self._attempt(refused=False)
+        rc, out, err = self._bind(att, "11111111-2222-3333-4444-555555555555")
+        self.assertEqual(rc, 0, (err or out))
+        spec = json.loads((att / "unit.json").read_text())
+        self.assertEqual(spec["job_id"],
+                         "11111111-2222-3333-4444-555555555555")
+
+
+class TestContainmentCoversAWorkspaceThatDoesNotExistYet(unittest.TestCase):
+    """A declared workspace need not exist when the command runs.
+
+    git cannot be asked about an absent path, so the path contributed nothing
+    to the containment set and state was allowed inside the very repository
+    the workspace would be created in. The later preflight does reject the
+    missing workspace, but only after the state directory exists.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def test_state_inside_the_repo_is_refused_for_an_absent_workspace(self):
+        repo = repo_at(self.tmp / "repo")
+        plan = {"units": [{"workspace_policy":
+                           {"requires_clean_git": True,
+                            "path": str(repo / "not-yet-created")}}]}
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        with self.assertRaises(CP.PathPolicyError) as cm:
+            CP.resolve_paths(state_dir=str(repo / "state"), plan=plan,
+                             cwd=str(outside))
+        self.assertIn("operated Git worktree", str(cm.exception))
+        self.assertFalse((repo / "state").exists())
+
+    def test_an_absent_workspace_outside_any_repo_is_still_allowed(self):
+        # The other direction: nothing legitimate is refused.
+        plain = self.tmp / "plain"
+        plain.mkdir()
+        plan = {"units": [{"workspace_policy":
+                           {"requires_clean_git": True,
+                            "path": str(plain / "later")}}]}
+        state, _runs, _wt = CP.resolve_paths(
+            state_dir=str(self.tmp / "state"), plan=plan, cwd=str(plain))
+        self.assertEqual(state, Path(self.tmp / "state").resolve())
+
+
 if __name__ == "__main__":
     unittest.main()

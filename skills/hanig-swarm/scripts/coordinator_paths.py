@@ -54,6 +54,23 @@ def git_top(path):
     return _resolved(top) if top else None
 
 
+def _git_top_of_nearest_existing_ancestor(path):
+    """Containment for a path that does not exist yet.
+
+    Only reached when the path itself is absent: an existing directory inside
+    a repository already answers `rev-parse --show-toplevel` from its own
+    location, so nothing that exists changes behaviour here.
+    """
+    try:
+        current = Path(os.path.abspath(os.path.expanduser(str(path))))
+    except (OSError, ValueError):
+        return None
+    for candidate in [current] + list(current.parents):
+        if os.path.isdir(candidate):
+            return git_top(candidate)
+    return None
+
+
 def worktrees_of(repo):
     """All ordinary worktrees attached to ``repo``.
 
@@ -65,6 +82,16 @@ def worktrees_of(repo):
     containment check.
     """
     top = git_top(repo)
+    if top is None:
+        # A declared workspace need not exist YET, and git cannot be asked
+        # about a path that is not there, so this returned nothing and the
+        # path contributed nothing to the containment set. State was then
+        # allowed inside the very repository the workspace will live in,
+        # created before the later preflight rejected the missing workspace:
+        # the ordering makes the refusal too late to matter. Ask the nearest
+        # ancestor that does exist instead, which answers for exactly the
+        # repository the path would be created inside.
+        top = _git_top_of_nearest_existing_ancestor(repo)
     if top is None:
         return []
     found = {top}

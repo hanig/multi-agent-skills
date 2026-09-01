@@ -46,6 +46,7 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 import unit as U  # noqa: E402  same skill, installed together
+import paseo_io as PIO
 import worktree as W  # noqa: E402
 import verify as V  # noqa: E402
 import coordinator_paths as CP  # noqa: E402
@@ -1719,16 +1720,30 @@ def _submit(u, unit_dir, dry_run, state=None):
         # execution checkout, so --cwd must name the same path preflight
         # checked and the anchor recorded.
         #
+        workspace, ws_err = _plan_workspace(u)
+        if ws_err:
+            return None, ws_err
         anchor, anchor_read_err = W.read_launch_record(unit_dir)
         if anchor_read_err:
             return None, anchor_read_err
-        workspace = (anchor or {}).get("execution_workspace")
-        if not workspace:
+        recorded = (anchor or {}).get("execution_workspace")
+        if not recorded:
             return None, (
                 f"unit {u.get('id')!r}: launch record for attempt "
                 f"{Path(unit_dir).name!r} records no execution_workspace; "
                 f"refusing to launch outside the Git workspace preflight "
                 f"checked")
+        # Disagreement means the record no longer describes the tree the
+        # coordinator checked. The plan decides --cwd either way; refusing
+        # rather than quietly preferring it is what makes an edit visible.
+        if str(recorded) != str(workspace):
+            return None, (
+                f"unit {u.get('id')!r}: the launch record for attempt "
+                f"{Path(unit_dir).name!r} names execution workspace "
+                f"{str(recorded)!r}, but the plan resolves to "
+                f"{str(workspace)!r}. That record is writable by the agent "
+                f"this unit launches, so a disagreement is not a tie to "
+                f"break: nothing is dispatched until they agree.")
         argv = ["paseo", "run", "--background", "--json",
                 "--cwd", str(workspace),
                 "--provider", u.get("provider") or DEFAULT_AGENT_PROVIDER,
@@ -1837,6 +1852,31 @@ class PreflightRefusal(str):
     dirty_count = 0
 
 
+def _plan_workspace(u):
+    """Resolve the execution workspace FROM THE PLAN, never from a record.
+
+    The plan is trusted input; the launch record is not. It sits at
+    `<unit>/launch-<attempt>.json`, one level above the attempt directory
+    whose path is handed to the agent as SWARM_UNIT_DIR, and a code agent runs
+    with write permissions. Reading `execution_workspace` back out of it and
+    passing it to `paseo --cwd` let the agent choose its own working tree
+    while `preflight.status` still said "passed" for the tree we checked.
+    """
+    declared = _execution_workspace(u)
+    if not declared:
+        return None, (f"unit {u.get('id')!r}: launch preflight requires a "
+                      f"declared Git execution workspace")
+    declared = str(declared)
+    if not os.path.isdir(declared):
+        return None, (f"unit {u.get('id')!r} declares repo {declared!r}, "
+                      f"which is not a directory")
+    rc, top, _ = _git(declared, "rev-parse", "--show-toplevel")
+    if rc != 0:
+        return None, (f"unit {u.get('id')!r} declares repo {declared!r}, "
+                      f"which is not a git repository")
+    return str(Path(top).resolve()), None
+
+
 def _dirty_refusal(uid, workspace, dirty):
     lines = [
         f"unit {uid!r}: launch preflight refused execution workspace "
@@ -1855,37 +1895,11 @@ def _dirty_refusal(uid, workspace, dirty):
     return refusal
 
 
-def _existing_preflight_refusal(unit_dir, u):
-    """Return only a prior refusal, never an anchored base.
-
-    The re-anchor path must not read a base from an agent-writable launch file
-    and promote it into coordinator state. A refusal is different: it grants
-    no authority and only keeps the same never-started attempt from routing
-    around its failed preflight.
-    """
-    existing, read_err = W.read_launch_record(unit_dir)
-    status = ((existing or {}).get("preflight") or {}).get("status")
-    if read_err or status != "refused":
-        return None
-    return _dirty_refusal(u.get("id"), existing.get("execution_workspace"),
-                          existing.get("dirty_paths") or [])
-
-
 def _repeat_launch_preflight(u):
     """Recheck cleanliness without recapturing or trusting the anchor base."""
-    workspace = _execution_workspace(u)
-    if not workspace:
-        return (f"unit {u.get('id')!r}: launch preflight requires a declared "
-                f"Git execution workspace"), None
-    workspace = str(workspace)
-    if not os.path.isdir(workspace):
-        return (f"unit {u.get('id')!r} declares repo {workspace!r}, which is "
-                f"not a directory"), None
-    rc, top, _ = _git(workspace, "rev-parse", "--show-toplevel")
-    if rc != 0:
-        return (f"unit {u.get('id')!r} declares repo {workspace!r}, which is "
-                f"not a git repository"), None
-    resolved_top = str(Path(top).resolve())
+    resolved_top, err = _plan_workspace(u)
+    if err:
+        return err, None
     rc, dirty = W.repo_status(U.run, resolved_top)
     if rc != 0:
         return (f"unit {u.get('id')!r}: cannot read git status in "
@@ -1916,7 +1930,7 @@ def _write_launch_record(unit_dir, u):
     #
     # Still not inside `unit_dir`: attempt artifacts and coordinator launch
     # facts are different records and should not share a filename namespace.
-    path = Path(unit_dir).parent / f"launch-{Path(unit_dir).name}.json"
+    path = W.launch_record_path(unit_dir)
     repo = _execution_workspace(u)
     dirty = []
     rec = {"schema_version": 2, "unit": u.get("id"),
@@ -2007,12 +2021,16 @@ def _write_launch_record(unit_dir, u):
         # state then. If state has it, it stands. If it does not, this attempt
         # cannot be verified, and `verify` says so rather than inventing a
         # base from a file the agent can edit.
+        # The CURRENT predicate decides, and only it. A previous refusal
+        # recorded in the file used to refuse here too, which was wrong twice
+        # over: a workspace cleaned since then is legitimately dispatchable,
+        # and the stale message was built by reading `dirty_paths` back out of
+        # a record the launched agent can write. Both reviewers landed on this
+        # function from opposite directions, one calling it a false refusal
+        # and one calling it a manufactured one. It has no work left to do.
         current_refusal, _workspace = _repeat_launch_preflight(u)
         if current_refusal:
             return current_refusal, None
-        refusal = _existing_preflight_refusal(unit_dir, u)
-        if refusal:
-            return refusal, None
         return None, None
     except OSError as exc:
         return f"cannot write the launch record for {u['id']!r}: {exc}", None
@@ -2922,45 +2940,8 @@ TERMINAL_BAD = {FAILED}
 
 
 def _paseo_json(out):
-    """paseo prints human notices ("Created workspace ...", "Tip: ...") to
-    stdout BEFORE its JSON, so json.loads on the whole stream fails. Take the
-    first balanced object instead."""
-    if not out:
-        return None
-    # Scan EVERY candidate brace, not just the first. paseo's preamble can
-    # contain one ("Tip: reuse with --workspace {id}"), and starting there
-    # parsed "{id}", failed, and left a launched agent unbound.
-    for i, ch in enumerate(out):
-        if ch == "{":
-            got = _balanced_from(out, i)
-            if got is not None:
-                return got
-    return None
-
-
-def _balanced_from(out, i):
-    depth, instr, esc = 0, False, False
-    for j, ch in enumerate(out[i:], i):
-        if instr:
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == '"':
-                instr = False
-            continue
-        if ch == '"':
-            instr = True
-        elif ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                try:
-                    return json.loads(out[i:j + 1])
-                except ValueError:
-                    return None
-    return None
+    """One implementation, in paseo_io. See that module for why."""
+    return PIO.first_json_object(out)
 
 
 def _paseo_error(out, err):
@@ -3506,8 +3487,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 # and do not leave an attempt_dir that recovery could bind.
                 launch, _launch_err = W.read_launch_record(unit_dir)
                 on_disk = ((launch or {}).get("preflight") or {})
-                receipt = str(Path(unit_dir).parent /
-                              f"launch-{Path(unit_dir).name}.json")
+                receipt = str(W.launch_record_path(unit_dir))
                 us.setdefault("preflight_refusals", []).append({
                     "attempt_dir": unit_dir,
                     # Only when the file itself records the refusal. On the

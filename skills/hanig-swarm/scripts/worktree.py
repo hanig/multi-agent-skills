@@ -70,9 +70,37 @@ def repo_status(runner, repo):
     return rc, entries
 
 
+def launch_record_path(unit_dir):
+    """One place for the convention, which three call sites had inlined."""
+    return Path(unit_dir).parent / f"launch-{Path(unit_dir).name}.json"
+
+
+def refused_launch(unit_dir):
+    """Why this attempt may not be bound, or None if it may.
+
+    A REFUSED launch never dispatched, so there is no job to bind it to. The
+    coordinator drops such an attempt from its state, which is why a reviewer
+    looking for a recovery SCAN found none and called this unreachable. It is
+    reachable: `unit.py bind` is a documented command that takes a directory
+    path, and the refused directory is still on disk with its spec intact.
+    Binding it would manufacture the one thing the preflight exists to
+    prevent, a started attempt in a tree that was never allowed to run.
+    """
+    launch, _err = read_launch_record(unit_dir)
+    pre = ((launch or {}).get("preflight") or {})
+    if pre.get("status") != "refused":
+        return None
+    ws = pre.get("workspace") or "the workspace"
+    return (f"attempt {Path(unit_dir).name} was REFUSED at launch preflight "
+            f"({ws} was not clean), so nothing was dispatched and there is no "
+            f"job to bind. Its receipt is at "
+            f"{launch_record_path(unit_dir)}. Clean the workspace and "
+            f"allocate a new attempt.")
+
+
 def read_launch_record(unit_dir):
     """The anchor the coordinator wrote before the agent existed."""
-    path = Path(unit_dir).parent / f"launch-{Path(unit_dir).name}.json"
+    path = launch_record_path(unit_dir)
     try:
         with open(path) as fh:
             rec = json.load(fh)
