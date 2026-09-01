@@ -432,7 +432,8 @@ class TestArrayAndOneWriteRoot(unittest.TestCase):
     because a dry run does not fan out."""
 
     def test_array_with_declared_outputs_is_refused(self):
-        for spelling in (["--array=0-19"], ["--array", "0-19"], ["-a0-19"]):
+        for spelling in (["--array=0-19"], ["--array", "0-19"], ["-a0-19"],
+                         ["-a", "0-19"]):
             with self.assertRaises(S.PlanError, msg=str(spelling)) as c:
                 S.validate_plan(plan(sbatch=spelling))
             self.assertIn("fraction of the work", str(c.exception))
@@ -460,11 +461,25 @@ class TestPathsTheCommandNames(unittest.TestCase):
     false confidence: a unit declared one input that existed and dispatched
     into FileNotFoundError on a different path in its own command."""
 
-    def test_an_undeclared_absolute_argument_is_refused(self):
+    def test_a_missing_file_in_a_VISIBLE_directory_is_refused(self):
+        """The shared-storage typo: this host can see the place the path
+        claims to be, and the thing is not there."""
         with self.assertRaises(S.PlanError) as c:
             S.validate_plan(plan(
-                command="python go.py --meta /nowhere/meta.tsv"))
+                command="python go.py --meta /tmp/definitely-not-here.tsv"))
         self.assertIn("FileNotFoundError you would meet", str(c.exception))
+
+    def test_a_path_under_an_INVISIBLE_directory_is_not_refused(self):
+        """The submit host is not the compute node. A path under a mount that
+        exists only there is legitimate and unknowable from here, and
+        refusing it rejects a working plan, which is the worse mistake."""
+        S.validate_plan(plan(
+            command="python go.py --in /opt/compute-node-only/data.tsv"))
+
+    def test_the_refusal_says_which_directory_it_could_see(self):
+        with self.assertRaises(S.PlanError) as c:
+            S.validate_plan(plan(command="python go.py /tmp/absent.tsv"))
+        self.assertIn("/tmp", str(c.exception))
 
     def test_a_declared_input_is_accepted(self):
         """It must also EXIST, because the inputs rule checks that
@@ -552,6 +567,42 @@ class TestTheSchemaIsReadableInOneGo(unittest.TestCase):
         for real in ("id", "kind", "command", "outputs", "repo", "branch",
                      "mode", "runtime", "needs", "inputs"):
             self.assertIn(real, names, real)
+
+
+class TestRoundOneOfThisBatch(unittest.TestCase):
+
+    def test_the_separated_short_array_form_is_caught(self):
+        """`-a 0-19` is valid Slurm and slipped through, so a broken
+        array-with-outputs plan was accepted and dispatched."""
+        with self.assertRaises(S.PlanError):
+            S.validate_plan(plan(sbatch=["-a", "0-19"], outputs=["r.tsv"]))
+
+    def test_the_entrypoint_exemption_is_exact_not_a_prefix(self):
+        """startswith exempted /opt/tool/bin/python_extra/missing.tsv because
+        the entrypoint is /opt/tool/bin/python, so an unrelated missing file
+        rode in on the runtime's name."""
+        rt = {"id": "r", "resolution": "direct", "entrypoint": "/tmp/python",
+              "probe": "/tmp/python -c pass",
+              "verified_by": "unverified: fixture for the prefix test"}
+        with self.assertRaises(S.PlanError):
+            S.validate_plan(plan(
+                runtime=rt,
+                command="/tmp/python go.py --in /tmp/python_extra_absent.tsv"))
+
+    def test_the_entrypoint_itself_is_still_exempt(self):
+        rt = {"id": "r", "resolution": "direct",
+              "entrypoint": "/opt/only-there/python",
+              "probe": "/opt/only-there/python -c pass",
+              "verified_by": "unverified: fixture for the exact-match test"}
+        S.validate_plan(plan(
+            runtime=rt,
+            command="/opt/only-there/python go.py --flag value"))
+
+    def test_the_schema_note_matches_what_the_rule_does(self):
+        note = next(n for f, _k, _r, n in S.SCHEMA_FIELDS if f == "command")
+        self.assertIn("parent directory is visible", note)
+        self.assertIn("glob that matches", note)
+        self.assertIn("program itself is never checked", note)
 
 if __name__ == "__main__":
     unittest.main()

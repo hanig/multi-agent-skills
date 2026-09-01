@@ -1117,7 +1117,11 @@ def validate_plan(plan):
                 continue                       # expanded at run time
             if tok in declared or tok in produced_anywhere:
                 continue
-            if entry and tok.startswith(entry):
+            # EXACT, not a prefix. `startswith` exempted
+            # /opt/tool/bin/python_extra/missing.tsv because the entrypoint is
+            # /opt/tool/bin/python, so an unrelated missing file rode in on the
+            # runtime's name.
+            if entry and tok == entry:
                 continue               # the declared runtime, not a data path
             if any(ch in tok for ch in "*?["):
                 import glob as _glob
@@ -1130,13 +1134,26 @@ def validate_plan(plan):
                     f"missing path.")
             if os.path.exists(tok):
                 continue
+            # ONLY WHEN WE CAN SEE THE DIRECTORY. The submit host is not the
+            # compute node, so a path under a mount that exists only there is
+            # legitimate and unknowable from here: refusing it would reject a
+            # working plan, which is the more expensive mistake.
+            #
+            # The line that separates the two: if the PARENT DIRECTORY is
+            # visible and the file is not in it, this host can see the place
+            # the path claims to be and the thing is not there. That is the
+            # shared-storage typo the check exists for. If the parent is also
+            # absent, this is a different mount and nothing can be said.
+            parent = os.path.dirname(tok)
+            if not parent or not os.path.isdir(parent):
+                continue
             raise PlanError(
-                f"unit {u.get('id','?')!r} names {tok!r} in its command, and "
-                f"that path does not exist, is not a declared input, and is "
-                f"not produced by any upstream unit. Declaring one input that "
-                f"happens to exist does not establish the others: this is the "
-                f"FileNotFoundError you would meet after dispatching. Declare "
-                f"it in 'inputs', or have an upstream unit produce it.")
+                f"unit {u.get('id','?')!r} names {tok!r} in its command. "
+                f"{parent!r} exists on this host and does not contain it, so "
+                f"this is not a mount that differs on the compute node: it is "
+                f"the FileNotFoundError you would meet after dispatching. "
+                f"Declare it in 'inputs' if something else creates it, or fix "
+                f"the path.")
 
     # --- an array fans out into ONE attempt directory ---------------------
     #
@@ -1158,6 +1175,8 @@ def validate_plan(plan):
             if a.startswith("--array="):
                 arr = a.split("=", 1)[1]
             elif a == "--array" and i + 1 < len(args):
+                arr = args[i + 1]
+            elif a == "-a" and i + 1 < len(args):
                 arr = args[i + 1]
             elif a.startswith("-a") and len(a) > 2 and not a.startswith("--"):
                 arr = a[2:]
@@ -3705,8 +3724,10 @@ SCHEMA_FIELDS = [
     ("kind", "all", "required", "slurm | pipeline | code; fixes what closes "
      "the unit and cannot be overridden per plan"),
     ("command", "slurm, pipeline", "required",
-     "the WORK. Never sbatch/srun/salloc: the coordinator submits it. "
-     "Absolute paths in its ARGUMENTS must be declared inputs or exist"),
+     "the WORK. Never sbatch/srun/salloc: the coordinator submits it. An "
+     "absolute path in its ARGUMENTS is refused only when its parent "
+     "directory is visible here and does not contain it; a glob that matches "
+     "is fine, and the program itself is never checked"),
     ("prompt", "code", "required",
      "the agent's instruction, and the runner's last positional argument. A "
      "paseo flag at its start is refused; configuration goes in fields"),
