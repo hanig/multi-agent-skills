@@ -3748,7 +3748,7 @@ SCHEMA_FIELDS = [
      "the unit and cannot be overridden per plan"),
     ("command", "slurm, pipeline", "required",
      "the WORK. Never sbatch/srun/salloc: the coordinator submits it. An "
-     "an absolute path or glob in its ARGUMENTS is refused only when its "
+     "absolute path or glob in its ARGUMENTS is refused only when its "
      "parent directory is visible on THIS host and does not contain a match; "
      "a path under a mount only the compute node has is not refused, and the "
      "program in the first token is never checked"),

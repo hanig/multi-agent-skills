@@ -613,10 +613,19 @@ class TestRoundOneOfThisBatch(unittest.TestCase):
             command="/opt/only-there/python go.py --flag value"))
 
     def test_the_schema_note_matches_what_the_rule_does(self):
+        """Pinned to BEHAVIOUR, not to wording, so rewording the note does not
+        fail this and a rule change does. The note drifted twice in two
+        commits, which is why it is pinned at all."""
         note = next(n for f, _k, _r, n in S.SCHEMA_FIELDS if f == "command")
-        self.assertIn("parent directory is visible", note)
-        self.assertIn("glob that matches", note)
-        self.assertIn("program itself is never checked", note)
+        low = note.lower()
+        # it must state the visibility rule, cover globs as well as paths,
+        # exempt the program, and say a compute-only mount is not refused
+        self.assertIn("parent directory is visible", low)
+        self.assertIn("glob", low)
+        self.assertIn("compute node", low)
+        self.assertIn("first token is never checked", low)
+        self.assertNotIn("  ", note, "doubled spacing suggests a bad patch")
+        self.assertNotIn("an an ", low)
 
     def test_a_separated_array_value_must_not_be_another_flag(self):
         """`--array --partition=cpu` read the flag as the range, which Slurm
