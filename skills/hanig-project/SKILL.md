@@ -156,6 +156,23 @@ on a merged PR, so with no repository there is nowhere to open one from.
 written from the wrong model of what a unit is, which is what this table is
 for.
 
+**Read the field reference before writing units, not after being refused:**
+
+```sh
+python3 ../hanig-swarm/scripts/swarm.py schema
+```
+
+Every field, whether it is required for that kind, and what it couples to.
+Refusals teach one rule at a time by construction, so learning the shape from
+them takes as many dispatch attempts as there are coupled rules.
+
+**A `slurm` unit may not combine `--array` with declared outputs.** Every array
+task shares the unit's ONE attempt directory, so the first task to finish
+writes the artifacts record over a partially complete result and the unit reads
+DONE on a fraction of the work. A dry run will not show it, because a dry run
+does not fan out. Make each shard its own unit, or have the array write
+per-task paths and declare a separate merge unit that produces the outputs.
+
 `plan.json` for the coordinator. Every unit needs `id`, `kind`, `command`,
 and **`outputs`**. Add `needs` for dependencies, `gpu_hours` for the budget,
 `write_scopes`, and this cluster's own `sbatch` flags (the survey told you the

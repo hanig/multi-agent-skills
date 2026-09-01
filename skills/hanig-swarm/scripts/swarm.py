@@ -1071,6 +1071,108 @@ def validate_plan(plan):
                 f"them with 'needs' so only one touches the checkout at a "
                 f"time.")
 
+    # --- paths the COMMAND names, not just the ones it declares -----------
+    #
+    # "validate refuses a plan whose declared inputs are empty, still
+    # placeholders, or match nothing" is true, and it gave false confidence: a
+    # unit declared one input that existed, and dispatched straight into
+    # FileNotFoundError on a DIFFERENT path in its own command line.
+    #
+    # So the command is read too. An absolute path in it must be one of: an
+    # existing file or directory, a declared input, or something an upstream
+    # unit produces. Anything else is a path nobody has established will be
+    # there, and finding that out costs a dispatch.
+    #
+    # Deliberately narrow, because a false refusal here is expensive: only
+    # ABSOLUTE paths (a relative one is resolved against a working directory
+    # this cannot know), only tokens that look like filesystem paths, and
+    # anything under the attempt's own root is skipped since that is created
+    # at dispatch. A glob that matches nothing is reported, a glob that
+    # matches is fine.
+    produced_anywhere = {str(o) for u in units if isinstance(u, dict)
+                         for o in (u.get("outputs") or [])}
+    for u in units:
+        if not isinstance(u, dict) or u.get("kind") == "code":
+            continue
+        cmd = str(u.get("command") or "")
+        declared = {str(i) for i in (u.get("inputs") or [])}
+        # SKIP THE PROGRAM. The first token is the interpreter or executable,
+        # and sol's ruling on the runtime applies to it: an absolute path there
+        # need only resolve on the COMPUTE node, so stat-ing it here would
+        # assert a fact about a machine this one cannot see, and would refuse
+        # a container or module path that is correct. The runtime declaration
+        # and its canary cover the program. What is left, the ARGUMENTS, are
+        # data paths on shared storage, and those are exactly what dispatches
+        # into FileNotFoundError.
+        tokens = cmd.split()
+        rest = " ".join(tokens[1:]) if len(tokens) > 1 else ""
+        rt, _ref = resolve_runtime(plan, u)
+        entry = str((rt or {}).get("entrypoint") or "") if isinstance(
+            rt, dict) else ""
+        for raw in re.findall(r"[^\s'\"=,;:()]+", rest):
+            tok = raw.strip().rstrip(",;")
+            if not tok.startswith("/") or len(tok) < 4:
+                continue
+            if "$" in tok or "{" in tok:
+                continue                       # expanded at run time
+            if tok in declared or tok in produced_anywhere:
+                continue
+            if entry and tok.startswith(entry):
+                continue               # the declared runtime, not a data path
+            if any(ch in tok for ch in "*?["):
+                import glob as _glob
+                if _glob.glob(tok):
+                    continue
+                raise PlanError(
+                    f"unit {u.get('id','?')!r} names {tok!r} in its command "
+                    f"and it matches nothing. It is not a declared input and "
+                    f"no upstream unit produces it, so this dispatches into a "
+                    f"missing path.")
+            if os.path.exists(tok):
+                continue
+            raise PlanError(
+                f"unit {u.get('id','?')!r} names {tok!r} in its command, and "
+                f"that path does not exist, is not a declared input, and is "
+                f"not produced by any upstream unit. Declaring one input that "
+                f"happens to exist does not establish the others: this is the "
+                f"FileNotFoundError you would meet after dispatching. Declare "
+                f"it in 'inputs', or have an upstream unit produce it.")
+
+    # --- an array fans out into ONE attempt directory ---------------------
+    #
+    # Every task of `--array` shares the unit's single attempt directory, so
+    # the first task to finish writes the artifacts record over a partially
+    # complete result and the unit reads DONE on 1/20th of the work. Invisible
+    # in a dry run, because a dry run does not fan out.
+    #
+    # The exclusive write root makes a cheap predicate conclusive precisely
+    # because ONE writer owns it. An array is N writers by construction, so
+    # the premise is gone and the predicate is answering about whichever task
+    # happened to finish first.
+    for u in units:
+        if not isinstance(u, dict) or u.get("kind") != "slurm":
+            continue
+        arr = None
+        args = [str(a) for a in (u.get("sbatch") or [])]
+        for i, a in enumerate(args):
+            if a.startswith("--array="):
+                arr = a.split("=", 1)[1]
+            elif a == "--array" and i + 1 < len(args):
+                arr = args[i + 1]
+            elif a.startswith("-a") and len(a) > 2 and not a.startswith("--"):
+                arr = a[2:]
+        if arr and (u.get("outputs") or []):
+            raise PlanError(
+                f"unit {u.get('id','?')!r} declares --array {arr!r} AND "
+                f"outputs {', '.join(u['outputs'])}. Every array task shares "
+                f"this unit's single attempt directory, so the first task to "
+                f"finish writes the artifacts record over a partially "
+                f"complete result and the unit reads DONE on a fraction of "
+                f"the work. A dry run will not show it, because a dry run "
+                f"does not fan out. Make each shard its own unit, or have the "
+                f"array write into per-task paths and declare a separate "
+                f"merge unit that produces the outputs.")
+
     return {"units": len(units),
             "with_deps": sum(1 for u in units if u.get("needs")),
             # Which slurm units say nothing about where they run. The
@@ -3587,6 +3689,127 @@ def cmd_promote(args):
     return EXIT_OK if ok else EXIT_FAILED_UNIT
 
 
+# Every field a unit may carry, what requires it, and what it couples to.
+# ONE read instead of five successive refusals.
+#
+# Getting one moved unit valid took five dispatch attempts: repo, then branch,
+# then the account/canary mismatch, then the canary-ancestor rule, then
+# overlapping write scopes. Each message was precise about its own rule and
+# said nothing about the next one, so the coupling was learned serially, and a
+# field that does not exist got invented along the way from guessing at shape.
+# Error messages teach one rule at a time by construction; a schema teaches the
+# shape at once.
+SCHEMA_FIELDS = [
+    ("id", "all", "required", "unique; names the attempt directory and the "
+     "env var SWARM_DEP_<ID>"),
+    ("kind", "all", "required", "slurm | pipeline | code; fixes what closes "
+     "the unit and cannot be overridden per plan"),
+    ("command", "slurm, pipeline", "required",
+     "the WORK. Never sbatch/srun/salloc: the coordinator submits it. "
+     "Absolute paths in its ARGUMENTS must be declared inputs or exist"),
+    ("prompt", "code", "required",
+     "the agent's instruction, and the runner's last positional argument. A "
+     "paseo flag at its start is refused; configuration goes in fields"),
+    ("outputs", "all", "required",
+     "RELATIVE to the attempt write root. The predicate looks nowhere else. "
+     "Refused with --array, which fans N writers into one directory"),
+    ("inputs", "all", "optional",
+     "checked for existence, placeholders and upstream production"),
+    ("needs", "all", "optional",
+     "DAG edges. Also what lets two code units share one branch"),
+    ("repo", "code", "required", "closure is a merged PR; without it DONE is "
+     "unreachable"),
+    ("branch", "code", "required",
+     "its own, unless ordered with needs; agents share a checkout"),
+    ("mode", "code", "required",
+     "no default on purpose. Absent or empty means default permissions, so "
+     "the agent stalls at its first write"),
+    ("provider", "code", "optional",
+     "default codex/gpt-5.6-sol"),
+    ("model", "code", "optional", "overrides the provider's default"),
+    ("thinking", "code", "optional",
+     "default high. JSON null or \"\" suppresses the flag; the STRING "
+     "\"null\" is refused"),
+    ("env", "code", "optional", "list of KEY=VALUE passed to the agent"),
+    ("continuation", "code", "optional",
+     '{"max": N, "prompt": "..."}; bounded nudges when it settles without '
+     "producing. Exhaustion FAILS the unit"),
+    ("requires_verification", "code", "optional",
+     "claims an authorized verifier must establish before closing"),
+    ("runtime", "slurm, pipeline", "required",
+     'inline or a "runtimes" id, or the literal "none". Declares resolution, '
+     "entrypoint, probe and verified_by"),
+    ("sbatch", "slurm", "optional",
+     "a LIST of scheduler flags. A string is iterated character by character"),
+    ("write_scopes", "all", "optional",
+     "must not overlap between concurrent units. Names FILES; does NOT "
+     "isolate a code unit's repository"),
+    ("promote_to", "all", "optional",
+     "where verified outputs are published. Needs a named approver"),
+    ("max_attempts", "all", "optional",
+     "default 1. Above 1 requires a retry contract with max_lost"),
+    ("retry", "all", "optional",
+     '{"mode": "restart", "max_lost": {...}}. "resume" is REFUSED'),
+    ("gpu_hours", "all", "optional", "charged against the plan's budget"),
+    ("pool", "all", "optional", "must be declared in limits.pools"),
+]
+
+# What couples to what, stated once. These are the rules that only announce
+# themselves as a refusal.
+SCHEMA_COUPLINGS = [
+    "A canary must match its unit's runtime identity, partition AND account, "
+    "and be a DAG ancestor of it. A plan spanning two partitions needs one "
+    "canary per partition.",
+    "A canary must run the runtime's declared probe command verbatim; a "
+    "canary running `true` establishes nothing.",
+    "Two code units may share a branch only if one is an ancestor of the "
+    "other. Otherwise give each its own.",
+    "Concurrent units must have disjoint write_scopes; order them with needs "
+    "if they overlap.",
+    "max_attempts above 1 needs retry.max_lost in a metric the plan also caps "
+    "in retry_limits.",
+    "An input is satisfied by an upstream unit's output only when that unit "
+    "is an ancestor.",
+]
+
+
+def cmd_schema(args):
+    """Print the unit schema: fields, when required, and what they couple to."""
+    if args.json:
+        print(json.dumps(
+            {"fields": [{"field": f, "kinds": k, "requirement": r,
+                         "notes": n} for f, k, r, n in SCHEMA_FIELDS],
+             "couplings": SCHEMA_COUPLINGS}, indent=2))
+        return EXIT_OK
+    width = max(len(f) for f, _k, _r, _n in SCHEMA_FIELDS)
+    print("  UNIT FIELDS\n")
+    for field, kinds, req, note in SCHEMA_FIELDS:
+        print(f"  {field:<{width}}  {req:<8}  {kinds}")
+        for line in _wrap(note, 66):
+            print(f"  {'':<{width}}  {'':<8}  {line}")
+        print()
+    print("  COUPLINGS between fields\n")
+    for c in SCHEMA_COUPLINGS:
+        lines = _wrap(c, 72)
+        print(f"  - {lines[0]}")
+        for line in lines[1:]:
+            print(f"    {line}")
+    return EXIT_OK
+
+
+def _wrap(text, width):
+    words, lines, cur = text.split(), [], ""
+    for w in words:
+        if cur and len(cur) + 1 + len(w) > width:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = f"{cur} {w}".strip()
+    if cur:
+        lines.append(cur)
+    return lines or [""]
+
+
 def cmd_verify(args):
     """Run an authorized, content-pinned verifier and record what it said.
 
@@ -4018,6 +4241,11 @@ def main():
     pr.add_argument("--approver", default=None,
                     help="who accepted this result; recorded permanently")
     pr.set_defaults(fn=cmd_promote)
+
+    sc = sub.add_parser("schema", help="every unit field, when it is "
+                                      "required, and what it couples to")
+    sc.add_argument("--json", action="store_true")
+    sc.set_defaults(fn=cmd_schema)
 
     v = sub.add_parser("verify", help="run an authorized pinned verifier")
     v.add_argument("--state-dir", default=".swarm/state")

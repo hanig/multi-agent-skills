@@ -424,5 +424,134 @@ class TestRoundTwoFindings(unittest.TestCase):
         what fails loudly fail loudly."""
         S.validate_plan(self._code(thinking="some-future-effort-level"))
 
+
+class TestArrayAndOneWriteRoot(unittest.TestCase):
+    """Every array task shares the unit's single attempt directory, so the
+    first to finish writes the artifacts record over a partial result and the
+    unit reads DONE on a fraction of the work. A dry run does not show it,
+    because a dry run does not fan out."""
+
+    def test_array_with_declared_outputs_is_refused(self):
+        for spelling in (["--array=0-19"], ["--array", "0-19"], ["-a0-19"]):
+            with self.assertRaises(S.PlanError, msg=str(spelling)) as c:
+                S.validate_plan(plan(sbatch=spelling))
+            self.assertIn("fraction of the work", str(c.exception))
+
+    def test_the_refusal_offers_both_remedies(self):
+        with self.assertRaises(S.PlanError) as c:
+            S.validate_plan(plan(sbatch=["--array=0-9"]))
+        msg = str(c.exception)
+        self.assertIn("own unit", msg)
+        self.assertIn("merge unit", msg)
+
+    def test_an_array_can_never_be_legal_because_outputs_are_mandatory(self):
+        """There is no "array without outputs" escape: a unit with no
+        declared outputs is already refused as unjudgeable. The two rules
+        together mean an array unit must be split, full stop."""
+        with self.assertRaises(S.PlanError):
+            S.validate_plan(plan(sbatch=["--array=0-9"], outputs=[]))
+
+    def test_an_ordinary_unit_is_unaffected(self):
+        S.validate_plan(plan(sbatch=["--partition=cpu"]))
+
+
+class TestPathsTheCommandNames(unittest.TestCase):
+    """"validate refuses a plan whose inputs match nothing" was true and gave
+    false confidence: a unit declared one input that existed and dispatched
+    into FileNotFoundError on a different path in its own command."""
+
+    def test_an_undeclared_absolute_argument_is_refused(self):
+        with self.assertRaises(S.PlanError) as c:
+            S.validate_plan(plan(
+                command="python go.py --meta /nowhere/meta.tsv"))
+        self.assertIn("FileNotFoundError you would meet", str(c.exception))
+
+    def test_a_declared_input_is_accepted(self):
+        """It must also EXIST, because the inputs rule checks that
+        separately: declaring a path does not conjure it."""
+        S.validate_plan(plan(command="python go.py --meta /tmp",
+                             inputs=["/tmp"]))
+
+    def test_upstream_output_is_referenced_by_env_var_not_by_path(self):
+        """Outputs are relative to an attempt directory whose name is not
+        known when the plan is written, so a downstream unit reaches them
+        through SWARM_DEP_<ID>, which this check skips as a variable. An
+        absolute token can never BE an upstream output, which makes that
+        escape hatch unreachable by construction rather than merely unused."""
+        S.validate_plan({"project": "p", "units": [
+            {"id": "a", "kind": "slurm", "command": "true", "runtime": "none",
+             "outputs": ["made.tsv"]},
+            {"id": "b", "kind": "slurm", "runtime": "none", "needs": ["a"],
+             "command": "python go.py --in $SWARM_DEP_A/made.tsv",
+             "outputs": ["out.txt"]}]})
+
+    def test_the_program_itself_is_not_statted(self):
+        """sol's ruling on the runtime: an absolute program path need only
+        resolve on the COMPUTE node, so checking it here asserts a fact about
+        a machine this one cannot see."""
+        S.validate_plan(plan(
+            command="/opt/only-on-the-compute-node/bin/python go.py"))
+
+    def test_a_relative_path_is_not_checked(self):
+        S.validate_plan(plan(command="python go.py --in data/x.tsv"))
+
+    def test_a_variable_is_not_checked(self):
+        S.validate_plan(plan(command="python go.py --in $SWARM_UNIT_DIR/x"))
+
+    def test_an_existing_path_passes(self):
+        S.validate_plan(plan(command="python go.py --in /tmp"))
+
+    def test_a_glob_matching_nothing_is_refused(self):
+        with self.assertRaises(S.PlanError):
+            S.validate_plan(plan(command="python go.py /nowhere/*.fastq"))
+
+    def test_a_code_unit_is_exempt(self):
+        """Its string is a prompt, not a command line."""
+        S.validate_plan({"project": "p", "units": [
+            {"id": "c", "kind": "code", "prompt": "read /nowhere/notes.md",
+             "outputs": ["o"], "repo": "/tmp/r", "branch": "b",
+             "mode": "bypass"}]})
+
+
+class TestTheSchemaIsReadableInOneGo(unittest.TestCase):
+    """Five successive refusals to make one unit valid, and a field invented
+    along the way from guessing at shape. Error messages teach one rule at a
+    time by construction."""
+
+    def _run(self, *args):
+        import subprocess
+        return subprocess.run(
+            [sys.executable, str(ROOT / "skills" / "hanig-swarm" / "scripts"
+                                 / "swarm.py"), "schema", *args],
+            capture_output=True, text=True)
+
+    def test_it_prints_every_field(self):
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for field in ("repo", "branch", "mode", "runtime", "outputs",
+                      "sbatch", "write_scopes", "continuation"):
+            self.assertIn(field, r.stdout, field)
+
+    def test_it_states_the_couplings_that_only_show_as_refusals(self):
+        r = self._run()
+        for phrase in ("canary", "ancestor", "partition AND account",
+                       "disjoint write_scopes"):
+            self.assertIn(phrase, r.stdout, phrase)
+
+    def test_json_is_machine_readable(self):
+        import json as _json
+        r = self._run("--json")
+        d = _json.loads(r.stdout)
+        self.assertTrue(d["fields"] and d["couplings"])
+        names = {f["field"] for f in d["fields"]}
+        self.assertIn("mode", names)
+
+    def test_every_documented_field_requirement_is_a_real_one(self):
+        """A schema that drifts from the validator is worse than none."""
+        names = {f for f, _k, _r, _n in S.SCHEMA_FIELDS}
+        for real in ("id", "kind", "command", "outputs", "repo", "branch",
+                     "mode", "runtime", "needs", "inputs"):
+            self.assertIn(real, names, real)
+
 if __name__ == "__main__":
     unittest.main()
