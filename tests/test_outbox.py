@@ -2356,7 +2356,11 @@ class TestACodeUnitIsNotDoneUntilMerged(unittest.TestCase):
                                   "state": "DONE", "basis": {}})
             (Path(unit_dir) / "receipt.json").write_text(receipt)
             digest = __import__("hashlib").sha256(receipt.encode()).hexdigest()
-            return verdict, f"RECEIPT_SHA256 {digest}", ""
+            result = {"produced_head": "c" * 40,
+                      "receipt_sha256": digest}
+            return verdict, ("SWARM_CHECK_RESULT " +
+                             json.dumps(result, sort_keys=True,
+                                        separators=(",", ":"))), ""
         m._check = forced_check
         real_validate = m.W.validate_pinned_head
         m.W.validate_pinned_head = lambda *a, **k: None

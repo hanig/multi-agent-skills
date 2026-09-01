@@ -2934,34 +2934,57 @@ def trusted_produced_head(state, unit, attempt_dir):
         Path(attempt_dir).name)
 
 
-RECEIPT_DIGEST_PREFIX = "RECEIPT_SHA256"
+CHECK_RESULT_PREFIX = "SWARM_CHECK_RESULT"
 
 
-def _reported_receipt_digest(stdout):
-    """Parse the sole exact receipt result line from checker stdout.
+def _reported_check_result(stdout):
+    """Parse the sole exact authority result from checker stdout.
 
     Taken from the check's own output rather than from the directory, because
     a digest taken by looking attests whatever is there -- including a receipt
     the agent wrote before the check ran and the check then failed to replace.
+    The produced commit travels on the same channel because reading it back
+    from the receipt creates both an authority inversion and a deletion race.
 
-    Returns ``(digest, problem)``. Stderr is intentionally not an input. More
+    Returns ``(result, problem)``. Stderr is intentionally not an input. More
     than one result line is ambiguous even when both values happen to agree.
     """
     candidates = [line for line in (stdout or "").splitlines()
-                  if line.strip().startswith(RECEIPT_DIGEST_PREFIX)]
+                  if line.strip().startswith(CHECK_RESULT_PREFIX)]
     if not candidates:
         return None, None
     if len(candidates) != 1:
         return None, (f"checker stdout contained {len(candidates)} "
-                      f"{RECEIPT_DIGEST_PREFIX} result lines; exactly one is "
+                      f"{CHECK_RESULT_PREFIX} result lines; exactly one is "
                       "required")
-    match = re.fullmatch(
-        RECEIPT_DIGEST_PREFIX + r" ([0-9a-f]{64})", candidates[0])
-    if not match:
+    prefix = CHECK_RESULT_PREFIX + " "
+    line = candidates[0]
+    if not line.startswith(prefix):
         return None, (f"malformed checker result {candidates[0]!r}; expected "
-                      f"'{RECEIPT_DIGEST_PREFIX} ' followed by 64 lowercase "
-                      "hexadecimal characters")
-    return match.group(1), None
+                      f"'{CHECK_RESULT_PREFIX} ' followed by canonical JSON")
+    payload = line[len(prefix):]
+    try:
+        result = json.loads(payload)
+    except (TypeError, ValueError) as exc:
+        return None, f"malformed checker result {line!r}: {exc}"
+    required = {"produced_head", "receipt_sha256"}
+    if not isinstance(result, dict) or set(result) != required:
+        return None, ("checker result must be an object with exactly "
+                      "produced_head and receipt_sha256")
+    canonical = json.dumps(result, sort_keys=True, separators=(",", ":"))
+    if payload != canonical:
+        return None, "checker result JSON is not in canonical form"
+    digest = result.get("receipt_sha256")
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        return None, ("checker result receipt_sha256 must be exactly 64 "
+                      "lowercase hexadecimal characters")
+    produced = result.get("produced_head")
+    if produced is not None and (
+            not isinstance(produced, str)
+            or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", produced) is None):
+        return None, ("checker result produced_head must be null or a 40/64 "
+                      "character lowercase hexadecimal object id")
+    return result, None
 
 
 RECEIPT_PROVENANCE_LIMIT = (
@@ -3408,41 +3431,34 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             else:
                 rc, stdout = check_result
                 stderr = ""
-            digest, protocol_problem = _reported_receipt_digest(stdout)
-            if rc == DONE and not digest and not protocol_problem:
+            check_report, protocol_problem = _reported_check_result(stdout)
+            if rc == DONE and not check_report and not protocol_problem:
                 protocol_problem = (
-                    "a successful checker emitted no RECEIPT_SHA256 result "
+                    "a successful checker emitted no SWARM_CHECK_RESULT "
                     "on stdout, so its receipt cannot be attributed")
             if protocol_problem:
-                digest = None
+                check_report = None
                 report.append(f"{uid}: CHECK RESULT REFUSED -- "
                               f"{protocol_problem}")
+            digest = ((check_report or {}).get("receipt_sha256"))
             _record_receipt_provenance(state, uid, attempt, digest)
 
             # The one permitted production observation happened inside this
-            # check. Bind its attested result to this attempt immediately.
-            # Nothing later may recover a missing basis by reading HEAD, a
-            # branch, the launch record, or even the receipt again.
-            if digest:
-                checked, receipt_problem = attested_receipt(
-                    state, uid, attempt)
-                if receipt_problem:
-                    protocol_problem = receipt_problem
+            # check. Bind the value reported over the coordinator-controlled
+            # stdout pipe directly to this attempt. The receipt is an audit
+            # copy, not a transport hop for the merge basis: deleting or
+            # replacing it after the checker writes cannot unmake this result.
+            if check_report and u.get("kind") == "code" and rc == DONE:
+                produced = check_report.get("produced_head")
+                basis_problem = W.validate_pinned_head(
+                    U.run, trusted_launch_facts(state, uid, attempt), produced)
+                if basis_problem:
+                    protocol_problem = basis_problem
                     report.append(f"{uid}: CHECK RESULT REFUSED -- "
-                                  f"{receipt_problem}")
-                elif u.get("kind") == "code" and rc == DONE:
-                    produced = ((checked.get("basis") or {})
-                                .get("produced_head"))
-                    basis_problem = W.validate_pinned_head(
-                        U.run, trusted_launch_facts(state, uid, attempt),
-                        produced)
-                    if basis_problem:
-                        protocol_problem = basis_problem
-                        report.append(f"{uid}: CHECK RESULT REFUSED -- "
-                                      f"{basis_problem}")
-                    else:
-                        us.setdefault("attempt_produced_heads", {})[
-                            Path(attempt).name] = produced
+                                  f"{basis_problem}")
+                else:
+                    us.setdefault("attempt_produced_heads", {})[
+                        Path(attempt).name] = produced
         else:
             # Judgment already crossed the boundary for this attempt. Asking
             # the mutable ref again could replace pinned A with later C.

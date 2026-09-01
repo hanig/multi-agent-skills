@@ -64,36 +64,92 @@ class RepoCase(unittest.TestCase):
 
 class TestCheckerResultProtocol(unittest.TestCase):
     DIGEST = "a" * 64
+    PRODUCED = "b" * 40
+
+    def result_line(self, digest=None, produced=None):
+        result = {
+            "produced_head": self.PRODUCED if produced is None else produced,
+            "receipt_sha256": self.DIGEST if digest is None else digest,
+        }
+        return (S.CHECK_RESULT_PREFIX + " " +
+                json.dumps(result, sort_keys=True, separators=(",", ":")))
 
     def test_exactly_one_lowercase_stdout_result_is_accepted(self):
-        got, problem = S._reported_receipt_digest(
-            f"DONE\nRECEIPT_SHA256 {self.DIGEST}\n")
-        self.assertEqual(got, self.DIGEST)
+        got, problem = S._reported_check_result(
+            "DONE\n" + self.result_line() + "\n")
+        self.assertEqual(got, {
+            "produced_head": self.PRODUCED,
+            "receipt_sha256": self.DIGEST,
+        })
         self.assertIsNone(problem)
 
     def test_stderr_cannot_supply_the_result(self):
         real = S.U.run
         S.U.run = lambda *a, **k: (
-            0, "DONE\n", f"RECEIPT_SHA256 {self.DIGEST}\n")
+            0, "DONE\n", self.result_line() + "\n")
         try:
             rc, stdout, stderr = S._check("/attempt")
         finally:
             S.U.run = real
         self.assertEqual(rc, 0)
-        self.assertIsNone(S._reported_receipt_digest(stdout)[0])
+        self.assertIsNone(S._reported_check_result(stdout)[0])
         self.assertIn(self.DIGEST, stderr)
 
+    def test_real_checker_reports_its_judged_produced_head(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        (tmp / U.UNIT).write_text(json.dumps({
+            "task_id": "u1", "attempt_id": tmp.name, "kind": "code",
+            "declared_outputs": [],
+        }))
+
+        def judged(unit_dir, spec, notes, launch_facts=None):
+            spec["produced_head"] = self.PRODUCED
+            spec["worktree_judged"] = "produced-committed-change"
+            return "DONE"
+
+        real = U.check_unit
+        U.check_unit = judged
+        try:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = U.cmd_check(SimpleNamespace(
+                    unit_dir=str(tmp), launch_facts=None, json=False))
+        finally:
+            U.check_unit = real
+
+        self.assertEqual(rc, U.STATES["DONE"])
+        result, problem = S._reported_check_result(out.getvalue())
+        self.assertIsNone(problem)
+        self.assertEqual(result["produced_head"], self.PRODUCED)
+        receipt_bytes = (tmp / U.RECEIPT).read_bytes()
+        self.assertEqual(result["receipt_sha256"],
+                         hashlib.sha256(receipt_bytes).hexdigest())
+
     def test_duplicate_results_are_ambiguous_even_when_equal(self):
-        line = f"RECEIPT_SHA256 {self.DIGEST}"
-        got, problem = S._reported_receipt_digest(line + "\n" + line)
+        line = self.result_line()
+        got, problem = S._reported_check_result(line + "\n" + line)
         self.assertIsNone(got)
         self.assertIn("exactly one", problem)
 
     def test_malformed_or_nonexact_results_are_rejected(self):
-        for output in ("RECEIPT_SHA256 NOTHEX",
-                       f" RECEIPT_SHA256 {self.DIGEST}",
-                       f"RECEIPT_SHA256 {self.DIGEST.upper()}"):
-            got, problem = S._reported_receipt_digest(output)
+        uppercase = self.result_line(digest=self.DIGEST.upper())
+        extra = json.dumps({
+            "extra": True, "produced_head": self.PRODUCED,
+            "receipt_sha256": self.DIGEST,
+        }, sort_keys=True, separators=(",", ":"))
+        noncanonical = json.dumps({
+            "produced_head": self.PRODUCED,
+            "receipt_sha256": self.DIGEST,
+        }, sort_keys=True)
+        for output in (
+                S.CHECK_RESULT_PREFIX + " NOT-JSON",
+                " " + self.result_line(),
+                uppercase,
+                S.CHECK_RESULT_PREFIX + " " + extra,
+                S.CHECK_RESULT_PREFIX + " " + noncanonical,
+                self.result_line(produced="NOTHEX")):
+            got, problem = S._reported_check_result(output)
             self.assertIsNone(got, output)
             self.assertTrue(problem, output)
 
@@ -153,8 +209,13 @@ class TestPerAttemptProducedBasis(RepoCase):
                        "basis": {"produced_head": produced}}
             raw = json.dumps(receipt)
             (Path(unit_dir) / U.RECEIPT).write_text(raw)
-            return 0, ("DONE\nRECEIPT_SHA256 " +
-                       hashlib.sha256(raw.encode()).hexdigest()), ""
+            result = {
+                "produced_head": produced,
+                "receipt_sha256": hashlib.sha256(raw.encode()).hexdigest(),
+            }
+            return 0, ("DONE\n" + S.CHECK_RESULT_PREFIX + " " +
+                       json.dumps(result, sort_keys=True,
+                                  separators=(",", ":"))), ""
 
         real = S._check
         S._check = check
@@ -173,6 +234,60 @@ class TestPerAttemptProducedBasis(RepoCase):
                          "the legacy scalar should be ignored, not laundered")
         self.assertIsNone(S.trusted_produced_head(
             state, "u1", "/runs/u1/att1"))
+
+    def test_receipt_deleted_after_result_is_captured_still_merges(self):
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        produced = self.commit("attempt-one")
+        facts = self.facts(attempt)
+        state_dir = self.tmp / "state"
+        state_dir.mkdir()
+        state = {"schema_version": 1, "halted": None, "units": {
+            "u1": {"state": "SUBMITTED", "attempt_dir": str(attempt),
+                   "attempts": [str(attempt)], "gpu_hours": 0,
+                   "attempt_launch_facts": {"att1": facts}}}}
+        plan = {"name": "p", "units": [{
+            "id": "u1", "kind": "code", "repo": str(self.repo),
+            "outputs": ["o"], "write_scopes": ["u1/"]}]}
+
+        def check(unit_dir, launch_facts=None):
+            receipt = {"task_id": "u1", "attempt_id": "att1",
+                       "state": "DONE",
+                       "basis": {"produced_head": produced}}
+            raw = json.dumps(receipt)
+            receipt_path = Path(unit_dir) / U.RECEIPT
+            receipt_path.write_text(raw)
+            result = {
+                "produced_head": produced,
+                "receipt_sha256": hashlib.sha256(raw.encode()).hexdigest(),
+            }
+            stdout = ("DONE\n" + S.CHECK_RESULT_PREFIX + " " +
+                      json.dumps(result, sort_keys=True,
+                                 separators=(",", ":")))
+            receipt_path.unlink()
+            return 0, stdout, ""
+
+        def admit_merge(state_path, unit, got, expect_repo=None):
+            self.assertEqual(got, produced)
+            return ({"merged_as": produced, "pr": "PR-1",
+                     "method": "merge"}, None)
+
+        real_check, real_admit = S._check, S.admit_merge
+        S._check, S.admit_merge = check, admit_merge
+        try:
+            ok, why = S.acquire_lease(str(state_dir))
+            self.assertTrue(ok, why)
+            self.addCleanup(S.release_lease, str(state_dir))
+            S.advance(plan, state, str(state_dir), str(self.tmp / "runs"),
+                      False, max_new=0)
+        finally:
+            S._check, S.admit_merge = real_check, real_admit
+
+        self.assertFalse((attempt / U.RECEIPT).exists())
+        self.assertEqual(
+            state["units"]["u1"]["attempt_produced_heads"]["att1"],
+            produced)
+        self.assertEqual(state["units"]["u1"]["state"], "DONE")
 
     def test_cmd_verify_refuses_a_basis_from_another_attempt(self):
         attempt = self.tmp / "runs" / "u1" / "att2"

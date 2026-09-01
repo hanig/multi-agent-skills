@@ -87,10 +87,10 @@ USAGE_ERROR = 64
 UNIT = "unit.json"
 EVENTS = "events.jsonl"
 RECEIPT = "receipt.json"
-# Machine-readable line on stdout naming the digest of the receipt this
-# process wrote. The coordinator records only this, never a digest it took by
-# looking at the directory afterwards.
-RECEIPT_DIGEST_PREFIX = "RECEIPT_SHA256"
+# Machine-readable line on stdout carrying authority results directly from
+# this trusted checker to the coordinator. The receipt digest describes the
+# bytes this process wrote; produced_head is the commit judged in this process.
+CHECK_RESULT_PREFIX = "SWARM_CHECK_RESULT"
 KINDS = ("slurm", "pipeline", "code")
 
 # Constants the LIFTED code needs. Both were missing, and neither
@@ -1293,7 +1293,8 @@ def cmd_check(args):
         # we just wrote -- the agent can replace the file in the gap between
         # the write and the read, which is the same defect wearing a much
         # smaller window.
-        print(f"{RECEIPT_DIGEST_PREFIX} {wrote[0]}")
+        result = {"produced_head": (receipt.get("basis") or {}).get("produced_head"), "receipt_sha256": wrote[0]}
+        print(f"{CHECK_RESULT_PREFIX} " + json.dumps(result, sort_keys=True, separators=(",", ":")))
     event(unit_dir, "checked", state=state)
 
     if args.json:
