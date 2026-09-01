@@ -249,6 +249,84 @@ class TestCheckerResultProtocol(unittest.TestCase):
 
 
 class TestPerAttemptProducedBasis(RepoCase):
+    def test_closed_stdio_cannot_collide_with_the_authority_fd(self):
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        produced = self.commit("attempt-one")
+        facts = self.facts(attempt)
+        (attempt / U.UNIT).write_text(json.dumps({
+            "schema_version": 1, "task_id": "u1", "attempt_id": "att1",
+            "kind": "code", "job_id": "agent-1", "repo": str(self.repo),
+            "declared_outputs": [],
+        }))
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        paseo = bin_dir / "paseo"
+        paseo.write_text(
+            "#!/bin/sh\nprintf '%s\\n' "
+            "'{\"Status\":\"idle\",\"PendingPermissions\":[]}'\n")
+        paseo.chmod(0o755)
+
+        state_dir = self.tmp / "state"
+        state_dir.mkdir()
+        state = {"schema_version": 1, "halted": None, "units": {
+            "u1": {"state": "SUBMITTED", "attempt_dir": str(attempt),
+                   "attempts": [str(attempt)], "gpu_hours": 0,
+                   "attempt_launch_facts": {"att1": facts}}}}
+        plan = {"name": "p", "units": [{
+            "id": "u1", "kind": "code", "repo": str(self.repo),
+            "outputs": [], "write_scopes": ["u1/"]}]}
+        inputs = self.tmp / "child-input.json"
+        result = self.tmp / "child-result.json"
+        inputs.write_text(json.dumps({
+            "state": state, "plan": plan, "state_dir": str(state_dir),
+            "root": str(self.tmp / "runs"), "result": str(result),
+        }))
+        probe = r'''
+import json, os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import swarm as S
+data = json.loads(Path(sys.argv[2]).read_text())
+os.close(1)
+os.close(2)
+seen = []
+real_temporary_file = S.tempfile.TemporaryFile
+def observed_temporary_file(*args, **kwargs):
+    handle = real_temporary_file(*args, **kwargs)
+    seen.append(handle.fileno())
+    return handle
+S.tempfile.TemporaryFile = observed_temporary_file
+payload = {}
+try:
+    ok, why = S.acquire_lease(data["state_dir"])
+    if not ok:
+        raise RuntimeError(why)
+    report, _dispatched, _halted = S.advance(
+        data["plan"], data["state"], data["state_dir"], data["root"],
+        False, max_new=0)
+    payload = {"state": data["state"], "report": report, "seen": seen}
+except BaseException as exc:
+    payload = {"error": repr(exc), "seen": seen}
+finally:
+    S.release_lease(data["state_dir"])
+Path(data["result"]).write_text(json.dumps(payload))
+'''
+        env = dict(os.environ)
+        env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+        child = subprocess.run(
+            [sys.executable, "-c", probe, str(SCRIPTS), str(inputs)],
+            env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(child.returncode, 0, child.stderr)
+        observed = json.loads(result.read_text())
+        self.assertNotIn("error", observed)
+        self.assertIn(observed["seen"][0], (1, 2),
+                      "the fixture never made the temporary fd collide")
+        unit_state = observed["state"]["units"]["u1"]
+        self.assertEqual(
+            unit_state["attempt_produced_heads"]["att1"], produced)
+        self.assertEqual(unit_state["state"], "READY_FOR_PR")
+
     def test_attested_receipt_identity_cannot_be_cross_wired(self):
         attempt = self.tmp / "runs" / "u1" / "att2"
         attempt.mkdir(parents=True)

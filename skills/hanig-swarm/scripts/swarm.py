@@ -2107,9 +2107,22 @@ def _check(unit_dir, launch_facts=None):
     # become authority merely by printing a reserved-looking prefix.
     with tempfile.TemporaryFile(mode="w+b") as result_sink:
         result_fd = result_sink.fileno()
-        argv += ["--result-fd", str(result_fd)]
-        rc, out, err = U.run(
-            argv, timeout=300, pass_fds=(result_fd,))
+        child_result_fd = result_fd
+        low_duplicates = []
+        try:
+            # Popen installs its stdout/stderr capture pipes on 1 and 2. If a
+            # daemonized parent left either number free, passing that raw
+            # number would silently replace this authority channel. Keep each
+            # low dup open until dup() necessarily reaches a non-standard fd.
+            while child_result_fd < 3:
+                child_result_fd = os.dup(result_fd)
+                low_duplicates.append(child_result_fd)
+            argv += ["--result-fd", str(child_result_fd)]
+            rc, out, err = U.run(
+                argv, timeout=300, pass_fds=(child_result_fd,))
+        finally:
+            for duplicate in low_duplicates:
+                os.close(duplicate)
         result_sink.seek(0)
         result_channel = result_sink.read(4097).decode("ascii", "replace")
     return rc, out or "", err or "", result_channel
