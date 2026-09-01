@@ -40,6 +40,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -2101,8 +2102,17 @@ def _check(unit_dir, launch_facts=None):
     if launch_facts:
         argv += ["--launch-facts", json.dumps(
             launch_facts, sort_keys=True, separators=(",", ":"))]
-    rc, out, err = U.run(argv, timeout=300)
-    return rc, out or "", err or ""
+    # Anonymous coordinator-owned storage is the authority channel. stdout
+    # contains diagnostics derived from agent-writable artifacts and cannot
+    # become authority merely by printing a reserved-looking prefix.
+    with tempfile.TemporaryFile(mode="w+b") as result_sink:
+        result_fd = result_sink.fileno()
+        argv += ["--result-fd", str(result_fd)]
+        rc, out, err = U.run(
+            argv, timeout=300, pass_fds=(result_fd,))
+        result_sink.seek(0)
+        result_channel = result_sink.read(4097).decode("ascii", "replace")
+    return rc, out or "", err or "", result_channel
 
 
 # --- tracker outbox -------------------------------------------------------
@@ -2937,30 +2947,25 @@ def trusted_produced_head(state, unit, attempt_dir):
 CHECK_RESULT_PREFIX = "SWARM_CHECK_RESULT"
 
 
-def _reported_check_result(stdout):
-    """Parse the sole exact authority result from checker stdout.
+def _reported_check_result(result_channel):
+    """Parse the sole exact authority result from its dedicated channel.
 
-    Taken from the check's own output rather than from the directory, because
-    a digest taken by looking attests whatever is there -- including a receipt
-    the agent wrote before the check ran and the check then failed to replace.
-    The produced commit travels on the same channel because reading it back
-    from the receipt creates both an authority inversion and a deletion race.
+    The coordinator owns the underlying anonymous file and gives only its fd
+    to the checker. stdout and stderr are diagnostics, never inputs here.
 
-    Returns ``(result, problem)``. Stderr is intentionally not an input. More
-    than one result line is ambiguous even when both values happen to agree.
+    Returns ``(result, problem)``. Exactly one line is accepted; extra text is
+    malformed and more than one line is ambiguous even when values agree.
     """
-    candidates = [line for line in (stdout or "").splitlines()
-                  if line.strip().startswith(CHECK_RESULT_PREFIX)]
-    if not candidates:
+    lines = (result_channel or "").splitlines()
+    if not lines:
         return None, None
-    if len(candidates) != 1:
-        return None, (f"checker stdout contained {len(candidates)} "
-                      f"{CHECK_RESULT_PREFIX} result lines; exactly one is "
-                      "required")
+    if len(lines) != 1:
+        return None, (f"checker result channel contained {len(lines)} lines; "
+                      "exactly one is required")
     prefix = CHECK_RESULT_PREFIX + " "
-    line = candidates[0]
+    line = lines[0]
     if not line.startswith(prefix):
-        return None, (f"malformed checker result {candidates[0]!r}; expected "
+        return None, (f"malformed checker result {line!r}; expected "
                       f"'{CHECK_RESULT_PREFIX} ' followed by canonical JSON")
     payload = line[len(prefix):]
     try:
@@ -3423,15 +3428,20 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         if ran_check:
             check_result = _check(
                 attempt, trusted_launch_facts(state, uid, attempt))
-            # Some embedders predate stderr becoming a distinct diagnostic
-            # stream. The real checker always returns three values; accepting
-            # a two-value test double does not merge stderr into authority.
-            if len(check_result) == 3:
+            # Old embedders may omit diagnostic stderr or the new authority
+            # channel. Missing authority fails closed; stdout is never used as
+            # a compatibility fallback because agent-derived notes reach it.
+            if len(check_result) == 4:
+                rc, stdout, stderr, result_channel = check_result
+            elif len(check_result) == 3:
                 rc, stdout, stderr = check_result
+                result_channel = ""
             else:
                 rc, stdout = check_result
                 stderr = ""
-            check_report, protocol_problem = _reported_check_result(stdout)
+                result_channel = ""
+            check_report, protocol_problem = _reported_check_result(
+                result_channel)
             if rc == DONE and not check_report and not protocol_problem:
                 protocol_problem = (
                     "a successful checker emitted no SWARM_CHECK_RESULT "

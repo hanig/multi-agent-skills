@@ -2358,9 +2358,10 @@ class TestACodeUnitIsNotDoneUntilMerged(unittest.TestCase):
             digest = __import__("hashlib").sha256(receipt.encode()).hexdigest()
             result = {"produced_head": "c" * 40,
                       "receipt_sha256": digest}
-            return verdict, ("SWARM_CHECK_RESULT " +
-                             json.dumps(result, sort_keys=True,
-                                        separators=(",", ":"))), ""
+            return verdict, "diagnostic", "", ("SWARM_CHECK_RESULT " +
+                                                json.dumps(
+                                                    result, sort_keys=True,
+                                                    separators=(",", ":")))
         m._check = forced_check
         real_validate = m.W.validate_pinned_head
         m.W.validate_pinned_head = lambda *a, **k: None

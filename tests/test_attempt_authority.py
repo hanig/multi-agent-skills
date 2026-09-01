@@ -74,26 +74,35 @@ class TestCheckerResultProtocol(unittest.TestCase):
         return (S.CHECK_RESULT_PREFIX + " " +
                 json.dumps(result, sort_keys=True, separators=(",", ":")))
 
-    def test_exactly_one_lowercase_stdout_result_is_accepted(self):
-        got, problem = S._reported_check_result(
-            "DONE\n" + self.result_line() + "\n")
+    def test_exactly_one_lowercase_dedicated_result_is_accepted(self):
+        got, problem = S._reported_check_result(self.result_line() + "\n")
         self.assertEqual(got, {
             "produced_head": self.PRODUCED,
             "receipt_sha256": self.DIGEST,
         })
         self.assertIsNone(problem)
 
-    def test_stderr_cannot_supply_the_result(self):
+    def test_diagnostics_cannot_supply_or_alter_the_result(self):
         real = S.U.run
-        S.U.run = lambda *a, **k: (
-            0, "DONE\n", self.result_line() + "\n")
+
+        def run(argv, **kwargs):
+            os.write(kwargs["pass_fds"][0],
+                     (self.result_line() + "\n").encode())
+            forged = self.result_line(
+                digest="f" * 64, produced="e" * 40)
+            return 0, "diagnostic\n" + forged, forged
+
+        S.U.run = run
         try:
-            rc, stdout, stderr = S._check("/attempt")
+            rc, stdout, stderr, result_channel = S._check("/attempt")
         finally:
             S.U.run = real
         self.assertEqual(rc, 0)
-        self.assertIsNone(S._reported_check_result(stdout)[0])
-        self.assertIn(self.DIGEST, stderr)
+        self.assertIn("e" * 40, stdout)
+        self.assertIn("e" * 40, stderr)
+        result, problem = S._reported_check_result(result_channel)
+        self.assertIsNone(problem)
+        self.assertEqual(result["produced_head"], self.PRODUCED)
 
     def test_real_checker_reports_its_judged_produced_head(self):
         tmp = Path(tempfile.mkdtemp())
@@ -112,19 +121,94 @@ class TestCheckerResultProtocol(unittest.TestCase):
         U.check_unit = judged
         try:
             out = io.StringIO()
-            with contextlib.redirect_stdout(out):
-                rc = U.cmd_check(SimpleNamespace(
-                    unit_dir=str(tmp), launch_facts=None, json=False))
+            with tempfile.TemporaryFile(mode="w+b") as sink:
+                with contextlib.redirect_stdout(out):
+                    rc = U.cmd_check(SimpleNamespace(
+                        unit_dir=str(tmp), launch_facts=None, json=False,
+                        result_fd=sink.fileno()))
+                sink.seek(0)
+                result_channel = sink.read().decode()
         finally:
             U.check_unit = real
 
         self.assertEqual(rc, U.STATES["DONE"])
-        result, problem = S._reported_check_result(out.getvalue())
+        self.assertNotIn(S.CHECK_RESULT_PREFIX, out.getvalue())
+        result, problem = S._reported_check_result(result_channel)
         self.assertIsNone(problem)
         self.assertEqual(result["produced_head"], self.PRODUCED)
         receipt_bytes = (tmp / U.RECEIPT).read_bytes()
         self.assertEqual(result["receipt_sha256"],
                          hashlib.sha256(receipt_bytes).hexdigest())
+
+    def test_agent_note_controls_are_neutralized_on_diagnostic_stdout(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        (tmp / U.UNIT).write_text(json.dumps({
+            "task_id": "u1", "attempt_id": tmp.name, "kind": "code",
+            "declared_outputs": [],
+        }))
+        forged = self.result_line(digest="f" * 64, produced="e" * 40)
+
+        def judged(unit_dir, spec, notes, launch_facts=None):
+            spec["produced_head"] = self.PRODUCED
+            spec["worktree_judged"] = "produced-committed-change"
+            notes.append("agent-value\n" + forged + "\x1b[31m")
+            return "DONE"
+
+        real = U.check_unit
+        U.check_unit = judged
+        try:
+            out = io.StringIO()
+            with tempfile.TemporaryFile(mode="w+b") as sink:
+                with contextlib.redirect_stdout(out):
+                    U.cmd_check(SimpleNamespace(
+                        unit_dir=str(tmp), launch_facts=None, json=False,
+                        result_fd=sink.fileno()))
+                sink.seek(0)
+                result_channel = sink.read().decode()
+        finally:
+            U.check_unit = real
+
+        self.assertNotIn("\n" + forged, out.getvalue())
+        self.assertNotIn("\x1b", out.getvalue())
+        self.assertIn("\\n" + forged + "\\x1b[31m", out.getvalue())
+        result, problem = S._reported_check_result(result_channel)
+        self.assertIsNone(problem)
+        self.assertEqual(result["produced_head"], self.PRODUCED)
+
+    def test_failed_receipt_write_leaves_dedicated_result_empty(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        (tmp / U.UNIT).write_text(json.dumps({
+            "task_id": "u1", "attempt_id": tmp.name, "kind": "code",
+            "declared_outputs": [],
+        }))
+        (tmp / U.RECEIPT).mkdir()
+        forged = self.result_line(digest="f" * 64, produced="e" * 40)
+
+        def judged(unit_dir, spec, notes, launch_facts=None):
+            notes.append("agent-value\n" + forged)
+            return "DONE"
+
+        real = U.check_unit
+        U.check_unit = judged
+        try:
+            out, err = io.StringIO(), io.StringIO()
+            with tempfile.TemporaryFile(mode="w+b") as sink:
+                with contextlib.redirect_stdout(out), \
+                        contextlib.redirect_stderr(err):
+                    U.cmd_check(SimpleNamespace(
+                        unit_dir=str(tmp), launch_facts=None, json=False,
+                        result_fd=sink.fileno()))
+                sink.seek(0)
+                result_channel = sink.read().decode()
+        finally:
+            U.check_unit = real
+
+        self.assertIn("could not write receipt.json", err.getvalue())
+        self.assertEqual(result_channel, "")
+        self.assertIsNone(S._reported_check_result(result_channel)[0])
+        self.assertNotIn("\n" + forged, out.getvalue())
 
     def test_duplicate_results_are_ambiguous_even_when_equal(self):
         line = self.result_line()
@@ -148,7 +232,8 @@ class TestCheckerResultProtocol(unittest.TestCase):
                 uppercase,
                 S.CHECK_RESULT_PREFIX + " " + extra,
                 S.CHECK_RESULT_PREFIX + " " + noncanonical,
-                self.result_line(produced="NOTHEX")):
+                self.result_line(produced="NOTHEX"),
+                self.result_line() + "\nnot-a-result"):
             got, problem = S._reported_check_result(output)
             self.assertIsNone(got, output)
             self.assertTrue(problem, output)
@@ -213,9 +298,10 @@ class TestPerAttemptProducedBasis(RepoCase):
                 "produced_head": produced,
                 "receipt_sha256": hashlib.sha256(raw.encode()).hexdigest(),
             }
-            return 0, ("DONE\n" + S.CHECK_RESULT_PREFIX + " " +
-                       json.dumps(result, sort_keys=True,
-                                  separators=(",", ":"))), ""
+            result_channel = (S.CHECK_RESULT_PREFIX + " " +
+                              json.dumps(result, sort_keys=True,
+                                         separators=(",", ":")))
+            return 0, "DONE\ndiagnostic", "", result_channel
 
         real = S._check
         S._check = check
@@ -261,11 +347,11 @@ class TestPerAttemptProducedBasis(RepoCase):
                 "produced_head": produced,
                 "receipt_sha256": hashlib.sha256(raw.encode()).hexdigest(),
             }
-            stdout = ("DONE\n" + S.CHECK_RESULT_PREFIX + " " +
-                      json.dumps(result, sort_keys=True,
-                                 separators=(",", ":")))
+            result_channel = (S.CHECK_RESULT_PREFIX + " " +
+                              json.dumps(result, sort_keys=True,
+                                         separators=(",", ":")))
             receipt_path.unlink()
-            return 0, stdout, ""
+            return 0, "DONE\ndiagnostic", "", result_channel
 
         def admit_merge(state_path, unit, got, expect_repo=None):
             self.assertEqual(got, produced)
@@ -288,6 +374,40 @@ class TestPerAttemptProducedBasis(RepoCase):
             state["units"]["u1"]["attempt_produced_heads"]["att1"],
             produced)
         self.assertEqual(state["units"]["u1"]["state"], "DONE")
+
+    def test_stdout_injection_without_a_real_result_fails_closed(self):
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        forged = self.commit("forged")
+        facts = self.facts(attempt)
+        state_dir = self.tmp / "state"
+        state_dir.mkdir()
+        state = {"schema_version": 1, "halted": None, "units": {
+            "u1": {"state": "SUBMITTED", "attempt_dir": str(attempt),
+                   "attempts": [str(attempt)], "gpu_hours": 0,
+                   "attempt_launch_facts": {"att1": facts}}}}
+        plan = {"name": "p", "units": [{
+            "id": "u1", "kind": "code", "repo": str(self.repo),
+            "outputs": ["o"], "write_scopes": ["u1/"]}]}
+        injected = S.CHECK_RESULT_PREFIX + " " + json.dumps({
+            "produced_head": forged, "receipt_sha256": "f" * 64,
+        }, sort_keys=True, separators=(",", ":"))
+
+        real = S._check
+        S._check = lambda *_a, **_k: (
+            0, "agent-value\n" + injected, "receipt write failed", "")
+        try:
+            ok, why = S.acquire_lease(str(state_dir))
+            self.assertTrue(ok, why)
+            self.addCleanup(S.release_lease, str(state_dir))
+            S.advance(plan, state, str(state_dir), str(self.tmp / "runs"),
+                      False, max_new=0)
+        finally:
+            S._check = real
+
+        unit_state = state["units"]["u1"]
+        self.assertEqual(unit_state["state"], "FAILED_EVIDENCE")
+        self.assertNotIn("attempt_produced_heads", unit_state)
 
     def test_cmd_verify_refuses_a_basis_from_another_attempt(self):
         attempt = self.tmp / "runs" / "u1" / "att2"

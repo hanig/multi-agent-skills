@@ -534,9 +534,9 @@ class TestReceiptProvenanceIsActuallyRecorded(unittest.TestCase):
             result = {"produced_head": None,
                       "receipt_sha256":
                           _h.sha256(payload.encode()).hexdigest()}
-            return 0, ("DONE\nSWARM_CHECK_RESULT " +
-                       _json.dumps(result, sort_keys=True,
-                                   separators=(",", ":"))), ""
+            return 0, "DONE", "", ("SWARM_CHECK_RESULT " +
+                                    _json.dumps(result, sort_keys=True,
+                                                separators=(",", ":")))
 
         m._check = check
         ok, why = m.acquire_lease(str(st))
@@ -609,7 +609,7 @@ class TestOnlyAReceiptTheCheckReportedWritingIsAttested(unittest.TestCase):
         forged = json.dumps({"task_id": "h", "state": "DONE"})
         seals = self._run(
             lambda d, facts=None: (
-                0, "DONE\nSWARM_CHECK_RESULT not-json", ""),
+                0, "DONE", "", "SWARM_CHECK_RESULT not-json"),
             forged)
         self.assertEqual(seals, {})
 
@@ -625,9 +625,9 @@ class TestOnlyAReceiptTheCheckReportedWritingIsAttested(unittest.TestCase):
             result = {"produced_head": None,
                       "receipt_sha256":
                           _h.sha256(good.encode()).hexdigest()}
-            return 0, ("FAILED\nSWARM_CHECK_RESULT " +
-                       json.dumps(result, sort_keys=True,
-                                  separators=(",", ":"))), ""
+            return 0, "FAILED", "", ("SWARM_CHECK_RESULT " +
+                                      json.dumps(result, sort_keys=True,
+                                                 separators=(",", ":")))
 
         seals = self._run(check, json.dumps({"state": "DONE"}))
         self.assertEqual(seals.get("attempt-1"),

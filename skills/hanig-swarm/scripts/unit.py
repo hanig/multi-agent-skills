@@ -87,9 +87,9 @@ USAGE_ERROR = 64
 UNIT = "unit.json"
 EVENTS = "events.jsonl"
 RECEIPT = "receipt.json"
-# Machine-readable line on stdout carrying authority results directly from
-# this trusted checker to the coordinator. The receipt digest describes the
-# bytes this process wrote; produced_head is the commit judged in this process.
+# Machine-readable authority result written only to a coordinator-supplied fd.
+# The receipt digest describes the bytes this process wrote; produced_head is
+# the commit judged in this process. stdout and stderr are diagnostics only.
 CHECK_RESULT_PREFIX = "SWARM_CHECK_RESULT"
 KINDS = ("slurm", "pipeline", "code")
 
@@ -157,7 +157,7 @@ def disarm_watchdog():
             pass
 
 
-def run(argv, cwd=None, timeout=30):
+def run(argv, cwd=None, timeout=30, pass_fds=()):
     """Run a command, returning (rc, stdout, stderr). Never raises, never hangs.
 
     start_new_session + killpg: a repository can configure diff.external to
@@ -169,7 +169,8 @@ def run(argv, cwd=None, timeout=30):
     try:
         pr = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, encoding="utf-8",
-                              errors="replace", start_new_session=True)
+                              errors="replace", start_new_session=True,
+                              pass_fds=pass_fds)
         out, err = pr.communicate(timeout=timeout)
         return pr.returncode, (out or "").strip(), (err or "").strip()
     except subprocess.TimeoutExpired:
@@ -1293,8 +1294,7 @@ def cmd_check(args):
         # we just wrote -- the agent can replace the file in the gap between
         # the write and the read, which is the same defect wearing a much
         # smaller window.
-        result = {"produced_head": (receipt.get("basis") or {}).get("produced_head"), "receipt_sha256": wrote[0]}
-        print(f"{CHECK_RESULT_PREFIX} " + json.dumps(result, sort_keys=True, separators=(",", ":")))
+        if getattr(args, "result_fd", None) is not None: os.write(args.result_fd, (CHECK_RESULT_PREFIX + " " + json.dumps({"produced_head": (receipt.get("basis") or {}).get("produced_head"), "receipt_sha256": wrote[0]}, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii"))
     event(unit_dir, "checked", state=state)
 
     if args.json:
@@ -1302,7 +1302,7 @@ def cmd_check(args):
     else:
         print(f"{state}  ({unit_dir})")
         for n in notes:
-            print(f"  - {n}")
+            print("  - " + "".join(c if c.isprintable() else ascii(c)[1:-1] for c in str(n)))
     return STATES[state]
 
 
@@ -1339,6 +1339,7 @@ def main():
     # Complete authority snapshot, serialized directly from per-attempt
     # coordinator state. The launch record is only an audit copy.
     c.add_argument("--launch-facts", default=None)
+    c.add_argument("--result-fd", type=int, default=None, help=argparse.SUPPRESS)
     c.set_defaults(fn=cmd_check)
 
     args = ap.parse_args()
