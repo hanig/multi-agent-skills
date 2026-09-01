@@ -35,13 +35,25 @@ import coordinator_paths as CP  # noqa: E402
 SCHEMA = 1
 
 TERMINAL_OK = ("DONE",)
-TERMINAL_BAD = ("FAILED", "INCOMPLETE", "NEEDS_HUMAN", "USAGE_ERROR")
+# FAILED_EVIDENCE is terminal in the coordinator: `advance` skips it
+# alongside DONE and FAILED, so it never re-dispatches. Leaving it out made a
+# finished run report UNKNOWN, which reads as "this report is confused" when
+# the truth is "a unit never produced a verdict".
+# HELD is terminal by meaning rather than by mechanism: it is set when an
+# upstream will never complete, so the unit will never run either.
+TERMINAL_BAD = ("FAILED", "INCOMPLETE", "NEEDS_HUMAN", "USAGE_ERROR",
+                "FAILED_EVIDENCE", "HELD")
 # States that genuinely mean "still going". Anything NOT listed anywhere is
 # unknown, and unknown must not quietly read as "running": a USAGE_ERROR unit
 # used to make a finished run report IN FLIGHT forever, which is a stall
 # dressed as progress.
+# PREFLIGHT_REFUSED is LIVE, not bad: the unit never started, its budget was
+# returned and no retry was charged, so the next `advance` dispatches it once
+# the workspace is clean. It is stalled in the way READY_FOR_PR is stalled --
+# waiting on a human -- which is why the run still says so below rather than
+# leaving it as silent progress.
 LIVE = ("RUNNING", "SUBMITTED", "PENDING", "PREEMPTED", "READY_FOR_PR",
-        "NOT STARTED")
+        "NOT STARTED", "PREFLIGHT_REFUSED", "ALLOCATED")
 
 
 # --------------------------------------------------------------------------
@@ -211,6 +223,7 @@ def unit_rows(data):
             "notes": rc.get("notes") or [],
             "checked_at": rc.get("checked_at"),
             "attempt_dir": su.get("attempt_dir"),
+            "preflight_refusals": list(su.get("preflight_refusals") or []),
             "runtime": _runtime_of(data["plan"], pu),
             "evidence": ev,
             "has_receipt": bool(rc),
@@ -714,6 +727,26 @@ def render(data, title=None):
                    and not r["has_receipt"]]
     mismatch = [r for r in rows if r["has_receipt"]
                 and (r["missing_outputs"] or r["undeclared_outputs"])]
+    refused = [r for r in rows if r["preflight_refusals"]]
+    if refused:
+        a("<section>")
+        a('<div class="sec-head"><h2>Blocked before launch</h2>'
+          "<p>These units were refused at dispatch because their execution "
+          "workspace was not clean. Nothing ran, no retry was charged, and "
+          "the next pass will dispatch them once the workspace is clean. "
+          "Until then the run cannot finish.</p></div>")
+        a('<div class="note"><ul>')
+        for r in refused:
+            last = r["preflight_refusals"][-1]
+            ws = last.get("workspace") or "an undeclared workspace"
+            n = last.get("dirty_path_count")
+            count = ("%s dirty path(s)" % n) if n else "uncommitted changes"
+            a("<li><code>%s</code>: refused %d time(s); %s has %s. "
+              "Commit, stash or clean it, then re-run.</li>"
+              % (e(r["id"]), len(r["preflight_refusals"]), e(str(ws)),
+                 e(count)))
+        a("</ul></div></section>")
+
     if blind or mismatch or unevidenced:
         a("<section>")
         a('<div class="sec-head"><h2>Evidence problems</h2>'

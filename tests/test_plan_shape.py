@@ -642,5 +642,55 @@ class TestRoundOneOfThisBatch(unittest.TestCase):
             S.validate_plan(plan(sbatch=["--array", "0-19"]))
         self.assertIn("fraction of the work", str(c.exception))
 
+class TestModeAdviceMatchesTheProvider(unittest.TestCase):
+    """`mode` is provider-specific, so advice that names one is a claim.
+
+    The default provider became codex while every message and doc still said
+    `bypass`, which is claude's word. codex answers it with `auto,
+    auto-review, full-access`, so following our own instructions produced a
+    rejected dispatch.
+    """
+
+    def _refusal(self, unit):
+        with self.assertRaises(S.PlanError) as cm:
+            S.validate_plan({"name": "p", "units": [unit]})
+        return str(cm.exception)
+
+    def test_a_codex_unit_is_not_told_to_write_bypass(self):
+        msg = self._refusal(
+            {"id": "c", "kind": "code", "repo": "/r", "branch": "b",
+             "prompt": "work", "outputs": ["x"],
+             "provider": "codex/gpt-5.6-sol"})
+        self.assertIn("full-access", msg)
+        self.assertNotIn("bypass", msg)
+
+    def test_a_claude_unit_is_still_told_to_write_bypass(self):
+        msg = self._refusal(
+            {"id": "c", "kind": "code", "repo": "/r", "branch": "b",
+             "prompt": "work", "outputs": ["x"],
+             "provider": "claude/opus"})
+        self.assertIn("bypass", msg)
+
+    def test_a_unit_naming_no_provider_follows_the_default(self):
+        msg = self._refusal({"id": "c", "kind": "code", "repo": "/r",
+                             "branch": "b", "prompt": "work",
+                             "outputs": ["x"]})
+        want = S._unattended_mode_example(S.DEFAULT_AGENT_PROVIDER)
+        self.assertIn(want, msg)
+
+    def test_no_skill_doc_recommends_a_mode_the_default_rejects(self):
+        # codex rejects `bypass`; the docs are where the value gets copied
+        # from, so a doc that still says it is the defect, not a typo.
+        default = S.DEFAULT_AGENT_PROVIDER.split("/", 1)[0].lower()
+        if default != "codex":
+            self.skipTest("default provider is no longer codex")
+        for name in ("hanig-swarm", "hanig-project"):
+            doc = ROOT / "skills" / name / "SKILL.md"
+            for i, line in enumerate(doc.read_text().splitlines(), 1):
+                if '"mode": "bypass"' in line or '"mode":"bypass"' in line:
+                    self.fail("%s:%d recommends mode=bypass, which codex "
+                              "rejects: %s" % (doc.name, i, line.strip()))
+
+
 if __name__ == "__main__":
     unittest.main()

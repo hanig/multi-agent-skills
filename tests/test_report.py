@@ -501,5 +501,61 @@ class TestTheCommitteePlan(unittest.TestCase):
             self.assertEqual(R.verdict(R.unit_rows(R.collect(t)))[0],
                              "COMPLETE")
 
+def _row(state, **kw):
+    r = {"id": kw.get("id", "u"), "state": state, "has_receipt": True,
+         "missing_outputs": [], "undeclared_outputs": [],
+         "evidence": {"status": "ok"}, "preflight_refusals": []}
+    r.update(kw)
+    return r
+
+
+class TestCoordinatorStatesAreAllClassified(unittest.TestCase):
+    """Every state `advance` can store must land in exactly one bucket.
+
+    An unclassified state makes the whole run report UNKNOWN, which reads as
+    a confused report rather than as the thing that actually happened.
+    """
+
+    def test_failed_evidence_is_a_failure_not_an_unknown(self):
+        got, why = R.verdict([_row("FAILED_EVIDENCE")])
+        self.assertEqual(got, "FAILED", why)
+
+    def test_preflight_refused_is_live_because_it_redispatches(self):
+        # advance does not skip PREFLIGHT_REFUSED, so the unit is retried once
+        # the workspace is clean. Calling it FAILED would be wrong.
+        got, why = R.verdict([_row("PREFLIGHT_REFUSED")])
+        self.assertEqual(got, "IN FLIGHT", why)
+
+    def test_no_coordinator_state_is_left_unclassified(self):
+        swarm = (ROOT / "skills" / "hanig-swarm" / "scripts" /
+                 "swarm.py").read_text()
+        import re
+        stored = set(re.findall(r'us\["state"\] = "([A-Z_]+)"', swarm))
+        known = set(R.TERMINAL_OK) | set(R.TERMINAL_BAD) | set(R.LIVE)
+        missing = sorted(stored - known)
+        self.assertEqual(missing, [], "swarm.py stores %s, which the report "
+                         "does not classify" % missing)
+
+
+class TestBlockedBeforeLaunchIsVisible(unittest.TestCase):
+
+    def test_a_refused_unit_says_which_workspace_is_dirty(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t)
+            sp = os.path.join(t, ".swarm", "state", "swarm-state.json")
+            st = json.load(open(sp))
+            st["units"]["a"].update({
+                "state": "PREFLIGHT_REFUSED", "attempt_dir": None,
+                "preflight_refusals": [{"workspace": "/checkout",
+                                        "dirty_path_count": 2,
+                                        "receipt": None}]})
+            json.dump(st, open(sp, "w"))
+            data = R.collect(t)
+            html = R.render(data)
+            self.assertIn("Blocked before launch", html)
+            self.assertIn("/checkout", html)
+            self.assertIn("2 dirty path(s)", html)
+
+
 if __name__ == "__main__":
     unittest.main()

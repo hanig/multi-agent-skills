@@ -1006,22 +1006,35 @@ def validate_plan(plan):
         # FAILED unit, and validate cannot know a provider's valid set without
         # introspecting it. Hard-coding one would refuse ids that become valid
         # as the provider changes, which is the worse trade.
+        # PROVIDER-SPECIFIC, and the examples have to follow the provider or
+        # they teach a value that gets rejected. `bypass` is claude's word;
+        # codex answers it with `auto, auto-review, full-access`, and codex is
+        # the default provider now, so the old advice was wrong for every unit
+        # that did not name a provider. Still no hard-coded valid SET here,
+        # for the reason given above about `thinking`: naming one example the
+        # provider accepts is guidance, enumerating them all is a stale list
+        # waiting to refuse a value that became valid.
+        unattended = _unattended_mode_example(u.get("provider"))
         if "mode" in u and not str(u.get("mode") or "").strip():
             raise PlanError(
                 f"unit {uid!r} declares mode={u.get('mode')!r}, which is not a "
                 f"value. An absent or empty mode omits the flag entirely, so "
                 f"the agent runs on DEFAULT permissions, stops at its first "
                 f"write and waits for a person. Write the mode you want, e.g. "
-                f"\"bypass\" or \"default\".")
+                f"\"{unattended}\" or \"default\". Modes are "
+                f"provider-specific; `paseo run --help` and the provider name "
+                f"the set it accepts.")
         if "mode" not in u:
             raise PlanError(
                 f"unit {uid!r} is kind=code and declares no 'mode'. An agent "
                 f"under default permissions stops at its first write and "
                 f"waits for a person, so unattended it runs forever doing "
                 f"nothing. The coordinator will not pick permissions on your "
-                f"behalf: say what this unit needs, e.g. \"mode\": "
-                f"\"bypass\" for unattended work, or \"mode\": \"default\" "
-                f"to accept the stall deliberately.")
+                f"behalf: say what this unit needs, e.g. "
+                f"\"mode\": \"{unattended}\" for unattended work on "
+                f"{u.get('provider') or DEFAULT_AGENT_PROVIDER}, or "
+                f"\"mode\": \"default\" to accept the stall deliberately. "
+                f"Modes are provider-specific.")
 
         # "null" and "none" as STRINGS are a JSON slip, not a value. paseo
         # answers an unknown thinking id with an errored agent, so this would
@@ -1594,6 +1607,11 @@ def _submit(u, unit_dir, dry_run, state=None):
     # The shared checkout is the execution workspace until worktree
     # provisioning lands. The check lives in this last common function so an
     # initial run, retry, recovery, or direct submit cannot route around it.
+    #
+    # KNOWN LIMIT: this is a point-in-time check against a shared checkout.
+    # Another running attempt can dirty it after this check and before spawn.
+    # Item 11's per-attempt worktree is what turns the observation into an
+    # isolation guarantee. A lock here would only disguise the shared state.
     anchored_base = None
     if kind == "code":
         anchor_err, anchored_base = _write_launch_record(unit_dir, u)
@@ -1704,7 +1722,13 @@ def _submit(u, unit_dir, dry_run, state=None):
         anchor, anchor_read_err = W.read_launch_record(unit_dir)
         if anchor_read_err:
             return None, anchor_read_err
-        workspace = (anchor or {}).get("execution_workspace") or str(unit_dir)
+        workspace = (anchor or {}).get("execution_workspace")
+        if not workspace:
+            return None, (
+                f"unit {u.get('id')!r}: launch record for attempt "
+                f"{Path(unit_dir).name!r} records no execution_workspace; "
+                f"refusing to launch outside the Git workspace preflight "
+                f"checked")
         argv = ["paseo", "run", "--background", "--json",
                 "--cwd", str(workspace),
                 "--provider", u.get("provider") or DEFAULT_AGENT_PROVIDER,
@@ -1765,6 +1789,17 @@ def _git(repo, *args, timeout=60):
     return rc, (out or "").strip(), (err or "").strip()
 
 
+def _unattended_mode_example(provider):
+    """An unattended mode this provider actually accepts.
+
+    Guidance only. The coordinator does not police the valid set: a provider
+    adds modes faster than a hard-coded list is updated, and refusing a value
+    that became valid is worse than passing one through to a loud rejection.
+    """
+    name = str(provider or DEFAULT_AGENT_PROVIDER).split("/", 1)[0].lower()
+    return {"codex": "full-access", "claude": "bypass"}.get(name, "full-access")
+
+
 def _workspace_policy(u):
     policy = u.get("workspace_policy") or {}
     return policy if isinstance(policy, dict) else {}
@@ -1783,6 +1818,25 @@ def _execution_workspace(u):
             or u.get("repo"))
 
 
+class PreflightRefusal(str):
+    """A refusal the coordinator OBSERVED, carried rather than re-derived.
+
+    `advance` used to decide whether a failed `_submit` was a preflight
+    refusal by reading the launch record back off disk and looking at
+    `preflight.status`. That is re-deriving a fact instead of recording it
+    when it was true, and it is wrong on the re-dispatch path: the record was
+    written when the workspace was CLEAN and still says "passed", so a
+    workspace that went dirty afterwards produced a refusal that `advance`
+    read as a generic failure and charged a retry for.
+
+    A str subclass so every existing consumer that formats or matches the
+    message keeps working; the class itself is the signal.
+    """
+
+    workspace = None
+    dirty_count = 0
+
+
 def _dirty_refusal(uid, workspace, dirty):
     lines = [
         f"unit {uid!r}: launch preflight refused execution workspace "
@@ -1795,7 +1849,10 @@ def _dirty_refusal(uid, workspace, dirty):
             lines.append(f"  [{status}] {old} -> {path}")
         else:
             lines.append(f"  [{status}] {path}")
-    return "\n".join(lines)
+    refusal = PreflightRefusal("\n".join(lines))
+    refusal.workspace = str(workspace) if workspace is not None else None
+    refusal.dirty_count = len(dirty)
+    return refusal
 
 
 def _existing_preflight_refusal(unit_dir, u):
@@ -3438,21 +3495,30 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
 
         job_id, err = _submit(u, unit_dir, dry_run, state)
         if err:
-            launch, _launch_err = W.read_launch_record(unit_dir)
-            refused = (((launch or {}).get("preflight") or {}).get("status")
-                       == "refused")
-            if refused:
+            # Classified from what `_submit` OBSERVED, not from re-reading
+            # the launch record. On a re-dispatch the record was written while
+            # the workspace was clean and still says "passed", so reading it
+            # back turned a refusal into a generic failure and charged a
+            # retry for an attempt that never started.
+            if isinstance(err, PreflightRefusal):
                 # Allocation is bookkeeping, not a started attempt. Keep the
                 # receipt durably, but do not charge retry or resource budgets
                 # and do not leave an attempt_dir that recovery could bind.
+                launch, _launch_err = W.read_launch_record(unit_dir)
+                on_disk = ((launch or {}).get("preflight") or {})
                 receipt = str(Path(unit_dir).parent /
                               f"launch-{Path(unit_dir).name}.json")
                 us.setdefault("preflight_refusals", []).append({
                     "attempt_dir": unit_dir,
-                    "receipt": receipt,
-                    "workspace": launch.get("execution_workspace"),
-                    "checked_at": ((launch.get("preflight") or {}).get(
-                        "checked_at")),
+                    # Only when the file itself records the refusal. On the
+                    # re-dispatch path it records the earlier PASS, and
+                    # pointing at it as the receipt for this refusal would
+                    # cite a document that says the opposite.
+                    "receipt": (receipt if on_disk.get("status") == "refused"
+                                else None),
+                    "workspace": err.workspace,
+                    "dirty_path_count": err.dirty_count,
+                    "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                 })
                 if us.get("attempts"):
                     last = str(us["attempts"][-1])
@@ -3464,7 +3530,9 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 us["gpu_hours"] = max(
                     0.0, float(us.get("gpu_hours") or 0) - want)
                 spent -= want
-                report.append(f"{uid}: {err}\n  receipt: {receipt}")
+                cited = us["preflight_refusals"][-1]["receipt"]
+                report.append(f"{uid}: {err}" +
+                              (f"\n  receipt: {cited}" if cited else ""))
             else:
                 us["state"] = "FAILED"
                 report.append(f"{uid}: {err}")

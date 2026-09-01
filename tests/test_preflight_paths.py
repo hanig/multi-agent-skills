@@ -473,5 +473,132 @@ class TestPreflightIsTheLaunchChokepoint(Base):
         self.assertEqual(len(sbatch), 1)
 
 
+class TestRefusalIsCarriedNotRederived(unittest.TestCase):
+    """The re-dispatch trap: the record says "passed", the workspace is dirty.
+
+    `advance` classified a failed submit by reading `preflight.status` back
+    off disk. On a re-dispatch that field records the earlier PASS, so the
+    refusal read as a generic failure. Only one caller allocates a fresh
+    random attempt id today, so the misclassification is not reachable
+    through `advance` yet; these pin the classification itself so the first
+    recovery path that re-submits an attempt does not make it live.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def test_a_dirty_workspace_refusal_is_typed(self):
+        repo = repo_at(self.tmp / "repo")
+        (repo / "dirty.txt").write_text("x\n")
+        attempt = self.tmp / "runs" / "code" / "attempt"
+        attempt.mkdir(parents=True)
+        job, err = S._submit(code_unit(repo), str(attempt), False, {})
+        self.assertIsNone(job)
+        self.assertIsInstance(err, S.PreflightRefusal)
+        self.assertEqual(err.workspace, str(Path(repo).resolve()))
+        self.assertEqual(err.dirty_count, 1)
+
+    def test_redispatch_refusal_is_typed_though_the_record_says_passed(self):
+        repo = repo_at(self.tmp / "repo")
+        unit = code_unit(repo)
+        attempt = self.tmp / "runs" / "code" / "attempt"
+        attempt.mkdir(parents=True)
+        anchor_err, _base = S._write_launch_record(str(attempt), unit)
+        self.assertIsNone(anchor_err)
+        anchor = attempt.parent / "launch-attempt.json"
+        self.assertEqual(
+            json.loads(anchor.read_text())["preflight"]["status"], "passed")
+
+        (repo / "appeared-later.txt").write_text("dirty\n")
+        real = S.U.run
+        launched = []
+
+        def spy(argv, **kwargs):
+            if argv and argv[0] == "paseo":
+                launched.append(argv)
+                return 0, '{"agentId":"must-not-start"}', ""
+            return real(argv, **kwargs)
+
+        S.U.run = spy
+        try:
+            job, err = S._submit(unit, str(attempt), False, {})
+        finally:
+            S.U.run = real
+        self.assertIsNone(job)
+        self.assertEqual(launched, [])
+        # The disk still says the opposite; the type carries the truth.
+        self.assertEqual(
+            json.loads(anchor.read_text())["preflight"]["status"], "passed")
+        self.assertIsInstance(err, S.PreflightRefusal)
+        self.assertIn("appeared-later.txt", err)
+
+    def test_a_shape_error_is_not_a_preflight_refusal(self):
+        # Restoring the retry budget is for an attempt that never started
+        # because the workspace was dirty, not for every failed submit.
+        attempt = self.tmp / "runs" / "code" / "attempt"
+        attempt.mkdir(parents=True)
+        unit = {"id": "code", "kind": "code", "prompt": "work"}
+        job, err = S._submit(unit, str(attempt), False, {})
+        self.assertIsNone(job)
+        self.assertTrue(err)
+        self.assertNotIsInstance(err, S.PreflightRefusal)
+
+    def _advance_with_submit(self, stub):
+        repo = repo_at(self.tmp / "repo")
+        unit = code_unit(repo)
+        plan = {"name": "p", "units": [unit]}
+        state = {"schema_version": 1, "units": {}, "halted": None}
+        state_dir, runs = self.tmp / "state", self.tmp / "runs"
+        real_submit = S._submit
+        S._submit = stub
+        try:
+            locked, why = S.acquire_lease(str(state_dir))
+            self.assertTrue(locked, why)
+            report, dispatched, _halted = S.advance(
+                plan, state, str(state_dir), str(runs), False)
+        finally:
+            S.release_lease(str(state_dir))
+            S._submit = real_submit
+        return state["units"]["code"], report, dispatched
+
+    def test_advance_believes_the_observation_over_the_record(self):
+        # No launch record on disk at all: the old classifier read nothing,
+        # found no "refused", and charged the unit as a plain failure.
+        def stub(u, unit_dir, dry_run, state=None):
+            refusal = S.PreflightRefusal("dirty at dispatch")
+            refusal.workspace = "/checkout"
+            refusal.dirty_count = 3
+            return None, refusal
+
+        us, report, dispatched = self._advance_with_submit(stub)
+        self.assertEqual(dispatched, 0)
+        self.assertEqual(us["state"], "PREFLIGHT_REFUSED")
+        self.assertIsNone(us["attempt_dir"])
+        self.assertEqual(us["attempts"], [])
+        self.assertEqual(us["gpu_hours"], 0.0)
+        entry = us["preflight_refusals"][0]
+        self.assertEqual(entry["workspace"], "/checkout")
+        self.assertEqual(entry["dirty_path_count"], 3)
+        # Nothing on disk says "refused", so nothing is cited as the receipt.
+        self.assertIsNone(entry["receipt"])
+        self.assertNotIn("receipt:", "\n".join(report))
+
+    def test_a_record_saying_refused_does_not_make_a_failure_a_refusal(self):
+        # The mutation in the other direction: authority is the observation,
+        # so a launch record alone must not restore a retry budget.
+        def stub(u, unit_dir, dry_run, state=None):
+            anchor = Path(unit_dir).parent / f"launch-{Path(unit_dir).name}.json"
+            anchor.write_text(json.dumps(
+                {"preflight": {"status": "refused"},
+                 "execution_workspace": "/checkout"}))
+            return None, "the scheduler rejected the job"
+
+        us, _report, dispatched = self._advance_with_submit(stub)
+        self.assertEqual(dispatched, 0)
+        self.assertEqual(us["state"], "FAILED")
+        self.assertEqual(us.get("preflight_refusals"), None)
+
+
 if __name__ == "__main__":
     unittest.main()

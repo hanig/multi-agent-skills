@@ -148,8 +148,10 @@ one available locally. Override per unit with `provider`, `model` or
 `mode` has no default and `validate` REFUSES a code unit without one, because
 an absent default is otherwise a decision nobody made: unattended, an agent on
 default permissions stops at its first write and the unit runs forever doing
-nothing. Say `"mode": "bypass"` for unattended work, or `"mode": "default"` to
-accept the stall deliberately. A code unit also cannot omit `repo`: it closes
+nothing. Say `"mode": "full-access"` for unattended work on the default codex
+provider, or `"mode": "default"` to accept the stall deliberately. Modes are
+provider-specific: `bypass` is claude's word and codex rejects it, so the mode
+has to follow whichever provider the unit names. A code unit also cannot omit `repo`: it closes
 on a merged PR, so with no repository there is nowhere to open one from.
 
 `validate` refuses all three. Reaching one of those refusals means the plan was

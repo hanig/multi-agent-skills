@@ -22,11 +22,16 @@ intelligence, ahead of `claude/opus`.
 
 ```json
 {"id": "impl", "kind": "code", "repo": "/path", "branch": "impl-work",
- "prompt": "...", "mode": "bypass"}
+ "prompt": "...", "mode": "full-access"}
 ```
 
 Override with `provider`, `model` or `thinking` on the unit. `thinking: null`
 suppresses the flag for a provider that has no such option.
+
+`mode` is PROVIDER-SPECIFIC and there is no portable value. codex takes
+`auto`, `auto-review` or `full-access`; claude takes `bypass` or `default`.
+Writing claude's word on a codex unit is rejected at dispatch, which is the
+one way this gets caught, so the mode has to follow the provider.
 
 Every one of those strings was read off live agents rather than guessed,
 because paseo answers an unknown thinking id with an ERRORED agent: a default
