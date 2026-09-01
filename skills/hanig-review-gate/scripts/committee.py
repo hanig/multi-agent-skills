@@ -320,18 +320,22 @@ def cmd_review(args):
     """Phase 3: the diff goes back to the SAME members, against THEIR plan."""
     session = load_session(args.name)
     members = [r for r in R.load_reviewers() if r["name"] in session["members"]]
+    # review.py exposes git_out(*args) -> str, not run(argv) -> (rc, out, err).
+    # This called a function that has never existed, so phase 3 died with an
+    # AttributeError every time it was invoked: the committee could plan and be
+    # challenged, and could never review. Found by using it.
     if args.range:
-        rc, diff, err = R.run(["git", "diff", args.range])
+        diff = R.git_out("diff", args.range)
     elif args.staged:
-        rc, diff, err = R.run(["git", "diff", "--staged"])
+        diff = R.git_out("diff", "--staged")
     else:
-        rc, diff, err = R.run(["git", "diff"])
-    if rc != 0:
-        die(f"git diff failed: {err.strip()[:200]}. Check the range you "
-            f"passed.")
+        diff = R.git_out("diff")
     if not diff.strip():
-        die("the diff is empty; there is nothing to review. Pass --range, or "
-            "stage the change.")
+        # git_out returns "" for a failed git as well as for an empty diff, so
+        # the two cannot be distinguished here. Say both rather than asserting
+        # the wrong one.
+        die("no diff to review: either the range matched nothing or git "
+            "failed. Check the range you passed, or stage the change.")
     body = diff[:args.max_chars]
     truncated = len(diff) > args.max_chars
     prompt = (
