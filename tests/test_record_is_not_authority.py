@@ -623,5 +623,261 @@ class TestOnlyAReceiptTheCheckReportedWritingIsAttested(unittest.TestCase):
                          _h.sha256(good.encode()).hexdigest())
 
 
+# The receipt is the SECOND record with this problem, and it took four rounds
+# plus my own sweep to see it. report.py was taught to check attestation and
+# the six readers in swarm.py were not; each opened receipt.json and decided
+# its own trust. One of them supplied `produced_head`, the commit a merge
+# attestation is checked against, from a file the agent can write -- and then
+# stored it as coordinator state. Another handed the same value to the
+# verifier's checkout.
+RECEIPT_READER = "attested_receipt"
+RECEIPT_ALLOWED = {
+    ("swarm.py", "attested_receipt"):
+        "IS the accessor: reads the bytes and checks them against the digest "
+        "the coordinator recorded for a check it caused",
+    ("unit.py", "cmd_check"):
+        "WRITES the receipt and reports the digest of what it wrote",
+    ("unit.py", "<module>"):
+        "defines the RECEIPT filename constant",
+}
+
+
+class TestNothingReadsAReceiptWithoutAttestation(unittest.TestCase):
+
+    def test_no_module_opens_a_receipt_outside_the_accessor(self):
+        offenders = []
+        for path in sorted(SCRIPTS.glob("*.py")):
+            tree = ast.parse(path.read_text())
+            stack = []
+
+            class V(ast.NodeVisitor):
+                def visit_FunctionDef(self, node):
+                    stack.append(node.name)
+                    self.generic_visit(node)
+                    stack.pop()
+
+                visit_AsyncFunctionDef = visit_FunctionDef
+
+                def visit_Constant(self, node):
+                    if node.value != "receipt.json":
+                        return
+                    func = stack[-1] if stack else "<module>"
+                    if (path.name, func) not in RECEIPT_ALLOWED:
+                        offenders.append(f"{path.name}:{node.lineno} "
+                                         f"{func}() names receipt.json")
+
+            V().visit(tree)
+        self.assertEqual(
+            offenders, [],
+            "A receipt read for a decision must go through "
+            + RECEIPT_READER + ", which checks it against the digest the "
+            "coordinator recorded for a check it caused:\n  "
+            + "\n  ".join(offenders))
+
+    def test_the_receipt_constant_is_not_a_way_around_the_literal(self):
+        # U.RECEIPT is the same string wearing a name.
+        offenders = []
+        for path in sorted(SCRIPTS.glob("*.py")):
+            tree = ast.parse(path.read_text())
+            stack = []
+
+            class V(ast.NodeVisitor):
+                def visit_FunctionDef(self, node):
+                    stack.append(node.name)
+                    self.generic_visit(node)
+                    stack.pop()
+
+                visit_AsyncFunctionDef = visit_FunctionDef
+
+                def visit_Attribute(self, node):
+                    if node.attr != "RECEIPT":
+                        return self.generic_visit(node)
+                    func = stack[-1] if stack else "<module>"
+                    if (path.name, func) not in RECEIPT_ALLOWED:
+                        offenders.append(f"{path.name}:{node.lineno} "
+                                         f"{func}() uses U.RECEIPT")
+                    self.generic_visit(node)
+
+                def visit_Name(self, node):
+                    # The BARE name, inside unit.py, which the attribute form
+                    # never sees. My own scan had exactly the literal-only
+                    # blind spot a reviewer named on the previous guard.
+                    if node.id != "RECEIPT":
+                        return
+                    func = stack[-1] if stack else "<module>"
+                    if (path.name, func) not in RECEIPT_ALLOWED:
+                        offenders.append(f"{path.name}:{node.lineno} "
+                                         f"{func}() uses RECEIPT")
+
+            V().visit(tree)
+        self.assertEqual(offenders, [], "\n  ".join(offenders))
+
+    def test_the_allowlist_describes_the_code(self):
+        seen = set()
+        for path in sorted(SCRIPTS.glob("*.py")):
+            tree = ast.parse(path.read_text())
+            stack = []
+
+            class V(ast.NodeVisitor):
+                def visit_FunctionDef(self, node):
+                    stack.append(node.name)
+                    self.generic_visit(node)
+                    stack.pop()
+
+                visit_AsyncFunctionDef = visit_FunctionDef
+
+                def _seen(self):
+                    # "<module>" when outside a function, matching how the
+                    # offender scan names it. Requiring `stack` here meant the
+                    # module-level constant never counted, so its allowlist
+                    # entry looked dead.
+                    seen.add((path.name, stack[-1] if stack else "<module>"))
+
+                def visit_Constant(self, node):
+                    if node.value == "receipt.json":
+                        self._seen()
+
+                def visit_Attribute(self, node):
+                    if node.attr == "RECEIPT":
+                        self._seen()
+                    self.generic_visit(node)
+
+                def visit_Name(self, node):
+                    if node.id == "RECEIPT":
+                        self._seen()
+
+            V().visit(tree)
+        dead = sorted(set(RECEIPT_ALLOWED) - seen)
+        self.assertEqual(dead, [], f"entries with no call site: {dead}")
+
+
+class TestTheDigestDescribesWhatWasWritten(unittest.TestCase):
+    """Three fixes that a mutation pass showed were unguarded.
+
+    Each was fixed and none was tested, which is the third time in this change
+    that a mechanism's producer went unverified while its consumer was
+    covered. Mutation is the only thing that has reliably caught it.
+    """
+
+    def setUp(self):
+        import shutil, tempfile
+        sys.path.insert(0, str(SCRIPTS))
+        import unit as U, worktree as W
+        self.U, self.W = U, W
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def test_write_json_digests_the_bytes_it_wrote_not_a_re_read(self):
+        # The race: anything can replace the file between a write and a read
+        # of the same path. A digest of bytes we are holding has no gap.
+        import hashlib
+        path = self.tmp / "receipt.json"
+        got = []
+        self.assertIsNone(self.U.write_json(path, {"state": "DONE"},
+                                            digest_out=got))
+        self.assertEqual(len(got), 1)
+        original = path.read_bytes()
+        self.assertEqual(got[0], hashlib.sha256(original).hexdigest())
+
+        # The agent replaces it. The reported digest still describes what the
+        # writer wrote, so the swap is detectable rather than blessed.
+        path.write_text('{"state": "DONE", "forged": true}')
+        self.assertNotEqual(
+            got[0], hashlib.sha256(path.read_bytes()).hexdigest())
+
+    def test_write_json_never_reads_the_path_back_to_digest_it(self):
+        # The behavioural test above cannot catch this: a re-read of a file
+        # nobody touched agrees with the bytes written, so the race is
+        # invisible unless it is actually raced. What IS checkable is that no
+        # read of the path exists to race with.
+        tree = ast.parse((SCRIPTS / "unit.py").read_text())
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == "write_json")
+        src = ast.unparse(fn)
+        self.assertNotIn("read_bytes", src,
+                         "write_json reads the path back; anything can "
+                         "replace the file in that gap")
+        self.assertNotIn("read_text", src)
+        digest_calls = [n for n in ast.walk(fn)
+                        if isinstance(n, ast.Call)
+                        and getattr(n.func, "id", None) == "_digest_bytes"]
+        self.assertEqual(len(digest_calls), 1)
+        self.assertIn("payload", ast.unparse(digest_calls[0]),
+                      "the digest must be taken from the bytes this call "
+                      "wrote, which it is holding")
+
+    def test_produced_head_can_still_judge_when_given_the_seal(self):
+        # Dropping the seal here made this return None for every attempt,
+        # leaving the agent-writable receipt as the only working source for
+        # the commit a merge attestation is pinned to.
+        import subprocess, os as _os
+        env = dict(_os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@x",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@x")
+        repo = self.tmp / "r"
+        repo.mkdir()
+        subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True,
+                       env=env, capture_output=True)
+        (repo / "a.txt").write_text("one\n")
+        for args in (["add", "-A"], ["commit", "-qm", "base"]):
+            subprocess.run(["git", "-C", str(repo)] + args, check=True,
+                           env=env, capture_output=True)
+        att = self.tmp / "runs" / "u" / "a1"
+        att.mkdir(parents=True)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "sw_ph", SCRIPTS / "swarm.py")
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        unit = {"id": "u", "kind": "code", "repo": str(repo)}
+        err, anchored = m._write_launch_record(str(att), unit)
+        self.assertIsNone(err)
+        (repo / "b.txt").write_text("work\n")
+        for args in (["add", "-A"], ["commit", "-qm", "work"]):
+            subprocess.run(["git", "-C", str(repo)] + args, check=True,
+                           env=env, capture_output=True)
+        head = self.W.produced_head(self.U.run, str(att), unit,
+                                    anchored["seal"])
+        self.assertTrue(head, "produced_head cannot judge, so the only "
+                              "remaining source is the agent's receipt")
+        self.assertIsNone(
+            self.W.produced_head(self.U.run, str(att), unit, None),
+            "judging without a seal must refuse, not guess")
+
+
+class TestAWithdrawnSealDoesNotLingerAsAuthority(unittest.TestCase):
+
+    def test_a_later_check_that_wrote_nothing_withdraws_the_earlier_seal(self):
+        # Otherwise a favourable receipt from an earlier check keeps
+        # validating: restore that file and it still matches the stale seal,
+        # outranking the coordinator's newer verdict.
+        import importlib.util, json as _json, hashlib as _h
+        import shutil, tempfile
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        sys.path.insert(0, str(SCRIPTS))
+        spec = importlib.util.spec_from_file_location(
+            "sw_wd", SCRIPTS / "swarm.py")
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        att = tmp / "runs" / "h" / "attempt-1"
+        att.mkdir(parents=True)
+        good = _json.dumps({"task_id": "h", "state": "DONE"})
+        (att / "receipt.json").write_text(good)
+        state = {"units": {"h": {"attempt_receipt_seals": {
+            "attempt-1": _h.sha256(good.encode()).hexdigest()}}}}
+        # It is admissible now.
+        self.assertIsNotNone(m.attested_receipt(state, "h", str(att))[0])
+
+        # A later check writes nothing and so reports no digest.
+        m._record_receipt_provenance(state, "h", str(att), None)
+        seals = state["units"]["h"].get("attempt_receipt_seals") or {}
+        self.assertNotIn("attempt-1", seals,
+                         "the coordinator still vouches for a receipt it no "
+                         "longer caused")
+        rec, why = m.attested_receipt(state, "h", str(att))
+        self.assertIsNone(rec)
+        self.assertIn("claim by", why)
+
+
 if __name__ == "__main__":
     unittest.main()

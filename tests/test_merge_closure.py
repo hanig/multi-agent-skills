@@ -428,7 +428,9 @@ class TestTheProducedHeadIsRecordedNotRederived(unittest.TestCase):
         import ast
         src = (SCRIPTS / "swarm.py").read_text()
         i = src.index("attempt = us.get(\"attempt_dir\") or \"\"")
-        seg = src[i:i + 900]
+        # Wide enough for THREE sources: state, the attested receipt, then
+        # re-judging. It was 900 when there were two.
+        seg = src[i:i + 1500]
         self.assertIn('us.get("produced_head")', seg)
         j = seg.index('us.get("produced_head")')
         k = seg.index("W.produced_head(")
@@ -450,29 +452,62 @@ class TestTheJudgedHeadIsInTheReceipt(unittest.TestCase):
         self.assertIn("produced_head", ast.unparse(fn))
 
     def test_admission_prefers_the_receipt_over_rejudging(self):
-        import ast
+        # The ORDER is the point and it survives attestation: the receipt
+        # recorded the head at the moment it was judged, while asking the
+        # repository again later asks something the agent owns, and the answer
+        # moves. What changed is that the receipt is now read through
+        # attested_receipt rather than opened directly.
         src = (SCRIPTS / "swarm.py").read_text()
         i = src.index('produced = us.get("produced_head")')
-        seg = src[i:i + 300]
-        self.assertIn("_head_from_receipt", seg)
-        self.assertLess(seg.index("_head_from_receipt"),
+        seg = src[i:i + 400]
+        self.assertIn("attested_receipt(", seg)
+        self.assertLess(seg.index("attested_receipt("),
                         seg.index("W.produced_head("),
                         "the repository is re-judged before the receipt is "
                         "consulted")
 
-    def test_head_from_receipt_reads_the_basis(self):
+    def _att(self, d, receipt):
+        """State as it stands after a coordinator-caused check wrote this."""
+        import hashlib
+        raw = json.dumps(receipt)
+        (Path(d) / "receipt.json").write_text(raw)
+        return {"units": {"u1": {"attempt_receipt_seals": {
+            Path(d).name: hashlib.sha256(raw.encode()).hexdigest()}}}}
+
+    def test_an_attested_receipt_supplies_the_basis_head(self):
         with tempfile.TemporaryDirectory() as d:
-            with open(Path(d) / "receipt.json", "w") as fh:
-                json.dump({"basis": {"produced_head": HEAD}}, fh)
-            self.assertEqual(S._head_from_receipt(d), HEAD)
+            state = self._att(d, {"basis": {"produced_head": HEAD}})
+            rec, why = S.attested_receipt(state, "u1", d)
+            self.assertIsNone(why)
+            self.assertEqual((rec["basis"] or {}).get("produced_head"), HEAD)
+
+    def test_an_unattested_receipt_supplies_nothing(self):
+        # The defect this replaces: the head a merge attestation is checked
+        # against, taken from a file the agent can write.
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "receipt.json").write_text(
+                json.dumps({"basis": {"produced_head": HEAD}}))
+            rec, why = S.attested_receipt({"units": {}}, "u1", d)
+            self.assertIsNone(rec)
+            self.assertIn("claim by", why)
+
+    def test_a_replaced_receipt_supplies_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = self._att(d, {"basis": {"produced_head": HEAD}})
+            (Path(d) / "receipt.json").write_text(
+                json.dumps({"basis": {"produced_head": "f" * 40}}))
+            rec, why = S.attested_receipt(state, "u1", d)
+            self.assertIsNone(rec)
+            self.assertIn("replaced", why)
 
     def test_a_missing_or_unreadable_receipt_is_not_a_crash(self):
         with tempfile.TemporaryDirectory() as d:
-            self.assertIsNone(S._head_from_receipt(d))
-            with open(Path(d) / "receipt.json", "w") as fh:
-                fh.write("NOT JSON")
-            self.assertIsNone(S._head_from_receipt(d))
-        self.assertIsNone(S._head_from_receipt(""))
+            state = self._att(d, {"basis": {}})
+            (Path(d) / "receipt.json").unlink()
+            self.assertIsNone(S.attested_receipt(state, "u1", d)[0])
+            (Path(d) / "receipt.json").write_text("NOT JSON")
+            self.assertIsNone(S.attested_receipt(state, "u1", d)[0])
+        self.assertIsNone(S.attested_receipt({}, "u1", "")[0])
 
 if __name__ == "__main__":
     unittest.main()

@@ -30,7 +30,7 @@ class TestOnlyOneConditionTriggersIt(unittest.TestCase):
         S.U.run = lambda argv, timeout=None: (
             self.sent.append(argv) or (0, "", ""))
         self._reason = S._receipt_reason
-        S._receipt_reason = lambda d: U.REASON_NO_OUTPUTS
+        S._receipt_reason = lambda st, uid, d: U.REASON_NO_OUTPUTS
 
     def tearDown(self):
         S.U.run = self._real
@@ -57,7 +57,7 @@ class TestOnlyOneConditionTriggersIt(unittest.TestCase):
     def test_a_permission_block_is_never_prodded(self):
         """NEEDS_HUMAN means a person must answer. Sending a message at it
         does not make the person appear."""
-        S._receipt_reason = lambda d: U.REASON_NO_EVIDENCE
+        S._receipt_reason = lambda st, uid, d: U.REASON_NO_EVIDENCE
         self.assertFalse(
             S.maybe_continue("/tmp", "u1", self._u(), self._us(), []))
         self.assertEqual(self.sent, [])

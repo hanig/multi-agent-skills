@@ -2834,16 +2834,21 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
                   f"not a pass for this one.")
 
 
-def _receipt_reason(attempt_dir):
-    """The machine-readable REASON a check came back INCOMPLETE."""
-    rp, _ = U.read_json(Path(attempt_dir) / "receipt.json")
+def _receipt_reason(state, unit, attempt_dir):
+    """The machine-readable REASON a check came back INCOMPLETE.
+
+    Attested, because this drives a continuation: an agent that can write its
+    own REASON can ask for another turn. Existed in two copies, this one and
+    an inline duplicate in `advance`, so a fix to either left the other.
+    """
+    rp, _why = attested_receipt(state, unit, attempt_dir)
     for note in ((rp or {}).get("notes") or []):
         if str(note).startswith("REASON="):
             return str(note).split("=", 1)[1]
     return ""
 
 
-def maybe_continue(state_dir, uid, u, us, report):
+def maybe_continue(state_dir, uid, u, us, report, state=None):
     """Send a bounded continuation to a code agent that settled empty-handed.
 
     NOT a unit state, NOT a retry mode, and there is deliberately no Slurm
@@ -2869,7 +2874,8 @@ def maybe_continue(state_dir, uid, u, us, report):
     # answer it; a failure is FAILED and prodding it repeats the failure; a
     # verifier rejection is a correction loop, which is a different thing
     # wearing the same clothes.
-    if _receipt_reason(us.get("attempt_dir") or "") != U.REASON_NO_OUTPUTS:
+    if (_receipt_reason(state or {}, uid, us.get("attempt_dir") or "")
+            != U.REASON_NO_OUTPUTS):
         return False
     used = len(us.get("continuations") or [])
     if used >= limit:
@@ -2956,10 +2962,62 @@ def _record_receipt_provenance(state, unit, attempt_dir, digest):
     A receipt with no matching entry was not produced by a check this
     coordinator ran, and the report says so instead of trusting it.
     """
-    if not attempt_dir or not digest:
+    if not attempt_dir:
         return
     us = state.setdefault("units", {}).setdefault(unit, {})
+    if not digest:
+        # The check wrote no receipt, so the coordinator vouches for NOTHING
+        # here any more. Leaving an earlier seal in place let a favourable
+        # receipt from a previous check keep validating: restore that file and
+        # it still matches the stale seal, outranking the newer FAILED state.
+        # Withdrawing the seal is the whole point of holding it.
+        (us.get("attempt_receipt_seals") or {}).pop(Path(attempt_dir).name,
+                                                    None)
+        return
     us.setdefault("attempt_receipt_seals", {})[Path(attempt_dir).name] = digest
+
+
+def attested_receipt(state, unit, attempt_dir):
+    """THE ONLY way to read an attempt's receipt for a decision.
+
+    Returns (receipt, why_not). A receipt is admissible when its bytes match
+    the digest the coordinator recorded for a check IT caused; otherwise the
+    file is a claim by whoever wrote it, and the agent can write there.
+
+    This exists because report.py was taught to check attestation and the FIVE
+    readers in this module were not. Every one of them opened receipt.json and
+    decided its own trust, which is how `produced_head` -- the commit a merge
+    attestation gets pinned to -- came to be taken from an agent-writable file
+    and then STORED as coordinator state. Same shape as the base_commit defect
+    three review rounds ago, in a different field, found only by looking at
+    the neighbours instead of the instance in front of me.
+
+    One accessor, no fallback, and a test asserts nothing else opens the file.
+    """
+    if not attempt_dir:
+        return None, "this unit has no attempt directory"
+    recorded = ((((state.get("units") or {}).get(unit) or {})
+                 .get("attempt_receipt_seals") or {})
+                .get(Path(attempt_dir).name))
+    if not recorded:
+        return None, ("nothing records this coordinator causing a check for "
+                      "attempt %s, so any receipt there is a claim by "
+                      "whoever wrote it" % Path(attempt_dir).name)
+    path = Path(attempt_dir) / U.RECEIPT
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        return None, f"cannot read {path}: {exc}"
+    if hashlib.sha256(raw).hexdigest() != recorded:
+        return None, (f"the receipt at {path} is not the file this "
+                      f"coordinator's check wrote; it was replaced afterwards")
+    try:
+        rec = json.loads(raw)
+    except ValueError as exc:
+        return None, f"the receipt at {path} is not readable JSON: {exc}"
+    if not isinstance(rec, dict):
+        return None, f"the receipt at {path} is not a JSON object"
+    return rec, None
 
 
 def trusted_record_seal(state, unit, attempt_dir):
@@ -2974,25 +3032,6 @@ def trusted_record_seal(state, unit, attempt_dir):
         return None
     us = (state.get("units") or {}).get(unit) or {}
     return (us.get("attempt_record_seals") or {}).get(Path(attempt_dir).name)
-
-
-def _head_from_receipt(attempt_dir):
-    """The head recorded when the attempt was JUDGED.
-
-    Preferred over asking the repository again: the receipt was written at the
-    moment the judgment was true, and the repository has been under the
-    agent's control ever since.
-    """
-    if not attempt_dir:
-        return None
-    try:
-        with open(Path(attempt_dir) / U.RECEIPT) as fh:
-            rec = json.load(fh)
-    except (OSError, ValueError):
-        return None
-    if not isinstance(rec, dict):
-        return None
-    return (rec.get("basis") or {}).get("produced_head")
 
 
 def admit_merge(state_dir, unit, produced, expect_repo=None):
@@ -3351,16 +3390,26 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             # it pins is the one this attempt produced, which is the single
             # check available to a coordinator with no network.
             attempt = us.get("attempt_dir") or ""
-            # RECORD IT ONCE. Re-deriving the produced head on every advance
-            # asks a repository the agent owns what it produced, and the
-            # answer changes: validate A, park in READY_FOR_PR, let the agent
-            # move the branch to C, and a receipt for the genuinely produced A
-            # is then refused because the question was asked again. Every
-            # finding across three review rounds has been a version of this,
-            # so the fact is captured when it is true and read thereafter.
-            produced = us.get("produced_head") or _head_from_receipt(attempt)
+            # RECORD IT ONCE, and read state, then the ATTESTED receipt,
+            # then the repository. Re-deriving asks a repository the agent
+            # owns what it produced, and the answer moves: validate A, park in
+            # READY_FOR_PR, let the agent move the branch to C, and a receipt
+            # for the genuinely produced A is refused because the question was
+            # asked twice. So the receipt is preferred over re-judging on
+            # purpose -- it caught the head when it was judged.
+            #
+            # The ORDER was already right; the TRUST was not. Read unattested,
+            # the agent supplied the very value its own merge attestation is
+            # checked against, and the result was stored as coordinator state.
+            produced = us.get("produced_head")
             if not produced:
-                produced = W.produced_head(U.run, attempt, u)
+                rec, _why = attested_receipt(state, uid, attempt)
+                produced = ((rec or {}).get("basis") or {}).get(
+                    "produced_head")
+            if not produced:
+                produced = W.produced_head(
+                    U.run, attempt, u,
+                    trusted_record_seal(state, uid, attempt))
             if produced:
                 us["produced_head"] = produced
             anchor_rec, _ = W.read_launch_record(attempt) if attempt else (None,
@@ -3446,13 +3495,10 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 # to `sacct` for a job whose sacct row says COMPLETED 0:0 --
                 # the one place that hides the problem, and precisely the
                 # confusion this whole tool exists to prevent.
-                rp, _ = U.read_json(Path(us["attempt_dir"]) / "receipt.json")
-                reason = ""
-                for note in ((rp or {}).get("notes") or []):
-                    if str(note).startswith("REASON="):
-                        reason = str(note).split("=", 1)[1]
+                reason = _receipt_reason(state, uid, us["attempt_dir"])
                 if (reason == U.REASON_NO_OUTPUTS
-                        and maybe_continue(state_dir, uid, u, us, report)):
+                        and maybe_continue(state_dir, uid, u, us, report,
+                                           state)):
                     save_state(state_dir, state)
                     continue
                 if reason == U.REASON_NO_OUTPUTS:
@@ -3692,7 +3738,10 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         evidence = None
         if now == "DONE" and us.get("attempt_dir"):
             # The verdict itself, so a drain never closes on a self-report.
-            rp, _ = U.read_json(Path(us["attempt_dir"]) / "receipt.json")
+            # Attested, or it is a self-report by the other party: an
+            # unattested receipt shipped into the tracker as "evidence" is
+            # exactly the word this field exists to earn.
+            rp, _why = attested_receipt(state, uid, us["attempt_dir"])
             evidence = {"receipt": rp} if rp else None
         emit_intent(state_dir, project, uid, now, us, evidence,
                     kind=(units.get(uid) or {}).get("kind"))
@@ -3963,11 +4012,16 @@ def promote(plan, state, state_dir, uid, approver, approve,
                  f"promoted; promoting on any weaker basis is the false pass "
                  f"this repo exists to prevent."], False)
     attempt = us.get("attempt_dir")
-    receipt, err = (U.read_json(Path(attempt) / "receipt.json") if attempt
-                    else (None, "no attempt"))
+    # ATTESTED. Promotion copies artifacts into a shared canonical tree on a
+    # human's approval, and this receipt is both the evidence it rests on and
+    # what that human is shown. Read unattested, an agent could write its own
+    # DONE receipt and satisfy the gate with a claim about its own work.
+    receipt, err = attested_receipt(state, uid, attempt)
     if err or not isinstance(receipt, dict):
-        return ([f"REFUSING: no readable receipt for unit {uid} ({err}). The "
-                 f"receipt is the evidence promotion rests on."], False)
+        return ([f"REFUSING: no admissible receipt for unit {uid} ({err}). "
+                 f"The receipt is the evidence promotion rests on, and it "
+                 f"counts only when this coordinator caused the check that "
+                 f"wrote it."], False)
     if receipt.get("state") != "DONE":
         return ([f"REFUSING: the receipt for unit {uid} says "
                  f"{receipt.get('state')!r}, not DONE."], False)
@@ -4290,7 +4344,18 @@ def cmd_verify(args):
         sys.stderr.write(f"error: {refusal}\n")
         return EXIT_USAGE
 
-    produced = _head_from_receipt(args.attempt)
+    # The commit the verifier will be RUN AT. Taken from coordinator state
+    # first and otherwise from an ATTESTED receipt: read unattested, this let
+    # the agent choose the commit its own verification would be performed
+    # against, inside the one chain this repo is most careful about.
+    produced = ((state.get("units") or {}).get(args.unit) or {}).get(
+        "produced_head")
+    if not produced:
+        rec, why = attested_receipt(state, args.unit, args.attempt)
+        produced = ((rec or {}).get("basis") or {}).get("produced_head")
+        if not produced and why:
+            sys.stderr.write(f"error: {why}\n")
+            return EXIT_USAGE
     if not produced:
         sys.stderr.write("error: this attempt has no judged produced commit, "
                          "so a verification would have nothing to bind to.\n")

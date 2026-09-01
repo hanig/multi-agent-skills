@@ -636,6 +636,22 @@ class TestTheCodePredicate(unittest.TestCase):
         self.assertNotIn("Created workspace", msg)
 
 
+
+def _reseal(attempt, state_obj, uid):
+    """Re-attest a receipt a test rewrote.
+
+    A test that edits the receipt after the fixture built it is standing in
+    for a coordinator whose check produced that content, so the seal has to
+    move with it. Without this the test measures the attestation refusal
+    instead of the thing it is about.
+    """
+    import hashlib
+    from pathlib import Path as _P
+    raw = (_P(attempt) / "receipt.json").read_bytes()
+    state_obj["units"][uid]["attempt_receipt_seals"] = {
+        _P(attempt).name: hashlib.sha256(raw).hexdigest()}
+
+
 class TestGatedPromotion(unittest.TestCase):
     """Plan step 3, criteria d-g. Outputs live in the exclusive write root;
     reaching a shared canonical tree is a separate, approved, recorded step,
@@ -649,12 +665,15 @@ class TestGatedPromotion(unittest.TestCase):
         (attempt / "o.txt").write_text(body)
         st = (attempt / "o.txt").stat()
         digest = __import__("hashlib").sha256(body.encode()).hexdigest()
-        (attempt / "receipt.json").write_text(json.dumps({
+        receipt_raw = json.dumps({
             "state": "DONE", "attempt_id": "att1",
             "outputs": {"o.txt": {"size": st.st_size,
                                   "mtime": int(st.st_mtime),
                                   "sha256": digest,
-                                  "method": "content-digest"}}}))
+                                  "method": "content-digest"}}})
+        (attempt / "receipt.json").write_text(receipt_raw)
+        receipt_seal = __import__("hashlib").sha256(
+            receipt_raw.encode()).hexdigest()
         unit = {"id": "w", "kind": "slurm", "runtime": "none", "command": "true",
                 "outputs": ["o.txt"], "write_scopes": ["w/"]}
         if promote_to:
@@ -662,7 +681,10 @@ class TestGatedPromotion(unittest.TestCase):
         plan = {"name": "p", "units": [unit]}
         state_obj = {"schema_version": 1, "halted": None, "units": {
             "w": {"state": state, "attempt_dir": str(attempt),
-                  "attempts": [str(attempt)], "gpu_hours": 0}}}
+                  "attempts": [str(attempt)], "gpu_hours": 0,
+                  # As the coordinator leaves it after a check it caused.
+                  # Promotion reads the receipt only when it is attested.
+                  "attempt_receipt_seals": {"att1": receipt_seal}}}}
         sd = root / "state"
         sd.mkdir()
         return plan, state_obj, str(sd), attempt, root / "shared"
@@ -758,6 +780,7 @@ class TestGatedPromotion(unittest.TestCase):
             r["outputs"]["o.txt"].pop("sha256")
             r["outputs"]["o.txt"]["method"] = "size-mtime (WEAK: over limit)"
             (attempt / "receipt.json").write_text(json.dumps(r))
+            _reseal(attempt, st, "w")
             lines, ok = S.promote(plan, st, sd, "w", "hani", True)
             self.assertFalse(ok, "published on evidence that cannot establish "
                                  "unchanged content")
@@ -776,6 +799,7 @@ class TestGatedPromotion(unittest.TestCase):
             r["outputs"]["o.txt"].pop("sha256")
             r["outputs"]["o.txt"]["method"] = "size-mtime (WEAK: over limit)"
             (attempt / "receipt.json").write_text(json.dumps(r))
+            _reseal(attempt, st, "w")
             lines, ok = S.promote(plan, st, sd, "w", "hani", True,
                                   accept_weak=True)
             self.assertTrue(ok, "\n".join(lines))
@@ -1023,6 +1047,7 @@ class TestDirectoryOutputs(unittest.TestCase):
             state = {"schema_version": 1, "halted": None, "units": {
                 "w": {"state": "DONE", "attempt_dir": str(att),
                       "attempts": [str(att)], "gpu_hours": 0}}}
+            _reseal(att, state, "w")
             sd = root / "state"
             sd.mkdir()
             _, ok = S.promote(plan, state, str(sd), "w", "hani", True)

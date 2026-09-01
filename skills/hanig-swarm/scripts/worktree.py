@@ -379,14 +379,20 @@ def judge(runner, unit_dir, spec, seal=None):
     return produced, why
 
 
-def produced_head(runner, unit_dir, spec):
+def produced_head(runner, unit_dir, spec, seal=None):
     """The commit this attempt produced, or None.
 
     What a merge attestation gets PINNED to. Without it the attester names
     whatever commit it likes and the coordinator has no way to object; with
     it, an attestation about some other branch's work cannot close this unit.
+
+    Takes the seal because judging takes the seal. Omitting it left this
+    returning None for every attempt once sealing landed, which quietly made
+    the agent-writable receipt the ONLY working source for the very value a
+    merge is pinned to: a fallback promoted to primary by removing its
+    competitor.
     """
-    _produced, head, _why = judge_detail(runner, unit_dir, spec)
+    _produced, head, _why = judge_detail(runner, unit_dir, spec, seal)
     return head
 
 

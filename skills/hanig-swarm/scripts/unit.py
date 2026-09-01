@@ -605,14 +605,24 @@ def read_json(path):
         return None, f"{type(e).__name__}: {e}"
 
 
-def write_json(path, obj):
+def write_json(path, obj, digest_out=None):
     """Atomic. A half-written unit spec read by a resuming coordinator is worse
-    than none."""
+    than none.
+
+    `digest_out`, when a list is passed, receives the sha256 of the bytes
+    THIS CALL WROTE. Not a re-read of the path: the receipt digest used to be
+    taken by reading the file back, and anything can replace a file between a
+    write and a read. Sealing bytes you are holding has no such gap, which is
+    the same reason the launch record serializes once and seals that buffer.
+    """
     try:
         p = Path(path)
+        payload = json.dumps(obj, indent=2, sort_keys=True)
         tmp = p.with_suffix(p.suffix + ".tmp")
-        tmp.write_text(json.dumps(obj, indent=2, sort_keys=True))
+        tmp.write_text(payload)
         tmp.replace(p)
+        if digest_out is not None:
+            digest_out.append(_digest_bytes(payload.encode()))
         return None
     except (OSError, ValueError) as e:
         return f"{type(e).__name__}: {e}"
@@ -1262,21 +1272,19 @@ def cmd_check(args):
                     "writable bind mount.",
         },
     }
-    werr = write_json(unit_dir / RECEIPT, receipt)
+    wrote = []
+    werr = write_json(unit_dir / RECEIPT, receipt, digest_out=wrote)
     if werr:
         print(f"WARNING: could not write {RECEIPT}: {werr}", file=sys.stderr)
-    else:
-        # The digest of the receipt THIS RUN WROTE, reported to whoever
-        # invoked us. The coordinator used to attest whatever receipt was on
-        # disk after the check returned, which attests an agent-written file
-        # whenever the check leaves the old one in place. It cannot tell the
-        # two apart by looking; only the writer knows what it wrote.
-        try:
-            print(f"{RECEIPT_DIGEST_PREFIX} "
-                  f"{_digest_bytes((unit_dir / RECEIPT).read_bytes())}")
-        except OSError as exc:
-            print(f"WARNING: wrote {RECEIPT} but cannot digest it: {exc}",
-                  file=sys.stderr)
+    elif wrote:
+        # The digest of the bytes THIS RUN WROTE, reported to whoever invoked
+        # us. Two things this must not be. Not a digest taken by looking at
+        # the directory afterwards -- that attests an agent's file whenever
+        # the check left the old one in place. And not a re-read of the path
+        # we just wrote -- the agent can replace the file in the gap between
+        # the write and the read, which is the same defect wearing a much
+        # smaller window.
+        print(f"{RECEIPT_DIGEST_PREFIX} {wrote[0]}")
     event(unit_dir, "checked", state=state)
 
     if args.json:
