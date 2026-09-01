@@ -515,7 +515,8 @@ class TestTheCommitteePlan(unittest.TestCase):
 def _row(state, **kw):
     r = {"id": kw.get("id", "u"), "state": state, "has_receipt": True,
          "missing_outputs": [], "undeclared_outputs": [],
-         "evidence": {"status": "ok"}, "preflight_refusals": []}
+         "evidence": {"status": "ok"}, "preflight_refusals": [],
+         "receipt_attestation": R.ATTESTED}
     r.update(kw)
     return r
 
@@ -605,7 +606,44 @@ class TestAnUnattributedReceiptDoesNotOutrankState(unittest.TestCase):
             rows = R.unit_rows(data)
             self.assertEqual(rows[0]["state"], "FAILED")
             html = R.render(data)
-            self.assertIn("Receipts the coordinator did not cause", html)
+            self.assertIn("Receipts the coordinator cannot vouch for", html)
+
+    def test_an_unattributable_receipt_yields_no_verdict(self):
+        # Not FAILED and not COMPLETE: the report genuinely does not know
+        # whether the artifacts were judged. Saying so is the honest answer,
+        # and it is what this document exists for.
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, receipts={"a": {"state": "DONE"}}, attested=False)
+            got, why = R.verdict(R.unit_rows(R.collect(t)))
+            self.assertEqual(got, "NO VERDICT", why)
+            self.assertIn("attributes", why)
+
+    def test_an_attested_run_still_reaches_a_real_verdict(self):
+        # The other direction: attestation must not make every run NO VERDICT.
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, receipts={"a": {"state": "DONE", "outputs": {
+                "out.txt": {"sha256": "d" * 64, "bytes": 3}}}},
+                     attested=True)
+            got, why = R.verdict(R.unit_rows(R.collect(t)))
+            self.assertEqual(got, "COMPLETE", why)
+
+    def test_a_contradicted_receipt_says_it_was_replaced(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, receipts={"a": {"state": "FAILED"}}, attested=True)
+            path = os.path.join(t, ".swarm", "runs", "a", "att1",
+                                "receipt.json")
+            rc = json.load(open(path))
+            rc["state"] = "DONE"
+            json.dump(rc, open(path, "w"))
+            data = R.collect(t)
+            rows = R.unit_rows(data)
+            self.assertEqual(rows[0]["receipt_attestation"], R.CONTRADICTED)
+            html = R.render(data)
+            self.assertIn("replaced", html)
+            # A contradicted receipt is not an unknown: the coordinator did
+            # check, and its state stands, so the run still gets a verdict.
+            got, _why = R.verdict(rows)
+            self.assertNotEqual(got, "NO VERDICT")
 
     def test_a_receipt_edited_after_the_check_is_not_attested(self):
         with tempfile.TemporaryDirectory() as t:

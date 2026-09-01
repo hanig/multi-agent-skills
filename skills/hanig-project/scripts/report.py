@@ -130,8 +130,13 @@ def _discover_receipts(runs_root):
                 if not ae.is_dir():
                     continue
                 path = os.path.join(ae.path, "receipt.json")
-                with open(path) as fh:
-                    rec = json.load(fh)
+                # ONE read. Parsing one read and digesting a second let a
+                # file swapped between the two pass attestation while the
+                # report used the other content: the digest attested bytes
+                # nobody parsed.
+                with open(path, "rb") as fh:
+                    raw = fh.read()
+                rec = json.loads(raw)
             except FileNotFoundError:
                 continue
             except (OSError, ValueError) as exc:
@@ -149,8 +154,7 @@ def _discover_receipts(runs_root):
                 # the report cannot tell a judged artifact from a file the
                 # agent wrote into its own directory.
                 best_at = (os.path.basename(ae.path.rstrip(os.sep)),
-                           hashlib.sha256(
-                               open(path, "rb").read()).hexdigest())
+                           hashlib.sha256(raw).hexdigest())
 
         if best is not None:
             receipts[uid] = best
@@ -217,14 +221,16 @@ def unit_rows(data):
         pu = plan_units.get(uid, {})
         su = state_units.get(uid, {}) or {}
         rc = data["receipts"].get(uid, {}) or {}
-        attested = _receipt_is_attested(su, rc, data, uid)
+        attestation = _receipt_attestation(su, rc, data, uid)
+        attested = attestation == ATTESTED
         ev = (data.get("evidence") or {}).get(uid) or {"status": "missing"}
         rows.append({
             "id": uid,
             "kind": pu.get("kind") or rc.get("kind") or "?",
             "state": _state_of(su, rc, attested),
-            "state_conflict": _state_conflict(su, rc),
+            "state_conflict": _state_conflict(su, rc, attested),
             "receipt_attested": attested,
+            "receipt_attestation": attestation,
             "receipt_claimed_state": rc.get("state"),
             "job_id": su.get("job_id") or rc.get("job_id"),
             "attempts": len(su.get("attempts") or []),
@@ -256,22 +262,28 @@ def unit_rows(data):
     return rows
 
 
-def _receipt_is_attested(su, rc, data, uid):
-    """Did the coordinator record causing the receipt we are holding?
+# Three answers, not two. A reviewer pointed out that folding the third into
+# "not attested" retroactively rejects every legitimate receipt from a run
+# that predates provenance tracking, which is as wrong as accepting a forged
+# one. The distinguishing information is genuinely absent in that case, and
+# the honest report of absent information is to say so.
+ATTESTED = "attested"            # the coordinator recorded causing this file
+CONTRADICTED = "contradicted"    # it recorded causing a DIFFERENT file
+UNATTRIBUTABLE = "unattributable"  # it recorded nothing for this attempt
 
-    Absent a receipt there is nothing to attest. Absent the coordinator's
-    recorded digest -- older state, or a receipt written by something the
-    coordinator never ran -- the answer is no, and the report says so rather
-    than guessing.
-    """
+
+def _receipt_attestation(su, rc, data, uid):
+    """Whether the coordinator recorded causing the receipt we are holding."""
     if not rc:
-        return True
+        return ATTESTED               # nothing to attest
     prov = (data.get("receipt_provenance") or {}).get(uid)
     if not prov:
-        return False
+        return UNATTRIBUTABLE
     attempt, digest = prov
     recorded = (su.get("attempt_receipt_seals") or {}).get(attempt)
-    return bool(recorded) and recorded == digest
+    if not recorded:
+        return UNATTRIBUTABLE
+    return ATTESTED if recorded == digest else CONTRADICTED
 
 
 def _state_of(su, rc, attested=True):
@@ -296,14 +308,23 @@ def _state_of(su, rc, attested=True):
     return su.get("state") or "NOT STARTED"
 
 
-def _state_conflict(su, rc):
-    """Surface a disagreement rather than silently picking a side."""
+def _state_conflict(su, rc, attested=True):
+    """Surface a disagreement rather than silently picking a side.
+
+    Which side is shown depends on attestation, so this has to say the same
+    thing `_state_of` decided. Describing an unattributable receipt as "it
+    judged the artifacts" asserted the very thing in doubt.
+    """
     a, b = su.get("state"), rc.get("state")
-    if a and b and a != b:
+    if not (a and b and a != b):
+        return None
+    if attested:
         return ("coordinator state says %s; the attempt's receipt says %s. "
                 "The receipt is shown, because it judged the artifacts."
                 % (a, b))
-    return None
+    return ("coordinator state says %s; a receipt in the attempt directory "
+            "says %s. The coordinator's state is shown: nothing attributes "
+            "that receipt to a check this coordinator ran." % (a, b))
 
 
 def _runtime_of(plan, unit):
@@ -452,6 +473,16 @@ def verdict(rows):
             "%d unit(s) have evidence this report could not read, so their "
             "stored state is the only thing left saying what happened, and a "
             "stored state is a self-report." % len(blind))
+
+    unattributable = [r for r in rows
+                      if r["receipt_attestation"] == UNATTRIBUTABLE]
+    if unattributable:
+        return "NO VERDICT", (
+            "%d unit(s) have a receipt that nothing attributes to a check "
+            "this coordinator ran, so it is not known whether their "
+            "artifacts were judged or whether the file was simply written "
+            "there. Re-run `advance` so the coordinator checks them and "
+            "records causing the result." % len(unattributable))
 
     unknown = [r for r in rows if r["state"] not in TERMINAL_BAD
                and r["state"] not in TERMINAL_OK and r["state"] not in LIVE]
@@ -769,10 +800,12 @@ def render(data, title=None):
                 and (r["missing_outputs"] or r["undeclared_outputs"])]
     unattested = [r for r in rows
                   if r["has_receipt"] and not r["receipt_attested"]]
+    contradicted = [r for r in unattested
+                    if r["receipt_attestation"] == CONTRADICTED]
     if unattested:
         a("<section>")
-        a('<div class="sec-head"><h2>Receipts the coordinator did not '
-          "cause</h2>"
+        a('<div class="sec-head"><h2>Receipts the coordinator cannot '
+          "vouch for</h2>"
           "<p>A receipt normally outranks the coordinator's stored state, "
           "because it judged the artifacts. These do not: nothing records "
           "this coordinator running the check that produced them. An agent "
@@ -782,10 +815,18 @@ def render(data, title=None):
         a('<div class="note"><ul>')
         for r in unattested:
             claimed = r["receipt_claimed_state"] or "an outcome"
-            a("<li><code>%s</code>: receipt claims %s. Not counted. A "
-              "hand-run <code>unit.py check</code> also lands here, which is "
-              "not an accusation, only a statement that this report cannot "
-              "attribute it.</li>" % (e(r["id"]), e(str(claimed))))
+            if r["receipt_attestation"] == CONTRADICTED:
+                a("<li><code>%s</code>: receipt claims %s, and it is NOT the "
+                  "file the coordinator recorded causing. It was replaced "
+                  "after the check ran. The coordinator's state is what "
+                  "stands.</li>" % (e(r["id"]), e(str(claimed))))
+            else:
+                a("<li><code>%s</code>: receipt claims %s, and nothing "
+                  "attributes it to a check this coordinator ran. A run "
+                  "predating provenance tracking and a hand-run "
+                  "<code>unit.py check</code> both land here, which is not an "
+                  "accusation, only a statement that this report cannot "
+                  "attribute it.</li>" % (e(r["id"]), e(str(claimed))))
         a("</ul></div></section>")
 
     refused = [r for r in rows if r["preflight_refusals"]]

@@ -2921,7 +2921,26 @@ def trusted_base(state, unit, attempt_dir):
     return (us.get("attempt_bases") or {}).get(Path(attempt_dir).name)
 
 
-def _record_receipt_provenance(state, unit, attempt_dir):
+RECEIPT_DIGEST_PREFIX = "RECEIPT_SHA256"
+
+
+def _reported_receipt_digest(text):
+    """The digest `unit.py check` said it wrote, or None.
+
+    Taken from the check's own output rather than from the directory, because
+    a digest taken by looking attests whatever is there -- including a receipt
+    the agent wrote before the check ran and the check then failed to replace.
+    """
+    for line in reversed((text or "").splitlines()):
+        parts = line.strip().split()
+        if len(parts) == 2 and parts[0] == RECEIPT_DIGEST_PREFIX:
+            if len(parts[1]) == 64 and all(
+                    c in "0123456789abcdef" for c in parts[1].lower()):
+                return parts[1].lower()
+    return None
+
+
+def _record_receipt_provenance(state, unit, attempt_dir, digest):
     """Record that the COORDINATOR caused the receipt now on disk.
 
     An agent can write `receipt.json` into its own attempt directory, and the
@@ -2937,12 +2956,7 @@ def _record_receipt_provenance(state, unit, attempt_dir):
     A receipt with no matching entry was not produced by a check this
     coordinator ran, and the report says so instead of trusting it.
     """
-    if not attempt_dir:
-        return
-    path = Path(attempt_dir) / "receipt.json"
-    try:
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError:
+    if not attempt_dir or not digest:
         return
     us = state.setdefault("units", {}).setdefault(unit, {})
     us.setdefault("attempt_receipt_seals", {})[Path(attempt_dir).name] = digest
@@ -3300,11 +3314,12 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             continue
         rc, text = _check(us["attempt_dir"],
                           trusted_record_seal(state, uid, us["attempt_dir"]))
-        # Whatever the verdict: this check was ours, so the receipt it just
-        # wrote is attributable to us. Recorded before anything acts on the
-        # verdict, so a crash cannot leave a receipt we caused looking like
-        # one we did not.
-        _record_receipt_provenance(state, uid, us["attempt_dir"])
+        # Whatever the verdict: the receipt this check REPORTED WRITING is
+        # attributable to us. Only that one. A check that failed to write
+        # leaves whatever was there before, and attesting that would attest
+        # the agent's own file.
+        _record_receipt_provenance(state, uid, us["attempt_dir"],
+                                   _reported_receipt_digest(text))
         previous = us.get("state")
         us["state"] = NAME.get(rc, f"rc={rc}")
         # A CODE UNIT IS NOT DONE WHEN ITS PREDICATE PASSES. The receipt says

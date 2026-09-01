@@ -95,6 +95,15 @@ class EvidenceRecord(dict):
     Legitimate readers of these fields cross-check them against authority and
     refuse on disagreement. They say so by calling `record_claim`, which names
     what it is returning: a claim, not a fact.
+
+    WHAT THIS IS NOT. It is not a sandbox. `dict.get(rec, key)` and
+    `dict(rec)` reach the fields, and they must, because `record_claim` is
+    built on exactly that. Python has no way to stop a determined caller
+    inside the same process, and pretending otherwise would be the same
+    overclaim this class exists to clean up after. What it stops is the
+    accidental read and the casually-spelled one -- a computed key, an aliased
+    reader, an `items()` loop -- while the deliberate route stays visible,
+    allowlisted and tested.
     """
 
     def _refuse(self, key):
@@ -114,6 +123,26 @@ class EvidenceRecord(dict):
         if key in AUTHORITY_KEYS:
             self._refuse(key)
         return super().__getitem__(key)
+
+    def pop(self, key, *default):
+        if key in AUTHORITY_KEYS:
+            self._refuse(key)
+        return super().pop(key, *default)
+
+    def setdefault(self, key, default=None):
+        if key in AUTHORITY_KEYS:
+            self._refuse(key)
+        return super().setdefault(key, default)
+
+    def items(self):
+        # Iterating VALUES hands out the authority fields without ever naming
+        # them, which is the same access wearing a different spelling. Keys
+        # stay visible, so a caller can still see what the record contains.
+        return [(k, v) for k, v in super().items()
+                if k not in AUTHORITY_KEYS]
+
+    def values(self):
+        return [v for k, v in super().items() if k not in AUTHORITY_KEYS]
 
 
 def record_claim(rec, key):

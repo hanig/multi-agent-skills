@@ -447,6 +447,23 @@ class TestTheRecordItselfRefuses(unittest.TestCase):
         with self.assertRaises(self.W.AuthorityFromEvidence):
             rec.get("base_commit")
 
+    def test_the_other_spellings_are_refused_too(self):
+        for call in (lambda: self.rec.pop("base_commit"),
+                     lambda: self.rec.setdefault("base_tree", "x")):
+            with self.assertRaises(self.W.AuthorityFromEvidence):
+                call()
+        # Iterating values hands the fields out without naming them.
+        self.assertNotIn("base_commit", dict(self.rec.items()))
+        self.assertNotIn("a" * 40, self.rec.values())
+        # Keys stay visible: a caller may still see what the record holds.
+        self.assertIn("base_commit", set(self.rec.keys()))
+
+    def test_the_declared_escape_hatch_is_the_only_way_through(self):
+        # Stated plainly rather than claimed away: dict.get reaches the field,
+        # and must, because record_claim is built on it. The control is that
+        # the route is named, allowlisted and tested -- not that it is sealed.
+        self.assertEqual(dict.get(self.rec, "base_commit"), "a" * 40)
+
     def test_non_authority_fields_are_untouched(self):
         # A guard that refuses everything would just move the damage.
         self.assertEqual(self.rec.get("repo"), "/checkout")
@@ -511,9 +528,11 @@ class TestReceiptProvenanceIsActuallyRecorded(unittest.TestCase):
         payload = _json.dumps({"task_id": "h", "state": "DONE"})
 
         def check(unit_dir, seal=None):
-            # What the real check does: write the receipt, report the verdict.
+            # What the real check does: write the receipt, then report the
+            # digest of the receipt it wrote.
             (Path(unit_dir) / "receipt.json").write_text(payload)
-            return 0, "DONE"
+            return 0, ("DONE\nRECEIPT_SHA256 %s"
+                       % _h.sha256(payload.encode()).hexdigest())
 
         m._check = check
         ok, why = m.acquire_lease(str(st))
@@ -530,6 +549,78 @@ class TestReceiptProvenanceIsActuallyRecorded(unittest.TestCase):
             "the coordinator ran the check that wrote this receipt and did "
             "not record causing it, so the report cannot tell it apart from "
             "one the agent wrote")
+
+
+class TestOnlyAReceiptTheCheckReportedWritingIsAttested(unittest.TestCase):
+    """The coordinator cannot tell whose receipt it is by looking.
+
+    It used to digest whatever `receipt.json` was on disk once the check
+    returned. An agent that pre-writes a DONE receipt, and a check that then
+    fails to replace it, produced an attested agent claim. Only the writer
+    knows what it wrote, so the check reports the digest and the coordinator
+    records nothing else.
+    """
+
+    def _run(self, check_impl, payload_on_disk):
+        import importlib.util, json as _json
+        import shutil, tempfile
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        spec = importlib.util.spec_from_file_location(
+            "sw_stale", SCRIPTS / "swarm.py")
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        st, att = tmp / "st", tmp / "rn" / "h" / "attempt-1"
+        st.mkdir(parents=True)
+        att.mkdir(parents=True)
+        (att / "receipt.json").write_text(payload_on_disk)
+        (st / "swarm-state.json").write_text(_json.dumps(
+            {"schema_version": 1, "halted": None, "units": {
+                "h": {"state": "SUBMITTED", "job_id": "2868624",
+                      "attempt_dir": str(att), "attempts": [str(att)],
+                      "gpu_hours": 0}}}))
+        plan = {"name": "p", "units": [
+            {"id": "h", "kind": "slurm", "runtime": "none", "command": "true",
+             "outputs": ["o"], "write_scopes": ["h/"]}]}
+        m._check = check_impl
+        ok, why = m.acquire_lease(str(st))
+        self.assertTrue(ok, why)
+        self.addCleanup(m.release_lease, str(st))
+        m.advance(plan, m.load_state(str(st)), str(st), str(tmp / "rn"),
+                  False, max_new=0)
+        state = m.load_state(str(st))
+        return ((state.get("units") or {}).get("h") or {}).get(
+            "attempt_receipt_seals") or {}
+
+    def test_a_check_that_wrote_nothing_attests_nothing(self):
+        # The agent's pre-written claim is still on disk. The check reports no
+        # digest because it wrote no receipt.
+        forged = json.dumps({"task_id": "h", "state": "DONE"})
+        seals = self._run(lambda d, seal=None: (1, "check crashed"), forged)
+        self.assertEqual(seals, {}, "attested a receipt the check did not "
+                                    "write")
+
+    def test_a_malformed_digest_line_attests_nothing(self):
+        forged = json.dumps({"task_id": "h", "state": "DONE"})
+        seals = self._run(
+            lambda d, seal=None: (0, "DONE\nRECEIPT_SHA256 not-a-digest"),
+            forged)
+        self.assertEqual(seals, {})
+
+    def test_a_digest_line_the_agent_cannot_reach_is_what_counts(self):
+        # The reported digest is of the file the check wrote, so a later edit
+        # by the agent no longer matches and the report will say so.
+        import hashlib as _h
+        good = json.dumps({"task_id": "h", "state": "FAILED"})
+
+        def check(unit_dir, seal=None):
+            (Path(unit_dir) / "receipt.json").write_text(good)
+            return 0, ("FAILED\nRECEIPT_SHA256 %s"
+                       % _h.sha256(good.encode()).hexdigest())
+
+        seals = self._run(check, json.dumps({"state": "DONE"}))
+        self.assertEqual(seals.get("attempt-1"),
+                         _h.sha256(good.encode()).hexdigest())
 
 
 if __name__ == "__main__":

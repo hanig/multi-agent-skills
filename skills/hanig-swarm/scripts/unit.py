@@ -87,6 +87,10 @@ USAGE_ERROR = 64
 UNIT = "unit.json"
 EVENTS = "events.jsonl"
 RECEIPT = "receipt.json"
+# Machine-readable line on stdout naming the digest of the receipt this
+# process wrote. The coordinator records only this, never a digest it took by
+# looking at the directory afterwards.
+RECEIPT_DIGEST_PREFIX = "RECEIPT_SHA256"
 KINDS = ("slurm", "pipeline", "code")
 
 # Constants the LIFTED code needs. Both were missing, and neither
@@ -570,6 +574,10 @@ def sha256_file(path, limit_bytes=None):
 # The unit contract. Everything above this line is lifted verbatim from
 # contract.py and must not be edited here; everything below is new.
 # ==========================================================================
+
+def _digest_bytes(raw):
+    return hashlib.sha256(raw).hexdigest()
+
 
 def now_iso():
     return time.strftime("%Y-%m-%dT%H:%M:%S%z")
@@ -1257,6 +1265,18 @@ def cmd_check(args):
     werr = write_json(unit_dir / RECEIPT, receipt)
     if werr:
         print(f"WARNING: could not write {RECEIPT}: {werr}", file=sys.stderr)
+    else:
+        # The digest of the receipt THIS RUN WROTE, reported to whoever
+        # invoked us. The coordinator used to attest whatever receipt was on
+        # disk after the check returned, which attests an agent-written file
+        # whenever the check leaves the old one in place. It cannot tell the
+        # two apart by looking; only the writer knows what it wrote.
+        try:
+            print(f"{RECEIPT_DIGEST_PREFIX} "
+                  f"{_digest_bytes((unit_dir / RECEIPT).read_bytes())}")
+        except OSError as exc:
+            print(f"WARNING: wrote {RECEIPT} but cannot digest it: {exc}",
+                  file=sys.stderr)
     event(unit_dir, "checked", state=state)
 
     if args.json:
