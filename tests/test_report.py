@@ -5,6 +5,7 @@ self-assertion the rest of this repo refuses. These tests pin that it is built
 from evidence on disk, and that it does not quietly upgrade a weak claim into
 a strong one.
 """
+import hashlib
 import json
 import os
 import sys
@@ -19,7 +20,7 @@ import report as R  # noqa: E402
 
 
 def _project(tmp, units=None, receipts=None, findings=None, outbox=None,
-             tickets=None):
+             tickets=None, attested=True):
     units = units if units is not None else [
         {"id": "a", "kind": "slurm", "outputs": ["out.txt"], "needs": []}]
     os.makedirs(os.path.join(tmp, ".swarm", "state"), exist_ok=True)
@@ -30,15 +31,25 @@ def _project(tmp, units=None, receipts=None, findings=None, outbox=None,
         state["units"][u["id"]] = {
             "state": "DONE", "job_id": "1", "attempts": ["d"],
             "attempt_dir": "d"}
-    with open(os.path.join(tmp, ".swarm", "state", "swarm-state.json"),
-              "w") as fh:
-        json.dump(state, fh)
+    # Receipts first, then state, so state can carry the digest the
+    # coordinator records for a check it caused. Without that the receipt is
+    # unattested and correctly does NOT outrank state, which is a different
+    # scenario from the one most of these tests are about.
     for uid, rc in (receipts or {}).items():
         d = os.path.join(tmp, ".swarm", "runs", uid, "att1")
         os.makedirs(d, exist_ok=True)
         rc.setdefault("task_id", uid)
-        with open(os.path.join(d, "receipt.json"), "w") as fh:
+        path = os.path.join(d, "receipt.json")
+        with open(path, "w") as fh:
             json.dump(rc, fh)
+        if attested:
+            with open(path, "rb") as fh:
+                digest = hashlib.sha256(fh.read()).hexdigest()
+            state["units"].setdefault(uid, {})[
+                "attempt_receipt_seals"] = {"att1": digest}
+    with open(os.path.join(tmp, ".swarm", "state", "swarm-state.json"),
+              "w") as fh:
+        json.dump(state, fh)
     if findings is not None:
         with open(os.path.join(tmp, "findings.json"), "w") as fh:
             json.dump(findings, fh)
@@ -555,6 +566,59 @@ class TestBlockedBeforeLaunchIsVisible(unittest.TestCase):
             self.assertIn("Blocked before launch", html)
             self.assertIn("/checkout", html)
             self.assertIn("2 dirty path(s)", html)
+
+
+class TestAnUnattributedReceiptDoesNotOutrankState(unittest.TestCase):
+    """The other half of "the receipt wins".
+
+    An agent can write receipt.json into its own attempt directory. Letting
+    any receipt outrank coordinator state therefore handed the party being
+    judged priority over the party judging. A receipt counts when the
+    coordinator recorded causing the check that wrote it.
+    """
+
+    def test_an_attested_receipt_still_wins(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, receipts={"a": {"state": "FAILED"}}, attested=True)
+            rows = R.unit_rows(R.collect(t))
+            self.assertEqual(rows[0]["state"], "FAILED")
+            self.assertTrue(rows[0]["receipt_attested"])
+
+    def test_an_unattested_receipt_does_not_win(self):
+        with tempfile.TemporaryDirectory() as t:
+            # Coordinator state says DONE; an unattributed receipt claims
+            # otherwise. Previously the receipt decided.
+            _project(t, receipts={"a": {"state": "FAILED"}}, attested=False)
+            rows = R.unit_rows(R.collect(t))
+            self.assertEqual(rows[0]["state"], "DONE")
+            self.assertFalse(rows[0]["receipt_attested"])
+
+    def test_a_forged_done_cannot_promote_a_failed_unit(self):
+        # The direction that matters: the agent claims success.
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, receipts={"a": {"state": "DONE"}}, attested=False)
+            sp = os.path.join(t, ".swarm", "state", "swarm-state.json")
+            st = json.load(open(sp))
+            st["units"]["a"]["state"] = "FAILED"
+            json.dump(st, open(sp, "w"))
+            data = R.collect(t)
+            rows = R.unit_rows(data)
+            self.assertEqual(rows[0]["state"], "FAILED")
+            html = R.render(data)
+            self.assertIn("Receipts the coordinator did not cause", html)
+
+    def test_a_receipt_edited_after_the_check_is_not_attested(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, receipts={"a": {"state": "FAILED"}}, attested=True)
+            path = os.path.join(t, ".swarm", "runs", "a", "att1",
+                                "receipt.json")
+            rc = json.load(open(path))
+            rc["state"] = "DONE"
+            json.dump(rc, open(path, "w"))
+            rows = R.unit_rows(R.collect(t))
+            self.assertFalse(rows[0]["receipt_attested"])
+            self.assertEqual(rows[0]["state"], "DONE",
+                             "coordinator state is what stands here")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 """External coordinator paths and launch-time Git preflight."""
 
+import hashlib
 import json
 import os
 import shutil
@@ -49,6 +50,11 @@ class Base(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
 
+
+def _state_with_seal(uid, attempt, seal):
+    """Coordinator state as it stands after a first dispatch."""
+    return {"units": {uid: {"attempt_record_seals": {
+        Path(attempt).name: seal}}}}
 
 class TestExternalPathPolicy(Base):
 
@@ -630,8 +636,9 @@ class TestTheRecordIsNotTrustedForDispatch(unittest.TestCase):
         unit = code_unit(good)
         attempt = self.tmp / "runs" / "code" / "attempt"
         attempt.mkdir(parents=True)
-        err, _base = S._write_launch_record(str(attempt), unit)
+        err, anchored = S._write_launch_record(str(attempt), unit)
         self.assertIsNone(err)
+        state = _state_with_seal(unit["id"], attempt, anchored["seal"])
 
         anchor = W.launch_record_path(str(attempt))
         rec = json.loads(anchor.read_text())
@@ -641,13 +648,14 @@ class TestTheRecordIsNotTrustedForDispatch(unittest.TestCase):
         real, spy, launched = self._spy()
         S.U.run = spy
         try:
-            job, refusal = S._submit(unit, str(attempt), False, {})
+            job, refusal = S._submit(unit, str(attempt), False, state)
         finally:
             S.U.run = real
         self.assertIsNone(job)
         self.assertEqual(launched, [])
-        self.assertIn(str(evil), refusal)
-        self.assertIn("writable by the agent", refusal)
+        # The seal catches the edit before the field-level cross-check does,
+        # which is the point: it does not depend on a reviewer naming a field.
+        self.assertIn("no longer matches the digest", refusal)
 
     def test_a_clean_untouched_attempt_still_dispatches(self):
         # The other direction: the check must not refuse an honest launch.
@@ -679,10 +687,15 @@ class TestTheRecordIsNotTrustedForDispatch(unittest.TestCase):
         self.assertIsInstance(refusal, S.PreflightRefusal)
 
         (repo / "dirty.txt").unlink()               # cleaned
+        # A real re-dispatch: the coordinator still holds the seal it stored
+        # when it wrote this attempt's record.
+        seal = hashlib.sha256(
+            W.launch_record_path(str(attempt)).read_bytes()).hexdigest()
+        state = _state_with_seal(unit["id"], attempt, seal)
         real, spy, launched = self._spy()
         S.U.run = spy
         try:
-            job, err = S._submit(unit, str(attempt), False, {})
+            job, err = S._submit(unit, str(attempt), False, state)
         finally:
             S.U.run = real
         self.assertIsNone(err, "a cleaned workspace must dispatch")
@@ -769,6 +782,76 @@ class TestContainmentCoversAWorkspaceThatDoesNotExistYet(unittest.TestCase):
         state, _runs, _wt = CP.resolve_paths(
             state_dir=str(self.tmp / "state"), plan=plan, cwd=str(plain))
         self.assertEqual(state, Path(self.tmp / "state").resolve())
+
+
+class TestASealLessAttemptIsAbandonedNotStarted(unittest.TestCase):
+    """A legitimate unit must never become permanently unjudgeable.
+
+    Two ways the seal goes missing while the record exists: the coordinator
+    crashed between writing the record and storing the seal, or the record
+    predates sealing. Both used to dispatch anyway, and nothing could then
+    judge the attempt: stuck with no way out but hand-editing state.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.repo = repo_at(self.tmp / "repo")
+        self.unit = code_unit(self.repo)
+        self.attempt = self.tmp / "runs" / "code" / "attempt"
+        self.attempt.mkdir(parents=True)
+
+    def _submit_with(self, state):
+        real, launched = S.U.run, []
+
+        def spy(argv, **kwargs):
+            if argv and argv[0] == "paseo":
+                launched.append(argv)
+                return 0, '{"agentId":"11111111-2222-3333-4444-555555555555"}', ""
+            return real(argv, **kwargs)
+
+        S.U.run = spy
+        try:
+            return S._submit(self.unit, str(self.attempt), False, state), launched
+        finally:
+            S.U.run = real
+
+    def test_a_crash_before_the_seal_was_stored_abandons_the_attempt(self):
+        # First dispatch wrote the record; the crash lost the seal.
+        err, _anchored = S._write_launch_record(str(self.attempt), self.unit)
+        self.assertIsNone(err)
+        (job, refusal), launched = self._submit_with({"units": {}})
+        self.assertIsNone(job)
+        self.assertEqual(launched, [], "dispatched an attempt nothing could "
+                                       "ever judge")
+        self.assertIn("holds no seal", refusal)
+        self.assertIn("retry", refusal)
+
+    def test_a_record_predating_sealing_abandons_the_attempt(self):
+        # A v1-era record, written by hand, with no seal anywhere.
+        W.launch_record_path(str(self.attempt)).write_text(json.dumps(
+            {"schema_version": 1, "repo": str(self.repo),
+             "execution_workspace": str(self.repo),
+             "base_commit": "0" * 40, "clean_at_launch": True,
+             "preflight": {"status": "passed"}}))
+        (job, refusal), launched = self._submit_with({"units": {}})
+        self.assertIsNone(job)
+        self.assertEqual(launched, [])
+        self.assertIn("holds no seal", refusal)
+
+    def test_the_seal_is_not_re_derived_from_the_file(self):
+        # The tempting "fix": digest whatever is on disk now and call it the
+        # seal. That is the laundering the seal exists to prevent, and it
+        # would be worse than no seal because it would look like one.
+        err, _anchored = S._write_launch_record(str(self.attempt), self.unit)
+        self.assertIsNone(err)
+        state = {"units": {}}
+        (job, _refusal), _launched = self._submit_with(state)
+        self.assertIsNone(job)
+        seals = ((state.get("units") or {}).get("code") or {}).get(
+            "attempt_record_seals") or {}
+        self.assertEqual(seals, {}, "the coordinator invented a seal from a "
+                                    "file it did not write")
 
 
 if __name__ == "__main__":

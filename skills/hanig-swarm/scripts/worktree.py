@@ -71,6 +71,61 @@ def repo_status(runner, repo):
     return rc, entries
 
 
+# Fields whose value DECIDES something. `repo` is deliberately not here: it
+# says where to read a policy from, and the base commit that pins the policy's
+# content comes from coordinator state, so a substituted repository cannot
+# change what the policy says -- only whether the commit is found at all.
+AUTHORITY_KEYS = frozenset({"base_commit", "base_tree", "execution_workspace",
+                            "dirty_paths"})
+
+
+class AuthorityFromEvidence(KeyError):
+    """Raised when someone asks an unsealed record to decide something."""
+
+
+class EvidenceRecord(dict):
+    """A launch record read WITHOUT its seal, which refuses to be authority.
+
+    A reviewer's point, and a fair one: the static tests that guard this
+    invariant match string literals and direct reader names, so a computed key
+    or an alias walks straight past them. Detection at one chokepoint is
+    weaker than making the thing unrepresentable, so the object itself now
+    refuses. Static tests stay as the fast guard; this is the real control.
+
+    Legitimate readers of these fields cross-check them against authority and
+    refuse on disagreement. They say so by calling `record_claim`, which names
+    what it is returning: a claim, not a fact.
+    """
+
+    def _refuse(self, key):
+        raise AuthorityFromEvidence(
+            f"{key!r} decides something, and this launch record was read "
+            f"without its seal, so it is evidence rather than authority. Take "
+            f"the value from the plan or from coordinator state; if you are "
+            f"cross-checking the record's claim against one of those and will "
+            f"refuse on disagreement, say so by calling record_claim().")
+
+    def get(self, key, default=None):
+        if key in AUTHORITY_KEYS:
+            self._refuse(key)
+        return super().get(key, default)
+
+    def __getitem__(self, key):
+        if key in AUTHORITY_KEYS:
+            self._refuse(key)
+        return super().__getitem__(key)
+
+
+def record_claim(rec, key):
+    """What the record CLAIMS for an authority field. Not what is true.
+
+    Only for a caller that compares this against the plan or coordinator
+    state and refuses on disagreement. Using it to obtain a value to act on
+    is the defect this whole mechanism exists to prevent.
+    """
+    return dict.get(rec or {}, key)
+
+
 def launch_record_path(unit_dir):
     """One place for the convention, which three call sites had inlined."""
     return Path(unit_dir).parent / f"launch-{Path(unit_dir).name}.json"
@@ -88,6 +143,16 @@ def read_sealed_launch_record(unit_dir, seal):
     No seal means no judgment. Falling back to the unsealed record would
     restore the whole defect for exactly the caller an attacker arranges to
     be, which is what happened to `recorded or base` in cmd_verify.
+
+    WHAT THIS IS NOT. An unkeyed digest of bytes the agent can read, handed in
+    as an argument, is not an authenticator: anyone who can read the record
+    can recompute it. I claimed otherwise and a reviewer was right to refuse
+    the claim. What it actually provides is narrower and still worth having:
+    it binds the COORDINATOR's own judgment to the bytes the coordinator
+    wrote, so a record edited after launch cannot pass through `advance`'s
+    check. It does nothing about a party that supplies the seal itself, which
+    is why receipt provenance is recorded separately in coordinator state
+    rather than being inferred from a seal.
     """
     path = launch_record_path(unit_dir)
     try:
@@ -159,7 +224,9 @@ def read_launch_record(unit_dir):
         return None, f"launch record at {path} is unreadable: {exc}"
     if not isinstance(rec, dict):
         return None, f"launch record at {path} is not an object"
-    return rec, None
+    # Refusing type, so a computed key or an aliased reader cannot quietly
+    # take an authority field from an unsealed record.
+    return EvidenceRecord(rec), None
 
 
 def judge_detail(runner, unit_dir, spec, seal=None):

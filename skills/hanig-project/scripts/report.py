@@ -22,6 +22,7 @@ stdlib only, like the rest of the repo.
 import argparse
 import datetime as _dt
 import html
+import hashlib
 import json
 import os
 import shutil
@@ -100,17 +101,17 @@ def _discover_receipts(runs_root):
       unreadable  a receipt exists and could not be parsed
       unavailable the directory could not be traversed or read
     """
-    receipts, evidence = {}, {}
+    receipts, evidence, provenance = {}, {}, {}
     try:
         unit_entries = sorted(os.scandir(runs_root), key=lambda e: e.name)
     except FileNotFoundError:
-        return receipts, evidence
+        return receipts, evidence, provenance
     except OSError as exc:
         # The whole tree is unreachable: say so rather than reporting a run
         # with no evidence as a run that needed none.
         evidence["*"] = {"status": "unavailable",
                          "detail": "cannot read %s: %s" % (runs_root, exc)}
-        return receipts, evidence
+        return receipts, evidence, provenance
 
     for ue in unit_entries:
         uid = ue.name
@@ -123,7 +124,7 @@ def _discover_receipts(runs_root):
                              "detail": "cannot read %s: %s" % (ue.path, exc)}
             continue
 
-        best, unreadable = None, []
+        best, unreadable, best_at = None, [], None
         for ae in attempts:
             try:
                 if not ae.is_dir():
@@ -143,9 +144,17 @@ def _discover_receipts(runs_root):
             if best is None or str(rec.get("checked_at", "")) >= str(
                     best.get("checked_at", "")):
                 best = rec
+                # Kept so the receipt can be matched against the digest the
+                # coordinator recorded for the check IT caused. Without this
+                # the report cannot tell a judged artifact from a file the
+                # agent wrote into its own directory.
+                best_at = (os.path.basename(ae.path.rstrip(os.sep)),
+                           hashlib.sha256(
+                               open(path, "rb").read()).hexdigest())
 
         if best is not None:
             receipts[uid] = best
+            provenance[uid] = best_at
         if unreadable:
             evidence[uid] = {"status": "unreadable",
                              "detail": "; ".join(unreadable)}
@@ -153,7 +162,7 @@ def _discover_receipts(runs_root):
             evidence[uid] = {"status": "present"}
         else:
             evidence[uid] = {"status": "missing"}
-    return receipts, evidence
+    return receipts, evidence, provenance
 
 
 def collect(project):
@@ -174,7 +183,8 @@ def collect(project):
             state_dir, runs_root = legacy / "state", legacy / "runs"
     state = _load(os.path.join(state_dir, "swarm-state.json"), {}) or {}
 
-    receipts, evidence = _discover_receipts(str(runs_root))
+    receipts, evidence, provenance = _discover_receipts(
+        str(runs_root))
 
     return {
         "project": project,
@@ -183,6 +193,7 @@ def collect(project):
         "plan": plan,
         "state": state,
         "receipts": receipts,
+        "receipt_provenance": provenance,
         "evidence": evidence,
         "outbox": _load_lines(os.path.join(state_dir, "outbox.jsonl")),
         "tickets": _load(p("tickets.json"), {}) or {},
@@ -206,12 +217,15 @@ def unit_rows(data):
         pu = plan_units.get(uid, {})
         su = state_units.get(uid, {}) or {}
         rc = data["receipts"].get(uid, {}) or {}
+        attested = _receipt_is_attested(su, rc, data, uid)
         ev = (data.get("evidence") or {}).get(uid) or {"status": "missing"}
         rows.append({
             "id": uid,
             "kind": pu.get("kind") or rc.get("kind") or "?",
-            "state": _state_of(su, rc),
+            "state": _state_of(su, rc, attested),
             "state_conflict": _state_conflict(su, rc),
+            "receipt_attested": attested,
+            "receipt_claimed_state": rc.get("state"),
             "job_id": su.get("job_id") or rc.get("job_id"),
             "attempts": len(su.get("attempts") or []),
             "max_attempts": pu.get("max_attempts"),
@@ -242,16 +256,42 @@ def unit_rows(data):
     return rows
 
 
-def _state_of(su, rc):
-    """The receipt wins.
+def _receipt_is_attested(su, rc, data, uid):
+    """Did the coordinator record causing the receipt we are holding?
+
+    Absent a receipt there is nothing to attest. Absent the coordinator's
+    recorded digest -- older state, or a receipt written by something the
+    coordinator never ran -- the answer is no, and the report says so rather
+    than guessing.
+    """
+    if not rc:
+        return True
+    prov = (data.get("receipt_provenance") or {}).get(uid)
+    if not prov:
+        return False
+    attempt, digest = prov
+    recorded = (su.get("attempt_receipt_seals") or {}).get(attempt)
+    return bool(recorded) and recorded == digest
+
+
+def _state_of(su, rc, attested=True):
+    """The receipt wins, IF the coordinator caused it.
 
     This used to be `su.get("state") or rc.get("state")`, so the coordinator's
     stored state outranked the receipt that judged the attempt. A unit whose
     receipt said FAILED but whose state said DONE was reported COMPLETE: a
     self-report beating evidence, inside the one document whose whole job is
     to stop that. Reviewer found it; it is the worst defect in this change.
+
+    The `attested` qualifier arrived later, from the other direction. An agent
+    can write `receipt.json` into its own attempt directory, so "the receipt
+    wins" also handed the agent's self-report priority over the coordinator's.
+    Both halves are the same rule: prefer the party that judged over the party
+    that is being judged. A receipt whose digest matches what the coordinator
+    recorded for a check it ran was produced by that check. One that does not
+    is a claim by whoever wrote the file, and does not outrank state.
     """
-    if rc.get("state"):
+    if rc.get("state") and attested:
         return rc["state"]
     return su.get("state") or "NOT STARTED"
 
@@ -727,6 +767,27 @@ def render(data, title=None):
                    and not r["has_receipt"]]
     mismatch = [r for r in rows if r["has_receipt"]
                 and (r["missing_outputs"] or r["undeclared_outputs"])]
+    unattested = [r for r in rows
+                  if r["has_receipt"] and not r["receipt_attested"]]
+    if unattested:
+        a("<section>")
+        a('<div class="sec-head"><h2>Receipts the coordinator did not '
+          "cause</h2>"
+          "<p>A receipt normally outranks the coordinator's stored state, "
+          "because it judged the artifacts. These do not: nothing records "
+          "this coordinator running the check that produced them. An agent "
+          "can write into its own attempt directory, so an unattributed "
+          "receipt is a claim by whoever wrote the file. The state shown for "
+          "these units is the coordinator's.</p></div>")
+        a('<div class="note"><ul>')
+        for r in unattested:
+            claimed = r["receipt_claimed_state"] or "an outcome"
+            a("<li><code>%s</code>: receipt claims %s. Not counted. A "
+              "hand-run <code>unit.py check</code> also lands here, which is "
+              "not an accusation, only a statement that this report cannot "
+              "attribute it.</li>" % (e(r["id"]), e(str(claimed))))
+        a("</ul></div></section>")
+
     refused = [r for r in rows if r["preflight_refusals"]]
     if refused:
         a("<section>")

@@ -23,16 +23,18 @@ here until someone adds it deliberately, with a reason.
 """
 import ast
 import json
+import sys
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "hanig-swarm" / "scripts"
 
-# Fields whose value decides something. Reading one of these out of the record
-# and then acting on it is the defect; writing them there as evidence is fine.
-AUTHORITY_KEYS = {"base_commit", "base_tree", "execution_workspace",
-                  "dirty_paths"}
+# Imported, NOT restated. A second copy of this list is the same duplication
+# that produced the defects in the first place.
+sys.path.insert(0, str(SCRIPTS))
+import worktree as _W  # noqa: E402
+AUTHORITY_KEYS = set(_W.AUTHORITY_KEYS)
 
 # Functions permitted to name an authority key, each with the reason. A
 # function absent from here may not touch one at all.
@@ -43,12 +45,6 @@ ALLOWED = {
         "reads the declared workspace from the PLAN, not from a record",
     ("swarm.py", "validate_plan"):
         "validates the plan's own execution_workspace field before any run",
-    ("swarm.py", "_submit"):
-        "cross-checks the record's claim AGAINST the plan and refuses on "
-        "disagreement, which is the one safe way to read it",
-    ("swarm.py", "cmd_verify"):
-        "cross-checks the record's base against trusted_base, refuses on "
-        "disagreement, and refuses outright when state holds no base",
     ("coordinator_paths.py", "operated_worktrees"):
         "reads execution_workspace off the PLAN's units to build the path "
         "containment set; no record is involved",
@@ -60,6 +56,18 @@ ALLOWED = {
 # The UNSEALED reader. This is the sharper invariant: naming a field is not
 # the defect, taking it from a record nobody checked is. Every call site is
 # listed with what makes it safe.
+# Functions permitted to call record_claim, i.e. to look at what an unsealed
+# record CLAIMS for an authority field. Each must compare it against the plan
+# or coordinator state and refuse on disagreement; none may act on it.
+CLAIM_ALLOWED = {
+    ("swarm.py", "_submit"):
+        "compares the record's execution_workspace against the plan and "
+        "refuses on disagreement; the plan decides --cwd either way",
+    ("swarm.py", "cmd_verify"):
+        "compares the record's base against trusted_base, refuses on "
+        "disagreement, and refuses outright when state holds no base",
+}
+
 RAW_READER = "read_launch_record"
 RAW_ALLOWED = {
     ("swarm.py", "_submit"):
@@ -108,6 +116,32 @@ def _key_uses(path):
                     and node.func.attr in ("get", "setdefault", "pop")
                     and node.args):
                 self._note(node.args[0], node.lineno)
+            self.generic_visit(node)
+
+    V().visit(tree)
+    return out
+
+
+def _named_calls(path, name):
+    """(function, line) for every call to `name`."""
+    tree = ast.parse(path.read_text())
+    out = []
+    stack = []
+
+    class V(ast.NodeVisitor):
+        def visit_FunctionDef(self, node):
+            stack.append(node.name)
+            self.generic_visit(node)
+            stack.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Call(self, node):
+            f = node.func
+            got = (f.attr if isinstance(f, ast.Attribute)
+                   else getattr(f, "id", None))
+            if got == name:
+                out.append((stack[-1] if stack else "<module>", node.lineno))
             self.generic_visit(node)
 
     V().visit(tree)
@@ -183,6 +217,18 @@ class TestNoOneReadsAuthorityOutOfTheRecord(unittest.TestCase):
         self.assertIn("read_sealed_launch_record", called)
         self.assertNotIn(RAW_READER, called)
 
+    def test_record_claim_is_called_only_where_declared(self):
+        offenders = []
+        for path in sorted(SCRIPTS.glob("*.py")):
+            for func, line in _named_calls(path, "record_claim"):
+                if (path.name, func) not in CLAIM_ALLOWED:
+                    offenders.append(f"{path.name}:{line} {func}()")
+        self.assertEqual(
+            offenders, [],
+            "record_claim returns what an unsealed record CLAIMS. A caller "
+            "that does not cross-check it against authority and refuse on "
+            "disagreement must not use it:\n  " + "\n  ".join(offenders))
+
     def test_the_allowlist_has_no_dead_entries(self):
         # An allowlist that outlives its call sites stops describing the code
         # and starts excusing it.
@@ -200,6 +246,15 @@ class TestNoOneReadsAuthorityOutOfTheRecord(unittest.TestCase):
         dead_raw = sorted(set(RAW_ALLOWED) - raw_seen)
         self.assertEqual(dead_raw, [],
                          f"RAW_ALLOWED entries with no call site: {dead_raw}")
+
+        claim_seen = set()
+        for path in sorted(SCRIPTS.glob("*.py")):
+            for func, _line in _named_calls(path, "record_claim"):
+                claim_seen.add((path.name, func))
+        dead_claim = sorted(set(CLAIM_ALLOWED) - claim_seen)
+        self.assertEqual(dead_claim, [],
+                         f"CLAIM_ALLOWED entries with no call site: "
+                         f"{dead_claim}")
 
 
 class TestTheSealStopsARewrittenRecord(unittest.TestCase):
@@ -340,6 +395,141 @@ class TestTheSealActuallyTravels(unittest.TestCase):
         self.assertIn("--record-seal", seen["argv"])
         self.assertEqual(seen["argv"][seen["argv"].index("--record-seal") + 1],
                          "deadbeef" * 8)
+
+
+class TestTheRecordItselfRefuses(unittest.TestCase):
+    """The reviewer's hole in the static tests, closed at runtime.
+
+    _key_uses and _raw_reader_calls match string literals and direct reader
+    names, so a computed key or an aliased reader walks past both. Detection
+    at one chokepoint is weaker than making the thing unrepresentable, so the
+    object refuses. The static tests remain as the fast guard; this is the
+    control that does not depend on how the access was spelled.
+    """
+
+    def setUp(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import worktree as W
+        self.W = W
+        self.rec = W.EvidenceRecord({
+            "base_commit": "a" * 40, "base_tree": "b" * 40,
+            "execution_workspace": "/checkout", "dirty_paths": [],
+            "repo": "/checkout", "preflight": {"status": "passed"}})
+
+    def test_a_literal_authority_key_is_refused(self):
+        for key in sorted(self.W.AUTHORITY_KEYS):
+            with self.assertRaises(self.W.AuthorityFromEvidence):
+                self.rec.get(key)
+            with self.assertRaises(self.W.AuthorityFromEvidence):
+                self.rec[key]
+
+    def test_a_COMPUTED_authority_key_is_refused_too(self):
+        # The exact bypass the static scan cannot see.
+        key = "base_" + "commit"
+        with self.assertRaises(self.W.AuthorityFromEvidence):
+            self.rec.get(key)
+        for key in [k for k in ("base_commit",)]:
+            with self.assertRaises(self.W.AuthorityFromEvidence):
+                self.rec[key]
+
+    def test_an_ALIASED_reader_still_returns_a_refusing_record(self):
+        # The other bypass: rename the reader, defeat the name match.
+        import tempfile, shutil, json as _json
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        att = tmp / "runs" / "u" / "a1"
+        att.mkdir(parents=True)
+        self.W.launch_record_path(str(att)).write_text(
+            _json.dumps({"base_commit": "c" * 40, "repo": "/x"}))
+        aliased = self.W.read_launch_record          # no longer the name
+        rec, err = aliased(str(att))
+        self.assertIsNone(err)
+        with self.assertRaises(self.W.AuthorityFromEvidence):
+            rec.get("base_commit")
+
+    def test_non_authority_fields_are_untouched(self):
+        # A guard that refuses everything would just move the damage.
+        self.assertEqual(self.rec.get("repo"), "/checkout")
+        self.assertEqual(self.rec["preflight"]["status"], "passed")
+        self.assertIsNone(self.rec.get("absent"))
+        self.assertEqual(self.rec.get("absent", "d"), "d")
+
+    def test_record_claim_is_the_declared_way_through(self):
+        self.assertEqual(
+            self.W.record_claim(self.rec, "execution_workspace"), "/checkout")
+        self.assertIsNone(self.W.record_claim(None, "base_commit"))
+
+    def test_the_sealed_reader_returns_a_plain_usable_record(self):
+        # Sealed means checked, so judging must be able to read the fields it
+        # judges on. A refusing type there would break the legitimate path.
+        import tempfile, shutil, hashlib as _h, json as _json
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        att = tmp / "runs" / "u" / "a1"
+        att.mkdir(parents=True)
+        payload = _json.dumps({"base_commit": "d" * 40})
+        self.W.launch_record_path(str(att)).write_text(payload)
+        seal = _h.sha256(payload.encode()).hexdigest()
+        rec, err = self.W.read_sealed_launch_record(str(att), seal)
+        self.assertIsNone(err)
+        self.assertEqual(rec.get("base_commit"), "d" * 40)
+
+
+class TestReceiptProvenanceIsActuallyRecorded(unittest.TestCase):
+    """That the coordinator records causing a receipt, not merely that the
+    report checks it.
+
+    Written for the second time this change was made: a mutation removing the
+    coordinator's recording broke nothing, because the report's own fixtures
+    write the digest themselves. Verifying a mechanism with fixtures that
+    supply its input proves the consumer, never the producer.
+    """
+
+    def test_advance_records_the_digest_of_the_receipt_its_check_wrote(self):
+        import importlib.util, json as _json, hashlib as _h
+        import shutil, tempfile
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        spec = importlib.util.spec_from_file_location(
+            "sw_prov", SCRIPTS / "swarm.py")
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+
+        st = tmp / "st"
+        st.mkdir(parents=True)
+        att = tmp / "rn" / "h" / "attempt-1"
+        att.mkdir(parents=True)
+        (st / "swarm-state.json").write_text(_json.dumps(
+            {"schema_version": 1, "halted": None, "units": {
+                "h": {"state": "SUBMITTED", "job_id": "2868624",
+                      "attempt_dir": str(att), "attempts": [str(att)],
+                      "gpu_hours": 0}}}))
+        plan = {"name": "p", "units": [
+            {"id": "h", "kind": "slurm", "runtime": "none", "command": "true",
+             "outputs": ["o"], "write_scopes": ["h/"]}]}
+
+        payload = _json.dumps({"task_id": "h", "state": "DONE"})
+
+        def check(unit_dir, seal=None):
+            # What the real check does: write the receipt, report the verdict.
+            (Path(unit_dir) / "receipt.json").write_text(payload)
+            return 0, "DONE"
+
+        m._check = check
+        ok, why = m.acquire_lease(str(st))
+        self.assertTrue(ok, why)
+        self.addCleanup(m.release_lease, str(st))
+        m.advance(plan, m.load_state(str(st)), str(st), str(tmp / "rn"),
+                  False, max_new=0)
+
+        state = m.load_state(str(st))
+        seals = ((state.get("units") or {}).get("h") or {}).get(
+            "attempt_receipt_seals") or {}
+        self.assertEqual(
+            seals.get("attempt-1"), _h.sha256(payload.encode()).hexdigest(),
+            "the coordinator ran the check that wrote this receipt and did "
+            "not record causing it, so the report cannot tell it apart from "
+            "one the agent wrote")
 
 
 if __name__ == "__main__":

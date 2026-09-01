@@ -1622,6 +1622,44 @@ def _submit(u, unit_dir, dry_run, state=None):
         anchor_err, anchored_base = _write_launch_record(unit_dir, u)
         if anchor_err:
             return None, anchor_err
+    # UNJUDGEABLE-FOREVER, closed. Two ways the seal could be missing while
+    # dispatch went ahead anyway: the coordinator crashed between writing the
+    # record and storing the seal, or the record predates sealing entirely.
+    # Either way `_write_launch_record` returns no seal on the re-dispatch
+    # path, the attempt used to launch, and nothing could ever judge it: a
+    # legitimate unit stuck with no way out but hand-editing state.
+    #
+    # Re-deriving the seal from the file here is NOT the fix. That is exactly
+    # the laundering the seal exists to prevent, and it would be worse than
+    # having no seal because it would look like one. So the attempt fails now,
+    # loudly, and a retry starts in a fresh attempt directory with a fresh
+    # record and a fresh seal, which is what the retry boundary is for.
+    if _requires_clean_workspace(u) and not dry_run:
+        has_seal = bool((anchored_base or {}).get("seal"))
+        if not has_seal and state is not None:
+            has_seal = bool(trusted_record_seal(state, u["id"], unit_dir))
+        if not has_seal:
+            return None, (
+                f"unit {u['id']!r}: attempt {Path(unit_dir).name!r} has a "
+                f"launch record but coordinator state holds no seal for it, "
+                f"so nothing could later tell that record apart from one the "
+                f"agent rewrote, and the attempt could never be judged. This "
+                f"attempt is abandoned rather than started; retry to get a "
+                f"fresh attempt directory, record and seal.")
+        # And while we hold both: verify the record still matches its seal
+        # BEFORE dispatching, not only when judging. On a first dispatch this
+        # is trivially true, having just been written. On a re-dispatch it is
+        # the general form of the workspace cross-check below: any field the
+        # agent edited between the two dispatches is caught here, rather than
+        # only the one field a reviewer happened to name.
+        if state is not None:
+            stored = trusted_record_seal(state, u["id"], unit_dir)
+            if stored:
+                _rec, seal_err = W.read_sealed_launch_record(unit_dir, stored)
+                if seal_err:
+                    return None, (f"unit {u['id']!r}: refusing to dispatch "
+                                  f"attempt {Path(unit_dir).name!r}: "
+                                  f"{seal_err}")
     if state is not None and anchored_base:
         # Trusted coordinator observation, keyed by attempt. Historical
         # attempts retain the base they actually launched from.
@@ -1743,7 +1781,7 @@ def _submit(u, unit_dir, dry_run, state=None):
         anchor, anchor_read_err = W.read_launch_record(unit_dir)
         if anchor_read_err:
             return None, anchor_read_err
-        recorded = (anchor or {}).get("execution_workspace")
+        recorded = W.record_claim(anchor, "execution_workspace")
         if not recorded:
             return None, (
                 f"unit {u.get('id')!r}: launch record for attempt "
@@ -2883,6 +2921,33 @@ def trusted_base(state, unit, attempt_dir):
     return (us.get("attempt_bases") or {}).get(Path(attempt_dir).name)
 
 
+def _record_receipt_provenance(state, unit, attempt_dir):
+    """Record that the COORDINATOR caused the receipt now on disk.
+
+    An agent can write `receipt.json` into its own attempt directory, and the
+    report deliberately lets a receipt outrank coordinator state because a
+    receipt judged artifacts. Both are reasonable and together they are a
+    hole: the agent's self-report wins.
+
+    A seal cannot close it, because a seal handed in as an argument can be
+    computed by whoever hands it in. What cannot be forged is a fact the
+    coordinator wrote to its OWN state, which the threat model trusts and the
+    agent is never given the path to. So after a check the coordinator has
+    caused, it digests the receipt that check produced and records that here.
+    A receipt with no matching entry was not produced by a check this
+    coordinator ran, and the report says so instead of trusting it.
+    """
+    if not attempt_dir:
+        return
+    path = Path(attempt_dir) / "receipt.json"
+    try:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return
+    us = state.setdefault("units", {}).setdefault(unit, {})
+    us.setdefault("attempt_receipt_seals", {})[Path(attempt_dir).name] = digest
+
+
 def trusted_record_seal(state, unit, attempt_dir):
     """THE ONLY way to obtain an attempt's launch-record seal.
 
@@ -3235,6 +3300,11 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             continue
         rc, text = _check(us["attempt_dir"],
                           trusted_record_seal(state, uid, us["attempt_dir"]))
+        # Whatever the verdict: this check was ours, so the receipt it just
+        # wrote is attributable to us. Recorded before anything acts on the
+        # verdict, so a crash cannot leave a receipt we caused looking like
+        # one we did not.
+        _record_receipt_provenance(state, uid, us["attempt_dir"])
         previous = us.get("state")
         us["state"] = NAME.get(rc, f"rc={rc}")
         # A CODE UNIT IS NOT DONE WHEN ITS PREDICATE PASSES. The receipt says
@@ -4148,7 +4218,7 @@ def cmd_verify(args):
         sys.stderr.write(f"error: {err}\n")
         return EXIT_USAGE
     repo = (anchor_rec or {}).get("repo")
-    base = (anchor_rec or {}).get("base_commit")
+    base = W.record_claim(anchor_rec, "base_commit")
     _prepare_command_paths(args, extra_repos=([repo] if repo else []))
     try:
         load_verifications(args.state_dir)
