@@ -516,9 +516,23 @@ class TestPathsTheCommandNames(unittest.TestCase):
     def test_an_existing_path_passes(self):
         S.validate_plan(plan(command="python go.py --in /tmp"))
 
-    def test_a_glob_matching_nothing_is_refused(self):
+    def test_a_glob_matching_nothing_in_a_VISIBLE_directory_is_refused(self):
+        with self.assertRaises(S.PlanError) as c:
+            S.validate_plan(plan(command="python go.py /tmp/*.no-such-ext"))
+        self.assertIn("can see that directory", str(c.exception))
+
+    def test_a_glob_under_an_INVISIBLE_directory_is_not_refused(self):
+        """The same visibility rule as a plain path. I wrote it for paths and
+        left the glob branch raising unconditionally, so a compute-node-only
+        glob was still refused: the same false refusal surviving in the branch
+        I did not revisit."""
+        S.validate_plan(plan(command="python go.py /opt/only-there/*.tsv"))
+
+    def test_a_trailing_slash_does_not_defeat_the_parent_test(self):
+        """`/tmp/missing/` gave dirname `/tmp/missing`, not a directory, so
+        the check skipped a path it should have caught."""
         with self.assertRaises(S.PlanError):
-            S.validate_plan(plan(command="python go.py /nowhere/*.fastq"))
+            S.validate_plan(plan(command="python go.py --in /tmp/missing/"))
 
     def test_a_code_unit_is_exempt(self):
         """Its string is a prompt, not a command line."""
@@ -603,6 +617,21 @@ class TestRoundOneOfThisBatch(unittest.TestCase):
         self.assertIn("parent directory is visible", note)
         self.assertIn("glob that matches", note)
         self.assertIn("program itself is never checked", note)
+
+    def test_a_separated_array_value_must_not_be_another_flag(self):
+        """`--array --partition=cpu` read the flag as the range, which Slurm
+        rejects at submission, and produced a misleading array-and-outputs
+        refusal when outputs existed."""
+        for spelling in (["--array", "--partition=cpu"], ["-a", "--mem=4G"]):
+            with self.assertRaises(S.PlanError, msg=str(spelling)) as c:
+                S.validate_plan(plan(sbatch=spelling))
+            self.assertIn("another flag rather than a task range",
+                          str(c.exception))
+
+    def test_a_real_separated_range_still_works(self):
+        with self.assertRaises(S.PlanError) as c:
+            S.validate_plan(plan(sbatch=["--array", "0-19"]))
+        self.assertIn("fraction of the work", str(c.exception))
 
 if __name__ == "__main__":
     unittest.main()

@@ -1123,15 +1123,30 @@ def validate_plan(plan):
             # runtime's name.
             if entry and tok == entry:
                 continue               # the declared runtime, not a data path
+            # ONE visibility rule, applied to globs too. I wrote the
+            # parent-directory test for plain paths and left the glob branch
+            # raising unconditionally, so a compute-node-only glob was still
+            # refused: the same false refusal, surviving in the branch I did
+            # not revisit.
+            #
+            # Trailing slashes are stripped first. `/tmp/missing/` gave
+            # dirname `/tmp/missing`, which is not a directory, so the check
+            # skipped a path it should have caught.
+            probe = tok.rstrip("/") or tok
+            parent = os.path.dirname(probe)
+            visible = bool(parent) and os.path.isdir(parent)
+
             if any(ch in tok for ch in "*?["):
                 import glob as _glob
                 if _glob.glob(tok):
                     continue
+                if not visible:
+                    continue           # a mount this host cannot see
                 raise PlanError(
-                    f"unit {u.get('id','?')!r} names {tok!r} in its command "
-                    f"and it matches nothing. It is not a declared input and "
-                    f"no upstream unit produces it, so this dispatches into a "
-                    f"missing path.")
+                    f"unit {u.get('id','?')!r} names the pattern {tok!r} in "
+                    f"its command and nothing in {parent!r} matches it. This "
+                    f"host can see that directory, so this is not a mount "
+                    f"that differs on the compute node.")
             if os.path.exists(tok):
                 continue
             # ONLY WHEN WE CAN SEE THE DIRECTORY. The submit host is not the
@@ -1144,8 +1159,7 @@ def validate_plan(plan):
             # the path claims to be and the thing is not there. That is the
             # shared-storage typo the check exists for. If the parent is also
             # absent, this is a different mount and nothing can be said.
-            parent = os.path.dirname(tok)
-            if not parent or not os.path.isdir(parent):
+            if not visible:
                 continue
             raise PlanError(
                 f"unit {u.get('id','?')!r} names {tok!r} in its command. "
@@ -1174,10 +1188,19 @@ def validate_plan(plan):
         for i, a in enumerate(args):
             if a.startswith("--array="):
                 arr = a.split("=", 1)[1]
-            elif a == "--array" and i + 1 < len(args):
-                arr = args[i + 1]
-            elif a == "-a" and i + 1 < len(args):
-                arr = args[i + 1]
+            # A separated value must not be the next flag. `--array
+            # --partition=cpu` read "--partition=cpu" as the range, which is a
+            # malformed plan Slurm would reject at dispatch, and which
+            # produced a misleading array-and-outputs refusal when outputs
+            # existed.
+            elif a in ("--array", "-a") and i + 1 < len(args):
+                nxt = args[i + 1]
+                if nxt.startswith("-"):
+                    raise PlanError(
+                        f"unit {u.get('id','?')!r} has {a} followed by "
+                        f"{nxt!r}, which is another flag rather than a task "
+                        f"range. Slurm would reject this at submission.")
+                arr = nxt
             elif a.startswith("-a") and len(a) > 2 and not a.startswith("--"):
                 arr = a[2:]
         if arr and (u.get("outputs") or []):
@@ -3725,9 +3748,10 @@ SCHEMA_FIELDS = [
      "the unit and cannot be overridden per plan"),
     ("command", "slurm, pipeline", "required",
      "the WORK. Never sbatch/srun/salloc: the coordinator submits it. An "
-     "absolute path in its ARGUMENTS is refused only when its parent "
-     "directory is visible here and does not contain it; a glob that matches "
-     "is fine, and the program itself is never checked"),
+     "an absolute path or glob in its ARGUMENTS is refused only when its "
+     "parent directory is visible on THIS host and does not contain a match; "
+     "a path under a mount only the compute node has is not refused, and the "
+     "program in the first token is never checked"),
     ("prompt", "code", "required",
      "the agent's instruction, and the runner's last positional argument. A "
      "paseo flag at its start is refused; configuration goes in fields"),
