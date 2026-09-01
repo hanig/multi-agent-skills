@@ -80,8 +80,17 @@ def operated_worktrees(plan=None, cwd=None, extra_repos=()):
     """Resolved worktrees the current command may operate on."""
     repos = list(extra_repos or [])
     for unit in ((plan or {}).get("units") or []):
-        if isinstance(unit, dict) and unit.get("repo"):
-            repos.append(unit["repo"])
+        if not isinstance(unit, dict):
+            continue
+        # Keep every workspace source understood by swarm._execution_workspace
+        # in this boundary check. Protecting only `repo` leaves policy-only
+        # execution checkouts open to coordinator state writes.
+        for candidate in (unit.get("repo"), unit.get("execution_workspace")):
+            if candidate:
+                repos.append(candidate)
+        policy = unit.get("workspace_policy") or {}
+        if isinstance(policy, dict) and policy.get("path"):
+            repos.append(policy["path"])
     context = _resolved(cwd or os.getcwd())
     if git_top(context) is not None:
         repos.append(context)

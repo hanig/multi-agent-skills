@@ -113,6 +113,37 @@ class TestExternalPathPolicy(Base):
                              cwd=self.tmp, need_root=True)
         self.assertIn(str(worktree.resolve()), str(caught.exception))
 
+    def test_every_declared_workspace_source_is_protected(self):
+        repo = repo_at(self.tmp / "repo")
+        units = [
+            {"id": "execution", "kind": "pipeline",
+             "execution_workspace": str(repo)},
+            {"id": "policy", "kind": "slurm", "workspace_policy": {
+                "requires_clean_git": True, "path": str(repo)}},
+        ]
+        for unit in units:
+            with self.subTest(unit=unit["id"]):
+                with self.assertRaises(CP.PathPolicyError):
+                    CP.resolve_paths(state_dir=repo / (unit["id"] + "-state"),
+                                     plan={"units": [unit]}, cwd=self.tmp)
+
+    def test_policy_only_workspace_is_rejected_by_cli_before_lock_write(self):
+        repo = repo_at(self.tmp / "repo")
+        plan_path = self.tmp / "plan.json"
+        plan_path.write_text(json.dumps({"name": "p", "units": [{
+            "id": "job", "kind": "slurm", "runtime": "none",
+            "command": "true", "outputs": ["out"],
+            "workspace_policy": {"requires_clean_git": True,
+                                 "path": str(repo)}}]}))
+        state = repo / "state"
+        result = subprocess.run(
+            [sys.executable, str(SWARM), "run", str(plan_path), "--dry-run",
+             "--state-dir", str(state), "--root", str(self.tmp / "runs")],
+            cwd=self.tmp, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("resolves inside operated Git worktree", result.stderr)
+        self.assertFalse(state.exists())
+
     def test_legacy_state_is_copied_without_rewriting_or_deleting_facts(self):
         repo = repo_at(self.tmp / "repo")
         old_state = repo / ".swarm" / "state"
@@ -283,6 +314,59 @@ class TestPreflightIsTheLaunchChokepoint(Base):
         self.assertIsNone(job)
         self.assertIn("dirty.txt", err)
         self.assertEqual(launched, [])
+
+    def test_recovery_reruns_preflight_without_moving_the_anchor(self):
+        repo = repo_at(self.tmp / "repo")
+        unit = code_unit(repo)
+        attempt = self.tmp / "runs" / "code" / "attempt"
+        attempt.mkdir(parents=True)
+        err, base = S._write_launch_record(str(attempt), unit)
+        self.assertIsNone(err)
+        anchor_path = attempt.parent / "launch-attempt.json"
+        anchored = anchor_path.read_bytes()
+        (repo / "appeared-during-recovery.txt").write_text("dirty\n")
+        real = S.U.run
+        launched = []
+
+        def spy(argv, **kwargs):
+            if argv and argv[0] == "paseo":
+                launched.append(argv)
+                return 0, '{"agentId":"must-not-start"}', ""
+            return real(argv, **kwargs)
+
+        S.U.run = spy
+        try:
+            job, refusal = S._submit(unit, str(attempt), False, {})
+        finally:
+            S.U.run = real
+        self.assertIsNone(job)
+        self.assertIn("appeared-during-recovery.txt", refusal)
+        self.assertEqual(launched, [])
+        self.assertEqual(anchor_path.read_bytes(), anchored)
+        self.assertTrue(base)
+
+    def test_direct_code_submit_without_workspace_fails_closed(self):
+        attempt = self.tmp / "runs" / "code" / "attempt"
+        attempt.mkdir(parents=True)
+        unit = {"id": "code", "kind": "code", "prompt": "work"}
+        real = S.U.run
+        launched = []
+
+        def spy(argv, **kwargs):
+            if argv and argv[0] == "paseo":
+                launched.append(argv)
+                return 0, '{"agentId":"must-not-start"}', ""
+            return real(argv, **kwargs)
+
+        S.U.run = spy
+        try:
+            job, refusal = S._submit(unit, str(attempt), False, {})
+        finally:
+            S.U.run = real
+        self.assertIsNone(job)
+        self.assertIn("requires a declared Git execution workspace", refusal)
+        self.assertEqual(launched, [])
+        self.assertFalse((attempt.parent / "launch-attempt.json").exists())
 
     def test_clean_code_dispatches_and_anchors_before_paseo(self):
         repo = repo_at(self.tmp / "repo")

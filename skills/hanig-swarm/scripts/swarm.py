@@ -1814,12 +1814,36 @@ def _existing_preflight_refusal(unit_dir, u):
                           existing.get("dirty_paths") or [])
 
 
+def _repeat_launch_preflight(u):
+    """Recheck cleanliness without recapturing or trusting the anchor base."""
+    workspace = _execution_workspace(u)
+    if not workspace:
+        return (f"unit {u.get('id')!r}: launch preflight requires a declared "
+                f"Git execution workspace"), None
+    workspace = str(workspace)
+    if not os.path.isdir(workspace):
+        return (f"unit {u.get('id')!r} declares repo {workspace!r}, which is "
+                f"not a directory"), None
+    rc, top, _ = _git(workspace, "rev-parse", "--show-toplevel")
+    if rc != 0:
+        return (f"unit {u.get('id')!r} declares repo {workspace!r}, which is "
+                f"not a git repository"), None
+    resolved_top = str(Path(top).resolve())
+    rc, dirty = W.repo_status(U.run, resolved_top)
+    if rc != 0:
+        return (f"unit {u.get('id')!r}: cannot read git status in "
+                f"{resolved_top!r}"), None
+    if dirty:
+        return _dirty_refusal(u.get("id"), resolved_top, dirty), resolved_top
+    return None, resolved_top
+
+
 def _write_launch_record(unit_dir, u):
     """Capture the repository state BEFORE the agent exists.
 
-    Returns an error string, or None. A code unit that declares a `repo` gets
-    anchored; one that does not is recorded as having no repository to judge,
-    which is a declaration rather than a silence.
+    Returns an error string, or None. A unit whose policy requires clean Git
+    must declare an execution workspace. Other units may explicitly record
+    that no repository transition applies.
 
     The record lives beside the attempt, NOT inside the agent's working
     directory: a worker that can rewrite its own baseline can manufacture a
@@ -1843,6 +1867,12 @@ def _write_launch_record(unit_dir, u):
            "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
 
     if not repo:
+        # validate_plan already rejects this shape. Direct _submit callers are
+        # reachable in tests and recovery helpers, so the launch chokepoint
+        # must still fail closed rather than create an unchecked code agent.
+        if _requires_clean_workspace(u):
+            return (f"unit {u.get('id')!r}: launch preflight requires a "
+                    f"declared Git execution workspace"), None
         rec["repo"] = None
         rec["execution_workspace"] = None
         rec["preflight"] = {"status": "not-required"}
@@ -1905,6 +1935,9 @@ def _write_launch_record(unit_dir, u):
             os.fsync(fh.fileno())
     except FileExistsError:
         # Already anchored, so this is a re-dispatch of the SAME attempt.
+        # I warned explicitly that retry and recovery must not bypass the
+        # initial preflight, then made exactly that mistake here. Re-run the
+        # dirty predicate, but never move or re-trust the anchored base.
         #
         # Do NOT read the base back out of the file. I removed that laundering
         # from the main path and left it right here, which two reviewers found
@@ -1917,6 +1950,9 @@ def _write_launch_record(unit_dir, u):
         # state then. If state has it, it stands. If it does not, this attempt
         # cannot be verified, and `verify` says so rather than inventing a
         # base from a file the agent can edit.
+        current_refusal, _workspace = _repeat_launch_preflight(u)
+        if current_refusal:
+            return current_refusal, None
         refusal = _existing_preflight_refusal(unit_dir, u)
         if refusal:
             return refusal, None
