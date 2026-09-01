@@ -158,7 +158,7 @@ conclusive. Keep that distinction: when a new expensive check is proposed, ask
 U=skills/hanig-swarm/scripts/unit.py
 
 # 1. allocate an exclusive write root (prints the path on stdout)
-D=$(python3 $U allocate --root .swarm/runs --task align-reads --kind slurm \
+D=$(python3 $U allocate --root /external/swarm-runs --task align-reads --kind slurm \
       --command "bwa mem ref.fa r1.fq r2.fq > out.bam" \
       --output out.bam --input ref.fa --gpu-hours 4 --charge-to hani)
 

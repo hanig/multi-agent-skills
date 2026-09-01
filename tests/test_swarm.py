@@ -46,6 +46,14 @@ class Base(unittest.TestCase):
         return str(p)
 
     def swarm(self, *argv):
+        argv = list(argv)
+        # These legacy coordinator tests inspect the historical relative
+        # fixture directly. New default-path behavior has dedicated coverage.
+        if argv and argv[0] in ("run", "advance"):
+            if "--state-dir" not in argv:
+                argv += ["--state-dir", ".swarm/state"]
+            if "--root" not in argv:
+                argv += ["--root", ".swarm/runs"]
         return run(SWARM, *argv, cwd=str(self.tmp))
 
 

@@ -48,6 +48,7 @@ sys.path.insert(0, str(_HERE))
 import unit as U  # noqa: E402  same skill, installed together
 import worktree as W  # noqa: E402
 import verify as V  # noqa: E402
+import coordinator_paths as CP  # noqa: E402
 
 STATE_FILE = "swarm-state.json"
 KINDS = U.KINDS
@@ -483,6 +484,21 @@ def validate_plan(plan):
                 f"iterated one character at a time, so the value is silently "
                 f"lost and the unit runs with a default instead. Write "
                 f'["--partition=cpu_batch"], not "--partition=cpu_batch".')
+
+        policy = u.get("workspace_policy")
+        if policy is not None and not isinstance(policy, dict):
+            raise PlanError(
+                f"unit {u.get('id','?')!r} has workspace_policy={policy!r}; "
+                f"it must be an object")
+        if policy and (policy.get("requires_clean_git")
+                       or policy.get("clean_git")):
+            workspace = (u.get("execution_workspace") or policy.get("path")
+                         or u.get("repo"))
+            if not workspace:
+                raise PlanError(
+                    f"unit {u.get('id','?')!r} requires a clean Git workspace "
+                    f"but declares no workspace_policy.path, "
+                    f"execution_workspace, or repo")
 
     # A `code` unit needs paseo ON THIS HOST, because that is where the
     # coordinator dispatches it. Refusing here, before anything is dispatched,
@@ -1575,6 +1591,23 @@ def _submit(u, unit_dir, dry_run, state=None):
     without a scheduler. A coordinator that can only be tested on a live
     cluster does not get tested."""
     kind = u["kind"]
+    # The shared checkout is the execution workspace until worktree
+    # provisioning lands. The check lives in this last common function so an
+    # initial run, retry, recovery, or direct submit cannot route around it.
+    anchored_base = None
+    if kind == "code":
+        anchor_err, anchored_base = _write_launch_record(unit_dir, u)
+        if anchor_err:
+            return None, anchor_err
+    elif _requires_clean_workspace(u):
+        anchor_err, anchored_base = _write_launch_record(unit_dir, u)
+        if anchor_err:
+            return None, anchor_err
+    if state is not None and anchored_base:
+        # Trusted coordinator observation, keyed by attempt. Historical
+        # attempts retain the base they actually launched from.
+        us = state.setdefault("units", {}).setdefault(u["id"], {})
+        us.setdefault("attempt_bases", {})[Path(unit_dir).name] = anchored_base
     if dry_run:
         return f"dry-{os.urandom(3).hex()}", None
     if kind == "slurm":
@@ -1663,20 +1696,28 @@ def _submit(u, unit_dir, dry_run, state=None):
             return None, f"launched pid {proc.pid} but {werr}"
         return f"engine-{proc.pid}", None
     if kind == "code":
-        # Paseo owns the agent lifecycle; we own the write root.
+        # Paseo owns the agent lifecycle; we own the artifact root. Until
+        # provisioned worktrees land, the declared repository is the shared
+        # execution checkout, so --cwd must name the same path preflight
+        # checked and the anchor recorded.
         #
-        # --cwd is REQUIRED, not optional. Without it the agent runs in the
-        # coordinator's directory, so it writes nowhere near its exclusive
-        # root and the declared outputs can never be found there: the whole
-        # isolation premise, silently void for this one kind.
+        anchor, anchor_read_err = W.read_launch_record(unit_dir)
+        if anchor_read_err:
+            return None, anchor_read_err
+        workspace = (anchor or {}).get("execution_workspace") or str(unit_dir)
         argv = ["paseo", "run", "--background", "--json",
-                "--cwd", str(unit_dir),
+                "--cwd", str(workspace),
                 "--provider", u.get("provider") or DEFAULT_AGENT_PROVIDER,
                 # The title carries the ATTEMPT id, mirroring the Slurm job
                 # name, so an agent created just before a crash can be found
                 # again and is never confused with a later attempt of the same
                 # unit.
                 "--title", f"[swarm] {u['id']} {Path(unit_dir).name}"]
+        # Artifacts remain in the external attempt root even though source
+        # work runs in the checkout. Passing these automatically makes the
+        # declared output location reachable without relying on prompt prose.
+        argv += ["--env", f"SWARM_UNIT_ID={u['id']}",
+                 "--env", f"SWARM_UNIT_DIR={unit_dir}"]
         # An agent under default permissions stops at the first Write and
         # waits for a person, which is correct behaviour and fatal to an
         # unattended DAG. The plan must therefore say what it wants, and say
@@ -1697,29 +1738,6 @@ def _submit(u, unit_dir, dry_run, state=None):
         for kv in (u.get("env") or []):
             argv += ["--env", str(kv)]
         argv.append(u.get("prompt") or u.get("command") or u["id"])
-
-        # ANCHOR BEFORE DISPATCH. Everything that later judges whether this
-        # agent produced anything compares against this record, so it must be
-        # written before the agent can run and must not be caller-supplied.
-        #
-        # `bus await --base HEAD --require-clean` is what unit.py used to
-        # delegate this to, and it is not production evidence: the caller
-        # picks the base, so HEAD may already have advanced past the work, and
-        # a clean tree is clean precisely when nobody touched it. Anchoring to
-        # the repository state observed here, before the agent exists, is what
-        # makes a later transition mean something.
-        anchor_err, anchored_base = _write_launch_record(unit_dir, u)
-        if anchor_err:
-            return None, anchor_err
-        if state is not None and anchored_base:
-            # Into COORDINATOR state, from the coordinator's OWN observation,
-            # at the moment it made it, keyed BY ATTEMPT. A per-unit key kept
-            # the first attempt's base forever, so a retry anchored at a
-            # different commit was checked against a stale one and a valid
-            # verification for the retry was refused.
-            us = state.setdefault("units", {}).setdefault(u["id"], {})
-            us.setdefault("attempt_bases", {})[Path(unit_dir).name] = (
-                anchored_base)
 
         rc, out, err = U.run(argv, timeout=180)
         if rc != 0:
@@ -1747,6 +1765,55 @@ def _git(repo, *args, timeout=60):
     return rc, (out or "").strip(), (err or "").strip()
 
 
+def _workspace_policy(u):
+    policy = u.get("workspace_policy") or {}
+    return policy if isinstance(policy, dict) else {}
+
+
+def _requires_clean_workspace(u):
+    if u.get("kind") == "code":
+        return True
+    policy = _workspace_policy(u)
+    return bool(policy.get("requires_clean_git") or policy.get("clean_git"))
+
+
+def _execution_workspace(u):
+    policy = _workspace_policy(u)
+    return (u.get("execution_workspace") or policy.get("path")
+            or u.get("repo"))
+
+
+def _dirty_refusal(uid, workspace, dirty):
+    lines = [
+        f"unit {uid!r}: launch preflight refused execution workspace "
+        f"{str(workspace)!r}; Git reports {len(dirty)} dirty path(s):"]
+    for entry in dirty:
+        status = entry.get("status", "??")
+        path = json.dumps(entry.get("path", ""), ensure_ascii=True)
+        if "original_path" in entry:
+            old = json.dumps(entry["original_path"], ensure_ascii=True)
+            lines.append(f"  [{status}] {old} -> {path}")
+        else:
+            lines.append(f"  [{status}] {path}")
+    return "\n".join(lines)
+
+
+def _existing_preflight_refusal(unit_dir, u):
+    """Return only a prior refusal, never an anchored base.
+
+    The re-anchor path must not read a base from an agent-writable launch file
+    and promote it into coordinator state. A refusal is different: it grants
+    no authority and only keeps the same never-started attempt from routing
+    around its failed preflight.
+    """
+    existing, read_err = W.read_launch_record(unit_dir)
+    status = ((existing or {}).get("preflight") or {}).get("status")
+    if read_err or status != "refused":
+        return None
+    return _dirty_refusal(u.get("id"), existing.get("execution_workspace"),
+                          existing.get("dirty_paths") or [])
+
+
 def _write_launch_record(unit_dir, u):
     """Capture the repository state BEFORE the agent exists.
 
@@ -1766,18 +1833,21 @@ def _write_launch_record(unit_dir, u):
     # commits, so THOSE commits satisfied the new attempt's transition and a
     # retry that produced nothing passed. One anchor per attempt.
     #
-    # Still not inside `unit_dir`: that is the agent's --cwd, so a worker
-    # could rewrite its own baseline there.
+    # Still not inside `unit_dir`: attempt artifacts and coordinator launch
+    # facts are different records and should not share a filename namespace.
     path = Path(unit_dir).parent / f"launch-{Path(unit_dir).name}.json"
-    repo = u.get("repo")
-    rec = {"schema_version": 1, "unit": u.get("id"),
+    repo = _execution_workspace(u)
+    dirty = []
+    rec = {"schema_version": 2, "unit": u.get("id"),
            "attempt": Path(unit_dir).name,
            "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
 
     if not repo:
         rec["repo"] = None
-        rec["note"] = ("this unit declared no 'repo', so no git transition "
-                       "can be judged for it")
+        rec["execution_workspace"] = None
+        rec["preflight"] = {"status": "not-required"}
+        rec["note"] = ("this unit declared no Git execution workspace, so no "
+                       "git transition can be judged for it")
     else:
         repo = str(repo)
         if not os.path.isdir(repo):
@@ -1793,12 +1863,7 @@ def _write_launch_record(unit_dir, u):
                     f"An empty repository gives nothing to transition FROM."), None
         rc, tree, _ = _git(repo, "rev-parse", "HEAD^{tree}")
         rc2, branch, _ = _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
-        # Exclude the coordinator's own state tree: allocate has already
-        # written unit.json under <root>/<unit>/<attempt> by the time we get
-        # here, and if the swarm runs inside the repository it works on, that
-        # would make every launch look dirty.
-        rc3, dirty = W.repo_status(U.run, repo,
-                                   exclude=W.swarm_root_of(unit_dir))
+        rc3, dirty = W.repo_status(U.run, repo)
         if rc3 != 0:
             return (f"unit {u['id']!r}: cannot read git status in "
                     f"{repo!r}"), None
@@ -1807,15 +1872,37 @@ def _write_launch_record(unit_dir, u):
         # working copy actually pushes to.
         rc4, remote, _ = _git(repo, "remote", "get-url", "origin")
         rec["remote"] = remote if rc4 == 0 else None
-        rec.update({"repo": top, "branch": branch if rc2 == 0 else None,
+        resolved_top = str(Path(top).resolve())
+        try:
+            st = os.stat(resolved_top)
+            identity = {"path": resolved_top, "realpath": resolved_top,
+                        "device": st.st_dev, "inode": st.st_ino}
+        except OSError as exc:
+            return (f"unit {u['id']!r}: cannot identify execution workspace "
+                    f"{resolved_top!r}: {exc}"), None
+        status = "passed" if not dirty else "refused"
+        rec.update({"repo": resolved_top,
+                    "execution_workspace": resolved_top,
+                    "workspace_identity": identity,
+                    "branch": branch if rc2 == 0 else None,
                     "base_commit": head, "base_tree": tree if rc == 0 else None,
                     "clean_at_launch": not dirty,
-                    "dirty_paths_at_launch": len(dirty)})
+                    "dirty_paths_at_launch": len(dirty),
+                    "dirty_paths": dirty,
+                    "preflight": {
+                        "status": status,
+                        "checked_at": rec["captured_at"],
+                        "predicate": "git-status-porcelain-v1-z",
+                        "workspace": resolved_top,
+                        "dirty_path_count": len(dirty),
+                    }})
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "x") as fh:      # x: an anchor is written ONCE
             json.dump(rec, fh, indent=1, sort_keys=True)
             fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
     except FileExistsError:
         # Already anchored, so this is a re-dispatch of the SAME attempt.
         #
@@ -1830,9 +1917,14 @@ def _write_launch_record(unit_dir, u):
         # state then. If state has it, it stands. If it does not, this attempt
         # cannot be verified, and `verify` says so rather than inventing a
         # base from a file the agent can edit.
+        refusal = _existing_preflight_refusal(unit_dir, u)
+        if refusal:
+            return refusal, None
         return None, None
     except OSError as exc:
         return f"cannot write the launch record for {u['id']!r}: {exc}", None
+    if dirty:
+        return _dirty_refusal(u.get("id"), resolved_top, dirty), None
     return None, rec.get("base_commit")
 
 
@@ -3310,8 +3402,36 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
 
         job_id, err = _submit(u, unit_dir, dry_run, state)
         if err:
-            us["state"] = "FAILED"
-            report.append(f"{uid}: {err}")
+            launch, _launch_err = W.read_launch_record(unit_dir)
+            refused = (((launch or {}).get("preflight") or {}).get("status")
+                       == "refused")
+            if refused:
+                # Allocation is bookkeeping, not a started attempt. Keep the
+                # receipt durably, but do not charge retry or resource budgets
+                # and do not leave an attempt_dir that recovery could bind.
+                receipt = str(Path(unit_dir).parent /
+                              f"launch-{Path(unit_dir).name}.json")
+                us.setdefault("preflight_refusals", []).append({
+                    "attempt_dir": unit_dir,
+                    "receipt": receipt,
+                    "workspace": launch.get("execution_workspace"),
+                    "checked_at": ((launch.get("preflight") or {}).get(
+                        "checked_at")),
+                })
+                if us.get("attempts"):
+                    last = str(us["attempts"][-1])
+                    if last in (str(unit_dir), f"{DRY_PREFIX}{unit_dir}"):
+                        us["attempts"].pop()
+                us["attempt_dir"] = None
+                us["state"] = "PREFLIGHT_REFUSED"
+                us.pop("allocated_at", None)
+                us["gpu_hours"] = max(
+                    0.0, float(us.get("gpu_hours") or 0) - want)
+                spent -= want
+                report.append(f"{uid}: {err}\n  receipt: {receipt}")
+            else:
+                us["state"] = "FAILED"
+                report.append(f"{uid}: {err}")
             save_state(state_dir, state)
             continue
         # Bind EVERY kind that has an id. The old guard bound only numeric
@@ -3378,6 +3498,31 @@ def _load_plan(path):
     return plan
 
 
+def _prepare_command_paths(args, plan=None, extra_repos=(), need_root=False):
+    """Apply the one external path policy before any command can write."""
+    raw_state = getattr(args, "state_dir", None)
+    raw_root = getattr(args, "root", None)
+    try:
+        state, root, _worktrees = CP.resolve_paths(
+            raw_state, raw_root, plan=plan, cwd=os.getcwd(),
+            extra_repos=extra_repos, need_root=(need_root or raw_state is None))
+    except CP.PathPolicyError as exc:
+        sys.exit(f"error: {exc}")
+
+    # Only implicit defaults opt into implicit legacy migration. Explicit
+    # destinations are never populated from a guessed source.
+    if raw_state is None and root is not None:
+        try:
+            CP.migrate_legacy_defaults(state, root, cwd=os.getcwd())
+        except OSError as exc:
+            sys.exit(f"error: cannot copy legacy coordinator state to the "
+                     f"external default: {exc}. Legacy files were retained.")
+    args.state_dir = str(state)
+    if need_root:
+        args.root = str(root)
+    return state, root
+
+
 def cmd_validate(args):
     plan, err = U.read_json(args.plan)
     if err:
@@ -3420,6 +3565,7 @@ def cmd_validate(args):
 def cmd_run(args):
     """Dispatch what is ready, then EXIT. Does not babysit."""
     plan = _load_plan(args.plan)
+    _prepare_command_paths(args, plan=plan, need_root=True)
     # ONE WRITER. Two schedulers firing at once, or a human running `advance`
     # while cron does, would both read old state and submit the same unit.
     ok, holder = acquire_lease(args.state_dir)
@@ -3722,6 +3868,7 @@ def cmd_promote(args):
     plan, err = U.read_json(args.plan)
     if err:
         sys.exit(f"error: no readable plan at {args.plan}: {err}")
+    _prepare_command_paths(args, plan=plan)
     state = load_state(args.state_dir)
     lines, ok = promote(plan, state, args.state_dir, args.unit,
                         args.approver, args.approve,
@@ -3789,6 +3936,9 @@ SCHEMA_FIELDS = [
     ("write_scopes", "all", "optional",
      "must not overlap between concurrent units. Names FILES; does NOT "
      "isolate a code unit's repository"),
+    ("workspace_policy", "slurm, pipeline", "optional",
+     '{"requires_clean_git": true, "path": "/checkout"}; opt-in launch '
+     "preflight for a non-code unit"),
     ("promote_to", "all", "optional",
      "where verified outputs are published. Needs a named approver"),
     ("max_attempts", "all", "optional",
@@ -3863,18 +4013,18 @@ def cmd_verify(args):
     the verifier's bytes hashed to what the policy authorized, those exact
     bytes ran, and the head it ran against is the one this attempt produced.
     """
-    try:
-        load_verifications(args.state_dir)
-    except OutboxError as exc:
-        sys.stderr.write(f"  VERIFICATION JOURNAL: {exc}\n")
-        return EXIT_CONFLICT
-
     anchor_rec, err = W.read_launch_record(args.attempt)
     if err:
         sys.stderr.write(f"error: {err}\n")
         return EXIT_USAGE
     repo = (anchor_rec or {}).get("repo")
     base = (anchor_rec or {}).get("base_commit")
+    _prepare_command_paths(args, extra_repos=([repo] if repo else []))
+    try:
+        load_verifications(args.state_dir)
+    except OutboxError as exc:
+        sys.stderr.write(f"  VERIFICATION JOURNAL: {exc}\n")
+        return EXIT_CONFLICT
 
     # THE BASE COMES FROM COORDINATOR STATE, not from the launch record alone.
     # base_commit is the linchpin of the whole authorization chain, and the
@@ -3966,6 +4116,7 @@ def cmd_merge(args):
     the coordinator checks is that the head you pin is the head it judged this
     attempt to have produced.
     """
+    _prepare_command_paths(args)
     try:
         load_merge_receipts(args.state_dir)     # refuse to extend a bad journal
     except OutboxError as exc:
@@ -3997,6 +4148,7 @@ def cmd_outbox(args):
     command exists so a human on the cluster can see exactly what WOULD be
     sent before anything is, and afterwards what the drainer confirmed landed.
     """
+    _prepare_command_paths(args)
     intents = read_outbox(args.state_dir)
 
     try:
@@ -4161,7 +4313,7 @@ def status_report(plan, state, state_dir):
     # exits 0 and a cron wrapper polling it reports a healthy project forever.
     attention = [r for r in rows
                  if r["state"] in ("NEEDS_HUMAN", "FAILED", "FAILED_EVIDENCE",
-                                   "READY_FOR_PR")]
+                                   "READY_FOR_PR", "PREFLIGHT_REFUSED")]
     return {
         "project": plan.get("name"),
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -4180,6 +4332,7 @@ def cmd_status(args):
     plan, err = U.read_json(args.plan)
     if err:
         sys.exit(f"error: no readable plan at {args.plan}: {err}")
+    _prepare_command_paths(args, plan=plan)
     state = load_state(args.state_dir)
     rep = status_report(plan, state, args.state_dir)
 
@@ -4244,8 +4397,13 @@ def main():
 
     def common(p):
         p.add_argument("plan")
-        p.add_argument("--state-dir", default=".swarm/state")
-        p.add_argument("--root", default=".swarm/runs")
+        p.add_argument("--state-dir", default=None,
+                       help="external coordinator state directory. Default: "
+                            "a per-project directory under XDG_STATE_HOME or "
+                            "~/.local/state")
+        p.add_argument("--root", default=None,
+                       help="external attempt root beside the default state "
+                            "directory")
         p.add_argument("--dry-run", action="store_true",
                        help="allocate and record, but do not submit. The DAG "
                             "logic is testable without a scheduler.")
@@ -4275,7 +4433,7 @@ def main():
                              "shared path, on explicit approval")
     pr.add_argument("plan")
     pr.add_argument("--unit", required=True)
-    pr.add_argument("--state-dir", default=".swarm/state")
+    pr.add_argument("--state-dir", default=None)
     pr.add_argument("--approve", action="store_true",
                     help="actually copy. Without it this is a dry run.")
     pr.add_argument("--accept-weak-evidence", action="store_true",
@@ -4293,7 +4451,7 @@ def main():
     sc.set_defaults(fn=cmd_schema)
 
     v = sub.add_parser("verify", help="run an authorized pinned verifier")
-    v.add_argument("--state-dir", default=".swarm/state")
+    v.add_argument("--state-dir", default=None)
     v.add_argument("--unit", required=True)
     v.add_argument("--attempt", required=True,
                    help="the attempt directory whose produced commit is "
@@ -4312,7 +4470,7 @@ def main():
 
     m = sub.add_parser("merge", help="record an observed merged PR for a "
                                      "code unit")
-    m.add_argument("--state-dir", default=".swarm/state")
+    m.add_argument("--state-dir", default=None)
     m.add_argument("--unit", required=True)
     m.add_argument("--pr", required=True, help="the PR's URL or number")
     m.add_argument("--head", required=True,
@@ -4330,7 +4488,7 @@ def main():
     m.set_defaults(fn=cmd_merge)
 
     o = sub.add_parser("outbox", help="tracker intents, and what landed")
-    o.add_argument("--state-dir", default=".swarm/state")
+    o.add_argument("--state-dir", default=None)
     o.add_argument("--all", action="store_true",
                    help="include already-acknowledged intents")
     o.add_argument("--json", action="store_true")
@@ -4348,7 +4506,7 @@ def main():
     s.add_argument("--json", action="store_true",
                    help="machine-readable; exit 2 if any unit needs a person")
     s.add_argument("plan")
-    s.add_argument("--state-dir", default=".swarm/state")
+    s.add_argument("--state-dir", default=None)
     s.set_defaults(fn=cmd_status)
 
     args = ap.parse_args()

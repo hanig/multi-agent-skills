@@ -59,20 +59,20 @@ class TestTheAnchorIsCapturedBeforeDispatch(unittest.TestCase):
             self.assertTrue(rec["clean_at_launch"])
             self.assertEqual(rec["attempt"], "att1")
 
-    def test_a_dirty_repo_is_recorded_as_dirty_not_refused(self):
-        """Whether dirt at launch disqualifies is the JUDGE's call. The
-        anchor's job is to record what was true."""
+    def test_a_dirty_repo_is_recorded_and_refused_before_launch(self):
         with tempfile.TemporaryDirectory() as t:
             repo = _repo(os.path.join(t, "r"))
             with open(os.path.join(repo, "b.txt"), "w") as fh:
                 fh.write("x\n")
             d = self._attempt(t)
             err, base = S._write_launch_record(d, {"id": "u1", "repo": repo})
-            self.assertIsNone(err)
-            self.assertTrue(base)
+            self.assertIn("preflight refused", err or "")
+            self.assertIn('"b.txt"', err or "")
+            self.assertIsNone(base)
             rec = json.load(open(Path(d).parent / ("launch-%s.json" % Path(d).name)))
             self.assertFalse(rec["clean_at_launch"])
             self.assertEqual(rec["dirty_paths_at_launch"], 1)
+            self.assertEqual(rec["preflight"]["status"], "refused")
 
     def test_no_declared_repo_is_a_declaration_not_a_silence(self):
         with tempfile.TemporaryDirectory() as t:
@@ -152,26 +152,18 @@ class TestDispatchAnchorsFirst(unittest.TestCase):
         import ast
         fn = next(n for n in ast.walk(ast.parse(SWARM.read_text()))
                   if isinstance(n, ast.FunctionDef) and n.name == "_submit")
-        # Scope to the CODE branch. _submit dispatches Slurm first, so the
-        # first `run` call in the whole function is sbatch, and comparing
-        # against it measures nothing about the agent path.
-        branch = None
-        for sub in ast.walk(fn):
-            # ast.unparse emits single quotes, so matching '"code"' never
-            # fires. Match the comparison, not one spelling of the literal.
-            if isinstance(sub, ast.If) and ast.unparse(
-                    sub.test).replace('"', "'") == "kind == 'code'":
-                branch = sub
-                break
-        self.assertIsNotNone(branch, "no `kind == code` branch found")
-
         pos = {}
-        for sub in ast.walk(branch):
+        for sub in ast.walk(fn):
             if isinstance(sub, ast.Call):
                 name = (getattr(sub.func, "attr", None)
                         or getattr(sub.func, "id", None))
-                if name in ("_write_launch_record", "run"):
+                if name == "_write_launch_record":
                     pos.setdefault(name, sub.lineno)
+                # The code launch is U.run(argv); scheduler calls pass a list.
+                if (name == "run" and sub.args
+                        and isinstance(sub.args[0], ast.Name)
+                        and sub.args[0].id == "argv"):
+                    pos.setdefault("run", sub.lineno)
         self.assertIn("_write_launch_record", pos,
                       "the code branch never anchors")
         self.assertIn("run", pos, "no dispatch call found to compare against")

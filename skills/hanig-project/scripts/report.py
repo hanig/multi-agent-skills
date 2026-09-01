@@ -24,11 +24,15 @@ import datetime as _dt
 import html
 import json
 import os
+import shutil
 import sys
+from pathlib import Path
+
+_SWARM_SCRIPTS = Path(__file__).resolve().parents[2] / "hanig-swarm" / "scripts"
+sys.path.insert(0, str(_SWARM_SCRIPTS))
+import coordinator_paths as CP  # noqa: E402
 
 SCHEMA = 1
-DEFAULT_STATE = os.path.join(".swarm", "state")
-DEFAULT_RUNS = os.path.join(".swarm", "runs")
 
 TERMINAL_OK = ("DONE",)
 TERMINAL_BAD = ("FAILED", "INCOMPLETE", "NEEDS_HUMAN", "USAGE_ERROR")
@@ -144,18 +148,31 @@ def collect(project):
     """Gather every evidence source. Missing ones are absences, not errors:
     a report on a half-finished run is exactly when this is most useful."""
     p = lambda *a: os.path.join(project, *a)
-    state = _load(p(DEFAULT_STATE, "swarm-state.json"), {}) or {}
     plan = _load(p("plan.json"), {}) or {}
+    state_dir, runs_root, _worktrees = CP.resolve_paths(
+        plan=plan, cwd=project, need_root=True)
+    try:
+        CP.migrate_legacy_defaults(state_dir, runs_root, cwd=project)
+    except (OSError, shutil.Error):
+        # Inspection must still report an unreadable legacy attempt as
+        # unreadable. A failed migration is not permission to turn it into an
+        # absence. This fallback reads only and leaves the source untouched.
+        legacy = Path(project).resolve() / ".swarm"
+        if (legacy / "state" / "swarm-state.json").is_file():
+            state_dir, runs_root = legacy / "state", legacy / "runs"
+    state = _load(os.path.join(state_dir, "swarm-state.json"), {}) or {}
 
-    receipts, evidence = _discover_receipts(p(DEFAULT_RUNS))
+    receipts, evidence = _discover_receipts(str(runs_root))
 
     return {
         "project": project,
+        "state_dir": str(state_dir),
+        "runs_root": str(runs_root),
         "plan": plan,
         "state": state,
         "receipts": receipts,
         "evidence": evidence,
-        "outbox": _load_lines(p(DEFAULT_STATE, "outbox.jsonl")),
+        "outbox": _load_lines(os.path.join(state_dir, "outbox.jsonl")),
         "tickets": _load(p("tickets.json"), {}) or {},
         "survey": _load(p(".swarm", "survey.json"), {}) or {},
         "findings": _load(p("findings.json")),
@@ -278,12 +295,13 @@ def evidence_gaps(rows):
     return gaps
 
 
-# Kept byte-identical in spirit with swarm.py's reader: skills install
-# individually, so a skill cannot import from a sibling.
+# Kept byte-identical in spirit with swarm.py's reader. The path itself comes
+# from the shared coordinator policy, so inspection cannot drift back into the
+# operated checkout.
 RECEIPTS = "outbox-receipts.jsonl"
 
 
-def _read_attestations(project):
+def _read_attestations(project, state_dir=None):
     """(refs_by_key, fatal) from the receipt journal, fail-closed.
 
     swarm.py stopped writing the `applied` field, because it was always false
@@ -292,7 +310,8 @@ def _read_attestations(project):
     That is what happens when a field is removed and its consumers are not
     traced.
     """
-    path = os.path.join(project, ".swarm", "state", RECEIPTS)
+    path = (os.path.join(state_dir, RECEIPTS) if state_dir else
+            os.path.join(project, ".swarm", "state", RECEIPTS))
     # os.path.exists() is False both when the file is absent and when this
     # process cannot traverse the directory to find out. Those are opposite
     # facts: absent means nothing was ever attested, unreadable means we do
@@ -341,7 +360,7 @@ def outbox_summary(data):
     ATTESTED is the drainer's word, never verified: nothing here can ask the
     tracker. Absence means no confirmation either way, NOT that nothing was
     filed."""
-    refs, fatal = _read_attestations(data["project"])
+    refs, fatal = _read_attestations(data["project"], data.get("state_dir"))
     if fatal:
         # NO COUNTS AT ALL. Returning the intents as "unacknowledged" here
         # still printed "N tracker intent(s) are unacknowledged" directly

@@ -115,19 +115,19 @@ The coordinator. Roughly 2,200 lines in `swarm.py`, 1,300 in `unit.py`.
 
 ```sh
 python3 scripts/swarm.py validate plan.json
-python3 scripts/swarm.py run      plan.json --state-dir .swarm [--dry-run]
-python3 scripts/swarm.py status   plan.json --state-dir .swarm [--json]
-python3 scripts/swarm.py advance  plan.json --state-dir .swarm
-python3 scripts/swarm.py outbox            --state-dir .swarm [--all] [--json]
-python3 scripts/swarm.py outbox --state-dir .swarm \
+python3 scripts/swarm.py run      plan.json [--dry-run]
+python3 scripts/swarm.py status   plan.json [--json]
+python3 scripts/swarm.py advance  plan.json
+python3 scripts/swarm.py outbox            [--all] [--json]
+python3 scripts/swarm.py outbox \
         --record-receipt KEY --ref ARC-171     # after the tracker confirms
 python3 scripts/swarm.py promote  plan.json --unit ID --approve --approver hani
-python3 scripts/swarm.py merge    --state-dir .swarm --unit ID --repo o/r \
+python3 scripts/swarm.py merge    --unit ID --repo o/r \
         --pr URL --head SHA --target main --merged-as SHA --method merge
 python3 scripts/swarm.py verify   --unit ID --attempt DIR --claim tests-pass \
         --verifier NAME --path ./check.sh
 
-python3 scripts/unit.py allocate --root ROOT --task ID --kind slurm \
+python3 scripts/unit.py allocate --root /external/swarm-runs --task ID --kind slurm \
                                  --command CMD --output PATH [--gpu-hours N]
 python3 scripts/unit.py bind  <unit_dir> --job-id 12345
 python3 scripts/unit.py check <unit_dir> [--json]
@@ -141,6 +141,14 @@ kind of thing that should have to be typed out in full.
 `converge.py check` answers whether a training run converged or merely stopped.
 It was ported out of a deleted skill before that skill was removed, because it
 was the one capability with no replacement anywhere.
+
+Coordinator state and attempt roots default to a stable per-project directory
+under `$XDG_STATE_HOME`, or `~/.local/state` when it is unset. Both resolve
+outside every operated Git worktree. Explicit paths that resolve inside one,
+including through a symlink, are refused before a directory is created.
+Existing `.swarm/state` and `.swarm/runs` trees are copied to the external
+default on first use; the legacy files are retained and historical attempt
+paths are not rewritten.
 
 ### hanig-verified-workflow
 
@@ -333,6 +341,13 @@ A plan is JSON with a `units` list. Fields the coordinator reads:
 | `requires_verification` | claims an authorized verifier must establish before this closes |
 | `continuation` | `{"max": N}`: bounded nudges to a code agent that settled without producing |
 | `pool`, `gpu_hours`, `env` | declared resource facts |
+
+Every `code` unit must pass a NUL-safe Git cleanliness preflight on its exact
+execution checkout before Paseo is called. Staged, unstaged, conflicted,
+renamed, deleted, submodule-dirty, and untracked paths all refuse launch and
+are escaped in a durable per-attempt receipt. A non-code unit opts into the
+same rule with `workspace_policy: {"requires_clean_git": true, "path":
+"/checkout"}`. No refusal stashes, resets, deletes, commits, or ignores a path.
 
 **`needs`, `inputs`, `outputs` and `sbatch` must be JSON lists.** A string is
 refused, because the code that reads them iterates character by character: for

@@ -74,7 +74,7 @@
 The unit of isolation is the WRITE NAMESPACE, not the filesystem, GPU, conda env, or dataset. A worker READS shared datasets and envs; it WRITES outputs, logs, scratch. Only the write target needs an exclusive namespace; reads need immutability, not isolation.
 
 Per resource:
-- Outputs/logs: coordinator allocates a fresh, never-reused directory per unit (`.swarm/runs/<task-id>/<attempt-id>/`); the job writes only there. This is the generalization of Shreshth's worktree from code to arbitrary outputs.
+- Outputs/logs: coordinator allocates a fresh, never-reused external directory per unit (`<external-state>/runs/<task-id>/<attempt-id>/`); the job writes only there. The run root must resolve outside every operated Git worktree. This is the generalization of Shreshth's worktree from code to arbitrary outputs.
 - Scratch: `$SLURM_TMPDIR`, per-job by construction (Slurm tears it down).
 - GPU + memory: the Slurm allocation. Slurm cgroups already isolate these per-job; no swarm mechanism needed. Do not oversubscribe.
 - Conda env / container: an immutable, versioned reference (container image or versioned prefix). No mid-run installs. If a unit needs a new package, it builds a new versioned env as its own unit, it does not mutate a shared one.

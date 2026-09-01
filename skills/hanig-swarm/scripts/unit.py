@@ -71,6 +71,7 @@ import os
 import re
 import shutil
 import worktree as W
+import coordinator_paths as CP
 import signal
 import stat
 import subprocess
@@ -615,7 +616,7 @@ def cmd_allocate(args):
     enforcement: two units cannot be handed the same root, because the second
     allocation fails rather than sharing. Nothing later has to attribute a write,
     because nothing else may write here."""
-    root = Path(args.root).resolve()
+    root = CP.required_external_run_root(args.root, args.repo, os.getcwd())
     if args.kind not in KINDS:
         sys.exit(f"error: kind must be one of {', '.join(KINDS)}, got "
                  f"{args.kind!r}")
@@ -1299,7 +1300,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     a = sub.add_parser("allocate", help="create an exclusive write root")
-    a.add_argument("--root", required=True, help="e.g. .swarm/runs")
+    a.add_argument("--root", required=True, help="external attempt root, outside operated worktrees")
     a.add_argument("--task", required=True)
     a.add_argument("--kind", required=True, choices=KINDS)
     a.add_argument("--command", default=None)

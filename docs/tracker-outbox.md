@@ -28,7 +28,7 @@ can reach the tracker applies them later.
 Inspect before anything is sent:
 
 ```bash
-python3 swarm.py outbox --state-dir .swarm/state
+python3 swarm.py outbox
 ```
 
 ## Three properties, each a real defect avoided

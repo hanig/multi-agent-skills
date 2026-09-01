@@ -102,14 +102,14 @@ python3 ~/multi-agent-skills/skills/hanig-swarm/scripts/swarm.py validate \
 
 python3 ~/multi-agent-skills/skills/hanig-swarm/scripts/swarm.py run \
   /shared/goodarzilab/projects/mach1-zfish/swarm-plan.json \
-  --state-dir /shared/goodarzilab/projects/mach1-zfish/.swarm/state \
-  --root /shared/goodarzilab/projects/mach1-zfish/.swarm/runs
+  --state-dir /shared/goodarzilab/swarm-state/mach1-zfish/state \
+  --root /shared/goodarzilab/swarm-state/mach1-zfish/runs
 ```
 
 For a submitted unit, the actual path becomes something like:
 
 ```text
-/shared/goodarzilab/projects/mach1-zfish/.swarm/runs/train-seed-0/8e41c18d0ae3b643/
+/shared/goodarzilab/swarm-state/mach1-zfish/runs/train-seed-0/8e41c18d0ae3b643/
 ├── unit.json
 ├── events.jsonl
 ├── submitted.json
@@ -134,8 +134,8 @@ Step 4 is not built. Today nothing wakes it. Hani must run:
 ```bash
 python3 ~/multi-agent-skills/skills/hanig-swarm/scripts/swarm.py advance \
   /shared/goodarzilab/projects/mach1-zfish/swarm-plan.json \
-  --state-dir /shared/goodarzilab/projects/mach1-zfish/.swarm/state \
-  --root /shared/goodarzilab/projects/mach1-zfish/.swarm/runs
+  --state-dir /shared/goodarzilab/swarm-state/mach1-zfish/state \
+  --root /shared/goodarzilab/swarm-state/mach1-zfish/runs
 ```
 
 Paseo 0.6.1 can create schedules and heartbeats, but no swarm schedule registration has been implemented or proven on the cluster login nodes.
@@ -147,7 +147,7 @@ Today, from a terminal:
 ```bash
 python3 ~/multi-agent-skills/skills/hanig-swarm/scripts/swarm.py status \
   /shared/goodarzilab/projects/mach1-zfish/swarm-plan.json \
-  --state-dir /shared/goodarzilab/projects/mach1-zfish/.swarm/state
+  --state-dir /shared/goodarzilab/swarm-state/mach1-zfish/state
 ```
 
 That shows unit, kind, state, job ID, declared GPU-hours, and attempt count.
@@ -188,7 +188,7 @@ Ordinary dependency advancement and explicitly transient preemption retries shou
 
 ```bash
 python3 ~/multi-agent-skills/skills/hanig-swarm/scripts/converge.py check \
-  /shared/goodarzilab/projects/mach1-zfish/.swarm/runs/train-seed-0/<attempt>/metrics.jsonl \
+  /shared/goodarzilab/swarm-state/mach1-zfish/runs/train-seed-0/<attempt>/metrics.jsonl \
   --criterion '{"metric":"val_auroc","mode":"max","threshold":0.78,"min_steps":10000}' \
   --diverge '{"metric":"train_loss","above":1000}' \
   --budget 40000 \

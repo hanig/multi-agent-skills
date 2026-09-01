@@ -277,7 +277,7 @@ the coordinator takes an OS lock, so a second advance exits without acting.
 The coordinator records tracker intents as units change state:
 
 ```sh
-python3 ../hanig-swarm/scripts/swarm.py outbox --state-dir .swarm/state --json
+python3 ../hanig-swarm/scripts/swarm.py outbox --json
 ```
 
 In a session with the connector, apply each pending intent to its issue, then

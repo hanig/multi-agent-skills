@@ -294,10 +294,8 @@ class TestARetryDoesNotInheritTheLastAttemptsBaseline(Base):
         self.assertTrue(produced)
 
 
-class TestASwarmRunningInsideItsOwnRepo(Base):
-    """Ordinary layout, and it broke everything: allocate writes
-    runs/<unit>/<attempt>/unit.json BEFORE the anchor is taken, so every
-    launch looked dirty and no code unit could ever satisfy production."""
+class TestCoordinatorFilesAreNeverBlanketExcluded(Base):
+    """External defaults removed the reason for hiding a whole path prefix."""
 
     def setUp(self):
         super().setUp()
@@ -307,13 +305,11 @@ class TestASwarmRunningInsideItsOwnRepo(Base):
         with open(os.path.join(self.inside, "unit.json"), "w") as fh:
             json.dump({"task_id": "u1"}, fh)
 
-    def test_coordinator_state_is_not_counted_as_dirt(self):
-        rc, dirty = W.repo_status(U.run, self.repo,
-                                  exclude=W.swarm_root_of(self.inside))
+    def test_a_plan_authored_path_is_reported_as_dirt(self):
+        rc, dirty = W.repo_status(U.run, self.repo)
         self.assertEqual(rc, 0)
-        self.assertEqual(dirty, [],
-                         "the coordinator's own files were counted as the "
-                         "agent's uncommitted work")
+        self.assertEqual(len(dirty), 1)
+        self.assertEqual(dirty[0]["path"], "runs/u1/att1/unit.json")
 
     def test_without_the_exclusion_it_looks_dirty(self):
         """The control: this is what the judge used to see."""
@@ -321,35 +317,20 @@ class TestASwarmRunningInsideItsOwnRepo(Base):
         self.assertEqual(rc, 0)
         self.assertTrue(dirty)
 
-    def test_real_agent_dirt_is_still_caught(self):
+    def test_other_dirt_is_also_caught(self):
         self.write("leftover.txt", "uncommitted\n")
-        rc, dirty = W.repo_status(U.run, self.repo,
-                                  exclude=W.swarm_root_of(self.inside))
-        self.assertEqual(len(dirty), 1)
+        _rc, dirty = W.repo_status(U.run, self.repo)
+        self.assertEqual(len(dirty), 2)
 
-    def test_an_exclusion_outside_the_repo_is_ignored(self):
-        outside = os.path.join(self.tmp, "elsewhere", "u1", "att1")
-        rc, dirty = W.repo_status(U.run, self.repo, exclude=outside)
-        self.assertEqual(rc, 0)
-        self.assertTrue(dirty, "an unrelated exclusion must not blind the "
-                               "status check to real dirt")
-
-    def test_end_to_end_a_unit_inside_its_repo_can_produce(self):
+    def test_an_in_repository_run_root_is_refused_at_preflight(self):
         sys.path.insert(0, str(SCRIPTS))
         import swarm as S
         u = {"id": "u1", "repo": self.repo}
-        self.assertIsNone(S._write_launch_record(self.inside, u)[0])
+        err, _base = S._write_launch_record(self.inside, u)
+        self.assertIn("preflight refused", err or "")
         rec = json.load(open(Path(self.inside).parent
                              / ("launch-%s.json" % Path(self.inside).name)))
-        self.assertTrue(rec["clean_at_launch"],
-                        "the launch looked dirty because of our own files")
-        self.write("src.txt", "real work\n")
-        git(self.repo, "add", "-A")
-        git(self.repo, "commit", "-qm", "work")
-        produced, why = W.judge(U.run, self.inside,
-                                {"id": "u1", "kind": "code",
-                                 "repo": self.repo})
-        self.assertTrue(produced, why)
+        self.assertEqual(rec["preflight"]["status"], "refused")
 
     def test_a_missing_anchor_names_the_declared_repo(self):
         produced, why = W.judge(U.run, self.inside,

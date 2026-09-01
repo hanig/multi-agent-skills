@@ -571,14 +571,12 @@ class TestTheCodePredicate(unittest.TestCase):
                               "window logic")
         self.assertIn('us.pop("incomplete_since", None)', src[i:j])
 
-    def test_the_agent_runs_in_its_exclusive_write_root(self):
-        """Without --cwd the agent runs in the coordinator's directory, so it
-        writes nowhere near its write root and its declared outputs can never
-        be found: the isolation premise silently void for this one kind."""
+    def test_the_agent_runs_in_the_preflighted_execution_workspace(self):
         src = SWARM.read_text()
         seg = src[src.index('if kind == "code":'):]
         seg = seg[:seg.index("return str(agent), None")]
-        self.assertIn('"--cwd", str(unit_dir)', seg)
+        self.assertIn('"--cwd", str(workspace)', seg)
+        self.assertIn('f"SWARM_UNIT_DIR={unit_dir}"', seg)
 
     def test_bind_accepts_an_agent_id_for_a_code_unit(self):
         """`bind` demanded a numeric scheduler id, so a code unit could never

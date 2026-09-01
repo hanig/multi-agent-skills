@@ -37,31 +37,37 @@ def _git(runner, repo, *args, timeout=60):
     return rc, (out or "").strip(), (err or "").strip()
 
 
-def repo_status(runner, repo, exclude=None):
-    """(rc, dirty_lines) for `repo`, ignoring the coordinator's own state.
+def repo_status(runner, repo):
+    """Return ``(rc, entries)`` from the canonical Git dirty predicate.
 
-    Running a swarm inside the repository it works on is ordinary, and
-    `allocate` writes `runs/<unit>/<attempt>/unit.json` BEFORE the anchor is
-    taken. Counting that as dirt made `clean_at_launch` false for every code
-    unit in such a layout, so honest work could never satisfy production. The
-    coordinator's own files are attributable to the coordinator; they are not
-    the agent's uncommitted work, which is what this predicate is about.
+    Porcelain v1 with ``-z`` covers the index, worktree, untracked paths,
+    conflicts, renames, and dirty submodules without parsing human output.
+    Paths are split only on NUL. A filename containing a newline therefore
+    remains one entry and can be escaped safely by the caller.
+
+    No path is excluded. Coordinator state now lives outside every operated
+    worktree, so an in-repository path is user-authored dirt and must be named
+    rather than silently ignored.
     """
-    args = ["status", "--porcelain"]
-    if exclude:
-        try:
-            rel = os.path.relpath(str(exclude), str(repo))
-        except ValueError:
-            rel = None
-        if rel and not rel.startswith(os.pardir) and not os.path.isabs(rel):
-            args += ["--", ".", f":(exclude){rel}"]
-    rc, out, _ = _git(runner, repo, *args)
-    return rc, [l for l in out.splitlines() if l.strip()]
-
-
-def swarm_root_of(unit_dir):
-    """<root>/<unit>/<attempt> -> <root>. The coordinator's state tree."""
-    return str(Path(unit_dir).parent.parent)
+    rc, out, _ = _git(runner, repo, "status", "--porcelain=v1", "-z",
+                       "--untracked-files=all")
+    if rc != 0:
+        return rc, []
+    fields = out.split("\x00")
+    entries, i = [], 0
+    while i < len(fields):
+        field = fields[i]
+        i += 1
+        if not field:
+            continue
+        status = field[:2]
+        path = field[3:] if len(field) > 2 and field[2] == " " else field[2:]
+        entry = {"status": status, "path": path}
+        if ("R" in status or "C" in status) and i < len(fields):
+            entry["original_path"] = fields[i]
+            i += 1
+        entries.append(entry)
+    return rc, entries
 
 
 def read_launch_record(unit_dir):
@@ -146,7 +152,7 @@ def judge_detail(runner, unit_dir, spec):
     # An ignored path is DECLARED not to be part of the artifact, by the
     # repository itself, and production here is a claim about the committed
     # tree. The claim was too broad; the code is right.
-    rc, dirty = repo_status(runner, repo, exclude=swarm_root_of(unit_dir))
+    rc, dirty = repo_status(runner, repo)
     if rc != 0:
         return False, None, f"cannot read git status in {repo!r}"
     if dirty:
