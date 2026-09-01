@@ -136,10 +136,11 @@ fi
 
 # --- collision check against an org-managed skill store ----------------------
 # The comment here used to say "personal skills are prefixed hanig-* precisely
-# so this never fires". That premise was falsified on 2026-08-31: all five of
-# this repo's skills appeared in the Arc org store, in versions older than the
-# checkout, and the guard then refused every install with exit 1. The repo
-# became uninstallable, and the documented Quick Start printed an error.
+# so this never fires". That premise is simply wrong: a copy of these skills is
+# maintained on Claude Science, so all five arrive in the Arc org store through
+# catalog sync. It is deliberate and permanent, not an accident to be cleaned
+# up, and while the guard was a hard exit 1 the repo was uninstallable and the
+# documented Quick Start printed an error.
 #
 # The guard is still right about the hazard. Which store wins is not
 # guaranteed, so installing a skill whose name already exists there can mean

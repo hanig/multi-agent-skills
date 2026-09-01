@@ -414,14 +414,16 @@ across five Linear issues, each closed only on a predicate receipt.
              [--force] [--uninstall] [--allow-org-shadow]
 ```
 
-**`--allow-org-shadow` is currently required on this machine.** All five of
-these skills also exist in the Arc org store, in versions older than this
-checkout, and installing a skill whose name is already there means the copy the
-loader picks may not be the one you just installed. The installer refuses by
-default and names the flag, because shadowing should be deliberate: pass it
-when the org copies are stale snapshots of this repo, and rename ours instead
-if they are ever unrelated Arc skills. Pulling does not help, since the org
-store is not fed from this repo.
+**`--allow-org-shadow` is required here, and permanently.** A copy of these
+skills is maintained on Claude Science, so all five also arrive in the Arc org
+store through catalog sync. That is deliberate, not a mistake to clean up.
+
+The installer still refuses by default, because the hazard is real: which store
+the loader prefers is not guaranteed, so the copy that loads may not be the one
+you just installed, and the two copies drift as each is edited. Passing the flag
+says you know there are two and you mean to shadow the other. Rename ours
+instead only if a colliding name is ever an unrelated Arc skill rather than the
+Claude Science twin.
 
 Copy is the default deliberately. A symlink into a live checkout breaks when the
 checkout sits under a synced folder, when a branch switch silently mutates every
