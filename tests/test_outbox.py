@@ -2077,7 +2077,7 @@ class TestRetryBudgetBehaviour(unittest.TestCase):
                 "h": {"state": "SUBMITTED", "job_id": "2868624",
                       "attempt_dir": str(att), "attempts": attempts,
                       "gpu_hours": 0}}}))
-        m._check = lambda d: (verdict, "forced")
+        m._check = lambda d, seal=None: (verdict, "forced")
         # A real advance renews the lease between units, so the harness has to
         # hold it exactly as a controller would. Without this it stopped at
         # "no longer holds the lease" and measured nothing.
@@ -2312,7 +2312,7 @@ class TestACodeUnitIsNotDoneUntilMerged(unittest.TestCase):
         ok, _ = m.acquire_lease(str(st))
         self.assertTrue(ok)
         self.addCleanup(m.release_lease, str(st))
-        m._check = lambda d: (verdict, "forced")
+        m._check = lambda d, seal=None: (verdict, "forced")
         rep, disp, _ = m.advance(plan, m.load_state(str(st)), str(st),
                                  str(tmp / "rn"), False, max_new=0)
         return rep, disp, m.load_state(str(st)), m

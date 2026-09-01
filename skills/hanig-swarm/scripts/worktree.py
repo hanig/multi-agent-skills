@@ -14,6 +14,7 @@ tree is clean precisely when nobody touched it.
 
 Python 3.8+, standard library only.
 """
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -75,6 +76,52 @@ def launch_record_path(unit_dir):
     return Path(unit_dir).parent / f"launch-{Path(unit_dir).name}.json"
 
 
+def read_sealed_launch_record(unit_dir, seal):
+    """The record, ONLY if it is still the bytes the coordinator sealed.
+
+    `seal` is the digest the coordinator recorded in its own state at write
+    time, before any agent existed. Without it there is no way to tell a
+    record apart from a record the agent rewrote, and every field in here
+    decides something: repo, branch, base_commit, base_tree and
+    clean_at_launch between them decide whether an attempt PRODUCED anything.
+
+    No seal means no judgment. Falling back to the unsealed record would
+    restore the whole defect for exactly the caller an attacker arranges to
+    be, which is what happened to `recorded or base` in cmd_verify.
+    """
+    path = launch_record_path(unit_dir)
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return None, ("no launch record: nothing captured this repository's "
+                      "state before the agent ran, so no transition can be "
+                      "judged")
+    except OSError as exc:
+        return None, f"cannot read the launch record at {path}: {exc}"
+    # Checked AFTER the file, so an absent record still reports as absent.
+    # That case grants nothing either way, and the missing-anchor message is
+    # the one that tells an operator what to do.
+    if not seal:
+        return None, ("no record seal was supplied, so this launch record "
+                      "cannot be distinguished from one the agent rewrote. "
+                      "Re-dispatch the unit rather than judging against an "
+                      "unsealed anchor")
+    actual = hashlib.sha256(raw).hexdigest()
+    if actual != seal:
+        return None, (
+            f"the launch record at {path} no longer matches the digest the "
+            f"coordinator recorded when it wrote it (sealed {seal[:12]}, "
+            f"found {actual[:12]}). It was changed after the agent started, "
+            f"so nothing in it can be used to judge what the agent did")
+    try:
+        rec = json.loads(raw)
+    except ValueError as exc:
+        return None, f"the launch record at {path} is not readable JSON: {exc}"
+    if not isinstance(rec, dict):
+        return None, f"the launch record at {path} is not a JSON object"
+    return rec, None
+
+
 def refused_launch(unit_dir):
     """Why this attempt may not be bound, or None if it may.
 
@@ -115,7 +162,7 @@ def read_launch_record(unit_dir):
     return rec, None
 
 
-def judge_detail(runner, unit_dir, spec):
+def judge_detail(runner, unit_dir, spec, seal=None):
     """(produced, head, detail).
 
     Returns the head it VALIDATED, not one re-read afterwards. Splitting those
@@ -151,7 +198,7 @@ def judge_detail(runner, unit_dir, spec):
         return None, None, ("this unit declared no repository, so no git transition "
                       "is judged for it")
 
-    rec, err = read_launch_record(unit_dir)
+    rec, err = read_sealed_launch_record(unit_dir, seal)
     if err:
         return False, None, err
     repo = rec.get("repo")
@@ -229,10 +276,10 @@ def judge_detail(runner, unit_dir, spec):
                   f"from {str(base)[:12]}, with a clean tree at both ends")
 
 
-def judge(runner, unit_dir, spec):
+def judge(runner, unit_dir, spec, seal=None):
     """(produced, detail). The two-value view, for callers that do not need
     the head."""
-    produced, _head, why = judge_detail(runner, unit_dir, spec)
+    produced, _head, why = judge_detail(runner, unit_dir, spec, seal)
     return produced, why
 
 
@@ -247,20 +294,20 @@ def produced_head(runner, unit_dir, spec):
     return head
 
 
-def basis(runner, unit_dir, spec):
+def basis(runner, unit_dir, spec, seal=None):
     """What the receipt can say about the agent's repository.
 
     A string, not a bool: "we did not look", "there was nothing to look at"
     and "we looked and it produced" are three different claims, and a boolean
     carries only two.
     """
-    produced, _why = judge(runner, unit_dir, spec)
+    produced, _why = judge(runner, unit_dir, spec, seal)
     if produced is None:
         return "no-repository-declared"
     return "produced-committed-change" if produced else "no-produced-change"
 
 
-def code_basis(runner, unit_dir, spec):
+def code_basis(runner, unit_dir, spec, seal=None):
     """The code-only fields of a receipt's `basis`.
 
     Assembled here rather than spelled out in unit.py, which has a size guard
@@ -271,6 +318,6 @@ def code_basis(runner, unit_dir, spec):
     if spec.get("kind") != "code":
         return {"worktree_judged": None, "produced_head": None,
                 "production_denies": None}
-    return {"worktree_judged": basis(runner, unit_dir, spec),
+    return {"worktree_judged": basis(runner, unit_dir, spec, seal),
             "produced_head": spec.get("produced_head"),
             "production_denies": list(PRODUCTION_DENIES)}

@@ -5,6 +5,7 @@ Each test is a way for work to LOOK like it happened. `bus await --base HEAD
 several of them: the caller picks the base, so HEAD may already be past the
 work, and a clean tree is clean exactly when nobody touched it.
 """
+import hashlib
 import json
 import os
 import subprocess
@@ -55,12 +56,16 @@ class Base(unittest.TestCase):
                "base_tree": tree, "clean_at_launch": True,
                "dirty_paths_at_launch": 0}
         rec.update(over)
-        with open(Path(self.unit_dir).parent / ("launch-%s.json" % Path(self.unit_dir).name), "w") as fh:
-            json.dump(rec, fh)
+        # Seal what was WRITTEN, the way the coordinator does: it digests the
+        # bytes it wrote and keeps the digest in its own state.
+        payload = json.dumps(rec)
+        W.launch_record_path(self.unit_dir).write_text(payload)
+        self.seal = hashlib.sha256(payload.encode()).hexdigest()
         return rec
 
     def judge(self):
-        return W.judge(U.run, self.unit_dir, self.spec)
+        return W.judge(U.run, self.unit_dir, self.spec,
+                       getattr(self, "seal", None))
 
 
 class TestWorkThatDidNotHappen(Base):
@@ -201,12 +206,12 @@ class TestTheReceiptSaysWhatItDoesNotCover(Base):
         self.assertEqual(W.basis(U.run, self.unit_dir, {"id": "u"}),
                          "no-repository-declared")
         self.anchor()
-        self.assertEqual(W.basis(U.run, self.unit_dir, self.spec),
+        self.assertEqual(W.basis(U.run, self.unit_dir, self.spec, self.seal),
                          "no-produced-change")
         self.write("b.txt", "new\n")
         git(self.repo, "add", "-A")
         git(self.repo, "commit", "-qm", "c2")
-        self.assertEqual(W.basis(U.run, self.unit_dir, self.spec),
+        self.assertEqual(W.basis(U.run, self.unit_dir, self.spec, self.seal),
                          "produced-committed-change")
 
     def test_production_denies_the_claims_it_cannot_make(self):
@@ -266,16 +271,22 @@ class TestARetryDoesNotInheritTheLastAttemptsBaseline(Base):
         os.makedirs(att2)
         u = {"id": "u1", "repo": self.repo}
 
-        self.assertIsNone(S._write_launch_record(att1, u)[0])
+        err1, anchor1 = S._write_launch_record(att1, u)
+        self.assertIsNone(err1)
         # att1 commits, then is interrupted.
         self.write("b.txt", "from att1\n")
         git(self.repo, "add", "-A")
         git(self.repo, "commit", "-qm", "att1 work")
         # att2 starts here and produces NOTHING.
-        self.assertIsNone(S._write_launch_record(att2, u)[0])
+        err2, anchor2 = S._write_launch_record(att2, u)
+        self.assertIsNone(err2)
+        # Each attempt's own seal, from the writer, as the coordinator keeps
+        # them keyed by attempt in its state.
+        self.assertNotEqual(anchor1["seal"], anchor2["seal"])
 
         produced, why = W.judge(U.run, att2, {"id": "u1", "kind": "code",
-                                              "repo": self.repo})
+                                              "repo": self.repo},
+                                anchor2["seal"])
         self.assertFalse(produced,
                          "att2 produced nothing, but inherited att1's anchor "
                          "so att1's commit counted as att2's production")
@@ -285,12 +296,14 @@ class TestARetryDoesNotInheritTheLastAttemptsBaseline(Base):
         sys.path.insert(0, str(SCRIPTS))
         import swarm as S
         att1 = self.unit_dir
-        S._write_launch_record(att1, {"id": "u1", "repo": self.repo})
+        _err, anchor = S._write_launch_record(att1,
+                                              {"id": "u1", "repo": self.repo})
         self.write("b.txt", "real work\n")
         git(self.repo, "add", "-A")
         git(self.repo, "commit", "-qm", "att1 work")
         produced, _ = W.judge(U.run, att1, {"id": "u1", "kind": "code",
-                                            "repo": self.repo})
+                                            "repo": self.repo},
+                              anchor["seal"])
         self.assertTrue(produced)
 
 

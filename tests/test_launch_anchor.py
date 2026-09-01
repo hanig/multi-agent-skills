@@ -79,7 +79,10 @@ class TestTheAnchorIsCapturedBeforeDispatch(unittest.TestCase):
             d = self._attempt(t)
             err, base = S._write_launch_record(d, {"id": "u1"})
             self.assertIsNone(err)
-            self.assertIsNone(base)
+            # A record IS written and sealed for such a unit. What it has no
+            # business carrying is a base, and state stores neither key.
+            self.assertIsNone(base["base"])
+            self.assertTrue(base["seal"])
             rec = json.load(open(Path(d).parent / ("launch-%s.json" % Path(d).name)))
             self.assertIsNone(rec["repo"])
             self.assertIn("no git transition", rec["note"])

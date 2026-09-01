@@ -1625,8 +1625,25 @@ def _submit(u, unit_dir, dry_run, state=None):
     if state is not None and anchored_base:
         # Trusted coordinator observation, keyed by attempt. Historical
         # attempts retain the base they actually launched from.
+        #
+        # The SEAL is stored the same way and for the same reason. It is the
+        # digest of the launch record as written, before any agent existed, so
+        # a later reader can tell whether the record it is holding is still
+        # the one the coordinator wrote. Keeping it here rather than beside
+        # the record is the whole point: a seal stored next to what it seals
+        # protects nothing.
         us = state.setdefault("units", {}).setdefault(u["id"], {})
-        us.setdefault("attempt_bases", {})[Path(unit_dir).name] = anchored_base
+        # Two facts, stored independently, because they are not the same fact.
+        # A unit that declared no repository still gets a sealed record saying
+        # so; it has no base. Storing an explicit None base would put a key in
+        # state that reads as "we looked and found nothing" when the truth is
+        # "there was nothing to look for".
+        if anchored_base.get("base"):
+            us.setdefault("attempt_bases", {})[Path(unit_dir).name] = (
+                anchored_base["base"])
+        if anchored_base.get("seal"):
+            us.setdefault("attempt_record_seals", {})[Path(unit_dir).name] = (
+                anchored_base["seal"])
     if dry_run:
         return f"dry-{os.urandom(3).hex()}", None
     if kind == "slurm":
@@ -1999,9 +2016,14 @@ def _write_launch_record(unit_dir, u):
                     }})
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Serialize ONCE and seal those exact bytes. Re-serializing to compute
+        # the digest would seal a second rendering, and any difference in
+        # separators or key order between the two makes the seal fail on a
+        # record nobody touched.
+        payload = json.dumps(rec, indent=1, sort_keys=True) + "\n"
+        seal = hashlib.sha256(payload.encode()).hexdigest()
         with open(path, "x") as fh:      # x: an anchor is written ONCE
-            json.dump(rec, fh, indent=1, sort_keys=True)
-            fh.write("\n")
+            fh.write(payload)
             fh.flush()
             os.fsync(fh.fileno())
     except FileExistsError:
@@ -2031,12 +2053,16 @@ def _write_launch_record(unit_dir, u):
         current_refusal, _workspace = _repeat_launch_preflight(u)
         if current_refusal:
             return current_refusal, None
+        # No new bytes were written, so there is no new seal to report. The
+        # seal from the FIRST dispatch stands in state; re-sealing here would
+        # bless whatever the file says now, which is the laundering this
+        # whole mechanism exists to stop.
         return None, None
     except OSError as exc:
         return f"cannot write the launch record for {u['id']!r}: {exc}", None
     if dirty:
         return _dirty_refusal(u.get("id"), resolved_top, dirty), None
-    return None, rec.get("base_commit")
+    return None, {"base": rec.get("base_commit"), "seal": seal}
 
 
 def _bind(unit_dir, job_id):
@@ -2045,9 +2071,14 @@ def _bind(unit_dir, job_id):
     return None if rc == 0 else f"bind failed: {(err or out).strip()[:200]}"
 
 
-def _check(unit_dir):
-    rc, out, err = U.run([sys.executable, str(_HERE / "unit.py"), "check",
-                          str(unit_dir)], timeout=300)
+def _check(unit_dir, seal=None):
+    argv = [sys.executable, str(_HERE / "unit.py"), "check", str(unit_dir)]
+    # Judging a code unit means reading the launch record, and that record is
+    # not authority on its own. The seal travels from coordinator state so the
+    # judging process can tell whether the record is still what we wrote.
+    if seal:
+        argv += ["--record-seal", str(seal)]
+    rc, out, err = U.run(argv, timeout=300)
     return rc, (out or "") + (err or "")
 
 
@@ -2852,6 +2883,20 @@ def trusted_base(state, unit, attempt_dir):
     return (us.get("attempt_bases") or {}).get(Path(attempt_dir).name)
 
 
+def trusted_record_seal(state, unit, attempt_dir):
+    """THE ONLY way to obtain an attempt's launch-record seal.
+
+    Same shape and same reason as `trusted_base`: coordinator state, no
+    fallback. None means "this attempt cannot be judged against its anchor",
+    which callers must treat as a refusal rather than as permission to read
+    the record unsealed.
+    """
+    if not attempt_dir:
+        return None
+    us = (state.get("units") or {}).get(unit) or {}
+    return (us.get("attempt_record_seals") or {}).get(Path(attempt_dir).name)
+
+
 def _head_from_receipt(attempt_dir):
     """The head recorded when the attempt was JUDGED.
 
@@ -3188,7 +3233,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         us = _unit_state(state, uid)
         if not us["attempt_dir"] or us["state"] == "DONE":
             continue
-        rc, text = _check(us["attempt_dir"])
+        rc, text = _check(us["attempt_dir"],
+                          trusted_record_seal(state, uid, us["attempt_dir"]))
         previous = us.get("state")
         us["state"] = NAME.get(rc, f"rc={rc}")
         # A CODE UNIT IS NOT DONE WHEN ITS PREDICATE PASSES. The receipt says

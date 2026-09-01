@@ -998,7 +998,7 @@ def _pipeline_state(unit_dir, spec, present, missing, notes):
     return "DONE"
 
 
-def _code_state(unit_dir, spec, present, missing, notes):
+def _code_state(unit_dir, spec, present, missing, notes, seal=None):
     """The done predicate for an agent run by Paseo.
 
     DELEGATES lifecycle, judges artifacts. Paseo knows whether the agent
@@ -1089,7 +1089,7 @@ def _code_state(unit_dir, spec, present, missing, notes):
     # only later, during merge admission, asked the agent-owned repository a
     # second time; if it had moved on, the head actually validated was gone
     # and a correct receipt for it was refused.
-    produced, judged_head, why = W.judge_detail(run, unit_dir, spec)
+    produced, judged_head, why = W.judge_detail(run, unit_dir, spec, seal)
     spec["produced_head"] = judged_head
     head = (f"agent {agent} is {status or 'idle'} and all {len(present)} "
             f"declared output(s) are present")
@@ -1111,7 +1111,7 @@ REASON_NO_EVIDENCE = "no-accounting-row"   # nothing shows whether it ran
 REASON_NO_OUTPUTS = "outputs-absent"       # it ran cleanly and produced nothing
 
 
-def check_unit(unit_dir, spec, notes):
+def check_unit(unit_dir, spec, notes, seal=None):
     """The done predicate. Returns a state name.
 
     Conclusive ONLY because the write root is exclusive. There is deliberately
@@ -1128,7 +1128,8 @@ def check_unit(unit_dir, spec, notes):
         return "INCOMPLETE"
 
     if kind == "code":
-        return _code_state(unit_dir, spec, present, missing, notes)
+        return _code_state(unit_dir, spec, present, missing, notes,
+                           seal)
 
     if kind == "pipeline":
         return _pipeline_state(unit_dir, spec, present, missing, notes)
@@ -1210,7 +1211,7 @@ def cmd_check(args):
         sys.exit(f"error: no readable unit spec at {unit_dir / UNIT}: {err}. "
                  f"Run `allocate` first.")
     notes = []
-    state = check_unit(unit_dir, spec, notes)
+    state = check_unit(unit_dir, spec, notes, args.record_seal)
 
     receipt = {
         "schema_version": 1, "checked_at": now_iso(),
@@ -1246,7 +1247,7 @@ def cmd_check(args):
             # spells out the reach: "a change was produced" is not "the change
             # is any good".
             # The three code-only facts, assembled where they belong.
-            **W.code_basis(run, unit_dir, spec),
+            **W.code_basis(run, unit_dir, spec, args.record_seal),
             "note": "not isolated from other processes running as the same "
                     "Unix user. OS-enforced isolation would need a container "
                     "or mount namespace with this directory as the only "
@@ -1297,6 +1298,12 @@ def main():
     c = sub.add_parser("check", help="the done predicate")
     c.add_argument("unit_dir")
     c.add_argument("--json", action="store_true")
+    # The digest the COORDINATOR recorded when it wrote the launch record,
+    # before the agent existed. `swarm.py advance` supplies it from its own
+    # state. Run by hand without it, a code unit reports that it cannot be
+    # judged, which is the honest answer: this process has no trusted copy of
+    # the anchor to compare against.
+    c.add_argument("--record-seal", default=None)
     c.set_defaults(fn=cmd_check)
 
     args = ap.parse_args()
