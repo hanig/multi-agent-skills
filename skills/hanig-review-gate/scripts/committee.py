@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""committee.py — a persistent two-member committee that plans, then reviews
+"""committee.py — a persistent committee that plans, then reviews
 its own plan's implementation.
 
 Modelled on Shreshth's `paseo-committee`, which runs on Paseo agents that stay
@@ -22,7 +22,7 @@ all three cost this repo real time:
     building on it.
 
 Phases, per the reference skill:
-  1. plan     both members, fresh, same problem prompt. Challenge, then
+  1. plan     all members, fresh, same problem prompt. Challenge, then
               synthesise. Convergence -> unified plan. Divergence -> the user.
   2. implement  you do it. The committee stays clean.
   3. review   the diff goes back to the SAME members, against their own plan.
@@ -90,9 +90,18 @@ def save_session(name, data):
     tmp.replace(p)
 
 
+MIN_MEMBERS, MAX_MEMBERS = 2, 3
+
+
 def pick_members(explicit):
-    """Two members from contrasting providers. Contrast is the point, so this
-    refuses a same-provider pair rather than quietly accepting it."""
+    """Two or three members from contrasting providers.
+
+    Contrast is the point, so this refuses a panel that shares one provider
+    rather than quietly accepting it. Two distinct providers is the floor, not
+    one per member: two models from different labs reached through the same
+    gateway are genuinely contrasting, and demanding a distinct provider per
+    member would rule that out for no gain.
+    """
     revs = [r for r in R.load_reviewers() if r.get("enabled", True)]
     if explicit:
         want = [n.strip() for spec in explicit for n in spec.split(",")
@@ -103,16 +112,19 @@ def pick_members(explicit):
             die(f"no reviewer named {', '.join(missing)}. Available: "
                 f"{', '.join(sorted(r['name'] for r in revs))}.")
     else:
-        chosen = [r for r in revs if "plan" in (r.get("profiles") or [])]
-    if len(chosen) != 2:
-        die(f"a committee is exactly two members; got {len(chosen)} "
-            f"({', '.join(r['name'] for r in chosen) or 'none'}). Name two "
-            f"with --member, or fix the 'plan' profile in reviewers.json.")
-    if len({r["provider"] for r in chosen}) != 2:
-        die(f"both members use provider "
-            f"{chosen[0]['provider']!r}, so they can share a failure mode. "
-            f"Contrast is the point of a committee: name one from each "
-            f"provider.")
+        # The COMMITTEE profile, not "plan". They were the same list and
+        # should not be: a model can be wanted for planning and unwanted as a
+        # review-gate reviewer, which is exactly the split in force here.
+        chosen = [r for r in revs if "committee" in (r.get("profiles") or [])]
+    if not MIN_MEMBERS <= len(chosen) <= MAX_MEMBERS:
+        die(f"a committee is {MIN_MEMBERS} or {MAX_MEMBERS} members; got "
+            f"{len(chosen)} ({', '.join(r['name'] for r in chosen) or 'none'})"
+            f". Name them with --member, or fix the 'committee' profile in "
+            f"reviewers.json.")
+    if len({r["provider"] for r in chosen}) < 2:
+        die(f"every member uses provider {chosen[0]['provider']!r}, so they "
+            f"can share a failure mode. Contrast is the point of a committee: "
+            f"name members from at least two providers.")
     return chosen
 
 
@@ -275,16 +287,16 @@ def cmd_open(args):
                "turns": []}
     names = ", ".join(f"{m['name']} ({m['provider']})" for m in members)
     print(f"committee {args.name!r}: {names}\nphase 1 (plan), waiting for "
-          f"both members...\n")
+          f"all members...\n")
     results = run_turn(members, session, phase_prompt(problem), args.timeout,
                        "plan")
     save_session(args.name, session)
     ok = show_results(results)
     print(f"\n{'-' * 70}")
     print(f"session saved: {session_path(args.name)}")
-    print(f"{ok}/2 members answered.")
-    if ok < 2:
-        print("A committee needs both. Re-run the missing member with "
+    print(f"{ok}/{len(members)} members answered.")
+    if ok < len(members):
+        print("A committee needs all of them. Re-run the missing member with "
               "`committee.py ask` once its provider recovers.")
         return STATES["UNAVAILABLE"]
     print("\nNext: CHALLENGE them before accepting anything. e.g.\n"
@@ -392,7 +404,7 @@ def main():
     o.add_argument("--force", action="store_true")
     o.set_defaults(fn=cmd_open)
 
-    a = sub.add_parser("ask", help="follow-up to both members, with context")
+    a = sub.add_parser("ask", help="follow-up to all members, with context")
     a.add_argument("name")
     a.add_argument("--prompt")
     a.add_argument("--prompt-file")

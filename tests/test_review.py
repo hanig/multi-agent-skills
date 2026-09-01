@@ -602,7 +602,14 @@ class TestRound13Regressions(unittest.TestCase):
         # contrasting models and is never escalated, so it must not appear in
         # the cheapest-first cascade. Exempted by name rather than by
         # loosening the check, which is what keeps a typo'd tier detectable.
-        tiers -= {"plan"}
+        #
+        # `committee` is exempt for a different reason: it is not a review
+        # panel at all. It names committee.py's members, who plan and are
+        # challenged across turns. Keeping it out of the ladder is what lets a
+        # model sit on the committee while being barred from the gate --
+        # deepseek plans well and over-claims as a refuter, and that split is
+        # only expressible because these two lists are separate.
+        tiers -= {"plan", "committee"}
         self.assertTrue(tiers.issubset(set(review.LADDER)),
                         f"reviewers.json uses tiers outside LADDER: "
                         f"{tiers - set(review.LADDER)}")

@@ -1,108 +1,110 @@
 {
-  "_comment": "Routing config only \u2014 endpoint, model id, reasoning effort, profile membership. Carries NO quality scores: a stale ranking is worse than none. Availability is MEASURED by `review.py --list`, which probes each provider live; a key being set is not availability. All reviewers use DEFAULT_MAX_OUTPUT_TOKENS (64000) unless they set max_output_tokens: reasoning tokens come out of the answer's budget, and at 16000 a large review returned no content at all. Prices in _cost are per million tokens as listed 2026-08-25 and are a budgeting hint, not a routing input.",
-  "default_profile": "standard",
-  "_profiles": {
-    "plan": "TWO contrasting models, never escalated. For acceptance criteria and designs, BEFORE code exists. A third reviewer adds agreement, not insight.",
-    "fast": "cheapest implementation panel; the first tier of --escalate",
-    "standard": "fast + mid-cost; the usual implementation panel",
-    "deep": "everything, including sol. Reached only via --escalate."
+ "_comment": "Routing config only \u2014 endpoint, model id, reasoning effort, profile membership. Carries NO quality scores: a stale ranking is worse than none. Availability is MEASURED by `review.py --list`, which probes each provider live; a key being set is not availability. All reviewers use DEFAULT_MAX_OUTPUT_TOKENS (64000) unless they set max_output_tokens: reasoning tokens come out of the answer's budget, and at 16000 a large review returned no content at all. Prices in _cost are per million tokens as listed 2026-08-25 and are a budgeting hint, not a routing input.",
+ "default_profile": "standard",
+ "_profiles": {
+  "plan": "TWO contrasting models, never escalated. For acceptance criteria and designs, BEFORE code exists. A third reviewer adds agreement, not insight.",
+  "fast": "cheapest implementation panel; the first tier of --escalate",
+  "standard": "fast + mid-cost; the usual implementation panel",
+  "deep": "every enabled reviewer. Reached only via --escalate. sol is NOT here: it writes the code now, and an author does not review itself.",
+  "committee": "committee.py members. SEPARATE from the gate profiles on purpose: deepseek plans and concedes well but over-claims as a refuter, so it sits here and in no gate profile."
+ },
+ "reviewers": [
+  {
+   "name": "deepseek-v4-pro",
+   "provider": "openrouter",
+   "model": "deepseek/deepseek-v4-pro",
+   "effort": null,
+   "profiles": [
+    "committee"
+   ],
+   "enabled": true,
+   "_cost": {
+    "in": 0.87,
+    "out": 1.74
+   }
   },
-  "reviewers": [
-    {
-      "name": "deepseek-v4-pro",
-      "provider": "openrouter",
-      "model": "deepseek/deepseek-v4-pro",
-      "effort": null,
-      "profiles": [
-        "deep",
-        "fast",
-        "plan",
-        "standard"
-      ],
-      "enabled": true,
-      "_cost": {
-        "in": 0.87,
-        "out": 1.74
-      }
-    },
-    {
-      "name": "luna",
-      "provider": "openai",
-      "model": "gpt-5.6-luna",
-      "effort": "high",
-      "profiles": [
-        "deep",
-        "fast",
-        "plan",
-        "standard"
-      ],
-      "enabled": true,
-      "_cost": {
-        "in": 0.2,
-        "out": 1.2
-      }
-    },
-    {
-      "name": "kimi-k2.7-code",
-      "provider": "openrouter",
-      "model": "moonshotai/kimi-k2.7-code",
-      "effort": null,
-      "profiles": [
-        "standard",
-        "deep"
-      ],
-      "enabled": true,
-      "_cost": {
-        "in": 0.67,
-        "out": 3.4
-      }
-    },
-    {
-      "name": "sol",
-      "provider": "openai",
-      "model": "gpt-5.6-sol",
-      "effort": "xhigh",
-      "profiles": [
-        "deep"
-      ],
-      "enabled": true,
-      "_cost": {
-        "in": 2.0,
-        "out": 10.0
-      },
-      "_note": "deep-tier reviewer AND tie-breaker: the ladder reaches deep both when the cheaper tiers came up clean and when they could not fill quorum, and skips it only when a finding already has quorum behind it."
-    },
-    {
-      "name": "kimi-k3",
-      "provider": "openrouter",
-      "model": "moonshotai/kimi-k3",
-      "effort": null,
-      "profiles": [
-        "standard",
-        "deep"
-      ],
-      "enabled": false,
-      "_cost": {
-        "in": 3.0,
-        "out": 15.0
-      },
-      "_note": "dropped 2026-08-27: $15.00/M output, dearer than sol ($10.00) which is the deep-only tie-breaker, so cheapest-first reached its priciest reviewer before its designated last resort. Disabled rather than deleted so the reason survives; flip enabled to re-add."
-    },
-    {
-      "name": "glm-5.3",
-      "provider": "openrouter",
-      "model": "z-ai/glm-5.3",
-      "effort": null,
-      "profiles": [
-        "standard",
-        "deep"
-      ],
-      "enabled": true,
-      "_note": "1M context, so it does not need the >100KB review split. glm-5.2 is marginally cheaper (1.19/3.74) with the same context if cost matters more than recency.",
-      "_cost": {
-        "in": 1.4,
-        "out": 4.4
-      }
-    }
-  ]
+  {
+   "name": "luna",
+   "provider": "openai",
+   "model": "gpt-5.6-luna",
+   "effort": "high",
+   "profiles": [
+    "committee",
+    "deep",
+    "fast",
+    "plan",
+    "standard"
+   ],
+   "enabled": true,
+   "_cost": {
+    "in": 0.2,
+    "out": 1.2
+   }
+  },
+  {
+   "name": "kimi-k2.7-code",
+   "provider": "openrouter",
+   "model": "moonshotai/kimi-k2.7-code",
+   "effort": null,
+   "profiles": [
+    "committee",
+    "deep",
+    "fast",
+    "plan",
+    "standard"
+   ],
+   "enabled": true,
+   "_cost": {
+    "in": 0.67,
+    "out": 3.4
+   }
+  },
+  {
+   "name": "sol",
+   "provider": "openai",
+   "model": "gpt-5.6-sol",
+   "effort": "xhigh",
+   "profiles": [
+    "deep"
+   ],
+   "enabled": false,
+   "_cost": {
+    "in": 2.0,
+    "out": 10.0
+   },
+   "_note": "deep-tier reviewer AND tie-breaker: the ladder reaches deep both when the cheaper tiers came up clean and when they could not fill quorum, and skips it only when a finding already has quorum behind it."
+  },
+  {
+   "name": "kimi-k3",
+   "provider": "openrouter",
+   "model": "moonshotai/kimi-k3",
+   "effort": null,
+   "profiles": [
+    "standard",
+    "deep"
+   ],
+   "enabled": false,
+   "_cost": {
+    "in": 3.0,
+    "out": 15.0
+   },
+   "_note": "dropped 2026-08-27: $15.00/M output, dearer than sol ($10.00) which is the deep-only tie-breaker, so cheapest-first reached its priciest reviewer before its designated last resort. Disabled rather than deleted so the reason survives; flip enabled to re-add."
+  },
+  {
+   "name": "glm-5.3",
+   "provider": "openrouter",
+   "model": "z-ai/glm-5.3",
+   "effort": null,
+   "profiles": [
+    "deep",
+    "standard"
+   ],
+   "enabled": true,
+   "_note": "1M context, so it does not need the >100KB review split. glm-5.2 is marginally cheaper (1.19/3.74) with the same context if cost matters more than recency.",
+   "_cost": {
+    "in": 1.4,
+    "out": 4.4
+   }
+  }
+ ]
 }
