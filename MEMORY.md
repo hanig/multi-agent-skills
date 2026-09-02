@@ -47,10 +47,19 @@ three-member committee got there. Full account, including the four ways the
 authority channel leaked and the limits that are declared rather than solved,
 is in `docs/plan-field-reports.md` under "The authority work".
 
-**Most serious open item:** children inherit the coordinator's environment,
-which on this machine includes `OPENAI_API_KEY` and `OPENROUTER_API_KEY`. A
-code agent the threat model treats as untrusted gets live credentials. Do this
-before C11.
+Shipped to `origin/main` at `8a6cbb4` on 2026-09-02: eighteen commits, 30
+files, ~4900 insertions. `main` and the worktree agree; the suite is green on
+`main` itself, not only in the worktree.
+
+**Next, in order** (full detail in `docs/plan-field-reports.md`):
+
+1. **E1, the live exposure.** Children inherit the coordinator's environment,
+   which here includes `OPENAI_API_KEY` and `OPENROUTER_API_KEY`. An untrusted
+   agent is handed live credentials. This is the only open item that is an
+   exposure rather than a latent defect.
+2. **C11, a worktree per code attempt.** The declared fix for the
+   shared-checkout TOCTOU, promised twice in answer to a MAJOR and still owed.
+3. Then C12, C14, B1, B6, B4, B9 and the `scontrol` note.
 
 Model routing, set 2026-09-01: coding is `codex/gpt-5.6-sol` at thinking high;
 review is kimi/luna/glm; committee is luna/deepseek/kimi. Sol never reviews its

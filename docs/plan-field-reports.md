@@ -41,7 +41,35 @@ design, which a committee rejected and which is no longer what the code does.
 
 ## Open, in the order to do them
 
-### C11. A worktree per code attempt. DO FIRST.
+> Shipped to `origin/main` at `8a6cbb4` on 2026-09-02: field-report items 10
+> and 13, the authority work, and the model routing. Everything below is what
+> remains. Status per item was verified against code, not recalled.
+
+### E1. Stop handing the agent the coordinator's environment. DO FIRST.
+
+Children inherit the coordinator's ambient environment. On this machine that
+includes `OPENAI_API_KEY` and `OPENROUTER_API_KEY`, so a code agent that the
+entire threat model treats as untrusted is given live credentials it can read
+out of `environ` and exfiltrate. Found by sol during the descriptor audit,
+correctly scoped out of the authority-channel repair, and never fixed.
+
+This outranks C11 because it is the only item on this list that is a LIVE
+EXPOSURE rather than a latent defect. Six review rounds went into stopping the
+agent from writing a commit hash into a channel it should not reach, while it
+could read the keys the whole system authenticates with.
+
+Do not simply strip everything: the child legitimately needs `PATH`, `HOME`,
+and the Git and Python settings that make the checkout usable, and scheduler
+jobs may export the environment by policy. Decide an allowlist, apply it at
+the same chokepoint as the descriptor containment (`unit.run` and the direct
+pipeline launch), and state the policy where it is enforced.
+
+Done when: a code agent's environment contains no credential the coordinator
+holds; the allowlist is declared in one place rather than per call site; a
+test asserts a planted secret in the coordinator's environment does not reach
+a spawned child; and the scheduler path is covered as well as the paseo path.
+
+### C11. A worktree per code attempt. DO SECOND.
 
 `paseo run` supports `--new-workspace worktree --worktree-mode branch-off
 --new-branch <name> --base <ref>`, and `paseo inspect` reports
@@ -55,6 +83,7 @@ Two reviewers independently raised the shared-checkout TOCTOU as MAJOR: C10
 observes cleanliness at a point in time, and another agent can dirty the tree
 between that observation and the spawn. Both times the answer was "declared
 limit, C11 is the structural fix." That answer is only honest if C11 happens.
+It has now been given twice and the debt is still outstanding.
 
 Done when: each code attempt gets its own worktree on its own branch off a
 recorded base; the preflight checks the tree the agent will actually run in;
@@ -122,6 +151,23 @@ may CPU-only work use the exclusively-allowed partition (recommend yes when
 the shared queue is capped and the lab's is idle), and is the per-job
 footprint acceptable once `MaxMemPerCPU` is applied. Not hypothetical: 700 GB
 at `MaxMemPerCPU=5120` costs 140 CPUs, not the 32 requested.
+
+### E2. The two limits this design declares but does not solve.
+
+Neither is a defect; both are unclosed and should be revisited deliberately
+rather than discovered by someone assuming they are closed.
+
+**Same-UID process access.** kimi filed a CRITICAL, correctly out of scope: a
+same-UID descendant can reach the checker's `/proc` entries and obtain the
+authority descriptor. Nothing short of separate principals or containers
+closes it. Revisit if these ever run somewhere the agent is a real adversary
+rather than a careless one.
+
+**Process-tree quiescence.** The agent's process group is not guaranteed dead
+before the check runs, so a lingering descendant could still touch output
+files mid-digest. Recorded on each accepted receipt. deepseek raised it as a
+precondition for the result channel being authoritative at all, and sol could
+not make it portable across paseo agents and scheduler jobs.
 
 ### The `scontrol` note.
 
