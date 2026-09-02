@@ -2095,6 +2095,37 @@ def _bind(unit_dir, job_id):
     return None if rc == 0 else f"bind failed: {(err or out).strip()[:200]}"
 
 
+def _authority_result_sink():
+    """Anonymous result file with no live handle on fd 0, 1, or 2.
+
+    The complete containment property is split deliberately across two
+    chokepoints: this function removes every standard-fd alias before launch;
+    U.run replaces stdin, captures stdout/stderr, closes every other fd except
+    the explicit >=3 result fd, and contains timeout cleanup to the new process
+    group. Thus an agent-controlled git/paseo descendant neither inherits nor
+    keeps alive a handle to this file.
+    """
+    sink = tempfile.TemporaryFile(mode="w+b")
+    if sink.fileno() >= 3:
+        return sink
+    duplicates = []
+    try:
+        promoted_fd = sink.fileno()
+        while promoted_fd < 3:
+            promoted_fd = os.dup(sink.fileno())
+            duplicates.append(promoted_fd)
+        promoted = os.fdopen(duplicates.pop(), "w+b")
+    except BaseException:
+        for duplicate in duplicates:
+            os.close(duplicate)
+        sink.close()
+        raise
+    sink.close()
+    for duplicate in duplicates:
+        os.close(duplicate)
+    return promoted
+
+
 def _check(unit_dir, launch_facts=None):
     argv = [sys.executable, str(_HERE / "unit.py"), "check", str(unit_dir)]
     # The separate judge receives the complete authority snapshot directly
@@ -2105,24 +2136,11 @@ def _check(unit_dir, launch_facts=None):
     # Anonymous coordinator-owned storage is the authority channel. stdout
     # contains diagnostics derived from agent-writable artifacts and cannot
     # become authority merely by printing a reserved-looking prefix.
-    with tempfile.TemporaryFile(mode="w+b") as result_sink:
+    with _authority_result_sink() as result_sink:
         result_fd = result_sink.fileno()
-        child_result_fd = result_fd
-        low_duplicates = []
-        try:
-            # Popen installs its stdout/stderr capture pipes on 1 and 2. If a
-            # daemonized parent left either number free, passing that raw
-            # number would silently replace this authority channel. Keep each
-            # low dup open until dup() necessarily reaches a non-standard fd.
-            while child_result_fd < 3:
-                child_result_fd = os.dup(result_fd)
-                low_duplicates.append(child_result_fd)
-            argv += ["--result-fd", str(child_result_fd)]
-            rc, out, err = U.run(
-                argv, timeout=300, pass_fds=(child_result_fd,))
-        finally:
-            for duplicate in low_duplicates:
-                os.close(duplicate)
+        argv += ["--result-fd", str(result_fd)]
+        rc, out, err = U.run(
+            argv, timeout=300, pass_fds=(result_fd,))
         result_sink.seek(0)
         result_channel = result_sink.read(4097).decode("ascii", "replace")
     return rc, out or "", err or "", result_channel

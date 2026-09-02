@@ -160,15 +160,23 @@ def disarm_watchdog():
 def run(argv, cwd=None, timeout=30, pass_fds=()):
     """Run a command, returning (rc, stdout, stderr). Never raises, never hangs.
 
+    Descriptor containment is construction, not convention: stdin is
+    /dev/null, stdout/stderr are private capture pipes, every other descriptor
+    is closed except explicit non-standard pass_fds, and those are the only
+    handles a child can propagate to a descendant.
+
     start_new_session + killpg: a repository can configure diff.external to
     spawn a descendant that inherits the captured pipe, and killing only the
     child leaves the wait blocked on EOF forever.
     errors="replace": undecodable bytes must not raise UnicodeDecodeError.
     """
+    if any(not isinstance(fd, int) or fd < 3 for fd in pass_fds):
+        return 127, "", "refusing to pass a standard descriptor to a child"
     pr = None
     try:
-        pr = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, encoding="utf-8",
+        pr = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              close_fds=True, encoding="utf-8",
                               errors="replace", start_new_session=True,
                               pass_fds=pass_fds)
         out, err = pr.communicate(timeout=timeout)

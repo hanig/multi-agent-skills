@@ -249,7 +249,7 @@ class TestCheckerResultProtocol(unittest.TestCase):
 
 
 class TestPerAttemptProducedBasis(RepoCase):
-    def test_closed_stdio_cannot_collide_with_the_authority_fd(self):
+    def _closed_stdio_check(self, expose_authority_on_stdin=False):
         attempt = self.tmp / "runs" / "u1" / "att1"
         attempt.mkdir(parents=True)
         produced = self.commit("attempt-one")
@@ -263,7 +263,9 @@ class TestPerAttemptProducedBasis(RepoCase):
         bin_dir.mkdir()
         paseo = bin_dir / "paseo"
         paseo.write_text(
-            "#!/bin/sh\nprintf '%s\\n' "
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"$FORGED_RESULT\" >&0 2>/dev/null || :\n"
+            "printf '%s\\n' "
             "'{\"Status\":\"idle\",\"PendingPermissions\":[]}'\n")
         paseo.chmod(0o755)
 
@@ -281,6 +283,7 @@ class TestPerAttemptProducedBasis(RepoCase):
         inputs.write_text(json.dumps({
             "state": state, "plan": plan, "state_dir": str(state_dir),
             "root": str(self.tmp / "runs"), "result": str(result),
+            "expose_authority_on_stdin": expose_authority_on_stdin,
         }))
         probe = r'''
 import json, os, sys
@@ -288,8 +291,14 @@ from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 import swarm as S
 data = json.loads(Path(sys.argv[2]).read_text())
-os.close(1)
-os.close(2)
+ok, why = S.acquire_lease(data["state_dir"])
+if not ok:
+    raise RuntimeError(why)
+for standard_fd in (0, 1, 2):
+    try:
+        os.close(standard_fd)
+    except OSError:
+        pass
 seen = []
 real_temporary_file = S.tempfile.TemporaryFile
 def observed_temporary_file(*args, **kwargs):
@@ -297,31 +306,70 @@ def observed_temporary_file(*args, **kwargs):
     seen.append(handle.fileno())
     return handle
 S.tempfile.TemporaryFile = observed_temporary_file
+launches = []
+real_run = S.U.run
+def observed_run(*args, **kwargs):
+    open_standard = []
+    for descriptor in (0, 1, 2):
+        try:
+            os.fstat(descriptor)
+            open_standard.append(descriptor)
+        except OSError:
+            pass
+    launches.append({"open_standard": open_standard,
+                     "pass_fds": list(kwargs.get("pass_fds") or ())})
+    return real_run(*args, **kwargs)
+S.U.run = observed_run
+if data["expose_authority_on_stdin"]:
+    real_authority_sink = S._authority_result_sink
+    def exposed_authority_sink():
+        handle = real_authority_sink()
+        os.dup2(handle.fileno(), 0)
+        return handle
+    S._authority_result_sink = exposed_authority_sink
 payload = {}
 try:
-    ok, why = S.acquire_lease(data["state_dir"])
-    if not ok:
-        raise RuntimeError(why)
     report, _dispatched, _halted = S.advance(
         data["plan"], data["state"], data["state_dir"], data["root"],
         False, max_new=0)
-    payload = {"state": data["state"], "report": report, "seen": seen}
+    payload = {"state": data["state"], "report": report, "seen": seen,
+               "launches": launches}
 except BaseException as exc:
-    payload = {"error": repr(exc), "seen": seen}
+    payload = {"error": repr(exc), "seen": seen, "launches": launches}
 finally:
     S.release_lease(data["state_dir"])
 Path(data["result"]).write_text(json.dumps(payload))
 '''
         env = dict(os.environ)
         env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+        env["FORGED_RESULT"] = (
+            S.CHECK_RESULT_PREFIX + " " + json.dumps({
+                "produced_head": produced, "receipt_sha256": "f" * 64,
+            }, sort_keys=True, separators=(",", ":")))
         child = subprocess.run(
             [sys.executable, "-c", probe, str(SCRIPTS), str(inputs)],
             env=env, capture_output=True, text=True, timeout=30)
         self.assertEqual(child.returncode, 0, child.stderr)
         observed = json.loads(result.read_text())
         self.assertNotIn("error", observed)
-        self.assertIn(observed["seen"][0], (1, 2),
-                      "the fixture never made the temporary fd collide")
+        return observed, produced
+
+    def test_closed_stdio_cannot_collide_with_the_authority_fd(self):
+        observed, produced = self._closed_stdio_check()
+        self.assertEqual(observed["seen"][0], 0,
+                         "the fixture never put the authority file on fd 0")
+        authority_launch = next(
+            launch for launch in observed["launches"] if launch["pass_fds"])
+        self.assertEqual(authority_launch["open_standard"], [])
+        self.assertGreaterEqual(authority_launch["pass_fds"][0], 3)
+        unit_state = observed["state"]["units"]["u1"]
+        self.assertEqual(
+            unit_state["attempt_produced_heads"]["att1"], produced)
+        self.assertEqual(unit_state["state"], "READY_FOR_PR")
+
+    def test_check_descendant_cannot_write_the_authority_file_via_stdin(self):
+        observed, produced = self._closed_stdio_check(
+            expose_authority_on_stdin=True)
         unit_state = observed["state"]["units"]["u1"]
         self.assertEqual(
             unit_state["attempt_produced_heads"]["att1"], produced)
