@@ -1718,10 +1718,14 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
         # block for hours, holding the lease and checking nothing else. The
         # coordinator dispatches and detaches, exactly as it does for sbatch,
         # and unit.py judges the result later from the artifacts.
-        penv = dict(os.environ)
-        penv["SWARM_UNIT_ID"] = str(u["id"])
-        penv["SWARM_UNIT_DIR"] = str(unit_dir)
-        penv.update(dict(_dep_env(u, state or {})))
+        # Same policy as every U.run child. Pipelines bypass U.run because
+        # they detach, so they must construct their environment through the
+        # shared allowlist rather than inheriting coordinator authority.
+        penv = U.child_env({
+            "SWARM_UNIT_ID": str(u["id"]),
+            "SWARM_UNIT_DIR": str(unit_dir),
+            **dict(_dep_env(u, state or {})),
+        })
         log = Path(unit_dir) / "engine.log"
         try:
             fh = open(log, "ab")
@@ -1771,6 +1775,12 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
         if not workspace:
             return None, (f"unit {u.get('id')!r}: trusted coordinator state "
                           "records no execution workspace for this attempt")
+        # U.run contains the short-lived Paseo client's environment. The
+        # long-lived Paseo daemon is a separate process boundary: a live probe
+        # showed its provider credentials can still reach an agent even when
+        # absent from this client's environment. Paseo's --env cannot replace
+        # those provider variables. Do not mistake this boundary for daemon
+        # isolation; the daemon must itself be launched without ambient keys.
         argv = ["paseo", "run", "--background", "--json",
                 "--cwd", str(workspace),
                 "--provider", u.get("provider") or DEFAULT_AGENT_PROVIDER,

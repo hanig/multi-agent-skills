@@ -45,31 +45,33 @@ design, which a committee rejected and which is no longer what the code does.
 > and 13, the authority work, and the model routing. Everything below is what
 > remains. Status per item was verified against code, not recalled.
 
-### E1. Stop handing the agent the coordinator's environment. DO FIRST.
+### E1. Coordinator environment sanitised. DONE, with an ACCEPTED residue.
 
-Children inherit the coordinator's ambient environment. On this machine that
-includes `OPENAI_API_KEY` and `OPENROUTER_API_KEY`, so a code agent that the
-entire threat model treats as untrusted is given live credentials it can read
-out of `environ` and exfiltrate. Found by sol during the descriptor audit,
-correctly scoped out of the authority-channel repair, and never fixed.
+Children used to inherit the coordinator's whole environment, which here
+carries `OPENAI_API_KEY` and `OPENROUTER_API_KEY`. They no longer do:
+`child_environment.py` holds one allowlist, applied at every spawn path --
+`unit.run`, the direct pipeline launch, the sbatch submission, and the
+remaining direct Git subprocess in `coordinator_paths.py`. `PATH`, `HOME`,
+locale and temp settings, selected Git/Python/Slurm configuration,
+`SWARM_UNIT_*` and `SWARM_DEP_*` pass; provider credentials, auth and token
+variables, and broad `GIT_*` do not. Explicit `env` entries in a plan are
+still honoured, as trusted user input.
 
-This outranks C11 because it is the only item on this list that is a LIVE
-EXPOSURE rather than a latent defect. Six review rounds went into stopping the
-agent from writing a commit hash into a channel it should not reach, while it
-could read the keys the whole system authenticates with.
+**ACCEPTED LIMIT, Hani 2026-09-02.** This does NOT mean the agent receives no
+credential, and the difference matters:
 
-Do not simply strip everything: the child legitimately needs `PATH`, `HOME`,
-and the Git and Python settings that make the checkout usable, and scheduler
-jobs may export the environment by policy. Decide an allowlist, apply it at
-the same chokepoint as the descriptor containment (`unit.run` and the direct
-pipeline launch), and state the policy where it is enforced.
+  - Paseo's daemon supplies both provider keys to the agent independently of
+    anything the coordinator passes.
+  - `HOME` must be allowed, because a code agent needs it for Git config and
+    toolchains -- and `HOME` is where codex's stored auth now lives, since the
+    switch to `codex login --with-api-key`.
 
-Done when: a code agent's environment contains no credential the coordinator
-holds; the allowlist is declared in one place rather than per call site; a
-test asserts a planted secret in the coordinator's environment does not reach
-a spawned child; and the scheduler path is covered as well as the paseo path.
+Closing that needs daemon-launch sanitisation inside Paseo, or real
+user/process isolation. The coordinator boundary cannot enforce it, and Paseo
+is outside this repo. Accepted and not being pursued. Do not reopen this as a
+swarm defect; if it is ever revisited, it is a Paseo change.
 
-### C11. A worktree per code attempt. DO SECOND.
+### C11. A worktree per code attempt. DO FIRST.
 
 `paseo run` supports `--new-workspace worktree --worktree-mode branch-off
 --new-branch <name> --base <ref>`, and `paseo inspect` reports

@@ -53,13 +53,15 @@ files, ~4900 insertions. `main` and the worktree agree; the suite is green on
 
 **Next, in order** (full detail in `docs/plan-field-reports.md`):
 
-1. **E1, the live exposure.** Children inherit the coordinator's environment,
-   which here includes `OPENAI_API_KEY` and `OPENROUTER_API_KEY`. An untrusted
-   agent is handed live credentials. This is the only open item that is an
-   exposure rather than a latent defect.
-2. **C11, a worktree per code attempt.** The declared fix for the
+1. **C11, a worktree per code attempt.** The declared fix for the
    shared-checkout TOCTOU, promised twice in answer to a MAJOR and still owed.
-3. Then C12, C14, B1, B6, B4, B9 and the `scontrol` note.
+2. Then C12, C14, B1, B6, B4, B9 and the `scontrol` note.
+
+E1 is DONE with an accepted residue: the coordinator no longer leaks
+credentials to children, but Paseo's daemon supplies the provider keys to the
+agent independently, and `HOME` -- which a code agent must have -- is where
+codex's stored auth lives. Accepted 2026-09-02; closing it is a Paseo change,
+not a swarm one. Do not reopen it as a defect here.
 
 Model routing, set 2026-09-01: coding is `codex/gpt-5.6-sol` at thinking high;
 review is kimi/luna/glm; committee is luna/deepseek/kimi. Sol never reviews its

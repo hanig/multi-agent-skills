@@ -471,13 +471,16 @@ class TestThePipelinePredicate(unittest.TestCase):
 
 
 FAKE_PASEO = """#!/bin/sh
-# Fake paseo. $PASEO_FIXTURE holds the JSON `inspect` should return.
+# Fake paseo. The fixture sits beside this test's private bin directory; it is
+# deliberately not smuggled through ambient environment now that children get
+# only the production allowlist.
+fixture="$(dirname "$0")/../fixture.json"
 case "$1" in
-  inspect) cat "$PASEO_FIXTURE" ;;
-  ls)      cat "${PASEO_LS:-/dev/null}" ;;
+  inspect) cat "$fixture" ;;
+  ls)      cat /dev/null ;;
   run)     echo "Created workspace wks_deadbeef - fixture"
            echo "Tip: pass --workspace <id> to run in an existing workspace."
-           cat "$PASEO_FIXTURE" ;;
+           cat "$fixture" ;;
 esac
 exit 0
 """
@@ -503,7 +506,6 @@ class TestTheCodePredicate(unittest.TestCase):
         fx.write_text(json.dumps(fixture))
         env = dict(_os.environ)
         env["PATH"] = f"{bindir}:{env['PATH']}"
-        env["PASEO_FIXTURE"] = str(fx)
         return env
 
     def _attempt(self, tmp, agent="a1b2c3d4-0000-1111-2222-333344445555",

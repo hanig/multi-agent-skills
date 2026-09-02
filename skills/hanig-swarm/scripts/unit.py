@@ -73,6 +73,7 @@ import shutil
 import paseo_io as PIO
 import worktree as W
 import coordinator_paths as CP
+import child_environment as CE
 import signal
 import stat
 import subprocess
@@ -157,10 +158,14 @@ def disarm_watchdog():
             pass
 
 
+child_env = CE.child_env
+
+
 def run(argv, cwd=None, timeout=30, pass_fds=()):
     """Run a command, returning (rc, stdout, stderr). Never raises, never hangs.
 
-    Descriptor containment is construction, not convention: stdin is
+    Resource containment is construction, not convention: child_env supplies
+    the documented environment allowlist; stdin is
     /dev/null, stdout/stderr are private capture pipes, every other descriptor
     is closed except explicit non-standard pass_fds, and those are the only
     handles a child can propagate to a descendant.
@@ -174,7 +179,8 @@ def run(argv, cwd=None, timeout=30, pass_fds=()):
         return 127, "", "refusing to pass a standard descriptor to a child"
     pr = None
     try:
-        pr = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL,
+        pr = subprocess.Popen(argv, cwd=cwd, env=child_env(),
+                              stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               close_fds=True, encoding="utf-8",
                               errors="replace", start_new_session=True,

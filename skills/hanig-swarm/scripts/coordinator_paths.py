@@ -19,6 +19,8 @@ import tempfile
 import time
 from pathlib import Path
 
+import child_environment as CE
+
 
 class PathPolicyError(Exception):
     pass
@@ -42,6 +44,7 @@ def _git(repo, *args):
         p = subprocess.run(
             ["git", "-C", str(repo)] + list(args),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL, env=CE.child_env(), close_fds=True,
             encoding="utf-8", errors="replace", timeout=30)
     except (OSError, subprocess.SubprocessError):
         return None
