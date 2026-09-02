@@ -34,9 +34,10 @@ Status verified against code on 2026-09-01, not against memory of the session.
 | C10 | Refuse to dispatch a code unit into a dirty tree, at second zero | `swarm.py` `_write_launch_record` |
 | C13 | Coordinator state lives outside the repository it operates on | `coordinator_paths.py` |
 
-Plus one item nobody asked for, which the cycle forced: the launch record is
-now **evidence rather than authority**, with structural tests enforcing it.
-See "The root cause" below, and its open defects.
+Plus one item nobody asked for, which the cycle forced: the launch record and
+the receipt are now **audit-only**, and authority lives in coordinator state.
+See "The authority work" below. That section replaces the earlier sealing
+design, which a committee rejected and which is no longer what the code does.
 
 ## Open, in the order to do them
 
@@ -141,74 +142,88 @@ Belongs in the dispatch section of the skill.
   per partition. Partly covered by the grill work; needs an audit of what step
   2 asks against what `validate` enforces.
 
-## The root cause, and what it left open
+## The authority work, as it actually ended up
 
-A three-round review cycle was stopped by the gate itself: `round 4 exceeds
-the bound of 3 for one change. Past this, more rounds have not converged --
-they have been finding defects in the previous round's fixes.`
+Six review rounds, a three-member committee, and eight commits. The short
+version: **the launch record and the receipt are audit-only. Authority lives in
+coordinator state and reaches the separate judge over a channel the agent
+cannot obtain a handle to.**
 
-It was right. Four defects across three rounds were one move: deciding a trust
-question by reading the value back out of the launch record, which sits one
-level above the attempt directory handed to a full-access agent as
-`SWARM_UNIT_DIR`.
+### What kept recurring
 
-| round | field read back | decided |
+Every defect was one mistake wearing different clothes: the authority path was
+established by DISTINGUISHING it from the untrusted path rather than by
+construction, and each distinguishing property turned out to be shared with
+something the agent or the OS also controls.
+
+| # | the property that was supposed to distinguish it | how it leaked |
 |---|---|---|
-| 1 | `base_commit` | the verified base |
-| 2 | `preflight.status` | whether to charge a retry |
-| 3 | `execution_workspace` | which tree `paseo` runs in |
-| 3 | `dirty_paths` | whether to refuse |
+| 1 | a file the coordinator wrote first | the agent can write it too |
+| 2 | a digest of that file, held in state | detects tampering, is not authority |
+| 3 | a reserved prefix on a shared stdout | a newline in agent-written `engine.json` injects a line |
+| 4 | a dedicated descriptor, above 1 and 2 | `TemporaryFile` lands on fd 0, inherited as the child's stdin |
 
-`trusted_base`'s docstring said *"A test asserts nothing else reads
-base_commit out of a launch record."* No such test existed. That is the actual
-root cause: the invariant was prose, so violations were found by humans one at
-a time, and the worst was never found at all. `judge_detail` decided whether
-an attempt PRODUCED anything from a base, tree, branch and `clean_at_launch`
-it read from that record itself.
+`trusted_base`'s docstring had claimed a test enforced the invariant. No such
+test existed, which is why each violation had to be found by hand, one at a
+time, and why the worst of them -- `judge_detail` deciding production from a
+record it read itself -- was never found at all.
 
-The fix: the coordinator digests the record's bytes as it writes them and
-keeps the digest in its own state; `judge_detail` reads only through
-`read_sealed_launch_record`; the seal travels to the separate judging process
-as `unit.py check --record-seal`. Structural tests now enforce the invariant
-that used to be prose.
+### What it is now
 
-### Open defects in that fix (round 1 review, 3 MAJOR)
+- The complete launch snapshot is captured in coordinator state before the
+  spawn and passed to the judge as `--launch-facts`. Deleting or rewriting the
+  launch record cannot change a judgment; there is a test that says so.
+- `produced_head` is pinned per ATTEMPT. It was a unit-level scalar that was
+  never cleared, so a retry inherited the previous attempt's commit and pinned
+  its merge admission to it -- the same bug already fixed once for the launch
+  record, reproduced in state instead of on disk.
+- The checker reports its result over an anonymous `TemporaryFile` promoted
+  above fd 2, with every low alias closed. `unit.run` sets `stdin=DEVNULL`,
+  `close_fds=True` and `start_new_session=True`, and REFUSES any `pass_fds`
+  entry below 3 at the API boundary, so the mistake is unrepresentable rather
+  than avoided by convention.
+- No re-observation fallback. A missing basis fails closed.
 
-1. **The seal is not an authenticator.** It is an unkeyed SHA-256 of bytes the
-   agent can read, passed as a command-line argument. Anything that can read
-   the record can recompute it. It detects tampering ONLY when the seal comes
-   from the coordinator, which is true for `advance`'s invocation and false
-   for an agent invoking `unit.py check` itself with a rewritten record and a
-   matching digest. **The claim "a seal cannot be recomputed by anything that
-   does not hold coordinator state" was mine and it was wrong.** Options: an
-   HMAC keyed on a secret in the state dir, or pass the anchor values instead
-   of a digest. Note that neither closes the deeper question below.
+### The rule that makes re-checking safe
 
-2. **Fail-closed too hard, twice.** A crash between writing the record and
-   storing the seal, or a pre-existing record from before this change, leaves
-   `attempt_record_seals` empty; `_write_launch_record` returns no seal, the
-   attempt still dispatches, and it can then never be judged. A legitimate
-   unit becomes permanently stuck. Re-deriving the seal from the file is NOT
-   the fix, since that is the laundering being prevented; failing the attempt
-   with a clear reason so it retries into a fresh attempt directory is.
+Not "never ask again" -- that was the old code's over-correction, which refused
+a merge attestation for a genuinely produced commit because the branch had
+moved. The rule is **never ask a MUTABLE source again**. A commit and its tree
+are immutable; a ref and `HEAD` are not. Pin `A` once, and every later consumer
+uses `A`. A branch moved to `C` afterwards is harmless. A missing object `A` is
+an availability failure that fails closed, never a re-judgment.
 
-3. **The structural tests match literals only.** `_key_uses` and
-   `_raw_reader_calls` see direct string constants and direct reader names, so
-   a computed key or an alias introduces a violating site without failing.
-   Worth tightening, and worth stating the limit where the tests live.
+### Declared limits, not solved
 
-### The deeper question these findings expose
+- **Same-UID process compromise.** Nothing here defends against another
+  process running as the same user reaching in through `/proc` or `ptrace`.
+  That needs separate principals or containers.
+- **Process-tree quiescence.** The agent's process group is not guaranteed
+  dead before the check runs, so a lingering descendant could still touch
+  output files mid-digest. Recorded on each accepted receipt rather than
+  claimed closed.
+- **Ambient environment inheritance. NEW, and the most serious open item.**
+  Children inherit the coordinator's environment, which on this machine
+  includes `OPENAI_API_KEY` and `OPENROUTER_API_KEY`. A code agent the threat
+  model treats as untrusted is handed live credentials. Found during the
+  descriptor audit and deliberately not fixed there: sanitising it is a
+  compatibility-sensitive policy change. **Do this before C11.**
 
-`unit.py check` writes the receipt, and an agent with write access to the
-attempt directory can write `receipt.json` by hand regardless of any seal. The
-report's `_state_of` says the receipt WINS over coordinator state, deliberately
-and for good reasons. Coordinator closure comes from `advance`'s own
-invocation, and code units additionally close only on a merged PR, so this is
-not a straight path to DONE. But "which consumers trust a receipt, and what
-binds a receipt to a coordinator-caused check" has not been answered, and the
-seal work does not answer it.
+### Model routing, set 2026-09-01
 
-This is its own item, not a follow-up to the above.
+Coding agents are `codex/gpt-5.6-sol` at thinking high, including
+`start-a-sprint`'s workers, which previously used self-hosted DeepSeek Flash
+and native Luna. Sol coordinates and integrates; sol does NOT review, because
+an author reviewing itself is what the roster exists to prevent. The review
+gate is kimi-k2.7-code, luna and glm-5.3. The committee is luna, deepseek and
+kimi across two providers -- deepseek plans well and concedes under challenge
+but over-claims as a refuter, so it sits on the committee and in no gate
+profile. `committee.py` takes 2-3 members; `reviewers.json` has a `committee`
+profile separate from the gate tiers.
+
+Evidence for that split, from this session: kimi found a CRITICAL that luna,
+deepseek and glm all upheld past; luna then found the fd-0 MAJOR that kimi
+upheld past. Two rounds, two different models catching what the other missed.
 
 ## Loose ends
 
@@ -216,3 +231,9 @@ This is its own item, not a follow-up to the above.
   `unit.py`. Either wire it in or delete it.
 - No wandb integration for ML training units. Asked about and never closed.
 - Orphan paseo workspace `wks_acba5d75` from a probe run on 2026-08-31.
+- `paseo-advisor`, `paseo-committee`, `paseo-loop`, `paseo-handoff` and
+  `pi-fleet` pin no provider and fall back to Paseo's discovery, so they are
+  NOT sol. They live outside this repo; pinning them is a separate change.
+- `committee.py` phase 3 had never run: it called `R.run`, which does not exist
+  in `review.py`. Fixed at e122243. Found by using it, which is the only way
+  that class of bug surfaces.
