@@ -2114,7 +2114,11 @@ def _authority_result_sink():
         while promoted_fd < 3:
             promoted_fd = os.dup(sink.fileno())
             duplicates.append(promoted_fd)
-        promoted = os.fdopen(duplicates.pop(), "w+b")
+        # Do NOT pop before fdopen succeeds. fdopen takes ownership of the
+        # descriptor only on success; popping first means an exception leaves
+        # that one fd owned by nobody and closed by no one.
+        promoted = os.fdopen(duplicates[-1], "w+b")
+        duplicates.pop()
     except BaseException:
         for duplicate in duplicates:
             os.close(duplicate)
