@@ -22,19 +22,35 @@ import coordinator_paths as CP  # noqa: E402
 import child_environment as CE  # noqa: E402
 
 
-SECRET_NAME = "E1_PLANTED_COORDINATOR_SECRET"
+SECRET_NAME = "OPENAI_API_KEY"
 DEP_SHAPED_SECRET = "SWARM_DEP_OPENAI_API_KEY"
 UNIT_SHAPED_SECRET = "SWARM_UNIT_OPENAI_API_KEY"
+EXPECTED_DENIED_NAMES = {
+    "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "SENTRY_DSN_NXTRAY",
+    "SSH_AUTH_SOCK",
+    "SBATCH_GET_USER_ENV",
+}
 
 RUNTIME_NAMES = (
     "LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "SLURM_JOB_ID",
     "MODULEPATH", "MODULESHOME", "LOADEDMODULES", "LMOD_SYSTEM_NAME",
     "SRUN_CPU_BIND", "SALLOC_ACCOUNT", "SLURM_CPU_BIND", "http_proxy",
-    "https_proxy", "no_proxy", "NCCL_DEBUG", "OMPI_MCA_btl",
+    "https_proxy", "no_proxy", "NCCL_DEBUG", "OMPI_MCA_btl", "AWS_REGION",
 )
 
 
 SPAWN_NAMES = {"run", "Popen", "call", "check_call", "check_output"}
+
+# BEST-EFFORT LINT, NOT A PROOF. This catches ordinary direct subprocess calls
+# whose env= expression is not syntactically a direct child_env(...) call, and
+# recursively checks today's scripts. Python permits assigned subprocess
+# aliases, getattr access, dynamic imports and rebinding CE.child_env; those can
+# evade this scan. Adding spellings in pursuit of airtight static provenance
+# would repeat the unbounded-pattern mistake this module exists to avoid.
 
 
 def _child_env_call(node, module_aliases, direct_aliases):
@@ -62,14 +78,6 @@ def _subprocess_calls(path):
         if isinstance(n, ast.ImportFrom)
         and n.module == "child_environment" for n in n.names
         if n.name == "child_env"}
-    rebound = {n.id for n in ast.walk(tree)
-               if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
-    rebound.update(n.name for n in ast.walk(tree)
-                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                     ast.ClassDef)))
-    rebound.update(n.arg for n in ast.walk(tree) if isinstance(n, ast.arg))
-    child_module_aliases -= rebound
-    child_direct_aliases -= rebound
     direct_names = {n.asname or n.name for n in ast.walk(tree)
                     if isinstance(n, ast.ImportFrom)
                     and n.module == "subprocess" for n in n.names
@@ -108,39 +116,30 @@ def _spawn_offenders(root):
 
 
 class TestEnvironmentContainment(unittest.TestCase):
-    def test_unit_run_does_not_pass_an_ambient_secret(self):
+    def test_every_exact_denied_name_and_ambient_swarm_name_is_absent(self):
+        self.assertEqual(set(CE.DENIED_ENV_NAMES), EXPECTED_DENIED_NAMES)
         probe = (
             "import json,os; print(json.dumps({"
-            f"'secret': {SECRET_NAME!r} in os.environ, "
+            f"'denied': [n for n in {sorted(EXPECTED_DENIED_NAMES)!r} "
+            "if n in os.environ], "
             f"'dep_shaped': {DEP_SHAPED_SECRET!r} in os.environ, "
             f"'unit_shaped': {UNIT_SHAPED_SECRET!r} in os.environ, "
             "'path': bool(os.environ.get('PATH'))}))"
         )
-        planted = {SECRET_NAME: "live-secret",
-                   DEP_SHAPED_SECRET: "live-secret",
-                   UNIT_SHAPED_SECRET: "live-secret"}
+        planted = {name: "live-secret" for name in EXPECTED_DENIED_NAMES}
+        planted.update({DEP_SHAPED_SECRET: "live-secret",
+                        UNIT_SHAPED_SECRET: "live-secret"})
         with mock.patch.dict(os.environ, planted):
             rc, out, err = U.run([sys.executable, "-c", probe])
         self.assertEqual(rc, 0, err)
         self.assertEqual(json.loads(out), {
-            "secret": False, "dep_shaped": False, "unit_shaped": False,
+            "denied": [], "dep_shaped": False, "unit_shaped": False,
             "path": True})
-
-    def test_every_denied_name_and_pattern_is_stripped(self):
-        planted = {name: "credential" for name in CE.DENIED_ENV_NAMES}
-        planted.update({f"PLANTED{suffix}": "credential"
-                        for suffix in CE.DENIED_ENV_SUFFIXES})
-        planted.update({
-            "LC_OPENAI_API_KEY": "credential",
-            "lowercase_api_key": "credential",
-            "RUNTIME_CONTROL": "present",
-        })
-        with mock.patch.dict(os.environ, planted, clear=True):
-            got = CE.child_env()
-        self.assertEqual(got, {"RUNTIME_CONTROL": "present"})
 
     def test_runtime_environment_reaches_the_actual_child(self):
         planted = {name: f"value-{i}" for i, name in enumerate(RUNTIME_NAMES)}
+        planted["http_proxy"] = "http://build-user:build-pass@proxy.corp:8080"
+        planted["https_proxy"] = "https://user:pass@proxy.corp:8443"
         probe = ("import json, os; print(json.dumps("
                  + repr(list(RUNTIME_NAMES))
                  + " and {n: os.environ.get(n) for n in "
@@ -150,40 +149,19 @@ class TestEnvironmentContainment(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         self.assertEqual(json.loads(out), planted)
 
-    def test_url_userinfo_and_known_key_values_are_redacted_in_child(self):
-        proxy = "https://user:pass@proxy.corp:8443/path?q=1#fragment"
-        planted = {
-            "https_proxy": proxy,
-            "CONFIG_JSON": '{"openai_api_key":"sk-secret","mode":"train"}',
-            "GITHUB_VALUE": "prefix ghp_example suffix",
-            "AWS_VALUE": "AKIAIOSFODNN7EXAMPLE",
-            "SLACK_VALUE": "xoxb-example-token",
-        }
-        names = list(planted)
-        probe = ("import json, os; print(json.dumps({n: os.environ.get(n) "
-                 "for n in " + repr(names) + "}))")
-        with mock.patch.dict(os.environ, planted, clear=True):
+    def test_path_containing_sk_tool_reaches_child_intact(self):
+        planted = "/opt/sk-tool/bin:/usr/bin"
+        probe = "import os; print(os.environ.get('PATH', ''))"
+        with mock.patch.dict(os.environ, {"PATH": planted}):
             rc, out, err = U.run([sys.executable, "-c", probe])
         self.assertEqual(rc, 0, err)
-        got = json.loads(out)
-        self.assertEqual(
-            got["https_proxy"],
-            "https://proxy.corp:8443/path?q=1#fragment")
-        self.assertEqual(
-            got["CONFIG_JSON"],
-            '{"openai_api_key":"REDACTED_CREDENTIAL","mode":"train"}')
-        for name in ("GITHUB_VALUE", "AWS_VALUE", "SLACK_VALUE"):
-            self.assertNotEqual(got[name], planted[name])
-            self.assertIn(CE.REDACTED_CREDENTIAL, got[name])
+        self.assertEqual(out, planted)
 
-    def test_aws_runtime_configuration_passes_but_credentials_do_not(self):
+    def test_ml_credentials_and_database_dsn_reach_child_untouched(self):
         planted = {
-            "AWS_REGION": "us-west-2",
-            "AWS_DEFAULT_REGION": "us-east-1",
-            "AWS_ENDPOINT_URL": "https://s3.internal",
-            "AWS_SECRET_ACCESS_KEY": "secret",
-            "AWS_ACCESS_KEY_ID": "AKIAIOSFODNN7EXAMPLE",
-            "AWS_SESSION_TOKEN": "session",
+            "HF_TOKEN": "hf_gated-model-token",
+            "WANDB_API_KEY": "sk-wandb-training-key",
+            "DATABASE_DSN": "postgres://alice:hunter2@db.internal/app",
         }
         names = list(planted)
         probe = ("import json, os; print(json.dumps({n: os.environ.get(n) "
@@ -191,14 +169,7 @@ class TestEnvironmentContainment(unittest.TestCase):
         with mock.patch.dict(os.environ, planted, clear=True):
             rc, out, err = U.run([sys.executable, "-c", probe])
         self.assertEqual(rc, 0, err)
-        self.assertEqual(json.loads(out), {
-            "AWS_REGION": "us-west-2",
-            "AWS_DEFAULT_REGION": "us-east-1",
-            "AWS_ENDPOINT_URL": "https://s3.internal",
-            "AWS_SECRET_ACCESS_KEY": None,
-            "AWS_ACCESS_KEY_ID": None,
-            "AWS_SESSION_TOKEN": None,
-        })
+        self.assertEqual(json.loads(out), planted)
 
     def test_only_explicit_constructed_swarm_values_are_passed(self):
         planted = {"SWARM_DEP_RESULT": "ambient-dependency",
@@ -222,8 +193,9 @@ class TestEnvironmentContainment(unittest.TestCase):
         offenders = _spawn_offenders(SCRIPTS)
         self.assertEqual(
             offenders, [],
-            "Coordinator subprocesses must pass env=child_env(...) directly; "
-            "wrappers require a deliberate structural-test exception:\n  "
+            "Best-effort lint: ordinary coordinator subprocesses must pass "
+            "env=child_env(...) directly. Dynamic Python can evade this "
+            "scan; see its declared limit above. Offenders:\n  "
             + "\n  ".join(offenders))
 
     def test_direct_import_alias_is_recognized(self):
@@ -234,17 +206,6 @@ class TestEnvironmentContainment(unittest.TestCase):
                 "from subprocess import Popen as launch\n"
                 "launch(['true'], env=contained())\n")
             self.assertEqual(_spawn_offenders(root), [])
-
-    def test_shadowed_direct_import_alias_is_an_offender(self):
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d)
-            (root / "launcher.py").write_text(
-                "from child_environment import child_env as contained\n"
-                "import subprocess\n"
-                "def contained():\n"
-                "    return {'OPENAI_API_KEY': 'credential'}\n"
-                "subprocess.Popen(['true'], env=contained())\n")
-            self.assertEqual(_spawn_offenders(root), ["launcher.py:5"])
 
     def test_mutating_environment_wrapper_is_an_offender(self):
         with tempfile.TemporaryDirectory() as d:

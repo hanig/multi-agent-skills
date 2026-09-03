@@ -53,10 +53,9 @@ carries `OPENAI_API_KEY` and `OPENROUTER_API_KEY`. They no longer do:
 path --
 `unit.run`, the direct pipeline launch, the sbatch submission, and the
 remaining direct Git subprocess in `coordinator_paths.py`. Runtime variables
-pass through; credential-shaped names, explicit AWS credential variables,
-URL userinfo, known provider-key values, and `SBATCH_GET_USER_ENV` do not.
-Constructed `SWARM_UNIT_*` and `SWARM_DEP_*` values pass, while ambient values
-with those prefixes do not.
+and values pass through unchanged; exact credential names known to be held by
+the coordinator and `SBATCH_GET_USER_ENV` do not. Constructed `SWARM_UNIT_*`
+and `SWARM_DEP_*` values pass, while ambient values with those prefixes do not.
 
 **ACCEPTED LIMIT, Hani 2026-09-02.** This does NOT mean the agent receives no
 credential, and the difference matters:
