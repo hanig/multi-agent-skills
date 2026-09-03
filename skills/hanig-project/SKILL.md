@@ -138,11 +138,18 @@ question now or a wasted plan later.
   in a metric the plan also caps in `retry_limits`; `max_attempts` above 1
   without that pair is refused.
 
-Two answers the interview owns outright, because **nothing downstream checks
-them**: `--mem`, which the survey may report as required here and which no
-validation reads, and the final unit's `findings.json`, whose absence only
-shows up as a missing section in the report. Both fail after the plan
-validated clean, which is the most expensive moment to learn anything.
+Two answers the interview still owns, though neither is unchecked any more.
+**`--mem`**: `swarm.py validate` refuses a `slurm` unit that requests no
+memory when the survey it reads reports `mem_flag_required`. That refusal is
+only as good as the survey, and on a host where none was recorded the flag is
+yours to get right -- validate says which of the two happened rather than
+printing a bare "plan is valid". **`findings.json`**: whether this project
+has findings to publish is a judgement no validator can make, so ask. What
+validate enforces is narrower and mechanical -- a unit that declares
+`findings.json` must also declare `promote_to`, because an output that is
+never promoted stays in the attempt's write root, where the report never
+looks. Both otherwise fail after the plan validated clean, which is the most
+expensive moment to learn anything.
 
 `mode` in particular has to be ASKED. An agent under default permissions stops
 at its first write and waits for a person, which is correct behaviour and fatal
@@ -179,7 +186,11 @@ this account reads as wide open if you only look at the allowance. If
 `deny_accounts` names it, this is not a question -- say the partition is
 closed to this account and move on. If either field reads `unknown`, say that
 instead of asking: `unknown` is not `unrestricted`, and a recommendation built
-on a query that never answered is a guess wearing a number.
+on a query that never answered is a guess wearing a number. `swarm.py
+validate` applies the same three-state rule to the plan and refuses a unit
+whose `--account` a partition denies, or leaves out of a `set`
+`allow_accounts`; it stays silent on `unknown`, so a clean validate is not
+evidence that the pairing was checked.
 
 **2. Is the per-job footprint still acceptable once `max_mem_per_cpu_mb` is
 applied?** Recommend the size the limit actually charges, and shrinking the
@@ -222,7 +233,7 @@ contract lives in `command`. It does not.
 | `outputs` are | relative to the run-dir | relative to the run-dir | relative to the run-dir |
 | judged by | Slurm accounting + declared outputs | launcher exit + declared outputs | agent lifecycle + outputs + a produced commit |
 | closed by | a predicate receipt | a predicate receipt | a **merged PR** |
-| also needs | `--mem` if the survey says so | a fresh work and publish dir | `repo`, a `target_branch`, and an explicit `mode` |
+| also needs | `--mem` if the survey says so, and an `--account` the `--partition` accepts | a fresh work and publish dir | `repo`, a `target_branch`, and an explicit `mode` |
 
 Three of those cost a full dispatch cycle each to learn, so they are worth
 reading twice:
@@ -503,8 +514,24 @@ Three sections carry most of the value, and two of them are easy to leave out:
   `findings.json`, and labelled as the project's claims, because the
   coordinator cannot verify them: it has no idea what a column means.
 
-**So the final unit must emit `findings.json`.** Declare it as one of that
-unit's outputs, in this shape:
+**So a project that has findings emits `findings.json` from the unit that
+produces them, and publishes it.** Not every project has any: a plan whose
+last unit is a training run or a code change has an artifact and a merged PR
+to show, not claims about data, and a rule demanding the file from every
+terminal unit would refuse honest plans and be routed around with an empty
+`{"findings": []}`. So this is the interview's question, not the validator's.
+
+What IS enforced, because it is mechanical: **the unit declaring
+`findings.json` must also declare `promote_to`, or `swarm.py validate`
+refuses the plan.** Declared outputs live in the attempt's exclusive write
+root and the report reads `findings.json` from the project directory, so an
+unpromoted findings file is written, digested, and read by nobody -- which
+looks exactly like never writing one. Declare it as one of that unit's
+outputs, with a promotion destination, in this shape:
+
+```json
+{"outputs": ["findings.json"], "promote_to": "/abs/path/to/the/project"}
+```
 
 ```json
 {"findings": [{"title": "one sentence a reader can act on",

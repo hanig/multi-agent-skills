@@ -208,6 +208,227 @@ def partition_problems(units, known=_LOOK_IT_UP):
     return bad
 
 
+# --- what the survey already knows ----------------------------------------
+#
+# `survey.py` records this cluster BEFORE the plan is written: whether the
+# scheduler has a default memory, and who each partition will accept. Three
+# parts of the system agreed those facts matter -- the survey computes them,
+# the skill tells the planner to plan around them, the report prints them --
+# and the one component that can refuse a plan never looked. A unit charging
+# an account its partition denies validated clean and then spent hours in
+# QOSGrpCpuLimit beside 202 idle CPUs.
+#
+# THE RULE FOR `unknown` IS THE WHOLE DESIGN. Every allowance is recorded as
+# {"state": "set"|"unrestricted"|"unknown", "value": ...}, and unknown means
+# the query did not answer -- scontrol was missing, sacctmgr failed, the
+# survey predates the field. A refusal built on that is a guess wearing a
+# number: it blocks honest work on the first flaky day, and a validator that
+# cries wolf gets switched off. So unknown refuses NOTHING here. It is not
+# reported as satisfied either: silence from these checks means "not
+# checked", which is why `validate` names the survey it read, or says it read
+# none.
+SURVEY_FILE = os.path.join(".swarm", "survey.json")
+
+# The one artifact hanig-project's report renders as the project's own
+# claims. Named here because validate now has an opinion about it; see the
+# findings block in validate_plan for what that opinion is and is not.
+FINDINGS_FILE = "findings.json"
+
+# survey.py's vocabulary, imported as words rather than as a habit.
+LIMIT_SET, LIMIT_OPEN, LIMIT_UNKNOWN = "set", "unrestricted", "unknown"
+
+# The caveat that must ride along with every one of these judgements. Said
+# in the refusal itself, because that is the message someone reads while
+# choosing the partition they will move the unit to.
+QOS_CAVEAT = (
+    "Note that `qos_grptres` in the survey resolves the PARTITION QOS only: "
+    "an account or association QOS can impose a GrpTRES nothing here can "
+    "see, so a partition that accepts this account is still not a promise "
+    "the job will run.")
+
+
+def read_survey(path):
+    """One survey file as a mapping. Returns (survey, error)."""
+    data, err = U.read_json(path)
+    if err:
+        return None, err
+    if not isinstance(data, dict):
+        return None, "it is not a JSON object"
+    return data, None
+
+
+def discover_survey(plan_path=None, cwd=None):
+    """The survey recorded beside a plan. Returns (survey, note).
+
+    `None` is the answer when there is nothing to read, and the note says
+    which file was looked for or why the one found was not used. A validator
+    with no survey knows nothing about this cluster's allowances, and that is
+    `unknown`, which refuses nothing.
+
+    Two candidates, in order: the plan's own directory, then the working
+    directory, both at `.swarm/survey.json` -- the path hanig-project's very
+    first command writes.
+
+    A survey is an observation of ONE host. Applying another machine's
+    allowances here would refuse a unit on evidence about a different
+    cluster, so a hostname mismatch is unknown rather than authority. A
+    survey named explicitly on the command line is used as given: that is the
+    operator asserting it applies.
+    """
+    here = os.uname().nodename
+    tried = []
+    for base in (os.path.dirname(os.path.abspath(plan_path)) if plan_path
+                 else None, cwd or os.getcwd()):
+        if not base:
+            continue
+        cand = os.path.join(base, SURVEY_FILE)
+        if cand in tried:
+            continue
+        tried.append(cand)
+        if not os.path.isfile(cand):
+            continue
+        data, err = read_survey(cand)
+        if err:
+            return None, (f"the survey at {cand} could not be read ({err}), "
+                          f"so nothing in it was applied")
+        machine = data.get("machine") or {}
+        host = str(machine.get("hostname") or "").strip()
+        if host and host != here:
+            return None, (f"the survey at {cand} was taken on {host}, not "
+                          f"{here}. A survey is evidence about the host it "
+                          f"ran on, so nothing in it was applied here; pass "
+                          f"--survey to use it deliberately")
+        return data, cand
+    return None, (f"no survey was read (looked for {' and '.join(tried)}). "
+                  f"Record one with hanig-project's "
+                  f"`survey.py --repo . --out {SURVEY_FILE}`")
+
+
+def _scheduler_facts(survey):
+    sched = (survey or {}).get("scheduler")
+    return sched if isinstance(sched, dict) else {}
+
+
+def surveyed_partition(survey, name):
+    """The surveyed record for ONE partition, or None if the survey is silent
+    about it. Silence is unknown: `partitions_unavailable` and a partition
+    the query never listed are both "nothing was established here"."""
+    for part in (_scheduler_facts(survey).get("partitions") or []):
+        if isinstance(part, dict) and part.get("partition") == name:
+            return part
+    return None
+
+
+def limit_state(part, field):
+    """(state, value) for one allowance field, in the survey's vocabulary.
+
+    An ABSENT field is unknown, not unrestricted. schema_version 1 predates
+    the allowance block entirely, so a survey that never asked the question
+    must not read as one that asked and found no restriction."""
+    lim = (part or {}).get(field)
+    if not isinstance(lim, dict) or lim.get("state") not in (
+            LIMIT_SET, LIMIT_OPEN, LIMIT_UNKNOWN):
+        return LIMIT_UNKNOWN, None
+    return lim["state"], lim.get("value")
+
+
+def _account_names(value):
+    """An allowance's value as a list of account names, or None.
+
+    A bare string here would make `account in value` a SUBSTRING test, so
+    `lab` would pass an allow-list of `goodarzilab` and a deny-list naming
+    `goodarzilab` would refuse `lab`. Anything that is not a list is not an
+    account list, and not-a-list is unknown."""
+    if isinstance(value, (list, tuple)):
+        return [str(a) for a in value]
+    return None
+
+
+# Slurm's three ways to state a job's memory. `--mem` is MUTUALLY EXCLUSIVE
+# with `--mem-per-cpu` at submission, so insisting on `--mem` by name would
+# refuse a unit that has already answered the question in the only other
+# spelling it is allowed to use.
+MEM_FLAGS = ("--mem", "--mem-per-cpu", "--mem-per-gpu")
+
+
+def declared_memory(u):
+    """The memory request a unit makes, or None. Both spellings, as with
+    partition and account: `--mem=64G` and `--mem 64G`.
+
+    A flag with no value (`--mem=` or a trailing `--mem`) is not a request --
+    sbatch rejects it -- but it does not mask a later, well-formed one."""
+    args = [str(a) for a in (u.get("sbatch") or [])]
+    for i, a in enumerate(args):
+        name, sep, value = a.partition("=")
+        if name not in MEM_FLAGS:
+            continue
+        if sep:
+            if value.strip():
+                return a
+        elif i + 1 < len(args) and not args[i + 1].startswith("-"):
+            return f"{a} {args[i + 1]}"
+    return None
+
+
+def memory_flag_problems(units, survey):
+    """Which slurm units state no memory on a cluster that has no default.
+
+    `mem_flag_required` is the survey's reading of `DefMemPerNode`. Absent,
+    it is UNKNOWN -- `scontrol show config` did not answer, or the survey
+    predates the field -- and unknown refuses nothing and satisfies nothing.
+    """
+    sched = _scheduler_facts(survey)
+    if not sched.get("present") or "mem_flag_required" not in sched:
+        return []
+    if not sched.get("mem_flag_required"):
+        return []                       # answered: this cluster has a default
+    return [u.get("id", "?") for u in units
+            if isinstance(u, dict) and u.get("kind") == "slurm"
+            and not declared_memory(u)]
+
+
+def account_problems(units, survey):
+    """Which units charge an account their declared partition will not take.
+
+    BOTH HALVES of the rule, because Slurm prints `DenyAccounts` INSTEAD of
+    `AllowAccounts`: a partition that denies this account reads as wide open
+    to anyone who consults only the allowance. Checked only where the survey
+    ANSWERED -- `unknown` on one field still lets the other decide, and
+    `unknown` on both decides nothing.
+
+    Returns [(unit id, account, partition, what the survey says)].
+    """
+    bad = []
+    for u in units:
+        if not isinstance(u, dict) or u.get("kind") != "slurm":
+            continue
+        account, name = declared_account(u), declared_partition(u)
+        if not account or not name:
+            # An undeclared account is the association default and an
+            # undeclared partition is the cluster default. Neither is in the
+            # plan, so neither can be checked against the survey.
+            continue
+        part = surveyed_partition(survey, name)
+        if part is None:
+            continue
+        state, value = limit_state(part, "deny_accounts")
+        denied = _account_names(value)
+        if state == LIMIT_SET and denied is not None and account in denied:
+            bad.append((u.get("id", "?"), account, name,
+                        f"the survey records deny_accounts="
+                        f"{', '.join(denied)} on that partition, so the job "
+                        f"is refused there however long it queues"))
+            continue
+        state, value = limit_state(part, "allow_accounts")
+        allowed = _account_names(value)
+        if (state == LIMIT_SET and allowed is not None
+                and account not in allowed):
+            bad.append((u.get("id", "?"), account, name,
+                        f"that partition's allow_accounts is set to "
+                        f"{', '.join(allowed)}, which does not include it"))
+    return bad
+
+
 RESOLUTIONS = ("direct", "path", "conda", "container", "module", "uv",
                "wrapper")
 
@@ -673,9 +894,13 @@ def converge_verdict(u, attempt_dir):
                     bool(spec.get("sparse_metric")))
 
 
-def validate_plan(plan):
+def validate_plan(plan, survey=None):
     """Raise PlanError, or return a summary. Refuses BEFORE anything is
-    dispatched: a plan that cannot be run should not half-run."""
+    dispatched: a plan that cannot be run should not half-run.
+
+    `survey` is hanig-project's recorded observation of this cluster, or None
+    when there is none to read. None is UNKNOWN, not "no restrictions": every
+    check that consults it stays silent rather than guessing."""
     if not isinstance(plan, dict):
         raise PlanError("the plan is not a JSON object")
     units = plan.get("units")
@@ -949,6 +1174,43 @@ def validate_plan(plan):
                     f"conclusive; an output above it is neither exclusive nor "
                     f"findable.")
 
+    # --- findings.json must be able to REACH its reader -------------------
+    #
+    # ARC-247 asked whether every plan's terminal unit should be forced to
+    # declare `findings.json`. It should not, and the reason is not only that
+    # a training run has no findings to write: a "terminal unit declares it"
+    # check would not deliver the artifact either. `report.py` reads
+    # findings.json from the PROJECT DIRECTORY, while declared outputs live
+    # inside the attempt's exclusive write root, which nothing outside the
+    # attempt reads. A plan could satisfy that rule in full and the report
+    # would still render no findings section -- a passing check standing in
+    # for a working system, which is the shape of failure this validator
+    # exists to refuse.
+    #
+    # So the rule is narrowed to the part that is genuinely required and
+    # currently enforced nowhere: a unit that declares findings.json must
+    # also declare where it is published. Promotion is the only route out of
+    # the write root, and it is an explicit, approved, recorded step. Without
+    # one, the file is written, digested, and read by nobody.
+    for u in units:
+        if not isinstance(u, dict):
+            continue
+        for out in (u.get("outputs") or []):
+            if os.path.basename(str(out).strip()) != FINDINGS_FILE:
+                continue
+            if u.get("promote_to"):
+                break
+            raise PlanError(
+                f"unit {u.get('id','?')!r} declares the output {str(out)!r} "
+                f"and no 'promote_to'. Declared outputs stay inside the "
+                f"attempt's exclusive write root, and the only reader of "
+                f"{FINDINGS_FILE} -- report.py's \"Findings reported by this "
+                f"project\" section -- reads it from the PROJECT directory. "
+                f"Written there and never promoted, it is an artifact nobody "
+                f"sees, which is indistinguishable from not writing it. "
+                f"Declare \"promote_to\": \"/abs/path/to/the/project\", or "
+                f"drop the output if these findings are not being published.")
+
     # --- the runtime a unit will actually execute in -----------------------
     #
     # Nothing validated this, and it is the likeliest reason a scientific unit
@@ -1054,6 +1316,41 @@ def validate_plan(plan):
             f"sbatch flags, so this is usually a plan written for a different "
             f"cluster. Refusing here beats a half-dispatched DAG and an "
             f"sbatch error per unit.")
+
+    # --- the cluster facts the SURVEY already recorded --------------------
+    #
+    # Both of these were audited as "three parts of the system agree this
+    # matters and the one component that could refuse never looks". They read
+    # the survey and nothing else: no live sacctmgr call, because a validator
+    # that queries the controller per unit is a validator that hangs on a
+    # busy login node, and because the survey is the artifact the plan was
+    # written against. No survey is `unknown`, and unknown refuses nothing.
+    starved = memory_flag_problems(units, survey)
+    if starved:
+        raise PlanError(
+            f"unit(s) {', '.join(sorted(starved))} are kind=slurm and request "
+            f"no memory, but the survey of this cluster reports "
+            f"mem_flag_required: DefMemPerNode is UNLIMITED, so there is no "
+            f"default per-node memory to fall back on. A unit that says "
+            f"nothing here is not accepting a sensible default -- there is "
+            f"none -- and what it gets instead is a site-dependent fallback "
+            f"nothing in the plan records. Add a memory request to the unit's "
+            f"'sbatch' list: \"--mem=64G\". `--mem-per-cpu` or `--mem-per-gpu` "
+            f"count too, since sbatch refuses `--mem` alongside either.")
+
+    refused = account_problems(units, survey)
+    if refused:
+        listed = "; ".join(
+            f"{uid} charges {acct!r} on partition {part!r}, but {why}"
+            for uid, acct, part, why in refused)
+        raise PlanError(
+            f"this plan charges an account its partition will not accept: "
+            f"{listed}.\n"
+            f"    This is the failure the per-partition survey was added "
+            f"for: hours went into QOSGrpCpuLimit while a 736-CPU partition "
+            f"sat 202 CPUs idle, because nothing joined the account to the "
+            f"partition. Move the unit to a partition this account is allowed "
+            f"in, or charge an account that partition takes. {QOS_CAVEAT}")
 
     seen, by_id = set(), {}
     for i, u in enumerate(units):
@@ -5642,8 +5939,12 @@ def _load_plan(path):
     plan, err = U.read_json(path)
     if err:
         sys.exit(f"error: no readable plan at {path}: {err}")
+    # Dispatch validates against the survey too, not just `validate`. A
+    # refusal that only fires when someone runs the optional command is a
+    # refusal that fires after the DAG is live.
+    survey, _note = discover_survey(path)
     try:
-        validate_plan(plan)
+        validate_plan(plan, survey)
     except PlanError as e:
         sys.exit(f"error: invalid plan: {e}")
     except RecursionError:
@@ -5681,12 +5982,32 @@ def cmd_validate(args):
     plan, err = U.read_json(args.plan)
     if err:
         sys.exit(f"error: no readable plan at {args.plan}: {err}")
+    explicit = getattr(args, "survey", None)
+    if explicit:
+        # NAMED, so unreadable is an error rather than a shrug. Degrading a
+        # survey the operator pointed at into "unknown" would silently drop
+        # every check they asked for.
+        survey, serr = read_survey(explicit)
+        if serr:
+            sys.exit(f"error: no readable survey at {explicit}: {serr}")
+        note = explicit
+    else:
+        survey, note = discover_survey(args.plan)
     try:
-        summary = validate_plan(plan)
+        summary = validate_plan(plan, survey)
     except PlanError as e:
         sys.exit(f"error: invalid plan: {e}")
     print(f"plan is valid: {summary['units']} unit(s), "
           f"{summary['with_deps']} with dependencies")
+    # WHICH CLUSTER FACTS WERE CONSULTED, in both directions. A pass here
+    # means "the survey did not contradict this plan", and with no survey it
+    # means nothing at all, so neither may be printed as approval.
+    if survey is None:
+        print(f"  NOT CHECKED: {note}. Nothing here examined this cluster's "
+              f"memory policy or per-partition account rules.")
+    else:
+        print(f"  survey: {note} -- memory policy and per-partition account "
+              f"rules were checked against it. {QOS_CAVEAT}")
     # NAME WHAT WAS NOT VERIFIED, so silence is never read as approval. A real
     # run declared cpu_preemptible with 32 CPUs in its prose, ran on the
     # default partition with 2, and this printed "plan is valid" -- because
@@ -6176,7 +6497,10 @@ SCHEMA_FIELDS = [
      'inline or a "runtimes" id, or the literal "none". Declares resolution, '
      "entrypoint, probe and verified_by"),
     ("sbatch", "slurm", "optional",
-     "a LIST of scheduler flags. A string is iterated character by character"),
+     "a LIST of scheduler flags. A string is iterated character by "
+     "character. --mem is required when the survey reports "
+     "mem_flag_required, and --account is checked against the surveyed "
+     "allow/deny lists of the partition --partition names"),
     ("write_scopes", "all", "optional",
      "must not overlap between concurrent units. Names FILES; does NOT "
      "isolate a code unit's repository"),
@@ -6184,7 +6508,9 @@ SCHEMA_FIELDS = [
      '{"requires_clean_git": true, "path": "/checkout"}; opt-in launch '
      "preflight for a non-code unit"),
     ("promote_to", "all", "optional",
-     "where verified outputs are published. Needs a named approver"),
+     "where verified outputs are published. Needs a named approver. "
+     "REQUIRED of a unit whose outputs include findings.json, which the "
+     "report reads from the project directory rather than the write root"),
     ("max_attempts", "all", "optional",
      "default 1. Above 1 requires a retry contract with max_lost"),
     ("retry", "all", "optional",
@@ -6218,6 +6544,15 @@ SCHEMA_COUPLINGS = [
     "the file exists before convergence is judged over it.",
     "converge is refused on kind=code: a code unit is closed by a merged pull "
     "request and has no metrics series.",
+    "A slurm unit must state its memory (--mem, --mem-per-cpu or "
+    "--mem-per-gpu) when the survey reports mem_flag_required. With no "
+    "survey to read, that fact is unknown and nothing is refused on it.",
+    "A slurm unit's --account must not be denied by, nor missing from a set "
+    "allow_accounts of, the partition it names, as the survey recorded them. "
+    "unknown on a field decides nothing; the other field still decides.",
+    "A unit declaring findings.json must declare promote_to. Outputs stay in "
+    "the attempt write root and the report reads findings.json from the "
+    "project directory, so an unpromoted one is read by nobody.",
 ]
 
 
@@ -6659,6 +6994,13 @@ def main():
 
     v = sub.add_parser("validate", help="acyclic deps, disjoint write scopes")
     v.add_argument("plan")
+    v.add_argument("--survey", default=None,
+                   help="the survey.py JSON to check this plan's memory "
+                        "requests and account/partition pairs against. "
+                        "Without it, .swarm/survey.json beside the plan and "
+                        "then in the working directory, and if neither is "
+                        "there those cluster facts are UNKNOWN and nothing "
+                        "is refused on them.")
     v.set_defaults(fn=cmd_validate)
 
     r = sub.add_parser("run", help="dispatch what is ready, then exit")

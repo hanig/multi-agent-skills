@@ -5,6 +5,7 @@ Both are knowable at validate time, which is where a whole cycle collapses into
 one line.
 """
 import contextlib
+import json
 import os
 import shutil
 import sys
@@ -828,6 +829,504 @@ class TestTheCheapFixForAWrongPartitionIsWrittenDown(unittest.TestCase):
         usage = doc.index("## Usage")
         kinds = doc.index("## The three kinds")
         self.assertTrue(usage < doc.index("scontrol update JobId=") < kinds)
+
+
+# --- ARC-246: validate reads what the survey already recorded --------------
+#
+# survey.py computes the memory policy and the per-partition account rules,
+# the skill tells the planner to plan around them, the report prints them, and
+# the one component that could refuse a plan never looked. These tests state
+# each cluster fact in ONE state at a time, because the whole risk in this
+# feature is that `unknown` quietly becomes `fine`.
+
+
+@contextlib.contextmanager
+def cluster_tools_absent():
+    """PATH with no `sinfo` on it, so `_known_partitions()` answers UNKNOWN.
+
+    Not because this laptop has no Slurm. The suite also runs on andromeda,
+    where sinfo answers with that cluster's partition names and every test
+    below that names a fixture partition would be refused by the WRONG check
+    -- the same "passed on a laptop, failed on the cluster" trap the
+    `_LOOK_IT_UP` sentinel was introduced for."""
+    d = tempfile.mkdtemp(prefix="plan-shape-nocluster-")
+    old = os.environ.get("PATH", "")
+    try:
+        os.environ["PATH"] = d
+        yield d
+    finally:
+        os.environ["PATH"] = old
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def limit_set(value):
+    return {"state": "set", "value": value}
+
+
+OPEN = {"state": "unrestricted", "value": None}
+UNKNOWN = {"state": "unknown", "value": None,
+           "why": "scontrol is not on this PATH"}
+
+
+def surveyed(name, **fields):
+    """One partition as survey.py records it. A field left out is ABSENT,
+    which is the schema-version-1 case and must read as unknown."""
+    rec = {"partition": name}
+    rec.update(fields)
+    return rec
+
+
+def survey_doc(partitions=(), **scheduler):
+    """A survey document in survey.py's shape, for THIS host.
+
+    The hostname matters: a survey found beside a plan is only evidence about
+    the machine it ran on, so one carrying another host's name is ignored."""
+    sched = {"present": True}
+    sched.update(scheduler)
+    if partitions:
+        sched["partitions"] = list(partitions)
+    return {"schema_version": 3,
+            "machine": {"hostname": os.uname().nodename},
+            "scheduler": sched}
+
+
+class SurveyCase(unittest.TestCase):
+    """Base for tests whose subject is the SURVEY, not this host's Slurm."""
+
+    def setUp(self):
+        super().setUp()
+        cm = cluster_tools_absent()
+        cm.__enter__()
+        self.addCleanup(cm.__exit__, None, None, None)
+
+    def refuses(self, plan_, survey, *phrases):
+        with self.assertRaises(S.PlanError) as c:
+            S.validate_plan(plan_, survey)
+        msg = str(c.exception)
+        for phrase in phrases:
+            self.assertIn(phrase, msg)
+        return msg
+
+    def accepts(self, plan_, survey):
+        S.validate_plan(plan_, survey)
+
+
+class TestTheSurveySaysWhetherMemoryMustBeAsked(SurveyCase):
+    """`--mem` was enforced NOWHERE: grep for it in swarm.py returned
+    nothing, while survey.py computed `mem_flag_required` from
+    DefMemPerNode=UNLIMITED and the skill told the planner to add the flag."""
+
+    REQUIRED = staticmethod(lambda: survey_doc(mem_flag_required=True))
+
+    def test_a_slurm_unit_that_states_no_memory_is_refused(self):
+        msg = self.refuses(plan(sbatch=["--partition=cpu"]), self.REQUIRED(),
+                           "u1", "mem_flag_required", "--mem=")
+        self.assertIn("no default per-node memory", msg)
+
+    def test_a_unit_that_states_its_memory_is_not(self):
+        """The negative control. A check that refuses every plan has not
+        checked anything."""
+        for spelling in (["--mem=64G"], ["--mem", "64G"]):
+            self.accepts(plan(sbatch=spelling), self.REQUIRED())
+
+    def test_mem_per_cpu_counts_because_sbatch_refuses_both(self):
+        """--mem and --mem-per-cpu are mutually exclusive at submission, so
+        insisting on --mem by name would refuse a unit that has already
+        answered the question in the only other spelling it may use."""
+        for spelling in (["--mem-per-cpu=4G"], ["--mem-per-gpu", "8G"],
+                         ["--mem-per-cpu", "4G"]):
+            self.accepts(plan(sbatch=spelling), self.REQUIRED())
+
+    def test_a_flag_with_no_value_is_not_a_request(self):
+        self.refuses(plan(sbatch=["--mem="]), self.REQUIRED(), "u1")
+        self.refuses(plan(sbatch=["--mem", "--partition=cpu"]),
+                     self.REQUIRED(), "u1")
+
+    def test_a_malformed_flag_does_not_mask_a_good_one(self):
+        self.accepts(plan(sbatch=["--mem=", "--mem-per-cpu=4G"]),
+                     self.REQUIRED())
+
+    def test_mem_bind_is_not_a_memory_request(self):
+        """A prefix match would read --mem-bind as an answer to a question it
+        says nothing about."""
+        self.refuses(plan(sbatch=["--mem-bind=verbose"]), self.REQUIRED(),
+                     "u1")
+
+    def test_a_cluster_with_a_default_refuses_nothing(self):
+        """The surveyed answer NO. DefMemPerNode is a number here, so a unit
+        that says nothing is taking a real default."""
+        self.accepts(plan(sbatch=["--partition=cpu"]),
+                     survey_doc(mem_flag_required=False))
+
+    def test_a_survey_that_could_not_tell_refuses_nothing(self):
+        """UNKNOWN, the case that is easiest to get wrong. `scontrol show
+        config` did not answer, so the field is absent -- and absent is not
+        "no flag needed"."""
+        self.accepts(plan(sbatch=["--partition=cpu"]), survey_doc())
+
+    def test_no_survey_at_all_refuses_nothing(self):
+        """Validating on a machine with no survey is the same unknown."""
+        self.accepts(plan(sbatch=["--partition=cpu"]), None)
+
+    def test_a_host_without_slurm_refuses_nothing(self):
+        self.accepts(plan(sbatch=["--partition=cpu"]),
+                     {"scheduler": {"present": False},
+                      "machine": {"hostname": os.uname().nodename}})
+
+    def test_only_slurm_units_are_asked(self):
+        """A pipeline unit's engine submits its own jobs; its sbatch list is
+        not the one Slurm reads."""
+        p = plan(kind="pipeline", command="nextflow run x")
+        self.accepts(p, self.REQUIRED())
+
+
+class TestTheSurveySaysWhoMayChargeAPartition(SurveyCase):
+    """`declared_account` existed and was used ONLY for canary agreement.
+    B4 surveys allow_accounts and deny_accounts per partition, and this is
+    the failure it was bought with: hours in QOSGrpCpuLimit while a 736-CPU
+    partition sat 202 CPUs idle."""
+
+    def _plan(self, account="goodarzilab", partition="lab"):
+        return plan(sbatch=[f"--partition={partition}",
+                            f"--account={account}", "--mem=8G"])
+
+    def test_a_denied_account_is_refused(self):
+        s = survey_doc([surveyed("lab", allow_accounts=OPEN,
+                                 deny_accounts=limit_set(["goodarzilab"]))])
+        msg = self.refuses(self._plan(), s, "u1", "goodarzilab", "lab",
+                           "deny_accounts")
+        self.assertIn("QOSGrpCpuLimit", msg)
+
+    def test_an_account_missing_from_a_set_allow_list_is_refused(self):
+        s = survey_doc([surveyed(
+            "lab", allow_accounts=limit_set(["goodarzilab", "shared"]),
+            deny_accounts=OPEN)])
+        self.refuses(self._plan(account="other"), s, "allow_accounts",
+                     "does not include it")
+
+    def test_the_refusal_says_the_partition_qos_is_not_the_only_qos(self):
+        """A passing check must not read as a promise the job will run:
+        qos_grptres resolves the PARTITION QOS only, and an account or
+        association QOS can impose a GrpTRES the survey never sees -- the
+        second route to the same QOSGrpCpuLimit."""
+        s = survey_doc([surveyed(
+            "lab", deny_accounts=limit_set(["goodarzilab"]))])
+        msg = self.refuses(self._plan(), s, "qos_grptres")
+        self.assertIn("PARTITION QOS only", msg)
+        self.assertIn("not a promise", msg)
+
+    def test_an_allowed_account_is_not_refused(self):
+        """The negative control."""
+        s = survey_doc([surveyed(
+            "lab", allow_accounts=limit_set(["goodarzilab", "shared"]),
+            deny_accounts=OPEN)])
+        self.accepts(self._plan(), s)
+
+    def test_an_unrestricted_partition_is_not_refused(self):
+        s = survey_doc([surveyed("lab", allow_accounts=OPEN,
+                                 deny_accounts=OPEN)])
+        self.accepts(self._plan(), s)
+
+    def test_UNKNOWN_on_both_halves_refuses_nothing(self):
+        """THE case. A host without scontrol reports unknown for every
+        allowance, and a refusal built on a query that never answered is a
+        guess wearing a number."""
+        s = survey_doc([surveyed("lab", allow_accounts=UNKNOWN,
+                                 deny_accounts=UNKNOWN)])
+        self.accepts(self._plan(), s)
+        self.accepts(self._plan(account="nobody-has-this-account"), s)
+
+    def test_a_partition_with_no_allowance_block_refuses_nothing(self):
+        """schema_version 1 predates the block entirely. An absent field is
+        unknown, not unrestricted -- and not a crash."""
+        self.accepts(self._plan(), survey_doc([surveyed("lab")]))
+
+    def test_unknown_on_one_half_still_lets_the_other_decide(self):
+        """Slurm prints DenyAccounts INSTEAD of AllowAccounts, so one field
+        being unavailable is not a reason to ignore the one that answered."""
+        s = survey_doc([surveyed("lab", deny_accounts=UNKNOWN,
+                                 allow_accounts=limit_set(["shared"]))])
+        self.refuses(self._plan(), s, "allow_accounts")
+        s = survey_doc([surveyed("lab", allow_accounts=UNKNOWN,
+                                 deny_accounts=limit_set(["goodarzilab"]))])
+        self.refuses(self._plan(), s, "deny_accounts")
+
+    def test_an_account_list_is_never_matched_as_a_substring(self):
+        """`"lab" in "goodarzilab"` is True and would admit a unit onto a
+        partition that never allowed it. A value that is not a list is not an
+        account list."""
+        s = survey_doc([surveyed("lab",
+                                 allow_accounts=limit_set(["goodarzilab"]))])
+        self.refuses(self._plan(account="lab"), s, "allow_accounts")
+        s = survey_doc([surveyed("lab", deny_accounts=limit_set("goodarzilab"),
+                                 allow_accounts=OPEN)])
+        self.accepts(self._plan(), s)
+
+    def test_a_partition_the_survey_never_saw_refuses_nothing(self):
+        s = survey_doc([surveyed("other", allow_accounts=limit_set(["x"]))])
+        self.accepts(self._plan(), s)
+
+    def test_an_undeclared_account_refuses_nothing(self):
+        """The association default is not in the plan, so it cannot be
+        checked against the survey."""
+        s = survey_doc([surveyed("lab", allow_accounts=limit_set(["shared"]))])
+        self.accepts(plan(sbatch=["--partition=lab", "--mem=8G"]), s)
+
+    def test_an_undeclared_partition_refuses_nothing(self):
+        s = survey_doc([surveyed("lab", allow_accounts=limit_set(["shared"]))])
+        self.accepts(plan(sbatch=["--account=goodarzilab", "--mem=8G"]), s)
+
+    def test_every_spelling_of_the_two_flags_is_read(self):
+        s = survey_doc([surveyed("lab", allow_accounts=limit_set(["shared"]))])
+        for flags in (["-p", "lab", "-A", "goodarzilab"],
+                      ["-plab", "-Agoodarzilab"],
+                      ["--partition", "lab", "--account", "goodarzilab"]):
+            self.refuses(plan(sbatch=[*flags, "--mem=8G"]), s,
+                         "allow_accounts")
+
+
+class TestValidateFindsTheSurveyItself(SurveyCase):
+    """The plumbing. `validate` had no survey at all before this, so an
+    honest answer to "where does it get one" had to be built: the file
+    hanig-project's very first command writes, beside the plan."""
+
+    def _project(self, d, survey=None, plan_=None):
+        proj = Path(d)
+        (proj / ".swarm").mkdir(parents=True, exist_ok=True)
+        if survey is not None:
+            (proj / ".swarm" / "survey.json").write_text(json.dumps(survey))
+        (proj / "plan.json").write_text(json.dumps(plan_ or plan(
+            sbatch=["--partition=cpu"])))
+        return str(proj / "plan.json")
+
+    def test_it_reads_the_survey_beside_the_plan(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._project(d, survey_doc(mem_flag_required=True))
+            found, note = S.discover_survey(p)
+            self.assertEqual(found["scheduler"]["mem_flag_required"], True)
+            self.assertIn(".swarm", note)
+
+    def test_a_survey_from_ANOTHER_host_is_not_applied(self):
+        """A survey is an observation of one machine. Refusing a unit on
+        another cluster's allowances would be exactly the fabrication the
+        three-state rule exists to prevent."""
+        with tempfile.TemporaryDirectory() as d:
+            doc = survey_doc(mem_flag_required=True)
+            doc["machine"]["hostname"] = "some-other-login-node"
+            found, note = S.discover_survey(self._project(d, doc))
+            self.assertIsNone(found)
+            self.assertIn("some-other-login-node", note)
+            self.assertIn("--survey", note)
+
+    def test_an_unreadable_survey_is_unknown_and_says_so(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._project(d, survey_doc())
+            (Path(d) / ".swarm" / "survey.json").write_text("{not json")
+            found, note = S.discover_survey(p)
+            self.assertIsNone(found)
+            self.assertIn("could not be read", note)
+
+    def test_no_survey_names_the_path_it_looked_for(self):
+        with tempfile.TemporaryDirectory() as d:
+            found, note = S.discover_survey(self._project(d))
+            self.assertIsNone(found)
+            self.assertIn(os.path.join(".swarm", "survey.json"), note)
+            self.assertIn("survey.py", note)
+
+    def _validate(self, plan_path, *args):
+        import subprocess
+        return subprocess.run(
+            [sys.executable, str(SWARM), "validate", plan_path, *args],
+            capture_output=True, text=True)
+
+    def test_the_discovered_survey_refuses_the_plan_end_to_end(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._project(d, survey_doc(mem_flag_required=True))
+            r = self._validate(p)
+            self.assertNotEqual(r.returncode, 0, r.stdout)
+            self.assertIn("mem_flag_required", r.stderr)
+
+    def test_with_no_survey_it_names_what_it_did_not_check(self):
+        """Silence is never approval: "plan is valid" with no survey read
+        means the memory policy and the account rules were not examined at
+        all, and the reader has to be told which."""
+        with tempfile.TemporaryDirectory() as d:
+            r = self._validate(self._project(d))
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("NOT CHECKED", r.stdout)
+            self.assertIn("no survey was read", r.stdout)
+
+    def test_a_pass_against_a_survey_carries_the_qos_caveat(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._project(d, survey_doc(mem_flag_required=False))
+            r = self._validate(p)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("PARTITION QOS only", r.stdout)
+
+    def test_an_explicitly_named_survey_is_used(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._project(d)
+            elsewhere = Path(d) / "recorded.json"
+            elsewhere.write_text(json.dumps(survey_doc(
+                mem_flag_required=True)))
+            r = self._validate(p, "--survey", str(elsewhere))
+            self.assertNotEqual(r.returncode, 0, r.stdout)
+            self.assertIn("mem_flag_required", r.stderr)
+
+    def test_an_explicitly_named_survey_that_cannot_be_read_is_an_ERROR(self):
+        """Not a shrug. Degrading a survey the operator pointed at into
+        `unknown` would silently drop every check they asked for."""
+        with tempfile.TemporaryDirectory() as d:
+            r = self._validate(self._project(d), "--survey",
+                               os.path.join(d, "nope.json"))
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("no readable survey", r.stderr)
+
+    def test_dispatch_validates_against_the_survey_too(self):
+        """A refusal that only fires when someone runs the optional command
+        is a refusal that fires after the DAG is live."""
+        import subprocess
+        with tempfile.TemporaryDirectory() as d:
+            p = self._project(d, survey_doc(mem_flag_required=True))
+            r = subprocess.run(
+                [sys.executable, str(SWARM), "run", p, "--dry-run",
+                 "--state-dir", os.path.join(d, "state"),
+                 "--root", os.path.join(d, "runs")],
+                capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0, r.stdout)
+            self.assertIn("mem_flag_required", r.stderr)
+
+
+class TestTheSurveyShapeIsTheRealOne(SurveyCase):
+    """Every test above builds the survey by hand, so all of them would keep
+    passing if survey.py renamed a field tomorrow. This one runs the real
+    survey against a stubbed Slurm and hands its actual output to validate."""
+
+    PARTITIONS = (
+        'PartitionName=lab AllowAccounts=goodarzilab,shared Default=NO '
+        'State=UP MaxTime=infinite TotalNodes=8 MaxMemPerCPU=5120 QOS=lab_qos',
+        'PartitionName=preemptible DenyAccounts=goodarzilab Default=NO '
+        'State=UP MaxTime=1-00:00:00 TotalNodes=40 MaxMemPerCPU=0 QOS=normal',
+    )
+
+    def _survey(self, defmem="UNLIMITED"):
+        import subprocess
+        with tempfile.TemporaryDirectory() as d:
+            binp = Path(d) / "fakebin"
+            binp.mkdir()
+            # `defmem=None` prints NO DefMemPerNode line at all, which is the
+            # scontrol that answered without naming the field.
+            config = (f'    echo "DefMemPerNode = {defmem}" ;;\n' if defmem
+                      else '    echo "SchedulerType = sched/backfill" ;;\n')
+            bodies = {
+                "sinfo": "#!/bin/sh\n"
+                         'echo "lab|up|infinite|8"\n'
+                         'echo "preemptible|up|1-00:00:00|40"\n',
+                "scontrol": "#!/bin/sh\ncase \"$*\" in\n"
+                            "  *'show config'*)\n"
+                            + config
+                            + "  *'show partition'*)\n"
+                            + "".join(f"    echo '{line}'\n"
+                                      for line in self.PARTITIONS)
+                            + "    ;;\nesac\n",
+                "sacctmgr": "#!/bin/sh\ncase \"$*\" in\n"
+                            "  *'show qos'*) echo 'lab_qos|cpu=512' ;;\n"
+                            "  *'show assoc'*) echo 'goodarzilab' ;;\nesac\n",
+            }
+            for name, body in bodies.items():
+                (binp / name).write_text(body)
+                (binp / name).chmod(0o755)
+            env = dict(os.environ)
+            env["PATH"] = str(binp) + os.pathsep + env.get("PATH", "")
+            r = subprocess.run(
+                [sys.executable,
+                 str(ROOT / "skills" / "hanig-project" / "scripts"
+                     / "survey.py"), "--repo", d, "--json"],
+                capture_output=True, text=True, env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return json.loads(r.stdout)
+
+    def test_the_real_survey_drives_the_memory_refusal(self):
+        with self.assertRaises(S.PlanError) as c:
+            S.validate_plan(plan(sbatch=["--partition=lab",
+                                         "--account=goodarzilab"]),
+                            self._survey())
+        self.assertIn("mem_flag_required", str(c.exception))
+
+    def test_the_real_survey_drives_the_account_refusal(self):
+        with self.assertRaises(S.PlanError) as c:
+            S.validate_plan(plan(sbatch=["--partition=preemptible", "--mem=8G",
+                                         "--account=goodarzilab"]),
+                            self._survey())
+        self.assertIn("deny_accounts", str(c.exception))
+
+    def test_the_real_survey_also_lets_a_correct_plan_through(self):
+        S.validate_plan(plan(sbatch=["--partition=lab", "--mem=8G",
+                                     "--account=shared"]), self._survey())
+
+    def test_a_config_that_never_named_DefMemPerNode_is_unknown(self):
+        """survey.py used to write mem_flag_required=False when scontrol
+        printed no DefMemPerNode at all, which is "the query did not answer"
+        recorded as "no flag needed"."""
+        data = self._survey(defmem=None)
+        self.assertNotIn("mem_flag_required", data["scheduler"])
+        S.validate_plan(plan(sbatch=["--partition=lab"]), data)
+
+
+# --- ARC-247: findings.json ------------------------------------------------
+
+
+class TestFindingsMustBeAbleToReachTheReport(unittest.TestCase):
+    """The judgement call ARC-247 asked for, pinned so it cannot be reversed
+    by accident. `findings.json` is NOT required of every plan -- a terminal
+    training run or code unit has no claims about data to make, and a rule
+    that refuses those gets bypassed with an empty list, which is worse than
+    no rule. What is required is that a declared findings.json can REACH its
+    only reader: report.py loads it from the project directory, while
+    declared outputs never leave the attempt's exclusive write root."""
+
+    def test_a_declared_findings_file_with_no_promotion_is_refused(self):
+        with self.assertRaises(S.PlanError) as c:
+            S.validate_plan(plan(outputs=["findings.json"]))
+        msg = str(c.exception)
+        self.assertIn("promote_to", msg)
+        self.assertIn("artifact nobody sees", msg)
+
+    def test_a_nested_findings_file_is_caught_too(self):
+        with self.assertRaises(S.PlanError):
+            S.validate_plan(plan(outputs=["results/findings.json"]))
+
+    def test_a_promoted_findings_file_is_accepted(self):
+        """The negative control."""
+        S.validate_plan(plan(outputs=["findings.json"],
+                             promote_to="/tmp/a-project"))
+
+    def test_a_plan_with_no_findings_at_all_is_accepted(self):
+        """The decision itself. A plan whose terminal unit is a training run
+        has nothing to report, and refusing it would teach people to write
+        {"findings": []} to get past the validator."""
+        S.validate_plan(plan(outputs=["model.pt"]))
+        S.validate_plan({"project": "p", "units": [
+            {"id": "train", "kind": "slurm", "command": "true",
+             "runtime": "none", "outputs": ["model.pt"]},
+            {"id": "eval", "kind": "slurm", "command": "true",
+             "runtime": "none", "needs": ["train"], "outputs": ["scores.tsv"]},
+        ]})
+
+    def test_the_reader_this_rule_rests_on_still_reads_the_project_dir(self):
+        """The premise, pinned. If report.py ever learns to read findings out
+        of the terminal unit's attempt directory, this rule's justification is
+        gone and the rule should change with it."""
+        src = (ROOT / "skills" / "hanig-project" / "scripts"
+               / "report.py").read_text()
+        self.assertIn('"findings": _load(p("findings.json"))', src)
+
+    def test_the_doc_no_longer_demands_it_of_every_plan(self):
+        doc = " ".join((ROOT / "skills" / "hanig-project"
+                        / "SKILL.md").read_text().split())
+        self.assertNotIn("So the final unit must emit", doc)
+        self.assertIn("must also declare `promote_to`", doc)
+        self.assertIn("Not every project has any", doc)
 
 
 if __name__ == "__main__":

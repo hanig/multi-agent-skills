@@ -547,9 +547,15 @@ def scheduler():
             m = re.search(rf"^{key}\s*=\s*(.+)$", o, re.M)
             if m:
                 out.setdefault("config", {})[key] = m.group(1).strip()
-        # The one cluster fact that actually changes how a plan is written.
-        dm = (out.get("config", {}).get("DefMemPerNode") or "")
-        out["mem_flag_required"] = ("UNLIMITED" in dm.upper())
+        # The one cluster fact that actually changes how a plan is written,
+        # and now the one `swarm.py validate` refuses a memory-less unit on.
+        # ABSENT, not False, when scontrol printed no DefMemPerNode: `or ""`
+        # turned "the config did not say" into "no flag needed", which is the
+        # unknown-reads-as-fine direction, and a consumer cannot tell the two
+        # apart once it is written down as a bool.
+        dm = out.get("config", {}).get("DefMemPerNode")
+        if dm is not None:
+            out["mem_flag_required"] = ("UNLIMITED" in dm.upper())
     rc, o, _ = run(["sacctmgr", "-n", "show", "assoc",
                     f"user={os.environ.get('USER','')}", "format=Account%30"])
     if rc == 0:
