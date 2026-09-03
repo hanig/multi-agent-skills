@@ -167,14 +167,55 @@ they matter for reproducibility and ownership, never for making the predicate
 conclusive. Keep that distinction: when a new expensive check is proposed, ask
 "does write-root isolation already make this conclusive?" If yes, delete it.
 
+**That argument has a premise: the artifact was not already there.** "Found in
+an exclusive root, therefore produced here" holds only if the root was empty of
+that artifact when the attempt was dispatched, and nothing checked it until B1.
+Post-hoc observation cannot tell an input from an output: a unit that declared
+its input path as its output recorded a file it never wrote as produced
+evidence and read DONE. So the coordinator digests every declared artifact
+BEFORE dispatch, pins the result per ATTEMPT in its own state, and the checker
+refuses DONE for any declared artifact identical to that digest. A missing
+digest is a refusal, never a fresh look -- a digest taken afterwards is a
+digest of the run's own output. This is not the attribution machinery the drift
+guard forbids: it never asks which process wrote a file, only whether the thing
+digested first differs now, which is the question `judge_detail` already asks
+of a repository.
+
+**Its costs, stated rather than discovered.** Three, in order of how likely
+you are to meet them.
+
+- **An attempt dispatched before this existed has no basis**, so it can never
+  reach DONE. Re-dispatch it. There is no recovery path on purpose: the only
+  basis recoverable now would be a digest of what the run already wrote.
+- **An artifact over the 256 MB digest limit is compared by size and mtime**,
+  because hashing a 40 GB checkpoint on every check makes the predicate too
+  slow to run and a predicate nobody runs prevents nothing. A same-length
+  rewrite inside one second is invisible to it. The receipt records which
+  method was used per artifact and names, in its notes, every artifact whose
+  production rests on the weaker comparison.
+- **A byte-identical regeneration reads as no production.** Unchanged and
+  not-produced are indistinguishable from outside the run, and escaping that
+  would need the tool to digest immediately before and after the command it
+  launched -- which the coordinator does not launch; Slurm and Paseo do. In
+  practice this is nearly unreachable, because a coordinator-allocated write
+  root is empty at dispatch and an absent artifact is the passing case. It
+  bites only when something put the artifact there first, which is exactly
+  the condition this gate exists to catch.
+
 ## The authority path, and the two limits it does not close
 
 A predicate is only as good as the channel that reports it, so: **the launch
 record on disk and the attempt receipt are audit-only.** Authority lives in
 coordinator state, outside the operated repository and outside the attempt
 directory. The launch snapshot is captured there before the spawn and handed to
-the separate checker as `--launch-facts`; the checker reports its result back
-over an anonymous file with no live alias on fd 0, 1 or 2, and `unit.run`
+the separate checker as `--launch-facts`, and the pre-dispatch artifact digest
+travels the same way as `--artifact-basis` for the same reason -- it decides
+admission, so a copy the judged party can rewrite would not be a baseline. Both
+are pinned per ATTEMPT: `produced_head` was a unit-level scalar that was never
+cleared, so a retry inherited the previous attempt's commit, and a unit-level
+artifact digest would have been that bug a third time. The checker reports its
+result back over an anonymous file with no live alias on fd 0, 1 or 2, and
+`unit.run`
 REFUSES any `pass_fds` entry below 3 at the API boundary, so the
 result-file-lands-on-fd-0-and-is-inherited-as-stdin mistake is unrepresentable
 rather than avoided by convention. Rewriting `launch.json` changes no judging

@@ -25,6 +25,7 @@ SCRIPTS = ROOT / "skills" / "hanig-swarm" / "scripts"
 UNIT = SCRIPTS / "unit.py"
 sys.path.insert(0, str(SCRIPTS))
 import worktree as W  # noqa: E402
+import swarm as S  # noqa: E402
 import unit as U  # noqa: E402
 
 ENV = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@x",
@@ -103,6 +104,11 @@ class Base(unittest.TestCase):
                            cwd=str(self.tmp), timeout=300)
         self.assertEqual(r.returncode, 0, r.stderr)
         unit_dir = Path(r.stdout.strip().splitlines()[-1])
+        # BEFORE the outputs are written, exactly where the coordinator takes
+        # it. Taken after, it would be a digest of the run's own output and
+        # the unit could never be judged to have produced anything.
+        basis = S._capture_artifact_basis(
+            {}, "phase0b", str(unit_dir), {"outputs": list(outputs)})
         for o in outputs:
             p = unit_dir / o
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -111,7 +117,8 @@ class Base(unittest.TestCase):
                             "--job-id", "4242"], capture_output=True,
                            text=True, cwd=str(self.tmp), timeout=300)
         self.assertEqual(r.returncode, 0, r.stderr)
-        argv = [sys.executable, str(UNIT), "check", str(unit_dir), "--json"]
+        argv = [sys.executable, str(UNIT), "check", str(unit_dir), "--json",
+                "--artifact-basis", json.dumps(basis)]
         if facts is not False:
             argv += ["--launch-facts", json.dumps(facts or self.facts())]
         r = subprocess.run(argv, capture_output=True, text=True,

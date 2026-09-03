@@ -759,25 +759,6 @@ def cmd_bind(args):
     return 0
 
 
-def _outputs_present(unit_dir, spec):
-    """Which declared outputs exist INSIDE the exclusive write root.
-
-    Paths are resolved under the run-dir and an escape is refused rather than
-    followed: a declared output that resolves outside the root is not isolated,
-    so nothing about it can be concluded."""
-    present, missing, escaped = [], [], []
-    root = Path(unit_dir).resolve()
-    for rel in spec.get("declared_outputs") or []:
-        p = (root / rel).resolve()
-        try:
-            p.relative_to(root)
-        except ValueError:
-            escaped.append(rel)
-            continue
-        (present if p.exists() else missing).append(rel)
-    return present, missing, escaped
-
-
 # Above this, a declared output is fingerprinted by size+mtime rather than
 # content. Hashing a 40GB checkpoint on every check would make the predicate
 # too slow to run often, and a predicate nobody runs prevents nothing. The
@@ -1149,15 +1130,18 @@ REASON_NO_EVIDENCE = "no-accounting-row"   # nothing shows whether it ran
 REASON_NO_OUTPUTS = "outputs-absent"       # it ran cleanly and produced nothing
 
 
-def check_unit(unit_dir, spec, notes, launch_facts=None):
+def check_unit(unit_dir, spec, notes, launch_facts=None, artifact_basis=None):
     """The done predicate. Returns a state name.
 
-    Conclusive ONLY because the write root is exclusive. There is deliberately
-    no check anywhere in this function for "did the command write this file":
-    that question is unanswerable by observation and does not need answering
-    when nothing else may write here."""
+    Conclusive ONLY because the write root is exclusive AND the artifact was
+    not already sitting in it. There is still deliberately no check here for
+    "did the command write this file" -- that question is unanswerable by
+    observation. What `W.judge_artifacts` adds is the premise the exclusivity
+    argument was resting on unchecked: a declared output that existed before
+    dispatch and did not change is an input, whatever wrote it."""
     kind = spec.get("kind")
-    present, missing, escaped = _outputs_present(unit_dir, spec)
+    present, missing, escaped = W.outputs_present(unit_dir, spec)
+    spec["artifact_fingerprints"] = fingerprint_outputs(unit_dir, present)
     if escaped:
         notes.append(f"declared output(s) resolve outside the exclusive write "
                      f"root and are therefore not isolated: "
@@ -1165,12 +1149,16 @@ def check_unit(unit_dir, spec, notes, launch_facts=None):
                      f"run-dir.")
         return "INCOMPLETE"
 
+    def judged(state):
+        return W.judge_artifacts(state, artifact_basis, unit_dir, spec,
+                                 spec["artifact_fingerprints"], notes)
+
     if kind == "code":
-        return _code_state(unit_dir, spec, present, missing, notes,
-                           launch_facts)
+        return judged(_code_state(unit_dir, spec, present, missing, notes,
+                                  launch_facts))
 
     if kind == "pipeline":
-        return _pipeline_state(unit_dir, spec, present, missing, notes)
+        return judged(_pipeline_state(unit_dir, spec, present, missing, notes))
 
     job_id = spec.get("job_id")
     if not job_id:
@@ -1239,7 +1227,7 @@ def check_unit(unit_dir, spec, notes, launch_facts=None):
     notes.append(f"job {job_id} {sstate} exit {scode}, and all "
                  f"{len(present)} declared output(s) are present in the "
                  f"exclusive write root")
-    return "DONE"
+    return judged("DONE")
 
 
 def cmd_check(args):
@@ -1253,15 +1241,21 @@ def cmd_check(args):
     if facts_err and spec.get("kind") == "code":
         notes.append(facts_err + ". Re-dispatch this attempt; the launch "
                      "record is audit-only and cannot reconstruct authority.")
-    state = check_unit(unit_dir, spec, notes, launch_facts)
+    basis, basis_err = W.decode_artifact_basis(args.artifact_basis)
+    if basis_err and args.artifact_basis:
+        notes.append(basis_err)
+    state = check_unit(unit_dir, spec, notes, launch_facts, basis)
 
     receipt = {
         "schema_version": 1, "checked_at": now_iso(),
         "task_id": spec.get("task_id"), "attempt_id": spec.get("attempt_id"),
         "kind": spec.get("kind"), "job_id": spec.get("job_id"),
         "state": state, "exit_code": STATES[state], "notes": notes,
-        "outputs": fingerprint_outputs(unit_dir, _outputs_present(
-            unit_dir, spec)[0]),
+        # The fingerprints the PREDICATE judged, not a second look. Two walks
+        # of the same paths are two moments, and the receipt has to record the
+        # one that decided; the same reason `code_basis` reads the head off
+        # the spec instead of asking the repository again.
+        "outputs": spec.get("artifact_fingerprints") or {},
         # What this receipt does and does not establish, machine-readable, so a
         # consumer sees the boundary without parsing prose.
         # What this receipt establishes, and its BOUNDARY. Corrected after an
@@ -1356,6 +1350,10 @@ def main():
     # Complete authority snapshot, serialized directly from per-attempt
     # coordinator state. The launch record is only an audit copy.
     c.add_argument("--launch-facts", default=None)
+    # The pre-dispatch digest of every declared artifact, serialized from
+    # per-attempt coordinator state. Absent means DONE is unreachable, on
+    # purpose: there is no re-observation fallback.
+    c.add_argument("--artifact-basis", default=None)
     c.add_argument("--result-fd", type=int, default=None, help=argparse.SUPPRESS)
     c.set_defaults(fn=cmd_check)
 

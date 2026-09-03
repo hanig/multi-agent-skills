@@ -567,7 +567,7 @@ class TestReceiptProvenanceIsActuallyRecorded(unittest.TestCase):
         payload = _json.dumps({"task_id": "h", "attempt_id": "attempt-1",
                                "state": "DONE"})
 
-        def check(unit_dir, seal=None):
+        def check(unit_dir, seal=None, artifact_basis=None):
             # What the real check does: write the receipt, then report the
             # digest of the receipt it wrote.
             (Path(unit_dir) / "receipt.json").write_text(payload)
@@ -641,14 +641,14 @@ class TestOnlyAReceiptTheCheckReportedWritingIsAttested(unittest.TestCase):
         # digest because it wrote no receipt.
         forged = json.dumps({"task_id": "h", "state": "DONE"})
         seals = self._run(
-            lambda d, facts=None: (1, "check crashed", ""), forged)
+            lambda d, *_a, **_k: (1, "check crashed", ""), forged)
         self.assertEqual(seals, {}, "attested a receipt the check did not "
                                     "write")
 
     def test_a_malformed_digest_line_attests_nothing(self):
         forged = json.dumps({"task_id": "h", "state": "DONE"})
         seals = self._run(
-            lambda d, facts=None: (
+            lambda d, *_a, **_k: (
                 0, "DONE", "", "SWARM_CHECK_RESULT not-json"),
             forged)
         self.assertEqual(seals, {})
@@ -660,7 +660,7 @@ class TestOnlyAReceiptTheCheckReportedWritingIsAttested(unittest.TestCase):
         good = json.dumps({"task_id": "h", "attempt_id": "attempt-1",
                            "state": "FAILED"})
 
-        def check(unit_dir, seal=None):
+        def check(unit_dir, seal=None, artifact_basis=None):
             (Path(unit_dir) / "receipt.json").write_text(good)
             result = {"produced_head": None,
                       "receipt_sha256":

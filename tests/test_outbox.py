@@ -377,17 +377,24 @@ class TestThePipelinePredicate(unittest.TestCase):
             (d / "engine.rc").write_text(str(rc))
         return d
 
-    def _check(self, d):
-        r = subprocess.run([sys.executable, str(self.UNIT), "check", str(d)],
-                           capture_output=True, text=True)
+    def _check(self, d, basis=None):
+        argv = [sys.executable, str(self.UNIT), "check", str(d)]
+        if basis:
+            argv += ["--artifact-basis", json.dumps(basis)]
+        r = subprocess.run(argv, capture_output=True, text=True)
         return r.returncode, r.stdout + r.stderr
 
     def test_exit_zero_with_every_output_is_done(self):
         import tempfile
         with tempfile.TemporaryDirectory() as t:
             d = self._attempt(t, rc=0, outputs=["o.txt"])
+            # Digested BEFORE the output is written, where the coordinator
+            # takes it: an artifact already present and unchanged is not
+            # production, and without a basis DONE is unreachable at all.
+            basis = S._capture_artifact_basis(
+                {}, "u", str(d), {"outputs": ["o.txt"]})
             (d / "o.txt").write_text("real\n")
-            rc, out = self._check(d)
+            rc, out = self._check(d, basis)
             self.assertEqual(rc, 0, out)
 
     def test_exit_zero_with_a_missing_output_is_not_done(self):
@@ -521,9 +528,11 @@ class TestTheCodePredicate(unittest.TestCase):
             "created_at": "2026-08-28T00:00:00+0000"}))
         return d
 
-    def _check(self, d, env):
-        r = subprocess.run([sys.executable, str(self.UNIT), "check", str(d)],
-                           capture_output=True, text=True, env=env)
+    def _check(self, d, env, basis=None):
+        argv = [sys.executable, str(self.UNIT), "check", str(d)]
+        if basis:
+            argv += ["--artifact-basis", json.dumps(basis)]
+        r = subprocess.run(argv, capture_output=True, text=True, env=env)
         return r.returncode, r.stdout + r.stderr
 
     def test_idle_without_the_output_is_not_done(self):
@@ -544,8 +553,10 @@ class TestTheCodePredicate(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             env = self._env(t, {"Status": "idle", "PendingPermissions": []})
             d = self._attempt(t)
+            basis = S._capture_artifact_basis(
+                {}, "u", str(d), {"outputs": ["o.txt"]})
             (d / "o.txt").write_text("real\n")
-            rc, out = self._check(d, env)
+            rc, out = self._check(d, env, basis)
             self.assertEqual(rc, 0, out)
 
     def test_a_pending_permission_is_its_own_state(self):
@@ -2256,7 +2267,7 @@ class TestRetryBudgetBehaviour(unittest.TestCase):
                 "h": {"state": "SUBMITTED", "job_id": "2868624",
                       "attempt_dir": str(att), "attempts": attempts,
                       "gpu_hours": 0}}}))
-        m._check = lambda d, seal=None: (verdict, "forced")
+        m._check = lambda d, *_a, **_k: (verdict, "forced")
         # A real advance renews the lease between units, so the harness has to
         # hold it exactly as a controller would. Without this it stopped at
         # "no longer holds the lease" and measured nothing.
@@ -2502,7 +2513,7 @@ class TestACodeUnitIsNotDoneUntilMerged(unittest.TestCase):
         ok, _ = m.acquire_lease(str(st))
         self.assertTrue(ok)
         self.addCleanup(m.release_lease, str(st))
-        def forced_check(unit_dir, facts=None):
+        def forced_check(unit_dir, facts=None, artifact_basis=None):
             if verdict != 0:
                 return verdict, "forced", ""
             receipt = json.dumps({"task_id": "c", "attempt_id": "a1",
