@@ -833,6 +833,60 @@ class TestGatedPromotion(unittest.TestCase):
             self.assertEqual(next(iter(
                 durable["promotion_intents"].values()))["status"], "pending")
 
+    def test_publication_renames_are_fsynced_before_completion(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            plan, st, sd, _, shared = self._project(t)
+            destination = shared / "w"
+            observations = []
+            real_fsync_directory = S._fsync_directory
+
+            def observe(path):
+                # Resolved on BOTH sides: promote fsyncs the real path, and on
+                # macOS the tempdir arrives as /var/... while the realpath is
+                # /private/var/..., so an unresolved comparison never matches
+                # and the assertion silently observes nothing.
+                if Path(path).resolve() == destination.resolve():
+                    durable = S.load_state(sd)
+                    intent = next(iter(durable["promotion_intents"].values()))
+                    self.assertEqual(intent["status"], "pending")
+                    observations.append(((destination / "att1").exists(),
+                                         (destination / "current").is_symlink()))
+                return real_fsync_directory(path)
+
+            S._fsync_directory = observe
+            try:
+                lines, ok = S.promote(plan, st, sd, "w", "hani", True)
+            finally:
+                S._fsync_directory = real_fsync_directory
+            self.assertTrue(ok, "\n".join(lines))
+            self.assertIn((True, False), observations)
+            self.assertIn((True, True), observations)
+
+    def test_new_receipt_directory_entry_is_fsynced_before_completion(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            plan, st, sd, _, _ = self._project(t)
+            observed = []
+            real_fsync_directory = S._fsync_directory
+
+            def observe(path):
+                if Path(path) == Path(sd):
+                    durable = S.load_state(sd)
+                    intent = next(iter(durable["promotion_intents"].values()))
+                    self.assertEqual(intent["status"], "pending")
+                    self.assertTrue((Path(sd) / S.PROMOTIONS).is_file())
+                    observed.append(True)
+                return real_fsync_directory(path)
+
+            S._fsync_directory = observe
+            try:
+                lines, ok = S.promote(plan, st, sd, "w", "hani", True)
+            finally:
+                S._fsync_directory = real_fsync_directory
+            self.assertTrue(ok, "\n".join(lines))
+            self.assertTrue(observed)
+
     def test_the_canonical_name_is_a_pointer_not_a_copy_target(self):
         """Renaming into place is NOT atomic across filesystems, and a shared
         tree is usually a different mount from the run root, so a half-copied

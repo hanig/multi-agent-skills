@@ -3751,6 +3751,13 @@ def _paseo_path_ownership_problem(path):
     Git identity establishes what checkout is at the path; it does not
     establish that an existing Paseo workspace or agent belongs to this
     attempt. Registry unavailability is therefore uncertainty, not absence.
+
+    KNOWN LIMIT: Paseo has no conditional reservation primitive for an
+    already-existing checkout. These list calls reduce accidental adoption;
+    they do not close the list-then-run race against a same-UID process that
+    registers this path after both observations. Re-checking would only move
+    the gap. Closing it requires Paseo to atomically reserve-and-launch, or a
+    different OS identity/isolation boundary.
     """
     wanted = str(Path(path).resolve())
     workspaces = _paseo_workspace_records()
@@ -4962,6 +4969,16 @@ def cmd_advance(args):
 PROMOTIONS = "promotions.jsonl"
 
 
+def _fsync_directory(path):
+    """Persist directory-entry changes before recording their conclusion."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(str(path), flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def _append_promotion_receipt(state_dir, record):
     """Durably append one idempotent promotion receipt; return an error."""
     path = Path(state_dir) / PROMOTIONS
@@ -4974,11 +4991,20 @@ def _append_promotion_receipt(state_dir, record):
                 except ValueError:
                     continue
                 if existing.get("promotion_key") == key:
+                    # This may be recovery from a crash after the file fsync
+                    # but before its directory fsync. Anchor the visible entry
+                    # before allowing the pending intent to complete.
+                    _fsync_directory(path.parent)
                     return None
+        created = not path.exists()
         with path.open("a") as fh:
             fh.write(json.dumps(record, sort_keys=True) + "\n")
             fh.flush()
             os.fsync(fh.fileno())
+        if created:
+            # fsync(contents) does not make a newly-created filename durable.
+            # Completion may be saved only after the parent records the entry.
+            _fsync_directory(path.parent)
         return None
     except OSError as exc:
         return str(exc)
@@ -5190,7 +5216,17 @@ def promote(plan, state, state_dir, uid, approver, approve,
     save_state(state_dir, state)
 
     try:
+        missing_directories = []
+        cursor = version.parent
+        while not cursor.exists() and cursor != cursor.parent:
+            missing_directories.append(cursor)
+            cursor = cursor.parent
         version.parent.mkdir(parents=True, exist_ok=True)
+        # mkdir(parents=True) can create both the promotion root and the unit
+        # directory. Persist every new directory entry from the first created
+        # ancestor down; fsyncing only the leaf does not anchor its own name.
+        for created in reversed(missing_directories):
+            _fsync_directory(created.parent)
         if version.exists():
             # ALREADY PUBLISHED. The earlier version of this deleted it and
             # recopied, which destroys data other people may already be
@@ -5233,15 +5269,20 @@ def promote(plan, state, state_dir, uid, approver, approve,
             # and the canonical version is not published; there is no
             # cross-filesystem copy fallback that could expose a half-copy.
             os.replace(staging, version)      # same directory: atomic
+        # Persist either the new version rename or a version recovered from a
+        # crash after rename but before this fsync.
+        _fsync_directory(version.parent)
         tmp_link = dest / f".current-{os.getpid()}"
         if tmp_link.is_symlink() or tmp_link.exists():
             tmp_link.unlink()
         os.symlink(Path(attempt).name, tmp_link)
         os.replace(tmp_link, current)         # atomic pointer swap
+        _fsync_directory(current.parent)
     except OSError as e:
-        return lines + ["", f"REFUSING: promotion failed partway ({e}). The "
-                            f"canonical pointer was NOT moved, so nothing "
-                            f"downstream sees a partial result."], False
+        return lines + ["", f"REFUSING: promotion failed or could not be "
+                            f"made durable ({e}). No completion was recorded; "
+                            f"inspect version/current and rerun this exact "
+                            f"promotion."], False
 
     record = {"unit": uid, "attempt": Path(attempt).name,
               "promotion_key": promotion_key,
