@@ -543,7 +543,7 @@ crontab -l | grep swarm      # confirm
 with no human present. `crontab` exists on the lambda login node and the entry
 survives disconnection.
 
-The four things that make this safe, each proven by breaking it -- and read
+The six things that make this safe, each proven by breaking it -- and read
 the lock row's scope, which is narrower than the row used to say:
 
 | hole | guard | proven |
@@ -552,6 +552,8 @@ the lock row's scope, which is narrower than the row used to say:
 | crash between `sbatch` and bind | jobs named `swarm-<attempt>`; `reconcile_orphan` asks squeue/sacct | job id wiped from state on a LIVE job; advance recovered 187880 and did NOT resubmit |
 | `INCOMPLETE` forever | terminal `FAILED_EVIDENCE` after a 600s settle window; holds dependents | unit test |
 | plan edited mid-flight | canonical digest over dispatchable fields; refuses to advance | unit test |
+| two STATE DIRECTORIES dispatch one unit, or two units into one output path | a claim directory per declared output destination under `<root>/.output-claims`, `mkdir(exist_ok=False)` as the exclusivity; a foreign claim is released only when `squeue`/`paseo` positively says the attempt is gone | unit test. **A `squeue` that is absent or fails reads `unknown`, and unknown refuses** |
+| an agent runs `git stash` in one of several worktrees of one repo | the dispatched completion protocol forbids it and names the substitutes in the same breath; dispatch refuses a code unit whose source checkout has a non-empty stack | unit test. Field: three agents, three worktrees, one window, each `pop` took another's entry |
 
 
 **The lock's declared limit, which the table above used to talk past.**
@@ -571,6 +573,50 @@ row above were same-node: two controllers on two different nodes sharing the
 filesystem is outside the tested topology and would need a cross-node test to
 certify. So the evidence establishes same-node exclusion, on a filesystem that
 may be the one where the guarantee does not hold.
+
+**The output claims' declared limits, in the same spirit.** The lease excludes
+two controllers over one STATE DIRECTORY. It says nothing about two state
+directories over one output namespace, which is what three ad-hoc sub-plans of
+one project produce -- and that is how one unit came to be dispatched twice
+into identical output paths. The claim registry closes that, with three limits
+worth knowing before you rely on it:
+
+- It is **not an `flock`**, and it cannot be. `advance` dispatches and exits
+  while the job runs for hours, so a lock tied to the coordinator's lifetime
+  would be released seconds after the writer it protects started. The claim is
+  a durable directory, and staleness is settled by asking the scheduler, never
+  by a timeout. A coordinator frees its own claims -- including ones it left by
+  dying -- from its own state file; it can never free anybody else's.
+- It lives **under the run root**, so it is shared by exactly those
+  coordinators that share a run root. That covers the reported case, because
+  the default root is derived from the project checkout. Two coordinators
+  pointed at different `--root` values do not see each other's claims.
+- **A `squeue` that cannot be asked refuses.** Absent, failing, or a kind with
+  no registry to ask all read `unknown`, and unknown is not free. That is a
+  deliberate trade: it can block a unit whose job really did finish, and the
+  refusal names the exact claim directory to remove. Reading silence as
+  absence would instead start a second writer in a live namespace, which is
+  the failure the whole mechanism exists for.
+
+**Why the protocol forbids `git stash` and what it offers instead.** The stash
+stack is a SINGLE ref in the repository's shared common Git directory, so it is
+not per-worktree: every worktree of one repo shares one stack. Three agents in
+three worktrees each ran `git stash -u` inside one window and each `pop` took
+another's entry; it was recovered from dangling commits and cost real time. All
+three were checking whether a red test pre-existed their change, which makes it
+a protocol defect rather than three mistakes. So the dispatched protocol bans
+it and names the substitutes in the same sentence -- `git show <base>:<path>`
+to read a file at base, `git diff > /tmp/wip.patch` plus `git checkout --
+<path>` to set work aside, and a separate worktree at the base commit for a
+real comparison -- and tells the agent to read `git status --porcelain` for
+foreign paths before every commit, because the observed damage was a commit
+carrying another agent's files.
+
+What that comparison does NOT show is worth saying, because it was learned the
+same week: two branches can merge cleanly in text and not in meaning. Green at
+base and green in your worktree is a claim about your change alone, not about
+the integration branch after a merge. Only running the suite on the merged tree
+answers that.
 
 If you need the guard to hold, put the state dir on local disk -- the fallback
 chain already ends at `$TMPDIR/hanig-swarm-state` -- or run one coordinator per

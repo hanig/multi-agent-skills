@@ -840,20 +840,36 @@ def render(data, title=None):
     if refused:
         a("<section>")
         a('<div class="sec-head"><h2>Blocked before launch</h2>'
-          "<p>These units were refused at dispatch because their execution "
-          "workspace was not clean. Nothing ran, no retry was charged, and "
-          "the next pass will dispatch them once the workspace is clean. "
-          "Until then the run cannot finish.</p></div>")
+          "<p>These units were refused at dispatch. Nothing ran, no retry "
+          "was charged, and the next pass will dispatch them once the "
+          "condition named below is cleared. Until then the run cannot "
+          "finish.</p></div>")
         a('<div class="note"><ul>')
+        # THE REASON, not just the count. There are three preflight refusals
+        # now, and two of them have no dirty paths at all: a zero count
+        # rendered as "uncommitted changes" told a reader to go clean a
+        # workspace that was already clean.
+        detail = {
+            "shared-stash-stack":
+                ("has a non-empty <code>git stash</code> stack, which every "
+                 "worktree of it shares", "Apply or drop the parked entries "
+                 "(<code>git stash list</code> shows them), then re-run."),
+            "output-claim-held":
+                ("is claimed by a unit dispatched from another state "
+                 "directory", "Let that unit finish, or remove the claim "
+                 "named in the refusal, then re-run."),
+        }
         for r in refused:
             last = r["preflight_refusals"][-1]
             ws = last.get("workspace") or "an undeclared workspace"
             n = last.get("dirty_path_count")
-            count = ("%s dirty path(s)" % n) if n else "uncommitted changes"
-            a("<li><code>%s</code>: refused %d time(s); %s has %s. "
-              "Commit, stash or clean it, then re-run.</li>"
+            reason = str(last.get("reason") or "dirty-worktree")
+            said, remedy = detail.get(reason, (
+                ("has %s dirty path(s)" % n) if n else "has uncommitted "
+                "changes", "Commit or clean it, then re-run."))
+            a("<li><code>%s</code>: refused %d time(s); %s %s. %s</li>"
               % (e(r["id"]), len(r["preflight_refusals"]), e(str(ws)),
-                 e(count)))
+                 said, remedy))
         a("</ul></div></section>")
 
     # A stray file does NOT move the verdict. The receipt is audit-only, this

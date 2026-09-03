@@ -469,6 +469,17 @@ def _code_completion_protocol(intent):
     in arbitrary prose are not statically recognizable: matching phrases such
     as "do not commit" would also reject legitimate tasks that merely discuss
     them. A visible stop-and-report rule is bounded; a prose detector is not.
+
+    ARC-243, and why the stash rule is here rather than in the skill's prose.
+    Three agents in three worktrees of one repository each ran `git stash -u`
+    inside the same window. The stash stack is a SINGLE ref in the shared
+    common Git directory, so it is not per-worktree: every pop took somebody
+    else's entry. The work was recovered from dangling commits and it cost
+    real time. All three were doing the same reasonable thing -- checking
+    whether a red test pre-existed their change -- which is what makes it a
+    defect in the protocol rather than three mistakes, and which is why the
+    prohibition names its SUBSTITUTES in the same breath. A prohibition with
+    no alternative is a prohibition that gets worked around.
     """
     repo = str(intent["repo"])
     branch = str(intent["branch"])
@@ -494,6 +505,8 @@ The required pull-request target is {target!r}.
 Do not create or switch branches, and do not choose a different base.
 Commit all intended work on {branch!r}. Uncommitted work is invisible to the transition predicate and will be judged as producing nothing.
 {remote_instruction}
+NEVER run `git stash`, in any form. The stash stack is a SINGLE ref in the shared common Git directory, so every worktree of {repo!r} shares one stack and a pop takes whatever another agent parked. Do these instead: to read a file as it was at base, `git show {base}:<path>`; to set work aside, `git diff > /tmp/wip.patch` then `git checkout -- <path>`; and to answer "was this test already failing", add a separate worktree at {base} and run it there, rather than moving anything in this one. Note what such a comparison does and does not show: green at {base} and green here is a claim about your change alone, not about {target!r} after a merge.
+Before every commit, run `git status --porcelain` and read it. Stage only paths you changed yourself; if it lists a path you did not touch, STOP AND REPORT instead of committing it. The observed failure is a commit that carried another agent's files.
 If you cannot finish cleanly, STOP AND REPORT the problem instead of working around it.
 Leave the worktree clean. Do not force-push or rewrite history. The final commit must descend from recorded base {base}; rewritten history makes honest work unjudgeable."""
 
@@ -528,6 +541,15 @@ def _code_protocol_problem(prompt, intent):
             "repository_remote") else "no merge-evidence repository was recorded"),
         "clean failure instruction": "STOP AND REPORT",
         "history instruction": "Do not force-push or rewrite history",
+        # ARC-243. The prohibition and each substitute are required
+        # SEPARATELY and by exact text, so an edit cannot leave the ban
+        # standing with nothing to do instead -- which is the state in which
+        # it gets worked around.
+        "stash prohibition": "NEVER run `git stash`",
+        "read-at-base substitute": f"git show {str(intent['base_commit'])}:",
+        "set-aside substitute": "git diff > /tmp/wip.patch",
+        "base-comparison substitute": "add a separate worktree at",
+        "foreign path check": "git status --porcelain",
     }
     missing = [name for name, text in required.items() if text not in prompt]
     if missing:
@@ -1820,6 +1842,14 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
         if existing_intent:
             anchor_err = _code_launch_intent_problem(
                 existing_intent, u, attempt)
+            # Re-run the stash preflight on a re-dispatch of the SAME
+            # attempt, for the reason `_write_launch_record` re-runs the
+            # dirty predicate on its own already-anchored path: retry and
+            # recovery must not be the way past a launch check. The anchored
+            # base is never recaptured or re-trusted here, only the CURRENT
+            # condition re-asked.
+            if not anchor_err:
+                anchor_err = _repeat_stash_preflight(u)
             anchored_base = (None if anchor_err else {
                 "base": existing_intent["base_commit"],
                 "intent": existing_intent,
@@ -2237,6 +2267,11 @@ class PreflightRefusal(str):
 
     workspace = None
     dirty_count = 0
+    # WHICH preflight refused. There are two of them now, and the counts
+    # cannot tell them apart: a shared-stash-stack refusal has zero dirty
+    # paths, and the run report rendered a zero count as "uncommitted
+    # changes", which misstates why nothing ran.
+    reason = "dirty-worktree"
 
 
 def _plan_workspace(u):
@@ -2296,6 +2331,330 @@ def _repeat_launch_preflight(u):
     return None, resolved_top
 
 
+# --- B6: one live claim per declared output destination -------------------
+#
+# NOT validate_plan's duplicate-id check, which can only see one plan. The
+# skill encourages ad-hoc sub-plans; a reporter made three, and one unit was
+# dispatched twice from two of them into identical output paths. Both
+# coordinators were correct about everything they could see: `acquire_lease`
+# excludes two CONTROLLERS over one state directory, and says nothing at all
+# about two state directories over one output namespace.
+#
+# WHY A CLAIM DIRECTORY AND NOT AN flock. `acquire_lease`'s docstring is
+# emphatic that an advisory lock beats every hand-rolled lease it replaced,
+# because the kernel drops it when the holder dies and so there is no TTL to
+# steal. That property is simply unavailable here: `advance` dispatches and
+# EXITS, while the job it dispatched runs for hours or days. A lock held by
+# the coordinator process would be released seconds after the thing it is
+# meant to protect started, and holding it longer would mean not detaching,
+# which is the design. So the claim is durable, and "is it stale" is answered
+# by asking the party that actually knows -- the scheduler -- instead of by
+# inventing the timeout `acquire_lease` was rewritten to delete.
+#
+# `mkdir(exist_ok=False)` IS the exclusivity, the same primitive and the same
+# reasoning as unit.py's exclusive write root: two coordinators cannot both
+# create one directory, and unlike O_EXCL on a plain file, directory creation
+# is atomic on the network filesystems these paths usually sit on. Taking
+# over a claim PROVEN dead is one `rename` of the whole directory, so exactly
+# one racer wins it and the loser refuses.
+#
+# WHAT THIS DOES NOT GIVE YOU, stated in the spirit of ARC-248's note on the
+# lease rather than left for someone to assume: the registry lives under the
+# RUN ROOT, so it is shared by exactly those coordinators that share a run
+# root. That is the reported case -- the default root is derived from the
+# project checkout, so ad-hoc sub-plans of one project all land on it -- but
+# two coordinators pointed at different roots do not see each other's claims,
+# and no claim of any kind is taken by a dry run.
+OUTPUT_CLAIMS_DIRNAME = ".output-claims"
+CLAIM_FILE = "claim.json"
+
+# survey.py's vocabulary, imported as a habit rather than as a word: "the
+# scheduler does not list it" and "the scheduler could not be asked" are
+# different facts, and written the same way the second reads as the first.
+# Here that difference decides whether a second job is dispatched into a
+# namespace a live one owns, so they are never collapsed.
+CLAIM_LIVE, CLAIM_FREE, CLAIM_UNKNOWN = "live", "free", "unknown"
+
+
+def _inside_dir(path, directory):
+    try:
+        Path(path).relative_to(Path(directory))
+        return True
+    except ValueError:
+        return False
+
+
+def _output_destinations(u, root):
+    """Every place a unit's DECLARED OUTPUTS land, as (label, abs path).
+
+    The unit's own namespace `<root>/<id>` comes first. Every attempt of that
+    id lives under it, `SWARM_DEP_<ID>` points into it, and it is precisely
+    what two plans naming one unit id share -- which is the reported failure.
+
+    Then each declared output that ESCAPES that namespace, and each declared
+    output under `promote_to`. Those are the keys that catch two DIFFERENT
+    ids: a plain relative `metrics.jsonl` resolves inside its own namespace
+    and can collide with nobody, so claiming it would be a false refusal
+    against the commonest output name in the repo, while `../shared/model.pt`
+    or an absolute path or a shared promotion tree resolve to the SAME string
+    for both units. "The same outputs" only means anything as a destination.
+    """
+    uid = str(u.get("id") or "")
+    base = Path(root).resolve()
+    namespace = base / uid if uid else base
+    out = [("output namespace", str(namespace))]
+    seen = {str(namespace)}
+    anchors = [namespace]
+    promote = u.get("promote_to")
+    if isinstance(promote, str) and promote.strip():
+        # A malformed promote_to is `promote`'s refusal to make, with its own
+        # message; claiming nothing for it here neither hides that nor
+        # pretends to have checked a destination that does not resolve.
+        dest, derr = resolve_promote_to(promote, root)
+        if dest and not derr:
+            anchors.append(Path(dest))
+    for anchor in anchors:
+        for o in (u.get("outputs") or []):
+            resolved = os.path.normpath(os.path.join(str(anchor), str(o)))
+            if anchor == namespace and _inside_dir(resolved, namespace):
+                continue                  # covered by the namespace claim
+            if resolved not in seen:
+                seen.add(resolved)
+                out.append(("declared output destination", resolved))
+    return out
+
+
+def _claim_dir(root, destination):
+    """Where the claim on one destination lives. Content-addressed, because a
+    destination is an arbitrary absolute path and cannot be a filename."""
+    digest = hashlib.sha256(str(destination).encode()).hexdigest()[:24]
+    return Path(root).resolve() / OUTPUT_CLAIMS_DIRNAME / digest
+
+
+def _claim_liveness(claim):
+    """Is the attempt a foreign claim records still live? live/free/unknown.
+
+    FREE is a positive observation: a registry that answered and does not
+    list the attempt. UNKNOWN is a registry that is absent or that failed,
+    and it is NOT free. Silence is not evidence of absence, and reading it as
+    absence here dispatches a second writer into a namespace a live one owns,
+    which is the whole of B6.
+    """
+    attempt_id = str(claim.get("attempt") or "")
+    kind = str(claim.get("kind") or "")
+    job = str(claim.get("job") or "")
+    if not attempt_id:
+        return CLAIM_UNKNOWN, ("the claim names no attempt, so nothing can "
+                               "be asked about it")
+    if job.startswith("dry-") or job.startswith(DRY_PREFIX):
+        return CLAIM_FREE, "the recorded attempt is a dry run and has no job"
+    scheduler_job = f"swarm-{attempt_id}"
+    if kind == "code":
+        if not shutil.which("paseo"):
+            return CLAIM_UNKNOWN, ("paseo is not on PATH, so the agent "
+                                   "registry cannot be asked whether the "
+                                   "agent for this attempt still exists")
+        rc, out, _ = U.run(["paseo", "ls", "--json"], timeout=60)
+        if rc != 0:
+            return CLAIM_UNKNOWN, "`paseo ls --json` failed, which proves nothing"
+        try:
+            agents = json.loads(out or "[]")
+        except (ValueError, TypeError):
+            return CLAIM_UNKNOWN, "`paseo ls --json` did not return JSON"
+        for a in (agents if isinstance(agents, list) else []):
+            # EXACT trailing match, for reconcile_orphan's reason: `in`
+            # also matched an attempt whose id is another's prefix.
+            if str((a or {}).get("name") or "").split()[-1:] == [attempt_id]:
+                return CLAIM_LIVE, (f"paseo still lists an agent for attempt "
+                                    f"{attempt_id}")
+        return CLAIM_FREE, f"paseo answered and lists no agent for {attempt_id}"
+    if kind != "slurm":
+        # A detached pipeline is a pid on the host that launched it. Asking
+        # about a pid from another host is unanswerable, and asking about one
+        # on THIS host would still confuse pid reuse with liveness, so this
+        # says unknown rather than guessing in either direction.
+        return CLAIM_UNKNOWN, (f"a {kind or 'kind-less'} attempt records no "
+                               f"registry this host can ask about liveness")
+    if not shutil.which("squeue"):
+        return CLAIM_UNKNOWN, ("squeue is not on PATH, so the scheduler "
+                               "cannot be asked whether a job is still "
+                               "queued or running for this attempt")
+    # squeue ONLY, deliberately. `sacct` keeps a row long after a job ends,
+    # so an sacct row answers "did it ever reach the scheduler" -- which is
+    # reconcile_orphan's question -- and not "is it live", which is this one.
+    rc, out, _ = U.run(["squeue", "-h", "-n", scheduler_job, "-o", "%i"],
+                       timeout=60)
+    if rc != 0:
+        return CLAIM_UNKNOWN, (f"`squeue -n {scheduler_job}` failed, so "
+                               f"the scheduler said nothing about this "
+                               f"attempt")
+    listed = (out or "").strip()
+    if listed:
+        return CLAIM_LIVE, (f"squeue lists job "
+                            f"{listed.splitlines()[0].strip()} under job name "
+                            f"{scheduler_job}")
+    return CLAIM_FREE, (f"squeue answered and lists no job named "
+                        f"{scheduler_job}, so no queued or running job "
+                        f"holds it")
+
+
+def _claim_refusal(uid, label, destination, claim, verdict, why, claim_dir):
+    """The refusal, which is where the `squeue` half of B6 earns its keep: the
+    lock decides, and the scheduler supplies the sentence a human can act on."""
+    owner = str(claim.get("state_dir") or "an unrecorded state directory")
+    other = str(claim.get("unit") or "?")
+    head = ("is still live" if verdict == CLAIM_LIVE
+            else "cannot be shown to be finished")
+    lines = [
+        f"unit {uid!r}: launch preflight refused the {label} "
+        f"{str(destination)!r}; unit {other!r}, dispatched from state "
+        f"directory {owner!r} as attempt "
+        f"{str(claim.get('attempt') or '?')!r}, holds a claim on it and "
+        f"{head}.",
+        f"  scheduler: {why}",
+    ]
+    if verdict == CLAIM_UNKNOWN:
+        lines.append(
+            "  UNKNOWN IS NOT FREE. Nothing here shows the other attempt "
+            "finished, and dispatching on that silence is how one unit "
+            "becomes two writers of one output path.")
+    lines.append(
+        f"  If that attempt is genuinely gone, remove the claim and re-run: "
+        f"rm -r {claim_dir}")
+    refusal = PreflightRefusal("\n".join(lines))
+    refusal.workspace = str(destination)
+    refusal.dirty_count = 0
+    refusal.reason = "output-claim-held"
+    return refusal
+
+
+def _claim_record(u, state_dir, attempt, label, destination):
+    return {"schema_version": 1,
+            "unit": u.get("id"),
+            "kind": u.get("kind"),
+            "state_dir": str(Path(state_dir).resolve()),
+            "attempt": attempt,
+            "job": None,
+            "label": label,
+            "destination": str(destination),
+            "host": os.uname().nodename,
+            "pid": os.getpid(),
+            "claimed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+
+
+def _own_claim(claim, u, state_dir):
+    """Is an existing claim this state directory's own claim for this unit?
+
+    Adjudicated from OUR state file, which is authority for us and which the
+    lease already serializes. This is what stops a crashed coordinator
+    wedging its own project: it restarts, its state says the unit is not
+    live, and it retakes a claim it never released -- with no timeout, and
+    without any claim of knowing anything about a FOREIGN coordinator.
+    """
+    return (str(claim.get("state_dir") or "")
+            == str(Path(state_dir).resolve())
+            and claim.get("unit") == u.get("id"))
+
+
+def _take_output_claims(u, root, state_dir, attempt):
+    """Claim every destination this unit's declared outputs occupy.
+
+    Returns (refusal, held). Nothing is left held on refusal: a partial claim
+    would block the very unit that was not allowed to start.
+    """
+    held = []
+    for label, destination in _output_destinations(u, root):
+        directory = _claim_dir(root, destination)
+        record = _claim_record(u, state_dir, attempt, label, destination)
+        try:
+            directory.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            existing, read_err = U.read_json(directory / CLAIM_FILE)
+            existing = existing if isinstance(existing, dict) else {}
+            if read_err or not existing:
+                # A claim directory with no readable claim is a coordinator
+                # that died between the mkdir and the write. It names no
+                # owner, so it cannot be adjudicated and must not be assumed
+                # empty; the refusal says how to clear it.
+                refusal = _claim_refusal(
+                    u.get("id"), label, destination, existing, CLAIM_UNKNOWN,
+                    f"the claim itself is unreadable ({read_err or 'empty'})",
+                    directory)
+                _drop_claims(held)
+                return refusal, []
+            if not _own_claim(existing, u, state_dir):
+                verdict, why = _claim_liveness(existing)
+                if verdict != CLAIM_FREE:
+                    refusal = _claim_refusal(u.get("id"), label, destination,
+                                             existing, verdict, why, directory)
+                    _drop_claims(held)
+                    return refusal, []
+                # PROVEN dead. One rename decides the takeover, so two
+                # coordinators cannot both conclude they won it.
+                aside = directory.with_name(
+                    f"{directory.name}.superseded-{os.getpid()}-"
+                    f"{int(time.time())}")
+                try:
+                    os.rename(str(directory), str(aside))
+                    directory.mkdir(parents=True, exist_ok=False)
+                except OSError as exc:
+                    refusal = _claim_refusal(
+                        u.get("id"), label, destination, existing,
+                        CLAIM_UNKNOWN,
+                        f"{why}, but the dead claim could not be taken over "
+                        f"({exc}); another coordinator may have taken it first",
+                        directory)
+                    _drop_claims(held)
+                    return refusal, []
+        except OSError as exc:
+            _drop_claims(held)
+            return (f"unit {u.get('id')!r}: cannot claim the {label} "
+                    f"{str(destination)!r}: {exc}"), []
+        write_err = U.write_json(directory / CLAIM_FILE, record)
+        if write_err:
+            _drop_claims(held + [directory])
+            return (f"unit {u.get('id')!r}: cannot record the claim on "
+                    f"{str(destination)!r}: {write_err}"), []
+        held.append(directory)
+    return None, held
+
+
+def _drop_claims(directories):
+    for directory in directories:
+        shutil.rmtree(str(directory), ignore_errors=True)
+
+
+def _release_output_claims(u, root, state_dir):
+    """Drop the claims THIS state directory holds for this unit.
+
+    Recomputed from the plan rather than by scanning the registry, so a
+    coordinator can only ever release its own, and only for units it owns.
+    """
+    released = []
+    for _label, destination in _output_destinations(u, root):
+        directory = _claim_dir(root, destination)
+        claim, err = U.read_json(directory / CLAIM_FILE)
+        if err or not isinstance(claim, dict):
+            continue
+        if _own_claim(claim, u, state_dir):
+            shutil.rmtree(str(directory), ignore_errors=True)
+            released.append(str(destination))
+    return released
+
+
+def _note_claimed_attempt(u, root, state_dir, attempt, job):
+    """Record the job id on claims already held, so a later coordinator can
+    ask the scheduler about it rather than only about the attempt name."""
+    for _label, destination in _output_destinations(u, root):
+        directory = _claim_dir(root, destination)
+        claim, err = U.read_json(directory / CLAIM_FILE)
+        if err or not isinstance(claim, dict):
+            continue
+        if _own_claim(claim, u, state_dir) and claim.get("attempt") == attempt:
+            claim["job"] = str(job) if job is not None else None
+            U.write_json(directory / CLAIM_FILE, claim)
+
+
 def _code_worktree_names(unit_dir):
     """Names Paseo/Git resources from the already-random attempt id."""
     attempt = Path(unit_dir).name
@@ -2320,6 +2679,70 @@ def _git_worktrees_on_branch(repo, branch):
     return found
 
 
+def _stash_refusal(uid, repo, entries):
+    """ARC-243, at second zero, in the same shape as C10's dirty refusal.
+
+    The dirty index of the source checkout is deliberately NOT checked here,
+    for the reason the docstring below gives: it cannot reach a worktree made
+    from an object id. THE STASH STACK IS DIFFERENT, and that is the whole
+    reason this refusal exists. It is one ref in the shared common Git
+    directory, so it is visible and mutable from the fresh attempt worktree
+    too -- it crosses the isolation boundary every other part of the
+    code-unit design rests on. If the stack is non-empty at second zero, the
+    agent's worktree is not isolated with respect to it before the agent has
+    run a single command.
+
+    This does NOT stop an agent creating a stash mid-run; nothing at dispatch
+    can. What it stops is a run STARTING on top of somebody else's parked
+    work, which is the case where recovery is hardest because nobody knows
+    the entry is there to look for.
+    """
+    lines = [
+        f"unit {uid!r}: launch preflight refused source checkout "
+        f"{str(repo)!r}; its `git stash` stack holds {len(entries)} "
+        f"entry/entries:"]
+    lines += [f"  {line}" for line in entries[:10]]
+    if len(entries) > 10:
+        lines.append(f"  ... and {len(entries) - 10} more")
+    lines.append(
+        "The stack is a SINGLE ref in the shared common Git directory, so it "
+        "is shared with every worktree of this repository, including the one "
+        "this attempt would be given. Three agents lost work to that in one "
+        "window: each popped an entry another had pushed.")
+    lines.append(
+        "Deal with the parked work first -- `git stash list` to see it, then "
+        "apply or drop each entry -- and the next advance dispatches this "
+        "unit. No retry was charged.")
+    refusal = PreflightRefusal("\n".join(lines))
+    refusal.workspace = str(repo)
+    refusal.dirty_count = 0
+    refusal.reason = "shared-stash-stack"
+    return refusal
+
+
+def _stash_preflight(uid, repo):
+    """The refusal for a non-empty shared stash stack, or None."""
+    rc, stashes, _ = _git(repo, "stash", "list")
+    if rc != 0:
+        # Not being able to ask is not an answer, the same rule the output
+        # claims are built on. A checkout whose HEAD reads fine but whose
+        # stash list errors is not a checkout we can call free of parked work.
+        return (f"unit {uid!r}: cannot read the `git stash` stack in "
+                f"{str(repo)!r}, so it cannot be shown to be empty. The stack "
+                f"is shared with every worktree of this repository; refusing "
+                f"rather than assuming it is empty.")
+    entries = [line for line in (stashes or "").splitlines() if line.strip()]
+    return _stash_refusal(uid, repo, entries) if entries else None
+
+
+def _repeat_stash_preflight(u):
+    """Re-ask the stash question without recapturing or trusting an anchor."""
+    repo, err = _plan_workspace(u)
+    if err:
+        return err
+    return _stash_preflight(u.get("id"), repo)
+
+
 def _capture_code_launch(unit_dir, u):
     """Record the immutable input to Paseo's worktree creation.
 
@@ -2328,10 +2751,15 @@ def _capture_code_launch(unit_dir, u):
     checking them would both block unrelated human work and prove nothing
     about the tree the agent receives. The clean-at-launch guarantee comes
     from Paseo constructing a new branch-off worktree from ``base_commit``.
+
+    The stash stack is the exception, and `_stash_refusal` says why.
     """
     repo, err = _plan_workspace(u)
     if err:
         return err, None
+    stash_problem = _stash_preflight(u.get("id"), repo)
+    if stash_problem:
+        return stash_problem, None
     target = str(u.get("target_branch") or "").strip()
     if not target:
         return (f"unit {u.get('id')!r}: no target_branch was declared; "
@@ -4952,6 +5380,18 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                     state, u, attempt, report)
     save_state(state_dir, state)
 
+    # 1b. Release the output claims of units that are no longer live (B6).
+    #     Recomputed from the plan and released only when the claim names
+    #     THIS state directory, so a coordinator can free its own claims --
+    #     including ones it left behind by dying -- and can never free
+    #     anybody else's. This is what keeps a crash from wedging a project
+    #     without a TTL: our own state file is authority for our own units,
+    #     and `acquire_lease` already serialises access to it.
+    if not dry_run:
+        for uid, u in sorted(units.items()):
+            if _unit_state(state, uid).get("state") not in LIVE_STATES:
+                _release_output_claims(u, root, state_dir)
+
     # 2. Budget. Charged on DISPATCH, not on completion: a budget that only
     #    counts finished work cannot stop a runaway.
     budget = (plan.get("budget") or {}).get("gpu_hours")
@@ -5042,8 +5482,27 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         _capture_artifact_basis(state, uid, unit_dir, u)
         save_state(state_dir, state)
 
-        job_id, err = _submit(u, unit_dir, dry_run, state, state_dir)
+        # B6, and the reason it sits HERE. The lease excludes a second
+        # controller over this state directory; it says nothing about a
+        # second state directory over this unit's output namespace, which is
+        # exactly what three ad-hoc sub-plans of one project produce. A dry
+        # run takes no claim, because it creates no writer for one to protect
+        # against and a placeholder claim in a shared registry would refuse
+        # honest work.
+        claim_refusal, held_claims = (None, [])
+        if not dry_run:
+            claim_refusal, held_claims = _take_output_claims(
+                u, root, state_dir, Path(unit_dir).name)
+        job_id, err = ((None, claim_refusal) if claim_refusal
+                       else _submit(u, unit_dir, dry_run, state, state_dir))
         if err:
+            # Whatever we claimed for an attempt that never started must not
+            # outlive it. `_release_output_claims` recomputes from the plan
+            # and only frees claims naming this state directory, so this is
+            # the same operation the top of `advance` performs, not a second
+            # implementation of it.
+            if held_claims:
+                _release_output_claims(u, root, state_dir)
             # Classified from what `_submit` OBSERVED, not from re-reading
             # the launch record. On a re-dispatch the record was written while
             # the workspace was clean and still says "passed", so reading it
@@ -5066,6 +5525,10 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                                 else None),
                     "workspace": err.workspace,
                     "dirty_path_count": err.dirty_count,
+                    # WHICH preflight. Three of them refuse here now, and a
+                    # zero dirty count rendered as "uncommitted changes" is a
+                    # plain misstatement of why nothing ran.
+                    "reason": err.reason,
                     "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                 })
                 if us.get("attempts"):
@@ -5098,6 +5561,13 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             us["bind_pending"] = True
         # Persist the binding authority before unit.py writes its marker.
         save_state(state_dir, state)
+        # Now the claim can name the job as well as the attempt. Best effort
+        # and non-authoritative: the attempt id already names the scheduler
+        # job (`swarm-<attempt>`), so a claim that never gets this update is
+        # still adjudicable. It is written for the human reading a refusal.
+        if held_claims:
+            _note_claimed_attempt(u, root, state_dir, Path(unit_dir).name,
+                                  job_id)
         berr = _bind(unit_dir, job_id) if needs_bind else None
         if berr:
             # The job is REAL and running; only the binding write failed, on an
