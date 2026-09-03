@@ -92,7 +92,10 @@ done
 
 printf '\n=== SOURCE ===\n'
 printf '  repo: %s\n' "$REPO"
-if [ -d "$REPO/.git" ] && command -v git >/dev/null 2>&1; then
+# Ask git, never stat `.git`: it is a file in a worktree and a directory in a
+# clone, and this whole section vanished for every worktree.
+if command -v git >/dev/null 2>&1 &&
+   git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1; then
   printf '  commit: %s\n' "$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)"
   if [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]; then
     printf '  worktree: DIRTY\n'

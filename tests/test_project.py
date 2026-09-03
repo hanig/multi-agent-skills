@@ -815,6 +815,46 @@ class TestRamificationsOfTheRoundTwoFixes(unittest.TestCase):
                           "as forgotten")
 
 
+class TestTheInstalledVersionSurvivesAWorktree(unittest.TestCase):
+    """Both scripts asked `[ -d "$REPO/.git" ]`, which is false in a worktree
+    because `.git` is a FILE there. So every install from an attempt worktree
+    -- the normal way to try a change before merging it -- stamped
+    version=unknown, and doctor reported provenance it had been handed for
+    free. `unknown` reads like a value, not like a failure to look."""
+
+    def _repo_head(self):
+        r = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short",
+                            "HEAD"], capture_output=True, text=True)
+        return r.stdout.strip() if r.returncode == 0 else None
+
+    def test_the_marker_records_the_commit_not_unknown(self):
+        head = self._repo_head()
+        if not head:
+            self.skipTest("not a git checkout, so there is no version to find")
+        with tempfile.TemporaryDirectory() as d:
+            prefix = Path(d) / "prefix"
+            r = subprocess.run(
+                ["sh", str(ROOT / "install.sh"), "--prefix", str(prefix),
+                 "--allow-org-shadow"],
+                capture_output=True, text=True, cwd=ROOT)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            marker = (prefix / "hanig-swarm"
+                      / ".installed-by-multi-agent-skills").read_text()
+            version = next(l.split("=", 1)[1] for l in marker.splitlines()
+                           if l.startswith("version="))
+            self.assertNotEqual(version, "unknown", marker)
+            self.assertTrue(version.startswith(head),
+                            f"marker says {version!r}, HEAD is {head!r}")
+
+    def test_doctor_names_the_commit(self):
+        if not self._repo_head():
+            self.skipTest("not a git checkout, so there is no version to find")
+        r = subprocess.run(["sh", str(ROOT / "bin" / "doctor")],
+                           capture_output=True, text=True, cwd=ROOT)
+        self.assertIn("commit: ", r.stdout)
+        self.assertNotIn("commit: unknown", r.stdout)
+
+
 class TestUninstallOnlyRemovesOurOwn(unittest.TestCase):
     """I ran `install.sh --uninstall` on chimera to clear my own test install
     and it deleted two of Hani's skills. Its ownership test was

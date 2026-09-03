@@ -53,7 +53,14 @@ step() { [ "$DRY" -eq 1 ] && printf 'would: %s\n' "$*" || printf '%s\n' "$*"; }
 # --- source version ---------------------------------------------------------
 
 VERSION="unknown"
-if command -v git >/dev/null 2>&1 && [ -d "$REPO/.git" ]; then
+# ASK git whether this is a checkout; do not stat a path. `.git` is a DIRECTORY
+# in a clone and a FILE in a worktree, so `-d` answered "not a checkout" for
+# every worktree -- and installing from an attempt worktree, to try a change
+# before merging it, is the normal case here. The marker then recorded
+# version=unknown, which reads like a value rather than a failure, and doctor
+# reported provenance it had been handed for free.
+if command -v git >/dev/null 2>&1 &&
+   git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1; then
   VERSION=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)
   if [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]; then
     VERSION="${VERSION}-dirty"
