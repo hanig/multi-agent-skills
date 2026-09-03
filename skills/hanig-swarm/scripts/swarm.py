@@ -2678,13 +2678,22 @@ def _authority_result_sink():
     return promoted
 
 
-def _check(unit_dir, launch_facts=None):
+def _check(unit_dir, launch_facts=None, artifact_basis=None):
     argv = [sys.executable, str(_HERE / "unit.py"), "check", str(unit_dir)]
     # The separate judge receives the complete authority snapshot directly
     # from coordinator state. It never opens the launch audit record.
     if launch_facts:
         argv += ["--launch-facts", json.dumps(
             launch_facts, sort_keys=True, separators=(",", ":"))]
+    # Same channel, same provenance, for the same reason: the pre-dispatch
+    # artifact digest decides admission, so it travels BY VALUE from
+    # coordinator state. Passing a path to it, or letting the checker find it
+    # beside the attempt, would put the baseline where the judged party can
+    # write. What an onlooker could read off this argv is a digest of files it
+    # can already read; what it cannot do is change the baseline.
+    if artifact_basis:
+        argv += ["--artifact-basis", json.dumps(
+            artifact_basis, sort_keys=True, separators=(",", ":"))]
     # Anonymous coordinator-owned storage is the authority channel. stdout
     # contains diagnostics derived from agent-writable artifacts and cannot
     # become authority merely by printing a reserved-looking prefix.
@@ -3561,6 +3570,70 @@ def trusted_produced_head(state, unit, attempt_dir):
     us = (state.get("units") or {}).get(unit) or {}
     return (us.get("attempt_produced_heads") or {}).get(
         Path(attempt_dir).name)
+
+
+def _capture_artifact_basis(state, unit, unit_dir, u):
+    """Digest every declared artifact BEFORE anything is dispatched.
+
+    B1, and the strongest thing this function does is happen EARLY. The done
+    predicate concludes "the write root is exclusive, so an artifact found
+    there was produced here", and that inference needs the write root to have
+    been empty of that artifact when the attempt started. Nothing checked it,
+    so a unit that declared its input path as its output recorded a file it
+    never wrote as produced evidence and read DONE.
+
+    PINNED ONCE PER ATTEMPT, and the `if attempt in bases` guard is the whole
+    of it. `_submit` is re-entered on the code-launch recovery path and a
+    continuation re-runs the agent inside the SAME write root; either one, if
+    it re-digested, would adopt whatever the previous turn left behind as the
+    baseline it is about to be judged against. That is `produced_head`'s bug
+    -- a value that was never cleared and so was inherited -- and this is
+    where it would have been reproduced a third time.
+
+    The outputs come from the PLAN, never from the attempt's `unit.json`: the
+    party being judged can write that file, and a baseline over a list it
+    chose is a baseline it chose.
+    """
+    us = state.setdefault("units", {}).setdefault(unit, {})
+    attempt = Path(unit_dir).name
+    bases = us.setdefault("attempt_artifact_bases", {})
+    if attempt in bases:
+        return bases[attempt]
+    declared = [str(o) for o in (u.get("outputs") or [])]
+    present, missing, escaped = W.outputs_present(
+        unit_dir, {"declared_outputs": declared})
+    bases[attempt] = {
+        "schema_version": W.ARTIFACT_BASIS_SCHEMA,
+        # Both identities, so a basis lifted from another attempt or another
+        # unit is useless rather than merely unlikely to be lifted.
+        "attempt_id": attempt,
+        "unit_id": unit,
+        "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "declared": declared,
+        # Absent is the ordinary case and the strongest one: nothing was
+        # there, so anything there afterwards can only be new.
+        "absent": sorted(missing),
+        "escaped": sorted(escaped),
+        "present": U.fingerprint_outputs(unit_dir, present),
+    }
+    return bases[attempt]
+
+
+def trusted_artifact_basis(state, unit, attempt_dir):
+    """The pre-dispatch artifact digest pinned for THIS attempt; no fallback.
+
+    Never derived, never defaulted, and never read from the attempt directory
+    or the launch record. Returning None means "this attempt cannot be judged
+    for production", which the checker turns into a refusal.
+    """
+    if not attempt_dir:
+        return None
+    basis = ((((state.get("units") or {}).get(unit) or {})
+              .get("attempt_artifact_bases") or {}).get(Path(attempt_dir).name))
+    if W.artifact_basis_problem(basis, attempt_dir,
+                                {"id": unit, "task_id": unit}):
+        return None
+    return basis
 
 
 CHECK_RESULT_PREFIX = "SWARM_CHECK_RESULT"
@@ -4475,7 +4548,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         protocol_problem = None
         if ran_check:
             check_result = _check(
-                attempt, trusted_launch_facts(state, uid, attempt))
+                attempt, trusted_launch_facts(state, uid, attempt),
+                trusted_artifact_basis(state, uid, attempt))
             # Old embedders may omit diagnostic stderr or the new authority
             # channel. Missing authority fails closed; stdout is never used as
             # a compatibility fallback because agent-derived notes reach it.
@@ -4810,6 +4884,11 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         # three 4-hour attempts, 12 committed.
         us["gpu_hours"] = float(us.get("gpu_hours") or 0) + want
         spent += want
+        # BEFORE `_submit`, and persisted by the save below it, because the
+        # basis is only a basis if it predates everything that could write
+        # into the write root. A digest taken after dispatch is a digest of
+        # the run's own output.
+        _capture_artifact_basis(state, uid, unit_dir, u)
         save_state(state_dir, state)
 
         job_id, err = _submit(u, unit_dir, dry_run, state, state_dir)
