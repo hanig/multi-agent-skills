@@ -2033,6 +2033,11 @@ def _capture_code_launch(unit_dir, u):
     repo, err = _plan_workspace(u)
     if err:
         return err, None
+    # Store the source identity in the same canonical form used for Paseo's
+    # returned cwd. This is an authority boundary, not a display path: a
+    # relative spelling or symlink must not make the source checkout compare
+    # unequal to itself later.
+    repo = str(Path(repo).resolve())
     rc, head, _ = _git(repo, "rev-parse", "HEAD")
     if rc != 0:
         return (f"unit {u['id']!r}: {repo!r} has no HEAD to anchor to. "
@@ -2137,8 +2142,15 @@ def _write_code_launch_record(unit_dir, facts):
         return None, f"cannot write the launch record for {facts['unit_id']!r}: {exc}"
 
 
-def _complete_code_launch(state, u, unit_dir, workspace, workspace_id=None):
-    """Complete trusted launch facts from Paseo's returned worktree cwd."""
+def _complete_code_launch(state, u, unit_dir, workspace, workspace_id=None,
+                          recovery=False):
+    """Complete trusted launch facts from Paseo's returned worktree cwd.
+
+    A new launch must still be exactly at its pinned base. Crash recovery is
+    different: the already-running agent may honestly have committed while
+    the coordinator was down, so recovery accepts an extension of that base
+    but never a replacement history.
+    """
     attempt = Path(unit_dir).name
     us = state.setdefault("units", {}).setdefault(u["id"], {})
     intent = (us.get("attempt_launch_intents") or {}).get(attempt)
@@ -2174,9 +2186,18 @@ def _complete_code_launch(state, u, unit_dir, workspace, workspace_id=None):
         return (f"Paseo worktree {workspace!r} is on branch {branch!r}, not "
                 f"trusted attempt branch {intent['branch']!r}")
     rc, head, _ = _git(workspace, "rev-parse", "HEAD")
-    if rc != 0 or head != intent["base_commit"]:
-        return (f"Paseo worktree {workspace!r} is at {head or 'no HEAD'}, not "
-                f"trusted base {intent['base_commit']}")
+    if rc != 0:
+        return f"Paseo worktree {workspace!r} has no readable HEAD"
+    if recovery:
+        rc, _, _ = _git(workspace, "merge-base", "--is-ancestor",
+                         intent["base_commit"], head)
+        if rc != 0:
+            return (f"recovered Paseo worktree {workspace!r} at {head} does "
+                    f"not descend from trusted base {intent['base_commit']}; "
+                    f"its history was replaced rather than extended")
+    elif head != intent["base_commit"]:
+        return (f"Paseo worktree {workspace!r} is at {head}, not trusted "
+                f"base {intent['base_commit']}")
     try:
         st = os.stat(workspace)
     except OSError as exc:
@@ -2203,7 +2224,8 @@ def _complete_code_launch(state, u, unit_dir, workspace, workspace_id=None):
         return error or "worktree launch record has no recoverable seal"
     us.setdefault("attempt_launch_facts", {})[attempt] = facts
     meta = {"path": workspace, "branch": intent["branch"],
-            "slug": intent["worktree_slug"], "archived": False}
+            "slug": intent["worktree_slug"], "workspace_identity": identity,
+            "archived": False}
     if workspace_id:
         meta["workspace_id"] = workspace_id
     us.setdefault("attempt_workspaces", {})[attempt] = meta
@@ -3506,20 +3528,58 @@ def _paseo_error(out, err):
     return text.strip()[:400] or "no diagnostic"
 
 
-def _paseo_workspace_for_path(path):
-    """Return Paseo's workspace id for an exact cwd, if it can be listed."""
+def _paseo_workspace_records():
+    """Return Paseo's workspace registry, or ``None`` when unreadable."""
     rc, out, _err = U.run(["paseo", "workspace", "ls", "--json"], timeout=60)
     if rc != 0:
         return None
     try:
+        records = json.loads(out or "[]")
+        return records if isinstance(records, list) else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _paseo_workspace_for_path(path):
+    """Return Paseo's workspace id for an exact cwd, if it can be listed."""
+    records = _paseo_workspace_records()
+    if records is None:
+        return None
+    try:
         wanted = str(Path(path).resolve())
-        for rec in json.loads(out or "[]"):
+        for rec in records:
             cwd = rec.get("cwd") or rec.get("Cwd")
             if cwd and str(Path(cwd).resolve()) == wanted:
                 return rec.get("workspaceId") or rec.get("WorkspaceId")
-    except (ValueError, TypeError, AttributeError):
+    except (TypeError, AttributeError):
         return None
     return None
+
+
+def _registered_attempt_workspace(intent):
+    """Return the registry entry Paseo created for this exact attempt."""
+    records = _paseo_workspace_records()
+    if records is None:
+        return None, "cannot read Paseo's workspace registry"
+    matches = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        name = rec.get("name") or rec.get("Name")
+        isolation = rec.get("isolation") or rec.get("Isolation")
+        cwd = rec.get("cwd") or rec.get("Cwd")
+        # Paseo records the branch as the workspace name and uses the slug as
+        # the managed cwd's final component. Bind both independently-recorded
+        # values to the launch intent before considering a title-matched agent.
+        if (name == intent["branch"] and isolation == "worktree" and cwd
+                and Path(cwd).name == intent["worktree_slug"]):
+            matches.append(rec)
+    if len(matches) != 1:
+        return None, (f"Paseo's workspace registry has {len(matches)} "
+                      f"worktree entries for trusted branch/slug "
+                      f"{intent['branch']!r}/{intent['worktree_slug']!r}, "
+                      f"expected exactly one")
+    return matches[0], None
 
 
 def _recover_code_launch(state, u, unit_dir, agent):
@@ -3531,12 +3591,74 @@ def _recover_code_launch(state, u, unit_dir, agent):
     workspace = rec.get("Cwd") or rec.get("cwd")
     if not workspace:
         return f"recovered agent {agent} reports no cwd"
-    workspace_id = _paseo_workspace_for_path(workspace)
+    attempt = Path(unit_dir).name
+    intent = (((state.get("units") or {}).get(u["id"]) or {})
+              .get("attempt_launch_intents") or {}).get(attempt)
+    problem = _code_launch_intent_problem(intent, u, attempt)
+    if problem:
+        return problem
+    registered, problem = _registered_attempt_workspace(intent)
+    if problem:
+        return problem
+    registered_path = registered.get("cwd") or registered.get("Cwd")
+    if not registered_path:
+        return f"Paseo's workspace entry for attempt {attempt!r} has no cwd"
+    try:
+        agent_path = str(Path(workspace).resolve())
+        registry_path = str(Path(registered_path).resolve())
+        agent_st = os.stat(agent_path)
+        registry_st = os.stat(registry_path)
+    except OSError as exc:
+        return f"cannot identify recovered attempt workspace: {exc}"
+    agent_identity = (agent_st.st_dev, agent_st.st_ino)
+    registry_identity = (registry_st.st_dev, registry_st.st_ino)
+    if agent_identity != registry_identity:
+        return (f"recovered agent {agent} is attached to worktree "
+                f"{agent_path!r}, whose device/inode does not match Paseo's "
+                f"registered workspace for attempt {attempt!r} at "
+                f"{registry_path!r}")
+    us = ((state.get("units") or {}).get(u["id"]) or {})
+    known_facts = ((us.get("attempt_launch_facts") or {}).get(attempt) or {})
+    known_meta = ((us.get("attempt_workspaces") or {}).get(attempt) or {})
+    known_identity = (known_facts.get("workspace_identity")
+                      or known_meta.get("workspace_identity"))
+    if isinstance(known_identity, dict):
+        expected = (known_identity.get("device"), known_identity.get("inode"))
+        if expected != agent_identity:
+            return (f"recovered agent {agent} does not own the recorded "
+                    f"device/inode for attempt {attempt!r}")
+    workspace_id = (registered.get("workspaceId")
+                    or registered.get("WorkspaceId"))
     return _complete_code_launch(
-        state, u, unit_dir, workspace, workspace_id=workspace_id)
+        state, u, unit_dir, agent_path, workspace_id=workspace_id,
+        recovery=True)
 
 
-def _worktree_cleanup_failed(u, meta, report, detail):
+WORKTREE_CLEANUP_SUMMARY_PREFIX = "NEEDS_HUMAN -- retained worktrees:"
+
+
+def _report_retained_worktrees(state, report):
+    """Maintain one aggregate escalation for all exhausted cleanups."""
+    report[:] = [line for line in report
+                 if not line.startswith(WORKTREE_CLEANUP_SUMMARY_PREFIX)]
+    retained = []
+    for uid, us in sorted((state.get("units") or {}).items()):
+        for attempt, meta in sorted((us.get("attempt_workspaces") or {}).items()):
+            if isinstance(meta, dict) and meta.get("cleanup_gave_up"):
+                retained.append((uid, attempt, meta.get("path"),
+                                 meta.get("workspace_id") or "unknown"))
+    if not retained:
+        return
+    paths = "; ".join(
+        f"{uid}/{attempt}={path!r} (Paseo {workspace_id})"
+        for uid, attempt, path, workspace_id in retained)
+    report.append(
+        f"{WORKTREE_CLEANUP_SUMMARY_PREFIX} {len(retained)} cleanup(s) "
+        f"exhausted the {WORKTREE_ARCHIVE_MAX_ATTEMPTS}-attempt bound; "
+        f"automatic retries stopped. Archive or deliberately remove: {paths}")
+
+
+def _worktree_cleanup_failed(state, u, meta, report, detail):
     tries = int(meta.get("cleanup_attempts") or 0)
     if tries < WORKTREE_ARCHIVE_MAX_ATTEMPTS:
         report.append(
@@ -3545,12 +3667,8 @@ def _worktree_cleanup_failed(u, meta, report, detail):
         return
     meta.pop("cleanup_pending", None)
     meta["cleanup_gave_up"] = True
-    report.append(
-        f"{u['id']}: NEEDS_HUMAN -- {detail}; worktree cleanup gave up "
-        f"after {tries} attempts for {meta.get('path')!r} (Paseo workspace "
-        f"{meta.get('workspace_id') or 'unknown'}). Archive it with `paseo "
-        f"workspace archive <id>` or inspect/remove the stale worktree "
-        f"deliberately; automatic retries are stopped")
+    meta["cleanup_problem"] = detail
+    _report_retained_worktrees(state, report)
 
 
 def _archive_code_worktree(state, u, unit_dir, report):
@@ -3558,9 +3676,10 @@ def _archive_code_worktree(state, u, unit_dir, report):
 
     Paseo owns worktree lifecycle. Archiving removes the managed checkout
     after its last active reference, while the branch remains available for
-    PR creation and inspection. Failures are tried three times. After that a
-    NEEDS_HUMAN report names the retained path and automatic retries stop, so
-    a stale worktree is a bounded, visible operational problem.
+    PR creation and inspection. Failures are tried three times per worktree.
+    After that automatic retries stop and one aggregate NEEDS_HUMAN report
+    counts and names every retained path, rather than burying the condition
+    in one message per attempt.
     """
     if u.get("kind") != "code" or not unit_dir:
         return
@@ -3573,7 +3692,7 @@ def _archive_code_worktree(state, u, unit_dir, report):
     tries = int(meta.get("cleanup_attempts") or 0)
     if tries >= WORKTREE_ARCHIVE_MAX_ATTEMPTS:
         _worktree_cleanup_failed(
-            u, meta, report, "previous worktree archive attempts failed")
+            state, u, meta, report, "previous worktree archive attempts failed")
         return
     meta["cleanup_pending"] = True
     meta["cleanup_attempts"] = tries + 1
@@ -3589,7 +3708,7 @@ def _archive_code_worktree(state, u, unit_dir, report):
             meta["archived_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
             return
         _worktree_cleanup_failed(
-            u, meta, report,
+            state, u, meta, report,
             f"could not identify Paseo workspace for finished attempt "
             f"{attempt}")
         return
@@ -3598,7 +3717,7 @@ def _archive_code_worktree(state, u, unit_dir, report):
         timeout=120)
     if rc != 0:
         _worktree_cleanup_failed(
-            u, meta, report, f"could not archive worktree workspace "
+            state, u, meta, report, f"could not archive worktree workspace "
             f"{workspace_id}: {_paseo_error(out, err)}")
         return
     meta["archived"] = True
@@ -3737,6 +3856,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             if (attempt != current_attempt and isinstance(meta, dict)
                     and meta.get("cleanup_pending")):
                 _archive_code_worktree(state, u, attempt, report)
+    _report_retained_worktrees(state, report)
     save_state(state_dir, state)
 
     # The plan must not change under a live run. A mid-flight edit silently

@@ -324,6 +324,30 @@ def launch_facts_problem(facts, unit_dir=None, spec=None):
     return None
 
 
+def workspace_identity_problem(facts):
+    """Return why the execution path no longer names the launched directory."""
+    workspace = facts.get("execution_workspace")
+    identity = facts.get("workspace_identity") or {}
+    if not isinstance(identity, dict):
+        return "the trusted launch snapshot has no worktree identity"
+    if (identity.get("path") != workspace
+            or identity.get("realpath") != workspace
+            or not isinstance(identity.get("device"), int)
+            or not isinstance(identity.get("inode"), int)):
+        return "the trusted launch snapshot has an incomplete worktree identity"
+    try:
+        current_path = str(Path(workspace).resolve())
+        current = os.stat(workspace)
+    except OSError as exc:
+        return f"cannot identify the anchored worktree {workspace!r}: {exc}"
+    if (current_path != identity["realpath"]
+            or current.st_dev != identity["device"]
+            or current.st_ino != identity["inode"]):
+        return (f"the anchored worktree path {workspace!r} no longer names "
+                f"the launched directory (device/inode changed)")
+    return None
+
+
 def judge_detail(runner, unit_dir, spec, launch_facts=None):
     """(produced, head, detail).
 
@@ -364,6 +388,9 @@ def judge_detail(runner, unit_dir, spec, launch_facts=None):
     if err:
         return False, None, err
     rec = launch_facts
+    err = workspace_identity_problem(rec)
+    if err:
+        return False, None, err
     repo = rec.get("execution_workspace")
     if not repo:
         return False, None, (

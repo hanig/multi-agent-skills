@@ -225,6 +225,42 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         self.assertNotIn("attempt_workspaces", state["units"]["code"])
         self.assertFalse(W.launch_record_path(str(attempt)).exists())
 
+    def test_symlinked_plan_repo_cannot_make_source_checkout_a_worktree(self):
+        attempt = self.attempt("code", "symlink-source")
+        link = self.tmp / "repo-link"
+        link.symlink_to(self.repo, target_is_directory=True)
+        unit = code_unit(link)
+        real = S._plan_workspace
+        S._plan_workspace = lambda _unit: (str(link), None)
+        self.addCleanup(setattr, S, "_plan_workspace", real)
+        error, anchored = S._capture_code_launch(str(attempt), unit)
+        self.assertIsNone(error)
+        intent = anchored["intent"]
+        self.assertEqual(intent["repo"], str(self.repo.resolve()))
+        state = {"units": {"code": {
+            "attempt_launch_intents": {attempt.name: intent}}}}
+        error = S._complete_code_launch(
+            state, unit, str(attempt), str(link))
+        self.assertIn("shared source checkout", error)
+        self.assertNotIn("attempt_launch_facts", state["units"]["code"])
+
+    def test_renamed_and_replaced_worktree_fails_judgment_on_inode(self):
+        attempt = self.attempt("code", "replaced")
+        state = {"units": {}}
+        unit = code_unit(self.repo)
+        _job, error = S._submit(unit, str(attempt), False, state)
+        self.assertIsNone(error)
+        facts = state["units"]["code"]["attempt_launch_facts"][attempt.name]
+        workspace = Path(facts["execution_workspace"])
+        moved = workspace.with_name("moved-original")
+        workspace.rename(moved)
+        git(self.repo, "worktree", "prune", "--expire", "now")
+        git(self.repo, "worktree", "add", "-q", str(workspace),
+            facts["branch"])
+        produced, why = W.judge(S.U.run, str(attempt), unit, facts)
+        self.assertFalse(produced)
+        self.assertIn("device/inode changed", why)
+
     def test_fsync_before_state_save_recovers_the_exact_seal(self):
         attempt = self.attempt("code", "seal-crash")
         unit, first = self.intent_state(attempt)
@@ -254,7 +290,8 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         attempt = self.attempt("code", "recover")
         unit, state = self.intent_state(attempt)
         intent = state["units"]["code"]["attempt_launch_intents"][attempt.name]
-        workspace = self.tmp / "recover-worktree"
+        workspace = self.tmp / "recovery-managed" / intent["worktree_slug"]
+        workspace.parent.mkdir()
         git(self.repo, "worktree", "add", "-q", "-b", intent["branch"],
             str(workspace), intent["base_commit"])
         real = self.real_run
@@ -270,7 +307,9 @@ class TestPerAttemptWorktrees(unittest.TestCase):
                                       "Cwd": str(workspace)}), ""
             if argv[:3] == ["paseo", "workspace", "ls"]:
                 return 0, json.dumps([{"workspaceId": "wks_recover",
-                                       "cwd": str(workspace)}]), ""
+                                       "cwd": str(workspace),
+                                       "name": intent["branch"],
+                                       "isolation": "worktree"}]), ""
             if argv[:2] == ["paseo", "run"]:
                 self.fail("re-dispatch tried to recreate an existing worktree")
             return real(argv, **kwargs)
@@ -282,6 +321,100 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         self.assertFalse(any(call[:2] == ["paseo", "run"] for call in calls))
         self.assertIsNotNone(S.trusted_launch_facts(
             state, "code", str(attempt)))
+
+    def test_recovery_succeeds_when_agent_committed_during_downtime(self):
+        attempt = self.attempt("code", "recover-ahead")
+        unit, state = self.intent_state(attempt)
+        intent = state["units"]["code"]["attempt_launch_intents"][attempt.name]
+        workspace = self.tmp / "ahead-managed" / intent["worktree_slug"]
+        workspace.parent.mkdir()
+        git(self.repo, "worktree", "add", "-q", "-b", intent["branch"],
+            str(workspace), intent["base_commit"])
+        (workspace / "during-downtime.txt").write_text("done\n")
+        git(workspace, "add", "-A")
+        git(workspace, "commit", "-qm", "work during downtime")
+        real = self.real_run
+
+        def recovery(argv, **kwargs):
+            if argv[:2] == ["paseo", "inspect"]:
+                return 0, json.dumps({"Cwd": str(workspace)}), ""
+            if argv[:3] == ["paseo", "workspace", "ls"]:
+                return 0, json.dumps([{
+                    "workspaceId": "wks_ahead", "cwd": str(workspace),
+                    "name": intent["branch"],
+                    "isolation": "worktree"}]), ""
+            return real(argv, **kwargs)
+
+        S.U.run = recovery
+        error = S._recover_code_launch(
+            state, unit, str(attempt), "agent-ahead")
+        self.assertIsNone(error)
+        facts = state["units"]["code"]["attempt_launch_facts"][attempt.name]
+        self.assertEqual(facts["base_commit"], intent["base_commit"])
+
+    def test_recovery_refuses_when_agent_replaced_history(self):
+        attempt = self.attempt("code", "recover-replaced")
+        unit, state = self.intent_state(attempt)
+        intent = state["units"]["code"]["attempt_launch_intents"][attempt.name]
+        workspace = self.tmp / "replaced-managed" / intent["worktree_slug"]
+        workspace.parent.mkdir()
+        git(self.repo, "worktree", "add", "-q", "-b", intent["branch"],
+            str(workspace), intent["base_commit"])
+        tree = git(workspace, "write-tree")
+        replaced = subprocess.run(
+            ["git", "-C", str(workspace), "commit-tree", tree, "-m", "root"],
+            check=True, env=ENV, capture_output=True, text=True).stdout.strip()
+        git(workspace, "reset", "--hard", replaced)
+        real = self.real_run
+
+        def recovery(argv, **kwargs):
+            if argv[:2] == ["paseo", "inspect"]:
+                return 0, json.dumps({"Cwd": str(workspace)}), ""
+            if argv[:3] == ["paseo", "workspace", "ls"]:
+                return 0, json.dumps([{
+                    "workspaceId": "wks_replaced", "cwd": str(workspace),
+                    "name": intent["branch"],
+                    "isolation": "worktree"}]), ""
+            return real(argv, **kwargs)
+
+        S.U.run = recovery
+        error = S._recover_code_launch(
+            state, unit, str(attempt), "agent-replaced")
+        self.assertIn("does not descend from trusted base", error)
+        self.assertNotIn("attempt_launch_facts", state["units"]["code"])
+
+    def test_matching_title_agent_is_not_bound_to_another_workspace(self):
+        attempt = self.attempt("code", "wrong-owner")
+        unit, state = self.intent_state(attempt)
+        intent = state["units"]["code"]["attempt_launch_intents"][attempt.name]
+        expected = self.tmp / "expected-managed" / intent["worktree_slug"]
+        unrelated = self.tmp / "unrelated-worktree"
+        expected.parent.mkdir()
+        git(self.repo, "worktree", "add", "-q", "-b", intent["branch"],
+            str(expected), intent["base_commit"])
+        git(self.repo, "worktree", "add", "-q", "--detach", str(unrelated),
+            intent["base_commit"])
+        real = self.real_run
+
+        def impostor(argv, **kwargs):
+            if argv[:3] == ["paseo", "ls", "--json"]:
+                return 0, json.dumps([{
+                    "name": f"[swarm] code {attempt.name}",
+                    "id": "agent-unrelated"}]), ""
+            if argv[:2] == ["paseo", "inspect"]:
+                return 0, json.dumps({"Cwd": str(unrelated)}), ""
+            if argv[:3] == ["paseo", "workspace", "ls"]:
+                return 0, json.dumps([{
+                    "workspaceId": "wks_expected", "cwd": str(expected),
+                    "name": intent["branch"],
+                    "isolation": "worktree"}]), ""
+            return real(argv, **kwargs)
+
+        S.U.run = impostor
+        job, error = S._submit(unit, str(attempt), False, state)
+        self.assertIsNone(job)
+        self.assertIn("device/inode does not match", error)
+        self.assertNotIn("attempt_launch_facts", state["units"]["code"])
 
     def test_precreated_branch_without_agent_is_actionably_refused(self):
         attempt = self.attempt("code", "precreated")
@@ -332,6 +465,38 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         message = "\n".join(report)
         self.assertIn("NEEDS_HUMAN", message)
         self.assertIn(path, message)
+
+    def test_archive_exhaustion_is_one_aggregate_report(self):
+        unit1 = code_unit(self.repo, "u1")
+        unit2 = code_unit(self.repo, "u2")
+        attempts = [self.attempt("u1", "a1"), self.attempt("u2", "a2")]
+        paths = [str(self.tmp / "managed" / p.name) for p in attempts]
+        state = {"units": {
+            "u1": {"attempt_workspaces": {"a1": {
+                "path": paths[0], "workspace_id": "wks_a1",
+                "archived": False}}},
+            "u2": {"attempt_workspaces": {"a2": {
+                "path": paths[1], "workspace_id": "wks_a2",
+                "archived": False}}},
+        }}
+
+        def failing_archive(argv, **_kwargs):
+            if argv[:3] == ["paseo", "workspace", "archive"]:
+                return 1, "", "archive unavailable"
+            return self.real_run(argv, **_kwargs)
+
+        S.U.run = failing_archive
+        report = []
+        for unit, attempt in ((unit1, attempts[0]), (unit2, attempts[1])):
+            for _ in range(S.WORKTREE_ARCHIVE_MAX_ATTEMPTS):
+                S._archive_code_worktree(
+                    state, unit, str(attempt), report)
+        aggregate = [line for line in report if line.startswith(
+            S.WORKTREE_CLEANUP_SUMMARY_PREFIX)]
+        self.assertEqual(len(aggregate), 1)
+        self.assertIn("2 cleanup(s)", aggregate[0])
+        self.assertIn(paths[0], aggregate[0])
+        self.assertIn(paths[1], aggregate[0])
 
 
 if __name__ == "__main__":

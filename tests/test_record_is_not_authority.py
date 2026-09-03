@@ -45,6 +45,10 @@ ALLOWED = {
         "renders deterministic audit bytes from coordinator-state facts",
     ("swarm.py", "_complete_code_launch"):
         "combines the trusted launch intent with Paseo's returned cwd",
+    ("swarm.py", "_registered_attempt_workspace"):
+        "matches Paseo's registry against the coordinator-state intent",
+    ("swarm.py", "_recover_code_launch"):
+        "binds recovered Paseo state to coordinator-state workspace identity",
     ("swarm.py", "_archive_code_worktree"):
         "reads coordinator-state workspace metadata only for cleanup",
     ("swarm.py", "_execution_workspace"):
@@ -58,6 +62,8 @@ ALLOWED = {
         "reads the launch snapshot transported from coordinator state",
     ("worktree.py", "launch_facts_problem"):
         "validates the coordinator-state snapshot schema and identity",
+    ("worktree.py", "workspace_identity_problem"):
+        "checks the live directory against coordinator-state identity",
     ("worktree.py", "validate_pinned_head"):
         "checks immutable objects named by coordinator state",
     ("swarm.py", "_submit"):
