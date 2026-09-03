@@ -754,7 +754,12 @@ class TestTheConvergenceGateIsWiredIn(Base):
         self.assertTrue(ok)
         self.addCleanup(m.release_lease, str(st))
 
-        def forced_check(unit_dir, facts=None):
+        # Third parameter is the pre-dispatch artifact basis that B1 pins in
+        # coordinator state and passes to the checker by value. This double
+        # stands in for an absent Slurm, so it accepts the basis and ignores
+        # it: what these tests exercise is the CONVERGENCE gate, which runs
+        # only after the unit's own predicate has already said DONE.
+        def forced_check(unit_dir, facts=None, artifact_basis=None):
             receipt = json.dumps({"task_id": "train", "attempt_id": "a1",
                                   "state": "DONE", "basis": {}})
             (Path(unit_dir) / "receipt.json").write_text(receipt)
