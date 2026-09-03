@@ -125,6 +125,28 @@ class TestOnlyOneConditionTriggersIt(unittest.TestCase):
         self.assertTrue(S.maybe_continue(
             self.tmp.name, "u1", self._u(), us, [], state))
 
+    def test_crash_after_pending_save_leaves_the_slot_retryable(self):
+        class Crash(BaseException):
+            pass
+
+        us = self._us()
+        state = {"schema_version": 1, "units": {"u1": us}}
+        S.U.run = lambda argv, timeout=None: (_ for _ in ()).throw(Crash())
+        with self.assertRaises(Crash):
+            S.maybe_continue(
+                self.tmp.name, "u1", self._u(), us, [], state)
+
+        recovered = S.load_state(self.tmp.name)
+        recovered_us = recovered["units"]["u1"]
+        self.assertEqual(len(recovered_us["continuations"]), 1)
+        self.assertEqual(recovered_us["continuations"][0]["status"],
+                         "pending")
+        S.U.run = lambda argv, timeout=None: (0, "", "")
+        self.assertTrue(S.maybe_continue(
+            self.tmp.name, "u1", self._u(), recovered_us, [], recovered))
+        self.assertEqual(len(recovered_us["continuations"]), 1)
+        self.assertTrue(recovered_us["continuations"][0]["sent"])
+
 
 class TestTheBoundIsDeclaredAndChecked(unittest.TestCase):
 

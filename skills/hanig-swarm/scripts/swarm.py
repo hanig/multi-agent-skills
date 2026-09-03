@@ -1803,7 +1803,6 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
             return None, intent_err
         source_repo = intent["repo"]
         reuse_workspace = None
-        reuse_workspace_id = None
         # A prior `paseo run` may have created both branch and worktree before
         # this controller crashed. Re-running the creation command can only
         # collide with those resources. Recover the named agent first; if no
@@ -1841,10 +1840,14 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
                     f"one unambiguous worktree that still matches its trusted "
                     f"launch intent")
             reuse_workspace = candidates[0]
-            reuse_workspace_id = _paseo_workspace_for_path(reuse_workspace)
+            ownership_problem = _paseo_path_ownership_problem(reuse_workspace)
+            if ownership_problem:
+                return None, (
+                    f"attempt {attempt!r} will not launch an agent in "
+                    f"pre-existing worktree {reuse_workspace!r}: "
+                    f"{ownership_problem}")
             reuse_error = _complete_code_launch(
-                state, u, unit_dir, reuse_workspace,
-                workspace_id=reuse_workspace_id)
+                state, u, unit_dir, reuse_workspace)
             if reuse_error:
                 return None, (
                     f"attempt {attempt!r} has an unowned worktree, but it "
@@ -1914,8 +1917,7 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
                  or rec.get("id") or rec.get("Id"))
         workspace = rec.get("cwd") or rec.get("Cwd")
         workspace_id = (_paseo_workspace_id(out)
-                        or rec.get("workspaceId") or rec.get("WorkspaceId")
-                        or reuse_workspace_id)
+                        or rec.get("workspaceId") or rec.get("WorkspaceId"))
         # Paseo has already acted. Persist ownership of the resource now,
         # before checks that may reject it; registration makes it cleanable
         # and does not endorse its contents. Even a malformed response with
@@ -2178,7 +2180,13 @@ def _code_launch_intent_problem(intent, u, attempt):
 
 
 def _paseo_workspace_id(out):
-    """Read the workspace id from Paseo's creation notice, if present."""
+    """Read the workspace id from Paseo's creation notice, if present.
+
+    KNOWN WEAKNESS: this fallback parses free text. It is used for cleanup
+    bookkeeping, never to authenticate the returned cwd, branch, base, or Git
+    identity. A same-UID process can also falsify Paseo registry evidence, so
+    hardening this spelling alone would not create an ownership boundary.
+    """
     match = re.search(r"(?m)^Created workspace (wks_[A-Za-z0-9]+)\b", out or "")
     return match.group(1) if match else None
 
@@ -3349,9 +3357,6 @@ def maybe_continue(state_dir, uid, u, us, report, state=None):
     if (_receipt_reason(state or {}, uid, us.get("attempt_dir") or "")
             != U.REASON_NO_OUTPUTS):
         return False
-    used = len(us.get("continuations") or [])
-    if used >= limit:
-        return False
     agent = us.get("job_id")
     if not agent:
         return False
@@ -3366,15 +3371,39 @@ def maybe_continue(state_dir, uid, u, us, report, state=None):
     prompt = str(cfg.get("prompt") or
                  "Your turn ended without producing the declared outputs. "
                  "Continue the work you planned.")
-    entry = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-             "n": used + 1, "of": limit,
-             "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest()[:16],
-             "sent": None, "status": "pending"}
-    us.setdefault("continuations", []).append(entry)
-    # A continuation is an external, non-idempotent act. Charge its bounded
-    # slot before sending it. A crash may conservatively consume one slot,
-    # but can never replay a message whose existence was only in memory.
-    save_state(state_dir, state)
+    prompt_digest = hashlib.sha256(prompt.encode()).hexdigest()[:16]
+    continuations = us.setdefault("continuations", [])
+    pending = next((entry for entry in continuations
+                    if isinstance(entry, dict)
+                    and entry.get("status") == "pending"
+                    and entry.get("sent") is None), None)
+    if pending is not None:
+        if pending.get("prompt_sha256") != prompt_digest:
+            report.append(
+                f"{uid}: refusing to retry pending continuation "
+                f"{pending.get('n')}: its recorded prompt no longer matches "
+                f"the plan")
+            return False
+        entry = pending
+        used = int(entry.get("n") or len(continuations)) - 1
+    else:
+        used = len(continuations)
+        if used >= limit:
+            return False
+        entry = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                 "n": used + 1, "of": limit,
+                 "agent_id": str(agent),
+                 "prompt_sha256": prompt_digest,
+                 "sent": None, "status": "pending"}
+        continuations.append(entry)
+        # A continuation is an external, non-idempotent act. Persist the
+        # pending entry before sending it. If the coordinator dies before
+        # Paseo is contacted, the same entry is retried rather than consuming
+        # an unsent slot. If it dies after Paseo accepts the message but
+        # before the result is saved, Paseo offers no idempotency key, so a
+        # retry can duplicate the prompt; exactly-once delivery is not
+        # available across that boundary.
+        save_state(state_dir, state)
     rc, out, err = U.run(["paseo", "send", str(agent), prompt], timeout=120)
     entry["sent"] = rc == 0
     entry["status"] = "sent" if rc == 0 else "failed"
@@ -3716,6 +3745,58 @@ def _paseo_workspace_for_path(path):
     return None
 
 
+def _paseo_path_ownership_problem(path):
+    """Refuse attaching a new agent to a path Paseo already owns.
+
+    Git identity establishes what checkout is at the path; it does not
+    establish that an existing Paseo workspace or agent belongs to this
+    attempt. Registry unavailability is therefore uncertainty, not absence.
+    """
+    wanted = str(Path(path).resolve())
+    workspaces = _paseo_workspace_records()
+    if workspaces is None:
+        return ("Paseo's workspace registry is unavailable, so ownership of "
+                "the path cannot be established; retry when it is readable")
+    for rec in workspaces:
+        if not isinstance(rec, dict):
+            continue
+        cwd = rec.get("cwd") or rec.get("Cwd")
+        try:
+            matches = bool(cwd and str(Path(cwd).resolve()) == wanted)
+        except (OSError, TypeError):
+            matches = False
+        if matches:
+            workspace_id = (rec.get("workspaceId")
+                            or rec.get("WorkspaceId") or "unknown")
+            return (f"Paseo already owns that path as workspace "
+                    f"{workspace_id}; refusing to adopt it")
+
+    rc, out, _err = U.run(["paseo", "ls", "--json"], timeout=60)
+    if rc != 0:
+        return ("Paseo's agent registry is unavailable, so ownership of the "
+                "path cannot be established; retry when it is readable")
+    try:
+        agents = json.loads(out or "[]")
+    except (ValueError, TypeError):
+        agents = None
+    if not isinstance(agents, list):
+        return ("Paseo's agent registry is unreadable, so ownership of the "
+                "path cannot be established; retry when it is readable")
+    for rec in agents:
+        if not isinstance(rec, dict):
+            continue
+        cwd = rec.get("cwd") or rec.get("Cwd")
+        try:
+            matches = bool(cwd and str(Path(cwd).resolve()) == wanted)
+        except (OSError, TypeError):
+            matches = False
+        if matches:
+            agent_id = rec.get("id") or rec.get("agentId") or "unknown"
+            return (f"Paseo already has agent {agent_id} at that path; "
+                    f"refusing to adopt it")
+    return None
+
+
 def _registered_attempt_workspace(intent):
     """Return all registry entries that claim this exact attempt."""
     records = _paseo_workspace_records()
@@ -3805,10 +3886,10 @@ def _recover_code_launch(state, u, unit_dir, agent):
 WORKTREE_CLEANUP_SUMMARY_PREFIX = "NEEDS_HUMAN -- retained worktrees:"
 
 
-def _report_retained_worktrees(state, report):
+def _report_retained_worktrees(state, report, dry_run=False):
     """Maintain one aggregate escalation for all exhausted cleanups."""
     report[:] = [line for line in report
-                 if not line.startswith(WORKTREE_CLEANUP_SUMMARY_PREFIX)]
+                 if WORKTREE_CLEANUP_SUMMARY_PREFIX not in line]
     retained = []
     for uid, us in sorted((state.get("units") or {}).items()):
         for attempt, meta in sorted((us.get("attempt_workspaces") or {}).items()):
@@ -3820,10 +3901,30 @@ def _report_retained_worktrees(state, report):
     paths = "; ".join(
         f"{uid}/{attempt}={path!r} (Paseo {workspace_id})"
         for uid, attempt, path, workspace_id in retained)
-    report.append(
+    line = (
         f"{WORKTREE_CLEANUP_SUMMARY_PREFIX} {len(retained)} cleanup(s) "
         f"exhausted the {WORKTREE_ARCHIVE_MAX_ATTEMPTS}-attempt bound; "
         f"automatic retries stopped. Archive or deliberately remove: {paths}")
+    if dry_run:
+        line += " (DRY RUN observation only; no cleanup was attempted)"
+    report.append(line)
+
+
+def _report_would_archive_code_worktree(state, u, unit_dir, report):
+    """Describe cleanup without charging a retry or contacting Paseo."""
+    if u.get("kind") != "code" or not unit_dir:
+        return
+    attempt = Path(unit_dir).name
+    us = ((state.get("units") or {}).get(u["id"]) or {})
+    meta = (us.get("attempt_workspaces") or {}).get(attempt)
+    if (not isinstance(meta, dict) or meta.get("archived")
+            or meta.get("cleanup_gave_up")):
+        return
+    target = meta.get("workspace_id") or meta.get("path") or "unknown workspace"
+    line = (f"{u['id']}: DRY RUN -- would archive Paseo worktree {target} "
+            f"for attempt {attempt}; no cleanup retry was charged")
+    if line not in report:
+        report.append(line)
 
 
 def _worktree_cleanup_failed(state, u, meta, report, detail):
@@ -4031,24 +4132,32 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     # branch is the durable handoff and the checkout is operational debris.
     # Retry failed archives on every advance; this bounds managed worktrees to
     # live/interactive attempts plus cleanup failures that remain visible.
-    if not dry_run:
-        for uid, u in sorted(units.items()):
-            us = _unit_state(state, uid)
-            current_attempt = (Path(us["attempt_dir"]).name
-                               if us.get("attempt_dir") else None)
-            current_meta = ((us.get("attempt_workspaces") or {}).get(
-                current_attempt) if current_attempt else None)
-            if (us.get("state") in WORKTREE_CLEANUP_STATES
-                    or (isinstance(current_meta, dict)
-                        and current_meta.get("cleanup_pending"))):
+    for uid, u in sorted(units.items()):
+        us = _unit_state(state, uid)
+        current_attempt = (Path(us["attempt_dir"]).name
+                           if us.get("attempt_dir") else None)
+        current_meta = ((us.get("attempt_workspaces") or {}).get(
+            current_attempt) if current_attempt else None)
+        if (us.get("state") in WORKTREE_CLEANUP_STATES
+                or (isinstance(current_meta, dict)
+                    and current_meta.get("cleanup_pending"))):
+            if not dry_run:
                 _archive_code_worktree(
                     state, u, us.get("attempt_dir"), report, state_dir)
-            for attempt, meta in (us.get("attempt_workspaces") or {}).items():
-                if (attempt != current_attempt and isinstance(meta, dict)
-                        and meta.get("cleanup_pending")):
+            else:
+                _report_would_archive_code_worktree(
+                    state, u, us.get("attempt_dir"), report)
+        for attempt, meta in (us.get("attempt_workspaces") or {}).items():
+            if (attempt != current_attempt and isinstance(meta, dict)
+                    and meta.get("cleanup_pending")):
+                if not dry_run:
                     _archive_code_worktree(
                         state, u, attempt, report, state_dir)
-        _report_retained_worktrees(state, report)
+                else:
+                    _report_would_archive_code_worktree(
+                        state, u, attempt, report)
+    _report_retained_worktrees(state, report, dry_run=dry_run)
+    if not dry_run:
         save_state(state_dir, state)
 
     # The plan must not change under a live run. A mid-flight edit silently
@@ -4500,13 +4609,17 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                         f"'retry' contract, or split the unit smaller.")
                 else:
                     report.append(f"{uid}: preempted {policy} times, giving up")
-        if not dry_run and us.get("state") in WORKTREE_CLEANUP_STATES:
+        if us.get("state") in WORKTREE_CLEANUP_STATES:
             # The checker result, produced head, and terminal state are the
             # conclusion that justifies teardown. Persist that conclusion
             # before Paseo can remove the evidence used to reach it.
-            save_state(state_dir, state)
-            _archive_code_worktree(
-                state, u, attempt, report, state_dir)
+            if not dry_run:
+                save_state(state_dir, state)
+                _archive_code_worktree(
+                    state, u, attempt, report, state_dir)
+            else:
+                _report_would_archive_code_worktree(
+                    state, u, attempt, report)
     save_state(state_dir, state)
 
     # 2. Budget. Charged on DISPATCH, not on completion: a budget that only
@@ -4676,9 +4789,10 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     # the tracker NOTHING, so its issue would have sat on "work started"
     # forever. Comparing before-and-after cannot miss a path, including paths
     # added later.
-    if dry_run:
-        return report, dispatched, halted
     project = plan.get("name") or "swarm"
+    existing_outbox_keys = {
+        rec.get("key") for rec in read_outbox(state_dir)
+        if isinstance(rec, dict)} if dry_run else set()
     for uid in sorted(units):
         us = _unit_state(state, uid)
         now = us.get("state")
@@ -4696,8 +4810,25 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             # exactly the word this field exists to earn.
             rp, _why = attested_receipt(state, uid, us["attempt_dir"])
             evidence = {"receipt": rp} if rp else None
-        emit_intent(state_dir, project, uid, now, us, evidence,
-                    kind=(units.get(uid) or {}).get("kind"))
+        kind = (units.get(uid) or {}).get("kind")
+        if dry_run:
+            action = TRACKER_EVENTS.get(now)
+            key = outbox_key(project, uid, now, us.get("attempt_dir"))
+            if action and key not in existing_outbox_keys:
+                verb = action[0]
+                if (verb == "close"
+                        and closing_evidence_for(kind) != "predicate_receipt"):
+                    verb = "open_pr"
+                if verb == "close" and not evidence:
+                    report.append(
+                        f"{uid}: DRY RUN -- would retry outbox emission for "
+                        f"{now}, but no attested closing receipt is readable")
+                else:
+                    report.append(
+                        f"{uid}: DRY RUN -- would re-emit tracker {verb} "
+                        f"intent from durable state {now}")
+            continue
+        emit_intent(state_dir, project, uid, now, us, evidence, kind=kind)
     return report, dispatched, halted
 
 
@@ -4829,6 +4960,28 @@ def cmd_advance(args):
 #
 # A unit that declares no `promote_to` never touches a shared path at all.
 PROMOTIONS = "promotions.jsonl"
+
+
+def _append_promotion_receipt(state_dir, record):
+    """Durably append one idempotent promotion receipt; return an error."""
+    path = Path(state_dir) / PROMOTIONS
+    key = record.get("promotion_key")
+    try:
+        if path.is_file() and key:
+            for line in path.read_text().splitlines():
+                try:
+                    existing = json.loads(line)
+                except ValueError:
+                    continue
+                if existing.get("promotion_key") == key:
+                    return None
+        with path.open("a") as fh:
+            fh.write(json.dumps(record, sort_keys=True) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        return None
+    except OSError as exc:
+        return str(exc)
 
 
 def resolve_promote_to(raw, root=None):
@@ -5074,6 +5227,11 @@ def promote(plan, state, state_dir, uid, approver, approve,
                                     "pointer did not move."], False
             # Fully populated AND verified before it takes the canonical name,
             # so a reader never sees a partial or altered version directory.
+            # `staging` and `version` are siblings by construction, making
+            # this one same-filesystem atomic rename. If the filesystem
+            # refuses that guarantee (for example EXDEV), os.replace fails
+            # and the canonical version is not published; there is no
+            # cross-filesystem copy fallback that could expose a half-copy.
             os.replace(staging, version)      # same directory: atomic
         tmp_link = dest / f".current-{os.getpid()}"
         if tmp_link.is_symlink() or tmp_link.exists():
@@ -5086,20 +5244,25 @@ def promote(plan, state, state_dir, uid, approver, approve,
                             f"downstream sees a partial result."], False
 
     record = {"unit": uid, "attempt": Path(attempt).name,
+              "promotion_key": promotion_key,
               "promoted_to": str(version), "approver": approver,
               "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
               "outputs": recorded,
               "digest_basis": ("size-mtime only for at least one output" if weak
                                else "content digest for every output")}
+    receipt_error = _append_promotion_receipt(state_dir, record)
+    if receipt_error:
+        # Publication already happened, so do not claim it did not. Keep the
+        # durable intent pending and return failure: a rerun recognizes the
+        # version, records this same keyed receipt, then marks it complete.
+        lines += [f"  WARNING: promoted, but its receipt could not be "
+                  f"persisted: {receipt_error}",
+                  "  The promotion intent remains pending; rerun this exact "
+                  "promotion to finish its audit record."]
+        return lines, False
     promotion_intent["status"] = "complete"
     promotion_intent["completed_at"] = record["at"]
     save_state(state_dir, state)
-    try:
-        with (Path(state_dir) / PROMOTIONS).open("a") as fh:
-            fh.write(json.dumps(record, sort_keys=True) + "\n")
-    except OSError as e:
-        lines.append(f"  WARNING: promoted, but the record could not be "
-                     f"appended: {e}")
     lines += ["", f"PROMOTED {uid} -> {version}", f"approved by {approver}"]
     return lines, True
 

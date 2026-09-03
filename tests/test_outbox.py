@@ -790,6 +790,49 @@ class TestGatedPromotion(unittest.TestCase):
             self.assertEqual(next(iter(
                 durable["promotion_intents"].values()))["status"], "complete")
 
+    def test_promotion_receipt_precedes_complete_state(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            plan, st, sd, _, _ = self._project(t)
+            observed = []
+            real_append = S._append_promotion_receipt
+
+            def append_while_pending(current_state_dir, record):
+                durable = S.load_state(current_state_dir)
+                intent = durable["promotion_intents"][record["promotion_key"]]
+                self.assertEqual(intent["status"], "pending")
+                observed.append(True)
+                return real_append(current_state_dir, record)
+
+            S._append_promotion_receipt = append_while_pending
+            try:
+                lines, ok = S.promote(plan, st, sd, "w", "hani", True)
+            finally:
+                S._append_promotion_receipt = real_append
+            self.assertTrue(ok, "\n".join(lines))
+            self.assertTrue(observed)
+            receipt = json.loads((Path(sd) / S.PROMOTIONS).read_text())
+            durable = S.load_state(sd)
+            self.assertEqual(durable["promotion_intents"][
+                receipt["promotion_key"]]["status"], "complete")
+
+    def test_failed_promotion_receipt_leaves_intent_pending(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            plan, st, sd, _, _ = self._project(t)
+            real_append = S._append_promotion_receipt
+            S._append_promotion_receipt = (
+                lambda state_dir, record: "fixture disk failure")
+            try:
+                lines, ok = S.promote(plan, st, sd, "w", "hani", True)
+            finally:
+                S._append_promotion_receipt = real_append
+            self.assertFalse(ok)
+            self.assertIn("receipt could not be persisted", "\n".join(lines))
+            durable = S.load_state(sd)
+            self.assertEqual(next(iter(
+                durable["promotion_intents"].values()))["status"], "pending")
+
     def test_the_canonical_name_is_a_pointer_not_a_copy_target(self):
         """Renaming into place is NOT atomic across filesystems, and a shared
         tree is usually a different mount from the run root, so a half-copied

@@ -340,12 +340,20 @@ def workspace_identity_problem(runner, facts):
             or not isinstance(identity.get("device"), int)
             or not isinstance(identity.get("inode"), int)
             or not identity.get("git_common_dir")
-            or not isinstance(identity.get("git_common_device"), int)
-            or not isinstance(identity.get("git_common_inode"), int)
-            or not identity.get("git_dir")
-            or not isinstance(identity.get("git_dir_device"), int)
-            or not isinstance(identity.get("git_dir_inode"), int)):
+            or not identity.get("git_dir")):
         return "the trusted launch snapshot has an incomplete worktree identity"
+    common_identity_fields = ("git_common_device", "git_common_inode")
+    git_identity_fields = ("git_dir_device", "git_dir_inode")
+    common_values = [identity.get(key) for key in common_identity_fields]
+    git_values = [identity.get(key) for key in git_identity_fields]
+    if (any(value is not None for value in common_values)
+            and not all(isinstance(value, int) for value in common_values)):
+        return "the trusted launch snapshot has an incomplete Git common-directory identity"
+    if (any(value is not None for value in git_values)
+            and not all(isinstance(value, int) for value in git_values)):
+        return "the trusted launch snapshot has an incomplete Git directory identity"
+    has_common_inode = all(isinstance(value, int) for value in common_values)
+    has_git_inode = all(isinstance(value, int) for value in git_values)
     try:
         current_path = str(Path(workspace).resolve())
         current = os.stat(workspace)
@@ -375,13 +383,20 @@ def workspace_identity_problem(runner, facts):
         git_st = os.stat(git_dir)
     except OSError as exc:
         return f"cannot stat the anchored Git metadata: {exc}"
+    # Migration: launch snapshots written before the Git-metadata identity
+    # fields were added recorded paths but not device/inode. Those attempts
+    # keep the older, weaker path + worktree-root check until they finish;
+    # absence of a field that did not exist is unverifiable, not evidence of
+    # substitution. Every newly-written record takes both inode checks.
     if (top != workspace
             or common != identity["git_common_dir"]
-            or common_st.st_dev != identity["git_common_device"]
-            or common_st.st_ino != identity["git_common_inode"]
+            or (has_common_inode
+                and (common_st.st_dev != identity["git_common_device"]
+                     or common_st.st_ino != identity["git_common_inode"]))
             or git_dir != identity["git_dir"]
-            or git_st.st_dev != identity["git_dir_device"]
-            or git_st.st_ino != identity["git_dir_inode"]):
+            or (has_git_inode
+                and (git_st.st_dev != identity["git_dir_device"]
+                     or git_st.st_ino != identity["git_dir_inode"]))):
         return (f"the anchored directory {workspace!r} no longer has the "
                 f"launched Git worktree metadata identity")
     if observed["branch"] != facts.get("branch"):
