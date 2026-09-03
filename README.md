@@ -102,6 +102,16 @@ approval before anything is transmitted, and re-arms that approval if the unit
 digests change underneath it. Default team is `Arc`. Full automation requires
 the literal phrase `swarm autopilot`; absent it, approval is always required.
 
+It carries the plan's DAG as `blockedBy`, and because that relation is
+append-only through this interface, it also names the edges to REMOVE. Not
+re-adding an edge does not delete it, so a shrunken `needs` list would
+otherwise leave the tracker asserting a dependency the plan has dropped. It
+decides that from a read-back of what the tracker holds, supplied by the
+session with the connector as `--tracker-edges` -- never from the previous
+draft, which records what was asked for rather than what landed. With no
+read-back, `remove_blocked_by` is `null` rather than `[]`, and `check` calls
+a filed project's edges unknown rather than in sync.
+
 **The stopping condition is the whole point.** The interview ends when the plan
 can RUN, not when the interviewer runs out of prepared questions. Every value
 dispatch needs (input paths and globs, output destinations, account, partition,
