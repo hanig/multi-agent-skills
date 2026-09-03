@@ -227,10 +227,12 @@ These are the load-bearing decisions. Most were paid for with a real failure.
 
 **Isolation replaces attribution.** Observation shows that an artifact changed,
 never which process changed it. So each attempt gets an exclusive, never-reused
-write root, created with `mkdir(exist_ok=False)` as enforcement rather than as
-convention. Given isolation, a cheap predicate ("is there output under this
-root?") becomes conclusive, and the machinery built to *prove* which process
-wrote a file was answering a question that no longer needed asking.
+write root, created with `mkdir(exist_ok=False)`, which enforces that no two
+attempts are ever handed the same root -- not that the OS keeps another process
+running as the same Unix user out of one. Given that allocation, a cheap
+predicate ("is there output under this root?") becomes conclusive, and the
+machinery built to *prove* which process wrote a file was answering a question
+that no longer needed asking.
 
 **A unit is the retry boundary.** A retry starts in a fresh, empty attempt
 directory, so a retry redoes the whole unit. The quantity that matters is
@@ -269,7 +271,12 @@ including the launch record and the attempt receipts. No arrangement of files
 defends against that. What is defended is an agent that fails to do the work
 and an operator who runs the wrong thing. A hostile agent would need a
 container or a separate Unix user, which is what the receipts have always said
-about isolation.
+about isolation. Nor is the agent's process tree established to be dead when a
+check runs: no portable handle proves every same-UID descendant of a Paseo
+agent or a scheduler job is gone, so a lingering one could touch outputs
+mid-digest. That is recorded on each accepted receipt rather than claimed
+closed. Both are DECLARED limits, stated in full in `hanig-swarm/SKILL.md`;
+neither is scheduled, and neither should be assumed closed by a later reader.
 
 **A verifier is admissible only if it is authorized, pinned and bound.** The
 policy naming it is read from the **anchored base commit**, never from the

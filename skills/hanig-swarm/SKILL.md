@@ -147,6 +147,15 @@ unanswerable by observation on a shared filesystem, and it does not need
 answering when nothing else may write here. Three plan versions died learning
 that.
 
+"Nothing else may write here" is a **trusted-writer convention, not an OS
+boundary.** `mkdir(exist_ok=False)` enforces that no two attempts are ever
+handed the same root; it does not keep another process running as the same Unix
+user out of one. The receipt says so in its `basis` block
+(`os_enforced_isolation: false`, `attribution_by_observation: false`) and every
+report reprints it. Do not restate the predicate without that clause -- this
+project has claimed more than its mechanism establishes three times, and each
+time the claim was the part that got copied forward.
+
 Shreshth's repo had this all along: Paseo gives each agent its own git worktree,
 so his cheap `--base` predicate is conclusive because nothing else writes that
 tree. He never solved attribution; an exclusive namespace made it unnecessary.
@@ -156,6 +165,64 @@ commit, immutable spec and versioned environment are immutability of INPUTS --
 they matter for reproducibility and ownership, never for making the predicate
 conclusive. Keep that distinction: when a new expensive check is proposed, ask
 "does write-root isolation already make this conclusive?" If yes, delete it.
+
+## The authority path, and the two limits it does not close
+
+A predicate is only as good as the channel that reports it, so: **the launch
+record on disk and the attempt receipt are audit-only.** Authority lives in
+coordinator state, outside the operated repository and outside the attempt
+directory. The launch snapshot is captured there before the spawn and handed to
+the separate checker as `--launch-facts`; the checker reports its result back
+over an anonymous file with no live alias on fd 0, 1 or 2, and `unit.run`
+REFUSES any `pass_fds` entry below 3 at the API boundary, so the
+result-file-lands-on-fd-0-and-is-inherited-as-stdin mistake is unrepresentable
+rather than avoided by convention. Rewriting `launch.json` changes no judging
+input, and `tests/test_record_is_not_authority.py` says so. That cost six
+review rounds, because every earlier version established the authority path by
+DISTINGUISHING it from the agent's path, and each distinguishing property in
+turn was one the agent shared.
+
+Two limits are declared and NOT closed. Neither is a defect. They are written
+here, rather than only in the plan, because a reviewer filed the first as a
+CRITICAL and was right that it belongs in the threat model, and because a limit
+recorded nowhere a reader will meet it gets read as closed.
+
+**Same-UID process access.** A descendant running as the same Unix user can
+reach the checker's `/proc` entries or `ptrace` it and obtain the authority
+descriptor. Nothing here defends against that, and no arrangement of files
+can: modes, Git's own locks and descriptor discipline are all undoable by the
+same principal, and even a separate clone is writable by it. Closing it
+requires separate Unix identities, a container, or an equivalent OS boundary.
+What IS defended is an agent that fails to do the work, and an operator who
+runs the wrong thing. So the scope is explicit: if you are running this
+somewhere the agent is a real adversary rather than a careless one -- an
+account shared with someone you do not trust, or untrusted input steering a
+full-access agent on the coordinator's own machine -- you are outside the
+threat model, and none of the above helps you. Judged out of scope on purpose;
+revisit deliberately, not by discovering it.
+
+**Process-tree quiescence.** Neither Slurm's terminal accounting nor a
+terminal-or-idle Paseo lifecycle exposes one portable handle proving that every
+same-UID descendant of the job or the agent is dead, so a lingering background
+process can still touch output files while the digest is being computed. The
+digest binds the bytes of the receipt that check produced; it does not
+establish that nothing else moved during or after the check. So quiescence is
+not claimed anywhere. It is RECORDED next to the receipt seal on every accepted
+receipt (`attempt_receipt_provenance_limits` in coordinator state), which is
+the honest state of it. Closing it needs a barrier that holds for a Paseo agent
+and a scheduler job alike; a process group covers the scheduler job and not the
+agent, a cgroup barrier needs the scheduler to expose one, and a mechanism that
+works for one kind of unit while quietly doing nothing for the other would read
+like a closure without being one. One reviewer treats this as a precondition
+for the result channel being authoritative at all. Read it that way if your
+units leave daemons behind.
+
+Per-attempt Git worktrees sit in the same position, one level down. They
+isolate PATHS, which is what stops two ordinary agents and a human checkout
+from colliding by accident; they share one ref directory, so they do not
+isolate principals. `worktree.py`'s `WORKTREE_REF_ISOLATION_LIMIT` states that
+at the judgment boundary, and judgment therefore checks branch, descendant
+history, changed tree and a clean index together rather than trusting the path.
 
 ## Usage
 
