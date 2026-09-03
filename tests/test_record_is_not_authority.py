@@ -45,6 +45,9 @@ ALLOWED = {
         "renders deterministic audit bytes from coordinator-state facts",
     ("swarm.py", "_complete_code_launch"):
         "combines the trusted launch intent with Paseo's returned cwd",
+    ("swarm.py", "_code_launch_intent_problem"):
+        "validates the coordinator-state intent, including that its generated "
+        "source branch differs from its plan-declared pull-request target",
     ("swarm.py", "_code_completion_protocol"):
         "renders repository, branch and base from the coordinator-state "
         "launch intent into instructions; it never reads the audit record",

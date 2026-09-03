@@ -463,16 +463,36 @@ def _code_completion_protocol(intent):
     evidence on that branch and open the pull request that the unit's closing
     predicate requires; asking it to choose either launch fact would put
     authority back in prompt prose.
+
+    Precedence is explicit rather than inferred from task text. Contradictions
+    in arbitrary prose are not statically recognizable: matching phrases such
+    as "do not commit" would also reject legitimate tasks that merely discuss
+    them. A visible stop-and-report rule is bounded; a prose detector is not.
     """
     repo = str(intent["repo"])
     branch = str(intent["branch"])
     base = str(intent["base_commit"])
     target = str(intent["target_branch"])
+    remote = intent.get("repository_remote")
+    if remote:
+        remote_instruction = (
+            f"Use Git remote 'origin', recorded by the coordinator as "
+            f"{remote!r}. Push {branch!r} to that remote. Open a pull request "
+            f"from {branch!r} into target branch {target!r}; only a "
+            f"pull request merged into {target!r} in that recorded repository "
+            f"closes this code unit.")
+    else:
+        remote_instruction = (
+            "The coordinator recorded Git remote 'origin' as None. STOP AND "
+            "REPORT that no merge-evidence repository was recorded; do not "
+            "guess another remote.")
     return f"""{CODE_COMPLETION_PROTOCOL_MARKER} (coordinator-required)
+This protocol overrides any contrary instruction in the task text above it. If the task appears to forbid committing, pushing, or opening a pull request, STOP AND REPORT that conflict instead of choosing either instruction.
 You are already in a dedicated worktree for repository {repo!r}, on branch {branch!r}, cut from recorded base commit {base}.
+The required pull-request target is {target!r}.
 Do not create or switch branches, and do not choose a different base.
 Commit all intended work on {branch!r}. Uncommitted work is invisible to the transition predicate and will be judged as producing nothing.
-Open a pull request from {branch!r} into target branch {target!r}; only a pull request merged into {target!r} closes this code unit.
+{remote_instruction}
 If you cannot finish cleanly, STOP AND REPORT the problem instead of working around it.
 Leave the worktree clean. Do not force-push or rewrite history. The final commit must descend from recorded base {base}; rewritten history makes honest work unjudgeable."""
 
@@ -498,9 +518,13 @@ def _code_protocol_problem(prompt, intent):
         "repository": repr(str(intent["repo"])),
         "attempt branch": repr(str(intent["branch"])),
         "pull-request target": repr(str(intent["target_branch"])),
+        "recorded remote": repr(intent.get("repository_remote")),
         "recorded base": str(intent["base_commit"]),
+        "protocol precedence": "overrides any contrary instruction",
+        "contradiction instruction": "STOP AND REPORT that conflict",
         "commit instruction": "Commit all intended work",
-        "pull-request instruction": "Open a pull request",
+        "remote action": ("Open a pull request" if intent.get(
+            "repository_remote") else "no merge-evidence repository was recorded"),
         "clean failure instruction": "STOP AND REPORT",
         "history instruction": "Do not force-push or rewrite history",
     }
@@ -1035,6 +1059,7 @@ def validate_plan(plan):
         "repo": "/__swarm_protocol_validation_repo__",
         "branch": "swarm-protocol-validation-attempt",
         "target_branch": "main",
+        "repository_remote": "ssh://git@example.invalid/project.git",
         "base_commit": "0" * 40,
     }
     for u in units:
@@ -2183,6 +2208,14 @@ def _capture_code_launch(unit_dir, u):
         return (f"unit {u.get('id')!r}: no target_branch was declared; "
                 f"refusing to create a source branch for a pull request with "
                 f"no named destination"), None
+    slug, branch = _code_worktree_names(unit_dir)
+    # The generated source name depends on the attempt id, so plan validation
+    # cannot know this collision. Intent construction is the first point that
+    # can, and it is still before Paseo creates either an agent or worktree.
+    if target == branch:
+        return (f"unit {u.get('id')!r}: target_branch {target!r} is the same "
+                f"as generated attempt branch {branch!r}; a pull request "
+                f"cannot merge a branch into itself"), None
     # Store the source identity in the same canonical form used for Paseo's
     # returned cwd. This is an authority boundary, not a display path: a
     # relative spelling or symlink must not make the source checkout compare
@@ -2196,7 +2229,6 @@ def _capture_code_launch(unit_dir, u):
     if rc != 0:
         return f"unit {u['id']!r}: cannot read the tree of {head[:12]}", None
     rc, remote, _ = _git(repo, "remote", "get-url", "origin")
-    slug, branch = _code_worktree_names(unit_dir)
     intent = {
         "schema_version": 1,
         "unit_id": u.get("id"),
@@ -2234,6 +2266,9 @@ def _code_launch_intent_problem(intent, u, attempt):
         if (not isinstance(value, str) or len(value) not in (40, 64)
                 or any(c not in "0123456789abcdef" for c in value.lower())):
             return f"unit {u.get('id')!r}: invalid trusted {key}"
+    if intent["target_branch"] == intent["branch"]:
+        return (f"unit {u.get('id')!r}: trusted pull-request target equals "
+                f"its generated attempt branch {intent['branch']!r}")
     target = str(u.get("target_branch") or "").strip()
     if intent["target_branch"] != target:
         return (f"unit {u.get('id')!r}: trusted pull-request target "

@@ -125,6 +125,8 @@ class TestPerAttemptWorktrees(unittest.TestCase):
     def test_dispatched_prompt_names_source_target_base_and_survives_newlines(self):
         attempt = self.attempt("code", "prompt-facts")
         original = "fix the parser\nthen run the focused tests"
+        remote = "git@github.com:example/canonical.git"
+        git(self.repo, "remote", "add", "origin", remote)
         unit = code_unit(self.repo)
         unit["prompt"] = original
         unit["target_branch"] = "release/next"
@@ -143,6 +145,9 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         self.assertIn(repr(intent["repo"]), prompt)
         self.assertIn(repr(intent["branch"]), prompt)
         self.assertIn(repr(intent["target_branch"]), prompt)
+        self.assertEqual(intent["repository_remote"], remote)
+        self.assertIn("remote 'origin'", prompt)
+        self.assertIn(repr(remote), prompt)
         self.assertNotEqual(intent["branch"], intent["target_branch"])
         self.assertIn("into target branch", prompt)
         self.assertIn(intent["base_commit"], prompt)
@@ -154,6 +159,39 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         # no-shell, no-requoting delivery property rather than merely testing
         # the string before dispatch.
         self.assertEqual(argv.count(prompt), 1)
+
+    def test_delivered_protocol_overrides_a_task_that_forbids_closure(self):
+        attempt = self.attempt("code", "contrary-task")
+        task = ("Make the edits, but do not commit, do not push, and do not "
+                "open a pull request; leave them for a reviewer.")
+        unit = code_unit(self.repo)
+        unit["prompt"] = task
+        state = {"units": {}}
+
+        job, err = self.submit(unit, attempt, False, state)
+
+        self.assertIsNone(err)
+        self.assertEqual(job, "agent-contrary-task")
+        delivered = self.fake.launches[0][-1]
+        self.assertTrue(delivered.startswith(task + "\n\n"))
+        self.assertIn("overrides any contrary instruction", delivered)
+        self.assertIn("task appears to forbid committing, pushing, or opening",
+                      delivered)
+        self.assertIn("STOP AND REPORT that conflict", delivered)
+
+    def test_target_matching_generated_attempt_branch_is_refused(self):
+        attempt = self.attempt("code", "collision")
+        unit = code_unit(self.repo)
+        unit["target_branch"] = "swarm-collision"
+        state = {"units": {}}
+
+        job, err = self.submit(unit, attempt, False, state)
+
+        self.assertIsNone(job)
+        self.assertIn("cannot merge a branch into itself", err)
+        self.assertEqual(self.fake.launches, [])
+        self.assertNotIn("attempt_launch_intents",
+                         state.get("units", {}).get("code", {}))
 
     def test_same_and_different_units_receive_distinct_worktrees(self):
         state = {"units": {}}
