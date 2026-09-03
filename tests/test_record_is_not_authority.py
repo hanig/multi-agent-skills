@@ -41,8 +41,8 @@ AUTHORITY_KEYS = set(_W.AUTHORITY_KEYS)
 ALLOWED = {
     ("swarm.py", "_write_launch_record"):
         "writes the record from the coordinator's own git observation",
-    ("swarm.py", "_write_code_launch_record"):
-        "writes an audit copy from the coordinator-state launch snapshot",
+    ("swarm.py", "_code_launch_record_payload"):
+        "renders deterministic audit bytes from coordinator-state facts",
     ("swarm.py", "_complete_code_launch"):
         "combines the trusted launch intent with Paseo's returned cwd",
     ("swarm.py", "_archive_code_worktree"):

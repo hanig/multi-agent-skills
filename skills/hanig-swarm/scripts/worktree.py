@@ -31,6 +31,22 @@ PRODUCTION_DENIES = (
     "pull-request", "merge",
 )
 
+# DECLARED LIMIT AT THE JUDGMENT BOUNDARY. Per-attempt worktree paths prevent
+# ordinary agents and a human checkout from colliding by accident; they are
+# not process isolation. Git worktrees share refs in one common directory, so
+# another same-UID attempt can move this attempt's branch before judgment. A
+# simple move normally makes the index/worktree dirty and is refused below,
+# but a determined same-UID process can also write the other worktree and its
+# index. No Git lock closes that: the same principal can bypass it, and even a
+# separate clone is writable by the same principal. Closing intentional
+# interference requires a different Unix identity, container, or equivalent
+# OS boundary. After judgment the coordinator pins an immutable commit, so a
+# later ref rewrite cannot change merge admission or verification.
+WORKTREE_REF_ISOLATION_LIMIT = (
+    "per-attempt Git worktrees isolate paths, not hostile same-UID processes "
+    "or their shared mutable refs before judgment"
+)
+
 
 def decode_launch_facts(payload):
     """Decode coordinator-transported launch facts without consulting disk."""
