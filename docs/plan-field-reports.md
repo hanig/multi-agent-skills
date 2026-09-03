@@ -17,6 +17,26 @@
 
 Status verified against code on 2026-09-03, not against memory of the session.
 
+## Tracker
+
+Linear is the system of record for status. This doc holds the reasoning; the
+issue holds the state. Project: **Swarm skills: field-report hardening**
+(`linear.app/arc-projects/project/swarm-skills-field-report-hardening-4978bafcf9e3`),
+team Arc. Only OPEN items are filed; the Done table below is not duplicated
+there.
+
+| Item | Issue | Item | Issue |
+|---|---|---|---|
+| C14 | ARC-228 | converge.py | ARC-234 |
+| B1 | ARC-229 | A4 | ARC-235 |
+| B6 | ARC-230 | B8 stale-edge | ARC-236 |
+| B4 + `scontrol` note | ARC-231 | A8 | ARC-237 |
+| B9 | ARC-232 | wandb | ARC-238 |
+| E2 | ARC-233 | paseo provider pinning | ARC-239 |
+
+Each issue carries its own done-predicate, copied from the item below it. If
+you change a predicate here, change it there.
+
 ## Done
 
 | Item | What | Where |
