@@ -1116,5 +1116,274 @@ class TestTheRepoDecisionComesFromTheSurvey(unittest.TestCase):
         self.assertIn("outlive the attempt directory as SOURCE", doc)
 
 
+class TestTheSurveySaysWhoMayUseAPartition(unittest.TestCase):
+    """Bought on a real cluster: hours went into `QOSGrpCpuLimit` while a
+    736-CPU partition sat with 202 CPUs idle, because the survey reported
+    partition SIZES and never reported who was allowed in. Three facts decide
+    that and none of them come from `sinfo` -- AllowAccounts, the QOS
+    GrpTRES, and MaxMemPerCPU, which refuses a job while naming CPUs rather
+    than the memory that actually broke the limit.
+
+    THIS MACHINE HAS NO SLURM, so every test here drives a stubbed sinfo /
+    scontrol / sacctmgr on PATH, the same mechanism test_swarm.py uses for a
+    fake scheduler. Nothing below was measured against a real controller."""
+
+    # One line per partition, exactly as `scontrol -o show partition` prints
+    # it. TRES sits directly before MaxMemPerCPU on purpose: its value
+    # contains its own '=' signs, and a parser that mis-consumed it would lose
+    # every field after it.
+    PARTITIONS = (
+        'PartitionName=cpu AllowGroups=ALL AllowAccounts=ALL AllowQos=ALL '
+        'Default=YES State=UP MaxTime=7-00:00:00 TotalNodes=12 '
+        'TRES=cpu=736,mem=6000000M MaxMemPerCPU=UNLIMITED QOS=N/A',
+        'PartitionName=lab AllowGroups=ALL AllowAccounts=goodarzilab,shared '
+        'Default=NO State=UP MaxTime=infinite TotalNodes=8 '
+        'TRES=cpu=736,mem=6000000M MaxMemPerCPU=5120 QOS=lab_qos',
+        'PartitionName=preemptible AllowGroups=ALL '
+        'DenyAccounts=goodarzilab Default=NO State=UP MaxTime=1-00:00:00 '
+        'TotalNodes=40 MaxMemPerCPU=0 QOS=normal',
+        # Neither Allow nor Deny printed. Not a shape Slurm emits today,
+        # which is the point: the field must go UNKNOWN rather than assume.
+        'PartitionName=odd Default=NO State=UP MaxTime=1:00:00 '
+        'TotalNodes=1 MaxMemPerCPU=1024 QOS=N/A',
+        # Hidden from sinfo, present in scontrol. A plan can still name it.
+        'PartitionName=hidden_dev AllowAccounts=goodarzilab Hidden=YES '
+        'Default=NO State=UP MaxTime=4:00:00 TotalNodes=1 '
+        'MaxMemPerCPU=8192 QOS=dev_qos',
+    )
+    QOS_ROWS = ("normal|", "lab_qos|cpu=512,mem=2000G", "dev_qos|cpu=8")
+
+    def _fake_slurm(self, d, tools=("sinfo", "scontrol", "sacctmgr"),
+                    qos_rows=None):
+        """A Slurm on PATH that answers only what the survey asks.
+
+        Tools are named explicitly so a test can REMOVE one: a host with sinfo
+        and no sacctmgr is the case that must report unknown rather than
+        unrestricted, and it cannot be tested by deleting code."""
+        binp = Path(d) / "fakebin"
+        binp.mkdir(exist_ok=True)
+        rows = self.QOS_ROWS if qos_rows is None else qos_rows
+        bodies = {
+            "sinfo": "#!/bin/sh\n"
+                     'echo "cpu*|up|7-00:00:00|12"\n'
+                     'echo "lab|up|infinite|8"\n'
+                     'echo "preemptible|up|1-00:00:00|40"\n',
+            "scontrol": "#!/bin/sh\ncase \"$*\" in\n"
+                        "  *'show config'*)\n"
+                        '    echo "DefMemPerCPU = 4096"\n'
+                        '    echo "DefMemPerNode = UNLIMITED"\n'
+                        '    echo "SchedulerType = sched/backfill" ;;\n'
+                        "  *'show partition'*)\n"
+                        + "".join(f"    echo '{line}'\n"
+                                  for line in self.PARTITIONS)
+                        + "    ;;\nesac\n",
+            "sacctmgr": "#!/bin/sh\ncase \"$*\" in\n"
+                        "  *'show qos'*)\n"
+                        + "".join(f"    echo '{r}'\n" for r in rows)
+                        + "    ;;\n"
+                        "  *'show assoc'*) echo 'goodarzilab' ;;\nesac\n",
+        }
+        for name in tools:
+            f = binp / name
+            f.write_text(bodies[name])
+            f.chmod(0o755)
+        return str(binp)
+
+    def _survey(self, tools=("sinfo", "scontrol", "sacctmgr"), qos_rows=None):
+        with tempfile.TemporaryDirectory() as d:
+            env = dict(os.environ)
+            env["PATH"] = (self._fake_slurm(d, tools, qos_rows)
+                           + os.pathsep + env.get("PATH", ""))
+            r = subprocess.run([sys.executable, str(SURVEY), "--repo", d,
+                                "--json"], capture_output=True, text=True,
+                               env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return json.loads(r.stdout)
+
+    def _part(self, data, name):
+        for p in data["scheduler"]["partitions"]:
+            if p["partition"] == name:
+                return p
+        self.fail(f"{name} missing from {[p['partition'] for p in data['scheduler']['partitions']]}")
+
+    def test_a_restricted_partition_names_its_accounts(self):
+        p = self._part(self._survey(), "lab")
+        self.assertEqual(p["allow_accounts"],
+                         {"state": "set", "value": ["goodarzilab", "shared"]})
+
+    def test_an_open_partition_is_unrestricted_not_empty(self):
+        p = self._part(self._survey(), "cpu")
+        self.assertEqual(p["allow_accounts"]["state"], "unrestricted")
+        self.assertIsNone(p["allow_accounts"]["value"])
+
+    def test_a_missing_scontrol_is_UNKNOWN_and_never_unrestricted(self):
+        """The assertion this whole item exists for. 'no AllowAccounts
+        restriction' and 'could not determine AllowAccounts' are different
+        facts, and on a host without scontrol only the second is true."""
+        p = self._part(self._survey(tools=("sinfo",)), "lab")
+        for field in ("allow_accounts", "deny_accounts", "max_mem_per_cpu_mb",
+                      "qos", "qos_grptres"):
+            self.assertEqual(p[field]["state"], "unknown", field)
+            self.assertIsNone(p[field]["value"], field)
+            self.assertIn("scontrol", p[field]["why"], field)
+
+    def test_max_mem_per_cpu_is_a_number_and_UNLIMITED_is_not_zero(self):
+        data = self._survey()
+        self.assertEqual(self._part(data, "lab")["max_mem_per_cpu_mb"],
+                         {"state": "set", "value": 5120})
+        self.assertEqual(
+            self._part(data, "cpu")["max_mem_per_cpu_mb"]["state"],
+            "unrestricted")
+        # Slurm prints a bare 0 for "no per-CPU cap", which as an integer
+        # would divide a memory request by zero.
+        self.assertEqual(
+            self._part(data, "preemptible")["max_mem_per_cpu_mb"]["state"],
+            "unrestricted")
+
+    def test_the_note_states_the_cpu_cost_the_error_message_hides(self):
+        """Slurm refuses the job by naming CPUs, so the error points away from
+        the cause. 700G at 5120 costs 140 CPUs, not the 32 requested."""
+        note = self._survey()["scheduler"]["limits_note"]
+        self.assertIn("140", note)
+        self.assertIn("5120", note)
+        self.assertIn("UNKNOWN IS NOT UNRESTRICTED", note)
+
+    def test_the_qos_grptres_is_joined_onto_the_partition(self):
+        p = self._part(self._survey(), "lab")
+        self.assertEqual(p["qos"], {"state": "set", "value": "lab_qos"})
+        self.assertEqual(p["qos_grptres"],
+                         {"state": "set",
+                          "value": {"cpu": 512, "mem": "2000G"}})
+
+    def test_a_count_is_an_int_and_a_unit_stays_a_string(self):
+        """2000G and 2000 are not the same number, and guessing which was
+        meant would put a wrong figure in the one file the interview trusts."""
+        v = self._part(self._survey(), "lab")["qos_grptres"]["value"]
+        self.assertIsInstance(v["cpu"], int)
+        self.assertIsInstance(v["mem"], str)
+
+    def test_a_qos_with_no_grptres_is_unrestricted(self):
+        """`normal` exists and has no group limit. That is an answer, not a
+        failure, and it must not read as one."""
+        p = self._part(self._survey(), "preemptible")
+        self.assertEqual(p["qos"]["value"], "normal")
+        self.assertEqual(p["qos_grptres"]["state"], "unrestricted")
+
+    def test_no_partition_qos_is_unrestricted_but_the_note_scopes_it(self):
+        data = self._survey()
+        self.assertEqual(self._part(data, "cpu")["qos"]["state"],
+                         "unrestricted")
+        self.assertIn("association QOS",
+                      data["scheduler"]["qos_grptres_note"])
+
+    def test_a_missing_sacctmgr_keeps_the_qos_name_and_admits_the_rest(self):
+        """Half an answer, reported as half an answer: the partition's QOS is
+        known from scontrol, its GrpTRES is not knowable without sacctmgr."""
+        p = self._part(self._survey(tools=("sinfo", "scontrol")), "lab")
+        self.assertEqual(p["qos"]["value"], "lab_qos")
+        self.assertEqual(p["qos_grptres"]["state"], "unknown")
+        self.assertIn("sacctmgr", p["qos_grptres"]["why"])
+
+    def test_a_qos_sacctmgr_does_not_list_is_unknown_not_unrestricted(self):
+        p = self._part(self._survey(qos_rows=("normal|",)), "lab")
+        self.assertEqual(p["qos_grptres"]["state"], "unknown")
+        self.assertIn("lab_qos", p["qos_grptres"]["why"])
+
+    def test_deny_accounts_are_not_read_as_an_allowance(self):
+        """AllowAccounts=ALL on a partition that denies your account is not
+        the open partition it reads as. Reporting only the allowance would
+        recreate the original bug with a second field."""
+        p = self._part(self._survey(), "preemptible")
+        self.assertEqual(p["allow_accounts"]["state"], "unrestricted")
+        self.assertEqual(p["deny_accounts"],
+                         {"state": "set", "value": ["goodarzilab"]})
+
+    def test_a_partition_that_denies_nobody_does_not_cry_unknown(self):
+        """Slurm prints DenyAccounts INSTEAD of AllowAccounts, never both, so
+        a missing DenyAccounts beside a present AllowAccounts is an answer.
+        Calling it unknown put `denied=UNKNOWN` beside every partition on a
+        cluster that denies nobody -- the cries-wolf direction that gets a
+        field ignored, which this repo weights as heavily as a false pass."""
+        data = self._survey()
+        for name in ("cpu", "lab"):
+            self.assertEqual(self._part(data, name)["deny_accounts"]["state"],
+                             "unrestricted", name)
+        self.assertEqual(
+            self._part(data, "preemptible")["allow_accounts"]["state"],
+            "unrestricted")
+
+    def test_a_record_with_neither_account_key_is_unknown_for_both(self):
+        """The absence of BOTH keys is ignorance, not permission."""
+        p = self._part(self._survey(), "odd")
+        for field in ("allow_accounts", "deny_accounts"):
+            self.assertEqual(p[field]["state"], "unknown", field)
+            self.assertIn("neither", p[field]["why"])
+
+    def test_a_partition_only_scontrol_knows_about_is_not_dropped(self):
+        """Hidden=YES keeps it out of sinfo, and a plan can still name it."""
+        p = self._part(self._survey(), "hidden_dev")
+        self.assertEqual(p["allow_accounts"]["value"], ["goodarzilab"])
+        self.assertEqual(p["nodes"], "1")
+        self.assertFalse(p["default"])
+
+    def test_the_state_vocabulary_is_closed(self):
+        """A fourth state would be a fourth thing every consumer must handle,
+        and value must be None whenever the state is not `set` -- otherwise
+        `if p[f]["value"]` starts meaning something on an unknown field."""
+        data = self._survey()
+        for part in data["scheduler"]["partitions"]:
+            for field in ("allow_accounts", "deny_accounts",
+                          "max_mem_per_cpu_mb", "qos", "qos_grptres"):
+                lim = part[field]
+                self.assertIn(lim["state"],
+                              ("set", "unrestricted", "unknown"),
+                              f"{part['partition']}.{field}")
+                if lim["state"] != "set":
+                    self.assertIsNone(lim["value"])
+                if lim["state"] == "unknown":
+                    self.assertTrue(lim.get("why"),
+                                    "an unknown field must say why")
+
+    def test_the_whole_qos_table_is_reported_for_units_that_name_one(self):
+        """A unit can carry a --qos of its own, so the join table is kept and
+        not only the entries some partition happens to point at."""
+        qos = self._survey()["scheduler"]["qos"]
+        self.assertEqual(qos["lab_qos"]["grptres"]["value"]["cpu"], 512)
+        self.assertEqual(qos["normal"]["grptres"]["state"], "unrestricted")
+
+    def test_a_truncated_qos_table_is_unknown_rather_than_half_parsed(self):
+        """The read is capped at MAX_OUTPUT, so the last row of a huge table
+        is half a value: `cpu=51` would parse cleanly and be WRONG. Unknown
+        beats a plausible wrong number."""
+        sys.path.insert(0, str(SCRIPTS))
+        import survey as S2
+        rows = tuple(f"q{i}|cpu=512,mem=2000G" for i in range(12_000))
+        self.assertGreater(sum(len(r) + 1 for r in rows), S2.MAX_OUTPUT)
+        p = self._part(self._survey(qos_rows=rows), "lab")
+        self.assertEqual(p["qos_grptres"]["state"], "unknown")
+        self.assertIn("read cap", p["qos_grptres"]["why"])
+
+    def test_the_schema_version_moved_so_a_consumer_can_tell(self):
+        """An older survey has no limits block at all, and that is not the
+        same as a cluster with no limits."""
+        self.assertGreaterEqual(self._survey()["schema_version"], 2)
+
+    def test_a_value_containing_its_own_equals_sign_does_not_eat_the_line(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import survey as S2
+        f = S2._oneliner_fields(
+            "PartitionName=cpu TRES=cpu=736,mem=6000000M MaxMemPerCPU=5120")
+        self.assertEqual(f["TRES"], "cpu=736,mem=6000000M")
+        self.assertEqual(f["MaxMemPerCPU"], "5120")
+
+    def test_a_machine_with_no_slurm_at_all_still_surveys(self):
+        """This one is not stubbed: it is this laptop, which has no sinfo."""
+        with tempfile.TemporaryDirectory() as d:
+            data = json.loads(run(SURVEY, "--repo", d, "--json").stdout)
+            if data["scheduler"].get("present"):
+                self.skipTest("this host has a real Slurm")
+            self.assertEqual(data["scheduler"], {"present": False})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

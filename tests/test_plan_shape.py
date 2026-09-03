@@ -671,5 +671,38 @@ class TestModeAdviceMatchesTheProvider(unittest.TestCase):
                               "rejects: %s" % (doc.name, i, line.strip()))
 
 
+class TestTheCheapFixForAWrongPartitionIsWrittenDown(unittest.TestCase):
+    """A third rule of the same kind, learned the same way. A queued job in
+    the wrong partition has a one-command fix and an expensive one, and the
+    expensive one is the one you reach for by reflex: cancel it and dispatch
+    again. That loses the job id the attempt is bound to, and the redispatch
+    edits the unit's sbatch flags, so the plan digest changes and `advance`
+    then needs `--accept-plan-change`. Two problems for one mistake.
+
+    Guarded in the DOC rather than in code because nothing in swarm.py moves a
+    queued job; the doc is where the choice is actually made."""
+
+    DOC = ROOT / "skills" / "hanig-swarm" / "SKILL.md"
+
+    def test_the_dispatch_section_names_scontrol_update(self):
+        doc = self.DOC.read_text()
+        self.assertIn("scontrol update JobId=", doc)
+        self.assertIn("Partition=", doc)
+
+    def test_it_says_what_cancel_and_redispatch_costs(self):
+        doc = self.DOC.read_text()
+        self.assertIn("--accept-plan-change", doc,
+                      "the doc must say what the expensive path then needs")
+        self.assertIn("bound to nothing", doc)
+
+    def test_the_note_sits_in_the_dispatch_section(self):
+        """Not in the gotchas at the bottom: it is read while dispatching, and
+        a note two screens below the commands is a note nobody reaches."""
+        doc = self.DOC.read_text()
+        usage = doc.index("## Usage")
+        kinds = doc.index("## The three kinds")
+        self.assertTrue(usage < doc.index("scontrol update JobId=") < kinds)
+
+
 if __name__ == "__main__":
     unittest.main()

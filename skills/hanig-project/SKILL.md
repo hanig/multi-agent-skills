@@ -22,6 +22,18 @@ This reports the host, python, schedulers, partitions, accounts, whether
 `--mem` is required here, free disk, and, for a repo: git history, size,
 language mix, existing docs, and whether a swarm project already exists.
 
+Per partition it also reports **who may use it and what the allowance costs**:
+`allow_accounts`, `deny_accounts`, the partition `qos` and its `qos_grptres`,
+and `max_mem_per_cpu_mb`. Read these before sizing anything. Each carries
+`state` = `set` | `unrestricted` | `unknown`, and **`unknown` is not
+`unrestricted`** -- it means the query did not answer, so say so instead of
+planning around it. Two failures paid for this: hours lost to
+`QOSGrpCpuLimit` on a 736-CPU partition sitting 202 CPUs idle, because nothing
+said which accounts were allowed in it; and `MaxMemPerCPU`, which fixes the
+CPU count a memory request costs and then refuses the job by naming CPUs
+rather than memory -- 700 GB at `MaxMemPerCPU=5120` costs 140 CPUs, not the 32
+that were asked for.
+
 Read it before speaking. Every fact in it is a question you must not ask.
 If the repo is half-finished, also read its README, CONTEXT.md, MEMORY.md and
 any `docs/adr/*`, and skim the last dozen commits. The point is to arrive at

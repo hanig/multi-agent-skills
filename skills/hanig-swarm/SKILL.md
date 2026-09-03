@@ -178,6 +178,25 @@ Declared outputs are **relative to the run-dir**. One that resolves outside it i
 refused, because an output the coordinator did not isolate supports no
 conclusion.
 
+**To move a job that is ALREADY QUEUED to another partition, update it in
+place. Do not cancel and redispatch.**
+
+```bash
+scontrol update JobId=187196 Partition=cpu    # same job id, same binding
+```
+
+The job id survives, so the attempt's binding survives with it and `check`
+goes on answering about the same job. Cancel-and-redispatch buys two problems
+instead: the new job id is bound to nothing, and redispatching means editing
+the unit's `sbatch` flags, so the plan digest no longer matches and the next
+`advance` refuses to move until it is given `--accept-plan-change`. One
+command against a cancellation plus an override -- take the command.
+
+Better still, do not pick the wrong partition: `survey.py` reports
+`allow_accounts`, `qos_grptres` and `max_mem_per_cpu_mb` per partition, which
+is where a partition your account may not use is caught before dispatch
+rather than after a queued job has to be moved.
+
 ## The three kinds
 
 | kind | isolation | done predicate |

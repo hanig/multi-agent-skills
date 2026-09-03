@@ -28,6 +28,7 @@ MAX_ENTRIES_PER_DIR = 5_000   # one directory must not be materialised whole
 WALK_SECONDS = 20        # a survey that hangs is worse than a partial one
 RUN_TIMEOUT = 30
 MAX_OUTPUT = 200_000     # a child cannot inflate the survey without limit
+MAX_QOS_ROWS = 500       # a QOS table is small; a runaway one is not the survey
 
 
 # Things that must never reach the survey file. It is read into a session,
@@ -249,22 +250,279 @@ def machine():
     return out
 
 
+# THREE STATES, and collapsing any two of them is the whole failure this block
+# exists to prevent. Hours went into `QOSGrpCpuLimit` while a 736-CPU
+# partition sat with 202 CPUs idle, because the survey reported how big every
+# partition was and never reported who was ALLOWED to use it -- and "this
+# partition restricts nobody" and "we could not find out who it restricts" are
+# different facts. Written as an empty list, the second one reads as the
+# first, which is the quiet lie a plan author cannot detect. So every limit
+# below is one of:
+#
+#   {"state": "set",          "value": <the limit; it binds>}
+#   {"state": "unrestricted", "value": None}   the cluster declares no limit
+#   {"state": "unknown", "value": None, "why": ...}  assume NOTHING from this
+LIMIT_SET, LIMIT_OPEN, LIMIT_UNKNOWN = "set", "unrestricted", "unknown"
+
+# Slurm's several spellings of "nothing is limited here": ALL for the Allow*
+# lists, UNLIMITED (or a bare 0) for the Max* numbers, N/A for an unset
+# partition QOS. None of the three is evidence about any of the others, and
+# none of them means the query failed.
+_SLURM_OPEN = {"ALL", "UNLIMITED", "N/A", "NONE", "(NULL)", "0", ""}
+
+
+def _limit(state, value=None, why=None):
+    out = {"state": state, "value": value}
+    if why:
+        # Only on unknown, and always on unknown: a consumer that has to
+        # decide whether to re-query needs to know WHICH command went missing.
+        out["why"] = why
+    return out
+
+
+def _oneliner_fields(line):
+    """Parse one record of `scontrol -o show ...` into a dict.
+
+    `-o` is Slurm's own one-record-per-line format, asked for in preference to
+    the human-readable block form for the reason this repo keeps relearning:
+    scraping a layout somebody may reflow between releases is a bug waiting
+    for an upgrade.
+
+    A VALUE MAY ITSELF CONTAIN '=' (`TRES=cpu=736,mem=6000000M`), so each
+    value runs to the next space and the left-to-right scan never mistakes the
+    inner `cpu=736` for a key of its own -- checked with TRES sitting directly
+    before the fields we actually read."""
+    return {m.group(1): m.group(2) for m in re.finditer(r"(\w+)=(\S*)", line)}
+
+
+def _parse_tres(text):
+    """`cpu=512,mem=2000G,node=10` -> a dict.
+
+    A bare count becomes an int so a consumer can compare it. Anything
+    carrying a unit stays the string Slurm printed, because 2000G and 2000 are
+    not the same number and this file must not pretend to know which was
+    meant."""
+    out = {}
+    for item in (text or "").split(","):
+        key, _, val = item.partition("=")
+        key, val = key.strip(), val.strip()
+        if key and val:
+            out[key] = int(val) if val.isdigit() else val
+    return out
+
+
+def partition_records():
+    """Every partition as `scontrol` describes it, keyed by name.
+
+    Returns (records, why_unavailable). None is NOT {}: None means the query
+    did not answer, {} means it answered and named no partition. That
+    distinction is the reason this returns a pair at all."""
+    if not shutil.which("scontrol"):
+        return None, "scontrol is not on this PATH"
+    rc, o, err = run(["scontrol", "-o", "show", "partition"])
+    if rc != 0:
+        return None, ("`scontrol -o show partition` failed: "
+                      f"{err.strip()[:120] or rc}")
+    if len(o) >= MAX_OUTPUT:
+        # The read is capped mid-stream, so the last record is half a line and
+        # `MaxMemPerCPU=51` would parse cleanly into a wrong number. Unknown
+        # beats half-parsed; the partition list from sinfo is unaffected.
+        return None, (f"scontrol output hit the {MAX_OUTPUT}-byte read cap, "
+                      "so the last record is truncated; not parsed")
+    recs = {}
+    for line in o.splitlines():
+        fields = _oneliner_fields(line)
+        name = fields.get("PartitionName", "").strip()
+        if name:
+            recs[name] = fields
+    return recs, None
+
+
+def qos_grptres():
+    """GrpTRES per QOS name, from `sacctmgr`.
+
+    This is the number that produced `QOSGrpCpuLimit` on an idle partition:
+    the ceiling is on the QOS, not on the partition, so nothing in `sinfo`
+    can see it and a plan author sizing a job from partition CPUs has no idea
+    it is there.
+
+    `-n -P` is sacctmgr's parseable output. The column form pads AND TRUNCATES
+    long names -- that is what the `%30` on the assoc query below is working
+    around -- and a truncated QOS name joins to no partition at all, which
+    would look exactly like a partition with no QOS.
+
+    Returns (table, why_unavailable). None is NOT {}: {} means sacctmgr
+    answered and no QOS exists."""
+    if not shutil.which("sacctmgr"):
+        return None, "sacctmgr is not on this PATH"
+    rc, o, err = run(["sacctmgr", "-n", "-P", "show", "qos",
+                      "format=Name,GrpTRES"])
+    if rc != 0:
+        return None, f"`sacctmgr show qos` failed: {err.strip()[:120] or rc}"
+    if len(o) >= MAX_OUTPUT:
+        return None, (f"sacctmgr output hit the {MAX_OUTPUT}-byte read cap, "
+                      "so the last row is truncated; not parsed")
+    table = {}
+    for line in o.splitlines()[:MAX_QOS_ROWS]:
+        name, _, tres = line.partition("|")
+        if name.strip():
+            table[name.strip()] = _parse_tres(tres)
+    return table, None
+
+
+def partition_limits(fields, why, qos_table, qos_why):
+    """The limit fields for ONE partition, in the three-state shape.
+
+    `fields` is that partition's `scontrol` record, or None when scontrol did
+    not answer -- in which case every field is unknown and `why` says which
+    command was missing. Nothing here ever returns an empty allowance."""
+    if fields is None:
+        reason = why or "scontrol did not report this partition"
+        return {k: _limit(LIMIT_UNKNOWN, why=reason)
+                for k in ("allow_accounts", "deny_accounts",
+                          "max_mem_per_cpu_mb", "qos", "qos_grptres")}
+
+    # BOTH SIDES of the account rule, because AllowAccounts=ALL on a
+    # partition that DENIES your account is not the open partition it reads
+    # as, and reporting only the allowance would recreate the original bug
+    # with a second field.
+    #
+    # Slurm prints exactly ONE of the two: `AllowAccounts` when an allow-list
+    # is set or neither is, and `DenyAccounts` instead when only a deny-list
+    # is. So the absence of one key, WITH the other present, is an answer --
+    # "nothing is denied here" -- and only the absence of both is ignorance.
+    # Calling a missing DenyAccounts unknown printed `denied=UNKNOWN` beside
+    # every partition on a cluster that denies nobody, which is the
+    # cries-wolf direction that gets a field ignored.
+    def _accounts(key, other):
+        raw = fields.get(key)
+        if raw is None:
+            if fields.get(other) is not None:
+                return _limit(LIMIT_OPEN)
+            return _limit(LIMIT_UNKNOWN,
+                          why="scontrol printed neither AllowAccounts nor "
+                              "DenyAccounts for this partition")
+        if raw.strip().upper() in _SLURM_OPEN:
+            return _limit(LIMIT_OPEN)
+        return _limit(LIMIT_SET,
+                      [a for a in (x.strip() for x in raw.split(",")) if a])
+
+    out = {"allow_accounts": _accounts("AllowAccounts", "DenyAccounts"),
+           "deny_accounts": _accounts("DenyAccounts", "AllowAccounts")}
+
+    raw = fields.get("MaxMemPerCPU")
+    if raw is None:
+        out["max_mem_per_cpu_mb"] = _limit(
+            LIMIT_UNKNOWN, why="scontrol printed no MaxMemPerCPU")
+    elif raw.strip().upper() in _SLURM_OPEN:
+        out["max_mem_per_cpu_mb"] = _limit(LIMIT_OPEN)
+    else:
+        # Slurm prints plain megabytes here. A suffixed form is kept verbatim
+        # rather than converted, because a wrong number is worse than a string
+        # a human can read.
+        mb = raw.strip()
+        out["max_mem_per_cpu_mb"] = _limit(LIMIT_SET,
+                                           int(mb) if mb.isdigit() else mb)
+
+    raw = (fields.get("QOS") or "").strip()
+    if not raw:
+        out["qos"] = _limit(LIMIT_UNKNOWN,
+                            why="scontrol printed no QOS for this partition")
+        out["qos_grptres"] = _limit(LIMIT_UNKNOWN, why=out["qos"]["why"])
+        return out
+    if raw.upper() in _SLURM_OPEN:
+        # No partition QOS attached, so no partition-QOS GrpTRES. See
+        # qos_grptres_note: an association QOS can still cap you.
+        out["qos"] = _limit(LIMIT_OPEN)
+        out["qos_grptres"] = _limit(LIMIT_OPEN)
+        return out
+    out["qos"] = _limit(LIMIT_SET, raw)
+    if qos_table is None:
+        out["qos_grptres"] = _limit(LIMIT_UNKNOWN, why=qos_why or "not queried")
+    elif raw not in qos_table:
+        out["qos_grptres"] = _limit(
+            LIMIT_UNKNOWN,
+            why=f"the partition names QOS {raw!r}, which sacctmgr did not list")
+    elif qos_table[raw]:
+        out["qos_grptres"] = _limit(LIMIT_SET, qos_table[raw])
+    else:
+        out["qos_grptres"] = _limit(LIMIT_OPEN)
+    return out
+
+
+def _limits_line(part):
+    """One line per partition for the human-readable output. UNKNOWN is
+    printed as UNKNOWN rather than omitted: a field left off the line reads
+    as a field with nothing in it."""
+    bits = []
+    for key, label in (("allow_accounts", "accounts"),
+                       ("deny_accounts", "denied"),
+                       ("max_mem_per_cpu_mb", "maxmem/cpu"),
+                       ("qos_grptres", "grptres")):
+        lim = part.get(key) or {}
+        if lim.get("state") == LIMIT_UNKNOWN:
+            bits.append(f"{label}=UNKNOWN")
+        elif lim.get("state") != LIMIT_SET:
+            continue
+        elif isinstance(lim["value"], list):
+            bits.append(f"{label}=" + ",".join(lim["value"][:6]))
+        elif isinstance(lim["value"], dict):
+            bits.append(f"{label}=" + ",".join(
+                f"{k}={v}" for k, v in sorted(lim["value"].items())))
+        elif key == "max_mem_per_cpu_mb" and isinstance(lim["value"], int):
+            # The unit, spelled out. This is the number a memory request is
+            # divided by to get the CPU count Slurm will actually charge.
+            bits.append(f"{label}={lim['value']}M")
+        else:
+            bits.append(f"{label}={lim['value']}")
+    return "  ".join(bits)
+
+
 def scheduler():
     """Slurm facts a plan author would otherwise have to ask for."""
     if not shutil.which("sinfo"):
         return {"present": False}
     out = {"present": True}
+    parts, seen = [], set()
     rc, o, _ = run(["sinfo", "-h", "-o", "%P|%a|%l|%D"])
     if rc == 0:
-        parts = []
         for line in o.splitlines():
             f = line.split("|")
             if len(f) >= 4:
-                parts.append({"partition": f[0].strip().rstrip("*"),
+                name = f[0].strip().rstrip("*")
+                parts.append({"partition": name,
                               "default": f[0].strip().endswith("*"),
                               "avail": f[1].strip(), "timelimit": f[2].strip(),
                               "nodes": f[3].strip()})
+                seen.add(name)
+    # WHO MAY USE IT, and what the allowance costs. Not one of these comes
+    # from sinfo, and every one of them can refuse a job that fits the
+    # partition's size -- which is how the survey came to report a 736-CPU
+    # partition to somebody whose account was never allowed in it.
+    recs, why = partition_records()
+    qos_table, qos_why = qos_grptres()
+    for name in sorted(recs or {}):
+        if name in seen:
+            continue
+        # A partition scontrol knows and sinfo did not print (Hidden=YES is
+        # the usual reason) is still a partition a plan may name.
+        f = recs[name]
+        parts.append({"partition": name,
+                      "default": f.get("Default", "").upper() == "YES",
+                      "avail": f.get("State", "").lower(),
+                      "timelimit": f.get("MaxTime", ""),
+                      "nodes": f.get("TotalNodes", "")})
+        seen.add(name)
+    for part in parts:
+        part.update(partition_limits(
+            (recs or {}).get(part["partition"]) if recs is not None else None,
+            why, qos_table, qos_why))
+    if rc == 0 or recs is not None:
         out["partitions"] = parts
+    else:
+        # ABSENT, not empty. A consumer that saw [] here would read "this
+        # cluster has no partitions", which is never a true statement.
+        out["partitions_unavailable"] = why or "sinfo did not answer"
     rc, o, _ = run(["scontrol", "show", "config"])
     if rc == 0:
         for key in ("DefMemPerCPU", "DefMemPerNode", "MaxArraySize",
@@ -281,6 +539,28 @@ def scheduler():
         accts = sorted({a.strip() for a in o.splitlines() if a.strip()})
         if accts:
             out["accounts"] = accts
+    if qos_table is not None:
+        # The whole table, not only the QOS the partitions name: a unit can
+        # carry a --qos of its own, and validate will want to resolve that too.
+        out["qos"] = {n: {"grptres": _limit(LIMIT_SET, t) if t
+                          else _limit(LIMIT_OPEN)}
+                      for n, t in sorted(qos_table.items())}
+    elif qos_why:
+        out["qos_unavailable"] = qos_why
+    out["limits_note"] = (
+        "allow_accounts, deny_accounts, max_mem_per_cpu_mb, qos and "
+        "qos_grptres each carry state=set|unrestricted|unknown. UNKNOWN IS "
+        "NOT UNRESTRICTED: it means the query did not answer, so assume "
+        "nothing and say so rather than planning around it. A set "
+        "max_mem_per_cpu_mb also fixes the CPU count, because Slurm charges "
+        "ceil(mem_mb / max_mem_per_cpu_mb) CPUs and then refuses the job by "
+        "naming CPUS, NOT MEMORY -- 700G at MaxMemPerCPU=5120 costs 140 CPUs, "
+        "not the 32 that were asked for, and the error points away from the "
+        "cause.")
+    out["qos_grptres_note"] = (
+        "the PARTITION QOS only. An account or association QOS can impose a "
+        "GrpTRES this does not show, so an unrestricted qos_grptres is not a "
+        "promise that nothing caps you.")
     return out
 
 
@@ -477,7 +757,11 @@ def main():
                     help="JSON even when writing to stdout")
     args = ap.parse_args()
 
-    data = {"schema_version": 1, "machine": machine(),
+    # 2 adds the per-partition allowance block (allow_accounts,
+    # deny_accounts, max_mem_per_cpu_mb, qos, qos_grptres). Additive, but
+    # versioned so a consumer can tell "this cluster restricts nothing"
+    # from "this survey is older than the question".
+    data = {"schema_version": 2, "machine": machine(),
             "scheduler": scheduler(), "repo": repo(args.repo)}
     # DEDUPE. Surveying a home directory printed the same filesystem twice,
     # on every host, because home and the repo resolve to the same path.
@@ -519,6 +803,13 @@ def main():
             print("            --mem is REQUIRED on this cluster")
         if s.get("accounts"):
             print(f"  accounts  {', '.join(s['accounts'])}")
+        # The allowance, per partition. Printed because the machine-readable
+        # field exists for validate and a human reading the terminal was the
+        # one who lost the hours.
+        for part in s.get("partitions", [])[:12]:
+            line = _limits_line(part)
+            if line:
+                print(f"  limits    {part['partition']}: {line}")
     else:
         print("  slurm     not present")
     for st in data["storage"]:
