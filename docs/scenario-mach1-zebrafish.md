@@ -186,6 +186,8 @@ Ordinary dependency advancement and explicitly transient preemption retries shou
 - **Cluster outage:** Missing accounting rows also return `INCOMPLETE`; no outage detector distinguishes this from normal accounting delay.
 - **Plateau:** `converge.py` is not integrated into `swarm.py`. Hani must run it manually against each `metrics.jsonl`:
 
+> **CLOSED, ARC-234.** A unit may now declare a `converge` block in the plan and the coordinator applies it inside `advance`: a non-`CONVERGED` verdict makes the unit `NEEDS_HUMAN` rather than `DONE`, so the DAG stops on its own and dependents wait. The command below still works as the hand tool. The "multiple predicates per unit" generalisation below was NOT built; one declared convergence gate was.
+
 ```bash
 python3 ~/multi-agent-skills/skills/hanig-swarm/scripts/converge.py check \
   /shared/goodarzilab/swarm-state/mach1-zfish/runs/train-seed-0/<attempt>/metrics.jsonl \

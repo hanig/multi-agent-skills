@@ -307,6 +307,42 @@ python3 skills/hanig-swarm/scripts/converge.py check metrics.jsonl \
 not finish. Divergence is checked BEFORE convergence, because a run that blew up
 and later coincidentally satisfied a threshold has not converged.
 
+### Declaring it in a plan, so the coordinator applies it
+
+The command above is the hand tool. A `slurm` or `pipeline` unit that declares a
+`converge` block is judged by it automatically, and the verdict gates `DONE`:
+
+```json
+{"id": "train-seed-0", "kind": "slurm", "command": "...",
+ "outputs": ["metrics.jsonl", "ckpt.pt"],
+ "converge": {"metrics": "metrics.jsonl",
+              "criterion": {"metric": "val_auroc", "mode": "max",
+                            "threshold": 0.78, "min_steps": 10000},
+              "diverge": [{"metric": "train_loss", "above": 1000}],
+              "budget": 40000}}
+```
+
+- Anything other than `CONVERGED` makes the unit **`NEEDS_HUMAN`**, not `DONE`.
+  It closes no ticket, satisfies no dependent, and cannot be promoted. It is not
+  `FAILED`, because the command did not fail: extending the budget, changing the
+  recipe, or accepting the checkpoint anyway are decisions with a cost, and a
+  coordinator that guessed among them would either burn a second full run or
+  quietly accept a bad model. It also stays out of the retry path.
+- `converge.metrics` must ALSO be a declared output. The gate is conclusive only
+  over a file inside the attempt's exclusive write root, and only a declared
+  output is checked to be there at all -- otherwise a run that produced no
+  metrics reads as "cannot judge" instead of "produced nothing".
+- The criterion is read from the PLAN, whose digest is frozen, and never from
+  the attempt directory. The unit spec lives inside the write root the job
+  writes to, so reading it from there would let a run rewrite the standard it is
+  judged against.
+- The whole block is validated by `swarm.py validate`, before anything is
+  dispatched. A typo'd criterion key is refused rather than defaulted, because
+  finding it when the job is finished means the GPU-hours are already spent.
+- Declaring nothing changes nothing: a unit with no `converge` block never
+  reaches this code. A `code` unit may not declare one -- it has no metrics
+  series and is closed by a merged pull request.
+
 **Nothing in Shreshth's repo does this**, checked directly: its apparent hits
 are a Unix timestamp ("epoch seconds"), a GPU-load scrape, and a REVIEWER
 agreeing a diff is fixed. `paseo-loop`'s verification shapes cannot reach it --

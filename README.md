@@ -140,7 +140,10 @@ kind of thing that should have to be typed out in full.
 
 `converge.py check` answers whether a training run converged or merely stopped.
 It was ported out of a deleted skill before that skill was removed, because it
-was the one capability with no replacement anywhere.
+was the one capability with no replacement anywhere. A unit that declares a
+`converge` block is judged by it: a run that spent its step budget without
+meeting the criterion becomes `NEEDS_HUMAN`, not `DONE`, so it closes no ticket
+and releases no dependent. Units that declare none never reach that code.
 
 Coordinator state and attempt roots default to a stable per-project directory
 under `$XDG_STATE_HOME`, or `~/.local/state` when it is unset. Both resolve
