@@ -51,6 +51,7 @@ import child_environment as CE  # noqa: E402
 import paseo_io as PIO
 import worktree as W  # noqa: E402
 import verify as V  # noqa: E402
+import converge as CV  # noqa: E402  the declared-convergence gate
 import coordinator_paths as CP  # noqa: E402
 
 STATE_FILE = "swarm-state.json"
@@ -534,6 +535,122 @@ def _code_protocol_problem(prompt, intent):
     return None
 
 
+# --- the declared convergence gate ---------------------------------------
+# `unit.py` answers existence and terminal state. For a training run that is
+# not enough: a job that executed its whole step budget, exited 0 and wrote a
+# checkpoint is DONE under that predicate even if the loss was flat for the
+# last three quarters of it. `converge.py` scores a declared criterion over
+# the metrics SERIES and tells "it converged" apart from "it stopped".
+#
+# It is OPT-IN per unit and it gates DONE, in the same shape as
+# `requires_verification`: undeclared, nothing changes, because a gate
+# everybody must satisfy is one everybody learns to satisfy trivially.
+#
+# THE CRITERION COMES FROM THE PLAN, whose digest is frozen, and never from
+# the attempt directory. That is not a detail. The unit spec lives inside the
+# write root the job itself writes to, so reading the criterion from there
+# would let a run rewrite the standard it is judged against -- the same
+# laundering the launch record and the receipt were demoted to audit-only for.
+CONVERGE_UNIT_KEYS = frozenset({"metrics", "criterion", "diverge", "budget",
+                                "sparse_metric"})
+
+
+def converge_problem(u):
+    """Why a unit's declared convergence block cannot be evaluated, or None.
+
+    Checked at PLAN time as well as at judge time. `converge.py` says it
+    plainly -- "declaring the criterion BEFORE the run is the whole point" --
+    and a criterion accepted here but rejected forty thousand steps later has
+    cost a real job for a typo.
+    """
+    spec = u.get("converge")
+    if spec is None:
+        return None
+    uid = u.get("id", "?")
+    if u.get("kind") == "code":
+        return (f"unit {uid!r} is kind=code and declares 'converge'. A code "
+                f"unit has no metrics series and is closed by a merged pull "
+                f"request, so the gate would never be reached. Drop the "
+                f"block, or declare the work as kind=slurm or kind=pipeline.")
+    if not isinstance(spec, dict):
+        return (f"unit {uid!r} has converge={spec!r}, a "
+                f"{type(spec).__name__}; it must be an object like "
+                f'{{"metrics": "metrics.jsonl", "criterion": '
+                f'{{"metric": "val_loss", "mode": "min", "threshold": 0.5}}}}.')
+    unknown = sorted(set(spec) - CONVERGE_UNIT_KEYS)
+    if unknown:
+        return (f"unit {uid!r} converge has unrecognised key(s) "
+                f"{', '.join(unknown)}; it reads only "
+                f"{', '.join(sorted(CONVERGE_UNIT_KEYS))}. A typo here would "
+                f"drop the gate silently, which is the one failure mode this "
+                f"whole family of checks exists to prevent.")
+    metrics = spec.get("metrics")
+    if not isinstance(metrics, str) or not metrics.strip():
+        return (f"unit {uid!r} converge declares metrics={metrics!r}; name "
+                f"the JSONL file the run appends its evaluations to, RELATIVE "
+                f"to the attempt write root.")
+    if metrics not in (u.get("outputs") or []):
+        return (f"unit {uid!r} judges convergence over {metrics!r}, which is "
+                f"not one of its declared outputs. The gate is conclusive "
+                f"only over a file inside the exclusive write root, and only "
+                f"a declared output is checked to be there at all -- "
+                f"otherwise a missing metrics file reads as 'cannot judge' "
+                f"instead of 'the run produced nothing'. Add {metrics!r} to "
+                f"'outputs'.")
+    problem = CV.criterion_problem(spec.get("criterion"))
+    if problem:
+        return f"unit {uid!r} converge criterion: {problem}"
+    if not isinstance(spec.get("sparse_metric", False), bool):
+        return (f"unit {uid!r} has converge.sparse_metric="
+                f"{spec['sparse_metric']!r}; it must be true or false.")
+    rules = spec.get("diverge")
+    if rules is not None and not isinstance(rules, list):
+        return (f"unit {uid!r} has converge.diverge={rules!r}, a "
+                f"{type(rules).__name__}, but it must be a LIST of rule "
+                f"objects. A single object here is iterated over its KEYS, so "
+                f"the bound is silently lost and nothing is checked.")
+    for i, rule in enumerate(rules or []):
+        if not isinstance(rule, dict):
+            return (f"unit {uid!r} converge.diverge[{i}]={rule!r} is not an "
+                    f"object; each rule looks like "
+                    f'{{"metric": "train_loss", "above": 1e9}}.')
+        if not isinstance(rule.get("metric"), str) or not rule["metric"].strip():
+            return (f"unit {uid!r} converge.diverge[{i}] names no metric; "
+                    f"give the metric's name exactly as the run writes it.")
+        if not any(k in rule for k in ("above", "below")):
+            return (f"unit {uid!r} converge.diverge[{i}] declares no bound; "
+                    f"add 'above' or 'below', or remove the rule. A rule with "
+                    f"no bound cannot show the run stayed inside it.")
+        problem = CV.unread_key_problem(rule, CV.DIVERGE_KEYS,
+                                        f"converge.diverge[{i}]")
+        if problem:
+            return f"unit {uid!r} {problem}"
+    if spec.get("budget") is not None:
+        budget, err = CV.finite_number(spec["budget"])
+        if err or budget < 0:
+            return (f"unit {uid!r} has converge.budget={spec['budget']!r}, "
+                    f"which {err or 'must not be negative'}. The budget is "
+                    f"the step count whose exhaustion is NOT convergence.")
+    return None
+
+
+def converge_verdict(u, attempt_dir):
+    """Judge a unit's declared criterion over its attempt's metrics.
+
+    Returns (state_name, [reasons]) straight from `converge.py`. It reads the
+    metrics file the PLAN named, inside this attempt's exclusive write root,
+    and nothing else: it writes nothing, consults neither the launch record
+    nor the receipt, and re-derives no pinned value. The metrics series is
+    primary evidence observed where it lies, not a pinned fact asked again.
+    """
+    spec = u.get("converge") or {}
+    return CV.judge(str(Path(attempt_dir) / str(spec.get("metrics") or "")),
+                    spec.get("criterion") or {},
+                    spec.get("diverge") or [],
+                    spec.get("budget"),
+                    bool(spec.get("sparse_metric")))
+
+
 def validate_plan(plan):
     """Raise PlanError, or return a summary. Refuses BEFORE anything is
     dispatched: a plan that cannot be run should not half-run."""
@@ -585,6 +702,18 @@ def validate_plan(plan):
                     f"unit {u.get('id','?')!r} requires a clean Git workspace "
                     f"but declares no workspace_policy.path, "
                     f"execution_workspace, or repo")
+
+    # A convergence criterion is refused HERE, before anything is dispatched,
+    # for the reason converge.py gives for requiring one at all: it has to be
+    # declared before the run. Discovering the typo when the job is finished
+    # means the GPU-hours are already spent and there is no criterion to judge
+    # them against.
+    for u in units:
+        if not isinstance(u, dict):
+            continue
+        problem = converge_problem(u)
+        if problem:
+            raise PlanError(problem)
 
     # A `code` unit needs paseo ON THIS HOST, because that is where the
     # coordinator dispatches it. Refusing here, before anything is dispatched,
@@ -4524,6 +4653,28 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         previous = us.get("state")
         us["state"] = ("FAILED_EVIDENCE" if protocol_problem
                        else NAME.get(rc, f"rc={rc}"))
+
+        # A DECLARED convergence criterion gates DONE. Undeclared, nothing
+        # changes. This is the whole reason converge.py exists: the scheduler
+        # and the done predicate BOTH report success for a run that spent its
+        # budget without improving, and that checkpoint must not close a
+        # ticket, satisfy a dependent, or become promotable.
+        #
+        # NEEDS_HUMAN, not FAILED: the command did not fail. Extending the
+        # budget, changing the recipe, or accepting the checkpoint anyway are
+        # decisions with cost, and a coordinator that guessed among them would
+        # either burn another full run or quietly accept a bad model. It also
+        # keeps the unit out of the retry path and out of the settle window,
+        # so nothing is auto-redone on the strength of this verdict.
+        if us["state"] == "DONE" and u.get("converge"):
+            verdict, why = converge_verdict(u, attempt)
+            us["converge_verdict"] = verdict
+            us["converge_reasons"] = list(why)
+            if verdict != "CONVERGED":
+                us["state"] = "NEEDS_HUMAN"
+            report.append(f"{uid}: convergence {verdict} -- " +
+                          " ".join(str(w) for w in why))
+
         # A CODE UNIT IS NOT DONE WHEN ITS PREDICATE PASSES. The receipt says
         # an agent went idle and files exist; the accepted form of that work
         # is a merged PR. Rewriting only the tracker intent left the unit
@@ -5490,6 +5641,13 @@ SCHEMA_FIELDS = [
      '{"mode": "restart", "max_lost": {...}}. "resume" is REFUSED'),
     ("gpu_hours", "all", "optional", "charged against the plan's budget"),
     ("pool", "all", "optional", "must be declared in limits.pools"),
+    ("converge", "slurm, pipeline", "optional",
+     '{"metrics": "metrics.jsonl", "criterion": {...}, "diverge": [...], '
+     '"budget": N}. Scores a criterion over the metrics SERIES and gates '
+     "DONE: a run that spent its budget without meeting it is NEEDS_HUMAN, "
+     "not DONE, so it closes no ticket and satisfies no dependent. The "
+     "metrics file must also be a declared output, and the criterion is read "
+     "from the plan, never from the attempt directory"),
 ]
 
 # What couples to what, stated once. These are the rules that only announce
@@ -5506,6 +5664,10 @@ SCHEMA_COUPLINGS = [
     "in retry_limits.",
     "An input is satisfied by an upstream unit's output only when that unit "
     "is an ancestor.",
+    "converge.metrics must also appear in outputs, so the predicate checks "
+    "the file exists before convergence is judged over it.",
+    "converge is refused on kind=code: a code unit is closed by a merged pull "
+    "request and has no metrics series.",
 ]
 
 
