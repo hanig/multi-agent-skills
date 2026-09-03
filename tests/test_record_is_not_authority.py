@@ -45,6 +45,8 @@ ALLOWED = {
         "renders deterministic audit bytes from coordinator-state facts",
     ("swarm.py", "_complete_code_launch"):
         "combines the trusted launch intent with Paseo's returned cwd",
+    ("swarm.py", "_register_code_workspace"):
+        "records cleanup metadata from the coordinator-state intent",
     ("swarm.py", "_registered_attempt_workspace"):
         "matches Paseo's registry against the coordinator-state intent",
     ("swarm.py", "_recover_code_launch"):

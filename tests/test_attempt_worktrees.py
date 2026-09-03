@@ -196,6 +196,67 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         meta = state["units"]["code"]["attempt_workspaces"]["cleanup"]
         self.assertTrue(meta["archived"])
 
+    def test_crash_after_archive_keeps_durable_produced_head(self):
+        class Crash(BaseException):
+            pass
+
+        attempt = self.attempt("code", "archive-crash")
+        unit = code_unit(self.repo)
+        state = {"schema_version": 1, "halted": None, "units": {}}
+        _job, error = S._submit(unit, str(attempt), False, state)
+        self.assertIsNone(error)
+        facts = state["units"]["code"]["attempt_launch_facts"][attempt.name]
+        workspace = Path(facts["execution_workspace"])
+        (workspace / "made.txt").write_text("made\n")
+        git(workspace, "add", "-A")
+        git(workspace, "commit", "-qm", "attempt work")
+        produced = git(workspace, "rev-parse", "HEAD")
+        us = state["units"]["code"]
+        us.update({"state": "SUBMITTED", "attempt_dir": str(attempt),
+                   "attempts": [str(attempt)], "gpu_hours": 0,
+                   "job_id": "agent-archive-crash"})
+        state_dir = self.tmp / "state"
+        S.save_state(str(state_dir), state)
+        plan = {"name": "p", "units": [dict(
+            unit, outputs=[], write_scopes=["code/"])]}
+
+        result_line = S.CHECK_RESULT_PREFIX + " " + json.dumps({
+            "produced_head": produced, "receipt_sha256": "f" * 64,
+        }, sort_keys=True, separators=(",", ":"))
+        real_check = S._check
+        real_archive = S._archive_code_worktree
+
+        def check(*_args, **_kwargs):
+            return S.DONE, "DONE", "", result_line
+
+        def archive_then_crash(current, _unit, _attempt, _report,
+                               current_state_dir=None):
+            durable = S.load_state(current_state_dir)
+            recorded = durable["units"]["code"]["attempt_produced_heads"]
+            self.assertEqual(recorded[attempt.name], produced)
+            current["units"]["code"]["attempt_workspaces"][
+                attempt.name]["archived"] = True
+            git(self.repo, "worktree", "remove", "--force", str(workspace))
+            raise Crash()
+
+        S._check = check
+        S._archive_code_worktree = archive_then_crash
+        self.addCleanup(setattr, S, "_check", real_check)
+        self.addCleanup(setattr, S, "_archive_code_worktree", real_archive)
+        ok, why = S.acquire_lease(str(state_dir))
+        self.assertTrue(ok, why)
+        self.addCleanup(S.release_lease, str(state_dir))
+        with self.assertRaises(Crash):
+            S.advance(plan, state, str(state_dir), str(self.tmp / "runs"),
+                      False, max_new=0)
+        recovered = S.load_state(str(state_dir))
+        self.assertEqual(recovered["units"]["code"][
+            "attempt_produced_heads"][attempt.name], produced)
+        recovered_facts = S.trusted_launch_facts(
+            recovered, "code", str(attempt))
+        self.assertIsNone(W.validate_pinned_head(
+            self.real_run, recovered_facts, produced))
+
     def test_returned_worktree_on_wrong_branch_is_refused_unrecorded(self):
         attempt = self.attempt("code", "wrong-branch")
         unit, state = self.intent_state(attempt)
@@ -260,6 +321,37 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         produced, why = W.judge(S.U.run, str(attempt), unit, facts)
         self.assertFalse(produced)
         self.assertIn("device/inode changed", why)
+
+    def test_swapped_git_metadata_is_refused_at_judgment(self):
+        attempt = self.attempt("code", "swapped-git")
+        state = {"units": {}}
+        unit = code_unit(self.repo)
+        _job, error = S._submit(unit, str(attempt), False, state)
+        self.assertIsNone(error)
+        facts = state["units"]["code"]["attempt_launch_facts"][attempt.name]
+        workspace = Path(facts["execution_workspace"])
+        (workspace / "made.txt").write_text("made\n")
+        git(workspace, "add", "-A")
+        git(workspace, "commit", "-qm", "attempt work")
+        produced_head = git(workspace, "rev-parse", "HEAD")
+
+        donor = self.tmp / "donor-worktree"
+        git(self.repo, "worktree", "add", "-q", "--detach", str(donor),
+            facts["base_commit"])
+        donor_git = Path(git(donor, "rev-parse", "--git-dir"))
+        if not donor_git.is_absolute():
+            donor_git = (donor / donor_git).resolve()
+        (donor_git / "HEAD").write_text(f"ref: refs/heads/{facts['branch']}\n")
+        git(donor, "reset", "--hard", produced_head)
+
+        before = os.stat(workspace)
+        (workspace / ".git").write_text((donor / ".git").read_text())
+        after = os.stat(workspace)
+        self.assertEqual((before.st_dev, before.st_ino),
+                         (after.st_dev, after.st_ino))
+        produced, why = W.judge(S.U.run, str(attempt), unit, facts)
+        self.assertFalse(produced)
+        self.assertIn("launched Git worktree metadata", why)
 
     def test_fsync_before_state_save_recovers_the_exact_seal(self):
         attempt = self.attempt("code", "seal-crash")
@@ -383,6 +475,34 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         self.assertIn("does not descend from trusted base", error)
         self.assertNotIn("attempt_launch_facts", state["units"]["code"])
 
+    def test_ambiguous_registry_does_not_refuse_legitimate_recovery(self):
+        attempt = self.attempt("code", "ambiguous-registry")
+        unit, state = self.intent_state(attempt)
+        intent = state["units"]["code"]["attempt_launch_intents"][attempt.name]
+        workspace = self.tmp / "ambiguous-managed" / intent["worktree_slug"]
+        workspace.parent.mkdir()
+        git(self.repo, "worktree", "add", "-q", "-b", intent["branch"],
+            str(workspace), intent["base_commit"])
+        real = self.real_run
+
+        def recovery(argv, **kwargs):
+            if argv[:2] == ["paseo", "inspect"]:
+                return 0, json.dumps({"Cwd": str(workspace)}), ""
+            if argv[:3] == ["paseo", "workspace", "ls"]:
+                record = {"cwd": str(workspace), "name": intent["branch"],
+                          "isolation": "worktree"}
+                return 0, json.dumps([
+                    dict(record, workspaceId="wks_one"),
+                    dict(record, workspaceId="wks_duplicate")]), ""
+            return real(argv, **kwargs)
+
+        S.U.run = recovery
+        error = S._recover_code_launch(
+            state, unit, str(attempt), "agent-legitimate")
+        self.assertIsNone(error)
+        self.assertIsNotNone(S.trusted_launch_facts(
+            state, "code", str(attempt)))
+
     def test_matching_title_agent_is_not_bound_to_another_workspace(self):
         attempt = self.attempt("code", "wrong-owner")
         unit, state = self.intent_state(attempt)
@@ -439,6 +559,47 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         self.assertIn("already exists but no agent", error)
         self.assertIn("git worktree list", error)
 
+    def test_failed_verification_registers_worktree_for_retained_report(self):
+        attempt = self.attempt("code", "verify-fails")
+        unit = code_unit(self.repo)
+        state = {"units": {}}
+        state_dir = self.tmp / "state"
+        fake = self.fake
+
+        def wrong_branch(argv, **kwargs):
+            result = fake(argv, **kwargs)
+            if argv[:2] == ["paseo", "run"]:
+                workspace = self.tmp / "managed" / attempt.name
+                git(workspace, "switch", "-q", "-c", "wrong-branch")
+            return result
+
+        S.U.run = wrong_branch
+        job, error = S._submit(
+            unit, str(attempt), False, state, str(state_dir))
+        self.assertIsNone(job)
+        self.assertIn("not trusted attempt branch", error)
+        durable = S.load_state(str(state_dir))
+        meta = durable["units"]["code"]["attempt_workspaces"][attempt.name]
+        self.assertEqual(meta["verification"], "refused")
+        self.assertTrue(meta["cleanup_pending"])
+        self.assertEqual(meta["path"],
+                         str((self.tmp / "managed" / attempt.name).resolve()))
+
+        def failing_archive(argv, **kwargs):
+            if argv[:3] == ["paseo", "workspace", "archive"]:
+                return 1, "", "archive unavailable"
+            return self.real_run(argv, **kwargs)
+
+        S.U.run = failing_archive
+        report = []
+        for _ in range(S.WORKTREE_ARCHIVE_MAX_ATTEMPTS):
+            S._archive_code_worktree(
+                durable, unit, str(attempt), report, str(state_dir))
+        retained = [line for line in report if line.startswith(
+            S.WORKTREE_CLEANUP_SUMMARY_PREFIX)]
+        self.assertEqual(len(retained), 1)
+        self.assertIn(meta["path"], retained[0])
+
     def test_archive_retries_are_bounded_and_name_the_retained_path(self):
         attempt = self.attempt("code", "archive-fails")
         unit = code_unit(self.repo)
@@ -465,6 +626,43 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         message = "\n".join(report)
         self.assertIn("NEEDS_HUMAN", message)
         self.assertIn(path, message)
+
+    def test_crash_mid_cleanup_does_not_reset_retry_counter(self):
+        class Crash(BaseException):
+            pass
+
+        attempt = self.attempt("code", "cleanup-crash")
+        unit = code_unit(self.repo)
+        state_dir = self.tmp / "state"
+        state = {"schema_version": 1, "halted": None, "units": {
+            "code": {"attempt_workspaces": {attempt.name: {
+                "path": str(self.tmp / "managed" / attempt.name),
+                "workspace_id": "wks_crash", "archived": False}}}}}
+        S.save_state(str(state_dir), state)
+
+        def crash_during_archive(argv, **_kwargs):
+            if argv[:3] == ["paseo", "workspace", "archive"]:
+                raise Crash()
+            return self.real_run(argv, **_kwargs)
+
+        S.U.run = crash_during_archive
+        for expected in range(1, S.WORKTREE_ARCHIVE_MAX_ATTEMPTS + 1):
+            current = S.load_state(str(state_dir))
+            with self.assertRaises(Crash):
+                S._archive_code_worktree(
+                    current, unit, str(attempt), [], str(state_dir))
+            durable = S.load_state(str(state_dir))
+            meta = durable["units"]["code"]["attempt_workspaces"][attempt.name]
+            self.assertEqual(meta["cleanup_attempts"], expected)
+        report = []
+        durable = S.load_state(str(state_dir))
+        S._archive_code_worktree(
+            durable, unit, str(attempt), report, str(state_dir))
+        final = S.load_state(str(state_dir))["units"]["code"][
+            "attempt_workspaces"][attempt.name]
+        self.assertTrue(final["cleanup_gave_up"])
+        self.assertEqual(final["cleanup_attempts"],
+                         S.WORKTREE_ARCHIVE_MAX_ATTEMPTS)
 
     def test_archive_exhaustion_is_one_aggregate_report(self):
         unit1 = code_unit(self.repo, "u1")

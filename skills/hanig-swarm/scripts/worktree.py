@@ -324,8 +324,8 @@ def launch_facts_problem(facts, unit_dir=None, spec=None):
     return None
 
 
-def workspace_identity_problem(facts):
-    """Return why the execution path no longer names the launched directory."""
+def workspace_identity_problem(runner, facts):
+    """Return why judgment no longer addresses the launched Git worktree."""
     workspace = facts.get("execution_workspace")
     identity = facts.get("workspace_identity") or {}
     if not isinstance(identity, dict):
@@ -333,7 +333,9 @@ def workspace_identity_problem(facts):
     if (identity.get("path") != workspace
             or identity.get("realpath") != workspace
             or not isinstance(identity.get("device"), int)
-            or not isinstance(identity.get("inode"), int)):
+            or not isinstance(identity.get("inode"), int)
+            or not identity.get("git_common_dir")
+            or not identity.get("git_dir")):
         return "the trusted launch snapshot has an incomplete worktree identity"
     try:
         current_path = str(Path(workspace).resolve())
@@ -345,6 +347,28 @@ def workspace_identity_problem(facts):
             or current.st_ino != identity["inode"]):
         return (f"the anchored worktree path {workspace!r} no longer names "
                 f"the launched directory (device/inode changed)")
+    observed = {}
+    for key, args in (
+            ("top", ("rev-parse", "--show-toplevel")),
+            ("git_common_dir", ("rev-parse", "--git-common-dir")),
+            ("git_dir", ("rev-parse", "--git-dir")),
+            ("branch", ("rev-parse", "--abbrev-ref", "HEAD"))):
+        rc, value, _ = _git(runner, workspace, *args)
+        if rc != 0:
+            return (f"cannot verify the anchored worktree's Git identity "
+                    f"({key} is unreadable)")
+        observed[key] = value
+    top = str(Path(observed["top"]).resolve())
+    common = str((Path(workspace) / observed["git_common_dir"]).resolve())
+    git_dir = str((Path(workspace) / observed["git_dir"]).resolve())
+    if (top != workspace
+            or common != identity["git_common_dir"]
+            or git_dir != identity["git_dir"]):
+        return (f"the anchored directory {workspace!r} no longer has the "
+                f"launched Git worktree metadata")
+    if observed["branch"] != facts.get("branch"):
+        return (f"the repository is on branch {observed['branch']!r}, but "
+                f"this attempt was anchored on {facts.get('branch')!r}")
     return None
 
 
@@ -388,7 +412,7 @@ def judge_detail(runner, unit_dir, spec, launch_facts=None):
     if err:
         return False, None, err
     rec = launch_facts
-    err = workspace_identity_problem(rec)
+    err = workspace_identity_problem(runner, rec)
     if err:
         return False, None, err
     repo = rec.get("execution_workspace")

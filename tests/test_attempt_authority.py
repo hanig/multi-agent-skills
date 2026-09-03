@@ -45,12 +45,18 @@ class RepoCase(unittest.TestCase):
     def facts(self, attempt, unit="u1"):
         top = str(self.repo.resolve())
         st = os.stat(top)
+        common = str((Path(top) / git(
+            self.repo, "rev-parse", "--git-common-dir")).resolve())
+        git_dir = str((Path(top) / git(
+            self.repo, "rev-parse", "--git-dir")).resolve())
         return {
             "schema_version": 1, "unit_id": unit,
             "attempt_id": Path(attempt).name, "repo": top,
             "repository_remote": None, "execution_workspace": top,
             "workspace_identity": {"path": top, "realpath": top,
-                                   "device": st.st_dev, "inode": st.st_ino},
+                                   "device": st.st_dev, "inode": st.st_ino,
+                                   "git_common_dir": common,
+                                   "git_dir": git_dir},
             "base_commit": self.base, "base_tree": self.base_tree,
             "branch": self.branch, "clean_at_launch": True,
         }
