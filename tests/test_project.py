@@ -1385,5 +1385,396 @@ class TestTheSurveySaysWhoMayUseAPartition(unittest.TestCase):
             self.assertEqual(data["scheduler"], {"present": False})
 
 
+
+def _filed(d, prefix="ARC-", start=200, project="proj-1"):
+    """Simulate the applying session: it creates the project and the issues
+    and writes the ids back into the draft, which is how 6(g) works."""
+    d = json.loads(json.dumps(d))
+    d["project"]["linear_id"] = project
+    for n, issue in enumerate(d["issues"]):
+        issue["linear_id"] = f"iss-{n}"
+        issue["identifier"] = f"{prefix}{start + n}"
+    return d
+
+
+def _readback(edges, read_at="2026-09-03T10:00:00-0700", **kw):
+    rb = {"schema_version": 1, "read_at": read_at,
+          "source": "linear mcp list_issues + blockedBy", "edges": edges}
+    rb.update(kw)
+    return rb
+
+
+class TestAStaleBlockedByEdgeIsRemovedNotMerelyNotAdded(unittest.TestCase):
+    """B8, second half. `blockedBy` is APPEND-ONLY through this interface --
+    Linear exposes `removeBlockedBy` as a separate operation -- so a shrunken
+    `needs` list leaves behind an edge the plan no longer declares, and not
+    re-adding it does not delete it.
+
+    The draft therefore has to name the removal, and it has to decide on a
+    READ of the tracker rather than on the previous draft, which records only
+    what was asked for. This repo has a scar from a docstring that claimed a
+    test enforced an invariant when no such test existed; these are the tests
+    that were missing."""
+
+    PLAN_WIDE = {"name": "p", "units": [
+        {"id": "a", "kind": "slurm", "runtime": "none", "command": "true",
+         "outputs": ["o.txt"]},
+        {"id": "b", "kind": "slurm", "runtime": "none", "command": "true",
+         "outputs": ["p.txt"], "needs": ["a"]}]}
+
+    def _shrunk(self):
+        plan = json.loads(json.dumps(self.PLAN_WIDE))
+        plan["units"][1].pop("needs")
+        return plan
+
+    def test_a_shrunken_needs_names_the_now_absent_edge_for_removal(self):
+        """The whole issue in one test: two runs against the same project,
+        `needs` shrinks, and the draft must say REMOVE."""
+        first = _filed(T.draft(self.PLAN_WIDE))
+        # What the tracker holds after the first apply: b blockedBy a.
+        rb = _readback({"ARC-200": [], "ARC-201": ["ARC-200"]})
+        second = T.draft(self._shrunk(), existing=first, readback=rb)
+        by_unit = {i["unit"]: i for i in second["issues"]}
+        self.assertEqual(by_unit["b"]["remove_blocked_by"], ["ARC-200"])
+        self.assertEqual(by_unit["b"]["add_blocked_by"], [])
+        self.assertFalse(by_unit["b"]["blocked_by_in_sync"])
+        self.assertIs(second["blocked_by_sync"]["in_sync"], False)
+
+    def test_the_removal_is_a_problem_the_check_reports(self):
+        first = _filed(T.draft(self.PLAN_WIDE))
+        rb = _readback({"ARC-200": [], "ARC-201": ["ARC-200"]})
+        plan = self._shrunk()
+        second = T.draft(plan, existing=first, readback=rb)
+        problems = T.edge_problems(plan, second)
+        self.assertTrue(any("no longer declares" in x for x in problems),
+                        problems)
+        self.assertTrue(any("removeBlockedBy" in x for x in problems),
+                        problems)
+
+    def test_not_re_adding_is_not_treated_as_removing(self):
+        """The counter-claim the old code implicitly made. `blocked_by` no
+        longer lists `a`, and that alone must not be read as the edge being
+        gone."""
+        first = _filed(T.draft(self.PLAN_WIDE))
+        rb = _readback({"ARC-200": [], "ARC-201": ["ARC-200"]})
+        second = T.draft(self._shrunk(), existing=first, readback=rb)
+        by_unit = {i["unit"]: i for i in second["issues"]}
+        self.assertEqual(by_unit["b"]["blocked_by"], [])
+        self.assertTrue(by_unit["b"]["remove_blocked_by"],
+                        "the plan stopped declaring the edge, which is "
+                        "exactly when the tracker still holds it")
+
+    def test_once_the_removal_is_applied_a_re_read_agrees(self):
+        """The verification loop closes. Without this the suite could not
+        tell a check that always complains from one that checks."""
+        first = _filed(T.draft(self.PLAN_WIDE))
+        plan = self._shrunk()
+        applied = _readback({"ARC-200": [], "ARC-201": []},
+                            read_at="2026-09-03T10:05:00-0700")
+        third = T.draft(plan, existing=first, readback=applied)
+        self.assertEqual(T.edge_problems(plan, third), [])
+        self.assertIs(third["blocked_by_sync"]["in_sync"], True)
+        self.assertEqual([i["remove_blocked_by"] for i in third["issues"]],
+                         [[], []])
+
+    def test_an_edge_the_plan_still_declares_is_left_alone(self):
+        first = _filed(T.draft(self.PLAN_WIDE))
+        rb = _readback({"ARC-200": [], "ARC-201": ["ARC-200"]})
+        second = T.draft(self.PLAN_WIDE, existing=first, readback=rb)
+        by_unit = {i["unit"]: i for i in second["issues"]}
+        self.assertEqual(by_unit["b"]["remove_blocked_by"], [])
+        self.assertEqual(by_unit["b"]["add_blocked_by"], [],
+                         "the tracker already holds it; re-adding is noise")
+        self.assertEqual(T.edge_problems(self.PLAN_WIDE, second), [])
+
+    def test_a_declared_edge_the_tracker_lacks_is_still_added(self):
+        """Both directions, or the fix trades one silent disagreement for
+        another."""
+        first = _filed(T.draft(self.PLAN_WIDE))
+        rb = _readback({"ARC-200": [], "ARC-201": []})
+        second = T.draft(self.PLAN_WIDE, existing=first, readback=rb)
+        by_unit = {i["unit"]: i for i in second["issues"]}
+        self.assertEqual(by_unit["b"]["add_blocked_by"], ["a"])
+        self.assertEqual(by_unit["b"]["remove_blocked_by"], [])
+
+    def test_a_deleted_unit_is_still_resolvable_enough_to_remove(self):
+        """The commonest stale edge points at a unit the plan DELETED, so the
+        current draft cannot name it. The draft that filed it can, which is
+        why prior issues join the alias map. Without that, the one edge this
+        work exists to remove is the one that resolves to nothing."""
+        first = _filed(T.draft(self.PLAN_WIDE))
+        gone = {"name": "p", "units": [
+            {"id": "b", "kind": "slurm", "runtime": "none", "command": "true",
+             "outputs": ["p.txt"]}]}
+        rb = _readback({"ARC-201": ["ARC-200"]})
+        second = T.draft(gone, existing=first, readback=rb)
+        by_unit = {i["unit"]: i for i in second["issues"]}
+        self.assertEqual(by_unit["b"]["remove_blocked_by"], ["ARC-200"])
+        self.assertEqual(second["blocked_by_sync"]["unresolved"], [],
+                         "a former unit of this project is not a mystery")
+
+    def test_a_handle_nothing_has_ever_known_is_reported_not_hidden(self):
+        first = _filed(T.draft(self.PLAN_WIDE))
+        rb = _readback({"ARC-200": [], "ARC-201": ["ARC-9999"]})
+        plan = self.PLAN_WIDE
+        second = T.draft(plan, existing=first, readback=rb)
+        unresolved = second["blocked_by_sync"]["unresolved"]
+        self.assertEqual([u["blocker"] for u in unresolved], ["ARC-9999"])
+        self.assertTrue(any("ARC-9999" in x
+                            for x in T.edge_problems(plan, second)))
+
+    def test_a_foreign_issue_with_no_edges_does_not_cry_wolf(self):
+        """A hand-created issue in the same tracker project cannot be holding
+        a stale edge if it holds none. Flagging it is the cries-wolf failure
+        that gets a guard deleted."""
+        first = _filed(T.draft(self.PLAN_WIDE))
+        rb = _readback({"ARC-200": [], "ARC-201": ["ARC-200"], "ARC-777": []})
+        second = T.draft(self.PLAN_WIDE, existing=first, readback=rb)
+        self.assertEqual(second["blocked_by_sync"]["unresolved"], [])
+        self.assertEqual(T.edge_problems(self.PLAN_WIDE, second), [])
+
+    def test_a_foreign_issue_that_does_hold_edges_is_flagged(self):
+        first = _filed(T.draft(self.PLAN_WIDE))
+        rb = _readback({"ARC-200": [], "ARC-201": ["ARC-200"],
+                        "ARC-777": ["ARC-200"]})
+        second = T.draft(self.PLAN_WIDE, existing=first, readback=rb)
+        self.assertEqual([u["holder"] for u
+                          in second["blocked_by_sync"]["unresolved"]],
+                         ["ARC-777"])
+        self.assertTrue(any("ARC-777" in x for x
+                            in T.edge_problems(self.PLAN_WIDE, second)))
+
+    def test_a_unit_id_read_back_resolves_as_well_as_an_identifier(self):
+        """The applying session may key the read-back however it likes; the
+        shape says so, so all three handles must work."""
+        first = _filed(T.draft(self.PLAN_WIDE))
+        for edges in ({"a": [], "b": ["a"]},
+                      {"iss-0": [], "iss-1": ["iss-0"]},
+                      {"arc-200": [], "arc-201": ["arc-200"]}):
+            second = T.draft(self._shrunk(), existing=first,
+                             readback=_readback(edges))
+            by_unit = {i["unit"]: i for i in second["issues"]}
+            self.assertEqual(len(by_unit["b"]["remove_blocked_by"] or []), 1,
+                             edges)
+
+
+class TestAnAbsentReadBackCannotClaimSync(unittest.TestCase):
+    """Fail closed. An absent read-back must not render as "no stale edges":
+    that is the class of bug this repo keeps fighting, where unknown reads as
+    fine. `remove_blocked_by` is null, never [], and the check refuses."""
+
+    PLAN = {"name": "p", "units": [
+        {"id": "a", "kind": "slurm", "runtime": "none", "command": "true",
+         "outputs": ["o.txt"]},
+        {"id": "b", "kind": "slurm", "runtime": "none", "command": "true",
+         "outputs": ["p.txt"], "needs": ["a"]}]}
+
+    def test_no_read_back_leaves_removals_null_not_empty(self):
+        d = T.draft(self.PLAN)
+        for issue in d["issues"]:
+            self.assertIsNone(issue["remove_blocked_by"], issue["unit"])
+            self.assertIsNone(issue["blocked_by_in_sync"], issue["unit"])
+        self.assertEqual(d["blocked_by_sync"]["state"], "absent")
+        self.assertIsNone(d["blocked_by_sync"]["in_sync"])
+
+    def test_a_filed_project_with_no_read_back_fails_the_check(self):
+        filed = _filed(T.draft(self.PLAN))
+        redrafted = T.draft(self.PLAN, existing=filed)
+        redrafted[T.READBACK] = None
+        problems = T.edge_problems(self.PLAN, redrafted)
+        self.assertTrue(any("CANNOT BE TOLD" in x for x in problems), problems)
+        self.assertTrue(any("not a claim that there are none" in x
+                            for x in problems), problems)
+
+    def test_check_exits_nonzero_and_says_so_on_the_command_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_p = Path(tmp) / "plan.json"
+            plan_p.write_text(json.dumps(self.PLAN))
+            tk = Path(tmp) / "tickets.json"
+            tk.write_text(json.dumps(_filed(T.draft(self.PLAN))))
+            r = run(TICKETS, "check", str(plan_p), str(tk))
+            self.assertEqual(r.returncode, 2, r.stdout)
+            self.assertIn("DRIFTED", r.stdout)
+            self.assertIn("never read back", r.stdout)
+
+    def test_nothing_filed_yet_is_not_a_fault(self):
+        """A first draft has filed nothing, so no edge can be stale. Crying
+        wolf here is what gets a guard deleted."""
+        self.assertEqual(T.edge_problems(self.PLAN, T.draft(self.PLAN)), [])
+
+    def test_a_malformed_read_back_is_unreadable_not_empty(self):
+        bad = [None, [], {}, {"edges": {}}, {"read_at": "x"},
+               {"read_at": "", "edges": {}},
+               {"schema_version": 9, "read_at": "x", "edges": {}},
+               {"read_at": "x", "edges": {"a": "b"}},
+               {"read_at": "x", "edges": {"a": [1]}},
+               {"read_at": "x", "edges": {"": []}}]
+        for rb in bad:
+            edges, _meta, reason = T.readback_edges(rb)
+            self.assertIsNone(edges, rb)
+            self.assertTrue(reason, rb)
+            d = T.draft(self.PLAN, readback=rb)
+            self.assertIn(d["blocked_by_sync"]["state"],
+                          ("absent", "unreadable"))
+            self.assertTrue(all(i["remove_blocked_by"] is None
+                                for i in d["issues"]), rb)
+
+    def test_a_named_read_back_that_cannot_be_read_refuses(self):
+        """Absent is honest by accident. A human who believed they supplied a
+        read-back and silently got the absent path is not being told."""
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_p = Path(tmp) / "plan.json"
+            plan_p.write_text(json.dumps(self.PLAN))
+            r = run(TICKETS, "draft", str(plan_p),
+                    "--tracker-edges", str(Path(tmp) / "nope.json"))
+            self.assertEqual(r.returncode, 2, r.stdout)
+            self.assertIn("REFUSING", r.stdout)
+            self.assertFalse((Path(tmp) / "tickets.json").exists())
+
+    def test_a_read_back_of_the_wrong_shape_refuses_on_the_command_line(self):
+        """It parses as JSON, so nothing errors; it would land in the quiet
+        `unreadable` state. A human who passed the flag is told instead."""
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_p = Path(tmp) / "plan.json"
+            plan_p.write_text(json.dumps(self.PLAN))
+            bad = Path(tmp) / "edges.json"
+            bad.write_text(json.dumps({"edges": {"a": []}}))   # no read_at
+            r = run(TICKETS, "draft", str(plan_p), "--tracker-edges", str(bad))
+            self.assertEqual(r.returncode, 2, r.stdout)
+            self.assertIn("REFUSING", r.stdout)
+            self.assertIn("read_at", r.stdout)
+            self.assertFalse((Path(tmp) / "tickets.json").exists())
+
+    def test_a_good_read_back_on_the_command_line_is_applied(self):
+        """The counter-claim: the path that is supposed to work must work,
+        end to end, through the actual CLI."""
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_p, tk = Path(tmp) / "plan.json", Path(tmp) / "tickets.json"
+            shrunk = json.loads(json.dumps(self.PLAN))
+            shrunk["units"][1].pop("needs")
+            plan_p.write_text(json.dumps(shrunk))
+            tk.write_text(json.dumps(_filed(T.draft(self.PLAN))))
+            edges = Path(tmp) / "edges.json"
+            edges.write_text(json.dumps(
+                _readback({"ARC-200": [], "ARC-201": ["ARC-200"]})))
+            r = run(TICKETS, "draft", str(plan_p),
+                    "--tracker-edges", str(edges))
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("REMOVE: b <- ARC-200", r.stdout)
+            written = json.loads(tk.read_text())
+            by_unit = {i["unit"]: i for i in written["issues"]}
+            self.assertEqual(by_unit["b"]["remove_blocked_by"], ["ARC-200"])
+            self.assertEqual(written["blocked_by_sync"]["state"], "read")
+
+    def test_a_filed_issue_omitted_from_the_read_back_is_unknown(self):
+        """Omitting an edgeless issue is indistinguishable from skipping it,
+        so the shape requires an empty list and this refuses to guess."""
+        filed = _filed(T.draft(self.PLAN))
+        second = T.draft(self.PLAN, existing=filed,
+                         readback=_readback({"ARC-200": []}))
+        by_unit = {i["unit"]: i for i in second["issues"]}
+        self.assertIsNone(by_unit["b"]["remove_blocked_by"])
+        self.assertEqual(second["blocked_by_sync"]["not_read_back"], ["b"])
+        self.assertIsNone(second["blocked_by_sync"]["in_sync"])
+        self.assertTrue(any("not having looked" in x for x in
+                            T.edge_problems(self.PLAN, second)))
+
+    def test_a_read_back_is_carried_forward_across_a_redraft(self):
+        """Otherwise editing the plan throws away the only knowledge of the
+        tracker's real edges this machine has, and every re-draft would
+        re-arm the unknown."""
+        filed = _filed(T.draft(self.PLAN))
+        rb = _readback({"ARC-200": [], "ARC-201": ["ARC-200"]})
+        second = T.draft(self.PLAN, existing=filed, readback=rb)
+        third = T.draft(self.PLAN, existing=second)
+        self.assertEqual(third["blocked_by_sync"]["state"], "read")
+        self.assertEqual(third["blocked_by_sync"]["read_at"], rb["read_at"])
+
+    def test_a_sync_claim_is_scoped_to_when_the_tracker_was_read(self):
+        """"In sync" is a statement about a moment. A carried-forward
+        read-back can be old, so the timestamp travels with the claim rather
+        than being dropped once it is convenient."""
+        filed = _filed(T.draft(self.PLAN))
+        rb = _readback({"ARC-200": [], "ARC-201": ["ARC-200"]})
+        second = T.draft(self.PLAN, existing=filed, readback=rb)
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_p, tk = Path(tmp) / "plan.json", Path(tmp) / "tickets.json"
+            plan_p.write_text(json.dumps(self.PLAN))
+            tk.write_text(json.dumps(second))
+            r = run(TICKETS, "check", str(plan_p), str(tk))
+            self.assertEqual(r.returncode, 0, r.stdout)
+            self.assertIn(rb["read_at"], r.stdout)
+
+    def test_the_schema_version_moved_so_a_consumer_can_tell(self):
+        """A consumer that only knows schema 1 applies `blocked_by` and never
+        removes anything, which is the bug. It must be able to notice."""
+        self.assertGreaterEqual(T.draft(self.PLAN)["schema_version"], 2)
+
+    def test_a_schema_1_draft_is_not_read_as_in_sync(self):
+        old = T.draft(self.PLAN)
+        old = _filed(old)
+        old["schema_version"] = 1
+        old.pop("blocked_by_sync")
+        for i in old["issues"]:
+            i.pop("add_blocked_by", None)
+            i.pop("remove_blocked_by", None)
+            i.pop("blocked_by_in_sync", None)
+        problems = T.edge_problems(self.PLAN, old)
+        self.assertTrue(any("no `blocked_by_sync`" in x for x in problems),
+                        problems)
+
+    def test_the_skill_tells_the_applying_session_to_remove(self):
+        """The draft is only half the interface. If the session with the
+        connector is never told to call `removeBlockedBy`, the field is a
+        request nobody reads -- which is the same defect one layer up."""
+        skill = (ROOT / "skills" / "hanig-project" / "SKILL.md").read_text()
+        self.assertIn("removeBlockedBy", skill)
+        self.assertIn("remove_blocked_by", skill)
+        self.assertIn("--tracker-edges", skill)
+        self.assertIn("append-only", skill)
+
+    def test_the_read_back_is_labelled_attested_not_verified(self):
+        """The same care the outbox receipts needed. There is no network here,
+        so a read-back is a session SAYING what the tracker holds; anyone who
+        can write the file can write anything. It is a much better basis than
+        diffing against the last draft -- that is a claim about our own
+        intentions -- but it is not proof, and the label carries the weakness
+        rather than the reader having to remember it."""
+        filed = _filed(T.draft(self.PLAN))
+        for rb in (None, _readback({"ARC-200": [], "ARC-201": ["ARC-200"]})):
+            sync = T.draft(self.PLAN, existing=filed,
+                           readback=rb)["blocked_by_sync"]
+            self.assertIn("attested", sync["basis"])
+            self.assertIn("not verified", sync["basis"])
+        src = TICKETS.read_text()
+        self.assertNotIn("verified evidence", src)
+
+    def test_the_attestation_travels_into_what_a_human_reads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_p, tk = Path(tmp) / "plan.json", Path(tmp) / "tickets.json"
+            plan_p.write_text(json.dumps(self.PLAN))
+            rb = _readback({"ARC-200": [], "ARC-201": ["ARC-200"]})
+            tk.write_text(json.dumps(
+                T.draft(self.PLAN, existing=_filed(T.draft(self.PLAN)),
+                        readback=rb)))
+            r = run(TICKETS, "check", str(plan_p), str(tk))
+            self.assertEqual(r.returncode, 0, r.stdout)
+            self.assertIn("ATTESTED", r.stdout)
+
+    def test_it_still_talks_to_no_tracker(self):
+        """The read-back arrives as a FILE. If reading the tracker back had
+        been implemented by reading the tracker, the token would be back on
+        the login node and the whole separation would be gone."""
+        tree = ast.parse(TICKETS.read_text())
+        mods = set()
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Import):
+                mods.update(a.name.split(".")[0] for a in n.names)
+            elif isinstance(n, ast.ImportFrom) and n.module:
+                mods.add(n.module.split(".")[0])
+        self.assertEqual(mods & {"urllib", "http", "requests", "socket",
+                                 "httpx", "ssl"}, set())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -269,12 +269,60 @@ Then, in this session, holding the Linear MCP connector:
    `issues[].identifier`).
 4. Re-running later UPDATES rather than duplicating, because the draft carries
    the ids forward keyed on unit id.
+5. Apply the DAG: for each issue, add every `add_blocked_by` relation, and
+   **call `removeBlockedBy` for every `remove_blocked_by` entry.**
+6. Read the edges back and hand them to the next draft, below. Applying
+   without doing this leaves the next run unable to say whether the write
+   landed.
+
+### The DAG is append-only, so removal has to be asked for
+
+`blockedBy` is append-only through this interface: Linear exposes
+`removeBlockedBy` as a separate operation. So when a unit's `needs` list
+SHRINKS, the edge that no longer exists stays in the tracker, and not
+re-adding it does not delete it. The tracker then says an issue is blocked by
+something the plan no longer says blocks it.
+
+`tickets.py` cannot see that on its own -- it talks to nothing. It decides it
+by diffing the plan against what you tell it the tracker holds:
+
+```sh
+# In the session with the connector: list every issue in the project with its
+# blockedBy relations, and write
+#   {"schema_version": 1, "read_at": "<ISO 8601>", "source": "...",
+#    "edges": {"<issue>": ["<blocker>", ...]}}
+# Each key is the BLOCKED issue; handles may be unit ids, identifiers
+# (ARC-236) or uuids. An issue with no blockers MUST appear with an empty
+# list: omitting it is indistinguishable from not having looked.
+python3 scripts/tickets.py draft plan.json --tracker-edges edges.json
+```
+
+The draft then carries, per issue, `add_blocked_by`, `remove_blocked_by` and
+`blocked_by_in_sync`, plus a top-level `blocked_by_sync` saying when the
+tracker was read and by what.
+
+**A read-back is ATTESTED, not verified**, the same way an outbox receipt is:
+there is no network on the coordinator, so what it has is your report of what
+you saw. Every rendering says so. It is still far better than diffing against
+the last draft -- that only records what was asked for, and would be
+confidently wrong the moment an apply half-finished or a human edited a
+relation in Linear by hand.
+
+**Without a read-back, `remove_blocked_by` is `null`, not `[]`.** Unknown is
+not empty: `[]` would say "the tracker holds no stale edges", which nothing on
+the coordinator can know. Once anything has been filed, `check` treats a
+missing read-back as drift and exits 2. That is deliberate -- the loop is
+apply, re-read, re-draft, check -- and it is what makes this a verification of
+the write rather than trust in it.
 
 Verify the two never drift:
 
 ```sh
 python3 scripts/tickets.py check plan.json tickets.json
 ```
+
+It reports both halves: the unit/issue mapping, and the blockedBy edges as
+read at a stated time. It never says "in sync" without naming that time.
 
 ## 5. Dispatch.
 
