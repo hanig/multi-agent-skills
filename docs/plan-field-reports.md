@@ -49,13 +49,13 @@ design, which a committee rejected and which is no longer what the code does.
 
 Children used to inherit the coordinator's whole environment, which here
 carries `OPENAI_API_KEY` and `OPENROUTER_API_KEY`. They no longer do:
-`child_environment.py` holds one allowlist, applied at every spawn path --
+`child_environment.py` holds one credential denylist, applied at every spawn
+path --
 `unit.run`, the direct pipeline launch, the sbatch submission, and the
-remaining direct Git subprocess in `coordinator_paths.py`. `PATH`, `HOME`,
-locale and temp settings, selected Git/Python/Slurm configuration,
-`SWARM_UNIT_*` and `SWARM_DEP_*` pass; provider credentials, auth and token
-variables, and broad `GIT_*` do not. Explicit `env` entries in a plan are
-still honoured, as trusted user input.
+remaining direct Git subprocess in `coordinator_paths.py`. Runtime variables
+pass through; credential-shaped names, AWS variables, and
+`SBATCH_GET_USER_ENV` do not. Constructed `SWARM_UNIT_*` and `SWARM_DEP_*`
+values pass, while ambient values with those prefixes do not.
 
 **ACCEPTED LIMIT, Hani 2026-09-02.** This does NOT mean the agent receives no
 credential, and the difference matters:

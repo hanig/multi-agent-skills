@@ -164,8 +164,8 @@ child_env = CE.child_env
 def run(argv, cwd=None, timeout=30, pass_fds=()):
     """Run a command, returning (rc, stdout, stderr). Never raises, never hangs.
 
-    Resource containment is construction, not convention: child_env supplies
-    the documented environment allowlist; stdin is
+    Resource containment is construction, not convention: child_env applies
+    the shared credential denylist; stdin is
     /dev/null, stdout/stderr are private capture pipes, every other descriptor
     is closed except explicit non-standard pass_fds, and those are the only
     handles a child can propagate to a descendant.
@@ -179,7 +179,7 @@ def run(argv, cwd=None, timeout=30, pass_fds=()):
         return 127, "", "refusing to pass a standard descriptor to a child"
     pr = None
     try:
-        pr = subprocess.Popen(argv, cwd=cwd, env=child_env(),
+        pr = subprocess.Popen(argv, cwd=cwd, env=CE.child_env(),
                               stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               close_fds=True, encoding="utf-8",

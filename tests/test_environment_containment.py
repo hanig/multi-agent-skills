@@ -1,5 +1,6 @@
 """E1: coordinator execution context is not coordinator authority."""
 
+import ast
 import json
 import os
 import shlex
@@ -18,30 +19,89 @@ sys.path.insert(0, str(SCRIPTS))
 import swarm as S  # noqa: E402
 import unit as U  # noqa: E402
 import coordinator_paths as CP  # noqa: E402
+import child_environment as CE  # noqa: E402
 
 
 SECRET_NAME = "E1_PLANTED_COORDINATOR_SECRET"
 DEP_SHAPED_SECRET = "SWARM_DEP_OPENAI_API_KEY"
 UNIT_SHAPED_SECRET = "SWARM_UNIT_OPENAI_API_KEY"
 
-EXPECTED_SLURM_INPUT_ENV_NAMES = set("""
-SBATCH_ACCOUNT SBATCH_ACCTG_FREQ SBATCH_ARRAY_INX SBATCH_BATCH SBATCH_CLUSTERS
-SBATCH_CONSTRAINT SBATCH_CONTAINER SBATCH_CONTAINER_ID SBATCH_CONTAINER_TYPE
-SBATCH_CORE_SPEC SBATCH_CPUS_PER_GPU SBATCH_DEBUG SBATCH_DELAY_BOOT
-SBATCH_DISTRIBUTION SBATCH_ERROR SBATCH_EXCLUSIVE SBATCH_EXPORT
-SBATCH_GET_USER_ENV SBATCH_GPU_BIND SBATCH_GPU_FREQ SBATCH_GPUS
-SBATCH_GPUS_PER_NODE SBATCH_GPUS_PER_TASK SBATCH_GRES SBATCH_GRES_FLAGS
-SBATCH_HINT SBATCH_IGNORE_PBS SBATCH_INPUT SBATCH_JOB_NAME SBATCH_MEM_BIND
-SBATCH_MEM_PER_CPU SBATCH_MEM_PER_GPU SBATCH_MEM_PER_NODE SBATCH_NETWORK
-SBATCH_NO_KILL SBATCH_NO_REQUEUE SBATCH_OPEN_MODE SBATCH_OUTPUT
-SBATCH_OVERCOMMIT SBATCH_PARTITION SBATCH_POWER SBATCH_PROFILE SBATCH_QOS
-SBATCH_REQ_SWITCH SBATCH_REQUEUE SBATCH_RESERVATION SBATCH_SEGMENT_SIZE
-SBATCH_SIGNAL SBATCH_SPREAD_JOB SBATCH_THREAD_SPEC SBATCH_THREADS_PER_CORE
-SBATCH_TIMELIMIT SBATCH_TRES_BIND SBATCH_TRES_PER_TASK SBATCH_USE_MIN_NODES
-SBATCH_WAIT SBATCH_WAIT_ALL_NODES SBATCH_WAIT4SWITCH SBATCH_WCKEY
-SLURM_CLUSTERS SLURM_CONF SLURM_DEBUG_FLAGS SLURM_EXIT_ERROR SLURM_HINT
-SLURM_STEP_KILLED_MSG_NODE_ID SLURM_UMASK SLURM_CLUSTER_NAME
-""".split())
+RUNTIME_NAMES = (
+    "LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "SLURM_JOB_ID",
+    "MODULEPATH", "MODULESHOME", "LOADEDMODULES", "LMOD_SYSTEM_NAME",
+    "SRUN_CPU_BIND", "SALLOC_ACCOUNT", "SLURM_CPU_BIND", "http_proxy",
+    "https_proxy", "no_proxy", "NCCL_DEBUG", "OMPI_MCA_btl",
+)
+
+
+def _child_env_call(node, module_aliases):
+    if not isinstance(node, ast.Call):
+        return False
+    return (isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in module_aliases
+            and node.func.attr == "child_env")
+
+
+def _subprocess_calls(path):
+    """Yield subprocess spawn calls and their containing function."""
+    tree = ast.parse(path.read_text())
+    module_aliases = {n.asname or n.name for n in ast.walk(tree)
+                      if isinstance(n, ast.Import) for n in n.names
+                      if n.name == "subprocess"}
+    child_module_aliases = {n.asname or n.name for n in ast.walk(tree)
+                            if isinstance(n, ast.Import) for n in n.names
+                            if n.name == "child_environment"}
+    direct_names = {n.asname or n.name for n in ast.walk(tree)
+                    if isinstance(n, ast.ImportFrom)
+                    and n.module == "subprocess" for n in n.names
+                    if n.name in {"run", "Popen", "call", "check_call",
+                                  "check_output"}}
+    spawn_names = {"run", "Popen", "call", "check_call", "check_output"}
+
+    parents = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Attribute):
+            is_spawn = (isinstance(node.func.value, ast.Name)
+                        and node.func.value.id in module_aliases
+                        and node.func.attr in spawn_names)
+        else:
+            is_spawn = (isinstance(node.func, ast.Name)
+                        and node.func.id in direct_names)
+        if not is_spawn:
+            continue
+        owner = node
+        while owner in parents and not isinstance(
+                owner, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            owner = parents[owner]
+        yield (node, owner if isinstance(
+            owner, (ast.FunctionDef, ast.AsyncFunctionDef)) else tree,
+               child_module_aliases)
+
+
+def _env_is_from_child_module(call, owner, child_module_aliases):
+    keyword = next((kw for kw in call.keywords if kw.arg == "env"), None)
+    if keyword is None:
+        return False
+    if _child_env_call(keyword.value, child_module_aliases):
+        return True
+    if not isinstance(keyword.value, ast.Name):
+        return False
+    assignments = []
+    for node in ast.walk(owner):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(isinstance(target, ast.Name)
+                   and target.id == keyword.value.id for target in targets):
+                assignments.append(node.value)
+    return (len(assignments) == 1
+            and _child_env_call(assignments[0], child_module_aliases))
 
 
 class TestEnvironmentContainment(unittest.TestCase):
@@ -63,12 +123,63 @@ class TestEnvironmentContainment(unittest.TestCase):
             "secret": False, "dep_shaped": False, "unit_shaped": False,
             "path": True})
 
-    def test_the_slurm_ambient_allowlist_is_an_exact_reviewable_set(self):
-        import child_environment as CE
-        self.assertEqual(set(CE.SLURM_INPUT_ENV_NAMES),
-                         EXPECTED_SLURM_INPUT_ENV_NAMES)
+    def test_every_denied_name_and_pattern_is_stripped(self):
+        planted = {name: "credential" for name in CE.DENIED_ENV_NAMES}
+        planted.update({f"PLANTED{suffix}": "credential"
+                        for suffix in CE.DENIED_ENV_SUFFIXES})
+        planted.update({f"{prefix}PLANTED": "credential"
+                        for prefix in CE.DENIED_ENV_PREFIXES})
+        planted.update({
+            "LC_OPENAI_API_KEY": "credential",
+            "lowercase_api_key": "credential",
+            "RUNTIME_CONTROL": "present",
+        })
+        with mock.patch.dict(os.environ, planted, clear=True):
+            got = CE.child_env()
+        self.assertEqual(got, {"RUNTIME_CONTROL": "present"})
 
-    def test_path_policy_git_helper_uses_the_same_allowlist(self):
+    def test_runtime_environment_reaches_the_actual_child(self):
+        planted = {name: f"value-{i}" for i, name in enumerate(RUNTIME_NAMES)}
+        probe = ("import json, os; print(json.dumps("
+                 + repr(list(RUNTIME_NAMES))
+                 + " and {n: os.environ.get(n) for n in "
+                 + repr(list(RUNTIME_NAMES)) + "}))")
+        with mock.patch.dict(os.environ, planted):
+            rc, out, err = U.run([sys.executable, "-c", probe])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out), planted)
+
+    def test_only_explicit_constructed_swarm_values_are_passed(self):
+        planted = {"SWARM_DEP_RESULT": "ambient-dependency",
+                   "SWARM_UNIT_CUSTOM": "ambient-unit"}
+        with mock.patch.dict(os.environ, planted, clear=True):
+            self.assertEqual(CE.child_env(), {})
+            got = CE.child_env({"SWARM_DEP_RESULT": "trusted-dependency",
+                                "SWARM_UNIT_CUSTOM": "trusted-unit"})
+        self.assertEqual(got, {"SWARM_DEP_RESULT": "trusted-dependency",
+                               "SWARM_UNIT_CUSTOM": "trusted-unit"})
+
+    def test_credential_shaped_constructed_name_is_still_a_trusted_path(self):
+        planted = {"SWARM_DEP_OPENAI_API_KEY": "ambient-credential"}
+        with mock.patch.dict(os.environ, planted, clear=True):
+            got = CE.child_env({
+                "SWARM_DEP_OPENAI_API_KEY": "/trusted/attempt-1"})
+        self.assertEqual(got, {
+            "SWARM_DEP_OPENAI_API_KEY": "/trusted/attempt-1"})
+
+    def test_spawn_environments_come_from_the_containment_module(self):
+        offenders = []
+        for path in sorted(SCRIPTS.glob("*.py")):
+            for call, owner, aliases in _subprocess_calls(path):
+                if not _env_is_from_child_module(call, owner, aliases):
+                    offenders.append(f"{path.name}:{call.lineno}")
+        self.assertEqual(
+            offenders, [],
+            "Coordinator subprocesses must pass env=child_env(...) or a "
+            "single local assigned from child_env(...):\n  "
+            + "\n  ".join(offenders))
+
+    def test_path_policy_git_helper_uses_the_same_denylist(self):
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
             bindir = tmp / "bin"
@@ -144,7 +255,7 @@ class TestEnvironmentContainment(unittest.TestCase):
         self.assertEqual(got["unit"], attempt)
         self.assertEqual(got["dep"], upstream)
 
-    def test_sbatch_receives_only_the_allowlisted_submission_environment(self):
+    def test_sbatch_uses_the_shared_denylist(self):
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
             attempt = tmp / "attempt-1"
@@ -157,6 +268,7 @@ class TestEnvironmentContainment(unittest.TestCase):
                 "import json, os\n"
                 "json.dump({'secret': " + repr(SECRET_NAME)
                 + " in os.environ, 'path': bool(os.environ.get('PATH')), "
+                "'get_user_env': 'SBATCH_GET_USER_ENV' in os.environ, "
                 "'account': os.environ.get('SBATCH_ACCOUNT'), "
                 "'partition': os.environ.get('SBATCH_PARTITION')}, "
                 "open('sbatch-environment.json', 'w'))\n"
@@ -175,6 +287,7 @@ class TestEnvironmentContainment(unittest.TestCase):
                 SECRET_NAME: "live-secret",
                 "SBATCH_ACCOUNT": "lab-account",
                 "SBATCH_PARTITION": "gpu-batch",
+                "SBATCH_GET_USER_ENV": "1",
             }
             with mock.patch.dict(os.environ, env):
                 job, err = S._submit(unit, attempt, False, state=state)
@@ -184,6 +297,7 @@ class TestEnvironmentContainment(unittest.TestCase):
                 (attempt / "sbatch-environment.json").read_text())
             self.assertEqual(got, {
                 "secret": False, "path": True,
+                "get_user_env": False,
                 "account": "lab-account", "partition": "gpu-batch"})
             script = (attempt / "job.sbatch").read_text()
             self.assertIn("export SWARM_DEP_UPSTREAM=", script)

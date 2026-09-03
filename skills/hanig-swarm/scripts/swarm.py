@@ -47,6 +47,7 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 import unit as U  # noqa: E402  same skill, installed together
+import child_environment as CE  # noqa: E402
 import paseo_io as PIO
 import worktree as W  # noqa: E402
 import verify as V  # noqa: E402
@@ -1720,8 +1721,9 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
         # and unit.py judges the result later from the artifacts.
         # Same policy as every U.run child. Pipelines bypass U.run because
         # they detach, so they must construct their environment through the
-        # shared allowlist rather than inheriting coordinator authority.
-        penv = U.child_env({
+        # shared credential denylist rather than inheriting coordinator
+        # authority.
+        penv = CE.child_env({
             "SWARM_UNIT_ID": str(u["id"]),
             "SWARM_UNIT_DIR": str(unit_dir),
             **dict(_dep_env(u, state or {})),
