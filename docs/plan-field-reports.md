@@ -15,7 +15,7 @@
 > plan (2026-08-30 committee, its own items 1-8, largely delivered); do not
 > read the two numbering schemes as one.
 
-Status verified against code on 2026-09-01, not against memory of the session.
+Status verified against code on 2026-09-03, not against memory of the session.
 
 ## Done
 
@@ -33,6 +33,9 @@ Status verified against code on 2026-09-01, not against memory of the session.
 | B8 | `tickets.py` carries the DAG into the tracker as `blockedBy` | `tickets.py` |
 | C10 | Refuse to dispatch a code unit into a dirty tree, at second zero | `swarm.py` `_write_launch_record` |
 | C13 | Coordinator state lives outside the repository it operates on | `coordinator_paths.py` |
+| E1 | Children no longer inherit the coordinator's credentials; exact-name denial | `child_environment.py` |
+| C11 | A worktree per code attempt, verified and bound by inode; TOCTOU closed | `swarm.py`, `worktree.py` |
+| C12 | The completion protocol is appended at dispatch: branch, base, remote, PR target | `swarm.py` |
 
 Plus one item nobody asked for, which the cycle forced: the launch record and
 the receipt are now **audit-only**, and authority lives in coordinator state.
@@ -41,76 +44,15 @@ design, which a committee rejected and which is no longer what the code does.
 
 ## Open, in the order to do them
 
-> Shipped to `origin/main` at `8a6cbb4` on 2026-09-02: field-report items 10
-> and 13, the authority work, and the model routing. Everything below is what
+> Shipped to `origin/main` at `d8591d4` on 2026-09-03: items 10 and 13, the
+> authority work, the model routing, E1, C11 and C12. Everything below is what
 > remains. Status per item was verified against code, not recalled.
+>
+> C11 took four review rounds and 26 findings; C12 took one round and three,
+> all three against "can an agent actually FOLLOW this", which no test checks.
+> Both are worth remembering when estimating what is left.
 
-### E1. Coordinator environment sanitised. DONE, with an ACCEPTED residue.
-
-Children used to inherit the coordinator's whole environment, which here
-carries `OPENAI_API_KEY` and `OPENROUTER_API_KEY`. They no longer do:
-`child_environment.py` holds one credential denylist, applied at every spawn
-path --
-`unit.run`, the direct pipeline launch, the sbatch submission, and the
-remaining direct Git subprocess in `coordinator_paths.py`. Runtime variables
-and values pass through unchanged; exact credential names known to be held by
-the coordinator and `SBATCH_GET_USER_ENV` do not. Constructed `SWARM_UNIT_*`
-and `SWARM_DEP_*` values pass, while ambient values with those prefixes do not.
-
-**ACCEPTED LIMIT, Hani 2026-09-02.** This does NOT mean the agent receives no
-credential, and the difference matters:
-
-  - Paseo's daemon supplies both provider keys to the agent independently of
-    anything the coordinator passes.
-  - `HOME` must be allowed, because a code agent needs it for Git config and
-    toolchains -- and `HOME` is where codex's stored auth now lives, since the
-    switch to `codex login --with-api-key`.
-
-Closing that needs daemon-launch sanitisation inside Paseo, or real
-user/process isolation. The coordinator boundary cannot enforce it, and Paseo
-is outside this repo. Accepted and not being pursued. Do not reopen this as a
-swarm defect; if it is ever revisited, it is a Paseo change.
-
-### C11. A worktree per code attempt. DO FIRST.
-
-`paseo run` supports `--new-workspace worktree --worktree-mode branch-off
---new-branch <name> --base <ref>`, and `paseo inspect` reports
-`Worktree: None` for every agent this project has ever run: the coordinator
-has never asked. The change belongs in `swarm.py`, which builds its own argv,
-NOT in the plan, which is where the reporter's earlier attempt was silently
-ignored.
-
-This is first because it is now load-bearing for something already shipped.
-Two reviewers independently raised the shared-checkout TOCTOU as MAJOR: C10
-observes cleanliness at a point in time, and another agent can dirty the tree
-between that observation and the spawn. Both times the answer was "declared
-limit, C11 is the structural fix." That answer is only honest if C11 happens.
-It has now been given twice and the debt is still outstanding.
-
-Done when: each code attempt gets its own worktree on its own branch off a
-recorded base; the preflight checks the tree the agent will actually run in;
-the repo pool can exceed capacity 1; agents cannot collide with each other or
-with the human operator in one shared checkout; and the point-in-time caveat
-is deleted from `_submit` because it is no longer true.
-
-### C12. Generate the branch/commit/PR protocol into every code prompt.
-
-All 16 units in the field report were specified to close on a merged PR and
-not one prompt mentioned a branch, a commit, or a PR. The agents behaved
-correctly by editing files and stopping. The instruction to produce the
-closing evidence was never given, which makes such a plan structurally
-unclosable.
-
-Done when: the plan generator appends the protocol to any unit whose closure
-is a merged PR, including "if `git status` is not clean, stop and report
-rather than working around it"; it cannot be omitted per-plan; and a code unit
-whose prompt lacks it is refused rather than dispatched.
-
-Note there is currently no draft/prompt-generator script in
-`hanig-project/scripts` (only `survey.py`, `tickets.py`, `report.py`), so this
-item includes deciding where prompt generation lives.
-
-### C14. The receipt flags untracked files not in `produces`.
+### C14. The receipt flags untracked files not in `produces`. DO FIRST.
 
 18 bytes of test debris (`phase0b/--reflink=auto`) appeared from a stubbed
 `cp` writing into the source directory, and nothing surfaced it. `repo_status`
