@@ -582,7 +582,7 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
             basis["worktree_judged"], "produced-committed-change")
         self.assertEqual(basis["produced_head"], "a" * 40)
 
-    def test_complete_snapshot_is_durable_before_paseo_starts(self):
+    def test_immutable_worktree_intent_is_durable_before_paseo_starts(self):
         attempt = self.tmp / "runs" / "u1" / "att1"
         attempt.mkdir(parents=True)
         state_dir = self.tmp / "state"
@@ -597,8 +597,13 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
                 durable = json.loads(
                     (state_dir / S.STATE_FILE).read_text())
                 seen.update(durable["units"]["u1"][
-                    "attempt_launch_facts"]["att1"])
-                return 0, json.dumps({"agentId": "agent-1"}), ""
+                    "attempt_launch_intents"]["att1"])
+                workspace = self.tmp / "managed" / "att1"
+                git(self.repo, "worktree", "add", "-q", "-b",
+                    argv[argv.index("--new-branch") + 1], str(workspace),
+                    argv[argv.index("--base") + 1])
+                return 0, json.dumps({"agentId": "agent-1",
+                                      "cwd": str(workspace)}), ""
             return real(argv, **kwargs)
 
         S.U.run = spy
@@ -610,10 +615,12 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         self.assertIsNone(err)
         self.assertEqual(job, "agent-1")
         for key in ("unit_id", "attempt_id", "repo", "base_commit",
-                    "base_tree", "branch", "clean_at_launch",
-                    "execution_workspace", "workspace_identity",
+                    "base_tree", "branch", "worktree_slug",
                     "repository_remote"):
             self.assertIn(key, seen)
+        facts = state["units"]["u1"]["attempt_launch_facts"]["att1"]
+        self.assertEqual(facts["execution_workspace"],
+                         str((self.tmp / "managed" / "att1").resolve()))
 
     def test_later_branch_movement_does_not_change_pinned_validation(self):
         attempt = self.tmp / "runs" / "u1" / "att1"

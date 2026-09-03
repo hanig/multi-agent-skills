@@ -151,7 +151,7 @@ class TestTheAnchorCannotBeMovedAfterwards(unittest.TestCase):
 
 class TestDispatchAnchorsFirst(unittest.TestCase):
 
-    def test_the_anchor_is_written_before_paseo_runs(self):
+    def test_the_immutable_worktree_intent_is_captured_before_paseo_runs(self):
         import ast
         fn = next(n for n in ast.walk(ast.parse(SWARM.read_text()))
                   if isinstance(n, ast.FunctionDef) and n.name == "_submit")
@@ -160,17 +160,17 @@ class TestDispatchAnchorsFirst(unittest.TestCase):
             if isinstance(sub, ast.Call):
                 name = (getattr(sub.func, "attr", None)
                         or getattr(sub.func, "id", None))
-                if name == "_write_launch_record":
+                if name == "_capture_code_launch":
                     pos.setdefault(name, sub.lineno)
                 # The code launch is U.run(argv); scheduler calls pass a list.
                 if (name == "run" and sub.args
                         and isinstance(sub.args[0], ast.Name)
                         and sub.args[0].id == "argv"):
                     pos.setdefault("run", sub.lineno)
-        self.assertIn("_write_launch_record", pos,
-                      "the code branch never anchors")
+        self.assertIn("_capture_code_launch", pos,
+                      "the code branch never captures its immutable base")
         self.assertIn("run", pos, "no dispatch call found to compare against")
-        self.assertLess(pos["_write_launch_record"], pos["run"],
+        self.assertLess(pos["_capture_code_launch"], pos["run"],
                         "the agent is dispatched before its baseline is "
                         "captured, so the baseline is not a baseline")
 

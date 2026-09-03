@@ -41,6 +41,12 @@ AUTHORITY_KEYS = set(_W.AUTHORITY_KEYS)
 ALLOWED = {
     ("swarm.py", "_write_launch_record"):
         "writes the record from the coordinator's own git observation",
+    ("swarm.py", "_write_code_launch_record"):
+        "writes an audit copy from the coordinator-state launch snapshot",
+    ("swarm.py", "_complete_code_launch"):
+        "combines the trusted launch intent with Paseo's returned cwd",
+    ("swarm.py", "_archive_code_worktree"):
+        "reads coordinator-state workspace metadata only for cleanup",
     ("swarm.py", "_execution_workspace"):
         "reads the declared workspace from the PLAN, not from a record",
     ("swarm.py", "validate_plan"):
@@ -352,7 +358,9 @@ class TestTheSealActuallyTravels(unittest.TestCase):
         self.att.mkdir(parents=True)
 
     def test_dispatch_stores_the_seal_of_the_record_on_disk(self):
-        import hashlib
+        import hashlib, os, subprocess
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@x",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@x")
         unit = {"id": "u1", "kind": "code", "repo": str(self.repo),
                 "branch": "b", "mode": "full-access", "prompt": "work"}
         state = {"units": {}}
@@ -361,7 +369,15 @@ class TestTheSealActuallyTravels(unittest.TestCase):
         def spy(argv, **kwargs):
             if argv and argv[0] == "paseo":
                 launched.append(argv)
-                return 0, '{"agentId":"11111111-2222-3333-4444-555555555555"}', ""
+                workspace = self.tmp / "managed" / "att1"
+                subprocess.run(
+                    ["git", "-C", str(self.repo), "worktree", "add", "-q",
+                     "-b", argv[argv.index("--new-branch") + 1],
+                     str(workspace), argv[argv.index("--base") + 1]],
+                    check=True, env=env, capture_output=True, text=True)
+                return 0, json.dumps({
+                    "agentId": "11111111-2222-3333-4444-555555555555",
+                    "cwd": str(workspace)}), ""
             return real(argv, **kwargs)
 
         self.S.U.run = spy

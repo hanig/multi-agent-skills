@@ -292,11 +292,10 @@ def launch_facts_problem(facts, unit_dir=None, spec=None):
     if missing:
         return ("the trusted launch snapshot is incomplete (missing "
                 f"{', '.join(missing)}). Re-dispatch this attempt")
-    if facts.get("repo") != facts.get("execution_workspace"):
-        return "the trusted launch snapshot names two different workspaces"
     identity = facts.get("workspace_identity")
-    if not isinstance(identity, dict) or identity.get("realpath") != facts.get("repo"):
-        return "the trusted launch snapshot has no matching repository identity"
+    if (not isinstance(identity, dict)
+            or identity.get("realpath") != facts.get("execution_workspace")):
+        return "the trusted launch snapshot has no matching worktree identity"
     for key in ("base_commit", "base_tree"):
         value = facts.get(key)
         if not isinstance(value, str) or len(value) not in (40, 64) or any(
@@ -349,11 +348,11 @@ def judge_detail(runner, unit_dir, spec, launch_facts=None):
     if err:
         return False, None, err
     rec = launch_facts
-    repo = rec.get("repo")
+    repo = rec.get("execution_workspace")
     if not repo:
         return False, None, (
             f"this unit declares repo {spec['repo']!r}, but its launch record "
-            f"anchored no repository. The anchor was written before the unit "
+            f"anchored no execution worktree. The anchor was written before the unit "
             f"declared one, or _write_launch_record failed: either way "
             f"nothing captured a baseline, so re-dispatch this unit rather "
             f"than reading this as a configuration mistake")
@@ -490,6 +489,9 @@ def validate_pinned_head(runner, launch_facts, produced):
     if not isinstance(produced, str) or len(produced) not in (40, 64) or any(
             c not in "0123456789abcdef" for c in produced.lower()):
         return "the per-attempt produced commit is not a valid object id"
+    # Immutable objects remain in the source repository after Paseo archives
+    # the finished worktree. Judgment itself uses execution_workspace above;
+    # this later pin validation deliberately needs no live checkout.
     repo, base = launch_facts["repo"], launch_facts["base_commit"]
     rc, _out, _err = _git(runner, repo, "cat-file", "-e", produced + "^{commit}")
     if rc != 0:

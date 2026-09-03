@@ -45,6 +45,17 @@ def code_unit(repo):
             "outputs": ["out.txt"]}
 
 
+def fake_paseo_result(argv, root, agent="agent-123"):
+    """Create the worktree that a mocked successful Paseo run promises."""
+    source = argv[argv.index("--cwd") + 1]
+    slug = argv[argv.index("--worktree-slug") + 1]
+    branch = argv[argv.index("--new-branch") + 1]
+    base = argv[argv.index("--base") + 1]
+    workspace = Path(root) / slug
+    git(source, "worktree", "add", "-q", "-b", branch, str(workspace), base)
+    return 0, json.dumps({"agentId": agent, "cwd": str(workspace)}), ""
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -219,12 +230,13 @@ class TestExternalPathPolicy(Base):
                 os.environ["XDG_STATE_HOME"] = old
         saved = json.loads((state / S.STATE_FILE).read_text())
         attempt = Path(saved["units"]["code"]["attempt_dir"])
-        anchor = json.loads((attempt.parent /
-                             ("launch-%s.json" % attempt.name)).read_text())
-        self.assertEqual(anchor["preflight"]["status"], "passed")
-        self.assertEqual(anchor["execution_workspace"], str(repo.resolve()))
-        self.assertEqual(anchor["workspace_identity"]["path"],
-                         str(repo.resolve()))
+        # A dry run records the immutable intent but asks Paseo for no
+        # workspace, so there is no invented execution path or audit record.
+        us = saved["units"]["code"]
+        self.assertIn(attempt.name, us["attempt_launch_intents"])
+        self.assertNotIn("attempt_launch_facts", us)
+        self.assertFalse((attempt.parent /
+                          ("launch-%s.json" % attempt.name)).exists())
         state.relative_to(Path(env["XDG_STATE_HOME"]).resolve())
         runs.relative_to(Path(env["XDG_STATE_HOME"]).resolve())
 
@@ -300,7 +312,7 @@ class TestCanonicalDirtyPredicate(Base):
 
 class TestPreflightIsTheLaunchChokepoint(Base):
 
-    def test_dirty_code_never_calls_paseo(self):
+    def test_dirty_shared_checkout_does_not_block_code_attempt(self):
         repo = repo_at(self.tmp / "repo")
         (repo / "dirty.txt").write_text("x\n")
         attempt = self.tmp / "runs" / "code" / "attempt"
@@ -311,7 +323,7 @@ class TestPreflightIsTheLaunchChokepoint(Base):
         def spy(argv, **kwargs):
             if argv and argv[0] == "paseo":
                 launched.append(argv)
-                return 0, '{"agentId":"should-not-start"}', ""
+                return fake_paseo_result(argv, self.tmp / "managed")
             return real(argv, **kwargs)
 
         S.U.run = spy
@@ -319,27 +331,25 @@ class TestPreflightIsTheLaunchChokepoint(Base):
             job, err = S._submit(code_unit(repo), str(attempt), False, {})
         finally:
             S.U.run = real
-        self.assertIsNone(job)
-        self.assertIn("dirty.txt", err)
-        self.assertEqual(launched, [])
+        self.assertEqual(job, "agent-123")
+        self.assertIsNone(err)
+        self.assertEqual(len(launched), 1)
+        self.assertFalse((self.tmp / "managed" / "attempt" / "dirty.txt").exists())
 
-    def test_recovery_reruns_preflight_without_moving_the_anchor(self):
+    def test_a_later_shared_checkout_edit_does_not_move_the_trusted_base(self):
         repo = repo_at(self.tmp / "repo")
         unit = code_unit(repo)
         attempt = self.tmp / "runs" / "code" / "attempt"
         attempt.mkdir(parents=True)
-        err, base = S._write_launch_record(str(attempt), unit)
-        self.assertIsNone(err)
-        anchor_path = attempt.parent / "launch-attempt.json"
-        anchored = anchor_path.read_bytes()
-        (repo / "appeared-during-recovery.txt").write_text("dirty\n")
+        base = git(repo, "rev-parse", "HEAD").stdout.strip()
         real = S.U.run
         launched = []
 
         def spy(argv, **kwargs):
             if argv and argv[0] == "paseo":
+                (repo / "appeared-during-launch.txt").write_text("dirty\n")
                 launched.append(argv)
-                return 0, '{"agentId":"must-not-start"}', ""
+                return fake_paseo_result(argv, self.tmp / "managed")
             return real(argv, **kwargs)
 
         S.U.run = spy
@@ -347,11 +357,9 @@ class TestPreflightIsTheLaunchChokepoint(Base):
             job, refusal = S._submit(unit, str(attempt), False, {})
         finally:
             S.U.run = real
-        self.assertIsNone(job)
-        self.assertIn("appeared-during-recovery.txt", refusal)
-        self.assertEqual(launched, [])
-        self.assertEqual(anchor_path.read_bytes(), anchored)
-        self.assertTrue(base)
+        self.assertEqual(job, "agent-123")
+        self.assertIsNone(refusal)
+        self.assertEqual(launched[0][launched[0].index("--base") + 1], base)
 
     def test_direct_code_submit_without_workspace_fails_closed(self):
         attempt = self.tmp / "runs" / "code" / "attempt"
@@ -385,12 +393,13 @@ class TestPreflightIsTheLaunchChokepoint(Base):
 
         def spy(argv, **kwargs):
             if argv and argv[0] == "paseo":
-                receipt = attempt.parent / "launch-attempt.json"
-                self.assertTrue(receipt.is_file())
+                durable = state["units"]["code"]["attempt_launch_intents"]
+                self.assertEqual(durable["attempt"]["base_commit"],
+                                 argv[argv.index("--base") + 1])
                 self.assertEqual(argv[argv.index("--cwd") + 1],
                                  str(repo.resolve()))
                 launched.append(argv)
-                return 0, '{"agentId":"agent-123"}', ""
+                return fake_paseo_result(argv, self.tmp / "managed")
             return real(argv, **kwargs)
 
         S.U.run = spy
@@ -402,45 +411,10 @@ class TestPreflightIsTheLaunchChokepoint(Base):
         self.assertEqual(job, "agent-123")
         self.assertEqual(len(launched), 1)
         self.assertTrue(state["units"]["code"]["attempt_bases"]["attempt"])
-
-    def test_dirty_refusal_is_durable_but_not_a_started_attempt(self):
-        repo = repo_at(self.tmp / "repo")
-        (repo / "dirty.txt").write_text("x\n")
-        unit = code_unit(repo)
-        plan = {"name": "p", "units": [unit]}
-        state = {"schema_version": 1, "units": {}, "halted": None}
-        state_dir, runs = self.tmp / "state", self.tmp / "runs"
-        real = S.U.run
-        launched = []
-
-        def spy(argv, **kwargs):
-            if argv and argv[0] == "paseo":
-                launched.append(argv)
-                return 0, '{"agentId":"must-not-start"}', ""
-            return real(argv, **kwargs)
-
-        S.U.run = spy
-        try:
-            locked, why = S.acquire_lease(str(state_dir))
-            self.assertTrue(locked, why)
-            report, dispatched, _halted = S.advance(
-                plan, state, str(state_dir), str(runs), False)
-        finally:
-            S.release_lease(str(state_dir))
-            S.U.run = real
-        us = state["units"]["code"]
-        self.assertEqual(dispatched, 0)
-        self.assertEqual(launched, [])
-        self.assertEqual(us["state"], "PREFLIGHT_REFUSED")
-        self.assertIsNone(us["attempt_dir"])
-        self.assertEqual(us["attempts"], [])
-        self.assertIsNone(us.get("job_id"))
-        self.assertEqual(us["gpu_hours"], 0.0)
-        receipt = Path(us["preflight_refusals"][0]["receipt"])
-        self.assertTrue(receipt.is_file())
-        self.assertIn(str(receipt), "\n".join(report))
-        persisted = json.loads((state_dir / S.STATE_FILE).read_text())
-        self.assertEqual(persisted["units"]["code"]["attempts"], [])
+        facts = state["units"]["code"]["attempt_launch_facts"]["attempt"]
+        self.assertEqual(facts["execution_workspace"],
+                         str((self.tmp / "managed" / "attempt").resolve()))
+        self.assertTrue((attempt.parent / "launch-attempt.json").is_file())
 
     def test_non_code_is_checked_only_when_policy_requires_it(self):
         repo = repo_at(self.tmp / "repo")
@@ -482,64 +456,11 @@ class TestPreflightIsTheLaunchChokepoint(Base):
 
 
 class TestRefusalIsCarriedNotRederived(unittest.TestCase):
-    """The re-dispatch trap: the record says "passed", the workspace is dirty.
-
-    `advance` classified a failed submit by reading `preflight.status` back
-    off disk. On a re-dispatch that field records the earlier PASS, so the
-    refusal read as a generic failure. Only one caller allocates a fresh
-    random attempt id today, so the misclassification is not reachable
-    through `advance` yet; these pin the classification itself so the first
-    recovery path that re-submits an attempt does not make it live.
-    """
+    """Explicit preflight refusals remain distinct for guarded non-code jobs."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-
-    def test_a_dirty_workspace_refusal_is_typed(self):
-        repo = repo_at(self.tmp / "repo")
-        (repo / "dirty.txt").write_text("x\n")
-        attempt = self.tmp / "runs" / "code" / "attempt"
-        attempt.mkdir(parents=True)
-        job, err = S._submit(code_unit(repo), str(attempt), False, {})
-        self.assertIsNone(job)
-        self.assertIsInstance(err, S.PreflightRefusal)
-        self.assertEqual(err.workspace, str(Path(repo).resolve()))
-        self.assertEqual(err.dirty_count, 1)
-
-    def test_redispatch_refusal_is_typed_though_the_record_says_passed(self):
-        repo = repo_at(self.tmp / "repo")
-        unit = code_unit(repo)
-        attempt = self.tmp / "runs" / "code" / "attempt"
-        attempt.mkdir(parents=True)
-        anchor_err, _base = S._write_launch_record(str(attempt), unit)
-        self.assertIsNone(anchor_err)
-        anchor = attempt.parent / "launch-attempt.json"
-        self.assertEqual(
-            json.loads(anchor.read_text())["preflight"]["status"], "passed")
-
-        (repo / "appeared-later.txt").write_text("dirty\n")
-        real = S.U.run
-        launched = []
-
-        def spy(argv, **kwargs):
-            if argv and argv[0] == "paseo":
-                launched.append(argv)
-                return 0, '{"agentId":"must-not-start"}', ""
-            return real(argv, **kwargs)
-
-        S.U.run = spy
-        try:
-            job, err = S._submit(unit, str(attempt), False, {})
-        finally:
-            S.U.run = real
-        self.assertIsNone(job)
-        self.assertEqual(launched, [])
-        # The disk still says the opposite; the type carries the truth.
-        self.assertEqual(
-            json.loads(anchor.read_text())["preflight"]["status"], "passed")
-        self.assertIsInstance(err, S.PreflightRefusal)
-        self.assertIn("appeared-later.txt", err)
 
     def test_a_shape_error_is_not_a_preflight_refusal(self):
         # Restoring the retry budget is for an attempt that never started
@@ -606,106 +527,6 @@ class TestRefusalIsCarriedNotRederived(unittest.TestCase):
         self.assertEqual(dispatched, 0)
         self.assertEqual(us["state"], "FAILED")
         self.assertEqual(us.get("preflight_refusals"), None)
-
-
-class TestTheRecordIsNotTrustedForDispatch(unittest.TestCase):
-    """The launch record is agent-writable; the plan is not.
-
-    `SWARM_UNIT_DIR` is handed to a code agent running with write
-    permissions, and the record sits one level above it. Reading
-    `execution_workspace` back out of it and passing it to `paseo --cwd` let
-    the agent pick its own working tree while `preflight.status` still said
-    "passed" for the tree the coordinator actually checked.
-    """
-
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-
-    def _spy(self):
-        real, launched = S.U.run, []
-
-        def spy(argv, **kwargs):
-            if argv and argv[0] == "paseo":
-                launched.append(argv)
-                return 0, '{"agentId":"11111111-2222-3333-4444-555555555555"}', ""
-            return real(argv, **kwargs)
-        return real, spy, launched
-
-    def test_an_edited_audit_record_is_ignored_for_dispatch(self):
-        good = repo_at(self.tmp / "good")
-        evil = repo_at(self.tmp / "evil")
-        unit = code_unit(good)
-        attempt = self.tmp / "runs" / "code" / "attempt"
-        attempt.mkdir(parents=True)
-        err, anchored = S._write_launch_record(str(attempt), unit)
-        self.assertIsNone(err)
-        state = _state_with_seal(unit["id"], attempt, anchored["seal"],
-                                 anchored["facts"])
-
-        anchor = W.launch_record_path(str(attempt))
-        rec = json.loads(anchor.read_text())
-        rec["execution_workspace"] = str(evil)      # the agent's edit
-        anchor.write_text(json.dumps(rec))
-
-        real, spy, launched = self._spy()
-        S.U.run = spy
-        try:
-            job, refusal = S._submit(unit, str(attempt), False, state)
-        finally:
-            S.U.run = real
-        self.assertIsNone(refusal)
-        self.assertTrue(job)
-        self.assertEqual(len(launched), 1)
-        cwd = launched[0][launched[0].index("--cwd") + 1]
-        self.assertEqual(cwd, str(Path(good).resolve()))
-        audit = state["units"]["code"]["attempt_record_audit"]["attempt"]
-        self.assertIn("no longer matches the digest", audit)
-
-    def test_a_clean_untouched_attempt_still_dispatches(self):
-        # The other direction: the check must not refuse an honest launch.
-        good = repo_at(self.tmp / "good")
-        unit = code_unit(good)
-        attempt = self.tmp / "runs" / "code" / "attempt"
-        attempt.mkdir(parents=True)
-        real, spy, launched = self._spy()
-        S.U.run = spy
-        try:
-            job, err = S._submit(unit, str(attempt), False, {})
-        finally:
-            S.U.run = real
-        self.assertIsNone(err)
-        self.assertEqual(len(launched), 1)
-        cwd = launched[0][launched[0].index("--cwd") + 1]
-        self.assertEqual(cwd, str(Path(good).resolve()))
-
-    def test_a_refused_attempt_without_trusted_facts_stays_abandoned(self):
-        # _existing_preflight_refusal refused on a stale recorded refusal even
-        # after the workspace was cleaned. The current predicate decides.
-        repo = repo_at(self.tmp / "repo")
-        (repo / "dirty.txt").write_text("x\n")
-        unit = code_unit(repo)
-        attempt = self.tmp / "runs" / "code" / "attempt"
-        attempt.mkdir(parents=True)
-        job, refusal = S._submit(unit, str(attempt), False, {})
-        self.assertIsNone(job)
-        self.assertIsInstance(refusal, S.PreflightRefusal)
-
-        (repo / "dirty.txt").unlink()               # cleaned
-        # A real re-dispatch: the coordinator still holds the seal it stored
-        # when it wrote this attempt's record.
-        seal = hashlib.sha256(
-            W.launch_record_path(str(attempt)).read_bytes()).hexdigest()
-        state = _state_with_seal(unit["id"], attempt, seal)
-        real, spy, launched = self._spy()
-        S.U.run = spy
-        try:
-            job, err = S._submit(unit, str(attempt), False, state)
-        finally:
-            S.U.run = real
-        self.assertIsNone(job)
-        self.assertIn("no complete launch snapshot", err)
-        self.assertEqual(launched, [])
 
 
 class TestARefusedAttemptCannotBeBound(unittest.TestCase):
@@ -788,76 +609,6 @@ class TestContainmentCoversAWorkspaceThatDoesNotExistYet(unittest.TestCase):
         state, _runs, _wt = CP.resolve_paths(
             state_dir=str(self.tmp / "state"), plan=plan, cwd=str(plain))
         self.assertEqual(state, Path(self.tmp / "state").resolve())
-
-
-class TestASealLessAttemptIsAbandonedNotStarted(unittest.TestCase):
-    """A legitimate unit must never become permanently unjudgeable.
-
-    Two ways the seal goes missing while the record exists: the coordinator
-    crashed between writing the record and storing the seal, or the record
-    predates sealing. Both used to dispatch anyway, and nothing could then
-    judge the attempt: stuck with no way out but hand-editing state.
-    """
-
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        self.repo = repo_at(self.tmp / "repo")
-        self.unit = code_unit(self.repo)
-        self.attempt = self.tmp / "runs" / "code" / "attempt"
-        self.attempt.mkdir(parents=True)
-
-    def _submit_with(self, state):
-        real, launched = S.U.run, []
-
-        def spy(argv, **kwargs):
-            if argv and argv[0] == "paseo":
-                launched.append(argv)
-                return 0, '{"agentId":"11111111-2222-3333-4444-555555555555"}', ""
-            return real(argv, **kwargs)
-
-        S.U.run = spy
-        try:
-            return S._submit(self.unit, str(self.attempt), False, state), launched
-        finally:
-            S.U.run = real
-
-    def test_a_crash_before_the_seal_was_stored_abandons_the_attempt(self):
-        # First dispatch wrote the record; the crash lost the seal.
-        err, _anchored = S._write_launch_record(str(self.attempt), self.unit)
-        self.assertIsNone(err)
-        (job, refusal), launched = self._submit_with({"units": {}})
-        self.assertIsNone(job)
-        self.assertEqual(launched, [], "dispatched an attempt nothing could "
-                                       "ever judge")
-        self.assertIn("no complete launch snapshot", refusal)
-        self.assertIn("Re-dispatch", refusal)
-
-    def test_a_record_predating_sealing_abandons_the_attempt(self):
-        # A v1-era record, written by hand, with no seal anywhere.
-        W.launch_record_path(str(self.attempt)).write_text(json.dumps(
-            {"schema_version": 1, "repo": str(self.repo),
-             "execution_workspace": str(self.repo),
-             "base_commit": "0" * 40, "clean_at_launch": True,
-             "preflight": {"status": "passed"}}))
-        (job, refusal), launched = self._submit_with({"units": {}})
-        self.assertIsNone(job)
-        self.assertEqual(launched, [])
-        self.assertIn("no complete launch snapshot", refusal)
-
-    def test_the_seal_is_not_re_derived_from_the_file(self):
-        # The tempting "fix": digest whatever is on disk now and call it the
-        # seal. That is the laundering the seal exists to prevent, and it
-        # would be worse than no seal because it would look like one.
-        err, _anchored = S._write_launch_record(str(self.attempt), self.unit)
-        self.assertIsNone(err)
-        state = {"units": {}}
-        (job, _refusal), _launched = self._submit_with(state)
-        self.assertIsNone(job)
-        seals = ((state.get("units") or {}).get("code") or {}).get(
-            "attempt_record_seals") or {}
-        self.assertEqual(seals, {}, "the coordinator invented a seal from a "
-                                    "file it did not write")
 
 
 if __name__ == "__main__":
