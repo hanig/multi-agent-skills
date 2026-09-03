@@ -7,7 +7,8 @@ description: >-
   pipeline, or a code-editing agent. Allocates an exclusive per-attempt write
   root so a cheap done-predicate is conclusive, binds a scheduler job to an
   attempt, and reports DONE / RUNNING / FAILED / PREEMPTED / INCOMPLETE. Use
-  with the paseo skills for agent lifecycle and bus await for code units.
+  with the paseo skills for agent lifecycle; a code unit gets a per-attempt
+  worktree and is judged here.
 ---
 
 # hanig-swarm
@@ -224,6 +225,134 @@ isolate principals. `worktree.py`'s `WORKTREE_REF_ISOLATION_LIMIT` states that
 at the judgment boundary, and judgment therefore checks branch, descendant
 history, changed tree and a clean index together rather than trusting the path.
 
+## What isolates a code unit
+
+The paragraph above says what a per-attempt worktree does NOT do. What it
+does is the whole isolation story for a `code` unit, and it is worth stating
+positively, because the reading it displaces -- that `write_scopes` confines
+an agent's writes -- was in these docs and is wrong.
+
+**`write_scopes` is a planning declaration, not a boundary.** It names paths,
+`validate` refuses concurrently runnable units whose scopes overlap, and
+nothing at run time stops any process writing anywhere its Unix user can. It
+constrains the PLAN, not the agent, and it never isolated a code unit's
+repository. C11 is what does that.
+
+**Each code ATTEMPT gets its own worktree, cut before the agent exists.** The
+coordinator records a launch intent in coordinator state first -- repo, base
+commit, base tree, the generated `swarm-<attempt>` branch, the worktree slug,
+and the plan's `target_branch` -- and only then has Paseo create the checkout
+with `--new-workspace worktree --worktree-mode branch-off --new-branch
+<branch> --base <base-commit>`. The base is a commit id, never a ref: cutting
+from a ref would let the ref move between the decision and the creation,
+which is the shared-checkout TOCTOU this replaced. `--cwd` names the trusted
+SOURCE repository only, so Paseo knows what to branch from; the agent's cwd
+is the path Paseo returns.
+
+Two consequences at planning time. The per-unit `branch` field is vestigial
+and is NOT read as a fallback -- a code unit declares `target_branch`, the
+destination of its pull request. And two concurrent code units on one
+repository need neither separate branches nor `needs` between them, because
+they no longer share a checkout.
+
+**The returned path is verified from Git, then bound by inode.** Nothing
+trusts Paseo's notice: the path must be a worktree root, its
+`--git-common-dir` must be the trusted source repository's, its `--git-dir`
+must DIFFER from that common dir or it is the main checkout rather than a
+linked per-attempt worktree, HEAD must be the recorded base commit, and the
+branch must be the recorded one. Only then are the worktree root's device and
+inode, and those of both Git metadata directories, written into the launch
+facts. At judgment `workspace_identity_problem` re-resolves and re-stats all
+three and refuses if any of them moved, which is what closes whole-directory
+substitution under the same path. Launch records written before those fields
+existed keep the weaker path-only check: the absence of a field that did not
+exist yet is unverifiable, not evidence of substitution.
+
+**Inode equality is not content tamper-evidence, and is not claimed as it.**
+HEAD, the index, refs and objects must all change for an honest commit, so no
+launch-time snapshot of them separates work from interference. That is why
+judgment checks their semantics together -- expected branch, descendant
+history from the recorded base, a changed tree, and a clean index and
+worktree -- rather than checking that nothing moved. After judgment the
+coordinator pins the produced commit, so a later ref rewrite cannot change
+merge admission or verification.
+
+The launch record is per ATTEMPT, `launch-<attempt-id>.json`, written beside
+the attempt directory rather than inside it. One shared record let a retry
+inherit the previous attempt's baseline, so the previous attempt's commits
+satisfied the new attempt.
+
+## Three more limits, recorded where a skill reader never looks
+
+Same shape as the two above, and here for the same reason. Each was accepted
+deliberately and written down in a code comment or in `MEMORY.md`, neither of
+which is a file a reader of this skill opens. None is scheduled work; two are
+safe only because of a restriction nothing enforces, so the restriction is
+stated with them.
+
+**A dispatched agent DOES hold credentials.** `child_environment.py` stops the
+COORDINATOR handing its own authority to a child: an exact-name denylist
+(`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, the GitHub tokens, the AWS set,
+`SSH_AUTH_SOCK`, and `SBATCH_GET_USER_ENV`, which would otherwise let sbatch
+reacquire the login environment from the far side) is dropped from every
+coordinator spawn, and `SWARM_UNIT_*` / `SWARM_DEP_*` are never inherited, so
+a constructed variable cannot be spoofed by the ambient environment. Do not
+read that as an agent running without credentials:
+
+- Paseo's long-lived daemon supplies provider credentials to the agent
+  independently of the short-lived client the coordinator spawns. A live
+  probe showed a key reaching an agent while absent from that client's
+  environment, and `paseo run --env` cannot replace those provider
+  variables. The daemon must itself be launched without ambient keys, or the
+  containment does not exist; it is not a swarm-side boundary.
+- `HOME` passes through, because a code agent cannot work without it, and
+  `HOME` is where codex's stored auth lives. The denylist covers process
+  environment names; it is not a filesystem boundary.
+- The list is finite and EXACT on purpose. A credential under a name nobody
+  enumerated, or embedded in another variable's value, passes through
+  untouched. Two rounds of name- and value-shape matching broke legitimate
+  runtime configuration -- `HF_TOKEN` under a second name is the standing
+  example, and a gated model will not download without it -- so exactness is
+  the policy rather than an omission.
+
+This is not a defect to re-file. A code unit is REQUIRED to push a branch and
+open a pull request, so an agent holding nothing could not close its own
+unit. The true claim is narrower than "the agent holds no credentials": the
+coordinator no longer hands over the credentials IT holds, and the agent
+still acts with whatever the Paseo daemon gives it and whatever is readable
+under `HOME`. Accepted 2026-09-02; closing it is a Paseo change, not a swarm
+one.
+
+**Adopting a pre-existing worktree races a same-UID process.** If a
+controller dies between `paseo run` and recording its result, the branch and
+the worktree may already exist. Recovery looks for the named agent first;
+failing that it will adopt exactly ONE unambiguous Git worktree on that
+branch, and before it does, `_paseo_path_ownership_problem` asks Paseo's
+workspace registry and then its agent registry whether anything already owns
+that path, treating an unreadable registry as ownership-unknown rather than
+as absence. That reduces ACCIDENTAL adoption, which is what it is for. It
+does not close the race: Paseo has no conditional reserve-and-launch
+primitive, so a same-UID process that registers the path after both list
+calls still wins, and re-checking would only move the gap. What keeps
+adoption safe is the check AFTER the lists -- the path must still match the
+trusted launch intent by repo, base commit, branch, worktree root and Git
+metadata inode, or it is refused rather than adopted. So do not replace the
+list calls with a lock and read the race as closed: closing it needs Paseo to
+reserve and launch atomically, or a different OS identity boundary.
+
+**`_paseo_workspace_id` parses free text, and only bookkeeping may depend on
+it.** The workspace id is recovered by matching `Created workspace wks_...`
+in Paseo's human-readable notice. It is used for cleanup -- archiving the
+managed checkout, naming a retained worktree a human has to remove -- and
+NEVER to authenticate the returned cwd, branch, base or Git identity, each of
+which is re-derived from Git and checked against the recorded launch intent.
+That restriction is what makes a free-text parse acceptable, and nothing in
+the code enforces it: a later caller could read the same string into a trust
+decision, and hardening the pattern would not help, because a same-UID
+process can falsify the registry evidence behind it anyway. If you need to
+know which workspace an attempt owns for anything that DECIDES something,
+take it from the launch intent.
+
 ## Usage
 
 ```bash
@@ -270,7 +399,7 @@ rather than after a queued job has to be moved.
 |---|---|---|
 | `slurm` | exclusive run-dir + Slurm allocation | terminal-OK owned row AND declared output present |
 | `pipeline` | fresh work dir + fresh publish dir, boundary only | engine's terminal exit AND final outputs present |
-| `code` | git worktree + branch via Paseo | delegate to `bus await`; not duplicated here |
+| `code` | per-attempt git worktree, inode-bound | lifecycle settled + outputs + a committed change over the base; a merged PR closes it |
 
 **A pipeline's interior is UNJUDGEABLE.** The engine owns its DAG, retries and
 work directory, so per-task success and which internal step produced which
