@@ -34,10 +34,22 @@ there.
 | B9 | ARC-232 | wandb | ARC-238 |
 | E2 | ARC-233 | paseo provider pinning | ARC-239 |
 
-Two more were filed from the work itself, not from a field report: **ARC-240**,
-21 tests in `test_plan_shape.py` that cannot run where `paseo` is absent, which
-blinds the suite exactly where C14, B1 and B6 change things; and **ARC-241**,
-three further limits that live only in code comments or `MEMORY.md`.
+Four more were filed from the work itself, not from a field report. **ARC-244**
+is the one to read: `survey.py`'s `WALK_SECONDS` is a cooperative deadline, so
+a blocked `opendir()` never reaches it and the walk never returns -- the script
+does what its own comment forbids, and on a cluster the trigger is a dead NFS
+mount rather than a cloud folder. **ARC-240**, 21 tests in `test_plan_shape.py`
+that cannot run where `paseo` is absent, blinding the suite exactly where C14,
+B1 and B6 change things. **ARC-243**, the dispatch protocol must forbid `git
+stash`: the stack is one shared ref across every worktree, and two concurrent
+agents collided on it the first time anyone dispatched three at once.
+**ARC-241**, three further limits that live only in code comments or
+`MEMORY.md`.
+
+Whole-suite baseline at this commit, for anyone comparing: **31 failed, 1102
+passed** in 64 minutes, of which ~59 minutes was the ARC-244 hang. Nearly all
+31 are environmental. Do not read a red suite here as a regression until
+ARC-240 and ARC-244 are closed.
 
 Each issue carries its own done-predicate, copied from the item below it. If
 you change a predicate here, change it there.
