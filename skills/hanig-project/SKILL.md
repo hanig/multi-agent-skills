@@ -22,6 +22,17 @@ This reports the host, python, schedulers, partitions, accounts, whether
 `--mem` is required here, free disk, and, for a repo: git history, size,
 language mix, existing docs, and whether a swarm project already exists.
 
+The tree walk is bounded by a **child process killed on a real deadline**,
+not by a check inside its own loop: `os.scandir` blocks inside `opendir()` on
+a stale NFS handle or a dead automount, and a loop that only looks at the
+clock between entries never gets its turn. So `repo.walk` reports how the
+walk ENDED -- `complete`, `truncated` (a declared cap stopped it: there was
+too much), `stuck` (a directory did not answer, and `stuck_at` names it), or
+`unknown`. **`truncated` and `stuck` are not the same fact**: the first
+describes the tree, the second warns about the host. On anything but
+`complete`, `file_count`, `size_mb` and `extensions` are FLOORS -- if it comes
+back `stuck`, say so and name the directory instead of planning off the count.
+
 Per partition it also reports **who may use it and what the allowance costs**:
 `allow_accounts`, `deny_accounts`, the partition `qos` and its `qos_grptres`,
 and `max_mem_per_cpu_mb`. Read these before sizing anything. Each carries

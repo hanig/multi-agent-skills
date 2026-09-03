@@ -1385,5 +1385,223 @@ class TestTheSurveySaysWhoMayUseAPartition(unittest.TestCase):
             self.assertEqual(data["scheduler"], {"present": False})
 
 
+class TestTheWalkCannotBeHeldOpenByASyscall(unittest.TestCase):
+    """WALK_SECONDS was a COOPERATIVE bound: `deadline = time.time() +
+    WALK_SECONDS`, checked in the `while stack` loop between entries. When
+    os.scandir blocks inside opendir() the loop never reaches its own check,
+    so the walk never returns. Measured against $HOME: still running at 45s,
+    and two orphaned instances wedged 59 and 47 minutes on 0.07s of CPU,
+    parked under ~/Library/CloudStorage. The machines this skill targets keep
+    $HOME on NFS, where a stale handle or a dead automount blocks opendir()
+    far longer than a sync daemon does, and surveying the host is step 1 --
+    so the first thing anyone runs hangs, with no output and no error.
+
+    The fan-out guards (MAX_DIRS, MAX_ENTRIES_PER_DIR, the scandir stack) are
+    correct and are not what these tests are about: this failure is LATENCY,
+    not volume.
+
+    A directory whose opendir() never returns is simulated with a
+    sitecustomize.py on PYTHONPATH, which every child interpreter imports at
+    startup. That makes the hostile filesystem a property of the WALK CHILD
+    rather than of this test process -- the only way to reproduce a blocking
+    syscall without a real dead NFS mount, and it holds whatever mechanism
+    the walk uses to bound itself."""
+
+    HOSTILE = "wedged"
+
+    def _hostile_tree(self, d, block=600):
+        """A tree of two files and one directory that never answers."""
+        root = Path(d) / "root"
+        (root / "good").mkdir(parents=True)
+        (root / self.HOSTILE).mkdir()
+        (root / "b.py").write_text("y\n")
+        (root / "good" / "a.py").write_text("x\n")
+        site = Path(d) / "site"
+        site.mkdir()
+        (site / "sitecustomize.py").write_text(
+            "import os, time\n"
+            "_real = os.scandir\n"
+            "def scandir(path='.', *a, **kw):\n"
+            "    if %r in str(path):\n"
+            "        time.sleep(%d)\n"
+            "    return _real(path, *a, **kw)\n"
+            "os.scandir = scandir\n" % (self.HOSTILE, block))
+        return root, site
+
+    def test_a_directory_that_never_answers_does_not_hold_the_walk(self):
+        """The bound has to hold against a syscall that does not return, and
+        the result has to say it was cut short AND WHY. Fails against the
+        cooperative deadline, which never gets a turn."""
+        import time as _t
+        sys.path.insert(0, str(SCRIPTS))
+        import survey as S2
+        with tempfile.TemporaryDirectory() as d:
+            root, site = self._hostile_tree(d)
+            # The kill deadline is shortened rather than waited out: what is
+            # under test is that the walk returns when the deadline passes,
+            # not the particular number of seconds in it.
+            keep = (S2.WALK_KILL_SECONDS, S2.REAP_SECONDS,
+                    os.environ.get("PYTHONPATH"))
+            S2.WALK_KILL_SECONDS, S2.REAP_SECONDS = 3, 1
+            os.environ["PYTHONPATH"] = str(site)
+            try:
+                t0 = _t.time()
+                out = S2.repo(str(root))
+                elapsed = _t.time() - t0
+            finally:
+                S2.WALK_KILL_SECONDS, S2.REAP_SECONDS = keep[0], keep[1]
+                if keep[2] is None:
+                    os.environ.pop("PYTHONPATH", None)
+                else:
+                    os.environ["PYTHONPATH"] = keep[2]
+            self.assertLess(elapsed, 30,
+                            "a blocked opendir outlasted the kill deadline")
+            walk = out["walk"]
+            self.assertEqual(walk["state"], "stuck", walk)
+            self.assertIn(self.HOSTILE, walk["why"])
+            self.assertIn(self.HOSTILE, walk["stuck_at"])
+            # A floor must not read as a total, in EITHER field.
+            self.assertTrue(out["counted_truncated_at"], out)
+            self.assertIn("FLOOR", walk["note"])
+            # And what it did see before it stopped is still reported: a walk
+            # killed on its first hostile directory used to report zero files
+            # for a tree it had already counted, which reads as empty.
+            self.assertGreaterEqual(out["file_count"], 1, out)
+
+    def test_the_survey_itself_returns_within_the_bound_it_declares(self):
+        """`_walk` in isolation is not the thing anybody runs. This drives the
+        command, at its real deadline, and reads the terminal output a human
+        gets -- the reader who loses the hours is the one watching stdout.
+
+        Bounded by this test's own subprocess timeout, so a regression fails
+        here instead of hanging the suite; start_new_session + killpg so the
+        walk child goes too."""
+        import signal as _sig
+        import time as _t
+        sys.path.insert(0, str(SCRIPTS))
+        import survey as S2
+        with tempfile.TemporaryDirectory() as d:
+            root, site = self._hostile_tree(d)
+            env = dict(os.environ)
+            env["PYTHONPATH"] = str(site)
+            t0 = _t.time()
+            proc = subprocess.Popen(
+                [sys.executable, str(SURVEY), "--repo", str(root)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                stdin=subprocess.DEVNULL, env=env, start_new_session=True)
+            try:
+                out, err = proc.communicate(
+                    timeout=S2.WALK_KILL_SECONDS + 90)
+            except subprocess.TimeoutExpired:
+                os.killpg(os.getpgid(proc.pid), _sig.SIGKILL)
+                proc.communicate()
+                self.fail("the survey never returned: a blocked opendir is "
+                          "still able to hang it")
+            elapsed = _t.time() - t0
+            self.assertEqual(proc.returncode, 0, err)
+            self.assertLess(elapsed, S2.WALK_KILL_SECONDS + 30,
+                            f"the survey took {elapsed:.0f}s against a "
+                            f"declared {S2.WALK_KILL_SECONDS}s bound")
+            # "capped" is what too-much says. A walk that got stuck must not
+            # borrow that word, and must name the directory.
+            self.assertIn("CUT SHORT", out, out)
+            self.assertIn("STUCK", out, out)
+            self.assertIn(self.HOSTILE, out, out)
+            self.assertNotIn("(capped)", out, out)
+
+    def test_too_much_and_stuck_are_not_the_same_verdict(self):
+        """counted_truncated_at carried ONE fact. `truncated` has to keep
+        meaning THERE WAS TOO MUCH: a plan author reads a capped count as a
+        big repo and a stuck one as a host with a filesystem that does not
+        answer, and does something different about each."""
+        with tempfile.TemporaryDirectory() as d:
+            r = Path(d) / "r"
+            r.mkdir()
+            sys.path.insert(0, str(SCRIPTS))
+            import survey as S2
+            for i in range(S2.MAX_ENTRIES_PER_DIR + 200):
+                (r / f"run-{i}").mkdir()
+            res = run(SURVEY, "--repo", str(r), "--json")
+            self.assertEqual(res.returncode, 0, res.stderr)
+            data = json.loads(res.stdout)
+            walk = data["repo"]["walk"]
+            self.assertEqual(walk["state"], "truncated", walk)
+            self.assertIn("MAX_ENTRIES_PER_DIR", walk["why"])
+            self.assertTrue(data["repo"]["counted_truncated_at"],
+                            "a floor rendering as a total is the failure the "
+                            "old flag exists to stop")
+
+    def test_a_walk_that_finished_says_so_and_invents_no_reason(self):
+        """The cries-wolf direction: an ordinary repo must not come back
+        carrying a warning, or the warning stops being read."""
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "x.py").write_text("print(1)\n")
+            res = run(SURVEY, "--repo", d, "--json")
+            data = json.loads(res.stdout)
+            walk = data["repo"]["walk"]
+            self.assertEqual(walk["state"], "complete", walk)
+            self.assertNotIn("why", walk)
+            self.assertNotIn("note", walk)
+            self.assertIsNone(data["repo"]["counted_truncated_at"])
+            self.assertNotIn("capped", res.stdout)
+
+    def test_the_walk_state_vocabulary_is_closed_and_never_silent(self):
+        """Same rule as the LIMIT_* states: a fourth spelling is a fourth
+        thing every consumer must handle, and a state that is not `complete`
+        must say why or it reads as fine."""
+        sys.path.insert(0, str(SCRIPTS))
+        import survey as S2
+        self.assertEqual(
+            sorted({S2.WALK_OK, S2.WALK_TRUNCATED, S2.WALK_STUCK,
+                    S2.WALK_UNKNOWN}),
+            ["complete", "stuck", "truncated", "unknown"])
+        for state in (S2.WALK_TRUNCATED, S2.WALK_STUCK, S2.WALK_UNKNOWN):
+            v = S2._walk_verdict(state, None, {"dirs": 0})
+            self.assertTrue(v.get("why"), f"{state} did not say why")
+            self.assertIn("FLOOR", v.get("note", ""))
+        self.assertNotIn("why", S2._walk_verdict(S2.WALK_OK, None,
+                                                 {"dirs": 1}))
+
+    def test_the_skill_tells_a_reader_the_two_verdicts_differ(self):
+        """The same lesson as the partition limits: a distinction that only
+        exists in the JSON is a distinction the agent reading the skill will
+        flatten, so the vocabulary goes where the reader hits it."""
+        doc = (ROOT / "skills" / "hanig-project" / "SKILL.md").read_text()
+        self.assertIn("`truncated` and `stuck` are not the same fact", doc)
+        self.assertIn("stuck_at", doc)
+        self.assertIn("FLOORS", doc)
+
+    def test_no_wait_in_this_file_is_unbounded(self):
+        """`run` killed a child that outlived its timeout and then called
+        proc.wait() with no timeout. A process parked in an uninterruptible
+        syscall -- a dead automount, a stale NFS handle -- does not die until
+        that syscall returns, so that wait handed the hang straight back. The
+        same defect as the walk's, one function above it."""
+        tree = ast.parse(SURVEY.read_text())
+        bare = [ast.unparse(n) for n in ast.walk(tree)
+                if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "wait" and not n.keywords]
+        self.assertEqual(bare, [],
+                         f"an unbounded wait can hang the survey: {bare}")
+
+    def test_the_walk_child_is_the_bound_and_says_when_it_is_not(self):
+        """If no child can be launched the walk still runs, but the survey
+        must not claim a bound it no longer has."""
+        sys.path.insert(0, str(SCRIPTS))
+        import survey as S2
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "x.py").write_text("print(1)\n")
+            keep = sys.executable
+            try:
+                sys.executable = ""      # nothing to launch a child with
+                counts, walk = S2._walk(d)
+            finally:
+                sys.executable = keep
+            self.assertEqual(counts["files"], 1)
+            self.assertEqual(walk["bound"], "cooperative")
+            self.assertIn("never returns", walk["bound_note"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
