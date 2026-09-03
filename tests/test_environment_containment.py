@@ -33,7 +33,8 @@ EXPECTED_DENIED_NAMES = {
     "SENTRY_DSN_NXTRAY",
     "GITHUB_TOKEN",
     "GH_TOKEN",
-    "HUGGINGFACE_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
     "AWS_SECRET_ACCESS_KEY",
     "AWS_ACCESS_KEY_ID",
     "AWS_SESSION_TOKEN",
@@ -41,6 +42,8 @@ EXPECTED_DENIED_NAMES = {
     "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
     "AWS_CONTAINER_CREDENTIALS_FULL_URI",
     "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+    "AWS_BEARER_TOKEN_BEDROCK",
     "AWS_WEB_IDENTITY_TOKEN_FILE",
     "SSH_AUTH_SOCK",
     "SBATCH_GET_USER_ENV",
@@ -135,6 +138,25 @@ def _spawn_offenders(root):
 
 
 class TestEnvironmentContainment(unittest.TestCase):
+    def test_huggingface_token_is_not_denied_under_either_name(self):
+        """HF_TOKEN and HUGGINGFACE_TOKEN are one credential, two spellings,
+        and the same library reads both. Denying either fails a gated model
+        download -- the regression that made us abandon suffix matching. This
+        pins BOTH names, because the list was briefly wrong on one of them."""
+        import child_environment as CE
+        planted = {"HF_TOKEN": "hf_a", "HUGGINGFACE_TOKEN": "hf_b",
+                   "WANDB_API_KEY": "w"}
+        original = dict(os.environ)
+        os.environ.update(planted)
+        try:
+            got = CE.child_env()
+        finally:
+            os.environ.clear()
+            os.environ.update(original)
+        for name, value in planted.items():
+            self.assertEqual(got.get(name), value,
+                             "%s must reach the child; units need it" % name)
+
     def test_every_exact_denied_name_and_ambient_swarm_name_is_absent(self):
         self.assertEqual(set(CE.DENIED_ENV_NAMES), EXPECTED_DENIED_NAMES)
         probe = (

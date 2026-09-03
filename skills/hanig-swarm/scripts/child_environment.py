@@ -27,7 +27,12 @@ DENIED_ENV_NAMES = frozenset({
     "SENTRY_DSN_NXTRAY",
     "GITHUB_TOKEN",
     "GH_TOKEN",
-    "HUGGINGFACE_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+    # HUGGINGFACE_TOKEN is deliberately absent. It is HF_TOKEN under a second
+    # name that the same library reads, and units need it: a gated model will
+    # not download without one. Denying either repeats the regression that
+    # made us abandon suffix matching.
     # Exact AWS credential names cannot match AWS_REGION, AWS_PROFILE or other
     # runtime configuration. That specificity is the policy boundary.
     "AWS_SECRET_ACCESS_KEY",
@@ -37,6 +42,8 @@ DENIED_ENV_NAMES = frozenset({
     "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
     "AWS_CONTAINER_CREDENTIALS_FULL_URI",
     "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+    "AWS_BEARER_TOKEN_BEDROCK",
     "AWS_WEB_IDENTITY_TOKEN_FILE",
     # Access to the live SSH credential agent is authority, even though the
     # variable contains a socket path rather than the credential itself.
