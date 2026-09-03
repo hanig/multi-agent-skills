@@ -78,6 +78,14 @@ def _subprocess_calls(path):
         if isinstance(n, ast.ImportFrom)
         and n.module == "child_environment" for n in n.names
         if n.name == "child_env"}
+    rebound = {n.id for n in ast.walk(tree)
+               if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    rebound.update(n.name for n in ast.walk(tree)
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                     ast.ClassDef)))
+    rebound.update(n.arg for n in ast.walk(tree) if isinstance(n, ast.arg))
+    child_module_aliases -= rebound
+    child_direct_aliases -= rebound
     direct_names = {n.asname or n.name for n in ast.walk(tree)
                     if isinstance(n, ast.ImportFrom)
                     and n.module == "subprocess" for n in n.names
@@ -206,6 +214,17 @@ class TestEnvironmentContainment(unittest.TestCase):
                 "from subprocess import Popen as launch\n"
                 "launch(['true'], env=contained())\n")
             self.assertEqual(_spawn_offenders(root), [])
+
+    def test_shadowed_direct_import_alias_is_an_offender(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "launcher.py").write_text(
+                "from child_environment import child_env as contained\n"
+                "import subprocess\n"
+                "def contained():\n"
+                "    return {'OPENAI_API_KEY': 'credential'}\n"
+                "subprocess.Popen(['true'], env=contained())\n")
+            self.assertEqual(_spawn_offenders(root), ["launcher.py:5"])
 
     def test_mutating_environment_wrapper_is_an_offender(self):
         with tempfile.TemporaryDirectory() as d:
