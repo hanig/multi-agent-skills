@@ -569,6 +569,75 @@ class TestBlockedBeforeLaunchIsVisible(unittest.TestCase):
             self.assertIn("2 dirty path(s)", html)
 
 
+class TestFilesNothingDeclaredAreVisible(unittest.TestCase):
+    """18 bytes of debris named `phase0b/--reflink=auto` rode a DONE unit out
+    of a real run because nothing looked. The receipt names it now, and a
+    receipt nobody reads is the same silence one file further along."""
+
+    DEBRIS = "phase0b/--reflink=auto"
+
+    def _done(self, stray):
+        return {"a": {"state": "DONE", "outputs": {
+            "out.txt": {"sha256": "f" * 64, "size": 1,
+                        "method": "content-digest"}},
+            "basis": {"stray_untracked": stray}}}
+
+    def test_the_stray_path_is_rendered(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, receipts=self._done(
+                {"workspace": "/checkout", "paths": [self.DEBRIS],
+                 "count": 1}))
+            html = R.render(R.collect(t))
+            self.assertIn("Files nothing declared", html)
+            self.assertIn("/checkout", html)
+            self.assertIn("--reflink=auto", html)
+
+    def test_a_truncated_list_says_how_many_it_did_not_show(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, receipts=self._done(
+                {"workspace": "/checkout", "paths": ["junk/f000"],
+                 "count": 51}))
+            html = R.render(R.collect(t))
+            self.assertIn("51 untracked path(s)", html)
+            self.assertIn("and 50 more", html)
+
+    def test_debris_does_not_move_the_verdict(self):
+        """Audit-only, and the report is where that is easiest to break:
+        authority lives in coordinator state, so a stray file must not turn a
+        genuinely complete run into a failure."""
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, receipts=self._done(
+                {"workspace": "/checkout", "paths": [self.DEBRIS],
+                 "count": 1}))
+            rows = R.unit_rows(R.collect(t))
+            self.assertEqual(rows[0]["stray_untracked"]["count"], 1)
+            self.assertEqual(R.verdict(rows)[0], "COMPLETE")
+
+    def test_a_clean_workspace_writes_no_section(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, receipts=self._done(
+                {"workspace": "/checkout", "paths": [], "count": 0}))
+            self.assertNotIn("Files nothing declared", R.render(R.collect(t)))
+
+    def test_a_receipt_that_did_not_look_writes_no_section(self):
+        """`null` is "we did not look", which is not "we looked and it was
+        clean". Neither gets a section, but reading one as the other would."""
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, receipts=self._done(None))
+            rows = R.unit_rows(R.collect(t))
+            self.assertIsNone(rows[0]["stray_untracked"])
+            self.assertNotIn("Files nothing declared", R.render(R.collect(t)))
+
+    def test_a_receipt_predating_the_field_still_renders(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, receipts={"a": {"state": "DONE", "outputs": {
+                "out.txt": {"sha256": "f" * 64, "size": 1,
+                            "method": "content-digest"}}}})
+            rows = R.unit_rows(R.collect(t))
+            self.assertIsNone(rows[0]["stray_untracked"])
+            self.assertEqual(R.verdict(rows)[0], "COMPLETE")
+
+
 class TestAnUnattributedReceiptDoesNotOutrankState(unittest.TestCase):
     """The other half of "the receipt wins".
 

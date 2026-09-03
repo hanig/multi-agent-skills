@@ -240,6 +240,13 @@ def unit_rows(data):
             "outputs": rc.get("outputs") or {},
             "exit_code": rc.get("exit_code"),
             "basis": rc.get("basis") or {},
+            # What the execution workspace held that nothing declared. Carried
+            # onto the row rather than dug out of `basis` at render time,
+            # because a section nobody can find the data for does not get
+            # written: 18 bytes of debris reached DONE unmentioned once
+            # already, and the receipt naming it changes nothing until a
+            # reader sees it.
+            "stray_untracked": (rc.get("basis") or {}).get("stray_untracked"),
             "notes": rc.get("notes") or [],
             "checked_at": rc.get("checked_at"),
             "attempt_dir": su.get("attempt_dir"),
@@ -847,6 +854,34 @@ def render(data, title=None):
               "Commit, stash or clean it, then re-run.</li>"
               % (e(r["id"]), len(r["preflight_refusals"]), e(str(ws)),
                  e(count)))
+        a("</ul></div></section>")
+
+    # A stray file does NOT move the verdict. The receipt is audit-only, this
+    # list is read from a repository the agent owns, and a leftover is not by
+    # itself a failure -- a build artifact and 18 bytes of test debris look
+    # identical from here. What it must not be is invisible, which is exactly
+    # what it was when the debris rode a DONE unit out of the run.
+    strays = [r for r in rows if (r["stray_untracked"] or {}).get("paths")]
+    if strays:
+        a("<section>")
+        a('<div class="sec-head"><h2>Files nothing declared</h2>'
+          "<p>Untracked paths in the unit's execution workspace that none of "
+          "its declared outputs covers. The workspace was clean when the "
+          "unit launched, so the run wrote these. That is not a failure on "
+          "its own -- it is a question worth asking, because a command that "
+          "writes where it was not meant to writes what it was not meant "
+          "to.</p></div>")
+        a('<div class="note"><ul>')
+        for r in strays:
+            s = r["stray_untracked"]
+            shown = s.get("paths") or []
+            extra = int(s.get("count") or len(shown)) - len(shown)
+            a("<li><code>%s</code> left %d untracked path(s) in <code>%s</code>"
+              ": %s%s</li>"
+              % (e(r["id"]), int(s.get("count") or len(shown)),
+                 e(str(s.get("workspace") or "?")),
+                 e(", ".join(shown)),
+                 (" and %d more" % extra) if extra > 0 else ""))
         a("</ul></div></section>")
 
     if blind or mismatch or unevidenced:
