@@ -390,7 +390,8 @@ class TestTheSealActuallyTravels(unittest.TestCase):
 
         self.S.U.run = spy
         try:
-            job, err = self.S._submit(unit, str(self.att), False, state)
+            job, err = self.S._submit(
+                unit, str(self.att), False, state, str(self.tmp / "state"))
         finally:
             self.S.U.run = real
         self.assertIsNone(err)

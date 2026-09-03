@@ -347,7 +347,9 @@ class TestEnvironmentContainment(unittest.TestCase):
         with mock.patch.dict(os.environ, planted):
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", ResourceWarning)
-                job, err = S._submit(unit, attempt, False, state=state)
+                job, err = S._submit(
+                    unit, attempt, False, state=state,
+                    state_dir=str(Path(tmp.name) / "state"))
         self.assertIsNone(err)
         self.assertTrue(str(job).startswith("engine-"))
         result = attempt / "pipeline-environment.json"
@@ -405,7 +407,9 @@ class TestEnvironmentContainment(unittest.TestCase):
                 "SBATCH_GET_USER_ENV": "1",
             }
             with mock.patch.dict(os.environ, env):
-                job, err = S._submit(unit, attempt, False, state=state)
+                job, err = S._submit(
+                    unit, attempt, False, state=state,
+                    state_dir=str(tmp / "state"))
             self.assertIsNone(err)
             self.assertEqual(job, "12345")
             got = json.loads(

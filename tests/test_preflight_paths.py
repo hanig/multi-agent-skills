@@ -328,7 +328,9 @@ class TestPreflightIsTheLaunchChokepoint(Base):
 
         S.U.run = spy
         try:
-            job, err = S._submit(code_unit(repo), str(attempt), False, {})
+            job, err = S._submit(
+                code_unit(repo), str(attempt), False, {},
+                str(self.tmp / "state"))
         finally:
             S.U.run = real
         self.assertEqual(job, "agent-123")
@@ -354,7 +356,8 @@ class TestPreflightIsTheLaunchChokepoint(Base):
 
         S.U.run = spy
         try:
-            job, refusal = S._submit(unit, str(attempt), False, {})
+            job, refusal = S._submit(
+                unit, str(attempt), False, {}, str(self.tmp / "state"))
         finally:
             S.U.run = real
         self.assertEqual(job, "agent-123")
@@ -404,7 +407,9 @@ class TestPreflightIsTheLaunchChokepoint(Base):
 
         S.U.run = spy
         try:
-            job, err = S._submit(code_unit(repo), str(attempt), False, state)
+            job, err = S._submit(
+                code_unit(repo), str(attempt), False, state,
+                str(self.tmp / "state"))
         finally:
             S.U.run = real
         self.assertIsNone(err)
@@ -447,7 +452,9 @@ class TestPreflightIsTheLaunchChokepoint(Base):
         attempt2.mkdir()
         S.U.run = spy
         try:
-            job, err = S._submit(unguarded, str(attempt2), False, {})
+            job, err = S._submit(
+                unguarded, str(attempt2), False, {},
+                str(self.tmp / "state"))
         finally:
             S.U.run = real
         self.assertIsNone(err)

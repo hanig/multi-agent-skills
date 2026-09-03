@@ -12,6 +12,7 @@ condition, and the bound is declared in the plan rather than passed by whoever
 runs advance.
 """
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -25,6 +26,7 @@ import unit as U  # noqa: E402
 class TestOnlyOneConditionTriggersIt(unittest.TestCase):
 
     def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
         self.sent = []
         self._real = S.U.run
         S.U.run = lambda argv, timeout=None: (
@@ -35,6 +37,7 @@ class TestOnlyOneConditionTriggersIt(unittest.TestCase):
     def tearDown(self):
         S.U.run = self._real
         S._receipt_reason = self._reason
+        self.tmp.cleanup()
 
     def _u(self, **over):
         u = {"id": "u1", "kind": "code", "repo": "/tmp/fixture-repo", "branch": "fx", "mode": "bypass", "continuation": {"max": 2}}
@@ -46,10 +49,16 @@ class TestOnlyOneConditionTriggersIt(unittest.TestCase):
         us.update(over)
         return us
 
+    def _continue(self, us, report=None, u=None):
+        state = {"schema_version": 1, "units": {"u1": us}}
+        return S.maybe_continue(
+            self.tmp.name, "u1", u or self._u(), us,
+            report if report is not None else [], state)
+
     def test_settled_without_producing_sends_one(self):
         us = self._us()
         report = []
-        self.assertTrue(S.maybe_continue("/tmp", "u1", self._u(), us, report))
+        self.assertTrue(self._continue(us, report))
         self.assertEqual(len(us["continuations"]), 1)
         self.assertEqual(us["state"], "RUNNING")
         self.assertIn("SAME attempt", " ".join(report))
@@ -59,49 +68,62 @@ class TestOnlyOneConditionTriggersIt(unittest.TestCase):
         does not make the person appear."""
         S._receipt_reason = lambda st, uid, d: U.REASON_NO_EVIDENCE
         self.assertFalse(
-            S.maybe_continue("/tmp", "u1", self._u(), self._us(), []))
+            self._continue(self._us()))
         self.assertEqual(self.sent, [])
 
     def test_an_undeclared_bound_means_no_continuation(self):
-        self.assertFalse(S.maybe_continue(
-            "/tmp", "u1", self._u(continuation=None), self._us(), []))
+        self.assertFalse(self._continue(
+            self._us(), u=self._u(continuation=None)))
 
     def test_the_bound_is_honoured(self):
         us = self._us(continuations=[{"n": 1}, {"n": 2}])
-        self.assertFalse(S.maybe_continue("/tmp", "u1", self._u(), us, []))
+        self.assertFalse(self._continue(us))
 
     def test_one_below_the_bound_still_sends(self):
         us = self._us(continuations=[{"n": 1}])
-        self.assertTrue(S.maybe_continue("/tmp", "u1", self._u(), us, []))
+        self.assertTrue(self._continue(us))
 
     def test_a_unit_with_no_agent_is_not_prodded(self):
-        self.assertFalse(S.maybe_continue(
-            "/tmp", "u1", self._u(), self._us(job_id=None), []))
+        self.assertFalse(self._continue(self._us(job_id=None)))
 
     def test_only_a_code_unit(self):
-        self.assertFalse(S.maybe_continue(
-            "/tmp", "u1", self._u(kind="slurm"), self._us(), []))
+        self.assertFalse(self._continue(
+            self._us(), u=self._u(kind="slurm")))
 
     def test_every_continuation_is_recorded(self):
         us = self._us()
-        S.maybe_continue("/tmp", "u1", self._u(), us, [])
+        self._continue(us)
         entry = us["continuations"][0]
         for field in ("at", "n", "of", "prompt_sha256", "sent"):
             self.assertIn(field, entry)
 
     def test_the_prompt_comes_from_the_plan_not_the_caller(self):
         us = self._us()
-        S.maybe_continue("/tmp", "u1",
-                         self._u(continuation={"max": 1, "prompt": "GO ON"}),
-                         us, [])
+        self._continue(
+            us, u=self._u(continuation={"max": 1, "prompt": "GO ON"}))
         self.assertIn("GO ON", self.sent[-1])
 
     def test_a_send_failure_is_recorded_and_does_not_resume(self):
         S.U.run = lambda argv, timeout=None: (1, "", "daemon down")
         us = self._us()
-        self.assertFalse(S.maybe_continue("/tmp", "u1", self._u(), us, []))
+        self.assertFalse(self._continue(us))
         self.assertFalse(us["continuations"][0]["sent"])
         self.assertNotEqual(us.get("state"), "RUNNING")
+
+    def test_continuation_is_charged_durably_before_send(self):
+        us = self._us()
+        state = {"schema_version": 1, "units": {"u1": us}}
+
+        def observe(argv, timeout=None):
+            durable = S.load_state(self.tmp.name)
+            entry = durable["units"]["u1"]["continuations"][0]
+            self.assertEqual(entry["status"], "pending")
+            self.assertIsNone(entry["sent"])
+            return 0, "", ""
+
+        S.U.run = observe
+        self.assertTrue(S.maybe_continue(
+            self.tmp.name, "u1", self._u(), us, [], state))
 
 
 class TestTheBoundIsDeclaredAndChecked(unittest.TestCase):

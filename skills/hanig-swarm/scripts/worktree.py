@@ -41,7 +41,12 @@ PRODUCTION_DENIES = (
 # separate clone is writable by the same principal. Closing intentional
 # interference requires a different Unix identity, container, or equivalent
 # OS boundary. After judgment the coordinator pins an immutable commit, so a
-# later ref rewrite cannot change merge admission or verification.
+# later ref rewrite cannot change merge admission or verification. The
+# recorded directory inodes below close whole-directory substitution, not
+# in-place edits of HEAD, index, refs, or objects. Those files must change for
+# an honest commit, so launch-time inode/content equality cannot distinguish
+# work from interference. Judgment instead checks their semantics together:
+# expected branch, descendant history, changed tree, and clean index/worktree.
 WORKTREE_REF_ISOLATION_LIMIT = (
     "per-attempt Git worktrees isolate paths, not hostile same-UID processes "
     "or their shared mutable refs before judgment"
@@ -335,7 +340,11 @@ def workspace_identity_problem(runner, facts):
             or not isinstance(identity.get("device"), int)
             or not isinstance(identity.get("inode"), int)
             or not identity.get("git_common_dir")
-            or not identity.get("git_dir")):
+            or not isinstance(identity.get("git_common_device"), int)
+            or not isinstance(identity.get("git_common_inode"), int)
+            or not identity.get("git_dir")
+            or not isinstance(identity.get("git_dir_device"), int)
+            or not isinstance(identity.get("git_dir_inode"), int)):
         return "the trusted launch snapshot has an incomplete worktree identity"
     try:
         current_path = str(Path(workspace).resolve())
@@ -361,11 +370,20 @@ def workspace_identity_problem(runner, facts):
     top = str(Path(observed["top"]).resolve())
     common = str((Path(workspace) / observed["git_common_dir"]).resolve())
     git_dir = str((Path(workspace) / observed["git_dir"]).resolve())
+    try:
+        common_st = os.stat(common)
+        git_st = os.stat(git_dir)
+    except OSError as exc:
+        return f"cannot stat the anchored Git metadata: {exc}"
     if (top != workspace
             or common != identity["git_common_dir"]
-            or git_dir != identity["git_dir"]):
+            or common_st.st_dev != identity["git_common_device"]
+            or common_st.st_ino != identity["git_common_inode"]
+            or git_dir != identity["git_dir"]
+            or git_st.st_dev != identity["git_dir_device"]
+            or git_st.st_ino != identity["git_dir_inode"]):
         return (f"the anchored directory {workspace!r} no longer has the "
-                f"launched Git worktree metadata")
+                f"launched Git worktree metadata identity")
     if observed["branch"] != facts.get("branch"):
         return (f"the repository is on branch {observed['branch']!r}, but "
                 f"this attempt was anchored on {facts.get('branch')!r}")

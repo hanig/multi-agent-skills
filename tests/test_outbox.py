@@ -763,6 +763,33 @@ class TestGatedPromotion(unittest.TestCase):
                 self.assertIn(field, rec)
             self.assertEqual(rec["approver"], "hani")
 
+    def test_promotion_intent_is_durable_before_shared_copy(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            plan, st, sd, _, _ = self._project(t)
+            seen = []
+            real_copy = S.shutil.copy2
+
+            def copy_after_intent(src, dst, *args, **kwargs):
+                durable = S.load_state(sd)
+                intents = durable.get("promotion_intents") or {}
+                self.assertEqual(len(intents), 1)
+                self.assertEqual(next(iter(intents.values()))["status"],
+                                 "pending")
+                seen.append(True)
+                return real_copy(src, dst, *args, **kwargs)
+
+            S.shutil.copy2 = copy_after_intent
+            try:
+                lines, ok = S.promote(plan, st, sd, "w", "hani", True)
+            finally:
+                S.shutil.copy2 = real_copy
+            self.assertTrue(ok, "\n".join(lines))
+            self.assertTrue(seen)
+            durable = S.load_state(sd)
+            self.assertEqual(next(iter(
+                durable["promotion_intents"].values()))["status"], "complete")
+
     def test_the_canonical_name_is_a_pointer_not_a_copy_target(self):
         """Renaming into place is NOT atomic across filesystems, and a shared
         tree is usually a different mount from the run root, so a half-copied
@@ -1156,7 +1183,7 @@ class TestNoStateChangeEscapesTheOutbox(unittest.TestCase):
             (sd / "swarm-state.json").write_text(json.dumps(st))
             (sd / "outbox.jsonl").unlink(missing_ok=True)
             subprocess.run([sys.executable, str(SWARM), "advance",
-                            str(tmp / "plan.json"), "--dry-run",
+                            str(tmp / "plan.json"),
                             "--state-dir", str(sd)],
                            capture_output=True, text=True, cwd=tmp)
             emitted = {(i["unit"], i["unit_state"])
@@ -1164,6 +1191,29 @@ class TestNoStateChangeEscapesTheOutbox(unittest.TestCase):
             self.assertIn(("train", "HELD"), emitted,
                           f"a state reached during the advance did not emit: "
                           f"{emitted}")
+
+    def test_durable_state_repairs_outbox_append_lost_to_crash(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            sd = tmp / "state"
+            plan = {"name": "p", "units": [{
+                "id": "u", "kind": "slurm", "command": "true",
+                "outputs": []}]}
+            state = {"schema_version": 1, "halted": None,
+                     "plan_digest": S.plan_digest(plan), "units": {"u": {
+                         "state": "FAILED", "attempt_dir": None,
+                         "attempts": [], "gpu_hours": 0}}}
+            S.save_state(sd, state)
+            ok, why = S.acquire_lease(sd)
+            self.assertTrue(ok, why)
+            try:
+                S.advance(plan, state, sd, tmp / "runs", False, max_new=0)
+            finally:
+                S.release_lease(sd)
+            emitted = {(i["unit"], i["unit_state"])
+                       for i in S.read_outbox(sd)}
+            self.assertIn(("u", "FAILED"), emitted)
 
     def test_an_unchanged_unit_does_not_re_emit_every_advance(self):
         """The counter-claim. A diff against the previous state must not turn

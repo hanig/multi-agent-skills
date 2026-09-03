@@ -1696,6 +1696,11 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
             save_state(state_dir, state)
     if dry_run:
         return f"dry-{os.urandom(3).hex()}", None
+    if state is None or state_dir is None:
+        return None, (f"refusing non-dry dispatch for unit {u['id']!r} "
+                      f"without coordinator state and state_dir: launch "
+                      f"authority must be durable before an external job or "
+                      f"agent is created")
     if kind == "slurm":
         deps = _dep_env(u, state or {})
         script = Path(unit_dir) / "job.sbatch"
@@ -1797,6 +1802,8 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
         if intent_err:
             return None, intent_err
         source_repo = intent["repo"]
+        reuse_workspace = None
+        reuse_workspace_id = None
         # A prior `paseo run` may have created both branch and worktree before
         # this controller crashed. Re-running the creation command can only
         # collide with those resources. Recover the named agent first; if no
@@ -1823,13 +1830,29 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
                 if state_dir is not None:
                     save_state(state_dir, state)
                 return str(existing_agent), None
-            return None, (
-                f"attempt {attempt!r} cannot create its Paseo worktree: "
-                f"branch {intent['branch']!r} already exists but no agent "
-                f"with this attempt id is registered. Inspect `git worktree "
-                f"list` and `paseo workspace ls`; archive/remove the stale "
-                f"workspace and branch, or abandon this attempt. The "
-                f"coordinator will not delete or reuse ambiguous state")
+            candidates = _git_worktrees_on_branch(
+                source_repo, intent["branch"])
+            if not candidates or len(candidates) != 1:
+                return None, (
+                    f"attempt {attempt!r} has branch {intent['branch']!r} "
+                    f"but no registered agent and {len(candidates or [])} "
+                    f"matching Git worktrees. Inspect `git worktree list` "
+                    f"and `paseo workspace ls`; the coordinator reuses only "
+                    f"one unambiguous worktree that still matches its trusted "
+                    f"launch intent")
+            reuse_workspace = candidates[0]
+            reuse_workspace_id = _paseo_workspace_for_path(reuse_workspace)
+            reuse_error = _complete_code_launch(
+                state, u, unit_dir, reuse_workspace,
+                workspace_id=reuse_workspace_id)
+            if reuse_error:
+                return None, (
+                    f"attempt {attempt!r} has an unowned worktree, but it "
+                    f"does not match the trusted launch intent: {reuse_error}")
+            # The exact-base worktree is now authenticated and durable. It is
+            # safe to create the missing agent in it without recreating Git
+            # resources or resolving a live ref.
+            save_state(state_dir, state)
         # U.run contains the short-lived Paseo client's environment. The
         # long-lived Paseo daemon is a separate process boundary: a live probe
         # showed its provider credentials can still reach an agent even when
@@ -1837,18 +1860,21 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
         # those provider variables. Do not mistake this boundary for daemon
         # isolation; the daemon must itself be launched without ambient keys.
         argv = ["paseo", "run", "--background", "--json",
-                "--cwd", str(source_repo),
-                "--new-workspace", "worktree",
-                "--worktree-mode", "branch-off",
-                "--worktree-slug", intent["worktree_slug"],
-                "--new-branch", intent["branch"],
-                "--base", intent["base_commit"],
-                "--provider", u.get("provider") or DEFAULT_AGENT_PROVIDER,
+                "--cwd", str(source_repo)]
+        if reuse_workspace:
+            argv[argv.index("--cwd") + 1] = str(reuse_workspace)
+        else:
+            argv += ["--new-workspace", "worktree",
+                     "--worktree-mode", "branch-off",
+                     "--worktree-slug", intent["worktree_slug"],
+                     "--new-branch", intent["branch"],
+                     "--base", intent["base_commit"]]
+        argv += ["--provider", u.get("provider") or DEFAULT_AGENT_PROVIDER,
                 # The title carries the ATTEMPT id, mirroring the Slurm job
                 # name, so an agent created just before a crash can be found
                 # again and is never confused with a later attempt of the same
                 # unit.
-                "--title", f"[swarm] {u['id']} {Path(unit_dir).name}"]
+                 "--title", f"[swarm] {u['id']} {Path(unit_dir).name}"]
         # Artifacts remain in the external attempt root even though source
         # work runs in the checkout. Passing these automatically makes the
         # declared output location reachable without relying on prompt prose.
@@ -1888,33 +1914,53 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
                  or rec.get("id") or rec.get("Id"))
         workspace = rec.get("cwd") or rec.get("Cwd")
         workspace_id = (_paseo_workspace_id(out)
-                        or rec.get("workspaceId") or rec.get("WorkspaceId"))
-        workspace_meta = None
-        if workspace:
-            # Paseo has already acted. Persist ownership of the resource now,
-            # before checks that may reject it; registration makes it
-            # cleanable and does not endorse its contents.
-            workspace_meta = _register_code_workspace(
-                state if state is not None else {}, u, unit_dir, workspace,
-                workspace_id=workspace_id)
+                        or rec.get("workspaceId") or rec.get("WorkspaceId")
+                        or reuse_workspace_id)
+        # Paseo has already acted. Persist ownership of the resource now,
+        # before checks that may reject it; registration makes it cleanable
+        # and does not endorse its contents. Even a malformed response with
+        # no cwd gets an id/slug record rather than becoming invisible.
+        workspace_meta = _register_code_workspace(
+            state if state is not None else {}, u, unit_dir, workspace,
+            workspace_id=workspace_id)
+        if state_dir is not None:
+            save_state(state_dir, state)
+        if not agent:
+            workspace_meta["verification"] = "refused"
+            workspace_meta["cleanup_pending"] = True
+            workspace_meta["verification_problem"] = (
+                "Paseo returned no agent id")
             if state_dir is not None:
                 save_state(state_dir, state)
-        if not agent:
-            if workspace_meta is not None:
-                workspace_meta["verification"] = "refused"
-                workspace_meta["cleanup_pending"] = True
-                workspace_meta["verification_problem"] = (
-                    "Paseo returned no agent id")
-                if state_dir is not None:
-                    save_state(state_dir, state)
             return None, (f"paseo run returned no agent id: "
                           f"{_paseo_error(out, err)}")
         if not workspace:
+            workspace_meta["verification"] = "refused"
+            workspace_meta["cleanup_pending"] = True
+            workspace_meta["verification_problem"] = (
+                f"Paseo returned agent {agent} but no worktree cwd")
+            if state_dir is not None:
+                save_state(state_dir, state)
             return None, (f"paseo run returned agent {agent} but no worktree "
                           f"cwd: {_paseo_error(out, err)}")
+        if reuse_workspace:
+            facts = trusted_launch_facts(state, u["id"], unit_dir)
+            identity_error = W.workspace_identity_problem(U.run, facts)
+            if str(Path(workspace).resolve()) != reuse_workspace:
+                identity_error = (f"Paseo attached the recovered agent to "
+                                  f"{workspace!r}, not authenticated worktree "
+                                  f"{reuse_workspace!r}")
+            if identity_error:
+                workspace_meta["verification"] = "refused"
+                workspace_meta["cleanup_pending"] = True
+                workspace_meta["verification_problem"] = identity_error
+                save_state(state_dir, state)
+                return None, (f"paseo run returned agent {agent}, but reused "
+                              f"worktree verification failed: "
+                              f"{identity_error}")
         complete_err = _complete_code_launch(
             state if state is not None else {}, u, unit_dir, workspace,
-            workspace_id=workspace_id)
+            workspace_id=workspace_id, recovery=bool(reuse_workspace))
         if complete_err:
             workspace_meta["verification"] = "refused"
             workspace_meta["cleanup_pending"] = True
@@ -2048,6 +2094,24 @@ def _code_worktree_names(unit_dir):
     return attempt, f"swarm-{attempt}"
 
 
+def _git_worktrees_on_branch(repo, branch):
+    """Return worktree roots Git associates with one exact local branch."""
+    rc, out, _ = _git(repo, "worktree", "list", "--porcelain")
+    if rc != 0:
+        return None
+    wanted = f"refs/heads/{branch}"
+    found = []
+    current = None
+    for line in (out + "\n").splitlines():
+        if line.startswith("worktree "):
+            current = line[len("worktree "):]
+        elif line == f"branch {wanted}" and current:
+            found.append(str(Path(current).resolve()))
+        elif not line:
+            current = None
+    return found
+
+
 def _capture_code_launch(unit_dir, u):
     """Record the immutable input to Paseo's worktree creation.
 
@@ -2148,7 +2212,7 @@ def _register_code_workspace(state, u, unit_dir, workspace, workspace_id=None):
     attempt = Path(unit_dir).name
     us = state.setdefault("units", {}).setdefault(u["id"], {})
     intent = (us.get("attempt_launch_intents") or {}).get(attempt) or {}
-    path = str(Path(workspace).resolve())
+    path = str(Path(workspace).resolve()) if workspace else None
     meta = {
         "path": path,
         "branch": intent.get("branch"),
@@ -2258,12 +2322,18 @@ def _complete_code_launch(state, u, unit_dir, workspace, workspace_id=None,
                 f"base {intent['base_commit']}")
     try:
         st = os.stat(workspace)
+        common_st = os.stat(worktree_common)
+        git_st = os.stat(worktree_git_dir)
     except OSError as exc:
         return f"cannot identify Paseo worktree {workspace!r}: {exc}"
     identity = {"path": workspace, "realpath": workspace,
                 "device": st.st_dev, "inode": st.st_ino,
                 "git_common_dir": worktree_common,
-                "git_dir": worktree_git_dir}
+                "git_common_device": common_st.st_dev,
+                "git_common_inode": common_st.st_ino,
+                "git_dir": worktree_git_dir,
+                "git_dir_device": git_st.st_dev,
+                "git_dir_inode": git_st.st_ino}
     facts = {
         "schema_version": 2,
         "unit_id": u.get("id"),
@@ -2367,10 +2437,16 @@ def _write_launch_record(unit_dir, u):
         git_dir = str((Path(resolved_top) / git_dir).resolve())
         try:
             st = os.stat(resolved_top)
+            common_st = os.stat(common_dir)
+            git_st = os.stat(git_dir)
             identity = {"path": resolved_top, "realpath": resolved_top,
                         "device": st.st_dev, "inode": st.st_ino,
                         "git_common_dir": common_dir,
-                        "git_dir": git_dir}
+                        "git_common_device": common_st.st_dev,
+                        "git_common_inode": common_st.st_ino,
+                        "git_dir": git_dir,
+                        "git_dir_device": git_st.st_dev,
+                        "git_dir_inode": git_st.st_ino}
         except OSError as exc:
             return (f"unit {u['id']!r}: cannot identify execution workspace "
                     f"{resolved_top!r}: {exc}"), None
@@ -3280,22 +3356,37 @@ def maybe_continue(state_dir, uid, u, us, report, state=None):
     if not agent:
         return False
 
+    if state is None or state_dir is None:
+        report.append(
+            f"{uid}: refusing to send an unrecorded continuation: durable "
+            f"coordinator state and state_dir are required before Paseo is "
+            f"contacted")
+        return False
+
     prompt = str(cfg.get("prompt") or
                  "Your turn ended without producing the declared outputs. "
                  "Continue the work you planned.")
-    rc, out, err = U.run(["paseo", "send", str(agent), prompt], timeout=120)
     entry = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
              "n": used + 1, "of": limit,
              "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest()[:16],
-             "sent": rc == 0}
+             "sent": None, "status": "pending"}
+    us.setdefault("continuations", []).append(entry)
+    # A continuation is an external, non-idempotent act. Charge its bounded
+    # slot before sending it. A crash may conservatively consume one slot,
+    # but can never replay a message whose existence was only in memory.
+    save_state(state_dir, state)
+    rc, out, err = U.run(["paseo", "send", str(agent), prompt], timeout=120)
+    entry["sent"] = rc == 0
+    entry["status"] = "sent" if rc == 0 else "failed"
     if rc != 0:
         entry["error"] = (err or out or "").strip()[:200]
-    us.setdefault("continuations", []).append(entry)
+    else:
+        us["state"] = "RUNNING"
+    save_state(state_dir, state)
     if rc != 0:
         report.append(f"{uid}: continuation {used + 1}/{limit} could not be "
                       f"sent: {entry['error']}")
         return False
-    us["state"] = "RUNNING"
     report.append(
         f"{uid}: settled without producing; sent continuation "
         f"{used + 1}/{limit} to agent {agent} in the SAME attempt. After "
@@ -3780,7 +3871,7 @@ def _archive_code_worktree(state, u, unit_dir, report, state_dir=None):
     if state_dir is not None:
         save_state(state_dir, state)
     workspace_id = meta.get("workspace_id")
-    if not workspace_id:
+    if not workspace_id and meta.get("path"):
         workspace_id = _paseo_workspace_for_path(meta.get("path"))
         if workspace_id:
             meta["workspace_id"] = workspace_id
@@ -3940,20 +4031,25 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     # branch is the durable handoff and the checkout is operational debris.
     # Retry failed archives on every advance; this bounds managed worktrees to
     # live/interactive attempts plus cleanup failures that remain visible.
-    for uid, u in sorted(units.items()):
-        us = _unit_state(state, uid)
-        current_attempt = (Path(us["attempt_dir"]).name
-                           if us.get("attempt_dir") else None)
-        if us.get("state") in WORKTREE_CLEANUP_STATES:
-            _archive_code_worktree(
-                state, u, us.get("attempt_dir"), report, state_dir)
-        for attempt, meta in (us.get("attempt_workspaces") or {}).items():
-            if (attempt != current_attempt and isinstance(meta, dict)
-                    and meta.get("cleanup_pending")):
+    if not dry_run:
+        for uid, u in sorted(units.items()):
+            us = _unit_state(state, uid)
+            current_attempt = (Path(us["attempt_dir"]).name
+                               if us.get("attempt_dir") else None)
+            current_meta = ((us.get("attempt_workspaces") or {}).get(
+                current_attempt) if current_attempt else None)
+            if (us.get("state") in WORKTREE_CLEANUP_STATES
+                    or (isinstance(current_meta, dict)
+                        and current_meta.get("cleanup_pending"))):
                 _archive_code_worktree(
-                    state, u, attempt, report, state_dir)
-    _report_retained_worktrees(state, report)
-    save_state(state_dir, state)
+                    state, u, us.get("attempt_dir"), report, state_dir)
+            for attempt, meta in (us.get("attempt_workspaces") or {}).items():
+                if (attempt != current_attempt and isinstance(meta, dict)
+                        and meta.get("cleanup_pending")):
+                    _archive_code_worktree(
+                        state, u, attempt, report, state_dir)
+        _report_retained_worktrees(state, report)
+        save_state(state_dir, state)
 
     # The plan must not change under a live run. A mid-flight edit silently
     # redefines what the recorded attempts were for.
@@ -4053,9 +4149,19 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                     continue
                 us.pop("launch_recovery_pending", None)
                 us.pop("launch_recovery_problem", None)
+            # The bind marker is an external durable write. Record which job
+            # it is allowed to name before creating it; a crash then retries
+            # an idempotent bind instead of leaving unauthorised evidence.
             us["job_id"] = job
-            _bind(us["attempt_dir"], job)
+            us["bind_pending"] = True
             us["state"] = "SUBMITTED"
+            save_state(state_dir, state)
+            bind_error = _bind(us["attempt_dir"], job)
+            if bind_error:
+                report.append(f"{uid}: recovered {job} but {bind_error}; "
+                              f"binding will retry next advance")
+            else:
+                us.pop("bind_pending", None)
             report.append(f"{uid}: {note}")
             save_state(state_dir, state)
         elif note == "UNKNOWN":
@@ -4073,15 +4179,36 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                         intent.get("repo"), "show-ref", "--verify", "--quiet",
                         f"refs/heads/{intent.get('branch')}")
                     if branch_rc == 0:
-                        problem = (
-                            f"attempt {attempt!r} has branch "
-                            f"{intent.get('branch')!r} but Paseo reports no "
-                            f"agent for it. Inspect `git worktree list` and "
-                            f"`paseo workspace ls`, then archive/remove the "
-                            f"stale resources or abandon the attempt")
-                        us["state"] = "NEEDS_HUMAN"
-                        us["launch_recovery_problem"] = problem
-                        report.append(f"{uid}: NEEDS_HUMAN -- {problem}")
+                        # Crash after Paseo created Git resources but before
+                        # it registered an agent. _submit reuses exactly one
+                        # worktree only after checking the pinned base,
+                        # intended branch, and metadata identity. Route that
+                        # recovery through the same durable bind protocol as
+                        # every other dispatch; do not intercept it merely
+                        # because the branch exists.
+                        recovered_job, problem = _submit(
+                            u, us["attempt_dir"], False, state, state_dir)
+                        if problem:
+                            us["state"] = "NEEDS_HUMAN"
+                            us["launch_recovery_problem"] = problem
+                            report.append(f"{uid}: NEEDS_HUMAN -- {problem}")
+                            save_state(state_dir, state)
+                            continue
+                        us["job_id"] = str(recovered_job)
+                        us["state"] = "SUBMITTED"
+                        us["bind_pending"] = True
+                        save_state(state_dir, state)
+                        bind_error = _bind(us["attempt_dir"], recovered_job)
+                        if bind_error:
+                            report.append(
+                                f"{uid}: recovered agent {recovered_job} but "
+                                f"{bind_error}; binding will retry next advance")
+                        else:
+                            us.pop("bind_pending", None)
+                        us.pop("launch_recovery_problem", None)
+                        report.append(
+                            f"{uid}: recovered exact-base worktree and "
+                            f"created missing agent {recovered_job}")
                         save_state(state_dir, state)
                         continue
             # Allocated, then the coordinator died before `sbatch`. The
@@ -4373,7 +4500,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                         f"'retry' contract, or split the unit smaller.")
                 else:
                     report.append(f"{uid}: preempted {policy} times, giving up")
-        if us.get("state") in WORKTREE_CLEANUP_STATES:
+        if not dry_run and us.get("state") in WORKTREE_CLEANUP_STATES:
             # The checker result, produced head, and terminal state are the
             # conclusion that justifies teardown. Persist that conclusion
             # before Paseo can remove the evidence used to reach it.
@@ -4515,9 +4642,15 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         # ids, so a code unit's agent id never reached unit.json and its
         # predicate could never see an agent at all. A dry run still has no
         # real id to bind.
-        berr = (_bind(unit_dir, job_id)
-                if job_id and not str(job_id).startswith(("dry-", "engine-"))
-                else None)
+        needs_bind = bool(
+            job_id and not str(job_id).startswith(("dry-", "engine-")))
+        us["job_id"] = str(job_id)
+        us["state"] = "SUBMITTED"
+        if needs_bind:
+            us["bind_pending"] = True
+        # Persist the binding authority before unit.py writes its marker.
+        save_state(state_dir, state)
+        berr = _bind(unit_dir, job_id) if needs_bind else None
         if berr:
             # The job is REAL and running; only the binding write failed, on an
             # NFS blip say. Recording job_id without this flag was a wedge: the
@@ -4529,8 +4662,6 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                           f"running; the binding will be retried next advance.")
         else:
             us.pop("bind_pending", None)
-        us["job_id"] = str(job_id)
-        us["state"] = "SUBMITTED"
         dispatched += 1
         report.append(f"{uid}: submitted {job_id} -> {unit_dir}")
         save_state(state_dir, state)
@@ -4545,11 +4676,17 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     # the tracker NOTHING, so its issue would have sat on "work started"
     # forever. Comparing before-and-after cannot miss a path, including paths
     # added later.
+    if dry_run:
+        return report, dispatched, halted
     project = plan.get("name") or "swarm"
     for uid in sorted(units):
         us = _unit_state(state, uid)
         now = us.get("state")
-        if not now or now == before_states.get(uid):
+        # Re-emit every durable current event. emit_intent's deterministic key
+        # makes this idempotent, and closes the crash window between saving a
+        # transition and appending its outbox intent: the next advance repairs
+        # a missing append even when state no longer changes.
+        if not now:
             continue
         evidence = None
         if now == "DONE" and us.get("attempt_dir"):
@@ -4884,6 +5021,21 @@ def promote(plan, state, state_dir, uid, approver, approve,
                       "record must name who accepted this."]
         return lines, False
 
+    promotion_key = hashlib.sha256(
+        f"{uid}\x00{Path(attempt).name}\x00{version}".encode()).hexdigest()[:16]
+    promotion_intent = {
+        "key": promotion_key, "unit": uid,
+        "attempt": Path(attempt).name, "destination": str(version),
+        "current": str(current), "approver": approver,
+        "status": "pending",
+    }
+    state.setdefault("promotion_intents", {})[promotion_key] = promotion_intent
+    # Copying into a shared tree and swapping its public pointer are the one
+    # promotion act that cannot be rolled back by coordinator state. Persist
+    # the exact approved destination first; a crash can then resume the same
+    # idempotent version rather than leaving an unexplained publication.
+    save_state(state_dir, state)
+
     try:
         version.parent.mkdir(parents=True, exist_ok=True)
         if version.exists():
@@ -4939,6 +5091,9 @@ def promote(plan, state, state_dir, uid, approver, approve,
               "outputs": recorded,
               "digest_basis": ("size-mtime only for at least one output" if weak
                                else "content digest for every output")}
+    promotion_intent["status"] = "complete"
+    promotion_intent["completed_at"] = record["at"]
+    save_state(state_dir, state)
     try:
         with (Path(state_dir) / PROMOTIONS).open("a") as fh:
             fh.write(json.dumps(record, sort_keys=True) + "\n")
