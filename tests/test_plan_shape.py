@@ -4,7 +4,11 @@ Both were learned at RUNTIME, from an INCOMPLETE receipt, after dispatching.
 Both are knowable at validate time, which is where a whole cycle collapses into
 one line.
 """
+import contextlib
+import os
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -19,6 +23,122 @@ def plan(**over):
          "outputs": ["out.txt"]}
     u.update(over)
     return {"project": "p", "units": [u]}
+
+
+# --- exercising kind=code validation on a host with no paseo ---------------
+#
+# `validate_plan` refuses any kind=code unit unless `paseo` is on PATH, so a
+# plan is not accepted on a machine that cannot run it. That refusal is
+# correct and stays -- TestTheRefusalWhenPaseoIsAbsent below pins it, which
+# nothing did before. Its side effect was that 21 tests of PURE validation
+# logic (mode declaration, PR targets, provider flags, prompt-as-prose) could
+# not run on a developer machine: they all failed identically at the same
+# line, so the suite was silent exactly where code-unit behaviour is being
+# changed, and a real regression would have looked like the usual noise.
+#
+# The seam is PATH -- the same one test_swarm.py::_fake_scheduler and
+# test_project.py::_fake_slurm use for absent cluster tools. swarm.py knows
+# nothing about it: there is no bypass flag to set in anger, and a real host
+# with no paseo still gets the refusal.
+
+
+def _fake_paseo(binp):
+    """A `paseo` that satisfies shutil.which and NOTHING else.
+
+    validate only asks whether the name resolves, so this is never executed
+    by these tests. It exits 127 rather than 0 deliberately: if a test ever
+    starts needing paseo to actually answer, it fails loudly here instead of
+    passing against a stub that lies."""
+    f = Path(binp) / "paseo"
+    f.write_text(
+        "#!/bin/sh\n"
+        "echo 'stub paseo from tests/test_plan_shape.py: a PATH placeholder "
+        "for validate_plan, not a runnable agent runner. A test that needs "
+        "a real paseo must skip instead.' >&2\n"
+        "exit 127\n")
+    f.chmod(0o755)
+    return str(binp)
+
+
+@contextlib.contextmanager
+def paseo_on_path():
+    """Prepend a directory holding the stub `paseo` to PATH."""
+    d = tempfile.mkdtemp(prefix="plan-shape-fakebin-")
+    old = os.environ.get("PATH", "")
+    try:
+        os.environ["PATH"] = _fake_paseo(d) + os.pathsep + old
+        yield d
+    finally:
+        os.environ["PATH"] = old
+        shutil.rmtree(d, ignore_errors=True)
+
+
+@contextlib.contextmanager
+def paseo_absent():
+    """PATH with nothing on it, so `paseo` cannot resolve.
+
+    Needed even here, where paseo happens to be missing anyway: a test that
+    only passes because of what this host lacks is a test that stops testing
+    anything on a host that has it."""
+    d = tempfile.mkdtemp(prefix="plan-shape-emptybin-")
+    old = os.environ.get("PATH", "")
+    try:
+        os.environ["PATH"] = d
+        yield d
+    finally:
+        os.environ["PATH"] = old
+        shutil.rmtree(d, ignore_errors=True)
+
+
+class CodeUnitCase(unittest.TestCase):
+    """Base for tests whose subject is kind=code validation, not paseo."""
+
+    def setUp(self):
+        super().setUp()
+        cm = paseo_on_path()
+        cm.__enter__()
+        self.addCleanup(cm.__exit__, None, None, None)
+
+
+class TestTheRefusalWhenPaseoIsAbsent(unittest.TestCase):
+    """The refusal the code-unit tests below step around, pinned here so
+    that stepping around it cannot quietly become deleting it. It was
+    untested: the only thing keeping it honest was that it fired on every
+    developer machine, which is precisely what made 21 unrelated tests
+    unrunnable."""
+
+    UNIT = {"id": "c1", "kind": "code", "prompt": "work", "outputs": ["o"],
+            "repo": "/tmp/r", "target_branch": "main", "mode": "bypass"}
+
+    def test_a_code_unit_is_refused_when_paseo_does_not_resolve(self):
+        with paseo_absent():
+            with self.assertRaises(S.PlanError) as c:
+                S.validate_plan({"project": "p", "units": [dict(self.UNIT)]})
+        msg = str(c.exception)
+        self.assertIn("paseo is not on PATH", msg)
+        self.assertIn("c1", msg, "name the units that cannot run")
+
+    def test_the_refusal_names_the_host_and_the_alternative(self):
+        """The message is the whole value of refusing early: it must say
+        WHERE the check ran and what to do instead of installing paseo on a
+        login node."""
+        with paseo_absent():
+            with self.assertRaises(S.PlanError) as c:
+                S.validate_plan({"project": "p", "units": [dict(self.UNIT)]})
+        msg = str(c.exception)
+        self.assertIn(os.uname().nodename, msg)
+        self.assertIn("kind=pipeline", msg)
+
+    def test_a_slurm_unit_is_not_refused_for_a_missing_paseo(self):
+        with paseo_absent():
+            S.validate_plan(plan())
+
+    def test_the_same_plan_validates_once_paseo_resolves(self):
+        """The counter-claim, and the one that makes the stub honest: with
+        paseo on PATH the plan is accepted, so every test using
+        CodeUnitCase is reaching its own assertion rather than a refusal."""
+        with paseo_on_path():
+            S.validate_plan({"project": "p", "units": [dict(self.UNIT)]})
 
 
 class TestOutputsMustLandInTheWriteRoot(unittest.TestCase):
@@ -94,7 +214,7 @@ class TestASlurmCommandIsTheWork(unittest.TestCase):
 
 
 
-class TestACodeUnitNeedsAPullRequestTarget(unittest.TestCase):
+class TestACodeUnitNeedsAPullRequestTarget(CodeUnitCase):
     """C11 creates the source branch; the plan must name its PR destination."""
 
     def _code(self, uid="c1", **over):
@@ -175,7 +295,7 @@ class TestTheSurveyFlagsWhatMustNotBeOverwritten(unittest.TestCase):
             self.assertNotIn("protected_docs_note", repo)
 
 
-class TestACodePromptIsAPrompt(unittest.TestCase):
+class TestACodePromptIsAPrompt(CodeUnitCase):
     """The prompt is the LAST POSITIONAL argument to the agent runner, so a
     flag written into it is not configuration: it is a sentence the agent is
     asked to read. Carefully-added paseo flags became instruction text."""
@@ -318,7 +438,7 @@ class TestTheDefaultAgent(unittest.TestCase):
         self.assertNotIn("'claude'", ast.unparse(fn).replace('"', "'"))
 
 
-class TestPerAttemptBranchesRemoveTheSharedCheckoutConstraint(unittest.TestCase):
+class TestPerAttemptBranchesRemoveTheSharedCheckoutConstraint(CodeUnitCase):
 
     def _c(self, uid, **over):
         u = {"id": uid, "kind": "code", "prompt": "work", "mode": "bypass",
@@ -336,7 +456,7 @@ class TestPerAttemptBranchesRemoveTheSharedCheckoutConstraint(unittest.TestCase)
             self._c("u1"), self._c("u2")]})
 
 
-class TestRoundTwoFindings(unittest.TestCase):
+class TestRoundTwoFindings(CodeUnitCase):
 
     def _code(self, **over):
         u = {"id": "c1", "kind": "code", "prompt": "work", "outputs": ["o"],
@@ -510,11 +630,17 @@ class TestPathsTheCommandNames(unittest.TestCase):
             S.validate_plan(plan(command="python go.py --in /tmp/missing/"))
 
     def test_a_code_unit_is_exempt(self):
-        """Its string is a prompt, not a command line."""
-        S.validate_plan({"project": "p", "units": [
-            {"id": "c", "kind": "code", "prompt": "read /nowhere/notes.md",
-             "outputs": ["o"], "repo": "/tmp/r", "target_branch": "main",
-             "mode": "bypass"}]})
+        """Its string is a prompt, not a command line.
+
+        The only test in this class that needs a code unit, so the PATH seam
+        is scoped to it rather than to the class: every other test here is
+        about paths the command names, and PATH is not what they are
+        varying."""
+        with paseo_on_path():
+            S.validate_plan({"project": "p", "units": [
+                {"id": "c", "kind": "code", "prompt": "read /nowhere/notes.md",
+                 "outputs": ["o"], "repo": "/tmp/r", "target_branch": "main",
+                 "mode": "bypass"}]})
 
 
 class TestTheSchemaIsReadableInOneGo(unittest.TestCase):
@@ -619,7 +745,7 @@ class TestRoundOneOfThisBatch(unittest.TestCase):
             S.validate_plan(plan(sbatch=["--array", "0-19"]))
         self.assertIn("fraction of the work", str(c.exception))
 
-class TestModeAdviceMatchesTheProvider(unittest.TestCase):
+class TestModeAdviceMatchesTheProvider(CodeUnitCase):
     """`mode` is provider-specific, so advice that names one is a claim.
 
     The default provider became codex while every message and doc still said

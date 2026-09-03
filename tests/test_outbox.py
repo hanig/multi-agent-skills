@@ -2716,6 +2716,30 @@ class TestAPersistedDoneIsCorrected(unittest.TestCase):
         {"id": "after", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
          "needs": ["c"], "write_scopes": ["a/"]}]}
 
+    def _paseo_env(self, tmp):
+        """PATH with a stub `paseo`, because the plan here HAS a code unit.
+
+        `validate` refuses a kind=code unit when paseo does not resolve, so
+        on a host without it `advance` exited before doing any work. The
+        refusal goes to stderr and these tests read stdout, so a plan that
+        never ran presented as "the correction is missing" -- pointing at a
+        persisted DONE releasing its dependents, which would be serious, and
+        is not what was happening.
+
+        Not this file's FAKE_PASEO: a dry-run advance never calls paseo, it
+        only asks whether the name resolves. This stub exits 127 so that if
+        anything ever does call it, that fails loudly instead of passing
+        against a fake. Same PATH seam as `_env` above and as
+        test_swarm.py::_fake_scheduler."""
+        binp = Path(tmp) / "fakebin"
+        binp.mkdir(parents=True, exist_ok=True)
+        f = binp / "paseo"
+        f.write_text("#!/bin/sh\necho 'test stub, not a real paseo' >&2\n"
+                     "exit 127\n")
+        f.chmod(0o755)
+        return dict(os.environ,
+                    PATH=str(binp) + os.pathsep + os.environ.get("PATH", ""))
+
     def _advance(self, tmp, plan, persisted):
         (tmp / "plan.json").write_text(json.dumps(plan))
         st = tmp / "st"
@@ -2728,7 +2752,14 @@ class TestAPersistedDoneIsCorrected(unittest.TestCase):
         r = subprocess.run(
             [sys.executable, str(SWARM), "advance", str(tmp / "plan.json"),
              "--dry-run", "--state-dir", str(st), "--root", str(tmp / "rn")],
-            capture_output=True, text=True, cwd=tmp)
+            capture_output=True, text=True, cwd=tmp,
+            env=self._paseo_env(tmp))
+        # Assert it RAN before asserting what it printed. Without this, a
+        # refusal on stderr reads as wrong content on stdout, and the tests
+        # below accuse the product of a defect it does not have.
+        self.assertEqual(r.returncode, 0,
+                         "advance did not run at all:\n%s%s"
+                         % (r.stdout, r.stderr))
         return r, json.loads((st / "swarm-state.json").read_text())
 
     def test_a_persisted_DONE_code_unit_does_not_release_dependents(self):
@@ -2757,6 +2788,13 @@ class TestAPersistedDoneIsCorrected(unittest.TestCase):
         plan = json.loads(json.dumps(self.PLAN))
         plan["units"][0]["kind"] = "slurm"
         plan["units"][0]["command"] = "true"
+        # A slurm unit must declare a runtime. Without it validate refused
+        # the plan, so this test asserted its two properties against a
+        # command that never ran: the DONE was "left alone" because nothing
+        # touched the state file, and the correction was absent because
+        # nothing printed. It could not fail, and the returncode check in
+        # _advance is what surfaced that.
+        plan["units"][0]["runtime"] = "none"
         with tempfile.TemporaryDirectory() as d:
             r, state = self._advance(Path(d), plan, "DONE")
             self.assertEqual(state["units"]["c"]["state"], "DONE")
