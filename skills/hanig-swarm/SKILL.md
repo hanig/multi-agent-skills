@@ -502,14 +502,39 @@ crontab -l | grep swarm      # confirm
 with no human present. `crontab` exists on the lambda login node and the entry
 survives disconnection.
 
-The four things that make this safe, each proven by breaking it:
+The four things that make this safe, each proven by breaking it -- and read
+the lock row's scope, which is narrower than the row used to say:
 
 | hole | guard | proven |
 |---|---|---|
-| two controllers both dispatch a unit | an OS advisory lock (`flock`) on the state dir; the kernel frees it when the holder dies, so there is no TTL and nothing to steal | 8 concurrent advances x 3 trials on each of lambda, chimera and andromeda: one dispatcher every time |
+| two controllers both dispatch a unit | an OS advisory lock (`flock`) on the state dir; the kernel frees it when the holder dies, so there is no TTL and nothing to steal -- **on a local filesystem** | 8 concurrent advances x 3 trials on each of lambda, chimera and andromeda: one dispatcher every time. All SAME-NODE, which is what a local `flock` already guarantees |
 | crash between `sbatch` and bind | jobs named `swarm-<attempt>`; `reconcile_orphan` asks squeue/sacct | job id wiped from state on a LIVE job; advance recovered 187880 and did NOT resubmit |
 | `INCOMPLETE` forever | terminal `FAILED_EVIDENCE` after a 600s settle window; holds dependents | unit test |
 | plan edited mid-flight | canonical digest over dispatchable fields; refuses to advance | unit test |
+
+
+**The lock's declared limit, which the table above used to talk past.**
+`swarm.py`'s `_hold_state_lock` records it: **NFS lock recovery.** If the
+server reboots, or evicts this client's lock state after a partition, the lock
+can be dropped while this process is still alive, and another controller can
+then acquire it. Nothing in local state can notice, because the kernel does
+not tell us. A lock cannot be made stronger than the lock manager underneath
+it, so do not add a heartbeat or a TTL -- a TTL reintroduces exactly the
+stealing this design avoided.
+
+Two facts decide whether that limit is theoretical or live for you, and
+neither is settled here. The default state directory is `XDG_STATE_HOME`, else
+`~/.local/state` (`coordinator_paths.py`), so it sits under `$HOME` -- which on
+a cluster login node is usually a network filesystem. And the trials in the
+row above were same-node: two controllers on two different nodes sharing the
+filesystem is outside the tested topology and would need a cross-node test to
+certify. So the evidence establishes same-node exclusion, on a filesystem that
+may be the one where the guarantee does not hold.
+
+If you need the guard to hold, put the state dir on local disk -- the fallback
+chain already ends at `$TMPDIR/hanig-swarm-state` -- or run one coordinator per
+plan from one node. `stat -f -c %T "$HOME"` on the host tells you which case
+you are in.
 
 ## First real DAG, lambda 2026-08-28
 
