@@ -5184,9 +5184,10 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         # the DAG contradicted the tracker -- the fix was cosmetic. Found by a
         # reviewer.
         #
-        # KNOWN LIMIT, stated rather than hidden: nothing records a merge yet,
-        # so a code unit stays READY_FOR_PR and anything depending on it
-        # waits. That is honest until stage 3 exists.
+        # A merge IS recorded now -- `us["merged_as"]` below, read a few
+        # lines down -- so the older note here claiming otherwise was a limit
+        # that outlived its cause. A stale limit is not harmless: it reads as
+        # a standing gap and invites a workaround for a solved problem.
         # READY_FOR_PR is included deliberately. Guarding on DONE alone made
         # the state a dead end: the first advance moved a produced unit to
         # READY_FOR_PR, and a receipt recorded afterwards was never looked at

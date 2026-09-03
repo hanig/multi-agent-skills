@@ -51,8 +51,12 @@ isolation boundary differ.
             is UNJUDGEABLE and this module does not pretend otherwise -- the
             receipt says "interior not judged; engine's self-report trusted at
             the boundary". Do not reimplement the engine's scheduler.
-  code      delegate to `bus await` (Shreshth's artifact contract over a git
-            worktree). Taken UNCHANGED; nothing here redesigns it.
+  code      judged HERE, over a per-attempt git worktree: the lifecycle is
+            settled, declared outputs exist, and the repository shows a
+            committed change over the recorded base. A merged pull request
+            is what closes the unit. The design once meant to delegate this
+            to `bus await`; nothing ever called `bus`, so nothing judged the
+            worktree at all, and C11 replaced the idea. See `worktree.py`.
 
 The Slurm knowledge below is lifted VERBATIM from contract.py, which earned it
 against a real scheduler: sacct row ownership under job-id reuse, `0:0` on a
