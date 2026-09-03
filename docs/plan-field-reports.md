@@ -34,6 +34,11 @@ there.
 | B9 | ARC-232 | wandb | ARC-238 |
 | E2 | ARC-233 | paseo provider pinning | ARC-239 |
 
+Two more were filed from the work itself, not from a field report: **ARC-240**,
+21 tests in `test_plan_shape.py` that cannot run where `paseo` is absent, which
+blinds the suite exactly where C14, B1 and B6 change things; and **ARC-241**,
+three further limits that live only in code comments or `MEMORY.md`.
+
 Each issue carries its own done-predicate, copied from the item below it. If
 you change a predicate here, change it there.
 
