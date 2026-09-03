@@ -15,16 +15,29 @@ enumerator cannot bound.
 import os
 
 
-# Concrete authority known to be present in coordinator environments. Keep
-# this bounded and exact: additions require an observed credential name, not a
-# suffix, prefix or value-shape guess. ANTHROPIC_API_KEY is included explicitly
-# with the provider keys even when a particular coordinator does not hold it.
+# Concrete authority known to be present in coordinator environments or under
+# conventional, unambiguous credential names across deployments. Keep this
+# bounded and exact: additions require an exact credential name, not a suffix,
+# prefix or value-shape guess.
 DENIED_ENV_NAMES = frozenset({
     "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
     "ANTHROPIC_API_KEY",
     "CLAUDE_CODE_MESSAGING_TOKEN",
     "SENTRY_DSN_NXTRAY",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "HUGGINGFACE_TOKEN",
+    # Exact AWS credential names cannot match AWS_REGION, AWS_PROFILE or other
+    # runtime configuration. That specificity is the policy boundary.
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SESSION_TOKEN",
+    "AWS_SECURITY_TOKEN",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
     # Access to the live SSH credential agent is authority, even though the
     # variable contains a socket path rather than the credential itself.
     "SSH_AUTH_SOCK",

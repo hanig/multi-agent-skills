@@ -31,6 +31,17 @@ EXPECTED_DENIED_NAMES = {
     "ANTHROPIC_API_KEY",
     "CLAUDE_CODE_MESSAGING_TOKEN",
     "SENTRY_DSN_NXTRAY",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "HUGGINGFACE_TOKEN",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SESSION_TOKEN",
+    "AWS_SECURITY_TOKEN",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
     "SSH_AUTH_SOCK",
     "SBATCH_GET_USER_ENV",
 }
@@ -39,7 +50,7 @@ RUNTIME_NAMES = (
     "LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "SLURM_JOB_ID",
     "MODULEPATH", "MODULESHOME", "LOADEDMODULES", "LMOD_SYSTEM_NAME",
     "SRUN_CPU_BIND", "SALLOC_ACCOUNT", "SLURM_CPU_BIND", "http_proxy",
-    "https_proxy", "no_proxy", "NCCL_DEBUG", "OMPI_MCA_btl", "AWS_REGION",
+    "https_proxy", "no_proxy", "NCCL_DEBUG", "OMPI_MCA_btl",
 )
 
 
@@ -164,6 +175,21 @@ class TestEnvironmentContainment(unittest.TestCase):
             rc, out, err = U.run([sys.executable, "-c", probe])
         self.assertEqual(rc, 0, err)
         self.assertEqual(out, planted)
+
+    def test_aws_runtime_configuration_reaches_child_intact(self):
+        planted = {
+            "AWS_REGION": "us-west-2",
+            "AWS_DEFAULT_REGION": "us-east-1",
+            "AWS_ENDPOINT_URL": "https://s3.internal",
+            "AWS_PROFILE": "research",
+        }
+        names = list(planted)
+        probe = ("import json, os; print(json.dumps({n: os.environ.get(n) "
+                 "for n in " + repr(names) + "}))")
+        with mock.patch.dict(os.environ, planted, clear=True):
+            rc, out, err = U.run([sys.executable, "-c", probe])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out), planted)
 
     def test_ml_credentials_and_database_dsn_reach_child_untouched(self):
         planted = {
