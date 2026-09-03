@@ -71,6 +71,11 @@ ALLOWED = {
         "containment set; no record is involved",
     ("worktree.py", "judge_detail"):
         "reads the launch snapshot transported from coordinator state",
+    ("worktree.py", "stray_untracked"):
+        "takes the workspace and the clean-at-launch baseline from the "
+        "coordinator-state snapshot, the same source judge_detail uses, and "
+        "decides nothing with either: it writes an audit list onto a receipt "
+        "that closes, fails and admits nothing",
     ("worktree.py", "launch_facts_problem"):
         "validates the coordinator-state snapshot schema and identity",
     ("worktree.py", "workspace_identity_problem"):

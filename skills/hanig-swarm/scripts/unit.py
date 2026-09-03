@@ -1288,8 +1288,11 @@ def cmd_check(args):
             # records what was actually established, and PRODUCTION_DENIES
             # spells out the reach: "a change was produced" is not "the change
             # is any good".
-            # The three code-only facts, assembled where they belong.
-            **W.code_basis(run, unit_dir, spec, launch_facts),
+            # The three code-only facts, plus the execution workspace's
+            # undeclared leftovers, assembled where they belong. ONE line:
+            # the size guard below the marker has none to spare, and the
+            # answer to that is a callee in worktree.py, never a raised limit.
+            **W.receipt_basis(run, unit_dir, spec, launch_facts),
             "note": "not isolated from other processes running as the same "
                     "Unix user. OS-enforced isolation would need a container "
                     "or mount namespace with this directory as the only "

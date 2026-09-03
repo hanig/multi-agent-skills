@@ -17,6 +17,7 @@ Python 3.8+, standard library only.
 import hashlib
 import json
 import os
+import posixpath
 from pathlib import Path
 
 # One per ATTEMPT: `launch-<attempt-id>.json`, beside the attempt rather than
@@ -104,6 +105,82 @@ def repo_status(runner, repo):
             i += 1
         entries.append(entry)
     return rc, entries
+
+
+# Porcelain v1's code for a path no index entry mentions. Every other code
+# describes a TRACKED path, and those are already named: a code unit's
+# judgment refuses on any of them, and a non-code unit's launch preflight
+# refuses before it starts. Dirt that git has never heard of is the class that
+# reached DONE with nobody mentioning it.
+UNTRACKED_STATUS = "??"
+
+# Enough to name the problem without turning a receipt into a directory
+# listing. One stubbed `cp` wrote one file; a loop that writes a thousand
+# needs the count, and `count` above `len(paths)` says the list was cut.
+MAX_STRAY_PATHS = 50
+
+
+def _declared_names(spec):
+    """Declared outputs as relative names, ready for prefix containment.
+
+    Compared by NAME rather than by resolved path, and that is not laziness.
+    Declared outputs are relative to the attempt write root, and a run root is
+    required to sit OUTSIDE every operated worktree, so the two roots can
+    never share an absolute prefix; resolving both sides would make every
+    declared artifact look stray and the exclusion would mean nothing.
+
+    A directory counts for everything under it. `results/table.csv` is what
+    the unit declared when it declared `results`, whereas the sibling
+    `results.bak/x` it never mentioned is dirt -- which is why the test is
+    ``p == d or p.startswith(d + "/")`` and not ``p.startswith(d)``.
+    """
+    names = set()
+    for rel in (spec.get("declared_outputs") or []):
+        name = posixpath.normpath(str(rel).replace(os.sep, "/")).strip("/")
+        if name and name != "." and not name.startswith(".."):
+            names.add(name)
+    return names
+
+
+def stray_untracked(runner, spec, launch_facts=None):
+    """Untracked paths in the execution workspace that no output declares.
+
+    18 bytes of debris named `phase0b/--reflink=auto` appeared from a stubbed
+    `cp` writing into its source directory instead of its destination, and the
+    unit still read DONE. `repo_status` had collected that path at launch
+    preflight; nothing carried it as far as the check. This is the carry.
+
+    NEW without needing a second baseline. Dispatch refuses a workspace that
+    is not clean: a code attempt gets a fresh per-attempt worktree at the base
+    commit, and a non-code unit with a clean-git policy is refused outright.
+    So `clean_at_launch` is READ rather than assumed, and when it is false
+    this looked at nothing, because an untracked path could then predate the
+    attempt and calling it new would be a guess.
+
+    The workspace comes from the coordinator's launch facts, never from the
+    spec's `repo` or from the launch record: the same rule `judge_detail`
+    follows, for the same reason. No facts means nothing trustworthy names a
+    workspace, so the answer is None -- "we did not look" is a different claim
+    from "we looked and it was clean", and a list cannot carry both.
+
+    AUDIT ONLY, like the rest of the receipt. Nothing may close, fail or admit
+    a unit on this list. It is read from a repository the agent owns, at a
+    moment nothing pins, and its only job is to stop debris being silent.
+    """
+    repo = (launch_facts or {}).get("execution_workspace")
+    if not repo or not (launch_facts or {}).get("clean_at_launch"):
+        return None
+    rc, entries = repo_status(runner, repo)
+    if rc != 0:
+        return {"workspace": repo, "paths": [], "count": 0,
+                "error": f"cannot read git status in {repo!r}"}
+    declared = _declared_names(spec)
+    stray = sorted(e["path"] for e in entries
+                   if e.get("status") == UNTRACKED_STATUS
+                   and not any(e["path"] == d or e["path"].startswith(d + "/")
+                               for d in declared))
+    return {"workspace": repo, "paths": stray[:MAX_STRAY_PATHS],
+            "count": len(stray)}
 
 
 # Every launch field that can select or alter a judgment. The launch record is
@@ -574,6 +651,24 @@ def code_basis(runner, unit_dir, spec, launch_facts=None):
     return {"worktree_judged": spec.get("worktree_judged"),
             "produced_head": spec.get("produced_head"),
             "production_denies": list(PRODUCTION_DENIES)}
+
+
+def receipt_basis(runner, unit_dir, spec, launch_facts=None):
+    """Every field worktree.py contributes to a receipt's `basis`.
+
+    Two callees with OPPOSITE relationships to the repository, which is why
+    they stay two functions. `code_basis` must not touch it at all: its
+    fields were decided at judgment, and asking a mutable source a second
+    time is how a pinned head stopped matching the tree that satisfied it. A
+    test hands it a runner that fails the test on use.
+
+    `stray_untracked` is the other kind of read: a first and only look, at
+    something no judgment produced, deciding nothing. Refusing it here on the
+    strength of the rule above would have been cargo cult -- the rule is
+    "never ask a mutable source AGAIN", not "never look".
+    """
+    return dict(code_basis(runner, unit_dir, spec, launch_facts),
+                stray_untracked=stray_untracked(runner, spec, launch_facts))
 
 
 def validate_pinned_head(runner, launch_facts, produced):
