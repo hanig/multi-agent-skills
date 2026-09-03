@@ -14,6 +14,7 @@ admissible, and any one missing makes the rest theatre:
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -250,7 +251,33 @@ class TestAdmissionIsBound(unittest.TestCase):
             self.assertIsNotNone(got)
 
 
+def _paseo_stub_on_path(case):
+    """Put a stub `paseo` on PATH for the duration of one test.
+
+    Every unit in the class below is kind=code, and `validate_plan` refuses
+    those unless `paseo` resolves, so on a host without it these tests never
+    reached their own assertion: three failed, and the ones asserting only
+    "some PlanError" passed on the WRONG refusal, which is worse than red.
+
+    Same PATH seam as test_swarm.py::_fake_scheduler; the reasoning, and the
+    test that pins the refusal itself, are in tests/test_plan_shape.py. The
+    stub is never executed -- validate only asks shutil.which -- and exits
+    127 so a test that starts needing a real paseo fails loudly."""
+    d = tempfile.mkdtemp(prefix="fake-paseo-")
+    stub = Path(d) / "paseo"
+    stub.write_text("#!/bin/sh\necho 'test stub, not a real paseo' >&2\n"
+                    "exit 127\n")
+    stub.chmod(0o755)
+    old = os.environ.get("PATH", "")
+    case.addCleanup(shutil.rmtree, d, True)
+    case.addCleanup(os.environ.__setitem__, "PATH", old)
+    os.environ["PATH"] = d + os.pathsep + old
+
+
 class TestTheRequirementIsDeclared(unittest.TestCase):
+
+    def setUp(self):
+        _paseo_stub_on_path(self)
 
     def _plan(self, **over):
         u = {"id": "u1", "kind": "code", "repo": "/tmp/fixture-repo", "target_branch": "main", "mode": "bypass", "outputs": ["o"],
