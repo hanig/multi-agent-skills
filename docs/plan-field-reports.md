@@ -24,39 +24,44 @@ issue holds the state. Project: **Swarm skills: field-report hardening**
 (`linear.app/arc-projects/project/swarm-skills-field-report-hardening-4978bafcf9e3`),
 team Arc.
 
-Field-report items, and where each ended up:
+Field-report items, and where each ended up. **Every one is now closed and on
+`dev`**, except the two that were never code:
 
 | Item | Issue | Item | Issue |
 |---|---|---|---|
-| C14 | ARC-228 done | converge.py | ARC-234 |
-| B1 | ARC-229 | A4 | ARC-235 done |
+| C14 | ARC-228 | converge.py | ARC-234 |
+| B1 | ARC-229 | A4 | ARC-235 |
 | B6 | ARC-230 | B8 stale-edge | ARC-236 |
-| B4 + `scontrol` note | ARC-231 done | A8 | ARC-237 done |
-| B9 | ARC-232 done | wandb | ARC-238 deferred |
-| E2 | ARC-233 done | paseo provider pinning | ARC-239 blocked |
+| B4 + `scontrol` note | ARC-231 | A8 | ARC-237 |
+| B9 | ARC-232 | wandb | ARC-238 DEFERRED |
+| E2 | ARC-233 | paseo provider pinning | ARC-239 BLOCKED |
 
-Nine more were filed from the work itself rather than from a field report, and
-two of them matter more than most of the list above:
+`ARC-238` is a product decision plus an external service, so it waits for a
+human. `ARC-239` cannot be done from this machine: the `paseo-*` and `pi-fleet`
+skills are not installed here, so there is no file to edit.
+
+Nine more were filed from the work itself. Six are closed; three are not:
 
 | Issue | What | State |
 |---|---|---|
-| ARC-244 | `WALK_SECONDS` is COOPERATIVE, so a blocked `opendir()` never reaches it and the walk never returns. On a cluster the trigger is a dead mount | in flight |
-| ARC-248 | The skill claims `flock` has "nothing to steal"; `swarm.py:1450` declares NFS lock recovery unfixed, and the state dir defaults under `$HOME` | open |
-| ARC-240 | 21 tests could not run where `paseo` is absent. Fixed: the suite is GREEN and mutation-verified | done |
-| ARC-243 | The dispatch protocol must forbid `git stash`: one shared stack across every worktree | open |
-| ARC-245 | `install.sh` and `doctor` stat `.git`, a FILE in a worktree, so installs from one recorded `version=unknown` | done |
-| ARC-246 | `--mem` is enforced nowhere; the account is never checked against the partition | open |
-| ARC-247 | `findings.json` is required by the docs and checked by nothing | open |
-| ARC-249 | Four sites still route code units through `bus await`, which nothing ever called | open |
+| ARC-240 | 21 tests could not run where `paseo` is absent. The suite is now GREEN and mutation-verified five ways | done |
 | ARC-241 | Three further limits that lived only in code comments or `MEMORY.md` | done |
+| ARC-243 | The dispatch protocol forbids `git stash` AND the coordinator refuses a non-empty stack | done |
+| ARC-244 | `WALK_SECONDS` was COOPERATIVE, so a blocked `opendir()` never reached it. Now a child with a real kill deadline | done |
+| ARC-245 | `install.sh` and `doctor` stat `.git`, a FILE in a worktree, so installs from one recorded `version=unknown` | done |
+| ARC-249 | Four sites routed code units through `bus await`, which nothing ever called | done |
+| ARC-246 | `--mem` enforced nowhere; the account never checked against the partition, which B4 now makes possible | OPEN |
+| ARC-247 | `findings.json` required by the docs, checked by nothing | OPEN |
+| ARC-248 | The `flock` claim is now scoped to its evidence; whether `$HOME` is NFS on the clusters is unanswered | HALF |
 
-**Whole-suite baseline, `dev` at `52e7986`: 1182 passed, 0 failed, 1 deselected,
-6m10s.** The single deselection is the `test_project.py` filesystem test that
-does not terminate on a host with a cloud-sync folder under `$HOME`, which is
-ARC-244. Before this cycle the same suite reported 31 failures in 64 minutes,
-of which ~59 minutes was that one hang and every failure was environmental. A
-red result here now means a regression -- ARC-240 proved that by breaking
-`swarm.py` five ways and confirming each break is caught.
+**Whole-suite baseline, `dev` at `cbc1b56`: 1298 passed, 0 failed, no
+deselection, 7m26s.** Before this cycle: 31 failed, 1102 passed, 64 minutes --
+of which ~59 minutes was one hang, and every failure was environmental.
+
+Green means something here now. ARC-240 broke `swarm.py` five ways and
+confirmed each break is caught, so a red result is a regression rather than
+noise. Two tests that asserted nothing were found and fixed on the way, plus
+one that could not fail at all.
 
 Each issue carries its own done-predicate, copied from the item below it. If
 you change a predicate here, change it there.
