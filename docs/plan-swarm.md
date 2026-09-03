@@ -94,6 +94,8 @@ Common to all three: a never-reused attempt id, an exclusive write root, an immu
 
 **Code-editing agent.** Shreshth already solves this; take it UNCHANGED. Isolation: git worktree+branch via Paseo. Done: `bus await` artifact contract (`--base` HEAD advanced, `--require-clean`, optional `--status-file`). Route it straight through `bus launch-worker` / `bus await`. No redesign.
 
+> **SUPERSEDED by C11 on 2026-09-03, and this is the one place that mattered.** `bus` was never called -- `worktree.py`'s docstring records it: "We never called it, so nothing judged the worktree at all." The decision above is kept because it is why the mechanism looks the way it does, but do NOT implement it. A code attempt now gets a per-attempt Git worktree cut from a recorded base COMMIT (never a ref), verified by device+inode at launch and re-stat-ed at judgment, and closure is a merged pull request. See "What isolates a code unit" in `hanig-swarm/SKILL.md`.
+
 Analysis/figure jobs were not selected; `result.py`'s domain is out of scope for the unit boundary, which strengthens the case for deleting it.
 
 ---
@@ -217,7 +219,7 @@ been created -- so today the "autonomous" swarm only advances when a human types
 `swarm.py advance`. That is the gap between a coordinator and a swarm.
 
 **1. Unit contract + Slurm-state predicate (the load-bearing primitive).**
-A stdlib-only module (Python 3.8+, login-node safe). Allocate an exclusive, never-reused run-dir per attempt; record command, declared outputs, pinned read-only inputs, env identity, Slurm job-id, budget charge; append-only event log. `check` returns {RUNNING, DONE, FAILED, PREEMPTED, INCOMPLETE} using ONLY the surviving functions lifted from `contract.py:61-80,582-636,646-918` plus the watchdog `87-116`. Per-kind done: Slurm job = terminal-OK owned row + output-exists; pipeline = engine terminal exit + final-output-exists, receipt marks interior unjudged; code agent = delegate to `bus await`.
+A stdlib-only module (Python 3.8+, login-node safe). Allocate an exclusive, never-reused run-dir per attempt; record command, declared outputs, pinned read-only inputs, env identity, Slurm job-id, budget charge; append-only event log. `check` returns {RUNNING, DONE, FAILED, PREEMPTED, INCOMPLETE} using ONLY the surviving functions lifted from `contract.py:61-80,582-636,646-918` plus the watchdog `87-116`. Per-kind done: Slurm job = terminal-OK owned row + output-exists; pipeline = engine terminal exit + final-output-exists, receipt marks interior unjudged; code agent = delegate to `bus await` **[SUPERSEDED: judged here, via the per-attempt worktree; see the note in step 0]**.
 
 Acceptance criteria:
 - a. DONE. Two units cannot be allocated the same run-dir; the allocator/validator rejects it (reuse `validate_sprint_plan.py` overlap logic).
