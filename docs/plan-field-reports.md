@@ -22,34 +22,41 @@ Status verified against code on 2026-09-03, not against memory of the session.
 Linear is the system of record for status. This doc holds the reasoning; the
 issue holds the state. Project: **Swarm skills: field-report hardening**
 (`linear.app/arc-projects/project/swarm-skills-field-report-hardening-4978bafcf9e3`),
-team Arc. Only OPEN items are filed; the Done table below is not duplicated
-there.
+team Arc.
+
+Field-report items, and where each ended up:
 
 | Item | Issue | Item | Issue |
 |---|---|---|---|
-| C14 | ARC-228 | converge.py | ARC-234 |
-| B1 | ARC-229 | A4 | ARC-235 |
+| C14 | ARC-228 done | converge.py | ARC-234 |
+| B1 | ARC-229 | A4 | ARC-235 done |
 | B6 | ARC-230 | B8 stale-edge | ARC-236 |
-| B4 + `scontrol` note | ARC-231 | A8 | ARC-237 |
-| B9 | ARC-232 | wandb | ARC-238 |
-| E2 | ARC-233 | paseo provider pinning | ARC-239 |
+| B4 + `scontrol` note | ARC-231 done | A8 | ARC-237 done |
+| B9 | ARC-232 done | wandb | ARC-238 deferred |
+| E2 | ARC-233 done | paseo provider pinning | ARC-239 blocked |
 
-Four more were filed from the work itself, not from a field report. **ARC-244**
-is the one to read: `survey.py`'s `WALK_SECONDS` is a cooperative deadline, so
-a blocked `opendir()` never reaches it and the walk never returns -- the script
-does what its own comment forbids, and on a cluster the trigger is a dead NFS
-mount rather than a cloud folder. **ARC-240**, 21 tests in `test_plan_shape.py`
-that cannot run where `paseo` is absent, blinding the suite exactly where C14,
-B1 and B6 change things. **ARC-243**, the dispatch protocol must forbid `git
-stash`: the stack is one shared ref across every worktree, and two concurrent
-agents collided on it the first time anyone dispatched three at once.
-**ARC-241**, three further limits that live only in code comments or
-`MEMORY.md`.
+Nine more were filed from the work itself rather than from a field report, and
+two of them matter more than most of the list above:
 
-Whole-suite baseline at this commit, for anyone comparing: **31 failed, 1102
-passed** in 64 minutes, of which ~59 minutes was the ARC-244 hang. Nearly all
-31 are environmental. Do not read a red suite here as a regression until
-ARC-240 and ARC-244 are closed.
+| Issue | What | State |
+|---|---|---|
+| ARC-244 | `WALK_SECONDS` is COOPERATIVE, so a blocked `opendir()` never reaches it and the walk never returns. On a cluster the trigger is a dead mount | in flight |
+| ARC-248 | The skill claims `flock` has "nothing to steal"; `swarm.py:1450` declares NFS lock recovery unfixed, and the state dir defaults under `$HOME` | open |
+| ARC-240 | 21 tests could not run where `paseo` is absent. Fixed: the suite is GREEN and mutation-verified | done |
+| ARC-243 | The dispatch protocol must forbid `git stash`: one shared stack across every worktree | open |
+| ARC-245 | `install.sh` and `doctor` stat `.git`, a FILE in a worktree, so installs from one recorded `version=unknown` | done |
+| ARC-246 | `--mem` is enforced nowhere; the account is never checked against the partition | open |
+| ARC-247 | `findings.json` is required by the docs and checked by nothing | open |
+| ARC-249 | Four sites still route code units through `bus await`, which nothing ever called | open |
+| ARC-241 | Three further limits that lived only in code comments or `MEMORY.md` | done |
+
+**Whole-suite baseline, `dev` at `52e7986`: 1182 passed, 0 failed, 1 deselected,
+6m10s.** The single deselection is the `test_project.py` filesystem test that
+does not terminate on a host with a cloud-sync folder under `$HOME`, which is
+ARC-244. Before this cycle the same suite reported 31 failures in 64 minutes,
+of which ~59 minutes was that one hang and every failure was environmental. A
+red result here now means a regression -- ARC-240 proved that by breaking
+`swarm.py` five ways and confirming each break is caught.
 
 Each issue carries its own done-predicate, copied from the item below it. If
 you change a predicate here, change it there.
@@ -73,6 +80,12 @@ you change a predicate here, change it there.
 | E1 | Children no longer inherit the coordinator's credentials; exact-name denial | `child_environment.py` |
 | C11 | A worktree per code attempt, verified and bound by inode; TOCTOU closed | `swarm.py`, `worktree.py` |
 | C12 | The completion protocol is appended at dispatch: branch, base, remote, PR target | `swarm.py` |
+| C14 | The receipt lists untracked paths no declared output covers; audit-only | `worktree.py`, `report.py` |
+| B4 | Per-partition `allow_accounts`, `deny_accounts`, `max_mem_per_cpu_mb`, `qos`, `qos_grptres`, each `set`/`unrestricted`/`unknown` | `survey.py` |
+| B9 | The two partition questions `sinfo` cannot answer, with the association-QOS caveat | `hanig-project/SKILL.md` |
+| A8 | Interview audited against `SCHEMA_FIELDS`; `target_branch` and the retry contract were asked by the wrong name or not at all | `hanig-project/SKILL.md` |
+| A4 | The isolation described as the per-attempt worktree; the branch constraint C11 removed is no longer claimed | both `SKILL.md`s |
+| E2 | The two declared limits stated where a skill reader meets them, plus three contradicting claims fixed | `hanig-swarm/SKILL.md`, `README.md` |
 
 Plus one item nobody asked for, which the cycle forced: the launch record and
 the receipt are now **audit-only**, and authority lives in coordinator state.
@@ -81,13 +94,22 @@ design, which a committee rejected and which is no longer what the code does.
 
 ## Open, in the order to do them
 
-> Shipped to `origin/main` at `d8591d4` on 2026-09-03: items 10 and 13, the
-> authority work, the model routing, E1, C11 and C12. Everything below is what
-> remains. Status per item was verified against code, not recalled.
+> **Read the Tracker table above for what is still open.** C14, B4, B9, A8, A4
+> and E2 are DONE and live on `dev`; their sections are kept below because the
+> reasoning is why the fix looks the way it does, and deleting it would lose
+> the failure that paid for it. B1 and B6 are the two field-report items that
+> remain.
 >
-> C11 took four review rounds and 26 findings; C12 took one round and three,
-> all three against "can an agent actually FOLLOW this", which no test checks.
-> Both are worth remembering when estimating what is left.
+> Shipped to `origin/main` at `d8591d4`: items 10 and 13, the authority work,
+> the model routing, E1, C11 and C12. Everything since is on `dev` and has not
+> been pushed.
+>
+> On estimating: C11 took four review rounds and 26 findings; C12 took one
+> round and three, all three against "can an agent actually FOLLOW this",
+> which no test checks. The second wave cost less per item and found more --
+> nine issues that no field report contained, two of them (ARC-244, ARC-248)
+> more serious than most of the list they came from. Dispatching against a
+> written plan surfaces the plan's own blind spots.
 
 ### C14. The receipt flags untracked files not in `produces`. DO FIRST.
 
