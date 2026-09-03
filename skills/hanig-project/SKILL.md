@@ -271,16 +271,30 @@ and **`outputs`**. Add `needs` for dependencies, `gpu_hours` for the budget,
 partitions and whether `--mem` is required).
 
 **`write_scopes` does not isolate a code unit.** It reads like an isolation
-mechanism and it is not one: it names FILES, and the isolation is the attempt
-directory. Code units share the repository, so state it positively and pick
-one of two remedies: give each unit **its own branch**, or **serialise them**
-with `needs` so only one touches the checkout at a time. A code unit also
-closes on a MERGED PULL REQUEST (step 6), so without a branch there is nothing
-to open one from and the unit is structurally unclosable: it will dispatch,
-run, be judged, and never reach DONE. `validate` refuses a code unit with a
-`repo` and no `branch`, and refuses two units sharing one branch
-CONCURRENTLY. Units ordered with `needs` may share a branch, because they
-commit one after another, which is what a branch is for.
+mechanism and it is not one: it names FILES, and it DECLARES where a unit
+intends to write. What the declaration buys is a refusal -- `validate` rejects
+two units that can run concurrently and whose scopes overlap, because two
+units that may write the same place cannot both have an exclusive write root,
+and that exclusivity is what makes the done-predicate conclusive. Give them
+disjoint scopes, or order them with `needs`.
+
+The isolation for a code unit is the **per-attempt Git worktree**: every
+attempt gets its own checkout at the anchored base commit, verified and bound
+by inode, so two code units no longer share one working tree. That is why
+concurrent code units MAY share a pull-request target -- a constraint the
+earlier design needed and this one does not.
+`TestPerAttemptBranchesRemoveTheSharedCheckoutConstraint` in
+`tests/test_plan_shape.py` pins it. Worktrees isolate PATHS and not
+principals; `hanig-swarm/SKILL.md` states what that does and does not defend
+against.
+
+A code unit closes on a MERGED PULL REQUEST (step 6), so it must name the
+branch the request merges INTO. `validate` refuses a code unit that has a
+`repo` and no `target_branch`: the coordinator creates the source branch, but
+it cannot open a mergeable pull request without the plan naming the
+destination, and the unit is then structurally unclosable -- it will dispatch,
+run, be judged, and never reach DONE. The legacy field `branch` is NOT a
+fallback, and a plan that names it instead is told so.
 
 `PLAN.md` for humans: what is being built, what was decided in step 2 and by
 whom, and what is deliberately out of scope.
