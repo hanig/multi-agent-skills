@@ -94,12 +94,8 @@ class TestASlurmCommandIsTheWork(unittest.TestCase):
 
 
 
-class TestACodeUnitNeedsItsOwnBranch(unittest.TestCase):
-    """write_scopes names FILES and isolates the attempt directory. It does
-    not isolate a repository: agents share a checkout, so several code units on
-    one repo run against one working tree, one branch and one index. And a code
-    unit closes on a merged PR, so with no branch it is structurally
-    unclosable."""
+class TestACodeUnitNeedsAPullRequestTarget(unittest.TestCase):
+    """C11 creates the source branch; the plan must name its PR destination."""
 
     def _code(self, uid="c1", **over):
         u = {"id": uid, "kind": "code", "prompt": "do it",
@@ -110,34 +106,34 @@ class TestACodeUnitNeedsItsOwnBranch(unittest.TestCase):
     def _plan(self, *units):
         return {"project": "p", "units": list(units)}
 
-    def test_a_code_unit_with_a_repo_needs_a_branch(self):
+    def test_a_code_unit_with_a_repo_needs_a_pr_target(self):
         with self.assertRaises(S.PlanError) as c:
             S.validate_plan(self._plan(self._code()))
         msg = str(c.exception)
-        self.assertIn("never close", msg)
-        self.assertIn("share a checkout", msg,
-                      "the refusal must say why scopes do not cover this")
+        self.assertIn("target_branch", msg)
+        self.assertIn("pull request", msg)
+        self.assertNotIn("share a checkout", msg)
 
-    def test_two_units_may_not_share_a_branch(self):
+    def test_legacy_branch_is_not_silently_reinterpreted_as_target(self):
         with self.assertRaises(S.PlanError) as c:
-            S.validate_plan(self._plan(
-                self._code("c1", branch="work"),
-                self._code("c2", branch="work")))
-        self.assertIn("interleave", str(c.exception))
+            S.validate_plan(self._plan(self._code(branch="impl-work")))
+        self.assertIn("not used as a fallback", str(c.exception))
 
-    def test_distinct_branches_are_accepted(self):
-        S.validate_plan(self._plan(self._code("c1", branch="c1-work"),
-                                   self._code("c2", branch="c2-work")))
-
-    def test_the_same_branch_in_different_repos_is_fine(self):
+    def test_concurrent_units_may_share_a_pr_target(self):
         S.validate_plan(self._plan(
-            self._code("c1", branch="work", repo="/a"),
-            self._code("c2", branch="work", repo="/b")))
+            self._code("c1", target_branch="main"),
+            self._code("c2", target_branch="main")))
+
+    def test_the_same_target_in_different_repos_is_fine(self):
+        S.validate_plan(self._plan(
+            self._code("c1", target_branch="main", repo="/a"),
+            self._code("c2", target_branch="main", repo="/b")))
 
     def test_a_code_unit_with_no_repo_is_refused(self):
         """It used to be SKIPPED, which made "no repo" a way to bypass the
-        branch rule and land in a state nothing can leave: a code unit closes
-        on a merged PR, and with no repository there is nowhere to open one."""
+        closure rules and land in a state nothing can leave: a code unit
+        closes on a merged PR, and with no repository there is nowhere to
+        open one."""
         with self.assertRaises(S.PlanError) as c:
             S.validate_plan(self._plan(self._code(repo=None)))
         self.assertIn("never reach DONE", str(c.exception))
@@ -185,7 +181,7 @@ class TestACodePromptIsAPrompt(unittest.TestCase):
     asked to read. Carefully-added paseo flags became instruction text."""
 
     def _plan(self, text, **over):
-        u = {"id": "c1", "kind": "code", "repo": "/tmp/fixture-repo", "branch": "fx", "mode": "bypass", "outputs": ["o"], "prompt": text}
+        u = {"id": "c1", "kind": "code", "repo": "/tmp/fixture-repo", "target_branch": "main", "mode": "bypass", "outputs": ["o"], "prompt": text}
         u.update(over)
         return {"project": "p", "units": [u]}
 
@@ -231,12 +227,34 @@ class TestACodePromptIsAPrompt(unittest.TestCase):
         """`command` is the fallback the runner uses when prompt is absent."""
         with self.assertRaises(S.PlanError):
             S.validate_plan({"project": "p", "units": [
-                {"id": "c1", "kind": "code", "repo": "/tmp/fixture-repo", "branch": "fx", "mode": "bypass", "outputs": ["o"],
+                {"id": "c1", "kind": "code", "repo": "/tmp/fixture-repo", "target_branch": "main", "mode": "bypass", "outputs": ["o"],
                  "command": "--provider claude go"}]})
 
     def test_a_slurm_unit_may_pass_flags_in_its_command(self):
         """Only code units hand their string to an agent."""
         S.validate_plan(plan(command="python go.py --mode strict"))
+
+    def test_validate_refuses_if_assembled_code_prompt_lacks_protocol(self):
+        """Validation exercises the dispatch builder, not plan-authored prose."""
+        real = S._dispatch_prompt
+        S._dispatch_prompt = lambda u, intent=None: str(u.get("prompt") or "")
+        try:
+            with self.assertRaises(S.PlanError) as c:
+                S.validate_plan(self._plan("fix the parser"))
+        finally:
+            S._dispatch_prompt = real
+        self.assertIn("without the required completion protocol",
+                      str(c.exception))
+
+    def test_non_code_prompt_gets_no_completion_protocol(self):
+        unit = {"id": "pipe", "kind": "pipeline",
+                "prompt": "run the workflow"}
+        intent = {"repo": "/repo", "branch": "swarm-a1",
+                  "target_branch": "main",
+                  "base_commit": "a" * 40}
+        prompt = S._dispatch_prompt(unit, intent)
+        self.assertEqual(prompt, "run the workflow")
+        self.assertNotIn(S.CODE_COMPLETION_PROTOCOL_MARKER, prompt)
 
 
 class TestTheDefaultAgent(unittest.TestCase):
@@ -300,72 +318,29 @@ class TestTheDefaultAgent(unittest.TestCase):
         self.assertNotIn("'claude'", ast.unparse(fn).replace('"', "'"))
 
 
-class TestSerialisedUnitsMaySharaABranch(unittest.TestCase):
-    """The rule refused what the skill's own text recommends. A validator that
-    refuses its own advice is worse than none: it teaches people the advice is
-    unreliable."""
+class TestPerAttemptBranchesRemoveTheSharedCheckoutConstraint(unittest.TestCase):
 
     def _c(self, uid, **over):
         u = {"id": uid, "kind": "code", "prompt": "work", "mode": "bypass",
-             "outputs": ["o"], "repo": "/tmp/repo", "branch": "shared"}
+             "outputs": ["o"], "repo": "/tmp/repo",
+             "target_branch": "main"}
         u.update(over)
         return u
 
-    def test_units_ordered_with_needs_may_share_a_branch(self):
+    def test_ordered_units_may_share_a_pr_target(self):
         S.validate_plan({"project": "p", "units": [
             self._c("u1"), self._c("u2", needs=["u1"])]})
 
-    def test_a_transitive_order_also_counts(self):
+    def test_concurrent_units_may_share_a_pr_target(self):
         S.validate_plan({"project": "p", "units": [
-            self._c("u1"),
-            self._c("mid", needs=["u1"]),
-            self._c("u2", needs=["mid"])]})
-
-    def test_concurrent_units_on_one_branch_are_still_refused(self):
-        with self.assertRaises(S.PlanError) as c:
-            S.validate_plan({"project": "p", "units": [
-                self._c("u1"), self._c("u2")]})
-        msg = str(c.exception)
-        self.assertIn("CONCURRENTLY", msg)
-        self.assertIn("order them with 'needs'", msg,
-                      "the refusal must offer the remedy the skill does")
-
-    def test_a_partial_order_is_not_enough(self):
-        """Three units, only two ordered: the third still runs alongside."""
-        with self.assertRaises(S.PlanError):
-            S.validate_plan({"project": "p", "units": [
-                self._c("u1"), self._c("u2", needs=["u1"]), self._c("u3")]})
-
-
-class TestARepoIsAPathNotAString(unittest.TestCase):
-
-    def _c(self, uid, repo):
-        return {"id": uid, "kind": "code", "prompt": "work", "outputs": ["o"],
-                "repo": repo, "branch": "shared", "mode": "bypass"}
-
-    def test_equivalent_spellings_are_one_repository(self):
-        with self.assertRaises(S.PlanError):
-            S.validate_plan({"project": "p", "units": [
-                self._c("u1", "/tmp/repo"),
-                self._c("u2", "/tmp/repo/.")]})
-
-    def test_a_trailing_slash_does_not_evade_it(self):
-        with self.assertRaises(S.PlanError):
-            S.validate_plan({"project": "p", "units": [
-                self._c("u1", "/tmp/repo"),
-                self._c("u2", "/tmp/repo/")]})
-
-    def test_genuinely_different_repos_are_fine(self):
-        S.validate_plan({"project": "p", "units": [
-            self._c("u1", "/tmp/repo-a"),
-            self._c("u2", "/tmp/repo-b")]})
+            self._c("u1"), self._c("u2")]})
 
 
 class TestRoundTwoFindings(unittest.TestCase):
 
     def _code(self, **over):
         u = {"id": "c1", "kind": "code", "prompt": "work", "outputs": ["o"],
-             "repo": "/tmp/r", "branch": "b", "mode": "bypass"}
+             "repo": "/tmp/r", "target_branch": "main", "mode": "bypass"}
         u.update(over)
         return {"project": "p", "units": [u]}
 
@@ -538,7 +513,7 @@ class TestPathsTheCommandNames(unittest.TestCase):
         """Its string is a prompt, not a command line."""
         S.validate_plan({"project": "p", "units": [
             {"id": "c", "kind": "code", "prompt": "read /nowhere/notes.md",
-             "outputs": ["o"], "repo": "/tmp/r", "branch": "b",
+             "outputs": ["o"], "repo": "/tmp/r", "target_branch": "main",
              "mode": "bypass"}]})
 
 
@@ -557,7 +532,7 @@ class TestTheSchemaIsReadableInOneGo(unittest.TestCase):
     def test_it_prints_every_field(self):
         r = self._run()
         self.assertEqual(r.returncode, 0, r.stderr)
-        for field in ("repo", "branch", "mode", "runtime", "outputs",
+        for field in ("repo", "target_branch", "mode", "runtime", "outputs",
                       "sbatch", "write_scopes", "continuation"):
             self.assertIn(field, r.stdout, field)
 
@@ -574,12 +549,14 @@ class TestTheSchemaIsReadableInOneGo(unittest.TestCase):
         self.assertTrue(d["fields"] and d["couplings"])
         names = {f["field"] for f in d["fields"]}
         self.assertIn("mode", names)
+        self.assertIn("target_branch", names)
+        self.assertNotIn("branch", names)
 
     def test_every_documented_field_requirement_is_a_real_one(self):
         """A schema that drifts from the validator is worse than none."""
         names = {f for f, _k, _r, _n in S.SCHEMA_FIELDS}
-        for real in ("id", "kind", "command", "outputs", "repo", "branch",
-                     "mode", "runtime", "needs", "inputs"):
+        for real in ("id", "kind", "command", "outputs", "repo",
+                     "target_branch", "mode", "runtime", "needs", "inputs"):
             self.assertIn(real, names, real)
 
 
@@ -658,7 +635,8 @@ class TestModeAdviceMatchesTheProvider(unittest.TestCase):
 
     def test_a_codex_unit_is_not_told_to_write_bypass(self):
         msg = self._refusal(
-            {"id": "c", "kind": "code", "repo": "/r", "branch": "b",
+            {"id": "c", "kind": "code", "repo": "/r",
+             "target_branch": "main",
              "prompt": "work", "outputs": ["x"],
              "provider": "codex/gpt-5.6-sol"})
         self.assertIn("full-access", msg)
@@ -666,14 +644,15 @@ class TestModeAdviceMatchesTheProvider(unittest.TestCase):
 
     def test_a_claude_unit_is_still_told_to_write_bypass(self):
         msg = self._refusal(
-            {"id": "c", "kind": "code", "repo": "/r", "branch": "b",
+            {"id": "c", "kind": "code", "repo": "/r",
+             "target_branch": "main",
              "prompt": "work", "outputs": ["x"],
              "provider": "claude/opus"})
         self.assertIn("bypass", msg)
 
     def test_a_unit_naming_no_provider_follows_the_default(self):
         msg = self._refusal({"id": "c", "kind": "code", "repo": "/r",
-                             "branch": "b", "prompt": "work",
+                             "target_branch": "main", "prompt": "work",
                              "outputs": ["x"]})
         want = S._unattended_mode_example(S.DEFAULT_AGENT_PROVIDER)
         self.assertIn(want, msg)

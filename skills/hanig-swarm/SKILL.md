@@ -21,7 +21,7 @@ otherwise: the strongest agent on this machine by `bus models`' measured
 intelligence, ahead of `claude/opus`.
 
 ```json
-{"id": "impl", "kind": "code", "repo": "/path", "branch": "impl-work",
+{"id": "impl", "kind": "code", "repo": "/path", "target_branch": "main",
  "prompt": "...", "mode": "full-access"}
 ```
 

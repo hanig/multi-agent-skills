@@ -34,7 +34,8 @@ def repo_at(path):
 
 def code_unit(repo, uid="code"):
     return {"id": uid, "kind": "code", "repo": str(repo),
-            "prompt": "work", "mode": "full-access"}
+            "target_branch": "main", "prompt": "work",
+            "mode": "full-access"}
 
 
 class FakePaseo:
@@ -120,6 +121,39 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         self.assertEqual(facts["execution_workspace"],
                          str((self.tmp / "managed" / "a1").resolve()))
         self.assertNotEqual(facts["execution_workspace"], facts["repo"])
+
+    def test_dispatched_prompt_names_source_target_base_and_survives_newlines(self):
+        attempt = self.attempt("code", "prompt-facts")
+        original = "fix the parser\nthen run the focused tests"
+        unit = code_unit(self.repo)
+        unit["prompt"] = original
+        unit["target_branch"] = "release/next"
+        state = {"units": {}}
+
+        job, err = self.submit(unit, attempt, False, state)
+
+        self.assertIsNone(err)
+        self.assertEqual(job, "agent-prompt-facts")
+        argv = self.fake.launches[0]
+        prompt = argv[-1]
+        intent = state["units"]["code"]["attempt_launch_intents"][
+            "prompt-facts"]
+        self.assertTrue(prompt.startswith(original + "\n\n"))
+        self.assertIn(S.CODE_COMPLETION_PROTOCOL_MARKER, prompt)
+        self.assertIn(repr(intent["repo"]), prompt)
+        self.assertIn(repr(intent["branch"]), prompt)
+        self.assertIn(repr(intent["target_branch"]), prompt)
+        self.assertNotEqual(intent["branch"], intent["target_branch"])
+        self.assertIn("into target branch", prompt)
+        self.assertIn(intent["base_commit"], prompt)
+        self.assertIn("Commit all intended work", prompt)
+        self.assertIn("Open a pull request", prompt)
+        self.assertIn("STOP AND REPORT", prompt)
+        # FakePaseo captures the argv list handed to U.run. Both original
+        # lines and the protocol arriving in this one final element pins the
+        # no-shell, no-requoting delivery property rather than merely testing
+        # the string before dispatch.
+        self.assertEqual(argv.count(prompt), 1)
 
     def test_same_and_different_units_receive_distinct_worktrees(self):
         state = {"units": {}}

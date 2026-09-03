@@ -45,6 +45,12 @@ ALLOWED = {
         "renders deterministic audit bytes from coordinator-state facts",
     ("swarm.py", "_complete_code_launch"):
         "combines the trusted launch intent with Paseo's returned cwd",
+    ("swarm.py", "_code_completion_protocol"):
+        "renders repository, branch and base from the coordinator-state "
+        "launch intent into instructions; it never reads the audit record",
+    ("swarm.py", "_code_protocol_problem"):
+        "checks an assembled prompt against the coordinator-state launch "
+        "intent (or validate_plan's fixed canary intent)",
     ("swarm.py", "_register_code_workspace"):
         "records cleanup metadata from the coordinator-state intent",
     ("swarm.py", "_registered_attempt_workspace"):
@@ -370,7 +376,8 @@ class TestTheSealActuallyTravels(unittest.TestCase):
         env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@x",
                    GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@x")
         unit = {"id": "u1", "kind": "code", "repo": str(self.repo),
-                "branch": "b", "mode": "full-access", "prompt": "work"}
+                "target_branch": "main", "mode": "full-access",
+                "prompt": "work"}
         state = {"units": {}}
         real, launched = self.S.U.run, []
 

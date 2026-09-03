@@ -152,7 +152,7 @@ class TestTicketsMapBothWays(unittest.TestCase):
         plan = {"name": "p", "units": [
             {"id": "pipe", "kind": "pipeline", "runtime": "none", "command": "nf run",
              "outputs": ["out/"]},
-            {"id": "agent", "kind": "code", "repo": "/tmp/fixture-repo", "branch": "fx", "mode": "bypass", "prompt": "do it",
+            {"id": "agent", "kind": "code", "repo": "/tmp/fixture-repo", "target_branch": "main", "mode": "bypass", "prompt": "do it",
              "outputs": ["r.txt"]}]}
         bodies = {i["unit"]: i["body"] for i in T.draft(plan)["issues"]}
         self.assertIn("NOT attested by a scheduler", bodies["pipe"])

@@ -71,6 +71,11 @@ KINDS = U.KINDS
 DEFAULT_AGENT_PROVIDER = "codex/gpt-5.6-sol"
 DEFAULT_AGENT_THINKING = "high"
 
+# This marker is deliberately stable: validation checks the exact prompt the
+# coordinator would dispatch, not prose copied into a plan. Plans cannot omit
+# the protocol, and attempts cannot invent its source branch, target, or base.
+CODE_COMPLETION_PROTOCOL_MARKER = "SWARM CODE COMPLETION PROTOCOL"
+
 # unit.py's exit codes are the ONLY judgement this coordinator consumes.
 DONE, RUNNING, FAILED, PREEMPTED, INCOMPLETE, NEEDS_HUMAN = 0, 1, 2, 3, 4, 5
 NAME = {0: "DONE", 1: "RUNNING", 2: "FAILED", 3: "PREEMPTED",
@@ -449,6 +454,60 @@ def _validate_runtimes(plan, units):
     # NOTE what is deliberately absent: no stat of the entrypoint, and no
     # parsing of the command. Both would assert facts about a machine this
     # one cannot see.
+
+
+def _code_completion_protocol(intent):
+    """Instructions that make a code attempt capable of closing its unit.
+
+    C11 creates the branch and worktree. The agent's job is to leave durable
+    evidence on that branch and open the pull request that the unit's closing
+    predicate requires; asking it to choose either launch fact would put
+    authority back in prompt prose.
+    """
+    repo = str(intent["repo"])
+    branch = str(intent["branch"])
+    base = str(intent["base_commit"])
+    target = str(intent["target_branch"])
+    return f"""{CODE_COMPLETION_PROTOCOL_MARKER} (coordinator-required)
+You are already in a dedicated worktree for repository {repo!r}, on branch {branch!r}, cut from recorded base commit {base}.
+Do not create or switch branches, and do not choose a different base.
+Commit all intended work on {branch!r}. Uncommitted work is invisible to the transition predicate and will be judged as producing nothing.
+Open a pull request from {branch!r} into target branch {target!r}; only a pull request merged into {target!r} closes this code unit.
+If you cannot finish cleanly, STOP AND REPORT the problem instead of working around it.
+Leave the worktree clean. Do not force-push or rewrite history. The final commit must descend from recorded base {base}; rewritten history makes honest work unjudgeable."""
+
+
+def _dispatch_prompt(u, intent=None):
+    """Return the single prompt argv element for an agent dispatch."""
+    prompt = str(u.get("prompt") or u.get("command") or u.get("id") or "")
+    if u.get("kind") != "code":
+        return prompt
+    if not isinstance(intent, dict):
+        raise PlanError(
+            f"unit {u.get('id','?')!r} is kind=code but has no trusted "
+            f"launch intent from which to build its completion protocol")
+    return prompt.rstrip() + "\n\n" + _code_completion_protocol(intent)
+
+
+def _code_protocol_problem(prompt, intent):
+    """Return why an assembled code prompt is structurally unclosable."""
+    if not prompt.endswith("\n\n" + _code_completion_protocol(intent)):
+        return "the coordinator-generated protocol is not the final prompt block"
+    required = {
+        "protocol marker": CODE_COMPLETION_PROTOCOL_MARKER,
+        "repository": repr(str(intent["repo"])),
+        "attempt branch": repr(str(intent["branch"])),
+        "pull-request target": repr(str(intent["target_branch"])),
+        "recorded base": str(intent["base_commit"]),
+        "commit instruction": "Commit all intended work",
+        "pull-request instruction": "Open a pull request",
+        "clean failure instruction": "STOP AND REPORT",
+        "history instruction": "Do not force-push or rewrite history",
+    }
+    missing = [name for name, text in required.items() if text not in prompt]
+    if missing:
+        return "missing " + ", ".join(missing)
+    return None
 
 
 def validate_plan(plan):
@@ -963,18 +1022,42 @@ def validate_plan(plan):
                 f"asked to read. Set {flag!r} as a field on the unit instead, "
                 f"alongside 'prompt'.")
 
-    # --- a code unit needs a branch of its own ---------------------------
+    # --- every dispatched code prompt carries its closing protocol --------
     #
-    # `write_scopes` names FILES, and it does isolate the attempt directory.
-    # It does not isolate a repository: agents share a checkout, so nine code
-    # units on one repo would run against one working tree, one branch and one
-    # index, and the scopes would say nothing about it.
+    # Plans once described sixteen code units that could only close on a
+    # merged PR, while telling no agent to commit or open one. Appending here
+    # would still leave dispatch free to drop plan-level settings, so the
+    # coordinator's dispatch builder owns the protocol. Validate exercises
+    # that SAME builder with unmistakable launch facts and refuses if a later
+    # edit makes it produce an unclosable prompt. _submit repeats the check
+    # with the real, trusted attempt facts immediately before Paseo is called.
+    validation_intent = {
+        "repo": "/__swarm_protocol_validation_repo__",
+        "branch": "swarm-protocol-validation-attempt",
+        "target_branch": "main",
+        "base_commit": "0" * 40,
+    }
+    for u in units:
+        if not isinstance(u, dict) or u.get("kind") != "code":
+            continue
+        assembled = _dispatch_prompt(u, validation_intent)
+        problem = _code_protocol_problem(assembled, validation_intent)
+        if problem:
+            raise PlanError(
+                f"unit {u.get('id','?')!r} is kind=code but the coordinator "
+                f"would dispatch it without the required completion protocol "
+                f"({problem}). Refusing a code unit that could finish its "
+                f"edits yet never produce the merged-PR evidence that closes "
+                f"it.")
+
+    # --- a code unit declares where its pull request must merge -----------
     #
-    # And a `code` unit closes on a MERGED PR. A unit with no branch has
-    # nothing to open a PR from, so it is structurally unclosable: the plan can
-    # be built, dispatched and judged, and the unit can never reach DONE. That
-    # is worth refusing at the one point it is cheap.
-    by_repo = {}
+    # C11 made the old `branch` field vestigial: every attempt now gets a
+    # coordinator-created `swarm-<attempt>` source branch in its own worktree.
+    # Do not silently reinterpret old plans' working-branch names as merge
+    # targets. `target_branch` is a new, explicit plan decision; existing
+    # plans fail here until migrated instead of opening a PR against a branch
+    # they never meant as the destination.
     for u in units:
         if not isinstance(u, dict) or u.get("kind") != "code":
             continue
@@ -983,7 +1066,7 @@ def validate_plan(plan):
         # A code unit is closed by a MERGED PR, so one with no repository has
         # nowhere to open a PR from and cannot reach DONE by any route. The
         # check used to skip these, which made "no repo" a way to bypass the
-        # branch rule and land in a state nothing can leave.
+        # pull-request target rule and land in a state nothing can leave.
         if not u.get("repo"):
             raise PlanError(
                 f"unit {uid!r} is kind=code and declares no 'repo'. A code "
@@ -1051,57 +1134,15 @@ def validate_plan(plan):
                 f"receive that as a thinking id, not find it, and return an "
                 f"errored agent. To suppress the flag write JSON null or an "
                 f"empty string; to set a level write the id, e.g. \"high\".")
-        branch = str(u.get("branch") or "").strip()
-        if not branch:
+        target = str(u.get("target_branch") or "").strip()
+        if not target:
+            legacy = (" The legacy 'branch' field is not used as a fallback."
+                      if u.get("branch") else "")
             raise PlanError(
                 f"unit {uid!r} is kind=code on repo {u['repo']!r} and declares "
-                f"no 'branch'. A code unit is closed by a MERGED PULL REQUEST, "
-                f"so with no branch there is nothing to open one from and the "
-                f"unit can never close however good the work is. Agents also "
-                f"share a checkout: write scopes name files and isolate the "
-                f"attempt directory, not a working tree, so two units on one "
-                f"repo without distinct branches run against one index.")
-        # Keyed by the RESOLVED path. Two units naming /tmp/repo and
-        # /tmp/repo/. are one repository, and comparing the literal strings
-        # let them share a branch undetected.
-        key = os.path.normpath(os.path.realpath(str(u["repo"])))
-        by_repo.setdefault(key, {}).setdefault(branch, []).append(uid)
-
-    by_id = {u.get("id"): u for u in units if isinstance(u, dict)}
-    for repo, branches in by_repo.items():
-        for branch, ids in branches.items():
-            if len(ids) < 2:
-                continue
-            # SERIALISED UNITS MAY SHARE A BRANCH. The skill offers two
-            # remedies for code units sharing a checkout: give each its own
-            # branch, or order them with `needs` so only one touches it at a
-            # time. Refusing both made the documentation self-contradictory,
-            # and a validator that refuses its own advice is worse than no
-            # validator: it teaches people the advice is unreliable.
-            #
-            # What is actually forbidden is CONCURRENCY on one branch. Ordered
-            # units commit one after another, which is what a branch is for.
-            ordered = True
-            for a in ids:
-                for b in ids:
-                    if a == b:
-                        continue
-                    if (b not in _ancestors(a, by_id)
-                            and a not in _ancestors(b, by_id)):
-                        ordered = False
-                        break
-                if not ordered:
-                    break
-            if ordered:
-                continue
-            raise PlanError(
-                f"units {', '.join(sorted(ids))} target branch {branch!r} of "
-                f"{repo!r} CONCURRENTLY. One branch cannot carry two units' "
-                f"work at once as separable changes: their commits interleave, "
-                f"one PR merges both, and neither unit's produced tree means "
-                f"what its receipt says. Give each its own branch, or order "
-                f"them with 'needs' so only one touches the checkout at a "
-                f"time.")
+                f"no 'target_branch'. The coordinator creates the source "
+                f"branch, but it cannot open a mergeable pull request without "
+                f"the plan naming its destination.{legacy}")
 
     # --- paths the COMMAND names, not just the ones it declares -----------
     #
@@ -1902,7 +1943,18 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
             argv += ["--thinking", str(thinking)]
         for kv in (u.get("env") or []):
             argv += ["--env", str(kv)]
-        argv.append(u.get("prompt") or u.get("command") or u["id"])
+        prompt = _dispatch_prompt(u, intent)
+        protocol_problem = _code_protocol_problem(prompt, intent)
+        if protocol_problem:
+            return None, (
+                f"unit {u['id']!r} code prompt has no valid completion "
+                f"protocol ({protocol_problem}); refusing an unclosable "
+                f"agent launch")
+        # One list element, however many lines it contains. U.run does not
+        # invoke a shell, and Paseo's launcher forwards its argv with "$@",
+        # so newlines reach the runner as prompt content rather than argument
+        # separators.
+        argv.append(prompt)
 
         rc, out, err = U.run(argv, timeout=180)
         if rc != 0:
@@ -2126,6 +2178,11 @@ def _capture_code_launch(unit_dir, u):
     repo, err = _plan_workspace(u)
     if err:
         return err, None
+    target = str(u.get("target_branch") or "").strip()
+    if not target:
+        return (f"unit {u.get('id')!r}: no target_branch was declared; "
+                f"refusing to create a source branch for a pull request with "
+                f"no named destination"), None
     # Store the source identity in the same canonical form used for Paseo's
     # returned cwd. This is an authority boundary, not a display path: a
     # relative spelling or symlink must not make the source checkout compare
@@ -2150,6 +2207,7 @@ def _capture_code_launch(unit_dir, u):
         "base_tree": tree,
         "worktree_slug": slug,
         "branch": branch,
+        "target_branch": target,
         # Makes the audit payload reproducible after a crash. Recovery can
         # compare exact expected bytes and restore the original seal without
         # trusting or laundering fields out of the file.
@@ -2167,7 +2225,7 @@ def _code_launch_intent_problem(intent, u, attempt):
                 f"unit {intent.get('unit_id')!r}, attempt "
                 f"{intent.get('attempt_id')!r}")
     for key in ("repo", "base_commit", "base_tree", "worktree_slug", "branch",
-                "captured_at"):
+                "target_branch", "captured_at"):
         if not intent.get(key):
             return (f"unit {u.get('id')!r}: worktree launch intent is "
                     f"incomplete (missing {key})")
@@ -2176,6 +2234,11 @@ def _code_launch_intent_problem(intent, u, attempt):
         if (not isinstance(value, str) or len(value) not in (40, 64)
                 or any(c not in "0123456789abcdef" for c in value.lower())):
             return f"unit {u.get('id')!r}: invalid trusted {key}"
+    target = str(u.get("target_branch") or "").strip()
+    if intent["target_branch"] != target:
+        return (f"unit {u.get('id')!r}: trusted pull-request target "
+                f"{intent['target_branch']!r} disagrees with plan target "
+                f"{target!r}")
     return None
 
 
@@ -5352,11 +5415,12 @@ SCHEMA_FIELDS = [
     ("inputs", "all", "optional",
      "checked for existence, placeholders and upstream production"),
     ("needs", "all", "optional",
-     "DAG edges. Also what lets two code units share one branch"),
+     "DAG edges; a unit dispatches only after every dependency is DONE"),
     ("repo", "code", "required", "closure is a merged PR; without it DONE is "
      "unreachable"),
-    ("branch", "code", "required",
-     "its own, unless ordered with needs; agents share a checkout"),
+    ("target_branch", "code", "required",
+     "the destination of the attempt's pull request. The coordinator creates "
+     "a separate swarm-<attempt> source branch; legacy branch is not reused"),
     ("mode", "code", "required",
      "no default on purpose. Absent or empty means default permissions, so "
      "the agent stalls at its first write"),
@@ -5401,8 +5465,6 @@ SCHEMA_COUPLINGS = [
     "canary per partition.",
     "A canary must run the runtime's declared probe command verbatim; a "
     "canary running `true` establishes nothing.",
-    "Two code units may share a branch only if one is an ancestor of the "
-    "other. Otherwise give each its own.",
     "Concurrent units must have disjoint write_scopes; order them with needs "
     "if they overlap.",
     "max_attempts above 1 needs retry.max_lost in a metric the plan also caps "

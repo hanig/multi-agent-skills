@@ -2526,7 +2526,7 @@ class TestACodeUnitIsNotDoneUntilMerged(unittest.TestCase):
         return rep, disp, m.load_state(str(st)), m
 
     PLAN = {"name": "p", "units": [
-        {"id": "c", "kind": "code", "repo": "/tmp/fixture-repo", "branch": "fx", "mode": "bypass", "prompt": "x", "outputs": ["r"],
+        {"id": "c", "kind": "code", "repo": "/tmp/fixture-repo", "target_branch": "main", "mode": "bypass", "prompt": "x", "outputs": ["r"],
          "write_scopes": ["c/"]},
         {"id": "after", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
          "needs": ["c"], "write_scopes": ["a/"]}]}
@@ -2642,7 +2642,7 @@ class TestAStalledDAGIsDiagnosable(unittest.TestCase):
     undiagnosably is worse than one that fails."""
 
     PLAN = {"name": "p", "units": [
-        {"id": "writer", "kind": "code", "repo": "/tmp/fixture-repo", "branch": "fx", "mode": "bypass", "prompt": "x", "outputs": ["r.txt"],
+        {"id": "writer", "kind": "code", "repo": "/tmp/fixture-repo", "target_branch": "main", "mode": "bypass", "prompt": "x", "outputs": ["r.txt"],
          "write_scopes": ["w/"]},
         {"id": "after", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
          "needs": ["writer"], "write_scopes": ["a/"]}]}
@@ -2711,7 +2711,7 @@ class TestAPersistedDoneIsCorrected(unittest.TestCase):
     by design, so it stayed and its dependents dispatched."""
 
     PLAN = {"name": "p", "units": [
-        {"id": "c", "kind": "code", "repo": "/tmp/fixture-repo", "branch": "fx", "mode": "bypass", "prompt": "x", "outputs": ["r"],
+        {"id": "c", "kind": "code", "repo": "/tmp/fixture-repo", "target_branch": "main", "mode": "bypass", "prompt": "x", "outputs": ["r"],
          "write_scopes": ["c/"]},
         {"id": "after", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
          "needs": ["c"], "write_scopes": ["a/"]}]}

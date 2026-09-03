@@ -40,7 +40,7 @@ class TestOnlyOneConditionTriggersIt(unittest.TestCase):
         self.tmp.cleanup()
 
     def _u(self, **over):
-        u = {"id": "u1", "kind": "code", "repo": "/tmp/fixture-repo", "branch": "fx", "mode": "bypass", "continuation": {"max": 2}}
+        u = {"id": "u1", "kind": "code", "repo": "/tmp/fixture-repo", "target_branch": "main", "mode": "bypass", "continuation": {"max": 2}}
         u.update(over)
         return u
 
@@ -151,7 +151,7 @@ class TestOnlyOneConditionTriggersIt(unittest.TestCase):
 class TestTheBoundIsDeclaredAndChecked(unittest.TestCase):
 
     def _plan(self, **over):
-        u = {"id": "u1", "kind": "code", "repo": "/tmp/fixture-repo", "branch": "fx", "mode": "bypass", "outputs": ["o"], "runtime": "none"}
+        u = {"id": "u1", "kind": "code", "repo": "/tmp/fixture-repo", "target_branch": "main", "mode": "bypass", "outputs": ["o"], "runtime": "none"}
         u.update(over)
         return {"project": "p", "units": [u]}
 

@@ -599,7 +599,8 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         state_dir = self.tmp / "state"
         state = {"schema_version": 1, "halted": None, "units": {}}
         unit = {"id": "u1", "kind": "code", "repo": str(self.repo),
-                "prompt": "work", "mode": "bypass"}
+                "target_branch": "main", "prompt": "work",
+                "mode": "bypass"}
         seen = {}
         real = S.U.run
 
@@ -626,7 +627,7 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         self.assertIsNone(err)
         self.assertEqual(job, "agent-1")
         for key in ("unit_id", "attempt_id", "repo", "base_commit",
-                    "base_tree", "branch", "worktree_slug",
+                    "base_tree", "branch", "target_branch", "worktree_slug",
                     "repository_remote"):
             self.assertIn(key, seen)
         facts = state["units"]["u1"]["attempt_launch_facts"]["att1"]

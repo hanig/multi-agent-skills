@@ -39,9 +39,8 @@ def repo_at(path):
 
 
 def code_unit(repo):
-    branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
     return {"id": "code", "kind": "code", "repo": str(repo),
-            "branch": branch, "mode": "bypass", "prompt": "work",
+            "target_branch": "main", "mode": "bypass", "prompt": "work",
             "outputs": ["out.txt"]}
 
 
