@@ -1723,11 +1723,6 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
         # they detach, so they must construct their environment through the
         # shared credential denylist rather than inheriting coordinator
         # authority.
-        penv = CE.child_env({
-            "SWARM_UNIT_ID": str(u["id"]),
-            "SWARM_UNIT_DIR": str(unit_dir),
-            **dict(_dep_env(u, state or {})),
-        })
         log = Path(unit_dir) / "engine.log"
         try:
             fh = open(log, "ab")
@@ -1751,7 +1746,11 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
             wrapped = (f'(\n{u["command"]}\nrc=$?\nwait\nexit $rc\n)\n'
                        f'printf %s "$?" > {U.ENGINE_RC}\n')
             proc = subprocess.Popen(
-                ["sh", "-c", wrapped], cwd=str(unit_dir), env=penv,
+                ["sh", "-c", wrapped], cwd=str(unit_dir), env=CE.child_env({
+                    "SWARM_UNIT_ID": str(u["id"]),
+                    "SWARM_UNIT_DIR": str(unit_dir),
+                    **dict(_dep_env(u, state or {})),
+                }),
                 stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                 start_new_session=True)
         except OSError as e:

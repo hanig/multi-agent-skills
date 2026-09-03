@@ -34,9 +34,14 @@ RUNTIME_NAMES = (
 )
 
 
-def _child_env_call(node, module_aliases):
+SPAWN_NAMES = {"run", "Popen", "call", "check_call", "check_output"}
+
+
+def _child_env_call(node, module_aliases, direct_aliases):
     if not isinstance(node, ast.Call):
         return False
+    if isinstance(node.func, ast.Name):
+        return node.func.id in direct_aliases
     return (isinstance(node.func, ast.Attribute)
             and isinstance(node.func.value, ast.Name)
             and node.func.value.id in module_aliases
@@ -44,7 +49,7 @@ def _child_env_call(node, module_aliases):
 
 
 def _subprocess_calls(path):
-    """Yield subprocess spawn calls and their containing function."""
+    """Yield subprocess spawn calls and containment-module import aliases."""
     tree = ast.parse(path.read_text())
     module_aliases = {n.asname or n.name for n in ast.walk(tree)
                       if isinstance(n, ast.Import) for n in n.names
@@ -52,17 +57,23 @@ def _subprocess_calls(path):
     child_module_aliases = {n.asname or n.name for n in ast.walk(tree)
                             if isinstance(n, ast.Import) for n in n.names
                             if n.name == "child_environment"}
+    child_direct_aliases = {
+        n.asname or n.name for n in ast.walk(tree)
+        if isinstance(n, ast.ImportFrom)
+        and n.module == "child_environment" for n in n.names
+        if n.name == "child_env"}
+    rebound = {n.id for n in ast.walk(tree)
+               if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    rebound.update(n.name for n in ast.walk(tree)
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                     ast.ClassDef)))
+    rebound.update(n.arg for n in ast.walk(tree) if isinstance(n, ast.arg))
+    child_module_aliases -= rebound
+    child_direct_aliases -= rebound
     direct_names = {n.asname or n.name for n in ast.walk(tree)
                     if isinstance(n, ast.ImportFrom)
                     and n.module == "subprocess" for n in n.names
-                    if n.name in {"run", "Popen", "call", "check_call",
-                                  "check_output"}}
-    spawn_names = {"run", "Popen", "call", "check_call", "check_output"}
-
-    parents = {}
-    for parent in ast.walk(tree):
-        for child in ast.iter_child_nodes(parent):
-            parents[child] = parent
+                    if n.name in SPAWN_NAMES}
 
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -70,38 +81,30 @@ def _subprocess_calls(path):
         if isinstance(node.func, ast.Attribute):
             is_spawn = (isinstance(node.func.value, ast.Name)
                         and node.func.value.id in module_aliases
-                        and node.func.attr in spawn_names)
+                        and node.func.attr in SPAWN_NAMES)
         else:
             is_spawn = (isinstance(node.func, ast.Name)
                         and node.func.id in direct_names)
         if not is_spawn:
             continue
-        owner = node
-        while owner in parents and not isinstance(
-                owner, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            owner = parents[owner]
-        yield (node, owner if isinstance(
-            owner, (ast.FunctionDef, ast.AsyncFunctionDef)) else tree,
-               child_module_aliases)
+        yield node, child_module_aliases, child_direct_aliases
 
 
-def _env_is_from_child_module(call, owner, child_module_aliases):
+def _env_is_direct_child_env_call(call, module_aliases, direct_aliases):
     keyword = next((kw for kw in call.keywords if kw.arg == "env"), None)
-    if keyword is None:
-        return False
-    if _child_env_call(keyword.value, child_module_aliases):
-        return True
-    if not isinstance(keyword.value, ast.Name):
-        return False
-    assignments = []
-    for node in ast.walk(owner):
-        if isinstance(node, (ast.Assign, ast.AnnAssign)):
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            if any(isinstance(target, ast.Name)
-                   and target.id == keyword.value.id for target in targets):
-                assignments.append(node.value)
-    return (len(assignments) == 1
-            and _child_env_call(assignments[0], child_module_aliases))
+    return (keyword is not None
+            and _child_env_call(keyword.value, module_aliases,
+                                direct_aliases))
+
+
+def _spawn_offenders(root):
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        for call, module_aliases, direct_aliases in _subprocess_calls(path):
+            if not _env_is_direct_child_env_call(
+                    call, module_aliases, direct_aliases):
+                offenders.append(f"{path.relative_to(root)}:{call.lineno}")
+    return offenders
 
 
 class TestEnvironmentContainment(unittest.TestCase):
@@ -127,8 +130,6 @@ class TestEnvironmentContainment(unittest.TestCase):
         planted = {name: "credential" for name in CE.DENIED_ENV_NAMES}
         planted.update({f"PLANTED{suffix}": "credential"
                         for suffix in CE.DENIED_ENV_SUFFIXES})
-        planted.update({f"{prefix}PLANTED": "credential"
-                        for prefix in CE.DENIED_ENV_PREFIXES})
         planted.update({
             "LC_OPENAI_API_KEY": "credential",
             "lowercase_api_key": "credential",
@@ -149,6 +150,56 @@ class TestEnvironmentContainment(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         self.assertEqual(json.loads(out), planted)
 
+    def test_url_userinfo_and_known_key_values_are_redacted_in_child(self):
+        proxy = "https://user:pass@proxy.corp:8443/path?q=1#fragment"
+        planted = {
+            "https_proxy": proxy,
+            "CONFIG_JSON": '{"openai_api_key":"sk-secret","mode":"train"}',
+            "GITHUB_VALUE": "prefix ghp_example suffix",
+            "AWS_VALUE": "AKIAIOSFODNN7EXAMPLE",
+            "SLACK_VALUE": "xoxb-example-token",
+        }
+        names = list(planted)
+        probe = ("import json, os; print(json.dumps({n: os.environ.get(n) "
+                 "for n in " + repr(names) + "}))")
+        with mock.patch.dict(os.environ, planted, clear=True):
+            rc, out, err = U.run([sys.executable, "-c", probe])
+        self.assertEqual(rc, 0, err)
+        got = json.loads(out)
+        self.assertEqual(
+            got["https_proxy"],
+            "https://proxy.corp:8443/path?q=1#fragment")
+        self.assertEqual(
+            got["CONFIG_JSON"],
+            '{"openai_api_key":"REDACTED_CREDENTIAL","mode":"train"}')
+        for name in ("GITHUB_VALUE", "AWS_VALUE", "SLACK_VALUE"):
+            self.assertNotEqual(got[name], planted[name])
+            self.assertIn(CE.REDACTED_CREDENTIAL, got[name])
+
+    def test_aws_runtime_configuration_passes_but_credentials_do_not(self):
+        planted = {
+            "AWS_REGION": "us-west-2",
+            "AWS_DEFAULT_REGION": "us-east-1",
+            "AWS_ENDPOINT_URL": "https://s3.internal",
+            "AWS_SECRET_ACCESS_KEY": "secret",
+            "AWS_ACCESS_KEY_ID": "AKIAIOSFODNN7EXAMPLE",
+            "AWS_SESSION_TOKEN": "session",
+        }
+        names = list(planted)
+        probe = ("import json, os; print(json.dumps({n: os.environ.get(n) "
+                 "for n in " + repr(names) + "}))")
+        with mock.patch.dict(os.environ, planted, clear=True):
+            rc, out, err = U.run([sys.executable, "-c", probe])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out), {
+            "AWS_REGION": "us-west-2",
+            "AWS_DEFAULT_REGION": "us-east-1",
+            "AWS_ENDPOINT_URL": "https://s3.internal",
+            "AWS_SECRET_ACCESS_KEY": None,
+            "AWS_ACCESS_KEY_ID": None,
+            "AWS_SESSION_TOKEN": None,
+        })
+
     def test_only_explicit_constructed_swarm_values_are_passed(self):
         planted = {"SWARM_DEP_RESULT": "ambient-dependency",
                    "SWARM_UNIT_CUSTOM": "ambient-unit"}
@@ -168,16 +219,52 @@ class TestEnvironmentContainment(unittest.TestCase):
             "SWARM_DEP_OPENAI_API_KEY": "/trusted/attempt-1"})
 
     def test_spawn_environments_come_from_the_containment_module(self):
-        offenders = []
-        for path in sorted(SCRIPTS.glob("*.py")):
-            for call, owner, aliases in _subprocess_calls(path):
-                if not _env_is_from_child_module(call, owner, aliases):
-                    offenders.append(f"{path.name}:{call.lineno}")
+        offenders = _spawn_offenders(SCRIPTS)
         self.assertEqual(
             offenders, [],
-            "Coordinator subprocesses must pass env=child_env(...) or a "
-            "single local assigned from child_env(...):\n  "
+            "Coordinator subprocesses must pass env=child_env(...) directly; "
+            "wrappers require a deliberate structural-test exception:\n  "
             + "\n  ".join(offenders))
+
+    def test_direct_import_alias_is_recognized(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "launcher.py").write_text(
+                "from child_environment import child_env as contained\n"
+                "from subprocess import Popen as launch\n"
+                "launch(['true'], env=contained())\n")
+            self.assertEqual(_spawn_offenders(root), [])
+
+    def test_shadowed_direct_import_alias_is_an_offender(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "launcher.py").write_text(
+                "from child_environment import child_env as contained\n"
+                "import subprocess\n"
+                "def contained():\n"
+                "    return {'OPENAI_API_KEY': 'credential'}\n"
+                "subprocess.Popen(['true'], env=contained())\n")
+            self.assertEqual(_spawn_offenders(root), ["launcher.py:5"])
+
+    def test_mutating_environment_wrapper_is_an_offender(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "launcher.py").write_text(
+                "import child_environment as CE\n"
+                "import subprocess\n"
+                "env = CE.child_env()\n"
+                "env['OPENAI_API_KEY'] = 'credential'\n"
+                "subprocess.Popen(['true'], env=env)\n")
+            self.assertEqual(_spawn_offenders(root), ["launcher.py:5"])
+
+    def test_bare_spawn_in_nested_module_is_an_offender(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            nested = root / "nested"
+            nested.mkdir()
+            (nested / "launcher.py").write_text(
+                "import subprocess\nsubprocess.Popen(['true'])\n")
+            self.assertEqual(_spawn_offenders(root), ["nested/launcher.py:2"])
 
     def test_path_policy_git_helper_uses_the_same_denylist(self):
         with tempfile.TemporaryDirectory() as d:

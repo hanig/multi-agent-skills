@@ -11,6 +11,8 @@ latter is the cheaper failure mode.
 """
 
 import os
+import re
+from urllib.parse import urlsplit, urlunsplit
 
 
 # Spell out credentials known to be present in coordinator environments even
@@ -23,6 +25,16 @@ DENIED_ENV_NAMES = frozenset({
     "CLAUDE_CODE_MESSAGING_TOKEN",
     # Present in this coordinator environment and contains URL userinfo.
     "SENTRY_DSN_NXTRAY",
+    # AWS runtime configuration (region, profile, endpoints) passes. These
+    # names either contain credentials or point directly to their source.
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_SECURITY_TOKEN",
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
     # These variables grant access to credential agents or credential caches.
     "SSH_AUTH_SOCK",
     "GPG_AGENT_INFO",
@@ -32,12 +44,6 @@ DENIED_ENV_NAMES = frozenset({
     # module filtered it, defeating containment from the far side.
     "SBATCH_GET_USER_ENV",
 })
-
-DENIED_ENV_PREFIXES = (
-    # AWS uses both credential-shaped and innocuous names, but allowing any
-    # AWS_* name makes a future credential spelling a leak-by-default.
-    "AWS_",
-)
 
 DENIED_ENV_SUFFIXES = (
     "_API_KEY",
@@ -52,6 +58,20 @@ DENIED_ENV_SUFFIXES = (
     "_DSN",
 )
 
+# DECLARED LIMIT: these are deliberately lexical, documented credential
+# formats rather than entropy guesses. Arbitrary JSON, base64 and bespoke
+# values are opaque here. Trying to infer secrets from those formats would
+# create false positives that silently break jobs, so additions to this list
+# require a stable credential syntax. Boundaries avoid matching the common
+# shapes inside words.
+CREDENTIAL_VALUE_PATTERNS = tuple(map(re.compile, (
+    r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]+",
+    r"(?<![A-Za-z0-9])gh[po]_[A-Za-z0-9_]+",
+    r"(?<![A-Z0-9])AKIA[A-Z0-9]{8,}",
+    r"(?<![A-Za-z0-9])xox[baprs]-[A-Za-z0-9-]+",
+)))
+REDACTED_CREDENTIAL = "REDACTED_CREDENTIAL"
+
 
 def _constructed_name(name):
     return name.startswith(("SWARM_UNIT_", "SWARM_DEP_"))
@@ -60,8 +80,30 @@ def _constructed_name(name):
 def _denied_name(name):
     name = name.upper()
     return (name in DENIED_ENV_NAMES
-            or name.startswith(DENIED_ENV_PREFIXES)
             or name.endswith(DENIED_ENV_SUFFIXES))
+
+
+def _redact_url_userinfo(value):
+    """Remove URL userinfo while preserving the rest of a usable URL."""
+    try:
+        parsed = urlsplit(value)
+        has_userinfo = (parsed.username is not None
+                        or parsed.password is not None)
+    except (UnicodeError, ValueError):
+        return value
+    if not parsed.netloc or not has_userinfo:
+        return value
+    # Split on the final @ so an encoded or literal @ in userinfo cannot leave
+    # a credential fragment behind. Keep host spelling, IPv6 brackets and port.
+    netloc = parsed.netloc.rsplit("@", 1)[-1]
+    return urlunsplit(parsed._replace(netloc=netloc))
+
+
+def _sanitized_value(value):
+    value = _redact_url_userinfo(value)
+    for pattern in CREDENTIAL_VALUE_PATTERNS:
+        value = pattern.sub(REDACTED_CREDENTIAL, value)
+    return value
 
 
 def child_env(extra=None):
@@ -78,9 +120,15 @@ def child_env(extra=None):
 
     This contains process environment inheritance only. It cannot isolate
     same-uid filesystem configuration or credentials, nor credentials
-    independently inherited by a Paseo daemon.
+    independently inherited by a Paseo daemon. Value inspection is bounded to
+    URL userinfo and known provider-key syntax. Arbitrary secrets inside JSON,
+    base64 or bespoke formats cannot be detected without false positives that
+    break unrelated jobs; entropy heuristics and general structured-value
+    parsing deliberately do not belong at this boundary. The Paseo daemon's
+    independent credential supply already makes this boundary porous.
     """
-    out = {name: value for name, value in os.environ.items()
+    out = {name: _sanitized_value(value)
+           for name, value in os.environ.items()
            if not _constructed_name(name) and not _denied_name(name)}
     if extra:
         for name, value in extra.items():
