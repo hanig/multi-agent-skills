@@ -5,12 +5,18 @@ what you can look up"; tickets.py enforces "every unit maps to an issue and
 back". These test the rules, not the plumbing.
 """
 import ast
+import contextlib
+import http.server
 import json
 import os
 import re
+import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -1023,6 +1029,19 @@ def _vendored():
     return [n for n in _skill_dirs() if not n.startswith("hanig-")]
 
 
+def _doctor_sections(path):
+    """bin/doctor split by the headers it prints, so a rule can apply to one
+    part of it. Derived from the file's own output, never from line numbers,
+    which is the same reason vendoredness is read off the tree."""
+    out, cur = {}, "(preamble)"
+    for line in path.read_text().splitlines():
+        m = re.match(r"printf '\\n=== (.+?) ===\\n'", line.strip())
+        if m:
+            cur = m.group(1)
+        out.setdefault(cur, []).append(line)
+    return out
+
+
 class TestVendoredSkillsAreNotOursToDelete(unittest.TestCase):
     """19c5171 vendored eight skills from another author's repo verbatim, and
     install.sh stamped them with the same ownership marker it writes on the
@@ -1198,15 +1217,43 @@ class TestVendoredSkillsAreNotOursToDelete(unittest.TestCase):
         """A list of vendored names in the installer would rot the first time
         skills/ changed, and rot silently in the direction that deletes. The
         classification is the hanig- namespace applied to whatever is on disk,
-        so no executable line may name a specific vendored skill."""
-        for path in (ROOT / "install.sh", ROOT / "bin" / "doctor"):
-            code = [l for l in path.read_text().splitlines()
-                    if not l.lstrip().startswith("#")]
-            for name in _vendored():
-                offenders = [l for l in code if name in l]
-                self.assertEqual(offenders, [],
-                                 f"{path.name} names {name} in code: "
-                                 f"{offenders}")
+        so no executable line may name a specific vendored skill.
+
+        Scoped to the OWNERSHIP code rather than the whole file, because the
+        guard was written as a substring search and one vendored skill is
+        named after an external program. ARC-265 added a PREREQUISITES section
+        that has to say `paseo` -- the binary swarm.py looks for on PATH -- and
+        the path `~/.agent-bus/models.json`. Neither is a claim about who
+        wrote a skill, which is the only thing this rule is about, and the
+        assertions below keep the classification itself out of that section so
+        the exemption cannot be used to smuggle a hardcoded list back in."""
+        code = [l for l in (ROOT / "install.sh").read_text().splitlines()
+                if not l.lstrip().startswith("#")]
+        sections = _doctor_sections(ROOT / "bin" / "doctor")
+        self.assertIn("PREREQUISITES", sections,
+                      "the exempt section does not exist, so exempting it "
+                      "hides nothing and this test has drifted")
+        for name, lines in sections.items():
+            if name == "PREREQUISITES":
+                # $MARKER and $OWN_PREFIX are the only two inputs the
+                # ownership verdict has, so an exempt section that touches
+                # neither cannot be classifying anything.
+                for var in ("$MARKER", "OWN_PREFIX"):
+                    self.assertNotIn(
+                        var, "\n".join(lines),
+                        f"skill ownership has moved into {name}, which is "
+                        f"exempt from the no-hardcoded-names rule")
+                continue
+            code += [l for l in lines if not l.lstrip().startswith("#")]
+        joined = "\n".join(code)
+        self.assertIn("vendored (installed by us", joined,
+                      "the classification is no longer where this test "
+                      "checks it")
+        for name in _vendored():
+            offenders = [l for l in code if name in l]
+            self.assertEqual(offenders, [],
+                             f"install.sh or bin/doctor names {name} in "
+                             f"ownership code: {offenders}")
         self.assertTrue(_vendored(), "nothing vendored: this test proves "
                                      "nothing, and the guard is untested")
 
@@ -2281,6 +2328,290 @@ class TestAnAbsentReadBackCannotClaimSync(unittest.TestCase):
         self.assertEqual(mods & {"urllib", "http", "requests", "socket",
                                  "httpx", "ssl"}, set())
 
+
+DOCTOR = ROOT / "bin" / "doctor"
+
+
+class _Health(http.server.BaseHTTPRequestHandler):
+    """The one route the paseo skill documents as liveness."""
+    protocol_version = "HTTP/1.0"
+
+    def do_GET(self):
+        if self.path == "/api/health":
+            body = b'{"ok":true}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_error(404)
+
+    def log_message(self, *a):
+        pass
+
+
+@contextlib.contextmanager
+def _answering_daemon():
+    """A real listener on a real ephemeral port, so the daemon branch is
+    exercised on a host that has never had Paseo installed."""
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _Health)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        yield "127.0.0.1:%d" % srv.server_address[1]
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+@contextlib.contextmanager
+def _silent_listener():
+    """Accepts the connection out of the backlog and answers nothing. This is
+    what a hung daemon looks like from outside, and it is the shape that has
+    to be BOUNDED rather than waited on."""
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    s.listen(1)
+    try:
+        yield "127.0.0.1:%d" % s.getsockname()[1]
+    finally:
+        s.close()
+
+
+def _closed_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return "127.0.0.1:%d" % port
+
+
+class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
+    """ARC-265. Paseo was installed, its daemon was answering on
+    127.0.0.1:6767 and ~/.paseo was populated -- and `command -v paseo` found
+    nothing, because the macOS CLI lives inside the app bundle. swarm.py gates
+    every kind=code unit on exactly that lookup, so the install left code
+    units refused; doctor said "installed, from here, still works" throughout,
+    because the only thing it had ever inspected was the skill tree. In the
+    same session `./bin/bus models` failed for want of
+    ~/.agent-bus/models.json, a file this repo ships at its root and installs
+    nowhere.
+
+    Both facts are simulated here through PATH, HOME, PASEO_LISTEN and
+    AGENT_BUS_HOME. Nothing below asks this host whether Paseo is installed,
+    so the four states are all reachable on the machine that had it and on one
+    that never will."""
+
+    # Everything doctor shells out to. The sandbox PATH is built from this
+    # list alone: leaving /usr/bin on it would put this host's python3 back
+    # within reach, and then the "could not determine" branch could not be
+    # reached on a machine that has one.
+    TOOLS = ("sh", "bash", "hostname", "git", "ls", "wc", "tr", "sed",
+             "basename", "readlink", "dirname", "mktemp", "sleep", "head",
+             "rm", "cat")
+
+    def _bin(self, d, cli=False, python=True):
+        """A PATH with nothing on it but what doctor needs, so this host's own
+        ~/.local/bin cannot answer a question the test is asking. `claude` is
+        stubbed only to stop doctor falling back to `bash -lic`, which is slow
+        and reads whatever profile the machine happens to have."""
+        b = Path(d) / "bin"
+        b.mkdir()
+        for name in (["paseo"] if cli else []) + ["claude"]:
+            p = b / name
+            p.write_text("#!/bin/sh\necho 0.0.0-test\n")
+            p.chmod(0o755)
+        for name in self.TOOLS:
+            real = shutil.which(name)
+            if real:
+                os.symlink(real, b / name)
+        if python:
+            os.symlink(sys.executable, b / "python3")
+        return b
+
+    def _doctor(self, d, cli=False, python=True, listen=None, bus_home=None,
+                home=None):
+        home = Path(home) if home else Path(d) / "home"
+        home.mkdir(parents=True, exist_ok=True)
+        env = {"PATH": str(self._bin(d, cli, python)),
+               "HOME": str(home),
+               "USER": os.environ.get("USER", "test"),
+               "PASEO_LISTEN": listen or _closed_port()}
+        if bus_home:
+            env["AGENT_BUS_HOME"] = str(bus_home)
+        r = subprocess.run(["sh", str(DOCTOR)], capture_output=True,
+                           text=True, cwd=ROOT, env=env, timeout=120)
+        self.assertIn("=== PREREQUISITES ===", r.stdout, r.stderr)
+        return r
+
+    @staticmethod
+    def _section(out):
+        return out.split("=== PREREQUISITES ===", 1)[1].split("\n===", 1)[0]
+
+    def _field(self, out, name):
+        for line in self._section(out).splitlines():
+            if line.strip().startswith(name + ":"):
+                return line.strip()[len(name) + 1:].strip()
+        self.fail("doctor printed no %r line:%s" % (name, self._section(out)))
+
+    # --- the four states, which are two facts and not one -------------------
+
+    def test_the_cli_on_PATH_is_reported_as_the_path_it_was_found_at(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _answering_daemon() as addr:
+                out = self._doctor(d, cli=True, listen=addr).stdout
+            self.assertEqual(self._field(out, "paseo"),
+                             str(Path(d) / "bin" / "paseo"))
+            self.assertNotIn("WARNING", self._section(out))
+
+    def test_a_live_daemon_with_no_CLI_on_PATH_is_said_in_those_words(self):
+        """The reported defect. A reinstall does not fix this and a symlink
+        does, so the report has to name the symlink rather than leave a reader
+        to conclude "not installed" from a CLI that is missing."""
+        with tempfile.TemporaryDirectory() as d:
+            with _answering_daemon() as addr:
+                out = self._doctor(d, cli=False, listen=addr).stdout
+            sec = self._section(out)
+            self.assertRegex(self._field(out, "paseo"), r"^NOT ")
+            self.assertIn("answering", self._field(out, "daemon"))
+            self.assertIn("WARNING", sec)
+            self.assertIn("daemon is up and the CLI is NOT on PATH", sec)
+            self.assertIn("reinstalling it will not", sec)
+            self.assertTrue("ln -s" in sec or "app bundle" in sec, sec)
+
+    def test_neither_the_CLI_nor_the_daemon_is_absence_not_ignorance(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = self._doctor(d, cli=False).stdout
+            daemon = self._field(out, "daemon")
+            self.assertIn("not running", daemon)
+            self.assertNotIn("COULD NOT DETERMINE", daemon)
+            self.assertRegex(self._field(out, "paseo"), r"^NOT ")
+            self.assertIn("kind=code units are refused", self._section(out))
+
+    def test_a_daemon_that_cannot_be_probed_reads_unknown_never_absent(self):
+        """survey.py's rule, in doctor's words: `unknown` is not `absent`, and
+        it always says which look failed. Reported as absent, this sends
+        someone to install what they have -- the errand ARC-244, ARC-245 and
+        ARC-251 each closed somewhere else."""
+        with tempfile.TemporaryDirectory() as d:
+            out = self._doctor(d, cli=False, python=False).stdout
+            daemon = self._field(out, "daemon")
+            self.assertIn("COULD NOT DETERMINE", daemon)
+            self.assertIn("python3", daemon, "unknown must say why")
+            self.assertNotIn("not running", daemon)
+            self.assertIn("UNKNOWN -- not absent", self._section(out))
+
+    def test_the_CLI_and_the_daemon_are_never_collapsed_into_one_verdict(self):
+        """A live daemon is what made the old report confident. It must not
+        put a path on the CLI line."""
+        with tempfile.TemporaryDirectory() as d:
+            with _answering_daemon() as addr:
+                out = self._doctor(d, cli=False, listen=addr).stdout
+            self.assertNotRegex(self._field(out, "paseo"), r"^/")
+
+    # --- the probe is bounded, because doctor is what you run when it hangs --
+
+    def test_a_listener_that_never_answers_does_not_hang_doctor(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _silent_listener() as addr:
+                start = time.monotonic()
+                out = self._doctor(d, cli=True, listen=addr).stdout
+                elapsed = time.monotonic() - start
+            daemon = self._field(out, "daemon")
+            self.assertNotIn("answering", daemon)
+            self.assertIn("listening", daemon)
+            self.assertLess(elapsed, 60, "the health probe was not bounded")
+
+    def test_the_probe_is_bounded_and_never_waits_on_the_child(self):
+        """`wait` is the unbounded step: a child parked in an uninterruptible
+        syscall does not die when it is killed, and waiting on it hands the
+        hang to doctor. survey.py's run() bounds the kill for the same reason
+        (REAP_SECONDS); this is that shape in sh."""
+        src = DOCTOR.read_text()
+        for guard in ("PROBE_TICKS", "REAP_TICKS", "kill -TERM", "kill -KILL"):
+            self.assertIn(guard, src, "%s missing" % guard)
+        code = [l for l in src.splitlines()
+                if not l.lstrip().startswith("#")]
+        self.assertEqual([l for l in code if re.search(r"\bwait\b", l)], [])
+
+    # --- the registry bus models refuses without -----------------------------
+
+    def _registry(self, where, text=None):
+        where.parent.mkdir(parents=True, exist_ok=True)
+        where.write_text(text if text is not None
+                         else (ROOT / "models.json").read_text())
+        return where
+
+    def test_a_present_registry_is_reported_with_what_is_in_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d) / "home"
+            reg = self._registry(home / ".agent-bus" / "models.json")
+            out = self._doctor(d, cli=True, home=home).stdout
+            field = self._field(out, "models registry")
+            self.assertIn(str(reg), field)
+            n = len(json.loads((ROOT / "models.json").read_text())["models"])
+            self.assertIn("(%d models)" % n, field)
+
+    def test_an_absent_registry_names_the_copy_this_repo_already_ships(self):
+        """`bus models` dies without it, skills are told to run `bus models
+        --json` to route, and the file that belongs there is in this
+        checkout. Saying only "missing" would leave the reader to find that
+        out."""
+        with tempfile.TemporaryDirectory() as d:
+            out = self._doctor(d, cli=True).stdout
+            sec, field = self._section(out), self._field(out, "models registry")
+            self.assertIn("NOT PRESENT", field)
+            self.assertIn(".agent-bus/models.json", field)
+            self.assertIn(str(ROOT / "models.json"), sec)
+
+    def test_an_unreadable_registry_is_unknown_and_not_missing(self):
+        if os.geteuid() == 0:
+            self.skipTest("root reads everything, so nothing is unreadable")
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d) / "home"
+            reg = self._registry(home / ".agent-bus" / "models.json")
+            reg.chmod(0o000)
+            try:
+                field = self._field(self._doctor(d, cli=True, home=home).stdout,
+                                    "models registry")
+            finally:
+                reg.chmod(0o600)
+            self.assertIn("COULD NOT DETERMINE", field)
+            self.assertNotIn("NOT PRESENT", field)
+
+    def test_a_registry_that_will_not_parse_is_not_reported_as_working(self):
+        """`bus models` fails on a corrupt file exactly as it fails on no
+        file: load_models_registry swallows JSONDecodeError and returns []."""
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d) / "home"
+            self._registry(home / ".agent-bus" / "models.json", "{oops")
+            field = self._field(self._doctor(d, cli=True, home=home).stdout,
+                                "models registry")
+            self.assertIn("UNUSABLE", field)
+
+    def test_the_registry_is_looked_for_where_bus_would_look_for_it(self):
+        """bin/bus honours AGENT_BUS_HOME, so a report about ~/.agent-bus on a
+        host that sets it would be a fact about a path nothing reads."""
+        with tempfile.TemporaryDirectory() as d:
+            elsewhere = Path(d) / "bus-elsewhere"
+            reg = self._registry(elsewhere / "models.json")
+            field = self._field(self._doctor(d, cli=True,
+                                             bus_home=elsewhere).stdout,
+                                "models registry")
+            self.assertIn(str(reg), field)
+
+    # --- diagnosing is not deploying ----------------------------------------
+
+    def test_the_installer_still_writes_nothing_outside_the_skill_prefix(self):
+        """ARC-265 deliberately stopped at diagnosis. install.sh has just been
+        made careful about what it claims to own (ARC-257), and writing into
+        ~/.agent-bus or ~/.local/bin is a wider footprint than installing
+        skills. If that is ever revisited it should be revisited on purpose,
+        which is what this test makes it."""
+        code = [l for l in (ROOT / "install.sh").read_text().splitlines()
+                if not l.lstrip().startswith("#")]
+        for path in (".agent-bus", ".local/bin"):
+            self.assertEqual([l for l in code if path in l], [],
+                             "install.sh reaches into %s" % path)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

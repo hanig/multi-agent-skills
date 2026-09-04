@@ -46,6 +46,265 @@ if [ -z "$cl" ]; then
 fi
 printf '  claude: %s\n' "${cl:-ABSENT}"
 
+# --- prerequisites the skills gate on ---------------------------------------
+#
+# ARC-265. doctor answered "installed, from here, still works" on a host where
+# two prerequisites were missing, because the only thing it had ever looked at
+# was the skill tree. Neither is visible from there, and a skill refuses on
+# each:
+#
+#   * swarm.py gates every kind=code unit on `command -v paseo`. The macOS
+#     install puts the CLI inside the app bundle, so the daemon can be up and
+#     ~/.paseo populated while the CLI is unreachable. That is the one state a
+#     reinstall does not fix and a symlink does, so the CLI and the daemon are
+#     reported as TWO facts here, never as one "is it installed".
+#   * `bus models` needs a registry at ~/.agent-bus/models.json. This repo
+#     ships models.json at its root and installs it nowhere, and the paseo
+#     skill tells skills to run `bus models --json` to route work.
+#
+# Every fact below is PRESENT, NOT PRESENT, or COULD NOT DETERMINE, and the
+# third always says why -- survey.py's set/unrestricted/unknown rule, in the
+# words a person reads. Reporting silence as absence is the quiet lie
+# ARC-244, ARC-245 and ARC-251 were each about.
+
+# A probe that can hang is worse than no probe: this is the first command run
+# on a new host, often over a link that is why you are running it. Two bounds,
+# the shape survey.py's run() uses -- the child carries its own deadline, and a
+# child that overruns is killed and then reaped under a SECOND, shorter bound,
+# because a process parked in an uninterruptible syscall (a dead automount, a
+# stale NFS handle) does not die when it is killed. Nothing here ever calls
+# `wait`: `wait` is precisely the unbounded step, and doctor would inherit the
+# hang it was killing the child to avoid.
+# PROBE_SECONDS is the deadline the probe holds itself to; PROBE_TICKS is the
+# one held over it from out here, and is deliberately the looser of the two
+# (~6s against a worst case of connect-then-read at 2s each), so a probe that
+# is merely slow is answered rather than killed and then read as unknown.
+PROBE_SECONDS=2
+PROBE_TICKS=30
+REAP_TICKS=10
+TICK=
+
+# One tick is 0.2s wherever sleep takes a fraction -- every sleep(1) anyone
+# runs this on -- and 1s where it does not. The loops below count TICKS, not
+# seconds, so a sleep that silently rejects the fraction makes doctor slower
+# and never makes it unbounded. The capability test IS the first tick, so
+# asking costs nothing.
+tick() {
+  if [ -z "$TICK" ]; then
+    if sleep 0.2 2>/dev/null; then TICK=0.2; else TICK=1; fi
+    return 0
+  fi
+  sleep "$TICK"
+}
+
+# bounded CMD... -- run it, put its first line in PROBE_OUT, and leave
+# PROBE_OUT empty if it did not come back. The completion signal is the output
+# file, not the process: a background child is a zombie until someone waits on
+# it, so `kill -0` would report a finished probe as still running.
+PROBE_OUT=
+PROBE_WHY=
+bounded() {
+  PROBE_OUT=
+  PROBE_WHY="it returned nothing"
+  _pt=$(mktemp 2>/dev/null) || {
+    PROBE_WHY="there is no mktemp here to give the probe a file to answer in"
+    return 1
+  }
+  "$@" >"$_pt" 2>/dev/null &
+  _pp=$!
+  _i=0
+  while [ ! -s "$_pt" ]; do
+    _i=$((_i + 1))
+    if [ "$_i" -gt "$PROBE_TICKS" ]; then
+      kill -TERM "$_pp" 2>/dev/null
+      _j=0
+      while [ "$_j" -lt "$REAP_TICKS" ] && kill -0 "$_pp" 2>/dev/null; do
+        _j=$((_j + 1)); tick
+      done
+      kill -KILL "$_pp" 2>/dev/null
+      PROBE_WHY="it did not answer and was killed"
+      break
+    fi
+    tick
+  done
+  PROBE_OUT=$(head -n 1 "$_pt" 2>/dev/null)
+  rm -f "$_pt"
+}
+
+# Ask the daemon whether it answers, rather than whether a port is open: a
+# listening socket is evidence that something is there, and only /api/health
+# is evidence that it is the thing the skills talk to. A literal loopback
+# address, never a name, so no probe can end up waiting on DNS.
+LISTEN="${PASEO_LISTEN:-127.0.0.1:6767}"
+HEALTH_PY='
+import socket, sys
+addr = sys.argv[1]
+host, sep, port = addr.rpartition(":")
+if not sep:
+    host, port = "127.0.0.1", addr
+if not host:
+    host = "127.0.0.1"
+try:
+    port = int(port)
+except ValueError:
+    print("unknown:PASEO_LISTEN is " + addr + ", which is not host:port")
+    raise SystemExit
+limit = float(sys.argv[2])
+try:
+    s = socket.create_connection((host, port), timeout=limit)
+except (socket.timeout, TimeoutError):
+    print("unknown:connecting to " + addr + " timed out after %gs" % limit)
+    raise SystemExit
+except OSError as e:
+    print("closed:" + ((e.strerror or "no connection").lower()))
+    raise SystemExit
+try:
+    s.settimeout(limit)
+    s.sendall(("GET /api/health HTTP/1.0\r\nHost: " + addr +
+               "\r\nConnection: close\r\n\r\n").encode())
+    head = s.recv(200).split(b"\r\n")[0].decode("ascii", "replace").strip()
+except OSError:
+    head = ""
+finally:
+    s.close()
+if " 200" in head:
+    print("answering:" + head)
+elif head:
+    print("listening:answered /api/health with " + head)
+else:
+    print("listening:did not answer /api/health")
+'
+DAEMON=unknown
+WHY="no python3 here to open a socket with"
+if command -v python3 >/dev/null 2>&1; then
+  bounded python3 -c "$HEALTH_PY" "$LISTEN" "$PROBE_SECONDS"
+  case "$PROBE_OUT" in
+    answering:*) DAEMON=up;      WHY=${PROBE_OUT#answering:} ;;
+    listening:*) DAEMON=partial; WHY=${PROBE_OUT#listening:} ;;
+    closed:*)    DAEMON=down;    WHY=${PROBE_OUT#closed:} ;;
+    unknown:*)   DAEMON=unknown; WHY=${PROBE_OUT#unknown:} ;;
+    *)           DAEMON=unknown; WHY="the probe failed: $PROBE_WHY" ;;
+  esac
+fi
+
+printf '\n=== PREREQUISITES ===\n'
+
+# The CLI, on PATH, because on PATH is the only form swarm.py can use: it
+# calls shutil.which and refuses the unit if that is None.
+cli=$(command -v paseo 2>/dev/null)
+elsewhere=
+if [ -z "$cli" ]; then
+  for c in "$HOME/.local/bin/paseo" "$HOME/bin/paseo" \
+           /usr/local/bin/paseo /opt/homebrew/bin/paseo \
+           "$HOME/Applications/Paseo.app/Contents/Resources/bin/paseo" \
+           /Applications/Paseo.app/Contents/Resources/bin/paseo; do
+    [ -x "$c" ] || continue
+    elsewhere="$c"; break
+  done
+fi
+if [ -n "$cli" ]; then
+  printf '  paseo: %s\n' "$cli"
+elif [ -z "${PATH:-}" ]; then
+  printf '  paseo: COULD NOT DETERMINE — PATH is empty, so finding nothing on it is not evidence of anything\n'
+elif [ -n "$elsewhere" ]; then
+  printf '  paseo: NOT ON PATH — the binary is at %s\n' "$elsewhere"
+else
+  printf '  paseo: NOT PRESENT — not on PATH, and not in any of the usual install locations\n'
+fi
+
+case "$DAEMON" in
+  up)      printf '  daemon: answering at %s (%s)\n' "$LISTEN" "$WHY" ;;
+  partial) printf '  daemon: something is listening at %s but %s\n' "$LISTEN" "$WHY" ;;
+  down)    printf '  daemon: not running — nothing is listening at %s (%s)\n' "$LISTEN" "$WHY" ;;
+  *)       printf '  daemon: COULD NOT DETERMINE at %s — %s\n' "$LISTEN" "$WHY" ;;
+esac
+
+# The combination is the finding, not either line on its own. Say it here in
+# the words that end the wrong errand, because the wrong errand -- reinstall
+# the app -- is what the previous version of this file sent someone on.
+if [ -n "$cli" ]; then
+  case "$DAEMON" in
+    down) printf '      NOTE: the CLI is here but nothing is serving %s. Start the\n' "$LISTEN"
+          printf '      daemon before dispatching a kind=code unit.\n' ;;
+  esac
+elif [ -z "${PATH:-}" ]; then
+  :
+else
+  case "$DAEMON" in
+    up|partial)
+      printf '      WARNING: the daemon is up and the CLI is NOT on PATH. Paseo is\n'
+      printf '      installed on this host, so reinstalling it will not change this;\n'
+      printf '      the CLI ships inside the app bundle and nothing puts it on PATH.\n'
+      printf '      swarm.py refuses every kind=code unit on `command -v paseo`, so\n'
+      printf '      those units are dead here until the binary is linked:\n'
+      if [ -n "$elsewhere" ]; then
+        printf '        mkdir -p %s/.local/bin && ln -s %s %s/.local/bin/\n' \
+          "$HOME" "$elsewhere" "$HOME"
+      else
+        printf '        (it was not in any of the usual places -- find it inside the\n'
+        printf '        app bundle and link it into a directory on your PATH)\n'
+      fi ;;
+    down)
+      printf '      NOTE: no CLI and no daemon, so kind=code units are refused here.\n'
+      printf '      On a cluster login node that is the correct state: a code unit\n'
+      printf '      runs a coding agent as a local process and does not belong there.\n' ;;
+    *)
+      printf '      NOTE: the CLI is not on PATH and the daemon could not be probed,\n'
+      printf '      so whether Paseo is installed here is UNKNOWN -- not absent.\n' ;;
+  esac
+fi
+
+# The registry `bus models` reads. AGENT_BUS_HOME because bin/bus honours it,
+# and a report about a path the tool does not use is worth nothing.
+BUS_HOME="${AGENT_BUS_HOME:-$HOME/.agent-bus}"
+REG="$BUS_HOME/models.json"
+COUNT_PY='
+import json, sys
+try:
+    d = json.loads(open(sys.argv[1]).read())
+except Exception as e:
+    print("bad:" + type(e).__name__)
+    raise SystemExit
+m = d.get("models") if isinstance(d, dict) else None
+print(("ok:%d" % len(m)) if isinstance(m, list) else "bad:no models list in it")
+'
+if [ -d "$BUS_HOME" ] && { [ ! -r "$BUS_HOME" ] || [ ! -x "$BUS_HOME" ]; }; then
+  # Not readable is not empty. Whether the file is in there cannot be seen
+  # from out here, and saying "absent" would be a guess wearing a fact's face.
+  printf '  models registry: COULD NOT DETERMINE — %s is not readable\n' "$BUS_HOME"
+elif [ -f "$REG" ] && [ -r "$REG" ]; then
+  if command -v python3 >/dev/null 2>&1; then
+    bounded python3 -c "$COUNT_PY" "$REG"
+  else
+    PROBE_OUT=; PROBE_WHY="there is no python3 here to read it with"
+  fi
+  case "$PROBE_OUT" in
+    ok:*)  printf '  models registry: %s (%s models)\n' "$REG" "${PROBE_OUT#ok:}" ;;
+    bad:*) printf '  models registry: %s — PRESENT BUT UNUSABLE (%s)\n' \
+             "$REG" "${PROBE_OUT#bad:}"
+           printf '      `bus models` fails on this exactly as it fails on no file at all.\n' ;;
+    *)     printf '  models registry: %s — present, but its CONTENTS COULD NOT BE DETERMINED: %s\n' \
+             "$REG" "$PROBE_WHY" ;;
+  esac
+elif [ -e "$REG" ] || [ -L "$REG" ]; then
+  printf '  models registry: COULD NOT DETERMINE — %s exists but is not a readable regular file\n' "$REG"
+else
+  printf '  models registry: NOT PRESENT at %s\n' "$REG"
+  printf '      `bus models` exits with "no models registry" without it, and the\n'
+  printf '      paseo skill tells skills to run `bus models --json` to pick a model,\n'
+  printf '      so routing has nothing to read.\n'
+  if [ -f "$REPO/models.json" ]; then
+    printf '      This repo ships the file that belongs there:\n'
+    printf '        mkdir -p %s && cp %s/models.json %s\n' "$BUS_HOME" "$REPO" "$REG"
+    printf '      install.sh deliberately does not: writing into ~/.agent-bus is a\n'
+    printf '      wider footprint than installing skills, and doctor is where this\n'
+    printf '      repo says what it has NOT taken ownership of.\n'
+  else
+    printf '      This repo normally ships models.json at its root and this checkout\n'
+    printf '      has none, so there is nothing here to copy.\n'
+  fi
+fi
+
 printf '\n=== SKILL STORES ===\n'
 printf '  personal prefix: %s' "$PREFIX"
 if [ -d "$PREFIX" ]; then
