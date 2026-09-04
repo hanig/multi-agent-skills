@@ -565,14 +565,25 @@ not tell us. A lock cannot be made stronger than the lock manager underneath
 it, so do not add a heartbeat or a TTL -- a TTL reintroduces exactly the
 stealing this design avoided.
 
-Two facts decide whether that limit is theoretical or live for you, and
-neither is settled here. The default state directory is `XDG_STATE_HOME`, else
-`~/.local/state` (`coordinator_paths.py`), so it sits under `$HOME` -- which on
-a cluster login node is usually a network filesystem. And the trials in the
-row above were same-node: two controllers on two different nodes sharing the
-filesystem is outside the tested topology and would need a cross-node test to
-certify. So the evidence establishes same-node exclusion, on a filesystem that
-may be the one where the guarantee does not hold.
+**On our three clusters this limit is LIVE, not theoretical.** Measured
+2026-09-03:
+
+| host | `$HOME` | filesystem |
+|---|---|---|
+| lambda | `/home/hani` | nfs |
+| chimera | `/home/hani` | nfs4 |
+| andromeda | `/mnt/weka/home/hgoodarzi` | wekafs |
+
+`XDG_STATE_HOME` is unset on all three, so the default state directory falls
+through to `~/.local/state` (`coordinator_paths.py`) -- confirmed nfs on lambda
+and chimera. The lock has been living on a network filesystem on every machine
+this skill is for.
+
+The trials in the row above were also same-node, which a local `flock` handles
+whatever the backing store is. Two controllers on two different nodes sharing
+the filesystem is outside the tested topology and would need a cross-node test
+to certify. So the evidence establishes same-node exclusion, collected on the
+filesystem where the guarantee is weakest.
 
 **The output claims' declared limits, in the same spirit.** The lease excludes
 two controllers over one STATE DIRECTORY. It says nothing about two state
@@ -618,10 +629,18 @@ base and green in your worktree is a claim about your change alone, not about
 the integration branch after a merge. Only running the suite on the merged tree
 answers that.
 
-If you need the guard to hold, put the state dir on local disk -- the fallback
-chain already ends at `$TMPDIR/hanig-swarm-state` -- or run one coordinator per
-plan from one node. `stat -f -c %T "$HOME"` on the host tells you which case
-you are in.
+If you need the guard to hold, run **one coordinator per plan from one node**,
+or put the state dir on local disk -- the fallback chain already ends at
+`$TMPDIR/hanig-swarm-state`, and `/tmp` is ext2/ext3 on lambda and chimera.
+
+Read the second option carefully before taking it. Local state removes the
+hazard by construction, because two nodes cannot share a lock they cannot both
+see -- but it also removes the sharing the lock existed to arbitrate. Any login
+node being able to `advance`, and cron advancing unattended, both need the
+state reachable from wherever the coordinator runs. On andromeda `/tmp` is
+overlayfs, so it is node-local AND ephemeral in a way the other two are not.
+There is no setting that is right everywhere; pick per host and write down
+which you picked.
 
 ## First real DAG, lambda 2026-08-28
 
