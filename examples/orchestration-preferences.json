@@ -1,0 +1,50 @@
+{
+  "_comment": "TEMPLATE, not the live file. Nothing in this repo reads it. The file every Paseo skill actually reads is ~/.paseo/orchestration-preferences.json; on the machine that runs agents, `cp examples/orchestration-preferences.json ~/.paseo/`. JSON has no comment syntax, so the reasoning lives in the `_`-prefixed keys below; the skills read `providers` and `preferences` and ignore the rest.",
+
+  "_contract": "skills/paseo/SKILL.md, 'Orchestration preferences'. `providers` maps the five role categories to provider strings passed straight to create_agent's `provider` field; `preferences` is a freeform string array read at startup and woven into agent prompts. Categories are fixed by that skill: impl, ui, research, planning, audit.",
+
+  "_source": "docs/plan-field-reports.md, 'Model routing, set 2026-09-01'.",
+
+  "_unverified": "Written on a machine with no Paseo and no ~/.paseo, so nothing here was dispatched. Every provider string is copied verbatim from an attested id (the examples in skills/paseo/SKILL.md, or an id in models.json, whose ids are <Provider>/<Model> per bin/bus match_observed). A string being well-formed is not proof an agent comes up on that model: confirm on the host with `paseo run` + `paseo inspect`, or `bus launch --expect-provider/--expect-model`, which refuses a worker whose inspected provider differs from the plan.",
+
+  "providers": {
+    "impl": "codex/gpt-5.6-sol",
+    "ui": "claude/opus",
+    "research": "codex/gpt-5.6-luna",
+    "planning": "claude/opus",
+    "audit": "codex/gpt-5.6-luna"
+  },
+
+  "preferences": [
+    "Coding agents run at thinking high. This file cannot set it: `providers` values are provider strings only. Pass `settings: { thinkingOptionId: ... }` to create_agent, or `--thinking high` to `paseo run`.",
+    "Sol coordinates and integrates. Sol does NOT review. An author reviewing itself is what the roster exists to prevent, so never place the impl provider in a review, audit, or committee-review seat.",
+    "A real review gate is `review.py` over `reviewers.json` (kimi-k2.7-code, luna, glm-5.3) - three models across two API providers, prompted to refute. A single `audit` agent launched from this file is one opinion and is not a substitute for it.",
+    "Committee work is `committee.py` (luna, deepseek, kimi; 2-3 members). DeepSeek plans well and concedes under challenge but over-claims as a refuter, so it sits on the committee and in no gate profile.",
+    "Claude Opus is the right choice for anything artistic or human-skill-oriented: copywriting, naming, UX copy, visual design, styling. Codex is the workhorse for mechanical work.",
+    "When the category leaves room, or the user asks for efficient routing, run `~/.agent-bus/bin/bus models --json` and take the cheapest model that clears the bar. DeepSeek Flash is text-only: never send it images."
+  ],
+
+  "_judgement_calls": {
+    "impl": "SETTLED. Straight from the 2026-09-01 decision: coding agents are codex/gpt-5.6-sol, including start-a-sprint's workers, which previously used self-hosted DeepSeek Flash and native Luna.",
+
+    "ui": "CARRIED FORWARD, not re-decided. The 2026-09-01 decision says nothing about UI. claude/opus is the standing preference from the example in skills/paseo/SKILL.md and the note on claude/opus in models.json ('UI/design/artistic judgment per orchestration preferences').",
+
+    "planning": "JUDGEMENT CALL. The decision says Sol coordinates and integrates, which reads like planning - but paseo-committee draws its members from the planning and research categories, and its Phase 3 sends those same members the implementation diff to review. With impl = sol, a sol planning slot puts the author back in the review seat, which is the one thing the decision forbids. So planning is claude/opus: highest intelligence index in models.json (60.7) and a different provider from impl. Note this key does NOT select the decided committee (luna, deepseek, kimi) - that roster lives in reviewers.json's `committee` profile and runs through committee.py over API providers, a different mechanism from paseo-committee.",
+
+    "research": "JUDGEMENT CALL. codex/gpt-5.6-luna: luna sits on both the decided gate and the decided committee, so a luna research agent is consistent with the roster, and models.json credits it with stronger instruction following and image-capable inspection. Pairing it with claude/opus in planning also gives paseo-committee two providers to contrast, mirroring 'across two providers'. Counter-evidence, recorded rather than hidden: models.json calls kimi the 'default audit/research provider per orchestration preferences'. Kimi is not used here only because its single-string form is unverifiable - see _unmapped.kimi.",
+
+    "audit": "JUDGEMENT CALL, but the negative half is settled. NOT codex/gpt-5.6-sol, which is what the example in skills/paseo/SKILL.md has: sol writes the code, and the decision is explicit that sol does not review. Of the three decided gate models (kimi-k2.7-code, luna, glm-5.3), luna is the only one with an attested Paseo provider string. This key cannot express a three-model panel at all - see _unmapped.gate_and_committee_are_not_paseo."
+  },
+
+  "_unmapped": {
+    "thinking_high": "The decision's 'thinking high' is create_agent `settings.thinkingOptionId` / `paseo run --thinking high`, and this file has no slot for it. It is stated in `preferences` so it reaches prompts, but this file does not enforce it.",
+
+    "deepseek": "The committee's DeepSeek reaches Paseo as provider `pi` with model `deepseek-runai/deepseek-v4-flash-0731` - two fields (skills/start-a-sprint/SKILL.md; models.json, which warns the bare id times out Paseo's pi adapter). A category value is a single string, so that route cannot be written here. Left out rather than guessed: use committee.py, or pass provider and model explicitly.",
+
+    "kimi": "models.json ids are <Provider>/<Model>, so its kimi entry `kimi/kimi-code/k3-256k` is provider `kimi` plus model `kimi-code/k3-256k`. Whether create_agent's single `provider` field accepts the concatenated three-segment string is not verifiable without a daemon. It is a candidate to test on the host and adopt for `research`/`audit` if it works - not used above rather than guessed.",
+
+    "glm-5.3": "A decided gate model with no Paseo route anywhere in this repo: reviewers.json reaches it over OpenRouter as `z-ai/glm-5.3`. No Paseo provider string for it is attested here, and none is invented.",
+
+    "gate_and_committee_are_not_paseo": "'The review gate is kimi-k2.7-code, luna and glm-5.3' and 'the committee is luna, deepseek and kimi' describe profiles in skills/hanig-review-gate/reviewers.json, executed by review.py and committee.py against API endpoints. This file routes Paseo-launched agents, one provider string per role. The rosters are already encoded where they run; `audit` here is a one-agent approximation of the gate, not the gate."
+  }
+}

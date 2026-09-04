@@ -496,6 +496,49 @@ symlink is not evidence that we created it. Read a destructive command and
 dry-run it before trusting it, including one you wrote yourself, and especially
 then, because familiarity feels like knowledge.
 
+### Orchestration preferences, per machine
+
+Six vendored skills — `paseo`, `paseo-advisor`, `paseo-committee`,
+`paseo-handoff`, `paseo-loop` and `pi-fleet` — refuse to choose a provider
+until they have read `~/.paseo/orchestration-preferences.json`, and `agent-bus`
+names the same file as the policy layer over `bus models`. `skills/paseo/SKILL.md`
+is explicit that reading means an actual file read, and that no other skill may
+hardcode a provider string. So the routing decision lives in that one file, not
+in the skills — and this repo shipped the skills that need it without shipping
+an example of it.
+
+`examples/orchestration-preferences.json` is that example, carrying this
+project's routing decision of 2026-09-01 (`docs/plan-field-reports.md`, "Model
+routing"). Copy it into place on the machine that runs agents:
+
+```bash
+mkdir -p ~/.paseo && cp examples/orchestration-preferences.json ~/.paseo/
+```
+
+Nothing reads it from the repo. `install.sh` does not deploy it, because the
+live file is user-specific configuration and overwriting a machine's routing
+policy from a skill install is not a thing an installer should do.
+
+**Copying it is not the end of the job.** The file was written on a machine
+with no Paseo and no `~/.paseo`, so no value in it has ever been dispatched.
+Every provider string in it is copied verbatim from an attested id — the
+examples in `skills/paseo/SKILL.md`, or an id in `models.json` — but a
+well-formed string is not evidence that an agent comes up on the intended
+model. Confirm that separately, on the host, with `paseo run` plus
+`paseo inspect`, or with `bus launch --expect-provider/--expect-model`, which
+refuses a worker whose inspected provider does not match.
+
+Two things in the file are worth knowing before you rely on it. Three of the
+five categories are judgement calls — `impl` is settled, `ui` is carried
+forward unchanged, and `planning`, `research` and `audit` are readings of a
+decision that was not written in these terms; each says so in its
+`_judgement_calls` entry rather than presenting a guess as settled. And the
+decision does not fully fit: `audit` is one provider string, while the real
+review gate is three models across two API providers run by `review.py` over
+`reviewers.json`, and DeepSeek's Paseo route needs a provider *and* a model,
+which a one-string category cannot express. Those gaps are recorded in
+`_unmapped` instead of being papered over with invented strings.
+
 ---
 
 ## Deployment targets
@@ -576,6 +619,7 @@ skills/hanig-review-gate/   review.py, committee.py, reviewers.json, PROTOCOL.md
 skills/hanig-verified-workflow/  contract.py
 skills/hanig-portable-handoff/   handoff.py
 tests/                      stdlib unittest
+examples/                   reference config to copy elsewhere; nothing reads it here
 docs/probes/                measured environment data per cluster
 MEMORY.md                   portable project state; read this first
 ```
