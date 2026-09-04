@@ -265,7 +265,16 @@ an availability failure that fails closed, never a re-judgment.
 
 ### Model routing, set 2026-09-01
 
-Coding agents are `codex/gpt-5.6-sol` at thinking high, including
+Reasoning effort is per MODEL, revised 2026-09-04: `codex/gpt-5.6-sol`
+at **high**, `codex/gpt-5.6-luna` at **xhigh**, `claude/opus` at
+**high**. luna sits below the other two on `bus models`' measured
+intelligence, so it is asked for xhigh to compensate; asking the leaders
+for xhigh buys latency and not quality. `swarm.py`'s `THINKING_BY_MODEL`
+enforces this for code units, and nothing enforces it for a paseo skill
+dispatching from `orchestration-preferences.json`, which has no slot for
+effort -- there, claude/opus falls to its `auto` default.
+
+Coding agents are `codex/gpt-5.6-sol`, including
 `start-a-sprint`'s workers, which previously used self-hosted DeepSeek Flash
 and native Luna. Sol coordinates and integrates; sol does NOT review, because
 an author reviewing itself is what the roster exists to prevent. The review

@@ -101,6 +101,65 @@ class CodeUnitCase(unittest.TestCase):
         self.addCleanup(cm.__exit__, None, None, None)
 
 
+class TestEffortIsPerModelNotPerProject(unittest.TestCase):
+    """One project-wide thinking id was wrong once the roster held more than
+    one model. luna sits below sol and opus on measured intelligence and is
+    asked for xhigh to compensate; the leaders run at high, because asking
+    them for xhigh buys latency and not quality.
+
+    Every id was read off a live agent, not guessed: paseo answers an unknown
+    thinking id with an ERRORED agent, so a wrong value here fails at dispatch
+    rather than downgrading the work quietly."""
+
+    def test_the_two_leaders_run_at_high(self):
+        self.assertEqual(S.default_thinking_for({}), "high")
+        self.assertEqual(
+            S.default_thinking_for({"provider": "codex/gpt-5.6-sol"}), "high")
+        self.assertEqual(
+            S.default_thinking_for({"provider": "claude/opus"}), "high")
+
+    def test_luna_runs_at_xhigh(self):
+        self.assertEqual(
+            S.default_thinking_for({"provider": "codex/gpt-5.6-luna"}),
+            "xhigh")
+
+    def test_a_separate_model_field_resolves_the_same_way(self):
+        """`provider: codex, model: gpt-5.6-luna` reaches paseo identically to
+        `provider: codex/gpt-5.6-luna`, so the mapping must not apply to one
+        plan and miss its equivalent."""
+        self.assertEqual(
+            S.default_thinking_for({"provider": "codex",
+                                    "model": "gpt-5.6-luna"}), "xhigh")
+        self.assertEqual(
+            S.default_thinking_for({"provider": "codex",
+                                    "model": "gpt-5.6-sol"}), "high")
+
+    def test_the_opus_alias_and_its_expansion_agree(self):
+        """paseo expands claude/opus to claude-opus-5, so a plan written
+        either way must get the same effort."""
+        self.assertEqual(S.default_thinking_for({"provider": "claude/opus"}),
+                         S.default_thinking_for(
+                             {"provider": "claude/claude-opus-5"}))
+
+    def test_an_unknown_model_falls_back_rather_than_refusing(self):
+        """A model added to the roster tomorrow should dispatch at a sane
+        effort, not fail."""
+        self.assertEqual(
+            S.default_thinking_for({"provider": "somebody/new-model-9"}),
+            S.DEFAULT_AGENT_THINKING)
+
+    def test_a_unit_still_overrides_the_mapping(self):
+        u = {"provider": "codex/gpt-5.6-luna", "thinking": "low"}
+        self.assertEqual(u.get("thinking", S.default_thinking_for(u)), "low")
+
+    def test_an_explicit_empty_thinking_still_switches_it_off(self):
+        """The mapping must not resurrect the flag for a provider that has no
+        thinking option."""
+        for off in (None, ""):
+            u = {"provider": "codex/gpt-5.6-luna", "thinking": off}
+            self.assertFalse(u.get("thinking", S.default_thinking_for(u)))
+
+
 class TestTheRefusalWhenPaseoIsAbsent(unittest.TestCase):
     """The refusal the code-unit tests below step around, pinned here so
     that stepping around it cannot quietly become deleting it. It was
@@ -403,7 +462,9 @@ class TestTheDefaultAgent(unittest.TestCase):
                   if isinstance(n, ast.FunctionDef) and n.name == "_submit")
         body = ast.unparse(fn)
         self.assertIn("DEFAULT_AGENT_PROVIDER", body)
-        self.assertIn("DEFAULT_AGENT_THINKING", body)
+        # Effort is resolved per model now, so _submit calls the resolver
+        # rather than naming the project fallback directly.
+        self.assertIn("default_thinking_for", body)
         self.assertIn("--thinking", body)
 
     def test_a_unit_can_override_each_piece(self):
@@ -416,7 +477,7 @@ class TestTheDefaultAgent(unittest.TestCase):
         # provider and thinking fall back to the default; model has no default
         self.assertIn("u.get('provider') or DEFAULT_AGENT_PROVIDER",
                       body.replace('"', "'"))
-        self.assertIn("u.get('thinking', DEFAULT_AGENT_THINKING)",
+        self.assertIn("u.get('thinking', default_thinking_for(u))",
                       body.replace('"', "'"))
 
     def test_thinking_can_be_switched_off_for_a_provider_without_it(self):
