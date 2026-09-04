@@ -18,6 +18,9 @@ Python 3.8+, stdlib only.
 import json
 import os
 import re
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -25,6 +28,9 @@ ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = ROOT / "examples" / "orchestration-preferences.json"
 PASEO_SKILL = ROOT / "skills" / "paseo" / "SKILL.md"
 MODELS = ROOT / "models.json"
+BUS = ROOT / "bin" / "bus"
+PLAN = ROOT / "docs" / "plan-field-reports.md"
+README = ROOT / "README.md"
 LIVE_NAME = "orchestration-preferences.json"
 LIVE_PATH = "~/.paseo/" + LIVE_NAME
 
@@ -53,6 +59,56 @@ def attested_provider_strings():
     strings = set(re.findall(r"`([a-z]+/[a-z0-9.\-]+)`", section.group(1)))
     strings |= {m["id"] for m in json.loads(MODELS.read_text())["models"]}
     return strings
+
+
+def preferences_section():
+    """The 'Orchestration preferences' section of the paseo skill, alone.
+
+    Scoped on purpose: `thinkingOptionId` is a real key elsewhere in that
+    skill (on `create_agent`/`update_agent` `settings`), and the claim under
+    test is only that the PREFERENCES FILE has no slot for it."""
+    text = PASEO_SKILL.read_text()
+    section = re.search(r"^## Orchestration preferences$(.+?)^## ", text,
+                        re.M | re.S)
+    assert section, "skills/paseo/SKILL.md no longer has that section"
+    return section.group(1)
+
+
+def bus_help(*argv):
+    """`bin/bus ... --help`, with the bus root redirected at a throwaway dir.
+
+    Importing or running bin/bus mkdirs its root at module scope, so it never
+    gets to touch the real ~/.agent-bus from a test run."""
+    with tempfile.TemporaryDirectory() as home:
+        out = subprocess.run(
+            [sys.executable, str(BUS), *argv, "--help"],
+            capture_output=True, text=True, timeout=60,
+            env=dict(os.environ, AGENT_BUS_HOME=home),
+        )
+    return out.stdout + out.stderr
+
+
+def bus_call(body):
+    """Load bin/bus in a CHILD interpreter and run `body` against it.
+
+    A child rather than an import: bin/bus calls `os.umask(0o077)` and mkdirs
+    at module scope, and a umask change leaks into every other test in the
+    process. `body` prints one JSON object; this returns it."""
+    script = (
+        "import importlib.machinery, importlib.util, argparse, json\n"
+        "loader = importlib.machinery.SourceFileLoader('busmod', %r)\n"
+        "spec = importlib.util.spec_from_loader('busmod', loader)\n"
+        "bus = importlib.util.module_from_spec(spec)\n"
+        "loader.exec_module(bus)\n" % str(BUS)
+    ) + body
+    with tempfile.TemporaryDirectory() as home:
+        out = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True, timeout=60,
+            env=dict(os.environ, AGENT_BUS_HOME=home),
+        )
+    assert out.returncode == 0, "bin/bus probe failed: " + (out.stderr or "")[-2000:]
+    return json.loads(out.stdout)
 
 
 class TestItParses(unittest.TestCase):
@@ -159,6 +215,115 @@ class TestItIsObviouslyNotTheLiveFile(unittest.TestCase):
         readme = (ROOT / "README.md").read_text()
         self.assertIn("examples/" + LIVE_NAME, readme)
         self.assertIn(LIVE_PATH, readme)
+
+
+class TestEffortIsNotConfigurableHere(unittest.TestCase):
+    """ARC-263. `providers` is a provider string per category and effort is a
+    separate axis (`paseo run --thinking <id>` / `settings.thinkingOptionId`),
+    so this file cannot set effort and must not read as though it does.
+
+    These pin the negative half of the claim. If a vendored update grows an
+    effort slot, the disclaimers in the template, `README.md` and
+    `docs/plan-field-reports.md` become wrong, and this is where that surfaces
+    -- the same reason the category names are read out of the skill rather
+    than restated here."""
+
+    def test_the_skill_declares_only_providers_and_preferences(self):
+        example = re.search(r"```json\n(.+?)```", preferences_section(), re.S)
+        self.assertTrue(example, "the section no longer shows a JSON example")
+        self.assertEqual(set(json.loads(example.group(1))),
+                         {"providers", "preferences"})
+
+    def test_the_section_names_no_effort_key(self):
+        self.assertNotIn("thinking", preferences_section().lower())
+
+    def test_the_template_says_it_cannot_set_effort(self):
+        cfg = json.loads(TEMPLATE.read_text())
+        self.assertIn("CANNOT set it", " ".join(cfg["preferences"]))
+
+    def test_the_template_names_the_consequence_not_just_the_gap(self):
+        """A gap stated in the abstract gets read as harmless. The specific
+        consequence -- claude/opus dispatched from `ui`/`planning` runs at
+        `auto`, below the intended `high` -- is the part that stops someone
+        trusting the file to control effort."""
+        cfg = json.loads(TEMPLATE.read_text())
+        said = (" ".join(cfg["preferences"]) + " " +
+                " ".join(cfg["_unmapped"].values())).lower()
+        for fragment in ("auto", "claude/opus", "below"):
+            self.assertIn(fragment, said)
+
+
+class TestEffortIsVerifiableAtLaunch(unittest.TestCase):
+    """The other half: what cannot be configured can still be asserted.
+    `bin/bus` compares `paseo inspect`'s `Thinking` against an expectation, so
+    the docs point at verification instead of at a schema change. A
+    verification path that stops existing, or stops being named, is the
+    ARC-249 defect class -- so both ends are pinned."""
+
+    def test_the_launch_contract_compares_the_thinking_id(self):
+        got = bus_call(
+            "want = argparse.Namespace(expect_cwd=None, expect_branch=None,\n"
+            "                          expect_model=None, expect_provider=None,\n"
+            "                          expect_thinking='high')\n"
+            "print(json.dumps({\n"
+            "    'matched': bus.launch_contract_issues({'Cwd': '', 'Thinking': 'high'}, want),\n"
+            "    'mismatched': bus.launch_contract_issues({'Cwd': '', 'Thinking': 'auto'}, want),\n"
+            "}))\n"
+        )
+        self.assertEqual(got["matched"], [])
+        self.assertEqual(len(got["mismatched"]), 1)
+        self.assertIn("thinking=auto", got["mismatched"][0])
+        self.assertIn("expected high", got["mismatched"][0])
+
+    def test_an_uninspectable_thinking_id_fails_closed(self):
+        """`paseo inspect` not reporting `Thinking` must read as unmet, not as
+        satisfied. Measured 2026-09-04: it does report it, next to `Provider`
+        and `Model`. If a Paseo upgrade drops the field, this is the check
+        that has to notice rather than start passing everything."""
+        got = bus_call(
+            "want = argparse.Namespace(expect_cwd=None, expect_branch=None,\n"
+            "                          expect_model=None, expect_provider=None,\n"
+            "                          expect_thinking='high')\n"
+            "print(json.dumps({'absent': bus.launch_contract_issues({'Cwd': ''}, want)}))\n"
+        )
+        self.assertEqual(len(got["absent"]), 1)
+        self.assertIn("(missing)", got["absent"][0])
+
+    def test_await_still_takes_expect_thinking(self):
+        self.assertIn("--expect-thinking", bus_help("await"))
+
+    def test_launch_worker_will_not_launch_without_an_effort(self):
+        """Not merely accepted: required. A worker launched through it cannot
+        silently take the provider default."""
+        usage = " ".join(bus_help("launch-worker").split())
+        self.assertIn("--thinking THINKING", usage)
+        self.assertNotIn("[--thinking", usage)
+
+    def test_the_docs_name_the_mechanism(self):
+        """ARC-249 was four sites routing work through a `bus await` nothing
+        called. A verification path nobody is told about is the same defect,
+        so the three files that discuss effort have to point at it."""
+        for path in (TEMPLATE, PLAN, README):
+            self.assertIn("--expect-thinking", path.read_text(), str(path))
+
+
+class TestOurFilesNameRealBusCommands(unittest.TestCase):
+
+    def test_no_owned_file_invents_a_bus_subcommand(self):
+        """This repo shipped `bus launch --expect-provider/--expect-model` in
+        two places. There is no `bus launch`; the flags live on `await`, and
+        the launcher is `launch-worker`. A reader typing it gets an argparse
+        error, having been told the check does not exist."""
+        choices = re.search(r"\{(register[a-z,\-]+)\}", bus_help())
+        self.assertTrue(choices, "cannot read bus's subcommand list")
+        real = set(choices.group(1).split(","))
+        self.assertIn("launch-worker", real)
+        for path in (TEMPLATE, PLAN, README):
+            for named in re.findall(r"`(?:[\w./~-]*/)?bus ([a-z][a-z-]*)",
+                                    path.read_text()):
+                self.assertIn(named, real,
+                              "%s names `bus %s`, which does not exist"
+                              % (path.name, named))
 
 
 if __name__ == "__main__":
