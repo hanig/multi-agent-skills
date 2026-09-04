@@ -1,0 +1,4 @@
+interface:
+  display_name: "Start a Sprint"
+  short_description: "Launch guarded multi-agent ticket pods"
+  default_prompt: "Use $start-a-sprint to plan and launch the next approved sprint wave."

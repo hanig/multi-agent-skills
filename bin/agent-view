@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+"""agent-view — one fleet view across Kimi Code, Codex, Claude, and Paseo agents.
+
+Sources (all local, read-only):
+    Paseo      ~/.paseo/agents/*/*.json        supervised agents (codex/claude/kimi)
+    Kimi       ~/.kimi-code/session_index.jsonl + session dirs' wire mtimes
+    Codex      ~/.codex/sessions/**/rollout-*.jsonl mtimes
+    Bus        ~/.agent-bus/sessions/*.json    agents that registered on the bus
+
+Usage:
+    agent-view              one-shot table
+    agent-view --json       machine-readable rows
+    agent-view --web [port] serve an auto-refreshing HTML view (default port 7777)
+
+Status is heuristic for non-Paseo sources: "active" means file activity within
+the last 5 minutes, "idle" within 24h, older entries are hidden.
+"""
+
+import calendar
+import json
+import os
+import sys
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+
+ACTIVE_S = 300
+VISIBLE_S = 4 * 3600  # idle/closed entries older than this are hidden (--all extends)
+WINDOW = 7 * 24 * 3600 if "--all" in sys.argv else VISIBLE_S
+HOME = Path.home()
+PASEO_AGENTS = HOME / ".paseo" / "agents"
+KIMI_INDEX = HOME / ".kimi-code" / "session_index.jsonl"
+CODEX_SESSIONS = HOME / ".codex" / "sessions"
+BUS_SESSIONS = HOME / ".agent-bus" / "sessions"
+
+
+def age_s(ts: float) -> float:
+    return time.time() - ts
+
+
+def status_of(ts: float) -> str:
+    return "active" if age_s(ts) < ACTIVE_S else "idle"
+
+
+def fmt_age(ts: float) -> str:
+    s = int(age_s(ts))
+    if s < 60:
+        return f"{s}s ago"
+    if s < 3600:
+        return f"{s // 60}m ago"
+    if s < 86400:
+        return f"{s // 3600}h ago"
+    return f"{s // 86400}d ago"
+
+
+def collect_paseo() -> list[dict]:
+    rows = []
+    for path in PASEO_AGENTS.glob("*/*.json"):
+        try:
+            d = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        ts_str = (d.get("lastActivityAt") or d.get("updatedAt") or "").replace("Z", "+0000")
+        ts = None
+        for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+            try:
+                ts = calendar.timegm(time.strptime(ts_str, fmt))
+                break
+            except ValueError:
+                continue
+        if ts is None:
+            ts = path.stat().st_mtime
+        status = d.get("lastStatus", "?")
+        if age_s(ts) > WINDOW or status == "archived":
+            continue
+        rows.append({
+            "source": "paseo",
+            "name": (d.get("title") or d.get("id", "?"))[:44],
+            "tool": (d.get("runtimeInfo") or {}).get("model") or d.get("provider", "?"),
+            "status": d.get("lastStatus", "?"),
+            "activity": ts,
+            "cwd": d.get("cwd", ""),
+            "id": d.get("id", ""),
+            "provider": d.get("provider", ""),
+            "nativeId": (d.get("persistence") or {}).get("nativeHandle", ""),
+        })
+    return rows
+
+
+def collect_kimi() -> list[dict]:
+    rows = []
+    if not KIMI_INDEX.exists():
+        return rows
+    seen_dirs = set()
+    for line in KIMI_INDEX.read_text().splitlines():
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        sdir = Path(rec.get("sessionDir", ""))
+        if not sdir.is_dir() or str(sdir) in seen_dirs:
+            continue
+        seen_dirs.add(str(sdir))
+        wires = list(sdir.glob("agents/*/wire.jsonl"))
+        if not wires:
+            continue
+        ts = max(w.stat().st_mtime for w in wires)
+        if age_s(ts) > WINDOW:
+            continue
+        rows.append({
+            "source": "kimi",
+            "id": rec.get("sessionId", ""),
+            "name": rec.get("sessionId", "?")[:44],
+            "tool": "kimi-code",
+            "status": status_of(ts),
+            "activity": ts,
+            "cwd": rec.get("workDir", ""),
+        })
+    return rows
+
+
+def collect_codex() -> list[dict]:
+    rows = []
+    for path in CODEX_SESSIONS.glob("*/*/*/rollout-*.jsonl"):
+        ts = path.stat().st_mtime
+        if age_s(ts) > WINDOW:
+            continue
+        cwd = ""
+        try:
+            with path.open() as fh:
+                for line in fh:
+                    rec = json.loads(line)
+                    payload = rec.get("payload", {})
+                    if payload.get("cwd"):
+                        cwd = payload["cwd"]
+                        break
+        except (json.JSONDecodeError, OSError):
+            pass
+        sid = path.stem.split("-")[-5:]
+        rows.append({
+            "source": "codex",
+            "id": "-".join(sid),
+            "name": "codex-" + "-".join(sid)[:12],
+            "tool": "codex",
+            "status": status_of(ts),
+            "activity": ts,
+            "cwd": cwd,
+        })
+    return rows
+
+
+def collect_bus() -> list[dict]:
+    rows = []
+    for path in BUS_SESSIONS.glob("*.json"):
+        try:
+            d = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        ts = path.stat().st_mtime
+        rows.append({
+            "source": "bus",
+            "id": d.get("name", ""),
+            "name": d.get("name", "?"),
+            "tool": d.get("tool", "?"),
+            "status": status_of(ts),
+            "activity": ts,
+            "cwd": d.get("cwd", ""),
+        })
+    return rows
+
+
+def collect() -> list[dict]:
+    rows = collect_paseo() + collect_kimi() + collect_codex() + collect_bus()
+    order = {"active": 0, "running": 0, "working": 0}
+    rows.sort(key=lambda r: (order.get(r["status"], 1), -r["activity"]))
+    return rows
+
+
+def render_table(rows: list[dict]) -> str:
+    if not rows:
+        return "no agents seen in the last 24h"
+    out = [f"{'SRC':<7} {'NAME':<46} {'TOOL/MODEL':<22} {'STATUS':<9} {'ACTIVITY':<9} CWD"]
+    for r in rows:
+        out.append(f"{r['source']:<7} {r['name']:<46} {r['tool']:<22} {r['status']:<9} "
+                   f"{fmt_age(r['activity']):<9} {r['cwd']}")
+    return "\n".join(out)
+
+
+def render_html(rows: list[dict]) -> str:
+    trs = "".join(
+        f"<tr class='{r['status']}'><td>{r['source']}</td><td>{r['name']}</td>"
+        f"<td>{r['tool']}</td><td>{r['status']}</td>"
+        f"<td>{fmt_age(r['activity'])}</td><td>{r['cwd']}</td></tr>"
+        for r in rows
+    )
+    return f"""<!doctype html><meta http-equiv="refresh" content="10">
+<title>agent view</title>
+<style>
+body {{ background:#0d1117; color:#c9d1d9; font:14px -apple-system,monospace; margin:2rem }}
+table {{ border-collapse:collapse; width:100% }}
+td,th {{ padding:6px 12px; text-align:left; border-bottom:1px solid #21262d }}
+th {{ color:#8b949e }}
+tr.active td {{ color:#3fb950 }} tr.running td {{ color:#3fb950 }}
+h1 {{ font-size:18px }} small {{ color:#8b949e }}
+</style>
+<h1>agent view <small>refreshes every 10s · {time.strftime('%H:%M:%S')}</small></h1>
+<table><tr><th>src</th><th>name</th><th>tool/model</th><th>status</th><th>activity</th><th>cwd</th></tr>
+{trs}</table>"""
+
+
+def serve(port: int) -> None:
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = render_html(collect()).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    print(f"agent view on http://127.0.0.1:{port} (ctrl-c to stop)")
+    HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+
+
+def main() -> None:
+    args = sys.argv[1:]
+    if "--json" in args:
+        print(json.dumps(collect(), indent=1))
+    elif "--web" in args:
+        i = args.index("--web")
+        port = int(args[i + 1]) if i + 1 < len(args) else 7777
+        serve(port)
+    else:
+        print(render_table(collect()))
+
+
+if __name__ == "__main__":
+    main()

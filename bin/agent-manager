@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""agent-manager — curses fleet manager for local coding-agent sessions.
+
+Sections by harness (Kimi Code / Codex / Claude), rows from agent-view's
+collectors (direct sessions, Paseo-supervised agents, bus registry).
+
+Keys:
+    up/down (or k/j)   navigate
+    enter              attach: resume the selected session in its cwd
+    n                  new session in the selected row's harness and cwd
+    r                  refresh
+    q                  quit
+
+Attach hands the terminal over with exec — quitting the resumed session
+returns you to the shell, not to the manager.
+"""
+
+import curses
+import importlib.util
+import os
+import sys
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+
+BIN = Path(__file__).resolve().parent
+_loader = SourceFileLoader("agent_view", str(BIN / "agent-view"))
+_spec = importlib.util.spec_from_loader("agent_view", _loader)
+av = importlib.util.module_from_spec(_spec)
+sys.modules["agent_view"] = av
+_loader.exec_module(av)
+
+HARNESS_ORDER = ["kimi", "codex", "claude", "other"]
+HARNESS_TITLES = {"kimi": "Kimi Code", "codex": "Codex", "claude": "Claude", "other": "Other"}
+
+
+def harness_of(row: dict) -> str:
+    if row["source"] == "kimi":
+        return "kimi"
+    if row["source"] == "codex":
+        return "codex"
+    if row["source"] == "bus":
+        return row["tool"] if row["tool"] in HARNESS_ORDER else "other"
+    if row["source"] == "paseo":
+        p = row.get("provider", "")
+        return p if p in HARNESS_ORDER else "other"
+    return "other"
+
+
+def attach_command(row: dict):
+    """Shell command to attach to the row's session, or None."""
+    src, rid = row["source"], row.get("id", "")
+    if src == "paseo" and rid:
+        # supervised agent: attach to the live stream, no single-writer conflict
+        return f"paseo attach {rid}"
+    if src == "kimi" and rid:
+        return f"kimi -r {rid}"
+    if src == "codex" and rid:
+        return f"codex resume {rid}"
+    return None
+
+
+def new_command(harness: str):
+    return {"kimi": "kimi", "codex": "codex", "claude": "claude"}.get(harness)
+
+
+def hand_off(cmd: str, cwd: str) -> None:
+    """End curses and exec the command in the session's cwd."""
+    curses.endwin()
+    if cwd and os.path.isdir(cwd):
+        os.chdir(cwd)
+    print(f"\n→ {cmd}\n")
+    os.execvp("bash", ["bash", "-l", "-c", cmd])
+
+
+def build_rows():
+    rows = av.collect()
+    # a Paseo-supervised agent and its native session are the same session —
+    # keep the Paseo row (better title) and drop the duplicate direct row.
+    supervised = {r.get("nativeId") for r in rows if r["source"] == "paseo" and r.get("nativeId")}
+    rows = [r for r in rows
+            if not (r["source"] in ("kimi", "codex")
+                    and (r.get("id") in supervised
+                         or r.get("id", "").replace("session_", "") in supervised))]
+    for r in rows:
+        r["harness"] = harness_of(r)
+    return rows
+
+
+def draw(stdscr, rows, sel, message=""):
+    stdscr.erase()
+    h, w = stdscr.getmaxyx()
+    active = sum(1 for r in rows if r["status"] in ("active", "running", "working"))
+    header = f" agent manager · {active} active · {len(rows) - active} idle/closed (4h window)"
+    stdscr.addnstr(0, 0, header, w - 1, curses.A_BOLD)
+
+    y = 2
+    flat = []
+    for harness in HARNESS_ORDER:
+        group = [r for r in rows if r["harness"] == harness]
+        if not group:
+            continue
+        stdscr.addnstr(y, 0, f" {HARNESS_TITLES[harness]} ({len(group)})", w - 1,
+                       curses.A_UNDERLINE | curses.A_BOLD)
+        y += 1
+        for r in group:
+            flat.append(r)
+            dot = "●" if r["status"] in ("active", "running", "working") else "○"
+            tag = f"[{r['source']}]"
+            line = f"  {dot} {r['name']:<42} {r['tool']:<20} {tag:<8} {av.fmt_age(r['activity']):>8}  {r['cwd']}"
+            attr = curses.A_REVERSE if len(flat) - 1 == sel else curses.A_NORMAL
+            if r["status"] in ("active", "running", "working") and len(flat) - 1 != sel:
+                attr |= curses.A_BOLD
+            if y < h - 3:
+                stdscr.addnstr(y, 0, line, w - 1, attr)
+            y += 1
+
+    footer = " ↑/↓ navigate · enter attach · n new session · r refresh · q quit"
+    stdscr.addnstr(h - 2, 0, footer, w - 1, curses.A_DIM)
+    if message:
+        stdscr.addnstr(h - 1, 0, f" {message}", w - 1, curses.A_BOLD)
+    stdscr.refresh()
+    return flat
+
+
+def main(stdscr):
+    curses.curs_set(0)
+    rows = build_rows()
+    sel = 0
+    message = ""
+    force_armed_for = None  # row id that already got its active-writer warning
+    while True:
+        flat = draw(stdscr, rows, sel, message)
+        message = ""
+        if not flat:
+            stdscr.getch()
+            return
+        sel = max(0, min(sel, len(flat) - 1))
+        key = stdscr.getch()
+        if key in (curses.KEY_UP, ord("k")):
+            sel -= 1
+        elif key in (curses.KEY_DOWN, ord("j")):
+            sel += 1
+        elif key == ord("r"):
+            rows = build_rows()
+        elif key == ord("q"):
+            return
+        elif key in (curses.KEY_ENTER, 10, 13):
+            row = flat[sel]
+            cmd = attach_command(row)
+            if not cmd:
+                message = "no attachable session for this row (bus registry entries are metadata only)"
+                continue
+            busy = (row["source"] in ("kimi", "codex")
+                    and row["status"] in ("active", "running", "working"))
+            if busy and force_armed_for != row.get("id"):
+                force_armed_for = row.get("id")
+                message = ("looks active in another terminal (single-writer) — "
+                           "enter again to try anyway, or close its terminal first")
+                continue
+            hand_off(cmd, row.get("cwd", ""))
+            return  # exec replaces us; only reached if exec failed
+        elif key == ord("n"):
+            row = flat[sel]
+            cmd = new_command(row["harness"])
+            if cmd:
+                hand_off(cmd, row.get("cwd", ""))
+                return
+            message = "don't know how to launch this harness"
+
+
+if __name__ == "__main__":
+    if "--once" in sys.argv:  # smoke test without a terminal
+        for r in build_rows():
+            print(r["harness"], r["source"], r["status"], r["name"][:40], "->", attach_command(r))
+        sys.exit(0)
+    curses.wrapper(main)
