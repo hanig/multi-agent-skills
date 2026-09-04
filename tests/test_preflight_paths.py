@@ -44,6 +44,26 @@ def code_unit(repo):
             "outputs": ["out.txt"]}
 
 
+def paseo_stub_path(root, env):
+    """`env` with a stub `paseo` on PATH, for a plan holding a code unit.
+
+    `validate` refuses a kind=code plan when paseo does not resolve, and a
+    child process inherits PATH, so a test driving swarm.py in a subprocess
+    fails on that refusal rather than on the property it is about. Same PATH
+    seam as test_swarm.py::_fake_scheduler; tests/test_plan_shape.py explains
+    it and pins the refusal itself. The stub exits 127 because a dry run asks
+    Paseo for nothing: if anything ever calls it, that must fail loudly.
+    """
+    binp = Path(root) / "fakebin"
+    binp.mkdir(parents=True, exist_ok=True)
+    f = binp / "paseo"
+    f.write_text("#!/bin/sh\necho 'test stub, not a real paseo' >&2\n"
+                 "exit 127\n")
+    f.chmod(0o755)
+    return dict(env,
+                PATH=str(binp) + os.pathsep + env.get("PATH", ""))
+
+
 def fake_paseo_result(argv, root, agent="agent-123"):
     """Create the worktree that a mocked successful Paseo run promises."""
     source = argv[argv.index("--cwd") + 1]
@@ -203,7 +223,8 @@ class TestExternalPathPolicy(Base):
         git(repo, "commit", "-qm", "plan")
         before = subprocess.check_output(
             ["git", "-C", str(repo), "status", "--porcelain", "-z"])
-        env = dict(ENV, XDG_STATE_HOME=str(self.tmp / "state-home"))
+        env = paseo_stub_path(
+            self.tmp, dict(ENV, XDG_STATE_HOME=str(self.tmp / "state-home")))
         result = subprocess.run(
             [sys.executable, str(SWARM), "run", str(plan_path), "--dry-run"],
             cwd=repo, env=env, capture_output=True, text=True)

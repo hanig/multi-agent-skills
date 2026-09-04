@@ -3,11 +3,31 @@
 #
 # First thing to run on a new host, and the answer to "why isn't my skill
 # loading?". Read-only.
+#
+# Usage: doctor [--prefix DIR] | doctor DIR
+#
+# install.sh spells the install root --prefix and doctor took it positionally,
+# so the line install.sh prints to verify an install was wrong for any prefix
+# but the default -- it checked ~/.claude/skills whatever you had just
+# installed into. --prefix is now the spelling both take. The positional form
+# still works: it is in scripts and in shell history, and breaking it would
+# buy nothing.
 
 set -u
 
-PREFIX="${1:-$HOME/.claude/skills}"
+PREFIX="${HOME}/.claude/skills"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --prefix) PREFIX="$2"; shift 2 ;;
+    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+    -*) echo "unknown option: $1" >&2; exit 2 ;;
+    *) PREFIX="$1"; shift ;;
+  esac
+done
 MARKER=".installed-by-multi-agent-skills"
+# The authorship namespace: this repo writes hanig-*, and vendors everything
+# else it ships. Same rule install.sh classifies by, read off the tree.
+OWN_PREFIX="hanig-"
 REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
 printf '\n=== HOST ===\n'
@@ -59,7 +79,20 @@ else
       printf '  %-32s link -> %s\n' "$name" "$(readlink "$d")"
     elif [ -f "$d/$MARKER" ]; then
       v=$(sed -n 's/^version=//p' "$d/$MARKER" 2>/dev/null)
-      printf '  %-32s ours (version %s)\n' "$name" "${v:-?}"
+      # "ours" was true of the FILE and misleading about the lineage: this
+      # repo vendors eight skills verbatim from another author, and reporting
+      # them as ours at our commit hides whose work is installed -- and hides
+      # that --uninstall deliberately leaves them.
+      o=$(sed -n 's/^origin=//p' "$d/$MARKER" 2>/dev/null | head -n 1)
+      if [ -z "$o" ] && [ -d "$REPO/skills/$name" ]; then
+        case "$name" in "$OWN_PREFIX"*) o=authored ;; *) o=vendored ;; esac
+      fi
+      if [ "${o:-authored}" = vendored ]; then
+        printf '  %-32s vendored (installed by us, written upstream; version %s)\n' \
+          "$name" "${v:-?}"
+      else
+        printf '  %-32s ours (version %s)\n' "$name" "${v:-?}"
+      fi
     else
       printf '  %-32s foreign (not installed by this repo)\n' "$name"
     fi
@@ -92,7 +125,10 @@ done
 
 printf '\n=== SOURCE ===\n'
 printf '  repo: %s\n' "$REPO"
-if [ -d "$REPO/.git" ] && command -v git >/dev/null 2>&1; then
+# Ask git, never stat `.git`: it is a file in a worktree and a directory in a
+# clone, and this whole section vanished for every worktree.
+if command -v git >/dev/null 2>&1 &&
+   git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1; then
   printf '  commit: %s\n' "$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)"
   if [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]; then
     printf '  worktree: DIRTY\n'

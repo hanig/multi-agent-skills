@@ -18,6 +18,15 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "skills" / "hanig-swarm" / "scripts"
+# The scripts import one another by bare name (`unit` does `import paseo_io`),
+# so the directory has to be importable before any of them is loaded below.
+# Every other module in tests/ opens with exactly this line. This one did not,
+# and took the path for free from whichever sibling pytest imported first,
+# which made the largest file in the suite collectable only as part of a
+# whole-directory run: on its own, both `python3 -m pytest tests/test_swarm.py`
+# and `python3 tests/test_swarm.py` died in collection on "No module named
+# paseo_io", so the cheap way to iterate on it was seven minutes of everything.
+sys.path.insert(0, str(SCRIPTS))
 UNIT, SWARM = SCRIPTS / "unit.py", SCRIPTS / "swarm.py"
 CONVERGE = SCRIPTS / "converge.py"
 _cv = importlib.util.spec_from_file_location('_cv', CONVERGE)
@@ -640,6 +649,235 @@ class TestConvergence(Base):
                 json.dumps(self.CRIT), cwd=str(self.tmp))
         self.assertEqual(r.returncode, 4)
         self.assertIn("cannot read", r.stdout)
+
+
+class TestTheConvergenceGateIsWiredIn(Base):
+    """converge.py was 647 lines nothing called, so a reader assumed
+    convergence was handled when nothing evaluated it. It is now a DECLARED
+    per-unit gate on DONE, evaluated by the coordinator inside `advance`.
+
+    These drive the real caller, `swarm.advance`. Only `_check` is forced:
+    there is no Slurm here, and the sacct-and-outputs half of the predicate is
+    exactly what that stands in for. The convergence half is the code under
+    test, and it is reached only because that half said DONE -- which is the
+    whole point, since a run that spends its budget without improving passes
+    the scheduler AND the done predicate."""
+
+    CRIT = {"metric": "val_loss", "mode": "min", "threshold": 0.5,
+            "min_steps": 10000}
+
+    def flat(self):
+        return [{"step": s, "val_loss": 0.85 if s > 1000 else 1.5}
+                for s in range(0, 12001, 500)]
+
+    def falling(self):
+        return [{"step": s, "val_loss": round(max(0.30, 2.0 * 0.9 ** (s / 500)),
+                                              4)}
+                for s in range(0, 12001, 500)]
+
+    def unit(self, converge=None, **over):
+        cv = {"metrics": "metrics.jsonl", "criterion": dict(self.CRIT)}
+        cv.update(converge or {})
+        u = {"id": "train", "kind": "slurm", "runtime": "none",
+             "command": "true", "outputs": ["metrics.jsonl", "ckpt.pt"],
+             "write_scopes": ["train/"], "converge": cv}
+        u.update(over)
+        return u
+
+    def plan_for(self, u):
+        return {"name": "p", "units": [u, {
+            "id": "after", "kind": "slurm", "runtime": "none",
+            "command": "true", "outputs": ["o"], "needs": ["train"],
+            "write_scopes": ["after/"]}]}
+
+    # --- refused before anything is dispatched ---------------------------
+
+    def test_a_valid_criterion_is_accepted(self):
+        swarm.validate_plan(self.plan_for(self.unit()))
+
+    def test_a_typod_criterion_key_is_refused_at_PLAN_time(self):
+        """The reason the criterion is validated twice. Finding this after the
+        job finished means the GPU-hours are spent and there is no criterion
+        left to judge them against."""
+        bad = dict(self.CRIT)
+        bad["min_step"] = bad.pop("min_steps")
+        with self.assertRaises(swarm.PlanError) as c:
+            swarm.validate_plan(self.plan_for(
+                self.unit(converge={"criterion": bad})))
+        self.assertIn("min_steps", str(c.exception))
+
+    def test_a_metrics_file_that_is_not_a_declared_output_is_refused(self):
+        with self.assertRaises(swarm.PlanError) as c:
+            swarm.validate_plan(self.plan_for(
+                self.unit(converge={"metrics": "logs/m.jsonl"})))
+        self.assertIn("declared outputs", str(c.exception))
+
+    def test_an_unknown_converge_key_is_refused_not_ignored(self):
+        with self.assertRaises(swarm.PlanError) as c:
+            swarm.validate_plan(self.plan_for(
+                self.unit(converge={"budgett": 12000})))
+        self.assertIn("budgett", str(c.exception))
+
+    def test_a_single_diverge_object_instead_of_a_list_is_refused(self):
+        """A dict here is iterated over its KEYS, so the bound vanishes and
+        nothing is checked -- the same defect already paid for on `sbatch`."""
+        with self.assertRaises(swarm.PlanError) as c:
+            swarm.validate_plan(self.plan_for(self.unit(
+                converge={"diverge": {"metric": "train_loss", "above": 1e9}})))
+        self.assertIn("LIST", str(c.exception))
+
+    def test_a_code_unit_may_not_declare_convergence(self):
+        with self.assertRaises(swarm.PlanError) as c:
+            swarm.validate_plan({"name": "p", "units": [
+                {"id": "c", "kind": "code", "repo": "/tmp/r",
+                 "target_branch": "main", "mode": "bypass", "prompt": "x",
+                 "outputs": ["r"], "converge": {
+                     "metrics": "m.jsonl", "criterion": dict(self.CRIT)}}]})
+        self.assertIn("merged pull request", str(c.exception))
+
+    # --- the gate itself, through `advance` ------------------------------
+
+    def _advance(self, plan, rows, quiet=False, max_new=0):
+        """Run the coordinator over one finished attempt whose predicate
+        passed. Returns (report, dispatched, state)."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("sw_cv", SWARM)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        st = self.tmp / "cvstate"
+        st.mkdir(parents=True, exist_ok=True)
+        att = self.tmp / "cvruns" / "train" / "a1"
+        att.mkdir(parents=True, exist_ok=True)
+        mp = att / "metrics.jsonl"
+        mp.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        (att / "ckpt.pt").write_text("weights")
+        if quiet:
+            old = time.time() - (CONVERGE_QUIET_S + 60)
+            os.utime(str(mp), (old, old))
+        (st / "swarm-state.json").write_text(json.dumps(
+            {"schema_version": 1, "halted": None, "units": {
+                "train": {"state": "SUBMITTED", "job_id": "4242",
+                          "attempt_dir": str(att), "attempts": [str(att)],
+                          "gpu_hours": 0}}}))
+        ok, _ = m.acquire_lease(str(st))
+        self.assertTrue(ok)
+        self.addCleanup(m.release_lease, str(st))
+
+        # Third parameter is the pre-dispatch artifact basis that B1 pins in
+        # coordinator state and passes to the checker by value. This double
+        # stands in for an absent Slurm, so it accepts the basis and ignores
+        # it: what these tests exercise is the CONVERGENCE gate, which runs
+        # only after the unit's own predicate has already said DONE.
+        def forced_check(unit_dir, facts=None, artifact_basis=None):
+            receipt = json.dumps({"task_id": "train", "attempt_id": "a1",
+                                  "state": "DONE", "basis": {}})
+            (Path(unit_dir) / "receipt.json").write_text(receipt)
+            import hashlib
+            result = {"produced_head": None,
+                      "receipt_sha256": hashlib.sha256(
+                          receipt.encode()).hexdigest()}
+            return 0, "diagnostic", "", ("SWARM_CHECK_RESULT " + json.dumps(
+                result, sort_keys=True, separators=(",", ":")))
+
+        m._check = forced_check
+        rep, disp, _ = m.advance(plan, m.load_state(str(st)), str(st),
+                                 str(self.tmp / "cvruns"), False,
+                                 max_new=max_new)
+        return rep, disp, m.load_state(str(st))
+
+    def test_a_flat_run_that_spent_its_budget_does_not_reach_DONE(self):
+        """THE point of the gate. The scheduler says COMPLETED 0:0, the done
+        predicate finds every declared output present, and the loss never
+        moved. Before this was wired in, that closed the ticket."""
+        _rep, _d, state = self._advance(
+            self.plan_for(self.unit(converge={"budget": 12000})),
+            self.flat(), quiet=True)
+        us = state["units"]["train"]
+        self.assertEqual(us["converge_verdict"], "BUDGET_EXHAUSTED")
+        self.assertEqual(us["state"], "NEEDS_HUMAN",
+                         "a run that stopped without converging must not be "
+                         "DONE")
+
+    def test_a_converged_run_still_reaches_DONE(self):
+        """The counter-claim: the path that works must keep working, and an
+        undeclared gate must not appear by accident."""
+        _rep, _d, state = self._advance(
+            self.plan_for(self.unit(converge={"budget": 12000})),
+            self.falling(), quiet=True)
+        us = state["units"]["train"]
+        self.assertEqual(us["converge_verdict"], "CONVERGED")
+        self.assertEqual(us["state"], "DONE")
+
+    def test_a_unit_that_declares_no_criterion_is_judged_exactly_as_before(self):
+        u = self.unit()
+        u.pop("converge")
+        _rep, _d, state = self._advance(self.plan_for(u), self.flat(),
+                                        quiet=True)
+        us = state["units"]["train"]
+        self.assertEqual(us["state"], "DONE")
+        self.assertNotIn("converge_verdict", us)
+
+    def test_a_diverged_run_does_not_reach_DONE(self):
+        blew = [{"step": s, "train_loss": 1e12 if s > 3000 else 1.0,
+                 "val_loss": 0.4} for s in range(0, 12001, 500)]
+        _rep, _d, state = self._advance(
+            self.plan_for(self.unit(converge={
+                "diverge": [{"metric": "train_loss", "above": 1e9}]})),
+            blew, quiet=True)
+        us = state["units"]["train"]
+        self.assertEqual(us["converge_verdict"], "DIVERGED")
+        self.assertEqual(us["state"], "NEEDS_HUMAN")
+
+    def test_a_dependent_does_not_dispatch_on_a_run_that_merely_stopped(self):
+        """The consequence that makes the gate worth anything. A downstream
+        unit consuming that checkpoint must not start."""
+        _rep, dispatched, state = self._advance(
+            self.plan_for(self.unit(converge={"budget": 12000})),
+            self.flat(), quiet=True, max_new=None)
+        self.assertEqual(dispatched, 0)
+        self.assertNotEqual(state["units"].get("after", {}).get("state"),
+                            "SUBMITTED")
+
+    def test_the_verdict_is_reported_with_its_reasons(self):
+        rep, _d, _state = self._advance(
+            self.plan_for(self.unit(converge={"budget": 12000})),
+            self.flat(), quiet=True)
+        line = [l for l in rep if "convergence" in l]
+        self.assertTrue(line, rep)
+        self.assertIn("NOT convergence", " ".join(line),
+                      "the report must say the run stopped rather than "
+                      "finished")
+
+    def test_the_criterion_is_read_from_the_plan_not_from_the_attempt(self):
+        """A unit must not be able to weaken the standard it is judged
+        against. The write root is the job's own; the plan is not."""
+        u = self.unit(converge={"budget": 12000})
+        att = self.tmp / "cvruns" / "train" / "a1"
+        att.mkdir(parents=True, exist_ok=True)
+        (att / "unit.json").write_text(json.dumps(
+            {"task_id": "train", "kind": "slurm",
+             "converge": {"metrics": "metrics.jsonl",
+                          "criterion": {"metric": "val_loss", "mode": "min",
+                                        "threshold": 99.0}}}))
+        _rep, _d, state = self._advance(self.plan_for(u), self.flat(),
+                                        quiet=True)
+        self.assertEqual(state["units"]["train"]["state"], "NEEDS_HUMAN",
+                         "a criterion planted in the attempt directory was "
+                         "honoured; the plan's criterion is the only one")
+        # And structurally, on the CODE rather than the prose: the judge may
+        # read the plan's spec and the metrics path, and nothing the attempt
+        # itself wrote.
+        import ast
+        fn = next(n for n in ast.parse(SWARM.read_text()).body
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == "converge_verdict")
+        body = "\n".join(ast.unparse(st) for st in fn.body
+                          if not (isinstance(st, ast.Expr)
+                                  and isinstance(st.value, ast.Constant)))
+        for banned in ("unit.json", "receipt", "launch"):
+            self.assertNotIn(banned, body,
+                             f"the convergence judge reads {banned}, which "
+                             f"the attempt or the agent can write")
 
 
 class TestClosureByExclusion(unittest.TestCase):

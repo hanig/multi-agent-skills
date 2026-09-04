@@ -17,6 +17,55 @@
 
 Status verified against code on 2026-09-03, not against memory of the session.
 
+## Tracker
+
+Linear is the system of record for status. This doc holds the reasoning; the
+issue holds the state. Project: **Swarm skills: field-report hardening**
+(`linear.app/arc-projects/project/swarm-skills-field-report-hardening-4978bafcf9e3`),
+team Arc.
+
+Field-report items, and where each ended up. **Every one is now closed and on
+`dev`**, except the two that were never code:
+
+| Item | Issue | Item | Issue |
+|---|---|---|---|
+| C14 | ARC-228 | converge.py | ARC-234 |
+| B1 | ARC-229 | A4 | ARC-235 |
+| B6 | ARC-230 | B8 stale-edge | ARC-236 |
+| B4 + `scontrol` note | ARC-231 | A8 | ARC-237 |
+| B9 | ARC-232 | wandb | ARC-238 DEFERRED |
+| E2 | ARC-233 | paseo provider pinning | ARC-239 BLOCKED |
+
+`ARC-238` is a product decision plus an external service, so it waits for a
+human. `ARC-239` cannot be done from this machine: the `paseo-*` and `pi-fleet`
+skills are not installed here, so there is no file to edit.
+
+Nine more were filed from the work itself. Six are closed; three are not:
+
+| Issue | What | State |
+|---|---|---|
+| ARC-240 | 21 tests could not run where `paseo` is absent. The suite is now GREEN and mutation-verified five ways | done |
+| ARC-241 | Three further limits that lived only in code comments or `MEMORY.md` | done |
+| ARC-243 | The dispatch protocol forbids `git stash` AND the coordinator refuses a non-empty stack | done |
+| ARC-244 | `WALK_SECONDS` was COOPERATIVE, so a blocked `opendir()` never reached it. Now a child with a real kill deadline | done |
+| ARC-245 | `install.sh` and `doctor` stat `.git`, a FILE in a worktree, so installs from one recorded `version=unknown` | done |
+| ARC-249 | Four sites routed code units through `bus await`, which nothing ever called | done |
+| ARC-246 | `--mem` enforced nowhere; the account never checked against the partition, which B4 now makes possible | OPEN |
+| ARC-247 | `findings.json` required by the docs, checked by nothing | OPEN |
+| ARC-248 | The `flock` claim is now scoped to its evidence; whether `$HOME` is NFS on the clusters is unanswered | HALF |
+
+**Whole-suite baseline, `dev` at `cbc1b56`: 1298 passed, 0 failed, no
+deselection, 7m26s.** Before this cycle: 31 failed, 1102 passed, 64 minutes --
+of which ~59 minutes was one hang, and every failure was environmental.
+
+Green means something here now. ARC-240 broke `swarm.py` five ways and
+confirmed each break is caught, so a red result is a regression rather than
+noise. Two tests that asserted nothing were found and fixed on the way, plus
+one that could not fail at all.
+
+Each issue carries its own done-predicate, copied from the item below it. If
+you change a predicate here, change it there.
+
 ## Done
 
 | Item | What | Where |
@@ -36,6 +85,12 @@ Status verified against code on 2026-09-03, not against memory of the session.
 | E1 | Children no longer inherit the coordinator's credentials; exact-name denial | `child_environment.py` |
 | C11 | A worktree per code attempt, verified and bound by inode; TOCTOU closed | `swarm.py`, `worktree.py` |
 | C12 | The completion protocol is appended at dispatch: branch, base, remote, PR target | `swarm.py` |
+| C14 | The receipt lists untracked paths no declared output covers; audit-only | `worktree.py`, `report.py` |
+| B4 | Per-partition `allow_accounts`, `deny_accounts`, `max_mem_per_cpu_mb`, `qos`, `qos_grptres`, each `set`/`unrestricted`/`unknown` | `survey.py` |
+| B9 | The two partition questions `sinfo` cannot answer, with the association-QOS caveat | `hanig-project/SKILL.md` |
+| A8 | Interview audited against `SCHEMA_FIELDS`; `target_branch` and the retry contract were asked by the wrong name or not at all | `hanig-project/SKILL.md` |
+| A4 | The isolation described as the per-attempt worktree; the branch constraint C11 removed is no longer claimed | both `SKILL.md`s |
+| E2 | The two declared limits stated where a skill reader meets them, plus three contradicting claims fixed | `hanig-swarm/SKILL.md`, `README.md` |
 
 Plus one item nobody asked for, which the cycle forced: the launch record and
 the receipt are now **audit-only**, and authority lives in coordinator state.
@@ -44,13 +99,22 @@ design, which a committee rejected and which is no longer what the code does.
 
 ## Open, in the order to do them
 
-> Shipped to `origin/main` at `d8591d4` on 2026-09-03: items 10 and 13, the
-> authority work, the model routing, E1, C11 and C12. Everything below is what
-> remains. Status per item was verified against code, not recalled.
+> **Read the Tracker table above for what is still open.** C14, B4, B9, A8, A4
+> and E2 are DONE and live on `dev`; their sections are kept below because the
+> reasoning is why the fix looks the way it does, and deleting it would lose
+> the failure that paid for it. B1 and B6 are the two field-report items that
+> remain.
 >
-> C11 took four review rounds and 26 findings; C12 took one round and three,
-> all three against "can an agent actually FOLLOW this", which no test checks.
-> Both are worth remembering when estimating what is left.
+> Shipped to `origin/main` at `d8591d4`: items 10 and 13, the authority work,
+> the model routing, E1, C11 and C12. Everything since is on `dev` and has not
+> been pushed.
+>
+> On estimating: C11 took four review rounds and 26 findings; C12 took one
+> round and three, all three against "can an agent actually FOLLOW this",
+> which no test checks. The second wave cost less per item and found more --
+> nine issues that no field report contained, two of them (ARC-244, ARC-248)
+> more serious than most of the list they came from. Dispatching against a
+> written plan surfaces the plan's own blind spots.
 
 ### C14. The receipt flags untracked files not in `produces`. DO FIRST.
 

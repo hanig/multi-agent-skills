@@ -36,7 +36,7 @@ started (`413baca`), 30 files, ~4900 insertions.
 | Coordinator | `skills/hanig-swarm/scripts/swarm.py` | validate / run / advance / status / outbox / verify / merge / promote |
 | Worktree judging | `skills/hanig-swarm/scripts/worktree.py` | git predicate over a coordinator-supplied snapshot |
 | External paths | `skills/hanig-swarm/scripts/coordinator_paths.py` | state and runs live OUTSIDE the operated repo |
-| Convergence | `skills/hanig-swarm/scripts/converge.py` | 5 states — **nothing calls it** |
+| Convergence | `skills/hanig-swarm/scripts/converge.py` | 5 states; a unit's declared `converge` block gates DONE in `advance` |
 | Review gate | `skills/hanig-review-gate/` | kimi-k2.7-code, luna, glm-5.3 |
 | Committee | `skills/hanig-review-gate/scripts/committee.py` | luna, deepseek, kimi; 2-3 members |
 | End-of-run report | `skills/hanig-project/scripts/report.py` | verdict from evidence, not from stored state |

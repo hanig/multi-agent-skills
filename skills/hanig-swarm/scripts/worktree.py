@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Did a code unit actually produce a committed change?
+"""Did this attempt actually produce anything? Two transitions, one module.
 
 Split out of unit.py, which has a size guard precisely to stop it quietly
 becoming a library. Raising that guard because this tripped it would be how a
@@ -12,11 +12,27 @@ the worktree at all. And that predicate was never production evidence: the
 caller supplies the base, so HEAD may already be past the work, and a clean
 tree is clean precisely when nobody touched it.
 
+The second transition is the ARTIFACT one, and it is the same defect in the
+other half of the receipt. unit.py's premise is "isolation replaces
+attribution": the write root is exclusive, so an artifact found there was
+produced here. That inference is sound only if the write root was EMPTY of
+that artifact when the attempt was dispatched, and until B1 nothing ever
+checked it. Post-hoc observation cannot tell an input from an output -- a unit
+that declared its INPUT path as its output would record a file it never wrote
+as produced evidence and read DONE.
+
+`judge_artifacts` is therefore NOT the attribution machinery the committee's
+drift guard forbids. It never asks which process wrote a file. It asks the
+same question `judge_detail` asks of a repository -- did the thing we digested
+before the attempt started differ afterwards -- and it establishes the premise
+that isolation-based attribution has been resting on unchecked.
+
 Python 3.8+, standard library only.
 """
 import hashlib
 import json
 import os
+import posixpath
 from pathlib import Path
 
 # One per ATTEMPT: `launch-<attempt-id>.json`, beside the attempt rather than
@@ -104,6 +120,295 @@ def repo_status(runner, repo):
             i += 1
         entries.append(entry)
     return rc, entries
+
+
+# Porcelain v1's code for a path no index entry mentions. Every other code
+# describes a TRACKED path, and those are already named: a code unit's
+# judgment refuses on any of them, and a non-code unit's launch preflight
+# refuses before it starts. Dirt that git has never heard of is the class that
+# reached DONE with nobody mentioning it.
+UNTRACKED_STATUS = "??"
+
+# Enough to name the problem without turning a receipt into a directory
+# listing. One stubbed `cp` wrote one file; a loop that writes a thousand
+# needs the count, and `count` above `len(paths)` says the list was cut.
+MAX_STRAY_PATHS = 50
+
+
+def _declared_names(spec):
+    """Declared outputs as relative names, ready for prefix containment.
+
+    Compared by NAME rather than by resolved path, and that is not laziness.
+    Declared outputs are relative to the attempt write root, and a run root is
+    required to sit OUTSIDE every operated worktree, so the two roots can
+    never share an absolute prefix; resolving both sides would make every
+    declared artifact look stray and the exclusion would mean nothing.
+
+    A directory counts for everything under it. `results/table.csv` is what
+    the unit declared when it declared `results`, whereas the sibling
+    `results.bak/x` it never mentioned is dirt -- which is why the test is
+    ``p == d or p.startswith(d + "/")`` and not ``p.startswith(d)``.
+    """
+    names = set()
+    for rel in (spec.get("declared_outputs") or []):
+        name = posixpath.normpath(str(rel).replace(os.sep, "/")).strip("/")
+        if name and name != "." and not name.startswith(".."):
+            names.add(name)
+    return names
+
+
+def stray_untracked(runner, spec, launch_facts=None):
+    """Untracked paths in the execution workspace that no output declares.
+
+    18 bytes of debris named `phase0b/--reflink=auto` appeared from a stubbed
+    `cp` writing into its source directory instead of its destination, and the
+    unit still read DONE. `repo_status` had collected that path at launch
+    preflight; nothing carried it as far as the check. This is the carry.
+
+    NEW without needing a second baseline. Dispatch refuses a workspace that
+    is not clean: a code attempt gets a fresh per-attempt worktree at the base
+    commit, and a non-code unit with a clean-git policy is refused outright.
+    So `clean_at_launch` is READ rather than assumed, and when it is false
+    this looked at nothing, because an untracked path could then predate the
+    attempt and calling it new would be a guess.
+
+    The workspace comes from the coordinator's launch facts, never from the
+    spec's `repo` or from the launch record: the same rule `judge_detail`
+    follows, for the same reason. No facts means nothing trustworthy names a
+    workspace, so the answer is None -- "we did not look" is a different claim
+    from "we looked and it was clean", and a list cannot carry both.
+
+    AUDIT ONLY, like the rest of the receipt. Nothing may close, fail or admit
+    a unit on this list. It is read from a repository the agent owns, at a
+    moment nothing pins, and its only job is to stop debris being silent.
+    """
+    repo = (launch_facts or {}).get("execution_workspace")
+    if not repo or not (launch_facts or {}).get("clean_at_launch"):
+        return None
+    rc, entries = repo_status(runner, repo)
+    if rc != 0:
+        return {"workspace": repo, "paths": [], "count": 0,
+                "error": f"cannot read git status in {repo!r}"}
+    declared = _declared_names(spec)
+    stray = sorted(e["path"] for e in entries
+                   if e.get("status") == UNTRACKED_STATUS
+                   and not any(e["path"] == d or e["path"].startswith(d + "/")
+                               for d in declared))
+    return {"workspace": repo, "paths": stray[:MAX_STRAY_PATHS],
+            "count": len(stray)}
+
+
+def outputs_present(unit_dir, spec):
+    """Which declared outputs exist INSIDE the exclusive write root.
+
+    Paths are resolved under the run-dir and an escape is refused rather than
+    followed: a declared output that resolves outside the root is not isolated,
+    so nothing about it can be concluded.
+
+    Lives here rather than in unit.py because it answers the same question
+    `_declared_names` above answers for the execution workspace -- what did
+    this unit declare, and where does that name resolve -- and because both
+    halves of the artifact transition below have to agree about which paths
+    are in scope.
+    """
+    present, missing, escaped = [], [], []
+    root = Path(unit_dir).resolve()
+    for rel in spec.get("declared_outputs") or []:
+        p = (root / rel).resolve()
+        try:
+            p.relative_to(root)
+        except ValueError:
+            escaped.append(rel)
+            continue
+        (present if p.exists() else missing).append(rel)
+    return present, missing, escaped
+
+
+# --- the artifact transition (B1) ----------------------------------------
+#
+# The pre-dispatch digest is AUTHORITY: it decides admission. So it lives in
+# coordinator state, is captured before anything is dispatched, and reaches
+# this judge by value, exactly as `--launch-facts` does and for exactly the
+# same reason. It is never written into the launch record and never into the
+# attempt directory: a baseline the party being judged can rewrite is not a
+# baseline. Everything below is PURE -- it reads no file and runs no command,
+# so there is no second observation for a moving target to sit inside.
+ARTIFACT_BASIS_SCHEMA = 1
+
+# Machine-readable REASON, distinct from `outputs-absent` on purpose. "It
+# produced nothing" asks for another turn; "what is there is what was already
+# there, or nothing tells us what was there" is an evidence failure, and
+# prodding the agent again would answer the wrong question.
+REASON_ARTIFACT_UNCHANGED = "artifact-not-produced"
+
+
+def decode_artifact_basis(payload):
+    """Decode the coordinator-transported pre-dispatch digest. No disk."""
+    if not payload:
+        return None, ("no pre-dispatch artifact digest was supplied by the "
+                      "coordinator")
+    try:
+        basis = json.loads(payload)
+    except (TypeError, ValueError) as exc:
+        return None, f"the pre-dispatch artifact digest is malformed JSON: {exc}"
+    if not isinstance(basis, dict):
+        return None, "the pre-dispatch artifact digest is not a JSON object"
+    return basis, None
+
+
+def artifact_basis_problem(basis, unit_dir=None, spec=None):
+    """Return why a pre-dispatch artifact digest is unusable, or ``None``.
+
+    The identity check is what makes "pinned per ATTEMPT" structural rather
+    than a convention. `produced_head` was a unit-level scalar that was never
+    cleared, so a retry inherited the previous attempt's commit; a basis keyed
+    by attempt AND restating its own attempt id cannot be inherited by the
+    next one even if a caller hands it over.
+    """
+    if not isinstance(basis, dict):
+        return ("coordinator state holds no pre-dispatch digest of this "
+                "attempt's declared artifacts")
+    if basis.get("schema_version") != ARTIFACT_BASIS_SCHEMA:
+        return (f"the pre-dispatch artifact digest declares schema_version "
+                f"{basis.get('schema_version')!r}; this build understands "
+                f"{ARTIFACT_BASIS_SCHEMA}")
+    if unit_dir is not None and basis.get("attempt_id") != Path(unit_dir).name:
+        return (f"the pre-dispatch artifact digest belongs to attempt "
+                f"{basis.get('attempt_id')!r}, not {Path(unit_dir).name!r}")
+    expected_unit = (spec or {}).get("task_id") or (spec or {}).get("id")
+    if expected_unit and basis.get("unit_id") != expected_unit:
+        return (f"the pre-dispatch artifact digest belongs to unit "
+                f"{basis.get('unit_id')!r}, not {expected_unit!r}")
+    if not isinstance(basis.get("declared"), list):
+        return ("the pre-dispatch artifact digest names no declared artifact "
+                "list")
+    for key in ("absent", "escaped"):
+        if not isinstance(basis.get(key), list):
+            return f"the pre-dispatch artifact digest has no {key!r} list"
+    if not isinstance(basis.get("present"), dict):
+        return "the pre-dispatch artifact digest has no 'present' map"
+    return None
+
+
+def _artifact_changed(was, now):
+    """(changed, weak). ``changed`` is None when the two are incomparable.
+
+    Incomparable fails CLOSED at the caller. A basis digested by content and
+    an observation recorded by size+mtime describe the artifact with different
+    strength, and calling that pair "changed" would admit a unit on the
+    weaker of the two without saying so.
+    """
+    if not isinstance(was, dict) or not isinstance(now, dict):
+        return None, False
+    if was.get("error") or now.get("error"):
+        return None, False
+    before, after = was.get("sha256"), now.get("sha256")
+    if before and after:
+        return before != after, False
+    if before or after:
+        return None, False
+    for key in ("size", "mtime"):
+        if was.get(key) is None or now.get(key) is None:
+            return None, False
+    # The interim the field report named, reached ONLY for an artifact over
+    # the digest limit, and named as weak wherever it is used: a rewrite to
+    # the same length inside the same second is invisible to it.
+    return ((was["size"], was["mtime"]) != (now["size"], now["mtime"]), True)
+
+
+def artifact_transition_problem(basis, unit_dir, spec, observed):
+    """(problem, weak_paths). Are the declared artifacts evidence of production?
+
+    Fails closed at every gap, and there is deliberately no path that takes a
+    fresh look: a digest computed now would be a digest of whatever the run
+    left behind, which is the question rather than the answer.
+    """
+    problem = artifact_basis_problem(basis, unit_dir, spec)
+    if problem:
+        return (problem + ". Nothing distinguishes an artifact this attempt "
+                "wrote from one that was already there, and the basis is "
+                "never re-observed after the fact. Re-dispatch this unit "
+                "through the coordinator into a fresh attempt."), []
+    # The coordinator's list, not the spec's. `declared_outputs` lives in
+    # unit.json inside the attempt directory, so whoever is being judged can
+    # edit it; emptying it made every output "present" vacuously. Disagreement
+    # is refused rather than reconciled.
+    declared = [str(rel) for rel in basis["declared"]]
+    now_declared = [str(rel) for rel in (spec.get("declared_outputs") or [])]
+    if sorted(now_declared) != sorted(declared):
+        return (f"this attempt's spec now declares "
+                f"{', '.join(sorted(now_declared)) or 'nothing'}, but the "
+                f"coordinator digested {', '.join(sorted(declared)) or 'nothing'} "
+                f"before dispatch. The declaration changed after the baseline "
+                f"was taken, so the baseline does not cover what is being "
+                f"judged"), []
+    if not declared:
+        # Nothing to judge, which is NOT the same as nothing established, and
+        # is deliberately not turned into a refusal here. `validate_plan`
+        # already refuses a unit with no outputs, for the reason this would
+        # otherwise duplicate: a unit with nothing declared can never be
+        # judged done. Refusing it a second time from the artifact gate would
+        # be this change reaching past its own question. Same shape as
+        # `judge_detail` returning None for a unit that declared no repository.
+        return None, []
+    absent = set(str(rel) for rel in basis["absent"])
+    escaped = set(str(rel) for rel in basis["escaped"])
+    refusals, weak = [], []
+    for rel in declared:
+        if rel in escaped:
+            refusals.append(f"{rel} resolved outside the exclusive write root "
+                            f"before dispatch, so it was never isolated")
+            continue
+        if rel in absent:
+            continue          # nothing was there; whatever is there now is new
+        was = (basis["present"] or {}).get(rel)
+        if not isinstance(was, dict):
+            # Declared, and the basis says neither "absent" nor what it
+            # looked like. That is a hole in the baseline, not a pass.
+            refusals.append(f"{rel} is declared, and nothing was digested for "
+                            f"it before dispatch")
+            continue
+        changed, is_weak = _artifact_changed(was, (observed or {}).get(rel))
+        if changed is None:
+            refusals.append(
+                f"{rel} cannot be compared against its pre-dispatch digest "
+                f"(before: {was.get('method', was.get('error', 'nothing recorded'))!r}, "
+                f"now: {((observed or {}).get(rel) or {}).get('method', 'nothing recorded')!r})")
+        elif not changed:
+            refusals.append(
+                f"{rel} is identical to the artifact that was already there "
+                f"when this attempt was dispatched, so nothing shows this "
+                f"attempt produced it. A declared output that existed "
+                f"beforehand and did not change is an input")
+        elif is_weak:
+            weak.append(rel)
+    if refusals:
+        return "; ".join(refusals), weak
+    return None, weak
+
+
+def judge_artifacts(state, basis, unit_dir, spec, observed, notes):
+    """Gate a DONE on the artifact transition. Any other state passes through.
+
+    Only DONE is gated, and that is the point rather than an optimisation: an
+    artifact that has not changed yet is the NORMAL condition of a running
+    unit, and turning that into a refusal would report every live attempt as
+    broken.
+    """
+    if state != "DONE":
+        return state
+    problem, weak = artifact_transition_problem(basis, unit_dir, spec, observed)
+    if problem:
+        notes.append(f"REASON={REASON_ARTIFACT_UNCHANGED}")
+        notes.append(problem)
+        return "INCOMPLETE"
+    if weak:
+        notes.append(
+            f"production of {', '.join(sorted(weak))} was established by "
+            f"size and mtime rather than content, because the artifact is "
+            f"over the digest limit. A rewrite to the same length inside the "
+            f"same second would be invisible to that comparison.")
+    return state
 
 
 # Every launch field that can select or alter a judgment. The launch record is
@@ -574,6 +879,24 @@ def code_basis(runner, unit_dir, spec, launch_facts=None):
     return {"worktree_judged": spec.get("worktree_judged"),
             "produced_head": spec.get("produced_head"),
             "production_denies": list(PRODUCTION_DENIES)}
+
+
+def receipt_basis(runner, unit_dir, spec, launch_facts=None):
+    """Every field worktree.py contributes to a receipt's `basis`.
+
+    Two callees with OPPOSITE relationships to the repository, which is why
+    they stay two functions. `code_basis` must not touch it at all: its
+    fields were decided at judgment, and asking a mutable source a second
+    time is how a pinned head stopped matching the tree that satisfied it. A
+    test hands it a runner that fails the test on use.
+
+    `stray_untracked` is the other kind of read: a first and only look, at
+    something no judgment produced, deciding nothing. Refusing it here on the
+    strength of the rule above would have been cargo cult -- the rule is
+    "never ask a mutable source AGAIN", not "never look".
+    """
+    return dict(code_basis(runner, unit_dir, spec, launch_facts),
+                stray_untracked=stray_untracked(runner, spec, launch_facts))
 
 
 def validate_pinned_head(runner, launch_facts, produced):

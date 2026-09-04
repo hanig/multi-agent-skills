@@ -22,6 +22,29 @@ This reports the host, python, schedulers, partitions, accounts, whether
 `--mem` is required here, free disk, and, for a repo: git history, size,
 language mix, existing docs, and whether a swarm project already exists.
 
+The tree walk is bounded by a **child process killed on a real deadline**,
+not by a check inside its own loop: `os.scandir` blocks inside `opendir()` on
+a stale NFS handle or a dead automount, and a loop that only looks at the
+clock between entries never gets its turn. So `repo.walk` reports how the
+walk ENDED -- `complete`, `truncated` (a declared cap stopped it: there was
+too much), `stuck` (a directory did not answer, and `stuck_at` names it), or
+`unknown`. **`truncated` and `stuck` are not the same fact**: the first
+describes the tree, the second warns about the host. On anything but
+`complete`, `file_count`, `size_mb` and `extensions` are FLOORS -- if it comes
+back `stuck`, say so and name the directory instead of planning off the count.
+
+Per partition it also reports **who may use it and what the allowance costs**:
+`allow_accounts`, `deny_accounts`, the partition `qos` and its `qos_grptres`,
+and `max_mem_per_cpu_mb`. Read these before sizing anything. Each carries
+`state` = `set` | `unrestricted` | `unknown`, and **`unknown` is not
+`unrestricted`** -- it means the query did not answer, so say so instead of
+planning around it. Two failures paid for this: hours lost to
+`QOSGrpCpuLimit` on a 736-CPU partition sitting 202 CPUs idle, because nothing
+said which accounts were allowed in it; and `MaxMemPerCPU`, which fixes the
+CPU count a memory request costs and then refuses the job by naming CPUs
+rather than memory -- 700 GB at `MaxMemPerCPU=5120` costs 140 CPUs, not the 32
+that were asked for.
+
 Read it before speaking. Every fact in it is a question you must not ask.
 If the repo is half-finished, also read its README, CONTEXT.md, MEMORY.md and
 any `docs/adr/*`, and skim the last dozen commits. The point is to arrive at
@@ -77,14 +100,56 @@ and the glob" in an earlier answer, and then never came back for it. It sat
 waiting for a value nobody had been asked to give.
 
 So before you finish the interview, list every value the plan needs to
-dispatch, and check each one is settled: input paths and globs, output
-destinations, the account, the partition, any config file the command reads,
-the agent's **`mode`** and **`provider`** for every code unit, the **runtime**
-each unit executes in (resolution, entrypoint, probe command) and **how it
-gets verified** -- and if that is a canary, remember a canary
-must match its unit's partition AND account, so a plan spanning two partitions
-needs one canary per partition. `validate` enforces all of that, so leaving it
-to the interview's end means discovering it after the plan is written.
+dispatch, and check each one is settled. The list is not a matter of taste:
+
+```sh
+python3 ../hanig-swarm/scripts/swarm.py schema
+```
+
+prints every field, whether it is required for that kind, and what it couples
+to. Anything marked required is a refusal already waiting for you, so it is a
+question now or a wasted plan later.
+
+- **Inputs**: paths, globs, and any config file the command reads. Empty,
+  still a placeholder, or matching nothing are all refused.
+- **The partition and the account**, per unit. A partition this cluster does
+  not have is refused by name; **the account is NOT checked**, so a wrong one
+  survives validation and fails at submission instead.
+- **`promote_to`, and who approves it**, for anything that must reach a
+  shared path. A unit's `outputs` are relative to its own attempt directory,
+  so "where does this end up" is a separate question and `promote_to` is the
+  only thing that answers it.
+- **`mode` and `provider`** for every code unit. An absent `mode` is refused;
+  `provider` is not, because it has a default -- ask anyway, because modes are
+  provider-specific and which spelling of `mode` is legal depends on the
+  answer.
+- **`target_branch`** for every code unit: the branch its pull request merges
+  INTO. Not the branch it works on, which the coordinator creates itself per
+  attempt. A code unit closes on a merged PR, so a plan that never named the
+  destination is refused.
+- **The runtime** each unit executes in (resolution, entrypoint, probe) and
+  **how it gets verified**. If that is a canary, the canary must declare the
+  SAME runtime, run its `probe` command verbatim, match the unit's partition
+  AND account, and be a DAG ancestor of it -- so a plan spanning two
+  partitions needs one canary per partition, and `runtime: "none"` is a claim
+  to make on purpose rather than a way out.
+- **The retry contract**, for any unit that may attempt more than once. The
+  "most work you are willing to repeat" answer has to land as `retry.max_lost`
+  in a metric the plan also caps in `retry_limits`; `max_attempts` above 1
+  without that pair is refused.
+
+Two answers the interview still owns, though neither is unchecked any more.
+**`--mem`**: `swarm.py validate` refuses a `slurm` unit that requests no
+memory when the survey it reads reports `mem_flag_required`. That refusal is
+only as good as the survey, and on a host where none was recorded the flag is
+yours to get right -- validate says which of the two happened rather than
+printing a bare "plan is valid". **`findings.json`**: whether this project
+has findings to publish is a judgement no validator can make, so ask. What
+validate enforces is narrower and mechanical -- a unit that declares
+`findings.json` must also declare `promote_to`, because an output that is
+never promoted stays in the attempt's write root, where the report never
+looks. Both otherwise fail after the plan validated clean, which is the most
+expensive moment to learn anything.
 
 `mode` in particular has to be ASKED. An agent under default permissions stops
 at its first write and waits for a person, which is correct behaviour and fatal
@@ -99,6 +164,53 @@ remembered -- but reaching that refusal means the interview already failed.
 
 Stop when you can state, without hedging, what each unit must produce AND
 what it will read.
+
+### Two questions `sinfo` cannot answer
+
+The survey reports the allowance. It cannot report the judgement, and these
+two questions are the judgement. Hours were lost to `QOSGrpCpuLimit` while a
+736-CPU partition sat 202 CPUs idle, because nobody was ever asked whether the
+lab's own queue was fair game for that work. Ask each with a recommended
+answer, and quote this cluster's own numbers back so the human is deciding
+about their cluster rather than in the abstract.
+
+**1. May CPU-only work run in the partition your account is exclusively
+allowed into?** Recommend YES when the shared queue is capped and the lab's
+own partition is idle: idle CPUs beside a GPU you are not using still finish
+the job sooner than a queue you are throttled in. Read BOTH sides of the
+account rule from the survey before asking, because there are two ways to be
+shut out and only one of them is an absent allowance. `allow_accounts` naming
+the account is a route in; `deny_accounts` is the other half, since Slurm
+prints `DenyAccounts` *instead of* `AllowAccounts`, so a partition that denies
+this account reads as wide open if you only look at the allowance. If
+`deny_accounts` names it, this is not a question -- say the partition is
+closed to this account and move on. If either field reads `unknown`, say that
+instead of asking: `unknown` is not `unrestricted`, and a recommendation built
+on a query that never answered is a guess wearing a number. `swarm.py
+validate` applies the same three-state rule to the plan and refuses a unit
+whose `--account` a partition denies, or leaves out of a `set`
+`allow_accounts`; it stays silent on `unknown`, so a clean validate is not
+evidence that the pairing was checked.
+
+**2. Is the per-job footprint still acceptable once `max_mem_per_cpu_mb` is
+applied?** Recommend the size the limit actually charges, and shrinking the
+per-job memory until that number is one the account can hold. A set
+`max_mem_per_cpu_mb` does not cap memory; it fixes the CPU count a memory
+request costs. Slurm charges `ceil(mem_mb / max_mem_per_cpu_mb)` CPUs and then
+refuses the job by naming CPUS, not memory, so the error points away from its
+cause. This is not hypothetical: 700 GB at `MaxMemPerCPU=5120` costs 140 CPUs,
+not the 32 that were asked for. The survey has already done that arithmetic in
+`limits_note`, so quote the CPU number this cluster will charge and ask whether
+the unit still fits the budget and the queue -- not whether the memory figure
+looks reasonable, which it always does.
+
+**Carry this caveat into both answers, and do not let it drop quietly:**
+`qos_grptres` resolves the PARTITION QOS only. An account or association QOS
+can impose a `GrpTRES` the survey never sees, which is a second route to the
+same `QOSGrpCpuLimit` that cost those hours. So `unrestricted` on that field
+is not a promise the job will run -- it says nothing at the partition level
+caps you, and nothing more. Say so out loud when you recommend a size, so the
+human's answer is given against what is actually known.
 
 ## 3. Plan. Units are defined by their OUTPUTS, not their commands.
 
@@ -121,7 +233,7 @@ contract lives in `command`. It does not.
 | `outputs` are | relative to the run-dir | relative to the run-dir | relative to the run-dir |
 | judged by | Slurm accounting + declared outputs | launcher exit + declared outputs | agent lifecycle + outputs + a produced commit |
 | closed by | a predicate receipt | a predicate receipt | a **merged PR** |
-| also needs | `--mem` if the survey says so | a fresh work and publish dir | `repo`, a `branch`, and an explicit `mode` |
+| also needs | `--mem` if the survey says so, and an `--account` the `--partition` accepts | a fresh work and publish dir | `repo`, a `target_branch`, and an explicit `mode` |
 
 Three of those cost a full dispatch cycle each to learn, so they are worth
 reading twice:
@@ -181,16 +293,30 @@ and **`outputs`**. Add `needs` for dependencies, `gpu_hours` for the budget,
 partitions and whether `--mem` is required).
 
 **`write_scopes` does not isolate a code unit.** It reads like an isolation
-mechanism and it is not one: it names FILES, and the isolation is the attempt
-directory. Code units share the repository, so state it positively and pick
-one of two remedies: give each unit **its own branch**, or **serialise them**
-with `needs` so only one touches the checkout at a time. A code unit also
-closes on a MERGED PULL REQUEST (step 6), so without a branch there is nothing
-to open one from and the unit is structurally unclosable: it will dispatch,
-run, be judged, and never reach DONE. `validate` refuses a code unit with a
-`repo` and no `branch`, and refuses two units sharing one branch
-CONCURRENTLY. Units ordered with `needs` may share a branch, because they
-commit one after another, which is what a branch is for.
+mechanism and it is not one: it names FILES, and it DECLARES where a unit
+intends to write. What the declaration buys is a refusal -- `validate` rejects
+two units that can run concurrently and whose scopes overlap, because two
+units that may write the same place cannot both have an exclusive write root,
+and that exclusivity is what makes the done-predicate conclusive. Give them
+disjoint scopes, or order them with `needs`.
+
+The isolation for a code unit is the **per-attempt Git worktree**: every
+attempt gets its own checkout at the anchored base commit, verified and bound
+by inode, so two code units no longer share one working tree. That is why
+concurrent code units MAY share a pull-request target -- a constraint the
+earlier design needed and this one does not.
+`TestPerAttemptBranchesRemoveTheSharedCheckoutConstraint` in
+`tests/test_plan_shape.py` pins it. Worktrees isolate PATHS and not
+principals; `hanig-swarm/SKILL.md` states what that does and does not defend
+against.
+
+A code unit closes on a MERGED PULL REQUEST (step 6), so it must name the
+branch the request merges INTO. `validate` refuses a code unit that has a
+`repo` and no `target_branch`: the coordinator creates the source branch, but
+it cannot open a mergeable pull request without the plan naming the
+destination, and the unit is then structurally unclosable -- it will dispatch,
+run, be judged, and never reach DONE. The legacy field `branch` is NOT a
+fallback, and a plan that names it instead is told so.
 
 `PLAN.md` for humans: what is being built, what was decided in step 2 and by
 whom, and what is deliberately out of scope.
@@ -257,12 +383,60 @@ Then, in this session, holding the Linear MCP connector:
    `issues[].identifier`).
 4. Re-running later UPDATES rather than duplicating, because the draft carries
    the ids forward keyed on unit id.
+5. Apply the DAG: for each issue, add every `add_blocked_by` relation, and
+   **call `removeBlockedBy` for every `remove_blocked_by` entry.**
+6. Read the edges back and hand them to the next draft, below. Applying
+   without doing this leaves the next run unable to say whether the write
+   landed.
+
+### The DAG is append-only, so removal has to be asked for
+
+`blockedBy` is append-only through this interface: Linear exposes
+`removeBlockedBy` as a separate operation. So when a unit's `needs` list
+SHRINKS, the edge that no longer exists stays in the tracker, and not
+re-adding it does not delete it. The tracker then says an issue is blocked by
+something the plan no longer says blocks it.
+
+`tickets.py` cannot see that on its own -- it talks to nothing. It decides it
+by diffing the plan against what you tell it the tracker holds:
+
+```sh
+# In the session with the connector: list every issue in the project with its
+# blockedBy relations, and write
+#   {"schema_version": 1, "read_at": "<ISO 8601>", "source": "...",
+#    "edges": {"<issue>": ["<blocker>", ...]}}
+# Each key is the BLOCKED issue; handles may be unit ids, identifiers
+# (ARC-236) or uuids. An issue with no blockers MUST appear with an empty
+# list: omitting it is indistinguishable from not having looked.
+python3 scripts/tickets.py draft plan.json --tracker-edges edges.json
+```
+
+The draft then carries, per issue, `add_blocked_by`, `remove_blocked_by` and
+`blocked_by_in_sync`, plus a top-level `blocked_by_sync` saying when the
+tracker was read and by what.
+
+**A read-back is ATTESTED, not verified**, the same way an outbox receipt is:
+there is no network on the coordinator, so what it has is your report of what
+you saw. Every rendering says so. It is still far better than diffing against
+the last draft -- that only records what was asked for, and would be
+confidently wrong the moment an apply half-finished or a human edited a
+relation in Linear by hand.
+
+**Without a read-back, `remove_blocked_by` is `null`, not `[]`.** Unknown is
+not empty: `[]` would say "the tracker holds no stale edges", which nothing on
+the coordinator can know. Once anything has been filed, `check` treats a
+missing read-back as drift and exits 2. That is deliberate -- the loop is
+apply, re-read, re-draft, check -- and it is what makes this a verification of
+the write rather than trust in it.
 
 Verify the two never drift:
 
 ```sh
 python3 scripts/tickets.py check plan.json tickets.json
 ```
+
+It reports both halves: the unit/issue mapping, and the blockedBy edges as
+read at a stated time. It never says "in sync" without naming that time.
 
 ## 5. Dispatch.
 
@@ -340,8 +514,24 @@ Three sections carry most of the value, and two of them are easy to leave out:
   `findings.json`, and labelled as the project's claims, because the
   coordinator cannot verify them: it has no idea what a column means.
 
-**So the final unit must emit `findings.json`.** Declare it as one of that
-unit's outputs, in this shape:
+**So a project that has findings emits `findings.json` from the unit that
+produces them, and publishes it.** Not every project has any: a plan whose
+last unit is a training run or a code change has an artifact and a merged PR
+to show, not claims about data, and a rule demanding the file from every
+terminal unit would refuse honest plans and be routed around with an empty
+`{"findings": []}`. So this is the interview's question, not the validator's.
+
+What IS enforced, because it is mechanical: **the unit declaring
+`findings.json` must also declare `promote_to`, or `swarm.py validate`
+refuses the plan.** Declared outputs live in the attempt's exclusive write
+root and the report reads `findings.json` from the project directory, so an
+unpromoted findings file is written, digested, and read by nobody -- which
+looks exactly like never writing one. Declare it as one of that unit's
+outputs, with a promotion destination, in this shape:
+
+```json
+{"outputs": ["findings.json"], "promote_to": "/abs/path/to/the/project"}
+```
 
 ```json
 {"findings": [{"title": "one sentence a reader can act on",

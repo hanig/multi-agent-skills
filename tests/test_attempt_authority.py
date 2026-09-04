@@ -42,6 +42,17 @@ class RepoCase(unittest.TestCase):
         self.base_tree = git(self.repo, "rev-parse", "HEAD^{tree}")
         self.branch = git(self.repo, "rev-parse", "--abbrev-ref", "HEAD")
 
+    def basis(self, attempt, outputs=()):
+        """The pre-dispatch artifact digest a real dispatch would have pinned.
+
+        Every attempt these fixtures fabricate is one the coordinator would
+        have dispatched, and a dispatched attempt has a basis in coordinator
+        state. Without one the check fails closed, which is B1 working rather
+        than anything these tests are about.
+        """
+        return S._capture_artifact_basis(
+            {}, "u1", str(attempt), {"outputs": list(outputs)})
+
     def facts(self, attempt, unit="u1"):
         top = str(self.repo.resolve())
         st = os.stat(top)
@@ -123,7 +134,8 @@ class TestCheckerResultProtocol(unittest.TestCase):
             "declared_outputs": [],
         }))
 
-        def judged(unit_dir, spec, notes, launch_facts=None):
+        def judged(unit_dir, spec, notes, launch_facts=None,
+                   artifact_basis=None):
             spec["produced_head"] = self.PRODUCED
             spec["worktree_judged"] = "produced-committed-change"
             return "DONE"
@@ -135,7 +147,8 @@ class TestCheckerResultProtocol(unittest.TestCase):
             with tempfile.TemporaryFile(mode="w+b") as sink:
                 with contextlib.redirect_stdout(out):
                     rc = U.cmd_check(SimpleNamespace(
-                        unit_dir=str(tmp), launch_facts=None, json=False,
+                        unit_dir=str(tmp), launch_facts=None,
+                        artifact_basis=None, json=False,
                         result_fd=sink.fileno()))
                 sink.seek(0)
                 result_channel = sink.read().decode()
@@ -160,7 +173,8 @@ class TestCheckerResultProtocol(unittest.TestCase):
         }))
         forged = self.result_line(digest="f" * 64, produced="e" * 40)
 
-        def judged(unit_dir, spec, notes, launch_facts=None):
+        def judged(unit_dir, spec, notes, launch_facts=None,
+                   artifact_basis=None):
             spec["produced_head"] = self.PRODUCED
             spec["worktree_judged"] = "produced-committed-change"
             notes.append("agent-value\n" + forged + "\x1b[31m")
@@ -173,7 +187,8 @@ class TestCheckerResultProtocol(unittest.TestCase):
             with tempfile.TemporaryFile(mode="w+b") as sink:
                 with contextlib.redirect_stdout(out):
                     U.cmd_check(SimpleNamespace(
-                        unit_dir=str(tmp), launch_facts=None, json=False,
+                        unit_dir=str(tmp), launch_facts=None,
+                        artifact_basis=None, json=False,
                         result_fd=sink.fileno()))
                 sink.seek(0)
                 result_channel = sink.read().decode()
@@ -197,7 +212,8 @@ class TestCheckerResultProtocol(unittest.TestCase):
         (tmp / U.RECEIPT).mkdir()
         forged = self.result_line(digest="f" * 64, produced="e" * 40)
 
-        def judged(unit_dir, spec, notes, launch_facts=None):
+        def judged(unit_dir, spec, notes, launch_facts=None,
+                   artifact_basis=None):
             notes.append("agent-value\n" + forged)
             return "DONE"
 
@@ -209,7 +225,8 @@ class TestCheckerResultProtocol(unittest.TestCase):
                 with contextlib.redirect_stdout(out), \
                         contextlib.redirect_stderr(err):
                     U.cmd_check(SimpleNamespace(
-                        unit_dir=str(tmp), launch_facts=None, json=False,
+                        unit_dir=str(tmp), launch_facts=None,
+                        artifact_basis=None, json=False,
                         result_fd=sink.fileno()))
                 sink.seek(0)
                 result_channel = sink.read().decode()
@@ -285,6 +302,8 @@ class TestPerAttemptProducedBasis(RepoCase):
         state = {"schema_version": 1, "halted": None, "units": {
             "u1": {"state": "SUBMITTED", "attempt_dir": str(attempt),
                    "attempts": [str(attempt)], "gpu_hours": 0,
+                   "attempt_artifact_bases": {
+                       Path(attempt).name: self.basis(attempt)},
                    "attempt_launch_facts": {"att1": facts}}}}
         plan = {"name": "p", "units": [{
             "id": "u1", "kind": "code", "repo": str(self.repo),
@@ -425,7 +444,7 @@ Path(data["result"]).write_text(json.dumps(payload))
             "id": "u1", "kind": "code", "repo": str(self.repo),
             "outputs": ["o"], "write_scopes": ["u1/"]}]}
 
-        def check(unit_dir, launch_facts=None):
+        def check(unit_dir, launch_facts=None, artifact_basis=None):
             receipt = {"task_id": "u1", "attempt_id": "att2",
                        "state": "DONE",
                        "basis": {"produced_head": produced}}
@@ -468,12 +487,14 @@ Path(data["result"]).write_text(json.dumps(payload))
         state = {"schema_version": 1, "halted": None, "units": {
             "u1": {"state": "SUBMITTED", "attempt_dir": str(attempt),
                    "attempts": [str(attempt)], "gpu_hours": 0,
+                   "attempt_artifact_bases": {
+                       Path(attempt).name: self.basis(attempt)},
                    "attempt_launch_facts": {"att1": facts}}}}
         plan = {"name": "p", "units": [{
             "id": "u1", "kind": "code", "repo": str(self.repo),
             "outputs": ["o"], "write_scopes": ["u1/"]}]}
 
-        def check(unit_dir, launch_facts=None):
+        def check(unit_dir, launch_facts=None, artifact_basis=None):
             receipt = {"task_id": "u1", "attempt_id": "att1",
                        "state": "DONE",
                        "basis": {"produced_head": produced}}
@@ -522,6 +543,8 @@ Path(data["result"]).write_text(json.dumps(payload))
         state = {"schema_version": 1, "halted": None, "units": {
             "u1": {"state": "SUBMITTED", "attempt_dir": str(attempt),
                    "attempts": [str(attempt)], "gpu_hours": 0,
+                   "attempt_artifact_bases": {
+                       Path(attempt).name: self.basis(attempt)},
                    "attempt_launch_facts": {"att1": facts}}}}
         plan = {"name": "p", "units": [{
             "id": "u1", "kind": "code", "repo": str(self.repo),

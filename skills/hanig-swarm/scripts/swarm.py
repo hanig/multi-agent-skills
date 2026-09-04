@@ -51,6 +51,7 @@ import child_environment as CE  # noqa: E402
 import paseo_io as PIO
 import worktree as W  # noqa: E402
 import verify as V  # noqa: E402
+import converge as CV  # noqa: E402  the declared-convergence gate
 import coordinator_paths as CP  # noqa: E402
 
 STATE_FILE = "swarm-state.json"
@@ -204,6 +205,227 @@ def partition_problems(units, known=_LOOK_IT_UP):
         name = declared_partition(u)
         if name and name not in known:
             bad.append((u.get("id", "?"), name))
+    return bad
+
+
+# --- what the survey already knows ----------------------------------------
+#
+# `survey.py` records this cluster BEFORE the plan is written: whether the
+# scheduler has a default memory, and who each partition will accept. Three
+# parts of the system agreed those facts matter -- the survey computes them,
+# the skill tells the planner to plan around them, the report prints them --
+# and the one component that can refuse a plan never looked. A unit charging
+# an account its partition denies validated clean and then spent hours in
+# QOSGrpCpuLimit beside 202 idle CPUs.
+#
+# THE RULE FOR `unknown` IS THE WHOLE DESIGN. Every allowance is recorded as
+# {"state": "set"|"unrestricted"|"unknown", "value": ...}, and unknown means
+# the query did not answer -- scontrol was missing, sacctmgr failed, the
+# survey predates the field. A refusal built on that is a guess wearing a
+# number: it blocks honest work on the first flaky day, and a validator that
+# cries wolf gets switched off. So unknown refuses NOTHING here. It is not
+# reported as satisfied either: silence from these checks means "not
+# checked", which is why `validate` names the survey it read, or says it read
+# none.
+SURVEY_FILE = os.path.join(".swarm", "survey.json")
+
+# The one artifact hanig-project's report renders as the project's own
+# claims. Named here because validate now has an opinion about it; see the
+# findings block in validate_plan for what that opinion is and is not.
+FINDINGS_FILE = "findings.json"
+
+# survey.py's vocabulary, imported as words rather than as a habit.
+LIMIT_SET, LIMIT_OPEN, LIMIT_UNKNOWN = "set", "unrestricted", "unknown"
+
+# The caveat that must ride along with every one of these judgements. Said
+# in the refusal itself, because that is the message someone reads while
+# choosing the partition they will move the unit to.
+QOS_CAVEAT = (
+    "Note that `qos_grptres` in the survey resolves the PARTITION QOS only: "
+    "an account or association QOS can impose a GrpTRES nothing here can "
+    "see, so a partition that accepts this account is still not a promise "
+    "the job will run.")
+
+
+def read_survey(path):
+    """One survey file as a mapping. Returns (survey, error)."""
+    data, err = U.read_json(path)
+    if err:
+        return None, err
+    if not isinstance(data, dict):
+        return None, "it is not a JSON object"
+    return data, None
+
+
+def discover_survey(plan_path=None, cwd=None):
+    """The survey recorded beside a plan. Returns (survey, note).
+
+    `None` is the answer when there is nothing to read, and the note says
+    which file was looked for or why the one found was not used. A validator
+    with no survey knows nothing about this cluster's allowances, and that is
+    `unknown`, which refuses nothing.
+
+    Two candidates, in order: the plan's own directory, then the working
+    directory, both at `.swarm/survey.json` -- the path hanig-project's very
+    first command writes.
+
+    A survey is an observation of ONE host. Applying another machine's
+    allowances here would refuse a unit on evidence about a different
+    cluster, so a hostname mismatch is unknown rather than authority. A
+    survey named explicitly on the command line is used as given: that is the
+    operator asserting it applies.
+    """
+    here = os.uname().nodename
+    tried = []
+    for base in (os.path.dirname(os.path.abspath(plan_path)) if plan_path
+                 else None, cwd or os.getcwd()):
+        if not base:
+            continue
+        cand = os.path.join(base, SURVEY_FILE)
+        if cand in tried:
+            continue
+        tried.append(cand)
+        if not os.path.isfile(cand):
+            continue
+        data, err = read_survey(cand)
+        if err:
+            return None, (f"the survey at {cand} could not be read ({err}), "
+                          f"so nothing in it was applied")
+        machine = data.get("machine") or {}
+        host = str(machine.get("hostname") or "").strip()
+        if host and host != here:
+            return None, (f"the survey at {cand} was taken on {host}, not "
+                          f"{here}. A survey is evidence about the host it "
+                          f"ran on, so nothing in it was applied here; pass "
+                          f"--survey to use it deliberately")
+        return data, cand
+    return None, (f"no survey was read (looked for {' and '.join(tried)}). "
+                  f"Record one with hanig-project's "
+                  f"`survey.py --repo . --out {SURVEY_FILE}`")
+
+
+def _scheduler_facts(survey):
+    sched = (survey or {}).get("scheduler")
+    return sched if isinstance(sched, dict) else {}
+
+
+def surveyed_partition(survey, name):
+    """The surveyed record for ONE partition, or None if the survey is silent
+    about it. Silence is unknown: `partitions_unavailable` and a partition
+    the query never listed are both "nothing was established here"."""
+    for part in (_scheduler_facts(survey).get("partitions") or []):
+        if isinstance(part, dict) and part.get("partition") == name:
+            return part
+    return None
+
+
+def limit_state(part, field):
+    """(state, value) for one allowance field, in the survey's vocabulary.
+
+    An ABSENT field is unknown, not unrestricted. schema_version 1 predates
+    the allowance block entirely, so a survey that never asked the question
+    must not read as one that asked and found no restriction."""
+    lim = (part or {}).get(field)
+    if not isinstance(lim, dict) or lim.get("state") not in (
+            LIMIT_SET, LIMIT_OPEN, LIMIT_UNKNOWN):
+        return LIMIT_UNKNOWN, None
+    return lim["state"], lim.get("value")
+
+
+def _account_names(value):
+    """An allowance's value as a list of account names, or None.
+
+    A bare string here would make `account in value` a SUBSTRING test, so
+    `lab` would pass an allow-list of `goodarzilab` and a deny-list naming
+    `goodarzilab` would refuse `lab`. Anything that is not a list is not an
+    account list, and not-a-list is unknown."""
+    if isinstance(value, (list, tuple)):
+        return [str(a) for a in value]
+    return None
+
+
+# Slurm's three ways to state a job's memory. `--mem` is MUTUALLY EXCLUSIVE
+# with `--mem-per-cpu` at submission, so insisting on `--mem` by name would
+# refuse a unit that has already answered the question in the only other
+# spelling it is allowed to use.
+MEM_FLAGS = ("--mem", "--mem-per-cpu", "--mem-per-gpu")
+
+
+def declared_memory(u):
+    """The memory request a unit makes, or None. Both spellings, as with
+    partition and account: `--mem=64G` and `--mem 64G`.
+
+    A flag with no value (`--mem=` or a trailing `--mem`) is not a request --
+    sbatch rejects it -- but it does not mask a later, well-formed one."""
+    args = [str(a) for a in (u.get("sbatch") or [])]
+    for i, a in enumerate(args):
+        name, sep, value = a.partition("=")
+        if name not in MEM_FLAGS:
+            continue
+        if sep:
+            if value.strip():
+                return a
+        elif i + 1 < len(args) and not args[i + 1].startswith("-"):
+            return f"{a} {args[i + 1]}"
+    return None
+
+
+def memory_flag_problems(units, survey):
+    """Which slurm units state no memory on a cluster that has no default.
+
+    `mem_flag_required` is the survey's reading of `DefMemPerNode`. Absent,
+    it is UNKNOWN -- `scontrol show config` did not answer, or the survey
+    predates the field -- and unknown refuses nothing and satisfies nothing.
+    """
+    sched = _scheduler_facts(survey)
+    if not sched.get("present") or "mem_flag_required" not in sched:
+        return []
+    if not sched.get("mem_flag_required"):
+        return []                       # answered: this cluster has a default
+    return [u.get("id", "?") for u in units
+            if isinstance(u, dict) and u.get("kind") == "slurm"
+            and not declared_memory(u)]
+
+
+def account_problems(units, survey):
+    """Which units charge an account their declared partition will not take.
+
+    BOTH HALVES of the rule, because Slurm prints `DenyAccounts` INSTEAD of
+    `AllowAccounts`: a partition that denies this account reads as wide open
+    to anyone who consults only the allowance. Checked only where the survey
+    ANSWERED -- `unknown` on one field still lets the other decide, and
+    `unknown` on both decides nothing.
+
+    Returns [(unit id, account, partition, what the survey says)].
+    """
+    bad = []
+    for u in units:
+        if not isinstance(u, dict) or u.get("kind") != "slurm":
+            continue
+        account, name = declared_account(u), declared_partition(u)
+        if not account or not name:
+            # An undeclared account is the association default and an
+            # undeclared partition is the cluster default. Neither is in the
+            # plan, so neither can be checked against the survey.
+            continue
+        part = surveyed_partition(survey, name)
+        if part is None:
+            continue
+        state, value = limit_state(part, "deny_accounts")
+        denied = _account_names(value)
+        if state == LIMIT_SET and denied is not None and account in denied:
+            bad.append((u.get("id", "?"), account, name,
+                        f"the survey records deny_accounts="
+                        f"{', '.join(denied)} on that partition, so the job "
+                        f"is refused there however long it queues"))
+            continue
+        state, value = limit_state(part, "allow_accounts")
+        allowed = _account_names(value)
+        if (state == LIMIT_SET and allowed is not None
+                and account not in allowed):
+            bad.append((u.get("id", "?"), account, name,
+                        f"that partition's allow_accounts is set to "
+                        f"{', '.join(allowed)}, which does not include it"))
     return bad
 
 
@@ -468,6 +690,17 @@ def _code_completion_protocol(intent):
     in arbitrary prose are not statically recognizable: matching phrases such
     as "do not commit" would also reject legitimate tasks that merely discuss
     them. A visible stop-and-report rule is bounded; a prose detector is not.
+
+    ARC-243, and why the stash rule is here rather than in the skill's prose.
+    Three agents in three worktrees of one repository each ran `git stash -u`
+    inside the same window. The stash stack is a SINGLE ref in the shared
+    common Git directory, so it is not per-worktree: every pop took somebody
+    else's entry. The work was recovered from dangling commits and it cost
+    real time. All three were doing the same reasonable thing -- checking
+    whether a red test pre-existed their change -- which is what makes it a
+    defect in the protocol rather than three mistakes, and which is why the
+    prohibition names its SUBSTITUTES in the same breath. A prohibition with
+    no alternative is a prohibition that gets worked around.
     """
     repo = str(intent["repo"])
     branch = str(intent["branch"])
@@ -493,6 +726,8 @@ The required pull-request target is {target!r}.
 Do not create or switch branches, and do not choose a different base.
 Commit all intended work on {branch!r}. Uncommitted work is invisible to the transition predicate and will be judged as producing nothing.
 {remote_instruction}
+NEVER run `git stash`, in any form. The stash stack is a SINGLE ref in the shared common Git directory, so every worktree of {repo!r} shares one stack and a pop takes whatever another agent parked. Do these instead: to read a file as it was at base, `git show {base}:<path>`; to set work aside, `git diff > /tmp/wip.patch` then `git checkout -- <path>`; and to answer "was this test already failing", add a separate worktree at {base} and run it there, rather than moving anything in this one. Note what such a comparison does and does not show: green at {base} and green here is a claim about your change alone, not about {target!r} after a merge.
+Before every commit, run `git status --porcelain` and read it. Stage only paths you changed yourself; if it lists a path you did not touch, STOP AND REPORT instead of committing it. The observed failure is a commit that carried another agent's files.
 If you cannot finish cleanly, STOP AND REPORT the problem instead of working around it.
 Leave the worktree clean. Do not force-push or rewrite history. The final commit must descend from recorded base {base}; rewritten history makes honest work unjudgeable."""
 
@@ -527,6 +762,15 @@ def _code_protocol_problem(prompt, intent):
             "repository_remote") else "no merge-evidence repository was recorded"),
         "clean failure instruction": "STOP AND REPORT",
         "history instruction": "Do not force-push or rewrite history",
+        # ARC-243. The prohibition and each substitute are required
+        # SEPARATELY and by exact text, so an edit cannot leave the ban
+        # standing with nothing to do instead -- which is the state in which
+        # it gets worked around.
+        "stash prohibition": "NEVER run `git stash`",
+        "read-at-base substitute": f"git show {str(intent['base_commit'])}:",
+        "set-aside substitute": "git diff > /tmp/wip.patch",
+        "base-comparison substitute": "add a separate worktree at",
+        "foreign path check": "git status --porcelain",
     }
     missing = [name for name, text in required.items() if text not in prompt]
     if missing:
@@ -534,9 +778,129 @@ def _code_protocol_problem(prompt, intent):
     return None
 
 
-def validate_plan(plan):
+# --- the declared convergence gate ---------------------------------------
+# `unit.py` answers existence and terminal state. For a training run that is
+# not enough: a job that executed its whole step budget, exited 0 and wrote a
+# checkpoint is DONE under that predicate even if the loss was flat for the
+# last three quarters of it. `converge.py` scores a declared criterion over
+# the metrics SERIES and tells "it converged" apart from "it stopped".
+#
+# It is OPT-IN per unit and it gates DONE, in the same shape as
+# `requires_verification`: undeclared, nothing changes, because a gate
+# everybody must satisfy is one everybody learns to satisfy trivially.
+#
+# THE CRITERION COMES FROM THE PLAN, whose digest is frozen, and never from
+# the attempt directory. That is not a detail. The unit spec lives inside the
+# write root the job itself writes to, so reading the criterion from there
+# would let a run rewrite the standard it is judged against -- the same
+# laundering the launch record and the receipt were demoted to audit-only for.
+CONVERGE_UNIT_KEYS = frozenset({"metrics", "criterion", "diverge", "budget",
+                                "sparse_metric"})
+
+
+def converge_problem(u):
+    """Why a unit's declared convergence block cannot be evaluated, or None.
+
+    Checked at PLAN time as well as at judge time. `converge.py` says it
+    plainly -- "declaring the criterion BEFORE the run is the whole point" --
+    and a criterion accepted here but rejected forty thousand steps later has
+    cost a real job for a typo.
+    """
+    spec = u.get("converge")
+    if spec is None:
+        return None
+    uid = u.get("id", "?")
+    if u.get("kind") == "code":
+        return (f"unit {uid!r} is kind=code and declares 'converge'. A code "
+                f"unit has no metrics series and is closed by a merged pull "
+                f"request, so the gate would never be reached. Drop the "
+                f"block, or declare the work as kind=slurm or kind=pipeline.")
+    if not isinstance(spec, dict):
+        return (f"unit {uid!r} has converge={spec!r}, a "
+                f"{type(spec).__name__}; it must be an object like "
+                f'{{"metrics": "metrics.jsonl", "criterion": '
+                f'{{"metric": "val_loss", "mode": "min", "threshold": 0.5}}}}.')
+    unknown = sorted(set(spec) - CONVERGE_UNIT_KEYS)
+    if unknown:
+        return (f"unit {uid!r} converge has unrecognised key(s) "
+                f"{', '.join(unknown)}; it reads only "
+                f"{', '.join(sorted(CONVERGE_UNIT_KEYS))}. A typo here would "
+                f"drop the gate silently, which is the one failure mode this "
+                f"whole family of checks exists to prevent.")
+    metrics = spec.get("metrics")
+    if not isinstance(metrics, str) or not metrics.strip():
+        return (f"unit {uid!r} converge declares metrics={metrics!r}; name "
+                f"the JSONL file the run appends its evaluations to, RELATIVE "
+                f"to the attempt write root.")
+    if metrics not in (u.get("outputs") or []):
+        return (f"unit {uid!r} judges convergence over {metrics!r}, which is "
+                f"not one of its declared outputs. The gate is conclusive "
+                f"only over a file inside the exclusive write root, and only "
+                f"a declared output is checked to be there at all -- "
+                f"otherwise a missing metrics file reads as 'cannot judge' "
+                f"instead of 'the run produced nothing'. Add {metrics!r} to "
+                f"'outputs'.")
+    problem = CV.criterion_problem(spec.get("criterion"))
+    if problem:
+        return f"unit {uid!r} converge criterion: {problem}"
+    if not isinstance(spec.get("sparse_metric", False), bool):
+        return (f"unit {uid!r} has converge.sparse_metric="
+                f"{spec['sparse_metric']!r}; it must be true or false.")
+    rules = spec.get("diverge")
+    if rules is not None and not isinstance(rules, list):
+        return (f"unit {uid!r} has converge.diverge={rules!r}, a "
+                f"{type(rules).__name__}, but it must be a LIST of rule "
+                f"objects. A single object here is iterated over its KEYS, so "
+                f"the bound is silently lost and nothing is checked.")
+    for i, rule in enumerate(rules or []):
+        if not isinstance(rule, dict):
+            return (f"unit {uid!r} converge.diverge[{i}]={rule!r} is not an "
+                    f"object; each rule looks like "
+                    f'{{"metric": "train_loss", "above": 1e9}}.')
+        if not isinstance(rule.get("metric"), str) or not rule["metric"].strip():
+            return (f"unit {uid!r} converge.diverge[{i}] names no metric; "
+                    f"give the metric's name exactly as the run writes it.")
+        if not any(k in rule for k in ("above", "below")):
+            return (f"unit {uid!r} converge.diverge[{i}] declares no bound; "
+                    f"add 'above' or 'below', or remove the rule. A rule with "
+                    f"no bound cannot show the run stayed inside it.")
+        problem = CV.unread_key_problem(rule, CV.DIVERGE_KEYS,
+                                        f"converge.diverge[{i}]")
+        if problem:
+            return f"unit {uid!r} {problem}"
+    if spec.get("budget") is not None:
+        budget, err = CV.finite_number(spec["budget"])
+        if err or budget < 0:
+            return (f"unit {uid!r} has converge.budget={spec['budget']!r}, "
+                    f"which {err or 'must not be negative'}. The budget is "
+                    f"the step count whose exhaustion is NOT convergence.")
+    return None
+
+
+def converge_verdict(u, attempt_dir):
+    """Judge a unit's declared criterion over its attempt's metrics.
+
+    Returns (state_name, [reasons]) straight from `converge.py`. It reads the
+    metrics file the PLAN named, inside this attempt's exclusive write root,
+    and nothing else: it writes nothing, consults neither the launch record
+    nor the receipt, and re-derives no pinned value. The metrics series is
+    primary evidence observed where it lies, not a pinned fact asked again.
+    """
+    spec = u.get("converge") or {}
+    return CV.judge(str(Path(attempt_dir) / str(spec.get("metrics") or "")),
+                    spec.get("criterion") or {},
+                    spec.get("diverge") or [],
+                    spec.get("budget"),
+                    bool(spec.get("sparse_metric")))
+
+
+def validate_plan(plan, survey=None):
     """Raise PlanError, or return a summary. Refuses BEFORE anything is
-    dispatched: a plan that cannot be run should not half-run."""
+    dispatched: a plan that cannot be run should not half-run.
+
+    `survey` is hanig-project's recorded observation of this cluster, or None
+    when there is none to read. None is UNKNOWN, not "no restrictions": every
+    check that consults it stays silent rather than guessing."""
     if not isinstance(plan, dict):
         raise PlanError("the plan is not a JSON object")
     units = plan.get("units")
@@ -585,6 +949,18 @@ def validate_plan(plan):
                     f"unit {u.get('id','?')!r} requires a clean Git workspace "
                     f"but declares no workspace_policy.path, "
                     f"execution_workspace, or repo")
+
+    # A convergence criterion is refused HERE, before anything is dispatched,
+    # for the reason converge.py gives for requiring one at all: it has to be
+    # declared before the run. Discovering the typo when the job is finished
+    # means the GPU-hours are already spent and there is no criterion to judge
+    # them against.
+    for u in units:
+        if not isinstance(u, dict):
+            continue
+        problem = converge_problem(u)
+        if problem:
+            raise PlanError(problem)
 
     # A `code` unit needs paseo ON THIS HOST, because that is where the
     # coordinator dispatches it. Refusing here, before anything is dispatched,
@@ -798,6 +1174,43 @@ def validate_plan(plan):
                     f"conclusive; an output above it is neither exclusive nor "
                     f"findable.")
 
+    # --- findings.json must be able to REACH its reader -------------------
+    #
+    # ARC-247 asked whether every plan's terminal unit should be forced to
+    # declare `findings.json`. It should not, and the reason is not only that
+    # a training run has no findings to write: a "terminal unit declares it"
+    # check would not deliver the artifact either. `report.py` reads
+    # findings.json from the PROJECT DIRECTORY, while declared outputs live
+    # inside the attempt's exclusive write root, which nothing outside the
+    # attempt reads. A plan could satisfy that rule in full and the report
+    # would still render no findings section -- a passing check standing in
+    # for a working system, which is the shape of failure this validator
+    # exists to refuse.
+    #
+    # So the rule is narrowed to the part that is genuinely required and
+    # currently enforced nowhere: a unit that declares findings.json must
+    # also declare where it is published. Promotion is the only route out of
+    # the write root, and it is an explicit, approved, recorded step. Without
+    # one, the file is written, digested, and read by nobody.
+    for u in units:
+        if not isinstance(u, dict):
+            continue
+        for out in (u.get("outputs") or []):
+            if os.path.basename(str(out).strip()) != FINDINGS_FILE:
+                continue
+            if u.get("promote_to"):
+                break
+            raise PlanError(
+                f"unit {u.get('id','?')!r} declares the output {str(out)!r} "
+                f"and no 'promote_to'. Declared outputs stay inside the "
+                f"attempt's exclusive write root, and the only reader of "
+                f"{FINDINGS_FILE} -- report.py's \"Findings reported by this "
+                f"project\" section -- reads it from the PROJECT directory. "
+                f"Written there and never promoted, it is an artifact nobody "
+                f"sees, which is indistinguishable from not writing it. "
+                f"Declare \"promote_to\": \"/abs/path/to/the/project\", or "
+                f"drop the output if these findings are not being published.")
+
     # --- the runtime a unit will actually execute in -----------------------
     #
     # Nothing validated this, and it is the likeliest reason a scientific unit
@@ -903,6 +1316,41 @@ def validate_plan(plan):
             f"sbatch flags, so this is usually a plan written for a different "
             f"cluster. Refusing here beats a half-dispatched DAG and an "
             f"sbatch error per unit.")
+
+    # --- the cluster facts the SURVEY already recorded --------------------
+    #
+    # Both of these were audited as "three parts of the system agree this
+    # matters and the one component that could refuse never looks". They read
+    # the survey and nothing else: no live sacctmgr call, because a validator
+    # that queries the controller per unit is a validator that hangs on a
+    # busy login node, and because the survey is the artifact the plan was
+    # written against. No survey is `unknown`, and unknown refuses nothing.
+    starved = memory_flag_problems(units, survey)
+    if starved:
+        raise PlanError(
+            f"unit(s) {', '.join(sorted(starved))} are kind=slurm and request "
+            f"no memory, but the survey of this cluster reports "
+            f"mem_flag_required: DefMemPerNode is UNLIMITED, so there is no "
+            f"default per-node memory to fall back on. A unit that says "
+            f"nothing here is not accepting a sensible default -- there is "
+            f"none -- and what it gets instead is a site-dependent fallback "
+            f"nothing in the plan records. Add a memory request to the unit's "
+            f"'sbatch' list: \"--mem=64G\". `--mem-per-cpu` or `--mem-per-gpu` "
+            f"count too, since sbatch refuses `--mem` alongside either.")
+
+    refused = account_problems(units, survey)
+    if refused:
+        listed = "; ".join(
+            f"{uid} charges {acct!r} on partition {part!r}, but {why}"
+            for uid, acct, part, why in refused)
+        raise PlanError(
+            f"this plan charges an account its partition will not accept: "
+            f"{listed}.\n"
+            f"    This is the failure the per-partition survey was added "
+            f"for: hours went into QOSGrpCpuLimit while a 736-CPU partition "
+            f"sat 202 CPUs idle, because nothing joined the account to the "
+            f"partition. Move the unit to a partition this account is allowed "
+            f"in, or charge an account that partition takes. {QOS_CAVEAT}")
 
     seen, by_id = set(), {}
     for i, u in enumerate(units):
@@ -1691,6 +2139,14 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
         if existing_intent:
             anchor_err = _code_launch_intent_problem(
                 existing_intent, u, attempt)
+            # Re-run the stash preflight on a re-dispatch of the SAME
+            # attempt, for the reason `_write_launch_record` re-runs the
+            # dirty predicate on its own already-anchored path: retry and
+            # recovery must not be the way past a launch check. The anchored
+            # base is never recaptured or re-trusted here, only the CURRENT
+            # condition re-asked.
+            if not anchor_err:
+                anchor_err = _repeat_stash_preflight(u)
             anchored_base = (None if anchor_err else {
                 "base": existing_intent["base_commit"],
                 "intent": existing_intent,
@@ -2108,6 +2564,11 @@ class PreflightRefusal(str):
 
     workspace = None
     dirty_count = 0
+    # WHICH preflight refused. There are two of them now, and the counts
+    # cannot tell them apart: a shared-stash-stack refusal has zero dirty
+    # paths, and the run report rendered a zero count as "uncommitted
+    # changes", which misstates why nothing ran.
+    reason = "dirty-worktree"
 
 
 def _plan_workspace(u):
@@ -2167,6 +2628,330 @@ def _repeat_launch_preflight(u):
     return None, resolved_top
 
 
+# --- B6: one live claim per declared output destination -------------------
+#
+# NOT validate_plan's duplicate-id check, which can only see one plan. The
+# skill encourages ad-hoc sub-plans; a reporter made three, and one unit was
+# dispatched twice from two of them into identical output paths. Both
+# coordinators were correct about everything they could see: `acquire_lease`
+# excludes two CONTROLLERS over one state directory, and says nothing at all
+# about two state directories over one output namespace.
+#
+# WHY A CLAIM DIRECTORY AND NOT AN flock. `acquire_lease`'s docstring is
+# emphatic that an advisory lock beats every hand-rolled lease it replaced,
+# because the kernel drops it when the holder dies and so there is no TTL to
+# steal. That property is simply unavailable here: `advance` dispatches and
+# EXITS, while the job it dispatched runs for hours or days. A lock held by
+# the coordinator process would be released seconds after the thing it is
+# meant to protect started, and holding it longer would mean not detaching,
+# which is the design. So the claim is durable, and "is it stale" is answered
+# by asking the party that actually knows -- the scheduler -- instead of by
+# inventing the timeout `acquire_lease` was rewritten to delete.
+#
+# `mkdir(exist_ok=False)` IS the exclusivity, the same primitive and the same
+# reasoning as unit.py's exclusive write root: two coordinators cannot both
+# create one directory, and unlike O_EXCL on a plain file, directory creation
+# is atomic on the network filesystems these paths usually sit on. Taking
+# over a claim PROVEN dead is one `rename` of the whole directory, so exactly
+# one racer wins it and the loser refuses.
+#
+# WHAT THIS DOES NOT GIVE YOU, stated in the spirit of ARC-248's note on the
+# lease rather than left for someone to assume: the registry lives under the
+# RUN ROOT, so it is shared by exactly those coordinators that share a run
+# root. That is the reported case -- the default root is derived from the
+# project checkout, so ad-hoc sub-plans of one project all land on it -- but
+# two coordinators pointed at different roots do not see each other's claims,
+# and no claim of any kind is taken by a dry run.
+OUTPUT_CLAIMS_DIRNAME = ".output-claims"
+CLAIM_FILE = "claim.json"
+
+# survey.py's vocabulary, imported as a habit rather than as a word: "the
+# scheduler does not list it" and "the scheduler could not be asked" are
+# different facts, and written the same way the second reads as the first.
+# Here that difference decides whether a second job is dispatched into a
+# namespace a live one owns, so they are never collapsed.
+CLAIM_LIVE, CLAIM_FREE, CLAIM_UNKNOWN = "live", "free", "unknown"
+
+
+def _inside_dir(path, directory):
+    try:
+        Path(path).relative_to(Path(directory))
+        return True
+    except ValueError:
+        return False
+
+
+def _output_destinations(u, root):
+    """Every place a unit's DECLARED OUTPUTS land, as (label, abs path).
+
+    The unit's own namespace `<root>/<id>` comes first. Every attempt of that
+    id lives under it, `SWARM_DEP_<ID>` points into it, and it is precisely
+    what two plans naming one unit id share -- which is the reported failure.
+
+    Then each declared output that ESCAPES that namespace, and each declared
+    output under `promote_to`. Those are the keys that catch two DIFFERENT
+    ids: a plain relative `metrics.jsonl` resolves inside its own namespace
+    and can collide with nobody, so claiming it would be a false refusal
+    against the commonest output name in the repo, while `../shared/model.pt`
+    or an absolute path or a shared promotion tree resolve to the SAME string
+    for both units. "The same outputs" only means anything as a destination.
+    """
+    uid = str(u.get("id") or "")
+    base = Path(root).resolve()
+    namespace = base / uid if uid else base
+    out = [("output namespace", str(namespace))]
+    seen = {str(namespace)}
+    anchors = [namespace]
+    promote = u.get("promote_to")
+    if isinstance(promote, str) and promote.strip():
+        # A malformed promote_to is `promote`'s refusal to make, with its own
+        # message; claiming nothing for it here neither hides that nor
+        # pretends to have checked a destination that does not resolve.
+        dest, derr = resolve_promote_to(promote, root)
+        if dest and not derr:
+            anchors.append(Path(dest))
+    for anchor in anchors:
+        for o in (u.get("outputs") or []):
+            resolved = os.path.normpath(os.path.join(str(anchor), str(o)))
+            if anchor == namespace and _inside_dir(resolved, namespace):
+                continue                  # covered by the namespace claim
+            if resolved not in seen:
+                seen.add(resolved)
+                out.append(("declared output destination", resolved))
+    return out
+
+
+def _claim_dir(root, destination):
+    """Where the claim on one destination lives. Content-addressed, because a
+    destination is an arbitrary absolute path and cannot be a filename."""
+    digest = hashlib.sha256(str(destination).encode()).hexdigest()[:24]
+    return Path(root).resolve() / OUTPUT_CLAIMS_DIRNAME / digest
+
+
+def _claim_liveness(claim):
+    """Is the attempt a foreign claim records still live? live/free/unknown.
+
+    FREE is a positive observation: a registry that answered and does not
+    list the attempt. UNKNOWN is a registry that is absent or that failed,
+    and it is NOT free. Silence is not evidence of absence, and reading it as
+    absence here dispatches a second writer into a namespace a live one owns,
+    which is the whole of B6.
+    """
+    attempt_id = str(claim.get("attempt") or "")
+    kind = str(claim.get("kind") or "")
+    job = str(claim.get("job") or "")
+    if not attempt_id:
+        return CLAIM_UNKNOWN, ("the claim names no attempt, so nothing can "
+                               "be asked about it")
+    if job.startswith("dry-") or job.startswith(DRY_PREFIX):
+        return CLAIM_FREE, "the recorded attempt is a dry run and has no job"
+    scheduler_job = f"swarm-{attempt_id}"
+    if kind == "code":
+        if not shutil.which("paseo"):
+            return CLAIM_UNKNOWN, ("paseo is not on PATH, so the agent "
+                                   "registry cannot be asked whether the "
+                                   "agent for this attempt still exists")
+        rc, out, _ = U.run(["paseo", "ls", "--json"], timeout=60)
+        if rc != 0:
+            return CLAIM_UNKNOWN, "`paseo ls --json` failed, which proves nothing"
+        try:
+            agents = json.loads(out or "[]")
+        except (ValueError, TypeError):
+            return CLAIM_UNKNOWN, "`paseo ls --json` did not return JSON"
+        for a in (agents if isinstance(agents, list) else []):
+            # EXACT trailing match, for reconcile_orphan's reason: `in`
+            # also matched an attempt whose id is another's prefix.
+            if str((a or {}).get("name") or "").split()[-1:] == [attempt_id]:
+                return CLAIM_LIVE, (f"paseo still lists an agent for attempt "
+                                    f"{attempt_id}")
+        return CLAIM_FREE, f"paseo answered and lists no agent for {attempt_id}"
+    if kind != "slurm":
+        # A detached pipeline is a pid on the host that launched it. Asking
+        # about a pid from another host is unanswerable, and asking about one
+        # on THIS host would still confuse pid reuse with liveness, so this
+        # says unknown rather than guessing in either direction.
+        return CLAIM_UNKNOWN, (f"a {kind or 'kind-less'} attempt records no "
+                               f"registry this host can ask about liveness")
+    if not shutil.which("squeue"):
+        return CLAIM_UNKNOWN, ("squeue is not on PATH, so the scheduler "
+                               "cannot be asked whether a job is still "
+                               "queued or running for this attempt")
+    # squeue ONLY, deliberately. `sacct` keeps a row long after a job ends,
+    # so an sacct row answers "did it ever reach the scheduler" -- which is
+    # reconcile_orphan's question -- and not "is it live", which is this one.
+    rc, out, _ = U.run(["squeue", "-h", "-n", scheduler_job, "-o", "%i"],
+                       timeout=60)
+    if rc != 0:
+        return CLAIM_UNKNOWN, (f"`squeue -n {scheduler_job}` failed, so "
+                               f"the scheduler said nothing about this "
+                               f"attempt")
+    listed = (out or "").strip()
+    if listed:
+        return CLAIM_LIVE, (f"squeue lists job "
+                            f"{listed.splitlines()[0].strip()} under job name "
+                            f"{scheduler_job}")
+    return CLAIM_FREE, (f"squeue answered and lists no job named "
+                        f"{scheduler_job}, so no queued or running job "
+                        f"holds it")
+
+
+def _claim_refusal(uid, label, destination, claim, verdict, why, claim_dir):
+    """The refusal, which is where the `squeue` half of B6 earns its keep: the
+    lock decides, and the scheduler supplies the sentence a human can act on."""
+    owner = str(claim.get("state_dir") or "an unrecorded state directory")
+    other = str(claim.get("unit") or "?")
+    head = ("is still live" if verdict == CLAIM_LIVE
+            else "cannot be shown to be finished")
+    lines = [
+        f"unit {uid!r}: launch preflight refused the {label} "
+        f"{str(destination)!r}; unit {other!r}, dispatched from state "
+        f"directory {owner!r} as attempt "
+        f"{str(claim.get('attempt') or '?')!r}, holds a claim on it and "
+        f"{head}.",
+        f"  scheduler: {why}",
+    ]
+    if verdict == CLAIM_UNKNOWN:
+        lines.append(
+            "  UNKNOWN IS NOT FREE. Nothing here shows the other attempt "
+            "finished, and dispatching on that silence is how one unit "
+            "becomes two writers of one output path.")
+    lines.append(
+        f"  If that attempt is genuinely gone, remove the claim and re-run: "
+        f"rm -r {claim_dir}")
+    refusal = PreflightRefusal("\n".join(lines))
+    refusal.workspace = str(destination)
+    refusal.dirty_count = 0
+    refusal.reason = "output-claim-held"
+    return refusal
+
+
+def _claim_record(u, state_dir, attempt, label, destination):
+    return {"schema_version": 1,
+            "unit": u.get("id"),
+            "kind": u.get("kind"),
+            "state_dir": str(Path(state_dir).resolve()),
+            "attempt": attempt,
+            "job": None,
+            "label": label,
+            "destination": str(destination),
+            "host": os.uname().nodename,
+            "pid": os.getpid(),
+            "claimed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+
+
+def _own_claim(claim, u, state_dir):
+    """Is an existing claim this state directory's own claim for this unit?
+
+    Adjudicated from OUR state file, which is authority for us and which the
+    lease already serializes. This is what stops a crashed coordinator
+    wedging its own project: it restarts, its state says the unit is not
+    live, and it retakes a claim it never released -- with no timeout, and
+    without any claim of knowing anything about a FOREIGN coordinator.
+    """
+    return (str(claim.get("state_dir") or "")
+            == str(Path(state_dir).resolve())
+            and claim.get("unit") == u.get("id"))
+
+
+def _take_output_claims(u, root, state_dir, attempt):
+    """Claim every destination this unit's declared outputs occupy.
+
+    Returns (refusal, held). Nothing is left held on refusal: a partial claim
+    would block the very unit that was not allowed to start.
+    """
+    held = []
+    for label, destination in _output_destinations(u, root):
+        directory = _claim_dir(root, destination)
+        record = _claim_record(u, state_dir, attempt, label, destination)
+        try:
+            directory.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            existing, read_err = U.read_json(directory / CLAIM_FILE)
+            existing = existing if isinstance(existing, dict) else {}
+            if read_err or not existing:
+                # A claim directory with no readable claim is a coordinator
+                # that died between the mkdir and the write. It names no
+                # owner, so it cannot be adjudicated and must not be assumed
+                # empty; the refusal says how to clear it.
+                refusal = _claim_refusal(
+                    u.get("id"), label, destination, existing, CLAIM_UNKNOWN,
+                    f"the claim itself is unreadable ({read_err or 'empty'})",
+                    directory)
+                _drop_claims(held)
+                return refusal, []
+            if not _own_claim(existing, u, state_dir):
+                verdict, why = _claim_liveness(existing)
+                if verdict != CLAIM_FREE:
+                    refusal = _claim_refusal(u.get("id"), label, destination,
+                                             existing, verdict, why, directory)
+                    _drop_claims(held)
+                    return refusal, []
+                # PROVEN dead. One rename decides the takeover, so two
+                # coordinators cannot both conclude they won it.
+                aside = directory.with_name(
+                    f"{directory.name}.superseded-{os.getpid()}-"
+                    f"{int(time.time())}")
+                try:
+                    os.rename(str(directory), str(aside))
+                    directory.mkdir(parents=True, exist_ok=False)
+                except OSError as exc:
+                    refusal = _claim_refusal(
+                        u.get("id"), label, destination, existing,
+                        CLAIM_UNKNOWN,
+                        f"{why}, but the dead claim could not be taken over "
+                        f"({exc}); another coordinator may have taken it first",
+                        directory)
+                    _drop_claims(held)
+                    return refusal, []
+        except OSError as exc:
+            _drop_claims(held)
+            return (f"unit {u.get('id')!r}: cannot claim the {label} "
+                    f"{str(destination)!r}: {exc}"), []
+        write_err = U.write_json(directory / CLAIM_FILE, record)
+        if write_err:
+            _drop_claims(held + [directory])
+            return (f"unit {u.get('id')!r}: cannot record the claim on "
+                    f"{str(destination)!r}: {write_err}"), []
+        held.append(directory)
+    return None, held
+
+
+def _drop_claims(directories):
+    for directory in directories:
+        shutil.rmtree(str(directory), ignore_errors=True)
+
+
+def _release_output_claims(u, root, state_dir):
+    """Drop the claims THIS state directory holds for this unit.
+
+    Recomputed from the plan rather than by scanning the registry, so a
+    coordinator can only ever release its own, and only for units it owns.
+    """
+    released = []
+    for _label, destination in _output_destinations(u, root):
+        directory = _claim_dir(root, destination)
+        claim, err = U.read_json(directory / CLAIM_FILE)
+        if err or not isinstance(claim, dict):
+            continue
+        if _own_claim(claim, u, state_dir):
+            shutil.rmtree(str(directory), ignore_errors=True)
+            released.append(str(destination))
+    return released
+
+
+def _note_claimed_attempt(u, root, state_dir, attempt, job):
+    """Record the job id on claims already held, so a later coordinator can
+    ask the scheduler about it rather than only about the attempt name."""
+    for _label, destination in _output_destinations(u, root):
+        directory = _claim_dir(root, destination)
+        claim, err = U.read_json(directory / CLAIM_FILE)
+        if err or not isinstance(claim, dict):
+            continue
+        if _own_claim(claim, u, state_dir) and claim.get("attempt") == attempt:
+            claim["job"] = str(job) if job is not None else None
+            U.write_json(directory / CLAIM_FILE, claim)
+
+
 def _code_worktree_names(unit_dir):
     """Names Paseo/Git resources from the already-random attempt id."""
     attempt = Path(unit_dir).name
@@ -2191,6 +2976,70 @@ def _git_worktrees_on_branch(repo, branch):
     return found
 
 
+def _stash_refusal(uid, repo, entries):
+    """ARC-243, at second zero, in the same shape as C10's dirty refusal.
+
+    The dirty index of the source checkout is deliberately NOT checked here,
+    for the reason the docstring below gives: it cannot reach a worktree made
+    from an object id. THE STASH STACK IS DIFFERENT, and that is the whole
+    reason this refusal exists. It is one ref in the shared common Git
+    directory, so it is visible and mutable from the fresh attempt worktree
+    too -- it crosses the isolation boundary every other part of the
+    code-unit design rests on. If the stack is non-empty at second zero, the
+    agent's worktree is not isolated with respect to it before the agent has
+    run a single command.
+
+    This does NOT stop an agent creating a stash mid-run; nothing at dispatch
+    can. What it stops is a run STARTING on top of somebody else's parked
+    work, which is the case where recovery is hardest because nobody knows
+    the entry is there to look for.
+    """
+    lines = [
+        f"unit {uid!r}: launch preflight refused source checkout "
+        f"{str(repo)!r}; its `git stash` stack holds {len(entries)} "
+        f"entry/entries:"]
+    lines += [f"  {line}" for line in entries[:10]]
+    if len(entries) > 10:
+        lines.append(f"  ... and {len(entries) - 10} more")
+    lines.append(
+        "The stack is a SINGLE ref in the shared common Git directory, so it "
+        "is shared with every worktree of this repository, including the one "
+        "this attempt would be given. Three agents lost work to that in one "
+        "window: each popped an entry another had pushed.")
+    lines.append(
+        "Deal with the parked work first -- `git stash list` to see it, then "
+        "apply or drop each entry -- and the next advance dispatches this "
+        "unit. No retry was charged.")
+    refusal = PreflightRefusal("\n".join(lines))
+    refusal.workspace = str(repo)
+    refusal.dirty_count = 0
+    refusal.reason = "shared-stash-stack"
+    return refusal
+
+
+def _stash_preflight(uid, repo):
+    """The refusal for a non-empty shared stash stack, or None."""
+    rc, stashes, _ = _git(repo, "stash", "list")
+    if rc != 0:
+        # Not being able to ask is not an answer, the same rule the output
+        # claims are built on. A checkout whose HEAD reads fine but whose
+        # stash list errors is not a checkout we can call free of parked work.
+        return (f"unit {uid!r}: cannot read the `git stash` stack in "
+                f"{str(repo)!r}, so it cannot be shown to be empty. The stack "
+                f"is shared with every worktree of this repository; refusing "
+                f"rather than assuming it is empty.")
+    entries = [line for line in (stashes or "").splitlines() if line.strip()]
+    return _stash_refusal(uid, repo, entries) if entries else None
+
+
+def _repeat_stash_preflight(u):
+    """Re-ask the stash question without recapturing or trusting an anchor."""
+    repo, err = _plan_workspace(u)
+    if err:
+        return err
+    return _stash_preflight(u.get("id"), repo)
+
+
 def _capture_code_launch(unit_dir, u):
     """Record the immutable input to Paseo's worktree creation.
 
@@ -2199,10 +3048,15 @@ def _capture_code_launch(unit_dir, u):
     checking them would both block unrelated human work and prove nothing
     about the tree the agent receives. The clean-at-launch guarantee comes
     from Paseo constructing a new branch-off worktree from ``base_commit``.
+
+    The stash stack is the exception, and `_stash_refusal` says why.
     """
     repo, err = _plan_workspace(u)
     if err:
         return err, None
+    stash_problem = _stash_preflight(u.get("id"), repo)
+    if stash_problem:
+        return stash_problem, None
     target = str(u.get("target_branch") or "").strip()
     if not target:
         return (f"unit {u.get('id')!r}: no target_branch was declared; "
@@ -2678,13 +3532,22 @@ def _authority_result_sink():
     return promoted
 
 
-def _check(unit_dir, launch_facts=None):
+def _check(unit_dir, launch_facts=None, artifact_basis=None):
     argv = [sys.executable, str(_HERE / "unit.py"), "check", str(unit_dir)]
     # The separate judge receives the complete authority snapshot directly
     # from coordinator state. It never opens the launch audit record.
     if launch_facts:
         argv += ["--launch-facts", json.dumps(
             launch_facts, sort_keys=True, separators=(",", ":"))]
+    # Same channel, same provenance, for the same reason: the pre-dispatch
+    # artifact digest decides admission, so it travels BY VALUE from
+    # coordinator state. Passing a path to it, or letting the checker find it
+    # beside the attempt, would put the baseline where the judged party can
+    # write. What an onlooker could read off this argv is a digest of files it
+    # can already read; what it cannot do is change the baseline.
+    if artifact_basis:
+        argv += ["--artifact-basis", json.dumps(
+            artifact_basis, sort_keys=True, separators=(",", ":"))]
     # Anonymous coordinator-owned storage is the authority channel. stdout
     # contains diagnostics derived from agent-writable artifacts and cannot
     # become authority merely by printing a reserved-looking prefix.
@@ -3561,6 +4424,70 @@ def trusted_produced_head(state, unit, attempt_dir):
     us = (state.get("units") or {}).get(unit) or {}
     return (us.get("attempt_produced_heads") or {}).get(
         Path(attempt_dir).name)
+
+
+def _capture_artifact_basis(state, unit, unit_dir, u):
+    """Digest every declared artifact BEFORE anything is dispatched.
+
+    B1, and the strongest thing this function does is happen EARLY. The done
+    predicate concludes "the write root is exclusive, so an artifact found
+    there was produced here", and that inference needs the write root to have
+    been empty of that artifact when the attempt started. Nothing checked it,
+    so a unit that declared its input path as its output recorded a file it
+    never wrote as produced evidence and read DONE.
+
+    PINNED ONCE PER ATTEMPT, and the `if attempt in bases` guard is the whole
+    of it. `_submit` is re-entered on the code-launch recovery path and a
+    continuation re-runs the agent inside the SAME write root; either one, if
+    it re-digested, would adopt whatever the previous turn left behind as the
+    baseline it is about to be judged against. That is `produced_head`'s bug
+    -- a value that was never cleared and so was inherited -- and this is
+    where it would have been reproduced a third time.
+
+    The outputs come from the PLAN, never from the attempt's `unit.json`: the
+    party being judged can write that file, and a baseline over a list it
+    chose is a baseline it chose.
+    """
+    us = state.setdefault("units", {}).setdefault(unit, {})
+    attempt = Path(unit_dir).name
+    bases = us.setdefault("attempt_artifact_bases", {})
+    if attempt in bases:
+        return bases[attempt]
+    declared = [str(o) for o in (u.get("outputs") or [])]
+    present, missing, escaped = W.outputs_present(
+        unit_dir, {"declared_outputs": declared})
+    bases[attempt] = {
+        "schema_version": W.ARTIFACT_BASIS_SCHEMA,
+        # Both identities, so a basis lifted from another attempt or another
+        # unit is useless rather than merely unlikely to be lifted.
+        "attempt_id": attempt,
+        "unit_id": unit,
+        "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "declared": declared,
+        # Absent is the ordinary case and the strongest one: nothing was
+        # there, so anything there afterwards can only be new.
+        "absent": sorted(missing),
+        "escaped": sorted(escaped),
+        "present": U.fingerprint_outputs(unit_dir, present),
+    }
+    return bases[attempt]
+
+
+def trusted_artifact_basis(state, unit, attempt_dir):
+    """The pre-dispatch artifact digest pinned for THIS attempt; no fallback.
+
+    Never derived, never defaulted, and never read from the attempt directory
+    or the launch record. Returning None means "this attempt cannot be judged
+    for production", which the checker turns into a refusal.
+    """
+    if not attempt_dir:
+        return None
+    basis = ((((state.get("units") or {}).get(unit) or {})
+              .get("attempt_artifact_bases") or {}).get(Path(attempt_dir).name))
+    if W.artifact_basis_problem(basis, attempt_dir,
+                                {"id": unit, "task_id": unit}):
+        return None
+    return basis
 
 
 CHECK_RESULT_PREFIX = "SWARM_CHECK_RESULT"
@@ -4475,7 +5402,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         protocol_problem = None
         if ran_check:
             check_result = _check(
-                attempt, trusted_launch_facts(state, uid, attempt))
+                attempt, trusted_launch_facts(state, uid, attempt),
+                trusted_artifact_basis(state, uid, attempt))
             # Old embedders may omit diagnostic stderr or the new authority
             # channel. Missing authority fails closed; stdout is never used as
             # a compatibility fallback because agent-derived notes reach it.
@@ -4524,6 +5452,28 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         previous = us.get("state")
         us["state"] = ("FAILED_EVIDENCE" if protocol_problem
                        else NAME.get(rc, f"rc={rc}"))
+
+        # A DECLARED convergence criterion gates DONE. Undeclared, nothing
+        # changes. This is the whole reason converge.py exists: the scheduler
+        # and the done predicate BOTH report success for a run that spent its
+        # budget without improving, and that checkpoint must not close a
+        # ticket, satisfy a dependent, or become promotable.
+        #
+        # NEEDS_HUMAN, not FAILED: the command did not fail. Extending the
+        # budget, changing the recipe, or accepting the checkpoint anyway are
+        # decisions with cost, and a coordinator that guessed among them would
+        # either burn another full run or quietly accept a bad model. It also
+        # keeps the unit out of the retry path and out of the settle window,
+        # so nothing is auto-redone on the strength of this verdict.
+        if us["state"] == "DONE" and u.get("converge"):
+            verdict, why = converge_verdict(u, attempt)
+            us["converge_verdict"] = verdict
+            us["converge_reasons"] = list(why)
+            if verdict != "CONVERGED":
+                us["state"] = "NEEDS_HUMAN"
+            report.append(f"{uid}: convergence {verdict} -- " +
+                          " ".join(str(w) for w in why))
+
         # A CODE UNIT IS NOT DONE WHEN ITS PREDICATE PASSES. The receipt says
         # an agent went idle and files exist; the accepted form of that work
         # is a merged PR. Rewriting only the tracker intent left the unit
@@ -4531,9 +5481,10 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         # the DAG contradicted the tracker -- the fix was cosmetic. Found by a
         # reviewer.
         #
-        # KNOWN LIMIT, stated rather than hidden: nothing records a merge yet,
-        # so a code unit stays READY_FOR_PR and anything depending on it
-        # waits. That is honest until stage 3 exists.
+        # A merge IS recorded now -- `us["merged_as"]` below, read a few
+        # lines down -- so the older note here claiming otherwise was a limit
+        # that outlived its cause. A stale limit is not harmless: it reads as
+        # a standing gap and invites a workaround for a solved problem.
         # READY_FOR_PR is included deliberately. Guarding on DONE alone made
         # the state a dead end: the first advance moved a produced unit to
         # READY_FOR_PR, and a receipt recorded afterwards was never looked at
@@ -4727,6 +5678,18 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                     state, u, attempt, report)
     save_state(state_dir, state)
 
+    # 1b. Release the output claims of units that are no longer live (B6).
+    #     Recomputed from the plan and released only when the claim names
+    #     THIS state directory, so a coordinator can free its own claims --
+    #     including ones it left behind by dying -- and can never free
+    #     anybody else's. This is what keeps a crash from wedging a project
+    #     without a TTL: our own state file is authority for our own units,
+    #     and `acquire_lease` already serialises access to it.
+    if not dry_run:
+        for uid, u in sorted(units.items()):
+            if _unit_state(state, uid).get("state") not in LIVE_STATES:
+                _release_output_claims(u, root, state_dir)
+
     # 2. Budget. Charged on DISPATCH, not on completion: a budget that only
     #    counts finished work cannot stop a runaway.
     budget = (plan.get("budget") or {}).get("gpu_hours")
@@ -4810,10 +5773,34 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         # three 4-hour attempts, 12 committed.
         us["gpu_hours"] = float(us.get("gpu_hours") or 0) + want
         spent += want
+        # BEFORE `_submit`, and persisted by the save below it, because the
+        # basis is only a basis if it predates everything that could write
+        # into the write root. A digest taken after dispatch is a digest of
+        # the run's own output.
+        _capture_artifact_basis(state, uid, unit_dir, u)
         save_state(state_dir, state)
 
-        job_id, err = _submit(u, unit_dir, dry_run, state, state_dir)
+        # B6, and the reason it sits HERE. The lease excludes a second
+        # controller over this state directory; it says nothing about a
+        # second state directory over this unit's output namespace, which is
+        # exactly what three ad-hoc sub-plans of one project produce. A dry
+        # run takes no claim, because it creates no writer for one to protect
+        # against and a placeholder claim in a shared registry would refuse
+        # honest work.
+        claim_refusal, held_claims = (None, [])
+        if not dry_run:
+            claim_refusal, held_claims = _take_output_claims(
+                u, root, state_dir, Path(unit_dir).name)
+        job_id, err = ((None, claim_refusal) if claim_refusal
+                       else _submit(u, unit_dir, dry_run, state, state_dir))
         if err:
+            # Whatever we claimed for an attempt that never started must not
+            # outlive it. `_release_output_claims` recomputes from the plan
+            # and only frees claims naming this state directory, so this is
+            # the same operation the top of `advance` performs, not a second
+            # implementation of it.
+            if held_claims:
+                _release_output_claims(u, root, state_dir)
             # Classified from what `_submit` OBSERVED, not from re-reading
             # the launch record. On a re-dispatch the record was written while
             # the workspace was clean and still says "passed", so reading it
@@ -4836,6 +5823,10 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                                 else None),
                     "workspace": err.workspace,
                     "dirty_path_count": err.dirty_count,
+                    # WHICH preflight. Three of them refuse here now, and a
+                    # zero dirty count rendered as "uncommitted changes" is a
+                    # plain misstatement of why nothing ran.
+                    "reason": err.reason,
                     "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                 })
                 if us.get("attempts"):
@@ -4868,6 +5859,13 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             us["bind_pending"] = True
         # Persist the binding authority before unit.py writes its marker.
         save_state(state_dir, state)
+        # Now the claim can name the job as well as the attempt. Best effort
+        # and non-authoritative: the attempt id already names the scheduler
+        # job (`swarm-<attempt>`), so a claim that never gets this update is
+        # still adjudicable. It is written for the human reading a refusal.
+        if held_claims:
+            _note_claimed_attempt(u, root, state_dir, Path(unit_dir).name,
+                                  job_id)
         berr = _bind(unit_dir, job_id) if needs_bind else None
         if berr:
             # The job is REAL and running; only the binding write failed, on an
@@ -4941,8 +5939,12 @@ def _load_plan(path):
     plan, err = U.read_json(path)
     if err:
         sys.exit(f"error: no readable plan at {path}: {err}")
+    # Dispatch validates against the survey too, not just `validate`. A
+    # refusal that only fires when someone runs the optional command is a
+    # refusal that fires after the DAG is live.
+    survey, _note = discover_survey(path)
     try:
-        validate_plan(plan)
+        validate_plan(plan, survey)
     except PlanError as e:
         sys.exit(f"error: invalid plan: {e}")
     except RecursionError:
@@ -4980,12 +5982,32 @@ def cmd_validate(args):
     plan, err = U.read_json(args.plan)
     if err:
         sys.exit(f"error: no readable plan at {args.plan}: {err}")
+    explicit = getattr(args, "survey", None)
+    if explicit:
+        # NAMED, so unreadable is an error rather than a shrug. Degrading a
+        # survey the operator pointed at into "unknown" would silently drop
+        # every check they asked for.
+        survey, serr = read_survey(explicit)
+        if serr:
+            sys.exit(f"error: no readable survey at {explicit}: {serr}")
+        note = explicit
+    else:
+        survey, note = discover_survey(args.plan)
     try:
-        summary = validate_plan(plan)
+        summary = validate_plan(plan, survey)
     except PlanError as e:
         sys.exit(f"error: invalid plan: {e}")
     print(f"plan is valid: {summary['units']} unit(s), "
           f"{summary['with_deps']} with dependencies")
+    # WHICH CLUSTER FACTS WERE CONSULTED, in both directions. A pass here
+    # means "the survey did not contradict this plan", and with no survey it
+    # means nothing at all, so neither may be printed as approval.
+    if survey is None:
+        print(f"  NOT CHECKED: {note}. Nothing here examined this cluster's "
+              f"memory policy or per-partition account rules.")
+    else:
+        print(f"  survey: {note} -- memory policy and per-partition account "
+              f"rules were checked against it. {QOS_CAVEAT}")
     # NAME WHAT WAS NOT VERIFIED, so silence is never read as approval. A real
     # run declared cpu_preemptible with 32 CPUs in its prose, ran on the
     # default partition with 2, and this printed "plan is valid" -- because
@@ -5475,7 +6497,10 @@ SCHEMA_FIELDS = [
      'inline or a "runtimes" id, or the literal "none". Declares resolution, '
      "entrypoint, probe and verified_by"),
     ("sbatch", "slurm", "optional",
-     "a LIST of scheduler flags. A string is iterated character by character"),
+     "a LIST of scheduler flags. A string is iterated character by "
+     "character. --mem is required when the survey reports "
+     "mem_flag_required, and --account is checked against the surveyed "
+     "allow/deny lists of the partition --partition names"),
     ("write_scopes", "all", "optional",
      "must not overlap between concurrent units. Names FILES; does NOT "
      "isolate a code unit's repository"),
@@ -5483,13 +6508,22 @@ SCHEMA_FIELDS = [
      '{"requires_clean_git": true, "path": "/checkout"}; opt-in launch '
      "preflight for a non-code unit"),
     ("promote_to", "all", "optional",
-     "where verified outputs are published. Needs a named approver"),
+     "where verified outputs are published. Needs a named approver. "
+     "REQUIRED of a unit whose outputs include findings.json, which the "
+     "report reads from the project directory rather than the write root"),
     ("max_attempts", "all", "optional",
      "default 1. Above 1 requires a retry contract with max_lost"),
     ("retry", "all", "optional",
      '{"mode": "restart", "max_lost": {...}}. "resume" is REFUSED'),
     ("gpu_hours", "all", "optional", "charged against the plan's budget"),
     ("pool", "all", "optional", "must be declared in limits.pools"),
+    ("converge", "slurm, pipeline", "optional",
+     '{"metrics": "metrics.jsonl", "criterion": {...}, "diverge": [...], '
+     '"budget": N}. Scores a criterion over the metrics SERIES and gates '
+     "DONE: a run that spent its budget without meeting it is NEEDS_HUMAN, "
+     "not DONE, so it closes no ticket and satisfies no dependent. The "
+     "metrics file must also be a declared output, and the criterion is read "
+     "from the plan, never from the attempt directory"),
 ]
 
 # What couples to what, stated once. These are the rules that only announce
@@ -5506,6 +6540,19 @@ SCHEMA_COUPLINGS = [
     "in retry_limits.",
     "An input is satisfied by an upstream unit's output only when that unit "
     "is an ancestor.",
+    "converge.metrics must also appear in outputs, so the predicate checks "
+    "the file exists before convergence is judged over it.",
+    "converge is refused on kind=code: a code unit is closed by a merged pull "
+    "request and has no metrics series.",
+    "A slurm unit must state its memory (--mem, --mem-per-cpu or "
+    "--mem-per-gpu) when the survey reports mem_flag_required. With no "
+    "survey to read, that fact is unknown and nothing is refused on it.",
+    "A slurm unit's --account must not be denied by, nor missing from a set "
+    "allow_accounts of, the partition it names, as the survey recorded them. "
+    "unknown on a field decides nothing; the other field still decides.",
+    "A unit declaring findings.json must declare promote_to. Outputs stay in "
+    "the attempt write root and the report reads findings.json from the "
+    "project directory, so an unpromoted one is read by nobody.",
 ]
 
 
@@ -5947,6 +6994,13 @@ def main():
 
     v = sub.add_parser("validate", help="acyclic deps, disjoint write scopes")
     v.add_argument("plan")
+    v.add_argument("--survey", default=None,
+                   help="the survey.py JSON to check this plan's memory "
+                        "requests and account/partition pairs against. "
+                        "Without it, .swarm/survey.json beside the plan and "
+                        "then in the working directory, and if neither is "
+                        "there those cluster facts are UNKNOWN and nothing "
+                        "is refused on them.")
     v.set_defaults(fn=cmd_validate)
 
     r = sub.add_parser("run", help="dispatch what is ready, then exit")

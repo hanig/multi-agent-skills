@@ -569,6 +569,75 @@ class TestBlockedBeforeLaunchIsVisible(unittest.TestCase):
             self.assertIn("2 dirty path(s)", html)
 
 
+class TestFilesNothingDeclaredAreVisible(unittest.TestCase):
+    """18 bytes of debris named `phase0b/--reflink=auto` rode a DONE unit out
+    of a real run because nothing looked. The receipt names it now, and a
+    receipt nobody reads is the same silence one file further along."""
+
+    DEBRIS = "phase0b/--reflink=auto"
+
+    def _done(self, stray):
+        return {"a": {"state": "DONE", "outputs": {
+            "out.txt": {"sha256": "f" * 64, "size": 1,
+                        "method": "content-digest"}},
+            "basis": {"stray_untracked": stray}}}
+
+    def test_the_stray_path_is_rendered(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, receipts=self._done(
+                {"workspace": "/checkout", "paths": [self.DEBRIS],
+                 "count": 1}))
+            html = R.render(R.collect(t))
+            self.assertIn("Files nothing declared", html)
+            self.assertIn("/checkout", html)
+            self.assertIn("--reflink=auto", html)
+
+    def test_a_truncated_list_says_how_many_it_did_not_show(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, receipts=self._done(
+                {"workspace": "/checkout", "paths": ["junk/f000"],
+                 "count": 51}))
+            html = R.render(R.collect(t))
+            self.assertIn("51 untracked path(s)", html)
+            self.assertIn("and 50 more", html)
+
+    def test_debris_does_not_move_the_verdict(self):
+        """Audit-only, and the report is where that is easiest to break:
+        authority lives in coordinator state, so a stray file must not turn a
+        genuinely complete run into a failure."""
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, receipts=self._done(
+                {"workspace": "/checkout", "paths": [self.DEBRIS],
+                 "count": 1}))
+            rows = R.unit_rows(R.collect(t))
+            self.assertEqual(rows[0]["stray_untracked"]["count"], 1)
+            self.assertEqual(R.verdict(rows)[0], "COMPLETE")
+
+    def test_a_clean_workspace_writes_no_section(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, receipts=self._done(
+                {"workspace": "/checkout", "paths": [], "count": 0}))
+            self.assertNotIn("Files nothing declared", R.render(R.collect(t)))
+
+    def test_a_receipt_that_did_not_look_writes_no_section(self):
+        """`null` is "we did not look", which is not "we looked and it was
+        clean". Neither gets a section, but reading one as the other would."""
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, receipts=self._done(None))
+            rows = R.unit_rows(R.collect(t))
+            self.assertIsNone(rows[0]["stray_untracked"])
+            self.assertNotIn("Files nothing declared", R.render(R.collect(t)))
+
+    def test_a_receipt_predating_the_field_still_renders(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, receipts={"a": {"state": "DONE", "outputs": {
+                "out.txt": {"sha256": "f" * 64, "size": 1,
+                            "method": "content-digest"}}}})
+            rows = R.unit_rows(R.collect(t))
+            self.assertIsNone(rows[0]["stray_untracked"])
+            self.assertEqual(R.verdict(rows)[0], "COMPLETE")
+
+
 class TestAnUnattributedReceiptDoesNotOutrankState(unittest.TestCase):
     """The other half of "the receipt wins".
 
@@ -657,6 +726,236 @@ class TestAnUnattributedReceiptDoesNotOutrankState(unittest.TestCase):
             self.assertFalse(rows[0]["receipt_attested"])
             self.assertEqual(rows[0]["state"], "DONE",
                              "coordinator state is what stands here")
+
+
+def _survey(tmp, obj):
+    os.makedirs(os.path.join(tmp, ".swarm"), exist_ok=True)
+    path = os.path.join(tmp, ".swarm", "survey.json")
+    with open(path, "w") as fh:
+        if isinstance(obj, str):
+            fh.write(obj)
+        else:
+            json.dump(obj, fh)
+    return path
+
+
+# The shape survey.py actually writes, built from machine(), scheduler() and
+# the `data = {...}` assembly in its main() -- NOT from what the reader used
+# to assume. hostname/user/python all live under `machine` and `accounts`
+# under `scheduler`; none of them has ever been at the top level.
+REAL_SURVEY = {
+    "schema_version": 3,
+    "machine": {
+        "hostname": "chimera01", "system": "Linux", "release": "5.14.0",
+        "user": "hanig", "home": "/home/hanig", "python": "3.11.4",
+        "cpus": 256, "tools": {"sbatch": "/usr/bin/sbatch"}},
+    "scheduler": {
+        "present": True,
+        "partitions": [
+            {"partition": "gpu", "default": True, "avail": "up",
+             "timelimit": "7-00:00:00", "nodes": "12",
+             "allow_accounts": {"state": "set", "value": ["arc-lab"]},
+             "deny_accounts": {"state": "unrestricted", "value": None},
+             "max_mem_per_cpu_mb": {"state": "set", "value": 5120},
+             "qos": {"state": "set", "value": "gpu-qos"},
+             "qos_grptres": {"state": "set", "value": {"cpu": "736"}}},
+            {"partition": "cpu", "default": False, "avail": "up",
+             "timelimit": "2-00:00:00", "nodes": "40",
+             "allow_accounts": {"state": "unknown", "value": None,
+                                "why": "scontrol did not answer"},
+             "deny_accounts": {"state": "unknown", "value": None,
+                               "why": "scontrol did not answer"},
+             "max_mem_per_cpu_mb": {"state": "unrestricted", "value": None},
+             "qos": {"state": "unrestricted", "value": None},
+             "qos_grptres": {"state": "unrestricted", "value": None}}],
+        "config": {"DefMemPerCPU": "UNLIMITED", "MaxArraySize": "1001",
+                   "SchedulerType": "sched/backfill"},
+        "mem_flag_required": True,
+        "accounts": ["arc-lab", "pi-goodarzi"],
+        "qos": {"gpu-qos": {"grptres": {"state": "set",
+                                        "value": {"cpu": "736"}}}},
+        "limits_note": "allow_accounts, deny_accounts, max_mem_per_cpu_mb ...",
+        "qos_grptres_note": "the PARTITION QOS only ..."},
+    "repo": {"root": "/p", "exists": True, "git": True, "head": "19c5171",
+             "file_count": 12, "walk": {"state": "ok"}},
+    "storage": [{"path": "/home/hanig", "total_gb": 1.0, "free_gb": 0.5}],
+}
+
+
+class TestTheEnvironmentSectionReadsTheSurveyItWasGiven(unittest.TestCase):
+    """The reader took hostname/user/python/accounts off the TOP level of
+    survey.json, where survey.py has never written them. Three fields
+    rendered as nothing -- indistinguishable from a host that had nothing --
+    and `scheduler`, a dict with no version/path, fell through to
+    json.dumps() and put every partition's account rules and QOS limits into
+    one <dd>."""
+
+    def _render(self, survey, **kw):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, **kw)
+            if survey is not None:
+                _survey(t, survey)
+            return R.render(R.collect(t))
+
+    def test_host_user_python_and_accounts_all_appear(self):
+        html = self._render(REAL_SURVEY)
+        for want in ("chimera01", "hanig", "3.11.4", "arc-lab, pi-goodarzi"):
+            self.assertIn(want, html, "%r is in the survey and not in the "
+                                      "report" % want)
+
+    def test_the_host_reaches_the_header_too(self):
+        self.assertIn("host <code>chimera01</code>", self._render(REAL_SURVEY))
+
+    def test_the_scheduler_block_is_not_dumped_as_json(self):
+        html = self._render(REAL_SURVEY)
+        # Any of these on the page means the raw block was serialised in.
+        for leak in ("max_mem_per_cpu_mb", "qos_grptres", "limits_note",
+                     "unrestricted", '{"present"', "&quot;present&quot;"):
+            self.assertNotIn(leak, html, "the scheduler block leaked %r into "
+                                         "the report" % leak)
+
+    def test_the_scheduler_summary_says_what_is_worth_saying(self):
+        html = self._render(REAL_SURVEY)
+        self.assertIn("present (sched/backfill)", html)
+        self.assertIn("2 (default: gpu)", html)
+        self.assertIn("--mem required", html)
+        # And it admits what it left out, so the omission is not read as an
+        # absence of rules.
+        self.assertIn("not summarised here", html)
+
+    def test_an_absent_scheduler_is_not_the_same_as_an_unsurveyed_one(self):
+        off = self._render(dict(REAL_SURVEY, scheduler={"present": False}))
+        none = self._render({k: v for k, v in REAL_SURVEY.items()
+                             if k != "scheduler"})
+        # Matched against the rendered <dd>, not the page: the section's own
+        # legend names all three words, so a bare substring passes either way.
+        self.assertIn('<dd class="digest">not present on this host (no '
+                      "sinfo)</dd>", off)
+        self.assertNotIn('<dd class="digest">not surveyed</dd>', off)
+        self.assertIn('<dd class="digest">not surveyed</dd>', none)
+        self.assertNotIn("not present on this host (no sinfo)", none)
+
+    def test_partitions_that_could_not_be_listed_are_not_zero(self):
+        sched = {k: v for k, v in REAL_SURVEY["scheduler"].items()
+                 if k != "partitions"}
+        sched["partitions_unavailable"] = "sinfo did not answer"
+        html = self._render(dict(REAL_SURVEY, scheduler=sched))
+        self.assertIn("could not be listed", html)
+        self.assertIn("sinfo did not answer", html)
+        self.assertNotIn('<dd class="mono">0', html)
+
+    def test_a_field_the_survey_omitted_says_so(self):
+        machine = {k: v for k, v in REAL_SURVEY["machine"].items()
+                   if k != "user"}
+        html = self._render(dict(REAL_SURVEY, machine=machine))
+        self.assertIn('<dt>user</dt><dd class="digest">not recorded</dd>',
+                      html)
+        self.assertIn("chimera01", html, "the rest still renders")
+
+    def test_no_accounts_is_never_printed_as_no_accounts(self):
+        sched = {k: v for k, v in REAL_SURVEY["scheduler"].items()
+                 if k != "accounts"}
+        html = self._render(dict(REAL_SURVEY, scheduler=sched))
+        self.assertIn("sacctmgr named none, or did not answer", html)
+
+
+class TestAnUnreadableSurveyIsNotAnEmptyOne(unittest.TestCase):
+
+    def _render(self, write):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t)
+            write(t)
+            return R.render(R.collect(t))
+
+    def test_a_corrupt_survey_is_announced_not_rendered_blank(self):
+        html = self._render(lambda t: _survey(t, "{not json"))
+        self.assertIn("cannot be read", html)
+        self.assertIn("not valid JSON", html)
+        # And it does not then render a page of absences, which would read as
+        # a host that was looked at and had nothing on it.
+        self.assertNotIn('<dl class="kv">', html)
+
+    def test_a_survey_that_is_not_an_object_is_unreadable_too(self):
+        html = self._render(lambda t: _survey(t, ["chimera01"]))
+        self.assertIn("does not hold a JSON object", html)
+
+    def test_no_survey_at_all_writes_no_environment_section(self):
+        html = self._render(lambda t: None)
+        self.assertNotIn("<h2>Environment</h2>", html)
+
+    def test_env_lock_alone_says_the_survey_is_absent(self):
+        # env.lock has opened this section since it was written, and the
+        # section then had nothing to put in it.
+        html = self._render(
+            lambda t: open(os.path.join(t, "env.lock"), "w").close())
+        self.assertIn("Nothing here describes the host", html)
+        self.assertIn("<code>.swarm/survey.json</code> is absent", html)
+        self.assertIn("<code>env.lock</code> is present", html)
+
+    def test_an_empty_survey_object_is_not_reported_as_an_absent_file(self):
+        def write(t):
+            _survey(t, {})
+            open(os.path.join(t, "env.lock"), "w").close()
+        html = self._render(write)
+        self.assertIn("parsed, and is empty", html)
+        self.assertNotIn("is absent", html)
+
+    def test_collect_reports_which_of_the_three_it_was(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t)
+            self.assertEqual(R.collect(t)["survey_status"]["status"],
+                             "missing")
+            _survey(t, "{nope")
+            self.assertEqual(R.collect(t)["survey_status"]["status"],
+                             "unreadable")
+            _survey(t, REAL_SURVEY)
+            self.assertEqual(R.collect(t)["survey_status"]["status"],
+                             "present")
+
+
+class TestASurveyVersionTheReportCannotReadSaysSo(unittest.TestCase):
+    """survey.py versions its output precisely so a consumer can tell "this
+    cluster restricts nothing" from "this survey is older than the question".
+    A reader that ignores the number renders that difference as blanks."""
+
+    def _render(self, survey):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t)
+            _survey(t, survey)
+            return R.render(R.collect(t))
+
+    def test_the_current_version_produces_no_warning(self):
+        self.assertNotIn("not the shape this report reads",
+                         self._render(REAL_SURVEY))
+
+    def test_a_newer_survey_is_named_as_a_limit_of_this_reader(self):
+        html = self._render(dict(REAL_SURVEY, schema_version=99))
+        self.assertIn("not the shape this report reads", html)
+        self.assertIn("version 99", html)
+        self.assertIn("this reader's limit, not the host's", html)
+        # Still best-effort: what it does understand is still shown.
+        self.assertIn("chimera01", html)
+
+    def test_an_older_survey_says_the_file_is_short_not_the_host(self):
+        html = self._render(dict(REAL_SURVEY, schema_version=1))
+        self.assertIn("missing from the file rather than from the host", html)
+
+    def test_an_unversioned_survey_is_flagged_as_unverified(self):
+        html = self._render(
+            {k: v for k, v in REAL_SURVEY.items() if k != "schema_version"})
+        self.assertIn("no <code>schema_version</code>", html)
+
+    def test_the_version_cannot_smuggle_markup_in(self):
+        html = self._render(dict(REAL_SURVEY,
+                                 schema_version="<img src=x onerror=1>"))
+        self.assertNotIn("<img src=x", html)
+        self.assertIn("&lt;img", html)
+
+    def test_the_reader_pins_the_version_survey_py_writes(self):
+        src = (SCRIPTS / "survey.py").read_text()
+        self.assertIn('"schema_version": %d' % R.SURVEY_SCHEMA, src,
+                      "report.py reads a survey version survey.py no longer "
+                      "writes")
 
 
 if __name__ == "__main__":

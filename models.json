@@ -1,0 +1,73 @@
+{
+  "_comment": "Static model registry for routing. Intelligence and coding index values were seeded once from the Artificial Analysis Intelligence Index / Coding Agent Index (Aug 2026) — treat them as settled; do not re-verify per task. Edit by hand when you deliberately update scores. Live signals (quota, load, observed tok/s) are merged by `bus models` at read time.",
+  "models": [
+    {
+      "id": "claude/opus",
+      "label": "Claude Opus 5",
+      "intelligence_index": 60.7,
+      "intelligence_index_source": "Artificial Analysis Intelligence Index, Aug 2026 (max reasoning)",
+      "coding_index": 78.0,
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "cost_tier": "plan-high",
+      "quota": "claude plan; no local API — /usage in Claude Code TUI",
+      "notes": "UI/design/artistic judgment per orchestration preferences. AA Coding Index ~78.0, essentially tied with Sol."
+    },
+    {
+      "id": "codex/gpt-5.6-sol",
+      "label": "GPT-5.6 Sol",
+      "intelligence_index": 58.9,
+      "intelligence_index_source": "Artificial Analysis Intelligence Index, Aug 2026",
+      "coding_index": 80,
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "cost_tier": "plan-high",
+      "quota": "codex plan; live rate-limit windows read from codex rollouts",
+      "notes": "Integration/review gate in sprints. AA Coding Index 78.3, leads Opus by a hair."
+    },
+    {
+      "id": "kimi/kimi-code/k3-256k",
+      "label": "Kimi K3 (256k)",
+      "intelligence_index": 59.7,
+      "intelligence_index_source": "Artificial Analysis Intelligence Index, Aug 2026",
+      "modalities": [
+        "text"
+      ],
+      "cost_tier": "plan-mid",
+      "context": "256k",
+      "quota": "kimi membership; no local API — /usage in Kimi TUI or web console",
+      "notes": "Default audit/research provider per orchestration preferences (omit model override)."
+    },
+    {
+      "id": "codex/gpt-5.6-luna",
+      "label": "GPT-5.6 Luna",
+      "intelligence_index": 52,
+      "intelligence_index_source": "Artificial Analysis Intelligence Index, Aug 2026, max reasoning (default effort ~51)",
+      "coding_index": 74.6,
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "cost_tier": "plan-mid",
+      "quota": "codex plan; live rate-limit windows read from codex rollouts",
+      "notes": "User-preferred on max reasoning. AA Coding Agent Index ~74.6 (Terra 77, Sol 80). Stronger instruction following + image-capable frontend inspection in sprints."
+    },
+    {
+      "id": "pi/deepseek-runai/deepseek-v4-flash-0731",
+      "label": "DeepSeek V4 Flash (self-hosted, via pi)",
+      "intelligence_index": 52,
+      "intelligence_index_source": "Artificial Analysis Intelligence Index, Aug 2026 (0731 refresh)",
+      "modalities": [
+        "text"
+      ],
+      "cost_tier": "free-selfhosted",
+      "context": "1M",
+      "quota": "none (self-hosted vLLM); constraint is GPU capacity — live load from :8001/metrics",
+      "notes": "Bulk bounded text-only workhorse, routed through pi (paseo provider `pi`, model id must be provider-prefixed: deepseek-runai/deepseek-v4-flash-0731 (bare id times out paseo's pi adapter)). Never send images. Check endpoint health before batches."
+    }
+  ]
+}

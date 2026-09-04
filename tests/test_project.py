@@ -815,6 +815,46 @@ class TestRamificationsOfTheRoundTwoFixes(unittest.TestCase):
                           "as forgotten")
 
 
+class TestTheInstalledVersionSurvivesAWorktree(unittest.TestCase):
+    """Both scripts asked `[ -d "$REPO/.git" ]`, which is false in a worktree
+    because `.git` is a FILE there. So every install from an attempt worktree
+    -- the normal way to try a change before merging it -- stamped
+    version=unknown, and doctor reported provenance it had been handed for
+    free. `unknown` reads like a value, not like a failure to look."""
+
+    def _repo_head(self):
+        r = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short",
+                            "HEAD"], capture_output=True, text=True)
+        return r.stdout.strip() if r.returncode == 0 else None
+
+    def test_the_marker_records_the_commit_not_unknown(self):
+        head = self._repo_head()
+        if not head:
+            self.skipTest("not a git checkout, so there is no version to find")
+        with tempfile.TemporaryDirectory() as d:
+            prefix = Path(d) / "prefix"
+            r = subprocess.run(
+                ["sh", str(ROOT / "install.sh"), "--prefix", str(prefix),
+                 "--allow-org-shadow"],
+                capture_output=True, text=True, cwd=ROOT)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            marker = (prefix / "hanig-swarm"
+                      / ".installed-by-multi-agent-skills").read_text()
+            version = next(l.split("=", 1)[1] for l in marker.splitlines()
+                           if l.startswith("version="))
+            self.assertNotEqual(version, "unknown", marker)
+            self.assertTrue(version.startswith(head),
+                            f"marker says {version!r}, HEAD is {head!r}")
+
+    def test_doctor_names_the_commit(self):
+        if not self._repo_head():
+            self.skipTest("not a git checkout, so there is no version to find")
+        r = subprocess.run(["sh", str(ROOT / "bin" / "doctor")],
+                           capture_output=True, text=True, cwd=ROOT)
+        self.assertIn("commit: ", r.stdout)
+        self.assertNotIn("commit: unknown", r.stdout)
+
+
 class TestUninstallOnlyRemovesOurOwn(unittest.TestCase):
     """I ran `install.sh --uninstall` on chimera to clear my own test install
     and it deleted two of Hani's skills. Its ownership test was
@@ -967,6 +1007,256 @@ class TestInstallerSymlinkEdgeCases(unittest.TestCase):
             self.assertTrue((prefix / "hanig-gone").is_dir())
 
 
+MARKER = ".installed-by-multi-agent-skills"
+
+
+def _skill_dirs():
+    return sorted(d.name for d in (ROOT / "skills").iterdir()
+                  if d.is_dir() and not d.name.startswith("."))
+
+
+def _authored():
+    return [n for n in _skill_dirs() if n.startswith("hanig-")]
+
+
+def _vendored():
+    return [n for n in _skill_dirs() if not n.startswith("hanig-")]
+
+
+class TestVendoredSkillsAreNotOursToDelete(unittest.TestCase):
+    """19c5171 vendored eight skills from another author's repo verbatim, and
+    install.sh stamped them with the same ownership marker it writes on the
+    skills we wrote. That marker is the whole basis of `--uninstall`, so on a
+    host where upstream is also installed -- the setup
+    docs/plan-swarm-sol-variant.md records -- removing "our" skills took
+    theirs out of ~/.claude/skills too. Same shape as the chimera incident
+    TestUninstallOnlyRemovesOurOwn guards: ownership came from something we
+    recorded, but what we recorded no longer meant what it used to.
+
+    Vendored-ness is read off the tree, never from a list: this repo names
+    everything it writes hanig-*, so a directory under skills/ outside that
+    namespace arrived from somebody else."""
+
+    def _install(self, prefix, *extra):
+        return subprocess.run(
+            ["sh", str(ROOT / "install.sh"), "--prefix", str(prefix),
+             "--allow-org-shadow", *extra],
+            capture_output=True, text=True, cwd=ROOT)
+
+    def _upstream_install(self, base, prefix, name="paseo", shape="link"):
+        """What upstream's own install looks like from here: a symlink into
+        their checkout, or a plain directory we never stamped."""
+        theirs = base / "their-checkout" / name
+        theirs.mkdir(parents=True)
+        (theirs / "SKILL.md").write_text("theirs\n")
+        prefix.mkdir(exist_ok=True)
+        if shape == "link":
+            os.symlink(theirs, prefix / name)
+        else:
+            (prefix / name).mkdir()
+            (prefix / name / "SKILL.md").write_text("theirs\n")
+        return theirs
+
+    # --- uninstall ----------------------------------------------------------
+
+    def test_a_vendored_skill_survives_uninstall(self):
+        with tempfile.TemporaryDirectory() as d:
+            prefix = Path(d) / "prefix"
+            self._install(prefix)
+            self.assertTrue((prefix / "paseo" / "SKILL.md").is_file())
+            r = self._install(prefix, "--uninstall")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            for name in _vendored():
+                self.assertTrue((prefix / name).is_dir(),
+                                f"uninstall deleted {name}, which this repo "
+                                f"vendored rather than wrote")
+            self.assertIn("vendored", r.stdout)
+
+    def test_an_authored_skill_is_still_removed_by_a_plain_uninstall(self):
+        """The counter-claim. --uninstall must not become gentler in general;
+        for the skills this repo wrote it stays a plain delete, no flag."""
+        with tempfile.TemporaryDirectory() as d:
+            prefix = Path(d) / "prefix"
+            self._install(prefix)
+            authored = _authored()
+            self.assertTrue(authored)
+            r = self._install(prefix, "--uninstall")
+            for name in authored:
+                self.assertFalse((prefix / name).exists(),
+                                 f"--uninstall left {name}, which this repo "
+                                 f"wrote: it has gone gentle in general")
+            self.assertIn(f"removed {len(authored)} skill(s)", r.stdout)
+
+    def test_include_vendored_removes_them_when_asked(self):
+        with tempfile.TemporaryDirectory() as d:
+            prefix = Path(d) / "prefix"
+            self._install(prefix)
+            r = self._install(prefix, "--uninstall", "--include-vendored")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            for name in _skill_dirs():
+                self.assertFalse((prefix / name).exists(), name)
+
+    def test_a_marker_written_before_origin_existed_is_not_deleted(self):
+        """Anything installed by 19c5171 itself carries a marker with no
+        origin= line. Reading that as "authored here" would delete exactly the
+        skills this change exists to protect, on exactly the hosts that
+        already have them."""
+        with tempfile.TemporaryDirectory() as d:
+            prefix = Path(d) / "prefix"
+            prefix.mkdir()
+            for name, keep in (("paseo", True), ("hanig-swarm", False)):
+                (prefix / name).mkdir()
+                (prefix / name / MARKER).write_text(
+                    "repo=multi-agent-skills\nversion=19c5171\n")
+            self._install(prefix, "--uninstall")
+            self.assertTrue((prefix / "paseo").is_dir(),
+                            "an origin-less marker on a vendored name was "
+                            "read as ours to delete")
+            self.assertFalse((prefix / "hanig-swarm").exists())
+
+    # --- installing over somebody else's copy -------------------------------
+
+    def test_a_pre_existing_upstream_install_is_refused_by_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            prefix = base / "prefix"
+            theirs = self._upstream_install(base, prefix)
+            r = self._install(prefix)
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertIn("paseo", r.stderr)
+            self.assertIn(str(theirs), r.stderr,
+                          "the refusal must name the collision, not just "
+                          "report that there was one")
+            self.assertTrue((prefix / "paseo").is_symlink())
+            self.assertEqual((theirs / "SKILL.md").read_text(), "theirs\n")
+            self.assertFalse((prefix / "hanig-swarm").exists(),
+                             "refused at second zero, or it did not refuse")
+
+    def test_a_directory_with_someone_elses_marker_is_a_collision(self):
+        """Absent marker or a marker naming a different source: both mean
+        this install is not ours to replace."""
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            prefix = base / "prefix"
+            prefix.mkdir()
+            (prefix / "paseo").mkdir()
+            (prefix / "paseo" / MARKER).write_text("repo=someone-elses\n")
+            r = self._install(prefix)
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertIn("paseo", r.stderr)
+
+    def test_the_refusal_is_not_confused_with_org_shadowing(self):
+        """An operator who reads "org shadow" does not think "I am about to
+        replace the upstream author's paseo"."""
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            prefix = base / "prefix"
+            self._upstream_install(base, prefix)
+            err = self._install(prefix).stderr
+            self.assertIn("--allow-vendored-shadow", err)
+            self.assertIn("NOT the --allow-org-shadow case", err)
+
+    def test_taking_the_name_over_is_allowed_but_announced(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            prefix = base / "prefix"
+            theirs = self._upstream_install(base, prefix)
+            r = self._install(prefix, "--allow-vendored-shadow")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("taking over 'paseo'", r.stderr)
+            self.assertFalse((prefix / "paseo").is_symlink())
+            self.assertTrue((prefix / "paseo" / MARKER).is_file())
+            self.assertEqual((theirs / "SKILL.md").read_text(), "theirs\n",
+                             "replacing the link must not follow it")
+
+    def test_an_authored_name_installed_by_someone_else_is_still_skipped(self):
+        """Unchanged: a foreign hanig-* is skipped, not refused. The vendored
+        refusal is about names we ship but did not write."""
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            prefix = base / "prefix"
+            self._upstream_install(base, prefix, name="hanig-swarm")
+            r = self._install(prefix)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("skip hanig-swarm", r.stdout)
+            self.assertTrue((prefix / "hanig-swarm").is_symlink())
+
+    # --- where "vendored" comes from ----------------------------------------
+
+    def test_the_marker_records_which_it_is(self):
+        with tempfile.TemporaryDirectory() as d:
+            prefix = Path(d) / "prefix"
+            self._install(prefix)
+            for name in _skill_dirs():
+                origin = [l.split("=", 1)[1] for l
+                          in (prefix / name / MARKER).read_text().splitlines()
+                          if l.startswith("origin=")]
+                want = "authored" if name.startswith("hanig-") else "vendored"
+                self.assertEqual(origin, [want], f"{name}: {origin}")
+
+    def test_vendoredness_is_derived_from_the_tree_not_a_written_list(self):
+        """A list of vendored names in the installer would rot the first time
+        skills/ changed, and rot silently in the direction that deletes. The
+        classification is the hanig- namespace applied to whatever is on disk,
+        so no executable line may name a specific vendored skill."""
+        for path in (ROOT / "install.sh", ROOT / "bin" / "doctor"):
+            code = [l for l in path.read_text().splitlines()
+                    if not l.lstrip().startswith("#")]
+            for name in _vendored():
+                offenders = [l for l in code if name in l]
+                self.assertEqual(offenders, [],
+                                 f"{path.name} names {name} in code: "
+                                 f"{offenders}")
+        self.assertTrue(_vendored(), "nothing vendored: this test proves "
+                                     "nothing, and the guard is untested")
+
+    def test_doctor_does_not_call_a_vendored_skill_ours(self):
+        with tempfile.TemporaryDirectory() as d:
+            prefix = Path(d) / "prefix"
+            self._install(prefix)
+            out = subprocess.run(["sh", str(ROOT / "bin" / "doctor"),
+                                  "--prefix", str(prefix)],
+                                 capture_output=True, text=True,
+                                 cwd=ROOT).stdout
+            line = next(l for l in out.splitlines()
+                        if l.strip().startswith("paseo "))
+            self.assertIn("vendored", line)
+            ours = next(l for l in out.splitlines()
+                        if l.strip().startswith("hanig-swarm "))
+            self.assertIn("ours", ours)
+
+    # --- the prefix is spelled the same way twice ---------------------------
+
+    def test_doctor_takes_the_prefix_the_way_install_prints_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            prefix = Path(d) / "prefix"
+            r = self._install(prefix)
+            self.assertIn(f"bin/doctor --prefix {prefix}", r.stdout,
+                          "install told you to verify a prefix it did not "
+                          "install into")
+            flagged = subprocess.run(
+                ["sh", str(ROOT / "bin" / "doctor"), "--prefix", str(prefix)],
+                capture_output=True, text=True, cwd=ROOT)
+            self.assertIn("paseo", flagged.stdout)
+            self.assertIn(str(prefix), flagged.stdout)
+
+    def test_the_old_positional_prefix_still_works(self):
+        """Aligning the spelling is not worth breaking a script or a shell
+        history that already passes it positionally."""
+        with tempfile.TemporaryDirectory() as d:
+            prefix = Path(d) / "prefix"
+            self._install(prefix)
+            positional = subprocess.run(
+                ["sh", str(ROOT / "bin" / "doctor"), str(prefix)],
+                capture_output=True, text=True, cwd=ROOT).stdout
+            flagged = subprocess.run(
+                ["sh", str(ROOT / "bin" / "doctor"), "--prefix", str(prefix)],
+                capture_output=True, text=True, cwd=ROOT).stdout
+            skills = lambda o: o.split("=== INSTALLED SKILLS ===")[1] \
+                .split("=== SCRIPT HEALTH ===")[0]
+            self.assertEqual(skills(positional), skills(flagged))
+
+
 class TestTheTrackerTeamIsNotAQuestion(unittest.TestCase):
     """A draft with no team made the session stop and ask, mid-run, with 1.42
     TiB of hashing already in flight. It also guessed "goodarzilab", which is
@@ -1114,6 +1404,882 @@ class TestTheRepoDecisionComesFromTheSurvey(unittest.TestCase):
         doc = (ROOT / "skills" / "hanig-project" / "SKILL.md").read_text()
         self.assertIn("may commit a swarm output to a repo", doc)
         self.assertIn("outlive the attempt directory as SOURCE", doc)
+
+
+class TestTheSurveySaysWhoMayUseAPartition(unittest.TestCase):
+    """Bought on a real cluster: hours went into `QOSGrpCpuLimit` while a
+    736-CPU partition sat with 202 CPUs idle, because the survey reported
+    partition SIZES and never reported who was allowed in. Three facts decide
+    that and none of them come from `sinfo` -- AllowAccounts, the QOS
+    GrpTRES, and MaxMemPerCPU, which refuses a job while naming CPUs rather
+    than the memory that actually broke the limit.
+
+    THIS MACHINE HAS NO SLURM, so every test here drives a stubbed sinfo /
+    scontrol / sacctmgr on PATH, the same mechanism test_swarm.py uses for a
+    fake scheduler. Nothing below was measured against a real controller."""
+
+    # One line per partition, exactly as `scontrol -o show partition` prints
+    # it. TRES sits directly before MaxMemPerCPU on purpose: its value
+    # contains its own '=' signs, and a parser that mis-consumed it would lose
+    # every field after it.
+    PARTITIONS = (
+        'PartitionName=cpu AllowGroups=ALL AllowAccounts=ALL AllowQos=ALL '
+        'Default=YES State=UP MaxTime=7-00:00:00 TotalNodes=12 '
+        'TRES=cpu=736,mem=6000000M MaxMemPerCPU=UNLIMITED QOS=N/A',
+        'PartitionName=lab AllowGroups=ALL AllowAccounts=goodarzilab,shared '
+        'Default=NO State=UP MaxTime=infinite TotalNodes=8 '
+        'TRES=cpu=736,mem=6000000M MaxMemPerCPU=5120 QOS=lab_qos',
+        'PartitionName=preemptible AllowGroups=ALL '
+        'DenyAccounts=goodarzilab Default=NO State=UP MaxTime=1-00:00:00 '
+        'TotalNodes=40 MaxMemPerCPU=0 QOS=normal',
+        # Neither Allow nor Deny printed. Not a shape Slurm emits today,
+        # which is the point: the field must go UNKNOWN rather than assume.
+        'PartitionName=odd Default=NO State=UP MaxTime=1:00:00 '
+        'TotalNodes=1 MaxMemPerCPU=1024 QOS=N/A',
+        # Hidden from sinfo, present in scontrol. A plan can still name it.
+        'PartitionName=hidden_dev AllowAccounts=goodarzilab Hidden=YES '
+        'Default=NO State=UP MaxTime=4:00:00 TotalNodes=1 '
+        'MaxMemPerCPU=8192 QOS=dev_qos',
+    )
+    QOS_ROWS = ("normal|", "lab_qos|cpu=512,mem=2000G", "dev_qos|cpu=8")
+
+    def _fake_slurm(self, d, tools=("sinfo", "scontrol", "sacctmgr"),
+                    qos_rows=None):
+        """A Slurm on PATH that answers only what the survey asks.
+
+        Tools are named explicitly so a test can REMOVE one: a host with sinfo
+        and no sacctmgr is the case that must report unknown rather than
+        unrestricted, and it cannot be tested by deleting code."""
+        binp = Path(d) / "fakebin"
+        binp.mkdir(exist_ok=True)
+        rows = self.QOS_ROWS if qos_rows is None else qos_rows
+        bodies = {
+            "sinfo": "#!/bin/sh\n"
+                     'echo "cpu*|up|7-00:00:00|12"\n'
+                     'echo "lab|up|infinite|8"\n'
+                     'echo "preemptible|up|1-00:00:00|40"\n',
+            "scontrol": "#!/bin/sh\ncase \"$*\" in\n"
+                        "  *'show config'*)\n"
+                        '    echo "DefMemPerCPU = 4096"\n'
+                        '    echo "DefMemPerNode = UNLIMITED"\n'
+                        '    echo "SchedulerType = sched/backfill" ;;\n'
+                        "  *'show partition'*)\n"
+                        + "".join(f"    echo '{line}'\n"
+                                  for line in self.PARTITIONS)
+                        + "    ;;\nesac\n",
+            "sacctmgr": "#!/bin/sh\ncase \"$*\" in\n"
+                        "  *'show qos'*)\n"
+                        + "".join(f"    echo '{r}'\n" for r in rows)
+                        + "    ;;\n"
+                        "  *'show assoc'*) echo 'goodarzilab' ;;\nesac\n",
+        }
+        for name in tools:
+            f = binp / name
+            f.write_text(bodies[name])
+            f.chmod(0o755)
+        return str(binp)
+
+    def _survey(self, tools=("sinfo", "scontrol", "sacctmgr"), qos_rows=None):
+        with tempfile.TemporaryDirectory() as d:
+            env = dict(os.environ)
+            env["PATH"] = (self._fake_slurm(d, tools, qos_rows)
+                           + os.pathsep + env.get("PATH", ""))
+            r = subprocess.run([sys.executable, str(SURVEY), "--repo", d,
+                                "--json"], capture_output=True, text=True,
+                               env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return json.loads(r.stdout)
+
+    def _part(self, data, name):
+        for p in data["scheduler"]["partitions"]:
+            if p["partition"] == name:
+                return p
+        self.fail(f"{name} missing from {[p['partition'] for p in data['scheduler']['partitions']]}")
+
+    def test_a_restricted_partition_names_its_accounts(self):
+        p = self._part(self._survey(), "lab")
+        self.assertEqual(p["allow_accounts"],
+                         {"state": "set", "value": ["goodarzilab", "shared"]})
+
+    def test_an_open_partition_is_unrestricted_not_empty(self):
+        p = self._part(self._survey(), "cpu")
+        self.assertEqual(p["allow_accounts"]["state"], "unrestricted")
+        self.assertIsNone(p["allow_accounts"]["value"])
+
+    def test_a_missing_scontrol_is_UNKNOWN_and_never_unrestricted(self):
+        """The assertion this whole item exists for. 'no AllowAccounts
+        restriction' and 'could not determine AllowAccounts' are different
+        facts, and on a host without scontrol only the second is true."""
+        p = self._part(self._survey(tools=("sinfo",)), "lab")
+        for field in ("allow_accounts", "deny_accounts", "max_mem_per_cpu_mb",
+                      "qos", "qos_grptres"):
+            self.assertEqual(p[field]["state"], "unknown", field)
+            self.assertIsNone(p[field]["value"], field)
+            self.assertIn("scontrol", p[field]["why"], field)
+
+    def test_max_mem_per_cpu_is_a_number_and_UNLIMITED_is_not_zero(self):
+        data = self._survey()
+        self.assertEqual(self._part(data, "lab")["max_mem_per_cpu_mb"],
+                         {"state": "set", "value": 5120})
+        self.assertEqual(
+            self._part(data, "cpu")["max_mem_per_cpu_mb"]["state"],
+            "unrestricted")
+        # Slurm prints a bare 0 for "no per-CPU cap", which as an integer
+        # would divide a memory request by zero.
+        self.assertEqual(
+            self._part(data, "preemptible")["max_mem_per_cpu_mb"]["state"],
+            "unrestricted")
+
+    def test_the_note_states_the_cpu_cost_the_error_message_hides(self):
+        """Slurm refuses the job by naming CPUs, so the error points away from
+        the cause. 700G at 5120 costs 140 CPUs, not the 32 requested."""
+        note = self._survey()["scheduler"]["limits_note"]
+        self.assertIn("140", note)
+        self.assertIn("5120", note)
+        self.assertIn("UNKNOWN IS NOT UNRESTRICTED", note)
+
+    def test_the_qos_grptres_is_joined_onto_the_partition(self):
+        p = self._part(self._survey(), "lab")
+        self.assertEqual(p["qos"], {"state": "set", "value": "lab_qos"})
+        self.assertEqual(p["qos_grptres"],
+                         {"state": "set",
+                          "value": {"cpu": 512, "mem": "2000G"}})
+
+    def test_a_count_is_an_int_and_a_unit_stays_a_string(self):
+        """2000G and 2000 are not the same number, and guessing which was
+        meant would put a wrong figure in the one file the interview trusts."""
+        v = self._part(self._survey(), "lab")["qos_grptres"]["value"]
+        self.assertIsInstance(v["cpu"], int)
+        self.assertIsInstance(v["mem"], str)
+
+    def test_a_qos_with_no_grptres_is_unrestricted(self):
+        """`normal` exists and has no group limit. That is an answer, not a
+        failure, and it must not read as one."""
+        p = self._part(self._survey(), "preemptible")
+        self.assertEqual(p["qos"]["value"], "normal")
+        self.assertEqual(p["qos_grptres"]["state"], "unrestricted")
+
+    def test_no_partition_qos_is_unrestricted_but_the_note_scopes_it(self):
+        data = self._survey()
+        self.assertEqual(self._part(data, "cpu")["qos"]["state"],
+                         "unrestricted")
+        self.assertIn("association QOS",
+                      data["scheduler"]["qos_grptres_note"])
+
+    def test_a_missing_sacctmgr_keeps_the_qos_name_and_admits_the_rest(self):
+        """Half an answer, reported as half an answer: the partition's QOS is
+        known from scontrol, its GrpTRES is not knowable without sacctmgr."""
+        p = self._part(self._survey(tools=("sinfo", "scontrol")), "lab")
+        self.assertEqual(p["qos"]["value"], "lab_qos")
+        self.assertEqual(p["qos_grptres"]["state"], "unknown")
+        self.assertIn("sacctmgr", p["qos_grptres"]["why"])
+
+    def test_a_qos_sacctmgr_does_not_list_is_unknown_not_unrestricted(self):
+        p = self._part(self._survey(qos_rows=("normal|",)), "lab")
+        self.assertEqual(p["qos_grptres"]["state"], "unknown")
+        self.assertIn("lab_qos", p["qos_grptres"]["why"])
+
+    def test_deny_accounts_are_not_read_as_an_allowance(self):
+        """AllowAccounts=ALL on a partition that denies your account is not
+        the open partition it reads as. Reporting only the allowance would
+        recreate the original bug with a second field."""
+        p = self._part(self._survey(), "preemptible")
+        self.assertEqual(p["allow_accounts"]["state"], "unrestricted")
+        self.assertEqual(p["deny_accounts"],
+                         {"state": "set", "value": ["goodarzilab"]})
+
+    def test_a_partition_that_denies_nobody_does_not_cry_unknown(self):
+        """Slurm prints DenyAccounts INSTEAD of AllowAccounts, never both, so
+        a missing DenyAccounts beside a present AllowAccounts is an answer.
+        Calling it unknown put `denied=UNKNOWN` beside every partition on a
+        cluster that denies nobody -- the cries-wolf direction that gets a
+        field ignored, which this repo weights as heavily as a false pass."""
+        data = self._survey()
+        for name in ("cpu", "lab"):
+            self.assertEqual(self._part(data, name)["deny_accounts"]["state"],
+                             "unrestricted", name)
+        self.assertEqual(
+            self._part(data, "preemptible")["allow_accounts"]["state"],
+            "unrestricted")
+
+    def test_a_record_with_neither_account_key_is_unknown_for_both(self):
+        """The absence of BOTH keys is ignorance, not permission."""
+        p = self._part(self._survey(), "odd")
+        for field in ("allow_accounts", "deny_accounts"):
+            self.assertEqual(p[field]["state"], "unknown", field)
+            self.assertIn("neither", p[field]["why"])
+
+    def test_a_partition_only_scontrol_knows_about_is_not_dropped(self):
+        """Hidden=YES keeps it out of sinfo, and a plan can still name it."""
+        p = self._part(self._survey(), "hidden_dev")
+        self.assertEqual(p["allow_accounts"]["value"], ["goodarzilab"])
+        self.assertEqual(p["nodes"], "1")
+        self.assertFalse(p["default"])
+
+    def test_the_state_vocabulary_is_closed(self):
+        """A fourth state would be a fourth thing every consumer must handle,
+        and value must be None whenever the state is not `set` -- otherwise
+        `if p[f]["value"]` starts meaning something on an unknown field."""
+        data = self._survey()
+        for part in data["scheduler"]["partitions"]:
+            for field in ("allow_accounts", "deny_accounts",
+                          "max_mem_per_cpu_mb", "qos", "qos_grptres"):
+                lim = part[field]
+                self.assertIn(lim["state"],
+                              ("set", "unrestricted", "unknown"),
+                              f"{part['partition']}.{field}")
+                if lim["state"] != "set":
+                    self.assertIsNone(lim["value"])
+                if lim["state"] == "unknown":
+                    self.assertTrue(lim.get("why"),
+                                    "an unknown field must say why")
+
+    def test_the_whole_qos_table_is_reported_for_units_that_name_one(self):
+        """A unit can carry a --qos of its own, so the join table is kept and
+        not only the entries some partition happens to point at."""
+        qos = self._survey()["scheduler"]["qos"]
+        self.assertEqual(qos["lab_qos"]["grptres"]["value"]["cpu"], 512)
+        self.assertEqual(qos["normal"]["grptres"]["state"], "unrestricted")
+
+    def test_a_truncated_qos_table_is_unknown_rather_than_half_parsed(self):
+        """The read is capped at MAX_OUTPUT, so the last row of a huge table
+        is half a value: `cpu=51` would parse cleanly and be WRONG. Unknown
+        beats a plausible wrong number."""
+        sys.path.insert(0, str(SCRIPTS))
+        import survey as S2
+        rows = tuple(f"q{i}|cpu=512,mem=2000G" for i in range(12_000))
+        self.assertGreater(sum(len(r) + 1 for r in rows), S2.MAX_OUTPUT)
+        p = self._part(self._survey(qos_rows=rows), "lab")
+        self.assertEqual(p["qos_grptres"]["state"], "unknown")
+        self.assertIn("read cap", p["qos_grptres"]["why"])
+
+    def test_the_schema_version_moved_so_a_consumer_can_tell(self):
+        """An older survey has no limits block at all, and that is not the
+        same as a cluster with no limits."""
+        self.assertGreaterEqual(self._survey()["schema_version"], 2)
+
+    def test_a_value_containing_its_own_equals_sign_does_not_eat_the_line(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import survey as S2
+        f = S2._oneliner_fields(
+            "PartitionName=cpu TRES=cpu=736,mem=6000000M MaxMemPerCPU=5120")
+        self.assertEqual(f["TRES"], "cpu=736,mem=6000000M")
+        self.assertEqual(f["MaxMemPerCPU"], "5120")
+
+    def test_a_machine_with_no_slurm_at_all_still_surveys(self):
+        """This one is not stubbed: it is this laptop, which has no sinfo."""
+        with tempfile.TemporaryDirectory() as d:
+            data = json.loads(run(SURVEY, "--repo", d, "--json").stdout)
+            if data["scheduler"].get("present"):
+                self.skipTest("this host has a real Slurm")
+            self.assertEqual(data["scheduler"], {"present": False})
+
+
+class TestTheWalkCannotBeHeldOpenByASyscall(unittest.TestCase):
+    """WALK_SECONDS was a COOPERATIVE bound: `deadline = time.time() +
+    WALK_SECONDS`, checked in the `while stack` loop between entries. When
+    os.scandir blocks inside opendir() the loop never reaches its own check,
+    so the walk never returns. Measured against $HOME: still running at 45s,
+    and two orphaned instances wedged 59 and 47 minutes on 0.07s of CPU,
+    parked under ~/Library/CloudStorage. The machines this skill targets keep
+    $HOME on NFS, where a stale handle or a dead automount blocks opendir()
+    far longer than a sync daemon does, and surveying the host is step 1 --
+    so the first thing anyone runs hangs, with no output and no error.
+
+    The fan-out guards (MAX_DIRS, MAX_ENTRIES_PER_DIR, the scandir stack) are
+    correct and are not what these tests are about: this failure is LATENCY,
+    not volume.
+
+    A directory whose opendir() never returns is simulated with a
+    sitecustomize.py on PYTHONPATH, which every child interpreter imports at
+    startup. That makes the hostile filesystem a property of the WALK CHILD
+    rather than of this test process -- the only way to reproduce a blocking
+    syscall without a real dead NFS mount, and it holds whatever mechanism
+    the walk uses to bound itself."""
+
+    HOSTILE = "wedged"
+
+    def _hostile_tree(self, d, block=600):
+        """A tree of two files and one directory that never answers."""
+        root = Path(d) / "root"
+        (root / "good").mkdir(parents=True)
+        (root / self.HOSTILE).mkdir()
+        (root / "b.py").write_text("y\n")
+        (root / "good" / "a.py").write_text("x\n")
+        site = Path(d) / "site"
+        site.mkdir()
+        (site / "sitecustomize.py").write_text(
+            "import os, time\n"
+            "_real = os.scandir\n"
+            "def scandir(path='.', *a, **kw):\n"
+            "    if %r in str(path):\n"
+            "        time.sleep(%d)\n"
+            "    return _real(path, *a, **kw)\n"
+            "os.scandir = scandir\n" % (self.HOSTILE, block))
+        return root, site
+
+    def test_a_directory_that_never_answers_does_not_hold_the_walk(self):
+        """The bound has to hold against a syscall that does not return, and
+        the result has to say it was cut short AND WHY. Fails against the
+        cooperative deadline, which never gets a turn."""
+        import time as _t
+        sys.path.insert(0, str(SCRIPTS))
+        import survey as S2
+        with tempfile.TemporaryDirectory() as d:
+            root, site = self._hostile_tree(d)
+            # The kill deadline is shortened rather than waited out: what is
+            # under test is that the walk returns when the deadline passes,
+            # not the particular number of seconds in it.
+            keep = (S2.WALK_KILL_SECONDS, S2.REAP_SECONDS,
+                    os.environ.get("PYTHONPATH"))
+            S2.WALK_KILL_SECONDS, S2.REAP_SECONDS = 3, 1
+            os.environ["PYTHONPATH"] = str(site)
+            try:
+                t0 = _t.time()
+                out = S2.repo(str(root))
+                elapsed = _t.time() - t0
+            finally:
+                S2.WALK_KILL_SECONDS, S2.REAP_SECONDS = keep[0], keep[1]
+                if keep[2] is None:
+                    os.environ.pop("PYTHONPATH", None)
+                else:
+                    os.environ["PYTHONPATH"] = keep[2]
+            self.assertLess(elapsed, 30,
+                            "a blocked opendir outlasted the kill deadline")
+            walk = out["walk"]
+            self.assertEqual(walk["state"], "stuck", walk)
+            self.assertIn(self.HOSTILE, walk["why"])
+            self.assertIn(self.HOSTILE, walk["stuck_at"])
+            # A floor must not read as a total, in EITHER field.
+            self.assertTrue(out["counted_truncated_at"], out)
+            self.assertIn("FLOOR", walk["note"])
+            # And what it did see before it stopped is still reported: a walk
+            # killed on its first hostile directory used to report zero files
+            # for a tree it had already counted, which reads as empty.
+            self.assertGreaterEqual(out["file_count"], 1, out)
+
+    def test_the_survey_itself_returns_within_the_bound_it_declares(self):
+        """`_walk` in isolation is not the thing anybody runs. This drives the
+        command, at its real deadline, and reads the terminal output a human
+        gets -- the reader who loses the hours is the one watching stdout.
+
+        Bounded by this test's own subprocess timeout, so a regression fails
+        here instead of hanging the suite; start_new_session + killpg so the
+        walk child goes too."""
+        import signal as _sig
+        import time as _t
+        sys.path.insert(0, str(SCRIPTS))
+        import survey as S2
+        with tempfile.TemporaryDirectory() as d:
+            root, site = self._hostile_tree(d)
+            env = dict(os.environ)
+            env["PYTHONPATH"] = str(site)
+            t0 = _t.time()
+            proc = subprocess.Popen(
+                [sys.executable, str(SURVEY), "--repo", str(root)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                stdin=subprocess.DEVNULL, env=env, start_new_session=True)
+            try:
+                out, err = proc.communicate(
+                    timeout=S2.WALK_KILL_SECONDS + 90)
+            except subprocess.TimeoutExpired:
+                os.killpg(os.getpgid(proc.pid), _sig.SIGKILL)
+                proc.communicate()
+                self.fail("the survey never returned: a blocked opendir is "
+                          "still able to hang it")
+            elapsed = _t.time() - t0
+            self.assertEqual(proc.returncode, 0, err)
+            self.assertLess(elapsed, S2.WALK_KILL_SECONDS + 30,
+                            f"the survey took {elapsed:.0f}s against a "
+                            f"declared {S2.WALK_KILL_SECONDS}s bound")
+            # "capped" is what too-much says. A walk that got stuck must not
+            # borrow that word, and must name the directory.
+            self.assertIn("CUT SHORT", out, out)
+            self.assertIn("STUCK", out, out)
+            self.assertIn(self.HOSTILE, out, out)
+            self.assertNotIn("(capped)", out, out)
+
+    def test_too_much_and_stuck_are_not_the_same_verdict(self):
+        """counted_truncated_at carried ONE fact. `truncated` has to keep
+        meaning THERE WAS TOO MUCH: a plan author reads a capped count as a
+        big repo and a stuck one as a host with a filesystem that does not
+        answer, and does something different about each."""
+        with tempfile.TemporaryDirectory() as d:
+            r = Path(d) / "r"
+            r.mkdir()
+            sys.path.insert(0, str(SCRIPTS))
+            import survey as S2
+            for i in range(S2.MAX_ENTRIES_PER_DIR + 200):
+                (r / f"run-{i}").mkdir()
+            res = run(SURVEY, "--repo", str(r), "--json")
+            self.assertEqual(res.returncode, 0, res.stderr)
+            data = json.loads(res.stdout)
+            walk = data["repo"]["walk"]
+            self.assertEqual(walk["state"], "truncated", walk)
+            self.assertIn("MAX_ENTRIES_PER_DIR", walk["why"])
+            self.assertTrue(data["repo"]["counted_truncated_at"],
+                            "a floor rendering as a total is the failure the "
+                            "old flag exists to stop")
+
+    def test_a_walk_that_finished_says_so_and_invents_no_reason(self):
+        """The cries-wolf direction: an ordinary repo must not come back
+        carrying a warning, or the warning stops being read."""
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "x.py").write_text("print(1)\n")
+            res = run(SURVEY, "--repo", d, "--json")
+            data = json.loads(res.stdout)
+            walk = data["repo"]["walk"]
+            self.assertEqual(walk["state"], "complete", walk)
+            self.assertNotIn("why", walk)
+            self.assertNotIn("note", walk)
+            self.assertIsNone(data["repo"]["counted_truncated_at"])
+            self.assertNotIn("capped", res.stdout)
+
+    def test_the_walk_state_vocabulary_is_closed_and_never_silent(self):
+        """Same rule as the LIMIT_* states: a fourth spelling is a fourth
+        thing every consumer must handle, and a state that is not `complete`
+        must say why or it reads as fine."""
+        sys.path.insert(0, str(SCRIPTS))
+        import survey as S2
+        self.assertEqual(
+            sorted({S2.WALK_OK, S2.WALK_TRUNCATED, S2.WALK_STUCK,
+                    S2.WALK_UNKNOWN}),
+            ["complete", "stuck", "truncated", "unknown"])
+        for state in (S2.WALK_TRUNCATED, S2.WALK_STUCK, S2.WALK_UNKNOWN):
+            v = S2._walk_verdict(state, None, {"dirs": 0})
+            self.assertTrue(v.get("why"), f"{state} did not say why")
+            self.assertIn("FLOOR", v.get("note", ""))
+        self.assertNotIn("why", S2._walk_verdict(S2.WALK_OK, None,
+                                                 {"dirs": 1}))
+
+    def test_the_skill_tells_a_reader_the_two_verdicts_differ(self):
+        """The same lesson as the partition limits: a distinction that only
+        exists in the JSON is a distinction the agent reading the skill will
+        flatten, so the vocabulary goes where the reader hits it."""
+        doc = (ROOT / "skills" / "hanig-project" / "SKILL.md").read_text()
+        self.assertIn("`truncated` and `stuck` are not the same fact", doc)
+        self.assertIn("stuck_at", doc)
+        self.assertIn("FLOORS", doc)
+
+    def test_no_wait_in_this_file_is_unbounded(self):
+        """`run` killed a child that outlived its timeout and then called
+        proc.wait() with no timeout. A process parked in an uninterruptible
+        syscall -- a dead automount, a stale NFS handle -- does not die until
+        that syscall returns, so that wait handed the hang straight back. The
+        same defect as the walk's, one function above it."""
+        tree = ast.parse(SURVEY.read_text())
+        bare = [ast.unparse(n) for n in ast.walk(tree)
+                if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "wait" and not n.keywords]
+        self.assertEqual(bare, [],
+                         f"an unbounded wait can hang the survey: {bare}")
+
+    def test_the_walk_child_is_the_bound_and_says_when_it_is_not(self):
+        """If no child can be launched the walk still runs, but the survey
+        must not claim a bound it no longer has."""
+        sys.path.insert(0, str(SCRIPTS))
+        import survey as S2
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "x.py").write_text("print(1)\n")
+            keep = sys.executable
+            try:
+                sys.executable = ""      # nothing to launch a child with
+                counts, walk = S2._walk(d)
+            finally:
+                sys.executable = keep
+            self.assertEqual(counts["files"], 1)
+            self.assertEqual(walk["bound"], "cooperative")
+            self.assertIn("never returns", walk["bound_note"])
+
+def _filed(d, prefix="ARC-", start=200, project="proj-1"):
+    """Simulate the applying session: it creates the project and the issues
+    and writes the ids back into the draft, which is how 6(g) works."""
+    d = json.loads(json.dumps(d))
+    d["project"]["linear_id"] = project
+    for n, issue in enumerate(d["issues"]):
+        issue["linear_id"] = f"iss-{n}"
+        issue["identifier"] = f"{prefix}{start + n}"
+    return d
+
+
+def _readback(edges, read_at="2026-09-03T10:00:00-0700", **kw):
+    rb = {"schema_version": 1, "read_at": read_at,
+          "source": "linear mcp list_issues + blockedBy", "edges": edges}
+    rb.update(kw)
+    return rb
+
+
+class TestAStaleBlockedByEdgeIsRemovedNotMerelyNotAdded(unittest.TestCase):
+    """B8, second half. `blockedBy` is APPEND-ONLY through this interface --
+    Linear exposes `removeBlockedBy` as a separate operation -- so a shrunken
+    `needs` list leaves behind an edge the plan no longer declares, and not
+    re-adding it does not delete it.
+
+    The draft therefore has to name the removal, and it has to decide on a
+    READ of the tracker rather than on the previous draft, which records only
+    what was asked for. This repo has a scar from a docstring that claimed a
+    test enforced an invariant when no such test existed; these are the tests
+    that were missing."""
+
+    PLAN_WIDE = {"name": "p", "units": [
+        {"id": "a", "kind": "slurm", "runtime": "none", "command": "true",
+         "outputs": ["o.txt"]},
+        {"id": "b", "kind": "slurm", "runtime": "none", "command": "true",
+         "outputs": ["p.txt"], "needs": ["a"]}]}
+
+    def _shrunk(self):
+        plan = json.loads(json.dumps(self.PLAN_WIDE))
+        plan["units"][1].pop("needs")
+        return plan
+
+    def test_a_shrunken_needs_names_the_now_absent_edge_for_removal(self):
+        """The whole issue in one test: two runs against the same project,
+        `needs` shrinks, and the draft must say REMOVE."""
+        first = _filed(T.draft(self.PLAN_WIDE))
+        # What the tracker holds after the first apply: b blockedBy a.
+        rb = _readback({"ARC-200": [], "ARC-201": ["ARC-200"]})
+        second = T.draft(self._shrunk(), existing=first, readback=rb)
+        by_unit = {i["unit"]: i for i in second["issues"]}
+        self.assertEqual(by_unit["b"]["remove_blocked_by"], ["ARC-200"])
+        self.assertEqual(by_unit["b"]["add_blocked_by"], [])
+        self.assertFalse(by_unit["b"]["blocked_by_in_sync"])
+        self.assertIs(second["blocked_by_sync"]["in_sync"], False)
+
+    def test_the_removal_is_a_problem_the_check_reports(self):
+        first = _filed(T.draft(self.PLAN_WIDE))
+        rb = _readback({"ARC-200": [], "ARC-201": ["ARC-200"]})
+        plan = self._shrunk()
+        second = T.draft(plan, existing=first, readback=rb)
+        problems = T.edge_problems(plan, second)
+        self.assertTrue(any("no longer declares" in x for x in problems),
+                        problems)
+        self.assertTrue(any("removeBlockedBy" in x for x in problems),
+                        problems)
+
+    def test_not_re_adding_is_not_treated_as_removing(self):
+        """The counter-claim the old code implicitly made. `blocked_by` no
+        longer lists `a`, and that alone must not be read as the edge being
+        gone."""
+        first = _filed(T.draft(self.PLAN_WIDE))
+        rb = _readback({"ARC-200": [], "ARC-201": ["ARC-200"]})
+        second = T.draft(self._shrunk(), existing=first, readback=rb)
+        by_unit = {i["unit"]: i for i in second["issues"]}
+        self.assertEqual(by_unit["b"]["blocked_by"], [])
+        self.assertTrue(by_unit["b"]["remove_blocked_by"],
+                        "the plan stopped declaring the edge, which is "
+                        "exactly when the tracker still holds it")
+
+    def test_once_the_removal_is_applied_a_re_read_agrees(self):
+        """The verification loop closes. Without this the suite could not
+        tell a check that always complains from one that checks."""
+        first = _filed(T.draft(self.PLAN_WIDE))
+        plan = self._shrunk()
+        applied = _readback({"ARC-200": [], "ARC-201": []},
+                            read_at="2026-09-03T10:05:00-0700")
+        third = T.draft(plan, existing=first, readback=applied)
+        self.assertEqual(T.edge_problems(plan, third), [])
+        self.assertIs(third["blocked_by_sync"]["in_sync"], True)
+        self.assertEqual([i["remove_blocked_by"] for i in third["issues"]],
+                         [[], []])
+
+    def test_an_edge_the_plan_still_declares_is_left_alone(self):
+        first = _filed(T.draft(self.PLAN_WIDE))
+        rb = _readback({"ARC-200": [], "ARC-201": ["ARC-200"]})
+        second = T.draft(self.PLAN_WIDE, existing=first, readback=rb)
+        by_unit = {i["unit"]: i for i in second["issues"]}
+        self.assertEqual(by_unit["b"]["remove_blocked_by"], [])
+        self.assertEqual(by_unit["b"]["add_blocked_by"], [],
+                         "the tracker already holds it; re-adding is noise")
+        self.assertEqual(T.edge_problems(self.PLAN_WIDE, second), [])
+
+    def test_a_declared_edge_the_tracker_lacks_is_still_added(self):
+        """Both directions, or the fix trades one silent disagreement for
+        another."""
+        first = _filed(T.draft(self.PLAN_WIDE))
+        rb = _readback({"ARC-200": [], "ARC-201": []})
+        second = T.draft(self.PLAN_WIDE, existing=first, readback=rb)
+        by_unit = {i["unit"]: i for i in second["issues"]}
+        self.assertEqual(by_unit["b"]["add_blocked_by"], ["a"])
+        self.assertEqual(by_unit["b"]["remove_blocked_by"], [])
+
+    def test_a_deleted_unit_is_still_resolvable_enough_to_remove(self):
+        """The commonest stale edge points at a unit the plan DELETED, so the
+        current draft cannot name it. The draft that filed it can, which is
+        why prior issues join the alias map. Without that, the one edge this
+        work exists to remove is the one that resolves to nothing."""
+        first = _filed(T.draft(self.PLAN_WIDE))
+        gone = {"name": "p", "units": [
+            {"id": "b", "kind": "slurm", "runtime": "none", "command": "true",
+             "outputs": ["p.txt"]}]}
+        rb = _readback({"ARC-201": ["ARC-200"]})
+        second = T.draft(gone, existing=first, readback=rb)
+        by_unit = {i["unit"]: i for i in second["issues"]}
+        self.assertEqual(by_unit["b"]["remove_blocked_by"], ["ARC-200"])
+        self.assertEqual(second["blocked_by_sync"]["unresolved"], [],
+                         "a former unit of this project is not a mystery")
+
+    def test_a_handle_nothing_has_ever_known_is_reported_not_hidden(self):
+        first = _filed(T.draft(self.PLAN_WIDE))
+        rb = _readback({"ARC-200": [], "ARC-201": ["ARC-9999"]})
+        plan = self.PLAN_WIDE
+        second = T.draft(plan, existing=first, readback=rb)
+        unresolved = second["blocked_by_sync"]["unresolved"]
+        self.assertEqual([u["blocker"] for u in unresolved], ["ARC-9999"])
+        self.assertTrue(any("ARC-9999" in x
+                            for x in T.edge_problems(plan, second)))
+
+    def test_a_foreign_issue_with_no_edges_does_not_cry_wolf(self):
+        """A hand-created issue in the same tracker project cannot be holding
+        a stale edge if it holds none. Flagging it is the cries-wolf failure
+        that gets a guard deleted."""
+        first = _filed(T.draft(self.PLAN_WIDE))
+        rb = _readback({"ARC-200": [], "ARC-201": ["ARC-200"], "ARC-777": []})
+        second = T.draft(self.PLAN_WIDE, existing=first, readback=rb)
+        self.assertEqual(second["blocked_by_sync"]["unresolved"], [])
+        self.assertEqual(T.edge_problems(self.PLAN_WIDE, second), [])
+
+    def test_a_foreign_issue_that_does_hold_edges_is_flagged(self):
+        first = _filed(T.draft(self.PLAN_WIDE))
+        rb = _readback({"ARC-200": [], "ARC-201": ["ARC-200"],
+                        "ARC-777": ["ARC-200"]})
+        second = T.draft(self.PLAN_WIDE, existing=first, readback=rb)
+        self.assertEqual([u["holder"] for u
+                          in second["blocked_by_sync"]["unresolved"]],
+                         ["ARC-777"])
+        self.assertTrue(any("ARC-777" in x for x
+                            in T.edge_problems(self.PLAN_WIDE, second)))
+
+    def test_a_unit_id_read_back_resolves_as_well_as_an_identifier(self):
+        """The applying session may key the read-back however it likes; the
+        shape says so, so all three handles must work."""
+        first = _filed(T.draft(self.PLAN_WIDE))
+        for edges in ({"a": [], "b": ["a"]},
+                      {"iss-0": [], "iss-1": ["iss-0"]},
+                      {"arc-200": [], "arc-201": ["arc-200"]}):
+            second = T.draft(self._shrunk(), existing=first,
+                             readback=_readback(edges))
+            by_unit = {i["unit"]: i for i in second["issues"]}
+            self.assertEqual(len(by_unit["b"]["remove_blocked_by"] or []), 1,
+                             edges)
+
+
+class TestAnAbsentReadBackCannotClaimSync(unittest.TestCase):
+    """Fail closed. An absent read-back must not render as "no stale edges":
+    that is the class of bug this repo keeps fighting, where unknown reads as
+    fine. `remove_blocked_by` is null, never [], and the check refuses."""
+
+    PLAN = {"name": "p", "units": [
+        {"id": "a", "kind": "slurm", "runtime": "none", "command": "true",
+         "outputs": ["o.txt"]},
+        {"id": "b", "kind": "slurm", "runtime": "none", "command": "true",
+         "outputs": ["p.txt"], "needs": ["a"]}]}
+
+    def test_no_read_back_leaves_removals_null_not_empty(self):
+        d = T.draft(self.PLAN)
+        for issue in d["issues"]:
+            self.assertIsNone(issue["remove_blocked_by"], issue["unit"])
+            self.assertIsNone(issue["blocked_by_in_sync"], issue["unit"])
+        self.assertEqual(d["blocked_by_sync"]["state"], "absent")
+        self.assertIsNone(d["blocked_by_sync"]["in_sync"])
+
+    def test_a_filed_project_with_no_read_back_fails_the_check(self):
+        filed = _filed(T.draft(self.PLAN))
+        redrafted = T.draft(self.PLAN, existing=filed)
+        redrafted[T.READBACK] = None
+        problems = T.edge_problems(self.PLAN, redrafted)
+        self.assertTrue(any("CANNOT BE TOLD" in x for x in problems), problems)
+        self.assertTrue(any("not a claim that there are none" in x
+                            for x in problems), problems)
+
+    def test_check_exits_nonzero_and_says_so_on_the_command_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_p = Path(tmp) / "plan.json"
+            plan_p.write_text(json.dumps(self.PLAN))
+            tk = Path(tmp) / "tickets.json"
+            tk.write_text(json.dumps(_filed(T.draft(self.PLAN))))
+            r = run(TICKETS, "check", str(plan_p), str(tk))
+            self.assertEqual(r.returncode, 2, r.stdout)
+            self.assertIn("DRIFTED", r.stdout)
+            self.assertIn("never read back", r.stdout)
+
+    def test_nothing_filed_yet_is_not_a_fault(self):
+        """A first draft has filed nothing, so no edge can be stale. Crying
+        wolf here is what gets a guard deleted."""
+        self.assertEqual(T.edge_problems(self.PLAN, T.draft(self.PLAN)), [])
+
+    def test_a_malformed_read_back_is_unreadable_not_empty(self):
+        bad = [None, [], {}, {"edges": {}}, {"read_at": "x"},
+               {"read_at": "", "edges": {}},
+               {"schema_version": 9, "read_at": "x", "edges": {}},
+               {"read_at": "x", "edges": {"a": "b"}},
+               {"read_at": "x", "edges": {"a": [1]}},
+               {"read_at": "x", "edges": {"": []}}]
+        for rb in bad:
+            edges, _meta, reason = T.readback_edges(rb)
+            self.assertIsNone(edges, rb)
+            self.assertTrue(reason, rb)
+            d = T.draft(self.PLAN, readback=rb)
+            self.assertIn(d["blocked_by_sync"]["state"],
+                          ("absent", "unreadable"))
+            self.assertTrue(all(i["remove_blocked_by"] is None
+                                for i in d["issues"]), rb)
+
+    def test_a_named_read_back_that_cannot_be_read_refuses(self):
+        """Absent is honest by accident. A human who believed they supplied a
+        read-back and silently got the absent path is not being told."""
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_p = Path(tmp) / "plan.json"
+            plan_p.write_text(json.dumps(self.PLAN))
+            r = run(TICKETS, "draft", str(plan_p),
+                    "--tracker-edges", str(Path(tmp) / "nope.json"))
+            self.assertEqual(r.returncode, 2, r.stdout)
+            self.assertIn("REFUSING", r.stdout)
+            self.assertFalse((Path(tmp) / "tickets.json").exists())
+
+    def test_a_read_back_of_the_wrong_shape_refuses_on_the_command_line(self):
+        """It parses as JSON, so nothing errors; it would land in the quiet
+        `unreadable` state. A human who passed the flag is told instead."""
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_p = Path(tmp) / "plan.json"
+            plan_p.write_text(json.dumps(self.PLAN))
+            bad = Path(tmp) / "edges.json"
+            bad.write_text(json.dumps({"edges": {"a": []}}))   # no read_at
+            r = run(TICKETS, "draft", str(plan_p), "--tracker-edges", str(bad))
+            self.assertEqual(r.returncode, 2, r.stdout)
+            self.assertIn("REFUSING", r.stdout)
+            self.assertIn("read_at", r.stdout)
+            self.assertFalse((Path(tmp) / "tickets.json").exists())
+
+    def test_a_good_read_back_on_the_command_line_is_applied(self):
+        """The counter-claim: the path that is supposed to work must work,
+        end to end, through the actual CLI."""
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_p, tk = Path(tmp) / "plan.json", Path(tmp) / "tickets.json"
+            shrunk = json.loads(json.dumps(self.PLAN))
+            shrunk["units"][1].pop("needs")
+            plan_p.write_text(json.dumps(shrunk))
+            tk.write_text(json.dumps(_filed(T.draft(self.PLAN))))
+            edges = Path(tmp) / "edges.json"
+            edges.write_text(json.dumps(
+                _readback({"ARC-200": [], "ARC-201": ["ARC-200"]})))
+            r = run(TICKETS, "draft", str(plan_p),
+                    "--tracker-edges", str(edges))
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("REMOVE: b <- ARC-200", r.stdout)
+            written = json.loads(tk.read_text())
+            by_unit = {i["unit"]: i for i in written["issues"]}
+            self.assertEqual(by_unit["b"]["remove_blocked_by"], ["ARC-200"])
+            self.assertEqual(written["blocked_by_sync"]["state"], "read")
+
+    def test_a_filed_issue_omitted_from_the_read_back_is_unknown(self):
+        """Omitting an edgeless issue is indistinguishable from skipping it,
+        so the shape requires an empty list and this refuses to guess."""
+        filed = _filed(T.draft(self.PLAN))
+        second = T.draft(self.PLAN, existing=filed,
+                         readback=_readback({"ARC-200": []}))
+        by_unit = {i["unit"]: i for i in second["issues"]}
+        self.assertIsNone(by_unit["b"]["remove_blocked_by"])
+        self.assertEqual(second["blocked_by_sync"]["not_read_back"], ["b"])
+        self.assertIsNone(second["blocked_by_sync"]["in_sync"])
+        self.assertTrue(any("not having looked" in x for x in
+                            T.edge_problems(self.PLAN, second)))
+
+    def test_a_read_back_is_carried_forward_across_a_redraft(self):
+        """Otherwise editing the plan throws away the only knowledge of the
+        tracker's real edges this machine has, and every re-draft would
+        re-arm the unknown."""
+        filed = _filed(T.draft(self.PLAN))
+        rb = _readback({"ARC-200": [], "ARC-201": ["ARC-200"]})
+        second = T.draft(self.PLAN, existing=filed, readback=rb)
+        third = T.draft(self.PLAN, existing=second)
+        self.assertEqual(third["blocked_by_sync"]["state"], "read")
+        self.assertEqual(third["blocked_by_sync"]["read_at"], rb["read_at"])
+
+    def test_a_sync_claim_is_scoped_to_when_the_tracker_was_read(self):
+        """"In sync" is a statement about a moment. A carried-forward
+        read-back can be old, so the timestamp travels with the claim rather
+        than being dropped once it is convenient."""
+        filed = _filed(T.draft(self.PLAN))
+        rb = _readback({"ARC-200": [], "ARC-201": ["ARC-200"]})
+        second = T.draft(self.PLAN, existing=filed, readback=rb)
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_p, tk = Path(tmp) / "plan.json", Path(tmp) / "tickets.json"
+            plan_p.write_text(json.dumps(self.PLAN))
+            tk.write_text(json.dumps(second))
+            r = run(TICKETS, "check", str(plan_p), str(tk))
+            self.assertEqual(r.returncode, 0, r.stdout)
+            self.assertIn(rb["read_at"], r.stdout)
+
+    def test_the_schema_version_moved_so_a_consumer_can_tell(self):
+        """A consumer that only knows schema 1 applies `blocked_by` and never
+        removes anything, which is the bug. It must be able to notice."""
+        self.assertGreaterEqual(T.draft(self.PLAN)["schema_version"], 2)
+
+    def test_a_schema_1_draft_is_not_read_as_in_sync(self):
+        old = T.draft(self.PLAN)
+        old = _filed(old)
+        old["schema_version"] = 1
+        old.pop("blocked_by_sync")
+        for i in old["issues"]:
+            i.pop("add_blocked_by", None)
+            i.pop("remove_blocked_by", None)
+            i.pop("blocked_by_in_sync", None)
+        problems = T.edge_problems(self.PLAN, old)
+        self.assertTrue(any("no `blocked_by_sync`" in x for x in problems),
+                        problems)
+
+    def test_the_skill_tells_the_applying_session_to_remove(self):
+        """The draft is only half the interface. If the session with the
+        connector is never told to call `removeBlockedBy`, the field is a
+        request nobody reads -- which is the same defect one layer up."""
+        skill = (ROOT / "skills" / "hanig-project" / "SKILL.md").read_text()
+        self.assertIn("removeBlockedBy", skill)
+        self.assertIn("remove_blocked_by", skill)
+        self.assertIn("--tracker-edges", skill)
+        self.assertIn("append-only", skill)
+
+    def test_the_read_back_is_labelled_attested_not_verified(self):
+        """The same care the outbox receipts needed. There is no network here,
+        so a read-back is a session SAYING what the tracker holds; anyone who
+        can write the file can write anything. It is a much better basis than
+        diffing against the last draft -- that is a claim about our own
+        intentions -- but it is not proof, and the label carries the weakness
+        rather than the reader having to remember it."""
+        filed = _filed(T.draft(self.PLAN))
+        for rb in (None, _readback({"ARC-200": [], "ARC-201": ["ARC-200"]})):
+            sync = T.draft(self.PLAN, existing=filed,
+                           readback=rb)["blocked_by_sync"]
+            self.assertIn("attested", sync["basis"])
+            self.assertIn("not verified", sync["basis"])
+        src = TICKETS.read_text()
+        self.assertNotIn("verified evidence", src)
+
+    def test_the_attestation_travels_into_what_a_human_reads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_p, tk = Path(tmp) / "plan.json", Path(tmp) / "tickets.json"
+            plan_p.write_text(json.dumps(self.PLAN))
+            rb = _readback({"ARC-200": [], "ARC-201": ["ARC-200"]})
+            tk.write_text(json.dumps(
+                T.draft(self.PLAN, existing=_filed(T.draft(self.PLAN)),
+                        readback=rb)))
+            r = run(TICKETS, "check", str(plan_p), str(tk))
+            self.assertEqual(r.returncode, 0, r.stdout)
+            self.assertIn("ATTESTED", r.stdout)
+
+    def test_it_still_talks_to_no_tracker(self):
+        """The read-back arrives as a FILE. If reading the tracker back had
+        been implemented by reading the tracker, the token would be back on
+        the login node and the whole separation would be gone."""
+        tree = ast.parse(TICKETS.read_text())
+        mods = set()
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Import):
+                mods.update(a.name.split(".")[0] for a in n.names)
+            elif isinstance(n, ast.ImportFrom) and n.module:
+                mods.add(n.module.split(".")[0])
+        self.assertEqual(mods & {"urllib", "http", "requests", "socket",
+                                 "httpx", "ssl"}, set())
 
 
 if __name__ == "__main__":

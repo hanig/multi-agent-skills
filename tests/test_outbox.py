@@ -377,17 +377,24 @@ class TestThePipelinePredicate(unittest.TestCase):
             (d / "engine.rc").write_text(str(rc))
         return d
 
-    def _check(self, d):
-        r = subprocess.run([sys.executable, str(self.UNIT), "check", str(d)],
-                           capture_output=True, text=True)
+    def _check(self, d, basis=None):
+        argv = [sys.executable, str(self.UNIT), "check", str(d)]
+        if basis:
+            argv += ["--artifact-basis", json.dumps(basis)]
+        r = subprocess.run(argv, capture_output=True, text=True)
         return r.returncode, r.stdout + r.stderr
 
     def test_exit_zero_with_every_output_is_done(self):
         import tempfile
         with tempfile.TemporaryDirectory() as t:
             d = self._attempt(t, rc=0, outputs=["o.txt"])
+            # Digested BEFORE the output is written, where the coordinator
+            # takes it: an artifact already present and unchanged is not
+            # production, and without a basis DONE is unreachable at all.
+            basis = S._capture_artifact_basis(
+                {}, "u", str(d), {"outputs": ["o.txt"]})
             (d / "o.txt").write_text("real\n")
-            rc, out = self._check(d)
+            rc, out = self._check(d, basis)
             self.assertEqual(rc, 0, out)
 
     def test_exit_zero_with_a_missing_output_is_not_done(self):
@@ -521,9 +528,11 @@ class TestTheCodePredicate(unittest.TestCase):
             "created_at": "2026-08-28T00:00:00+0000"}))
         return d
 
-    def _check(self, d, env):
-        r = subprocess.run([sys.executable, str(self.UNIT), "check", str(d)],
-                           capture_output=True, text=True, env=env)
+    def _check(self, d, env, basis=None):
+        argv = [sys.executable, str(self.UNIT), "check", str(d)]
+        if basis:
+            argv += ["--artifact-basis", json.dumps(basis)]
+        r = subprocess.run(argv, capture_output=True, text=True, env=env)
         return r.returncode, r.stdout + r.stderr
 
     def test_idle_without_the_output_is_not_done(self):
@@ -544,8 +553,10 @@ class TestTheCodePredicate(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             env = self._env(t, {"Status": "idle", "PendingPermissions": []})
             d = self._attempt(t)
+            basis = S._capture_artifact_basis(
+                {}, "u", str(d), {"outputs": ["o.txt"]})
             (d / "o.txt").write_text("real\n")
-            rc, out = self._check(d, env)
+            rc, out = self._check(d, env, basis)
             self.assertEqual(rc, 0, out)
 
     def test_a_pending_permission_is_its_own_state(self):
@@ -1422,12 +1433,68 @@ class TestRound2ReviewFindings(unittest.TestCase):
 
     def test_orphan_recovery_matches_an_agent_exactly(self):
         """`attempt_id in name` also matched an attempt whose id is a prefix
-        of another's, binding a unit to somebody else's agent."""
-        src = SWARM.read_text()
-        seg = src[src.index('if kind == "code":'):]
-        seg = seg[:seg.index("name = f\"swarm-")]
-        self.assertNotIn("attempt_id in str(", seg)
-        self.assertIn("[attempt_id]", seg)
+        of another's, binding a unit to somebody else's agent.
+
+        Asked of BEHAVIOUR: paseo is stubbed to report three live agents whose
+        attempt ids are prefixes of one another, worst case first, and each
+        attempt must recover its own. That is the whole invariant and it
+        survives any rewrite of the matcher.
+
+        It replaces a source slice delimited by the first occurrence of two
+        string literals. Both literals recur in swarm.py, so the region drifted
+        to whatever lay between the first pair -- by now roughly 2900 lines
+        starting inside `_submit`, nowhere near the function under test. An
+        agent adding `_claim_liveness` found it contained both and renamed its
+        own local to `scheduler_job` to keep the slice quiet: production code
+        contorted to avoid confusing a test."""
+        from unittest import mock
+        # `--title` is f"[swarm] {unit id} {attempt id}", so the attempt id is
+        # the last whitespace-delimited field and nothing else.
+        agents = [
+            {"name": "[swarm] train a1b2", "id": "agent-for-a1b2"},
+            {"name": "[swarm] train a1", "id": "agent-for-a1"},
+            {"name": "[swarm] train a1-2", "id": "agent-for-a1-2"},
+        ]
+        asked = []
+
+        def fake_run(argv, **kw):
+            asked.append(list(argv))
+            return 0, json.dumps(agents), ""
+
+        for attempt in ("a1", "a1b2", "a1-2"):
+            with mock.patch.object(S.U, "run", fake_run):
+                aid, note = S.reconcile_orphan(
+                    f"/nowhere/train/{attempt}", kind="code")
+            self.assertEqual(aid, f"agent-for-{attempt}",
+                             f"attempt {attempt!r} was bound to {aid!r}, which "
+                             f"belongs to a different attempt")
+            self.assertIn(attempt, note or "")
+        self.assertEqual(asked[0][:2], ["paseo", "ls"],
+                         "the agent registry is the only party that knows")
+        # An id that merely occurs INSIDE a name is not this attempt's agent,
+        # and inventing one would be worse than reporting none.
+        with mock.patch.object(S.U, "run", fake_run):
+            self.assertEqual(
+                S.reconcile_orphan("/nowhere/train/b2", kind="code"),
+                (None, None),
+                "an attempt with no agent recovered somebody else's")
+
+        # And structurally, anchored on the PARSED function rather than a text
+        # span: no containment test of the attempt id against an agent name may
+        # reappear in the matcher. Anchoring on the name cannot drift, and it
+        # names the one function whose shape is being constrained.
+        import ast
+        fn = next(n for n in ast.parse(SWARM.read_text()).body
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == "reconcile_orphan")
+        contained = [ast.unparse(n) for n in ast.walk(fn)
+                     if isinstance(n, ast.Compare)
+                     and any(isinstance(o, ast.In) for o in n.ops)
+                     and "attempt_id" in ast.unparse(n.left)
+                     and any("name" in ast.unparse(c) for c in n.comparators)]
+        self.assertEqual(contained, [],
+                         "reconcile_orphan tests the attempt id for CONTAINMENT "
+                         "in an agent name; it must compare exactly")
 
     def test_exec_in_a_pipeline_command_was_a_false_finding(self):
         """One reviewer said `exec true` leaves engine.rc absent. Measured
@@ -2256,7 +2323,7 @@ class TestRetryBudgetBehaviour(unittest.TestCase):
                 "h": {"state": "SUBMITTED", "job_id": "2868624",
                       "attempt_dir": str(att), "attempts": attempts,
                       "gpu_hours": 0}}}))
-        m._check = lambda d, seal=None: (verdict, "forced")
+        m._check = lambda d, *_a, **_k: (verdict, "forced")
         # A real advance renews the lease between units, so the harness has to
         # hold it exactly as a controller would. Without this it stopped at
         # "no longer holds the lease" and measured nothing.
@@ -2502,7 +2569,7 @@ class TestACodeUnitIsNotDoneUntilMerged(unittest.TestCase):
         ok, _ = m.acquire_lease(str(st))
         self.assertTrue(ok)
         self.addCleanup(m.release_lease, str(st))
-        def forced_check(unit_dir, facts=None):
+        def forced_check(unit_dir, facts=None, artifact_basis=None):
             if verdict != 0:
                 return verdict, "forced", ""
             receipt = json.dumps({"task_id": "c", "attempt_id": "a1",
@@ -2716,6 +2783,30 @@ class TestAPersistedDoneIsCorrected(unittest.TestCase):
         {"id": "after", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
          "needs": ["c"], "write_scopes": ["a/"]}]}
 
+    def _paseo_env(self, tmp):
+        """PATH with a stub `paseo`, because the plan here HAS a code unit.
+
+        `validate` refuses a kind=code unit when paseo does not resolve, so
+        on a host without it `advance` exited before doing any work. The
+        refusal goes to stderr and these tests read stdout, so a plan that
+        never ran presented as "the correction is missing" -- pointing at a
+        persisted DONE releasing its dependents, which would be serious, and
+        is not what was happening.
+
+        Not this file's FAKE_PASEO: a dry-run advance never calls paseo, it
+        only asks whether the name resolves. This stub exits 127 so that if
+        anything ever does call it, that fails loudly instead of passing
+        against a fake. Same PATH seam as `_env` above and as
+        test_swarm.py::_fake_scheduler."""
+        binp = Path(tmp) / "fakebin"
+        binp.mkdir(parents=True, exist_ok=True)
+        f = binp / "paseo"
+        f.write_text("#!/bin/sh\necho 'test stub, not a real paseo' >&2\n"
+                     "exit 127\n")
+        f.chmod(0o755)
+        return dict(os.environ,
+                    PATH=str(binp) + os.pathsep + os.environ.get("PATH", ""))
+
     def _advance(self, tmp, plan, persisted):
         (tmp / "plan.json").write_text(json.dumps(plan))
         st = tmp / "st"
@@ -2728,7 +2819,14 @@ class TestAPersistedDoneIsCorrected(unittest.TestCase):
         r = subprocess.run(
             [sys.executable, str(SWARM), "advance", str(tmp / "plan.json"),
              "--dry-run", "--state-dir", str(st), "--root", str(tmp / "rn")],
-            capture_output=True, text=True, cwd=tmp)
+            capture_output=True, text=True, cwd=tmp,
+            env=self._paseo_env(tmp))
+        # Assert it RAN before asserting what it printed. Without this, a
+        # refusal on stderr reads as wrong content on stdout, and the tests
+        # below accuse the product of a defect it does not have.
+        self.assertEqual(r.returncode, 0,
+                         "advance did not run at all:\n%s%s"
+                         % (r.stdout, r.stderr))
         return r, json.loads((st / "swarm-state.json").read_text())
 
     def test_a_persisted_DONE_code_unit_does_not_release_dependents(self):
@@ -2757,6 +2855,13 @@ class TestAPersistedDoneIsCorrected(unittest.TestCase):
         plan = json.loads(json.dumps(self.PLAN))
         plan["units"][0]["kind"] = "slurm"
         plan["units"][0]["command"] = "true"
+        # A slurm unit must declare a runtime. Without it validate refused
+        # the plan, so this test asserted its two properties against a
+        # command that never ran: the DONE was "left alone" because nothing
+        # touched the state file, and the correction was absent because
+        # nothing printed. It could not fail, and the returncode check in
+        # _advance is what surfaced that.
+        plan["units"][0]["runtime"] = "none"
         with tempfile.TemporaryDirectory() as d:
             r, state = self._advance(Path(d), plan, "DONE")
             self.assertEqual(state["units"]["c"]["state"], "DONE")

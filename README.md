@@ -53,7 +53,7 @@ every issue title for approval, files them in Linear, and dispatches.
 
 ---
 
-## The five skills
+## The five skills we wrote
 
 | Skill | One line |
 |---|---|
@@ -63,8 +63,26 @@ every issue title for approval, files them in Linear, and dispatches.
 | `hanig-review-gate` | Adversarial multi-model review of code and of the claims made about it. |
 | `hanig-portable-handoff` | Capture and resume run state across machines. |
 
-All are prefixed `hanig-` so they can never collide with an Arc org-managed
-skill name.
+All five are prefixed `hanig-` so they can never collide with an Arc
+org-managed skill name. That prefix is now load-bearing rather than tidy:
+`install.sh` reads it as the authorship namespace, and anything under
+`skills/` outside it is treated as vendored -- installed by us, written
+upstream, and **left alone by `--uninstall`**.
+
+## The eight skills we vendor
+
+`skills/` also carries `paseo`, `paseo-advisor`, `paseo-committee`,
+`paseo-handoff`, `paseo-loop`, `pi-fleet`, `start-a-sprint` and `agent-bus`,
+taken **verbatim** from Shreshth's repo so the swarm's dependency lives here
+rather than in a second clone nobody's machine is guaranteed to have. They are
+not edited -- an upstream re-sync is meant to be a real diff -- so the routing
+decision they need goes in `~/.paseo/orchestration-preferences.json` instead
+(see "Orchestration preferences, per machine").
+
+Vendoring skills does **not** make this repo standalone at runtime: the hard
+dependency is the `paseo` binary, and copying markdown does not supply one.
+`bin/bus`, `bin/agent-manager`, `bin/agent-view` and `models.json` came across
+with them.
 
 ### hanig-project
 
@@ -101,6 +119,16 @@ that looks like a credential, after leaking a git token once.
 approval before anything is transmitted, and re-arms that approval if the unit
 digests change underneath it. Default team is `Arc`. Full automation requires
 the literal phrase `swarm autopilot`; absent it, approval is always required.
+
+It carries the plan's DAG as `blockedBy`, and because that relation is
+append-only through this interface, it also names the edges to REMOVE. Not
+re-adding an edge does not delete it, so a shrunken `needs` list would
+otherwise leave the tracker asserting a dependency the plan has dropped. It
+decides that from a read-back of what the tracker holds, supplied by the
+session with the connector as `--tracker-edges` -- never from the previous
+draft, which records what was asked for rather than what landed. With no
+read-back, `remove_blocked_by` is `null` rather than `[]`, and `check` calls
+a filed project's edges unknown rather than in sync.
 
 **The stopping condition is the whole point.** The interview ends when the plan
 can RUN, not when the interviewer runs out of prepared questions. Every value
@@ -140,7 +168,10 @@ kind of thing that should have to be typed out in full.
 
 `converge.py check` answers whether a training run converged or merely stopped.
 It was ported out of a deleted skill before that skill was removed, because it
-was the one capability with no replacement anywhere.
+was the one capability with no replacement anywhere. A unit that declares a
+`converge` block is judged by it: a run that spent its step budget without
+meeting the criterion becomes `NEEDS_HUMAN`, not `DONE`, so it closes no ticket
+and releases no dependent. Units that declare none never reach that code.
 
 Coordinator state and attempt roots default to a stable per-project directory
 under `$XDG_STATE_HOME`, or `~/.local/state` when it is unset. Both resolve
@@ -227,10 +258,12 @@ These are the load-bearing decisions. Most were paid for with a real failure.
 
 **Isolation replaces attribution.** Observation shows that an artifact changed,
 never which process changed it. So each attempt gets an exclusive, never-reused
-write root, created with `mkdir(exist_ok=False)` as enforcement rather than as
-convention. Given isolation, a cheap predicate ("is there output under this
-root?") becomes conclusive, and the machinery built to *prove* which process
-wrote a file was answering a question that no longer needed asking.
+write root, created with `mkdir(exist_ok=False)`, which enforces that no two
+attempts are ever handed the same root -- not that the OS keeps another process
+running as the same Unix user out of one. Given that allocation, a cheap
+predicate ("is there output under this root?") becomes conclusive, and the
+machinery built to *prove* which process wrote a file was answering a question
+that no longer needed asking.
 
 **A unit is the retry boundary.** A retry starts in a fresh, empty attempt
 directory, so a retry redoes the whole unit. The quantity that matters is
@@ -269,7 +302,12 @@ including the launch record and the attempt receipts. No arrangement of files
 defends against that. What is defended is an agent that fails to do the work
 and an operator who runs the wrong thing. A hostile agent would need a
 container or a separate Unix user, which is what the receipts have always said
-about isolation.
+about isolation. Nor is the agent's process tree established to be dead when a
+check runs: no portable handle proves every same-UID descendant of a Paseo
+agent or a scheduler job is gone, so a lingering one could touch outputs
+mid-digest. That is recorded on each accepted receipt rather than claimed
+closed. Both are DECLARED limits, stated in full in `hanig-swarm/SKILL.md`;
+neither is scheduled, and neither should be assumed closed by a later reader.
 
 **A verifier is admissible only if it is authorized, pinned and bound.** The
 policy naming it is read from the **anchored base commit**, never from the
@@ -476,6 +514,49 @@ symlink is not evidence that we created it. Read a destructive command and
 dry-run it before trusting it, including one you wrote yourself, and especially
 then, because familiarity feels like knowledge.
 
+### Orchestration preferences, per machine
+
+Six of the vendored skills — `paseo`, `paseo-advisor`, `paseo-committee`,
+`paseo-handoff`, `paseo-loop` and `pi-fleet` — refuse to choose a provider
+until they have read `~/.paseo/orchestration-preferences.json`, and `agent-bus`
+names the same file as the policy layer over `bus models`. `skills/paseo/SKILL.md`
+is explicit that reading means an actual file read, and that no other skill may
+hardcode a provider string. So the routing decision lives in that one file, not
+in the skills — and this repo shipped the skills that need it without shipping
+an example of it.
+
+`examples/orchestration-preferences.json` is that example, carrying this
+project's routing decision of 2026-09-01 (`docs/plan-field-reports.md`, "Model
+routing"). Copy it into place on the machine that runs agents:
+
+```bash
+mkdir -p ~/.paseo && cp examples/orchestration-preferences.json ~/.paseo/
+```
+
+Nothing reads it from the repo. `install.sh` does not deploy it, because the
+live file is user-specific configuration and overwriting a machine's routing
+policy from a skill install is not a thing an installer should do.
+
+**Copying it is not the end of the job.** The file was written on a machine
+with no Paseo and no `~/.paseo`, so no value in it has ever been dispatched.
+Every provider string in it is copied verbatim from an attested id — the
+examples in `skills/paseo/SKILL.md`, or an id in `models.json` — but a
+well-formed string is not evidence that an agent comes up on the intended
+model. Confirm that separately, on the host, with `paseo run` plus
+`paseo inspect`, or with `bus launch --expect-provider/--expect-model`, which
+refuses a worker whose inspected provider does not match.
+
+Two things in the file are worth knowing before you rely on it. Three of the
+five categories are judgement calls — `impl` is settled, `ui` is carried
+forward unchanged, and `planning`, `research` and `audit` are readings of a
+decision that was not written in these terms; each says so in its
+`_judgement_calls` entry rather than presenting a guess as settled. And the
+decision does not fully fit: `audit` is one provider string, while the real
+review gate is three models across two API providers run by `review.py` over
+`reviewers.json`, and DeepSeek's Paseo route needs a provider *and* a model,
+which a one-string category cannot express. Those gaps are recorded in
+`_unmapped` instead of being papered over with invented strings.
+
 ---
 
 ## Deployment targets
@@ -556,6 +637,7 @@ skills/hanig-review-gate/   review.py, committee.py, reviewers.json, PROTOCOL.md
 skills/hanig-verified-workflow/  contract.py
 skills/hanig-portable-handoff/   handoff.py
 tests/                      stdlib unittest
+examples/                   reference config to copy elsewhere; nothing reads it here
 docs/probes/                measured environment data per cluster
 MEMORY.md                   portable project state; read this first
 ```

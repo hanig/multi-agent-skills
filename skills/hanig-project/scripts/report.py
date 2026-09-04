@@ -35,6 +35,18 @@ import coordinator_paths as CP  # noqa: E402
 
 SCHEMA = 1
 
+# The survey.json shape this file knows how to read: {"schema_version": 3,
+# "machine": {...}, "scheduler": {...}, "repo": {...}, "storage": [...]}. The
+# Environment section used to read hostname/user/python/accounts off the TOP
+# level, where survey.py has never written them, so three fields rendered as
+# nothing and `scheduler` -- a dict with no version/path -- fell through to
+# json.dumps() and put the entire scheduler block, every partition's account
+# rules and QOS limits included, into one <dd>. Both halves were silent: an
+# empty section reads as a host with nothing on it. Pinned as a number so a
+# survey this reader does not understand is announced rather than rendered as
+# a page of blanks.
+SURVEY_SCHEMA = 3
+
 TERMINAL_OK = ("DONE",)
 # FAILED_EVIDENCE is terminal in the coordinator: `advance` skips it
 # alongside DONE and FAILED, so it never re-dispatches. Leaving it out made a
@@ -67,6 +79,37 @@ def _load(path, default=None):
             return json.load(fh)
     except (OSError, ValueError):
         return default
+
+
+def _read_survey(path):
+    """Read survey.json, keeping "there is none" apart from "it will not read".
+
+    `_load(path, {}) or {}` collapses both into the same empty dict, and the
+    Environment section then renders as though the host had been surveyed and
+    found to have nothing -- the reassuring reading of an unreadable file. A
+    reader cannot tell that from a survey that was never run, so the status
+    comes back alongside the object and gets rendered.
+
+    Returns (survey, status) where status["status"] is one of:
+      present     the file parsed into an object
+      missing     no survey.json exists
+      unreadable  it exists and could not be read or parsed as an object
+    """
+    if not os.path.exists(path):
+        return {}, {"status": "missing"}
+    try:
+        with open(path) as fh:
+            obj = json.load(fh)
+    except OSError as exc:
+        return {}, {"status": "unreadable",
+                    "detail": "cannot read %s: %s" % (path, exc)}
+    except ValueError as exc:
+        return {}, {"status": "unreadable",
+                    "detail": "%s is not valid JSON: %s" % (path, exc)}
+    if not isinstance(obj, dict):
+        return {}, {"status": "unreadable",
+                    "detail": "%s does not hold a JSON object" % path}
+    return obj, {"status": "present"}
 
 
 def _load_lines(path):
@@ -189,6 +232,7 @@ def collect(project):
 
     receipts, evidence, provenance = _discover_receipts(
         str(runs_root))
+    survey, survey_status = _read_survey(p(".swarm", "survey.json"))
 
     return {
         "project": project,
@@ -201,7 +245,8 @@ def collect(project):
         "evidence": evidence,
         "outbox": _load_lines(os.path.join(state_dir, "outbox.jsonl")),
         "tickets": _load(p("tickets.json"), {}) or {},
-        "survey": _load(p(".swarm", "survey.json"), {}) or {},
+        "survey": survey,
+        "survey_status": survey_status,
         "findings": _load(p("findings.json")),
         "brief": _load(p("brief.json"), {}) or {},
     }
@@ -240,6 +285,13 @@ def unit_rows(data):
             "outputs": rc.get("outputs") or {},
             "exit_code": rc.get("exit_code"),
             "basis": rc.get("basis") or {},
+            # What the execution workspace held that nothing declared. Carried
+            # onto the row rather than dug out of `basis` at render time,
+            # because a section nobody can find the data for does not get
+            # written: 18 bytes of debris reached DONE unmentioned once
+            # already, and the receipt naming it changes nothing until a
+            # reader sees it.
+            "stray_untracked": (rc.get("basis") or {}).get("stray_untracked"),
             "notes": rc.get("notes") or [],
             "checked_at": rc.get("checked_at"),
             "attempt_dir": su.get("attempt_dir"),
@@ -704,6 +756,117 @@ def _pill(state):
     return '<span class="pill %s">%s</span>' % (cls, e(state))
 
 
+# --------------------------------------------------------------------------
+# environment
+#
+# survey.py keeps `set` / `unrestricted` / `unknown` apart on every limit it
+# reports, for the reason its own comment gives: written as an absence, an
+# unanswered query reads as a permissive answer. This renderer owes the same
+# discipline one level up. Every field below is one of
+#
+#   a value        the survey looked and recorded this
+#   not recorded   the survey wrote this section and left the field out
+#   not surveyed   this survey has no such section at all
+#
+# and the whole section is suppressed in favour of a warning when the survey
+# file exists but will not parse, because a blank Environment section is
+# exactly what an unreadable survey would otherwise produce.
+
+
+def _survey_section(survey, name):
+    val = survey.get(name)
+    return val if isinstance(val, dict) else {}
+
+
+def _env_field(section, has_section, key):
+    """One environment field as (text, is_value)."""
+    if not has_section:
+        return "not surveyed", False
+    val = section.get(key)
+    if val is None or val == "":
+        return "not recorded", False
+    return str(val), True
+
+
+def _scheduler_rows(sched, has_sched):
+    """The scheduler facts worth a line here, as (label, text, is_value).
+
+    Deliberately a summary and not the block. The block carries every
+    partition's allow/deny accounts, QOS and MaxMemPerCPU -- a page of JSON
+    that a reader skips, and the reason `json.dumps(val)` was a bug rather
+    than a shortcut. What survives the cut is what changes what a reader does
+    next: whether there is a scheduler at all, how many partitions it offered,
+    whether this cluster forces --mem, and which accounts the user may charge.
+    The per-partition rules stay in survey.json, and the section says so
+    rather than letting their absence read as "there are none".
+    """
+    if not has_sched:
+        return [("scheduler", "not surveyed", False)]
+    present = sched.get("present")
+    if present is None:
+        return [("scheduler", "not recorded", False)]
+    if not present:
+        # A definite negative: survey.py writes {"present": False} only after
+        # looking for sinfo and not finding it.
+        return [("scheduler", "not present on this host (no sinfo)", False)]
+
+    rows = []
+    kind = _survey_section(sched, "config").get("SchedulerType")
+    rows.append(("scheduler", "present" + (" (%s)" % kind if kind else ""),
+                 True))
+
+    parts = sched.get("partitions")
+    if isinstance(parts, list):
+        default = next((p.get("partition") for p in parts
+                        if isinstance(p, dict) and p.get("default")), None)
+        rows.append(("partitions", "%d%s" % (
+            len(parts), " (default: %s)" % default if default else ""), True))
+    elif sched.get("partitions_unavailable"):
+        # NOT zero. survey.py refuses to write [] here for the same reason.
+        rows.append(("partitions", "could not be listed: %s"
+                     % sched["partitions_unavailable"], False))
+    else:
+        rows.append(("partitions", "not recorded", False))
+
+    mem = sched.get("mem_flag_required")
+    if mem is None:
+        rows.append(("--mem required", "not recorded: the scheduler config "
+                     "reported no DefMemPerNode", False))
+    else:
+        rows.append(("--mem required", "yes" if mem else "no", True))
+
+    accts = sched.get("accounts")
+    if isinstance(accts, list) and accts:
+        rows.append(("accounts", ", ".join(str(x) for x in accts), True))
+    else:
+        # survey.py writes this key only when sacctmgr answered AND named at
+        # least one account, so its absence spans two different facts and
+        # must not be printed as "you have no accounts".
+        rows.append(("accounts", "not recorded: sacctmgr named none, or did "
+                     "not answer", False))
+    return rows
+
+
+def _schema_warning(survey):
+    """What to say when the survey is not the shape this reader knows."""
+    ver = survey.get("schema_version")
+    if ver == SURVEY_SCHEMA:
+        return None
+    if ver is None:
+        return ("This survey carries no <code>schema_version</code>, so its "
+                "shape is unverified. Fields shown as absent below may be "
+                "fields this reader looked for in the wrong place.")
+    if isinstance(ver, int) and ver > SURVEY_SCHEMA:
+        return ("This survey is version %d; this report reads version %d. "
+                "Anything the newer survey added is not shown here, and its "
+                "absence below is this reader's limit, not the host's."
+                % (ver, SURVEY_SCHEMA))
+    # The version is project-supplied, and this string is emitted as markup.
+    return ("This survey is version %s; this report reads version %d. Fields "
+            "added since are missing from the file rather than from the "
+            "host." % (e(ver), SURVEY_SCHEMA))
+
+
 def render(data, title=None):
     rows = unit_rows(data)
     v, vwhy = verdict(rows)
@@ -730,8 +893,12 @@ def render(data, title=None):
         a('<p class="sub">%s</p>'
           % e(plan.get("goal") or data["brief"].get("goal")))
     bits = []
-    if survey.get("hostname"):
-        bits.append("host <code>%s</code>" % e(survey["hostname"]))
+    # machine.hostname, not survey["hostname"]: survey.py has never written a
+    # top-level one, so this banner has silently omitted the host on every
+    # report it has ever produced.
+    _host = _survey_section(survey, "machine").get("hostname")
+    if _host:
+        bits.append("host <code>%s</code>" % e(_host))
     if data["state"].get("plan_digest"):
         bits.append("plan <code>%s</code>"
                     % e(str(data["state"]["plan_digest"])[:12]))
@@ -833,20 +1000,64 @@ def render(data, title=None):
     if refused:
         a("<section>")
         a('<div class="sec-head"><h2>Blocked before launch</h2>'
-          "<p>These units were refused at dispatch because their execution "
-          "workspace was not clean. Nothing ran, no retry was charged, and "
-          "the next pass will dispatch them once the workspace is clean. "
-          "Until then the run cannot finish.</p></div>")
+          "<p>These units were refused at dispatch. Nothing ran, no retry "
+          "was charged, and the next pass will dispatch them once the "
+          "condition named below is cleared. Until then the run cannot "
+          "finish.</p></div>")
         a('<div class="note"><ul>')
+        # THE REASON, not just the count. There are three preflight refusals
+        # now, and two of them have no dirty paths at all: a zero count
+        # rendered as "uncommitted changes" told a reader to go clean a
+        # workspace that was already clean.
+        detail = {
+            "shared-stash-stack":
+                ("has a non-empty <code>git stash</code> stack, which every "
+                 "worktree of it shares", "Apply or drop the parked entries "
+                 "(<code>git stash list</code> shows them), then re-run."),
+            "output-claim-held":
+                ("is claimed by a unit dispatched from another state "
+                 "directory", "Let that unit finish, or remove the claim "
+                 "named in the refusal, then re-run."),
+        }
         for r in refused:
             last = r["preflight_refusals"][-1]
             ws = last.get("workspace") or "an undeclared workspace"
             n = last.get("dirty_path_count")
-            count = ("%s dirty path(s)" % n) if n else "uncommitted changes"
-            a("<li><code>%s</code>: refused %d time(s); %s has %s. "
-              "Commit, stash or clean it, then re-run.</li>"
+            reason = str(last.get("reason") or "dirty-worktree")
+            said, remedy = detail.get(reason, (
+                ("has %s dirty path(s)" % n) if n else "has uncommitted "
+                "changes", "Commit or clean it, then re-run."))
+            a("<li><code>%s</code>: refused %d time(s); %s %s. %s</li>"
               % (e(r["id"]), len(r["preflight_refusals"]), e(str(ws)),
-                 e(count)))
+                 said, remedy))
+        a("</ul></div></section>")
+
+    # A stray file does NOT move the verdict. The receipt is audit-only, this
+    # list is read from a repository the agent owns, and a leftover is not by
+    # itself a failure -- a build artifact and 18 bytes of test debris look
+    # identical from here. What it must not be is invisible, which is exactly
+    # what it was when the debris rode a DONE unit out of the run.
+    strays = [r for r in rows if (r["stray_untracked"] or {}).get("paths")]
+    if strays:
+        a("<section>")
+        a('<div class="sec-head"><h2>Files nothing declared</h2>'
+          "<p>Untracked paths in the unit's execution workspace that none of "
+          "its declared outputs covers. The workspace was clean when the "
+          "unit launched, so the run wrote these. That is not a failure on "
+          "its own -- it is a question worth asking, because a command that "
+          "writes where it was not meant to writes what it was not meant "
+          "to.</p></div>")
+        a('<div class="note"><ul>')
+        for r in strays:
+            s = r["stray_untracked"]
+            shown = s.get("paths") or []
+            extra = int(s.get("count") or len(shown)) - len(shown)
+            a("<li><code>%s</code> left %d untracked path(s) in <code>%s</code>"
+              ": %s%s</li>"
+              % (e(r["id"]), int(s.get("count") or len(shown)),
+                 e(str(s.get("workspace") or "?")),
+                 e(", ".join(shown)),
+                 (" and %d more" % extra) if extra > 0 else ""))
         a("</ul></div></section>")
 
     if blind or mismatch or unevidenced:
@@ -988,24 +1199,76 @@ def render(data, title=None):
         a("</section>")
 
     # environment
-    if survey or os.path.exists(os.path.join(data["project"], "env.lock")):
+    sstat = (data.get("survey_status") or {}).get("status", "missing")
+    envlock = os.path.exists(os.path.join(data["project"], "env.lock"))
+    if survey or sstat == "unreadable" or envlock:
         a("<section>")
         a('<div class="sec-head"><h2>Environment</h2>'
           "<p>Where this ran. Recorded so the run can be repeated, or its "
-          "difference from a later run explained.</p></div>")
-        a('<dl class="kv">')
-        for k, label in (("hostname", "host"), ("user", "user"),
-                         ("python", "python"), ("scheduler", "scheduler")):
-            val = survey.get(k)
-            if isinstance(val, dict):
-                val = val.get("version") or val.get("path") or json.dumps(val)
-            if val:
-                a("<dt>%s</dt><dd class='mono'>%s</dd>" % (e(label), e(val)))
-        accts = survey.get("accounts")
-        if accts:
-            a("<dt>accounts</dt><dd class='mono'>%s</dd>"
-              % e(", ".join(map(str, accts))))
-        a("</dl></section>")
+          "difference from a later run explained. Every field below is "
+          "either a value, <em>not recorded</em> (the survey wrote that "
+          "section and left the field out), or <em>not surveyed</em> (the "
+          "survey has no such section) &mdash; three different facts that a "
+          "blank would flatten into one.</p></div>")
+
+        if sstat == "unreadable":
+            # No fields at all. Rendering them as absences would put an empty
+            # Environment section under a heading, which is precisely how a
+            # surveyed host with nothing on it looks.
+            a('<div class="note"><strong>The survey exists and cannot be '
+              "read.</strong><p style='margin:6px 0 0'>Nothing below it is "
+              "shown, because an unreadable survey and a host with nothing "
+              "on it are not the same fact and must not render alike.</p>"
+              "<ul><li>%s</li></ul></div>"
+              % e(data["survey_status"].get("detail") or "unknown error"))
+        else:
+            if not survey:
+                # Reachable only via env.lock, or via a survey.json holding
+                # an empty object -- and those are different facts too.
+                a('<div class="note"><strong>Nothing here describes the '
+                  "host.</strong><p style='margin:6px 0 0'>%s%s</p></div>"
+                  % ("<code>.swarm/survey.json</code> is absent."
+                     if sstat == "missing" else
+                     "<code>.swarm/survey.json</code> parsed, and is empty.",
+                     " <code>env.lock</code> is present in the project root."
+                     if envlock else ""))
+            warn = _schema_warning(survey) if survey else None
+            if warn:
+                a('<div class="note"><strong>This survey is not the shape '
+                  'this report reads.</strong>'
+                  "<p style='margin:6px 0 0'>%s</p></div>" % warn)
+
+            machine = _survey_section(survey, "machine")
+            has_machine = isinstance(survey.get("machine"), dict)
+            sched = _survey_section(survey, "scheduler")
+            has_sched = isinstance(survey.get("scheduler"), dict)
+
+            # NOT `rows`: that name already holds this run's unit rows.
+            env = [("host",) + _env_field(machine, has_machine, "hostname"),
+                   ("user",) + _env_field(machine, has_machine, "user"),
+                   ("python",) + _env_field(machine, has_machine, "python")]
+            if has_machine and machine.get("system"):
+                env.append(("system", " ".join(
+                    str(machine[k]) for k in ("system", "release")
+                    if machine.get(k)), True))
+            else:
+                env.append(("system",)
+                           + _env_field(machine, has_machine, "system"))
+            env.append(("cpus",) + _env_field(machine, has_machine, "cpus"))
+            env.extend(_scheduler_rows(sched, has_sched))
+
+            a('<dl class="kv">')
+            for label, text, is_value in env:
+                a("<dt>%s</dt><dd class=\"%s\">%s</dd>"
+                  % (e(label), "mono" if is_value else "digest", e(text)))
+            a("</dl>")
+            if has_sched and sched.get("present"):
+                a('<p class="digest" style="margin:10px 0 0">Each '
+                  "partition's allow/deny accounts, QOS and MaxMemPerCPU are "
+                  "in <code>.swarm/survey.json</code>, not summarised here. "
+                  "Their absence from this page is not a claim that the "
+                  "cluster imposes none.</p>")
+        a("</section>")
 
     a('<footer>Generated by <code>report.py</code> from plan.json, the '
       "coordinator state, and each attempt's receipt. Nothing here is a "
