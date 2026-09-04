@@ -72,6 +72,41 @@ KINDS = U.KINDS
 DEFAULT_AGENT_PROVIDER = "codex/gpt-5.6-sol"
 DEFAULT_AGENT_THINKING = "high"
 
+# Reasoning effort belongs to the MODEL, not to the project. One project-wide
+# value was wrong the moment the roster held more than one model: on `bus
+# models`' measured intelligence luna sits well below sol and opus, so it is
+# asked for xhigh to compensate while the two leaders run at high. Asking the
+# leaders for xhigh buys latency, not quality.
+#
+# Every id here was read off a live agent on 2026-09-04, not guessed, because
+# paseo answers an unknown thinking id with an ERRORED agent. Two results are
+# worth keeping: `high` resolves on claude, whose bare default is `auto`, so
+# the value that looks like a no-op is the one that silently changes the run;
+# and `claude/opus` is an alias paseo expands to `claude-opus-5`, which is why
+# both spellings are keys.
+THINKING_BY_MODEL = {
+    "codex/gpt-5.6-sol": "high",
+    "codex/gpt-5.6-luna": "xhigh",
+    "claude/opus": "high",
+    "claude/claude-opus-5": "high",
+}
+
+
+def default_thinking_for(u):
+    """The reasoning effort one unit gets when it declares none.
+
+    Keyed on the model that will actually run, which is the provider string
+    unless the unit names a `model` separately -- both spellings reach paseo
+    the same way, so both have to resolve here or the mapping would apply to
+    one plan and not its equivalent. An unrecognised model falls back rather
+    than refusing: a new model on the roster should dispatch at a sane effort,
+    and the fallback is the level the two strongest models use.
+    """
+    provider = str(u.get("provider") or DEFAULT_AGENT_PROVIDER)
+    model = u.get("model")
+    key = "%s/%s" % (provider.split("/", 1)[0], model) if model else provider
+    return THINKING_BY_MODEL.get(key, DEFAULT_AGENT_THINKING)
+
 # This marker is deliberately stable: validation checks the exact prompt the
 # coordinator would dispatch, not prose copied into a plan. Plans cannot omit
 # the protocol, and attempts cannot invent its source branch, target, or base.
@@ -2419,7 +2454,7 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
         # return an errored agent rather than quietly ignoring it, so a wrong
         # value fails loudly at dispatch instead of silently downgrading the
         # work.
-        thinking = u.get("thinking", DEFAULT_AGENT_THINKING)
+        thinking = u.get("thinking", default_thinking_for(u))
         if thinking:
             argv += ["--thinking", str(thinking)]
         for kv in (u.get("env") or []):
