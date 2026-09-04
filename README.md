@@ -53,7 +53,7 @@ every issue title for approval, files them in Linear, and dispatches.
 
 ---
 
-## The five skills
+## The five skills we wrote
 
 | Skill | One line |
 |---|---|
@@ -63,8 +63,26 @@ every issue title for approval, files them in Linear, and dispatches.
 | `hanig-review-gate` | Adversarial multi-model review of code and of the claims made about it. |
 | `hanig-portable-handoff` | Capture and resume run state across machines. |
 
-All are prefixed `hanig-` so they can never collide with an Arc org-managed
-skill name.
+All five are prefixed `hanig-` so they can never collide with an Arc
+org-managed skill name. That prefix is now load-bearing rather than tidy:
+`install.sh` reads it as the authorship namespace, and anything under
+`skills/` outside it is treated as vendored -- installed by us, written
+upstream, and **left alone by `--uninstall`**.
+
+## The eight skills we vendor
+
+`skills/` also carries `paseo`, `paseo-advisor`, `paseo-committee`,
+`paseo-handoff`, `paseo-loop`, `pi-fleet`, `start-a-sprint` and `agent-bus`,
+taken **verbatim** from Shreshth's repo so the swarm's dependency lives here
+rather than in a second clone nobody's machine is guaranteed to have. They are
+not edited -- an upstream re-sync is meant to be a real diff -- so the routing
+decision they need goes in `~/.paseo/orchestration-preferences.json` instead
+(see "Orchestration preferences, per machine").
+
+Vendoring skills does **not** make this repo standalone at runtime: the hard
+dependency is the `paseo` binary, and copying markdown does not supply one.
+`bin/bus`, `bin/agent-manager`, `bin/agent-view` and `models.json` came across
+with them.
 
 ### hanig-project
 
@@ -498,7 +516,7 @@ then, because familiarity feels like knowledge.
 
 ### Orchestration preferences, per machine
 
-Six vendored skills — `paseo`, `paseo-advisor`, `paseo-committee`,
+Six of the vendored skills — `paseo`, `paseo-advisor`, `paseo-committee`,
 `paseo-handoff`, `paseo-loop` and `pi-fleet` — refuse to choose a provider
 until they have read `~/.paseo/orchestration-preferences.json`, and `agent-bus`
 names the same file as the policy layer over `bus models`. `skills/paseo/SKILL.md`
