@@ -1433,12 +1433,68 @@ class TestRound2ReviewFindings(unittest.TestCase):
 
     def test_orphan_recovery_matches_an_agent_exactly(self):
         """`attempt_id in name` also matched an attempt whose id is a prefix
-        of another's, binding a unit to somebody else's agent."""
-        src = SWARM.read_text()
-        seg = src[src.index('if kind == "code":'):]
-        seg = seg[:seg.index("name = f\"swarm-")]
-        self.assertNotIn("attempt_id in str(", seg)
-        self.assertIn("[attempt_id]", seg)
+        of another's, binding a unit to somebody else's agent.
+
+        Asked of BEHAVIOUR: paseo is stubbed to report three live agents whose
+        attempt ids are prefixes of one another, worst case first, and each
+        attempt must recover its own. That is the whole invariant and it
+        survives any rewrite of the matcher.
+
+        It replaces a source slice delimited by the first occurrence of two
+        string literals. Both literals recur in swarm.py, so the region drifted
+        to whatever lay between the first pair -- by now roughly 2900 lines
+        starting inside `_submit`, nowhere near the function under test. An
+        agent adding `_claim_liveness` found it contained both and renamed its
+        own local to `scheduler_job` to keep the slice quiet: production code
+        contorted to avoid confusing a test."""
+        from unittest import mock
+        # `--title` is f"[swarm] {unit id} {attempt id}", so the attempt id is
+        # the last whitespace-delimited field and nothing else.
+        agents = [
+            {"name": "[swarm] train a1b2", "id": "agent-for-a1b2"},
+            {"name": "[swarm] train a1", "id": "agent-for-a1"},
+            {"name": "[swarm] train a1-2", "id": "agent-for-a1-2"},
+        ]
+        asked = []
+
+        def fake_run(argv, **kw):
+            asked.append(list(argv))
+            return 0, json.dumps(agents), ""
+
+        for attempt in ("a1", "a1b2", "a1-2"):
+            with mock.patch.object(S.U, "run", fake_run):
+                aid, note = S.reconcile_orphan(
+                    f"/nowhere/train/{attempt}", kind="code")
+            self.assertEqual(aid, f"agent-for-{attempt}",
+                             f"attempt {attempt!r} was bound to {aid!r}, which "
+                             f"belongs to a different attempt")
+            self.assertIn(attempt, note or "")
+        self.assertEqual(asked[0][:2], ["paseo", "ls"],
+                         "the agent registry is the only party that knows")
+        # An id that merely occurs INSIDE a name is not this attempt's agent,
+        # and inventing one would be worse than reporting none.
+        with mock.patch.object(S.U, "run", fake_run):
+            self.assertEqual(
+                S.reconcile_orphan("/nowhere/train/b2", kind="code"),
+                (None, None),
+                "an attempt with no agent recovered somebody else's")
+
+        # And structurally, anchored on the PARSED function rather than a text
+        # span: no containment test of the attempt id against an agent name may
+        # reappear in the matcher. Anchoring on the name cannot drift, and it
+        # names the one function whose shape is being constrained.
+        import ast
+        fn = next(n for n in ast.parse(SWARM.read_text()).body
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == "reconcile_orphan")
+        contained = [ast.unparse(n) for n in ast.walk(fn)
+                     if isinstance(n, ast.Compare)
+                     and any(isinstance(o, ast.In) for o in n.ops)
+                     and "attempt_id" in ast.unparse(n.left)
+                     and any("name" in ast.unparse(c) for c in n.comparators)]
+        self.assertEqual(contained, [],
+                         "reconcile_orphan tests the attempt id for CONTAINMENT "
+                         "in an agent name; it must compare exactly")
 
     def test_exec_in_a_pipeline_command_was_a_false_finding(self):
         """One reviewer said `exec true` leaves engine.rc absent. Measured

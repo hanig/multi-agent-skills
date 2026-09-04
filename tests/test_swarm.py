@@ -18,6 +18,15 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "skills" / "hanig-swarm" / "scripts"
+# The scripts import one another by bare name (`unit` does `import paseo_io`),
+# so the directory has to be importable before any of them is loaded below.
+# Every other module in tests/ opens with exactly this line. This one did not,
+# and took the path for free from whichever sibling pytest imported first,
+# which made the largest file in the suite collectable only as part of a
+# whole-directory run: on its own, both `python3 -m pytest tests/test_swarm.py`
+# and `python3 tests/test_swarm.py` died in collection on "No module named
+# paseo_io", so the cheap way to iterate on it was seven minutes of everything.
+sys.path.insert(0, str(SCRIPTS))
 UNIT, SWARM = SCRIPTS / "unit.py", SCRIPTS / "swarm.py"
 CONVERGE = SCRIPTS / "converge.py"
 _cv = importlib.util.spec_from_file_location('_cv', CONVERGE)
