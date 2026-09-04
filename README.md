@@ -538,13 +538,35 @@ live file is user-specific configuration and overwriting a machine's routing
 policy from a skill install is not a thing an installer should do.
 
 **Copying it is not the end of the job.** The file was written on a machine
-with no Paseo and no `~/.paseo`, so no value in it has ever been dispatched.
+with no Paseo and no `~/.paseo`, so nothing in it was dispatched at the time.
+Two of its three distinct provider strings have been since — `claude/opus` and
+`codex/gpt-5.6-sol`, on 2026-09-04, both of which come up on the intended
+model; `codex/gpt-5.6-luna` still has not.
 Every provider string in it is copied verbatim from an attested id — the
 examples in `skills/paseo/SKILL.md`, or an id in `models.json` — but a
 well-formed string is not evidence that an agent comes up on the intended
 model. Confirm that separately, on the host, with `paseo run` plus
-`paseo inspect`, or with `bus launch --expect-provider/--expect-model`, which
-refuses a worker whose inspected provider does not match.
+`paseo inspect`, or launch through `bus launch-worker`, which inspects the
+agent it created and stops it when the provider, model, thinking id, cwd or
+branch does not match the plan. For a worker something else launched,
+`bus await --expect-provider/--expect-model/--expect-thinking` makes the same
+comparison and exits 4 on a mismatch. Those two are the whole surface:
+`bus launch-worker` and `bus await`. This README and the template both used to
+point at a third subcommand, which has never existed.
+
+**The file cannot set reasoning effort, and no longer implies it can.** Effort
+is a separate axis — `paseo run --thinking <id>`, or
+`settings.thinkingOptionId` on `create_agent` — and the schema is provider
+strings plus freeform prompt text, with no slot for it. The per-model effort
+decision in `docs/plan-field-reports.md` therefore binds `hanig-swarm`'s code
+units, which pass it from `swarm.py`'s `THINKING_BY_MODEL`, and binds nothing
+else: a Paseo skill dispatching from these categories gets the provider
+default. Measured on 2026-09-04 by dispatching and inspecting real agents,
+`claude/opus` comes up at `auto` against an intended `high`, so `ui` and
+`planning` silently run below intent; `codex/gpt-5.6-sol` comes up at `xhigh`
+against an intended `high`, above it. Read the effort lines in that file as
+intent to pass through, and check with `--expect-thinking` rather than
+assuming they took.
 
 Two things in the file are worth knowing before you rely on it. Three of the
 five categories are judgement calls — `impl` is settled, `ui` is carried

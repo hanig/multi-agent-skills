@@ -274,6 +274,76 @@ enforces this for code units, and nothing enforces it for a paseo skill
 dispatching from `orchestration-preferences.json`, which has no slot for
 effort -- there, claude/opus falls to its `auto` default.
 
+#### Effort cannot be configured there. It can be verified. ARC-263.
+
+`orchestration-preferences.json` is not going to grow an effort slot. Its
+schema is fixed by `skills/paseo/SKILL.md` -- `providers`, one provider string
+per category, and `preferences`, freeform text woven into prompts -- that file
+is vendored verbatim so an upstream re-sync stays a real diff, and it is
+explicit that no skill may hardcode a provider string. The same argument
+forbids hardcoding an effort. So the intent above binds `hanig-swarm`
+dispatches and nothing else, and the file must not be read as controlling
+something it cannot control.
+
+What was missing was never configuration. It was a check, and the check was
+already in the tree, unused. `bin/bus` asserts on the thinking id, not only on
+provider and model:
+
+```python
+    if args.expect_thinking and info.get("Thinking") != args.expect_thinking:
+        issues.append(
+            f"thinking={info.get('Thinking') or '(missing)'}; expected {args.expect_thinking}"
+        )
+```
+
+`info` is `paseo inspect --json`, which reports `Thinking` next to `Provider`
+and `Model`. Two entry points reach it:
+
+- **`bus launch-worker` requires `--thinking`.** It passes the id to
+  `paseo run`, re-inspects the agent it created, and `paseo stop`s it if the
+  inspected thinking id differs from the one asked for. A worker that came up
+  at the wrong effort does not get to run.
+- **`bus await --expect-thinking <id>`** checks a worker someone else
+  launched, and exits 4 with `INVALID LAUNCH CONTRACT`.
+
+Measured on this host on 2026-09-04, paseo 0.7.2, by dispatching real agents
+and inspecting them rather than by reading defaults out of the registry --
+except the luna row, which was not dispatched and is the registry's claim:
+
+| category | provider string | intent | inspected `Thinking` | verdict |
+|---|---|---|---|---|
+| impl | `codex/gpt-5.6-sol` | high | `xhigh` | above intent |
+| research, audit | `codex/gpt-5.6-luna` | xhigh | not dispatched; registry claims `xhigh` | right by accident, if the registry is right |
+| ui, planning | `claude/opus` | high | `auto` | **below intent, silently** |
+
+The axis itself works: `paseo run --provider claude/opus --thinking high`
+inspects as `high`. It is simply never passed. `bus await --expect-thinking
+high` against those two claude agents exited 0 for the one launched with
+`--thinking high`, and 4 with `unmet: thinking=auto; expected high` for the
+bare one.
+
+One trap worth writing down. `paseo provider models claude` advertises
+`defaultThinkingOptionId: high` for `claude-opus-5`, while a bare dispatch
+lands on `auto` -- which is not even in that model's `thinkingOptionIds`. The
+registry's declared default is not the dispatch default. Read effort off an
+inspected agent, never off the registry.
+
+This is the authority-work rule one level down: a property is established by
+construction and observation, not by asserting it in a config file that the
+consumer is free to ignore. And an unused verification path is the ARC-249
+defect class exactly -- there, four sites routed code units through a
+`bus await` that nothing ever called. So the decision is to name the mechanism
+rather than widen the schema: **a dispatcher that cares about effort passes
+`--thinking` and then asserts it**, and any claim about what effort a worker is
+running is worth only what an inspection of that worker says.
+
+Still open, and not fixed here: the vendored `paseo-*` skills pass neither a
+thinking id nor an expectation, so a role dispatched from these categories
+still takes the provider default. Pinning them is ARC-239, which is BLOCKED --
+those skills are not installed on this machine, so there is no file to edit.
+Until that lands, `claude/opus` launched from `ui` or `planning` runs at
+`auto`.
+
 Coding agents are `codex/gpt-5.6-sol`, including
 `start-a-sprint`'s workers, which previously used self-hosted DeepSeek Flash
 and native Luna. Sol coordinates and integrates; sol does NOT review, because
