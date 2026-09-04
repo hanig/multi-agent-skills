@@ -1007,6 +1007,256 @@ class TestInstallerSymlinkEdgeCases(unittest.TestCase):
             self.assertTrue((prefix / "hanig-gone").is_dir())
 
 
+MARKER = ".installed-by-multi-agent-skills"
+
+
+def _skill_dirs():
+    return sorted(d.name for d in (ROOT / "skills").iterdir()
+                  if d.is_dir() and not d.name.startswith("."))
+
+
+def _authored():
+    return [n for n in _skill_dirs() if n.startswith("hanig-")]
+
+
+def _vendored():
+    return [n for n in _skill_dirs() if not n.startswith("hanig-")]
+
+
+class TestVendoredSkillsAreNotOursToDelete(unittest.TestCase):
+    """19c5171 vendored eight skills from another author's repo verbatim, and
+    install.sh stamped them with the same ownership marker it writes on the
+    skills we wrote. That marker is the whole basis of `--uninstall`, so on a
+    host where upstream is also installed -- the setup
+    docs/plan-swarm-sol-variant.md records -- removing "our" skills took
+    theirs out of ~/.claude/skills too. Same shape as the chimera incident
+    TestUninstallOnlyRemovesOurOwn guards: ownership came from something we
+    recorded, but what we recorded no longer meant what it used to.
+
+    Vendored-ness is read off the tree, never from a list: this repo names
+    everything it writes hanig-*, so a directory under skills/ outside that
+    namespace arrived from somebody else."""
+
+    def _install(self, prefix, *extra):
+        return subprocess.run(
+            ["sh", str(ROOT / "install.sh"), "--prefix", str(prefix),
+             "--allow-org-shadow", *extra],
+            capture_output=True, text=True, cwd=ROOT)
+
+    def _upstream_install(self, base, prefix, name="paseo", shape="link"):
+        """What upstream's own install looks like from here: a symlink into
+        their checkout, or a plain directory we never stamped."""
+        theirs = base / "their-checkout" / name
+        theirs.mkdir(parents=True)
+        (theirs / "SKILL.md").write_text("theirs\n")
+        prefix.mkdir(exist_ok=True)
+        if shape == "link":
+            os.symlink(theirs, prefix / name)
+        else:
+            (prefix / name).mkdir()
+            (prefix / name / "SKILL.md").write_text("theirs\n")
+        return theirs
+
+    # --- uninstall ----------------------------------------------------------
+
+    def test_a_vendored_skill_survives_uninstall(self):
+        with tempfile.TemporaryDirectory() as d:
+            prefix = Path(d) / "prefix"
+            self._install(prefix)
+            self.assertTrue((prefix / "paseo" / "SKILL.md").is_file())
+            r = self._install(prefix, "--uninstall")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            for name in _vendored():
+                self.assertTrue((prefix / name).is_dir(),
+                                f"uninstall deleted {name}, which this repo "
+                                f"vendored rather than wrote")
+            self.assertIn("vendored", r.stdout)
+
+    def test_an_authored_skill_is_still_removed_by_a_plain_uninstall(self):
+        """The counter-claim. --uninstall must not become gentler in general;
+        for the skills this repo wrote it stays a plain delete, no flag."""
+        with tempfile.TemporaryDirectory() as d:
+            prefix = Path(d) / "prefix"
+            self._install(prefix)
+            authored = _authored()
+            self.assertTrue(authored)
+            r = self._install(prefix, "--uninstall")
+            for name in authored:
+                self.assertFalse((prefix / name).exists(),
+                                 f"--uninstall left {name}, which this repo "
+                                 f"wrote: it has gone gentle in general")
+            self.assertIn(f"removed {len(authored)} skill(s)", r.stdout)
+
+    def test_include_vendored_removes_them_when_asked(self):
+        with tempfile.TemporaryDirectory() as d:
+            prefix = Path(d) / "prefix"
+            self._install(prefix)
+            r = self._install(prefix, "--uninstall", "--include-vendored")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            for name in _skill_dirs():
+                self.assertFalse((prefix / name).exists(), name)
+
+    def test_a_marker_written_before_origin_existed_is_not_deleted(self):
+        """Anything installed by 19c5171 itself carries a marker with no
+        origin= line. Reading that as "authored here" would delete exactly the
+        skills this change exists to protect, on exactly the hosts that
+        already have them."""
+        with tempfile.TemporaryDirectory() as d:
+            prefix = Path(d) / "prefix"
+            prefix.mkdir()
+            for name, keep in (("paseo", True), ("hanig-swarm", False)):
+                (prefix / name).mkdir()
+                (prefix / name / MARKER).write_text(
+                    "repo=multi-agent-skills\nversion=19c5171\n")
+            self._install(prefix, "--uninstall")
+            self.assertTrue((prefix / "paseo").is_dir(),
+                            "an origin-less marker on a vendored name was "
+                            "read as ours to delete")
+            self.assertFalse((prefix / "hanig-swarm").exists())
+
+    # --- installing over somebody else's copy -------------------------------
+
+    def test_a_pre_existing_upstream_install_is_refused_by_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            prefix = base / "prefix"
+            theirs = self._upstream_install(base, prefix)
+            r = self._install(prefix)
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertIn("paseo", r.stderr)
+            self.assertIn(str(theirs), r.stderr,
+                          "the refusal must name the collision, not just "
+                          "report that there was one")
+            self.assertTrue((prefix / "paseo").is_symlink())
+            self.assertEqual((theirs / "SKILL.md").read_text(), "theirs\n")
+            self.assertFalse((prefix / "hanig-swarm").exists(),
+                             "refused at second zero, or it did not refuse")
+
+    def test_a_directory_with_someone_elses_marker_is_a_collision(self):
+        """Absent marker or a marker naming a different source: both mean
+        this install is not ours to replace."""
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            prefix = base / "prefix"
+            prefix.mkdir()
+            (prefix / "paseo").mkdir()
+            (prefix / "paseo" / MARKER).write_text("repo=someone-elses\n")
+            r = self._install(prefix)
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertIn("paseo", r.stderr)
+
+    def test_the_refusal_is_not_confused_with_org_shadowing(self):
+        """An operator who reads "org shadow" does not think "I am about to
+        replace the upstream author's paseo"."""
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            prefix = base / "prefix"
+            self._upstream_install(base, prefix)
+            err = self._install(prefix).stderr
+            self.assertIn("--allow-vendored-shadow", err)
+            self.assertIn("NOT the --allow-org-shadow case", err)
+
+    def test_taking_the_name_over_is_allowed_but_announced(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            prefix = base / "prefix"
+            theirs = self._upstream_install(base, prefix)
+            r = self._install(prefix, "--allow-vendored-shadow")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("taking over 'paseo'", r.stderr)
+            self.assertFalse((prefix / "paseo").is_symlink())
+            self.assertTrue((prefix / "paseo" / MARKER).is_file())
+            self.assertEqual((theirs / "SKILL.md").read_text(), "theirs\n",
+                             "replacing the link must not follow it")
+
+    def test_an_authored_name_installed_by_someone_else_is_still_skipped(self):
+        """Unchanged: a foreign hanig-* is skipped, not refused. The vendored
+        refusal is about names we ship but did not write."""
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            prefix = base / "prefix"
+            self._upstream_install(base, prefix, name="hanig-swarm")
+            r = self._install(prefix)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("skip hanig-swarm", r.stdout)
+            self.assertTrue((prefix / "hanig-swarm").is_symlink())
+
+    # --- where "vendored" comes from ----------------------------------------
+
+    def test_the_marker_records_which_it_is(self):
+        with tempfile.TemporaryDirectory() as d:
+            prefix = Path(d) / "prefix"
+            self._install(prefix)
+            for name in _skill_dirs():
+                origin = [l.split("=", 1)[1] for l
+                          in (prefix / name / MARKER).read_text().splitlines()
+                          if l.startswith("origin=")]
+                want = "authored" if name.startswith("hanig-") else "vendored"
+                self.assertEqual(origin, [want], f"{name}: {origin}")
+
+    def test_vendoredness_is_derived_from_the_tree_not_a_written_list(self):
+        """A list of vendored names in the installer would rot the first time
+        skills/ changed, and rot silently in the direction that deletes. The
+        classification is the hanig- namespace applied to whatever is on disk,
+        so no executable line may name a specific vendored skill."""
+        for path in (ROOT / "install.sh", ROOT / "bin" / "doctor"):
+            code = [l for l in path.read_text().splitlines()
+                    if not l.lstrip().startswith("#")]
+            for name in _vendored():
+                offenders = [l for l in code if name in l]
+                self.assertEqual(offenders, [],
+                                 f"{path.name} names {name} in code: "
+                                 f"{offenders}")
+        self.assertTrue(_vendored(), "nothing vendored: this test proves "
+                                     "nothing, and the guard is untested")
+
+    def test_doctor_does_not_call_a_vendored_skill_ours(self):
+        with tempfile.TemporaryDirectory() as d:
+            prefix = Path(d) / "prefix"
+            self._install(prefix)
+            out = subprocess.run(["sh", str(ROOT / "bin" / "doctor"),
+                                  "--prefix", str(prefix)],
+                                 capture_output=True, text=True,
+                                 cwd=ROOT).stdout
+            line = next(l for l in out.splitlines()
+                        if l.strip().startswith("paseo "))
+            self.assertIn("vendored", line)
+            ours = next(l for l in out.splitlines()
+                        if l.strip().startswith("hanig-swarm "))
+            self.assertIn("ours", ours)
+
+    # --- the prefix is spelled the same way twice ---------------------------
+
+    def test_doctor_takes_the_prefix_the_way_install_prints_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            prefix = Path(d) / "prefix"
+            r = self._install(prefix)
+            self.assertIn(f"bin/doctor --prefix {prefix}", r.stdout,
+                          "install told you to verify a prefix it did not "
+                          "install into")
+            flagged = subprocess.run(
+                ["sh", str(ROOT / "bin" / "doctor"), "--prefix", str(prefix)],
+                capture_output=True, text=True, cwd=ROOT)
+            self.assertIn("paseo", flagged.stdout)
+            self.assertIn(str(prefix), flagged.stdout)
+
+    def test_the_old_positional_prefix_still_works(self):
+        """Aligning the spelling is not worth breaking a script or a shell
+        history that already passes it positionally."""
+        with tempfile.TemporaryDirectory() as d:
+            prefix = Path(d) / "prefix"
+            self._install(prefix)
+            positional = subprocess.run(
+                ["sh", str(ROOT / "bin" / "doctor"), str(prefix)],
+                capture_output=True, text=True, cwd=ROOT).stdout
+            flagged = subprocess.run(
+                ["sh", str(ROOT / "bin" / "doctor"), "--prefix", str(prefix)],
+                capture_output=True, text=True, cwd=ROOT).stdout
+            skills = lambda o: o.split("=== INSTALLED SKILLS ===")[1] \
+                .split("=== SCRIPT HEALTH ===")[0]
+            self.assertEqual(skills(positional), skills(flagged))
+
+
 class TestTheTrackerTeamIsNotAQuestion(unittest.TestCase):
     """A draft with no team made the session stop and ask, mid-run, with 1.42
     TiB of hashing already in flight. It also guessed "goodarzilab", which is
