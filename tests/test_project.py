@@ -3563,6 +3563,7 @@ printf 'found:/cluster/profile/bin/claude\n'
             self.assertIn("NOT PRESENT", field)
             self.assertIn(".agent-bus/models.json", field)
             self.assertIn(str(ROOT / "models.json"), sec)
+            self.assertIn("models registry is absent", sec)
 
     def test_an_unreadable_registry_is_unknown_and_not_missing(self):
         if os.geteuid() == 0:
@@ -3580,14 +3581,14 @@ printf 'found:/cluster/profile/bin/claude\n'
             self.assertNotIn("NOT PRESENT", field)
 
     def test_a_registry_that_will_not_parse_is_not_reported_as_working(self):
-        """`bus models` fails on a corrupt file exactly as it fails on no
-        file: load_models_registry swallows JSONDecodeError and returns []."""
+        """Doctor and bus both reject corruption without calling it absent."""
         with tempfile.TemporaryDirectory() as d:
             home = Path(d) / "home"
             self._registry(home / ".agent-bus" / "models.json", "{oops")
-            field = self._field(self._doctor(d, cli=True, home=home).stdout,
-                                "models registry")
+            out = self._doctor(d, cli=True, home=home).stdout
+            field = self._field(out, "models registry")
             self.assertIn("UNUSABLE", field)
+            self.assertIn("separately from absence", out)
 
     def test_the_registry_is_looked_for_where_bus_would_look_for_it(self):
         """bin/bus honours AGENT_BUS_HOME, so a report about ~/.agent-bus on a

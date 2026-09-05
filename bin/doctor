@@ -629,7 +629,7 @@ elif [ -f "$REG" ] && [ -r "$REG" ]; then
     answered:0:ok:*)  printf '  models registry: %s (%s models)\n' "$REG" "${PROBE_OUT#ok:}" ;;
     answered:0:bad:*) printf '  models registry: %s — PRESENT BUT UNUSABLE (%s)\n' \
              "$REG" "${PROBE_OUT#bad:}"
-           printf '      `bus models` fails on this exactly as it fails on no file at all.\n' ;;
+           printf '      `bus models` reports malformed or invalid content separately from absence.\n' ;;
     *)     printf '  models registry: %s — present, but its CONTENTS COULD NOT BE DETERMINED: %s\n' \
              "$REG" "$PROBE_WHY" ;;
   esac
@@ -637,7 +637,7 @@ elif [ -e "$REG" ] || [ -L "$REG" ]; then
   printf '  models registry: COULD NOT DETERMINE — %s exists but is not a readable regular file\n' "$REG"
 else
   printf '  models registry: NOT PRESENT at %s\n' "$REG"
-  printf '      `bus models` exits with "no models registry" without it, and the\n'
+  printf '      `bus models` exits with "models registry is absent" without it, and the\n'
   printf '      paseo skill tells skills to run `bus models --json` to pick a model,\n'
   printf '      so routing has nothing to read.\n'
   if [ -f "$REPO/models.json" ]; then
