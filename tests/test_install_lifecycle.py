@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -95,6 +97,41 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual((target.destination / "SKILL.md").read_text(), old)
         self.assertFalse(list(target.destination.parent.glob(".alpha.stage-*")))
 
+    def test_failed_predecessor_rename_leaves_old_install_untouched(self):
+        target = self.target()
+        lifecycle.install([target])
+        old = (target.destination / "SKILL.md").read_text()
+        upgrade = self.target(source=self.source("alpha", "two"), version="v2")
+        real_replace = lifecycle.os.replace
+
+        def fail_backup_rename(source, destination):
+            if Path(source) == target.destination and Path(destination).name.startswith(".alpha.backup-"):
+                raise OSError("simulated predecessor rename failure")
+            return real_replace(source, destination)
+
+        with mock.patch.object(lifecycle.os, "replace", side_effect=fail_backup_rename):
+            result = lifecycle.install([upgrade])
+        self.assertEqual(result[0].status, "failed")
+        self.assertEqual((target.destination / "SKILL.md").read_text(), old)
+
+    def test_backup_cleanup_failure_keeps_good_replacement_and_backup(self):
+        target = self.target()
+        lifecycle.install([target])
+        upgrade = self.target(source=self.source("alpha", "two"), version="v2")
+        real_rmtree = lifecycle.shutil.rmtree
+
+        def fail_backup_cleanup(path, *args, **kwargs):
+            if Path(path).name.startswith(".alpha.backup-"):
+                raise OSError("simulated cleanup failure")
+            return real_rmtree(path, *args, **kwargs)
+
+        with mock.patch.object(lifecycle.shutil, "rmtree", side_effect=fail_backup_cleanup):
+            result = lifecycle.install([upgrade])
+        self.assertEqual(result[0].status, "upgraded")
+        self.assertTrue(result[0].predecessor_recoverable)
+        self.assertEqual((target.destination / "SKILL.md").read_text().splitlines()[-1], "two")
+        self.assertTrue(list(target.destination.parent.glob(".alpha.backup-*")))
+
     def test_repeated_upgrade_is_idempotent_and_leaves_no_staging(self):
         target = self.target(version="v1")
         self.assertEqual(lifecycle.install([target])[0].status, "installed")
@@ -104,6 +141,23 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual((target.destination / "SKILL.md").read_text().splitlines()[-1], "two")
         self.assertFalse(list(target.destination.parent.glob(".alpha.stage-*")))
         self.assertFalse(list(target.destination.parent.glob(".alpha.backup-*")))
+
+    def test_concurrent_installs_do_not_share_staging_or_corrupt_payload(self):
+        target = self.target()
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            results = list(workers.map(lambda _: lifecycle.install([target])[0], range(2)))
+        self.assertTrue(any(result.status == "installed" for result in results))
+        self.assertTrue(all(result.status in ("installed", "upgraded", "blocked") for result in results))
+        self.assertEqual((target.destination / "SKILL.md").read_text().splitlines()[-1], "one")
+        self.assertEqual(lifecycle.read_provenance(target.destination).repository, lifecycle.REPOSITORY_ID)
+        self.assertFalse(list(target.destination.parent.glob(".alpha.stage-*")))
+
+    def test_upgrade_unions_prior_recorded_consumers(self):
+        target = self.target(consumers=("claude", "codex"))
+        lifecycle.install([target])
+        upgrade = self.target(source=self.source("alpha", "two"), consumers=("claude",), version="v2")
+        self.assertEqual(lifecycle.install([upgrade])[0].status, "upgraded")
+        self.assertEqual(lifecycle.read_provenance(target.destination).consumers, ("claude", "codex"))
 
     def test_selective_uninstall_retains_shared_payload_for_other_consumer(self):
         target = self.target(consumers=("claude", "codex"))
@@ -140,10 +194,39 @@ class LifecycleTest(unittest.TestCase):
         sidecar = lifecycle.provenance_path(target.destination)
         self.assertTrue(target.destination.is_symlink())
         self.assertTrue(sidecar.is_file())
+        self.assertTrue(lifecycle.read_provenance(target.destination).link_identity)
         shutil.rmtree(target.source.parent)
         self.assertEqual(lifecycle.uninstall([target.destination])[0].status, "removed")
         self.assertFalse(target.destination.exists())
         self.assertFalse(sidecar.exists())
+
+    def test_link_never_overwrites_an_unowned_or_dangling_sidecar(self):
+        target = self.target(mode="link")
+        sidecar = lifecycle.provenance_path(target.destination)
+        sidecar.parent.mkdir(parents=True)
+        sidecar.write_text("repo=another-installer\n")
+        result = lifecycle.install([target])
+        self.assertEqual(result[0].status, "blocked")
+        self.assertFalse(target.destination.exists())
+        self.assertIn("another-installer", sidecar.read_text())
+
+    def test_stale_link_sidecar_cannot_authorize_replaced_foreign_link(self):
+        target = self.target(mode="link")
+        lifecycle.install([target])
+        foreign = self.source("foreign")
+        target.destination.unlink()
+        target.destination.symlink_to(foreign, target_is_directory=True)
+        self.assertEqual(lifecycle.preflight([target])[0].action, "blocked")
+        self.assertEqual(lifecycle.uninstall([target.destination])[0].status, "blocked")
+        self.assertEqual(os.path.realpath(target.destination), os.path.realpath(foreign))
+
+    def test_recreated_identical_link_does_not_reuse_old_sidecar_ownership(self):
+        target = self.target(mode="link")
+        lifecycle.install([target])
+        target.destination.unlink()
+        target.destination.symlink_to(target.source, target_is_directory=True)
+        self.assertEqual(lifecycle.preflight([target])[0].action, "blocked")
+        self.assertEqual(lifecycle.uninstall([target.destination])[0].status, "blocked")
 
     def test_migration_plan_is_dry_run_and_never_deletes_legacy_copy(self):
         legacy = self.home / ".claude" / "skills" / "alpha"

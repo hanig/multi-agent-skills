@@ -18,7 +18,7 @@ LifecycleTarget(
 
 Call `preflight(targets)` for dry-run output, then `install(targets)` to make changes. A target is blocked when its source is invalid or its destination is present without a matching `repo=multi-agent-skills` record, unless the caller explicitly sets `allow_foreign_replace`. The module validates `SKILL.md`; the installer should retain its richer frontmatter/script validation before it constructs targets.
 
-Each copied payload contains `.installed-by-multi-agent-skills`; a link has a deterministic adjacent sidecar under `.multi-agent-skills-provenance`. Schema 2 records `repo`, `origin`, `source_version`/compatibility `version`, absolute `destination`, comma-separated `consumers`, `mode`, and timestamp. Legacy markers remain readable but have `origin=unknown`; they are never silently treated as authored and are not destructively uninstalled.
+Each copied payload contains `.installed-by-multi-agent-skills`; a link has a deterministic adjacent sidecar under `.multi-agent-skills-provenance`. Schema 2 records `repo`, `origin`, `source_version`/compatibility `version`, absolute `destination`, comma-separated `consumers`, `mode`, link target and link-object identity (for links), and timestamp. Legacy markers remain readable but have `origin=unknown`; they are never silently treated as authored and are not destructively uninstalled.
 
 ## Failure and concurrency semantics
 
@@ -30,7 +30,7 @@ This is intentionally **not a multi-root atomic transaction**. After staging, ea
 
 Pass only candidate paths to `uninstall()`. It checks both repository identity and recorded destination before deletion. With `consumers=(...)`, it detaches only those consumers and retains a shared payload while other recorded consumers remain. The CLI should say that this preserves the payload but cannot guarantee what an independent loader chooses to make visible; precedence stays loader-specific.
 
-Vendored records require `include_vendored=True`; unknown legacy origins are retained. Foreign directories, a foreign/dangling symlink, and unrecorded metadata are blocked rather than inferred as ownership. Missing source checkouts do not prevent uninstall because the record is at the destination.
+Vendored records require `include_vendored=True`; unknown legacy origins are retained. Foreign directories, a foreign/dangling symlink, and unrecorded metadata are blocked rather than inferred as ownership. A link sidecar must also match the recorded link target, so a stale sidecar cannot authorize a replacement link. Missing source checkouts do not prevent uninstall because the record is at the destination.
 
 ## Migration planning
 

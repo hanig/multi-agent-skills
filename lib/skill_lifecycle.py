@@ -53,12 +53,17 @@ class Provenance:
     consumers: tuple[str, ...]
     mode: str
     installed_at: str
+    link_target: str = ""
+    link_identity: str = ""
     schema: str = SCHEMA_VERSION
     legacy: bool = False
 
     def __post_init__(self) -> None:
         if not self.repository or any(c in self.repository for c in "\n\r="):
             raise ValueError("repository must be a non-empty single-line value")
+        if any("\n" in value or "\r" in value
+               for value in (self.source_version, self.destination, self.installed_at, self.link_target, self.link_identity)):
+            raise ValueError("provenance fields must be single-line values")
         if self.origin not in VALID_ORIGINS:
             raise ValueError(f"unknown origin: {self.origin}")
         if self.mode not in VALID_MODES:
@@ -93,6 +98,8 @@ class LifecycleTarget:
             raise ValueError("new installs must declare authored or vendored origin")
         if self.mode not in VALID_MODES:
             raise ValueError("mode must be copy or link")
+        if not self.source_version or "\n" in self.source_version or "\r" in self.source_version:
+            raise ValueError("source_version must be a non-empty single-line value")
         object.__setattr__(self, "source", _absolute(self.source))
         object.__setattr__(self, "destination", _absolute(self.destination))
         object.__setattr__(self, "consumers", _clean_values(self.consumers))
@@ -181,6 +188,8 @@ def _parse_marker(path: Path) -> Provenance | None:
             consumers=tuple(filter(None, data.get("consumers", "").split(","))),
             mode=mode,
             installed_at=data.get("installed_at", "unknown"),
+            link_target=data.get("link_target", ""),
+            link_identity=data.get("link_identity", ""),
             schema=data.get("schema", "1"),
             legacy=legacy,
         )
@@ -214,7 +223,8 @@ def _serialize(record: Provenance) -> str:
         # Keep version for the existing POSIX installer while it adopts this API.
         ("version", record.source_version), ("destination", record.destination),
         ("consumers", ",".join(record.consumers)), ("mode", record.mode),
-        ("installed_at", record.installed_at),
+        ("installed_at", record.installed_at), ("link_target", record.link_target),
+        ("link_identity", record.link_identity),
     )
     return "".join(f"{key}={value}\n" for key, value in fields)
 
@@ -261,8 +271,33 @@ def _fingerprint(path: Path, explicit: Path | None = None) -> tuple | None:
     return (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_mode, marker_text)
 
 
+def _link_identity(destination: Path) -> str:
+    """Stable attributes of the link itself, not of what it currently loads."""
+    stat = destination.lstat()
+    return f"{stat.st_dev}:{stat.st_ino}:{stat.st_ctime_ns}"
+
+
+def _record_matches_link(destination: Path, record: Provenance) -> bool:
+    if not (destination.is_symlink() and record.link_target and record.link_identity):
+        return False
+    try:
+        return (os.path.realpath(destination) == os.path.realpath(record.link_target)
+                and _link_identity(destination) == record.link_identity)
+    except OSError:
+        return False
+
+
 def _owned_by(record: Provenance | None, target: LifecycleTarget) -> bool:
-    return bool(record and record.repository == target.repository)
+    if not record or record.repository != target.repository:
+        return False
+    if record.destination and record.destination != str(target.destination):
+        return False
+    if record.mode != "link":
+        return True
+    # A sidecar alone is not ownership of a symlink.  It may be stale after a
+    # user replaces the link, so verify the object is still a link to the
+    # recorded target before allowing it to be upgraded or removed.
+    return _record_matches_link(target.destination, record)
 
 
 def _source_error(target: LifecycleTarget, validator: Callable[[Path], None]) -> str | None:
@@ -297,6 +332,11 @@ def preflight(targets: Sequence[LifecycleTarget], *,
             continue
         record = read_provenance(target.destination, provenance_file=target.provenance_path)
         fingerprint = _fingerprint(target.destination, target.provenance_path)
+        sidecar = provenance_path(target.destination, target.provenance_path)
+        if target.mode == "link" and fingerprint is None and sidecar.exists():
+            if not _owned_by(record, target):
+                result.append(PreflightItem(target, "blocked", "link provenance sidecar exists without this repository's ownership record", record, fingerprint))
+                continue
         if fingerprint is None:
             result.append(PreflightItem(target, "install", "destination is absent", record, fingerprint))
         elif _owned_by(record, target):
@@ -308,12 +348,16 @@ def preflight(targets: Sequence[LifecycleTarget], *,
     return result
 
 
-def _record_for(target: LifecycleTarget) -> Provenance:
+def _record_for(target: LifecycleTarget, previous: Provenance | None = None) -> Provenance:
+    consumers = target.consumers
+    if previous and previous.repository == target.repository:
+        consumers = _clean_values((*previous.consumers, *consumers))
     return Provenance(
         repository=target.repository, origin=target.origin,
         source_version=target.source_version, destination=str(target.destination),
-        consumers=target.consumers, mode=target.mode,
+        consumers=consumers, mode=target.mode,
         installed_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        link_target=str(target.source) if target.mode == "link" else "",
     )
 
 
@@ -335,15 +379,16 @@ def _stage(item: PreflightItem, validator: Callable[[Path], None]) -> Path:
     target = item.target
     stage = target.destination.parent / f".{target.name}.stage-{uuid.uuid4().hex}"
     try:
+        stage.parent.mkdir(parents=True, exist_ok=True)
         if target.mode == "copy":
             shutil.copytree(target.source, stage, symlinks=True)
-            write_provenance(stage, _record_for(target))
+            write_provenance(stage, _record_for(target, item.previous))
             validator(stage)
         else:
             # Link targets validate the source now, and stage their sidecar in
             # the destination filesystem before the old link is moved aside.
             validator(target.source)
-            _write_atomic(stage, _serialize(_record_for(target)))
+            _write_atomic(stage, _serialize(_record_for(target, item.previous)))
     except BaseException:
         _cleanup_stage(stage)
         raise
@@ -369,6 +414,7 @@ def _publish(item: PreflightItem, stage: Path) -> InstallResult:
     # distinct link after the predecessor is recoverably moved aside.
     backup: Path | None = None
     moved_predecessor = False
+    replacement_created = False
     try:
         if dest.exists() or dest.is_symlink():
             backup = dest.parent / f".{target.name}.backup-{uuid.uuid4().hex}"
@@ -376,13 +422,25 @@ def _publish(item: PreflightItem, stage: Path) -> InstallResult:
             moved_predecessor = True
         if target.mode == "copy":
             os.replace(stage, dest)
+            replacement_created = True
         else:
             os.symlink(target.source, dest, target_is_directory=True)
+            replacement_created = True
             sidecar = provenance_path(dest, target.provenance_path)
             sidecar.parent.mkdir(parents=True, exist_ok=True)
             os.replace(stage, sidecar)
+            # The staged record knew the intended target.  Bind its sidecar to
+            # the newly-created link object before it can authorize ownership.
+            write_provenance(dest, replace(_record_for(target, item.previous),
+                                            link_identity=_link_identity(dest)),
+                             provenance_file=target.provenance_path)
         if backup:
-            _remove_path(backup)
+            try:
+                _remove_path(backup)
+            except OSError as exc:
+                return InstallResult(target, "upgraded" if item.action == "upgrade" else "installed",
+                                     f"published; predecessor cleanup failed and was retained at {backup}: {exc}",
+                                     predecessor_recoverable=True)
         return InstallResult(target, "upgraded" if item.action == "upgrade" else "installed",
                              "published after staging and validation")
     except Exception as exc:
@@ -391,7 +449,7 @@ def _publish(item: PreflightItem, stage: Path) -> InstallResult:
         # A new link may have been created before its sidecar could publish.
         # It is not a usable owned installation, so remove it before restoring
         # the predecessor (or before returning failure for a fresh install).
-        if dest.exists() or dest.is_symlink():
+        if replacement_created and (dest.exists() or dest.is_symlink()):
             try:
                 _remove_path(dest)
             except OSError as remove_exc:
@@ -470,6 +528,9 @@ def uninstall(destinations: Iterable[Path | str], *, consumers: Iterable[str] = 
                 continue
             if record.destination != str(dest):
                 results.append(UninstallResult(dest, "blocked", "recorded destination does not match this path"))
+                continue
+            if record.mode == "link" and not _record_matches_link(dest, record):
+                results.append(UninstallResult(dest, "blocked", "link no longer matches its recorded target"))
                 continue
             if wanted_consumers:
                 if not record.consumers:
