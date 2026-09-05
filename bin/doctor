@@ -49,13 +49,14 @@ REPO=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 # unknown; an unbounded fallback would recreate the bug this function exists
 # to close.
 #
-# The direct command gets its own process group. On timeout the supervisor
-# signals both that group and the direct pid, then gives the direct child a
-# separate reap deadline. That also cleans up ordinary profile children from
-# bash -lic. A descendant that deliberately leaves the group, or a direct
-# child parked in an uninterruptible syscall, can survive; neither can make
-# doctor wait past the reap deadline. Arbitrary descendant quiescence is not a
-# guarantee a portable diagnostic can honestly make.
+# The direct command gets its own process group. Timeout is a one-way latch:
+# TERM is followed at one absolute grace deadline by KILL of the original
+# group, even if the direct child exited after TERM. The direct child is polled
+# for reaping but never waited on without a bound. That cleans up ordinary
+# profile children from bash -lic. A descendant that deliberately leaves the
+# group, or a direct child parked in an uninterruptible syscall, can survive;
+# neither can make doctor wait past the grace deadline. Arbitrary descendant
+# quiescence is not a guarantee a portable diagnostic can honestly make.
 #
 # Output is not the completion signal: py_compile says nothing on success, and
 # silence is not a timeout. RUN_SECONDS is the ordinary command deadline.
@@ -110,8 +111,10 @@ fcntl($reader, F_SETFL, $flags | O_NONBLOCK)
     or answer("unknown", 127, "");
 
 my $started = clock_gettime(CLOCK_MONOTONIC);
-my ($term_at, $status);
-my $state = "answered";
+my $run_deadline = $started + $limit;
+my $grace_deadline = $run_deadline + $reap;
+my $state = "RUNNING";
+my ($status, $direct_reaped);
 my $tail = "";
 sub drain {
     while (1) {
@@ -125,35 +128,48 @@ sub drain {
 
 while (1) {
     drain();
-    my $got = waitpid($pid, WNOHANG);
-    if ($got == $pid) {
-        $status = $?;
-        last;
-    }
     my $now = clock_gettime(CLOCK_MONOTONIC);
-    if (!defined($term_at) && $now - $started >= $limit) {
-        $state = "timeout";
-        $term_at = $now;
+
+    if ($state eq "RUNNING" && $now >= $run_deadline) {
+        $state = "TIMED_OUT";
         kill "TERM", -$pid;
-        kill "TERM", $pid;
-    } elsif (defined($term_at) && $now - $term_at >= $reap) {
+        kill "TERM", $pid unless $direct_reaped;
+    }
+
+    unless ($direct_reaped) {
+        my $got = waitpid($pid, WNOHANG);
+        if ($got == $pid) {
+            $status = $?;
+            $direct_reaped = 1;
+            last if $state eq "RUNNING";
+        }
+    }
+
+    if ($state eq "TIMED_OUT" && $now >= $grace_deadline) {
+        # The group may still contain a TERM-ignoring child after its parent
+        # exited and was reaped. Always signal the original group at grace.
         kill "KILL", -$pid;
-        kill "KILL", $pid;
-        my $last = waitpid($pid, WNOHANG);
-        $status = $? if $last == $pid;
+        kill "KILL", $pid unless $direct_reaped;
+        unless ($direct_reaped) {
+            my $last = waitpid($pid, WNOHANG);
+            if ($last == $pid) {
+                $status = $?;
+                $direct_reaped = 1;
+            }
+        }
         last;
     }
     sleep 0.02;
 }
 drain();
 my $rc = 127;
-if ($state eq "timeout") {
+if ($state eq "TIMED_OUT") {
     $rc = 124;
 } elsif (defined $status) {
     $rc = WIFEXITED($status) ? WEXITSTATUS($status)
         : WIFSIGNALED($status) ? 128 + WTERMSIG($status) : 127;
 }
-answer($state, $rc, $tail);'
+answer($state eq "TIMED_OUT" ? "timeout" : "answered", $rc, $tail);'
 
 # bounded SECONDS CMD... -- run CMD under a real kill deadline. PROBE_STATE is
 # answered, timeout, or unknown; answered includes a non-zero return and empty
