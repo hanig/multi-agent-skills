@@ -2,19 +2,26 @@
 
 ## Summary
 
-The `paseo` and `agent-bus` skills hardcode `~/.agent-bus/bin/bus`, although
-that location is a property of one installer rather than part of the bus's
-state contract. A consumer that vendors the skills and `bin/bus` without
-reproducing that installer layout receives instructions that cannot run.
+Four skills hardcode `~/.agent-bus/bin/bus`, although that location is a
+property of one installer rather than part of the bus's state contract. A
+consumer that vendors the skills and `bin/bus` without reproducing that
+installer layout receives instructions that cannot run.
 
 Affected instructions in the 2026-08-25 vendored snapshot:
 
-- `skills/paseo/SKILL.md`: model selection runs
-  `~/.agent-bus/bin/bus models --json`.
-- `skills/paseo/SKILL.md`: CLI-only completion arms
-  `~/.agent-bus/bin/bus await ...`.
-- `skills/agent-bus/SKILL.md`: the introduction and command examples declare
-  `~/.agent-bus/bin/bus` as the CLI location.
+- `skills/agent-bus/SKILL.md` (2 hardcoded occurrences): the introduction and
+  command setup declare the fixed CLI location.
+- `skills/paseo/SKILL.md` (2 hardcoded occurrences): model selection runs
+  `models --json`, and CLI-only completion arms `await`.
+- `skills/pi-fleet/SKILL.md` (5 hardcoded occurrences): model selection,
+  completion waiting, Paseo-routed sending, registration, and inbox checking.
+- `skills/start-a-sprint/SKILL.md` (3 hardcoded occurrences): deterministic
+  worker launch in prose and in its command example, plus artifact-aware
+  waiting.
+
+That is the complete inventory returned by searching every vendored
+`skills/*/SKILL.md` in this snapshot for the literal path. A correction must
+cover every occurrence, not only the first skill that exposed the problem.
 
 ## Reproduction
 
@@ -63,7 +70,8 @@ as:
 > tell the user how to configure or install it. Use the resolved executable
 > for `models`, `await`, and every other bus command.
 
-Apply the same rule in both skills so model routing, peer messaging, and
+Apply the same rule to every bus invocation in all four skills so model
+routing, worker launch, peer messaging, registration, inbox checks, and
 completion notification cannot disagree about where the CLI lives.
 
 ## Acceptance checks

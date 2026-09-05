@@ -1307,7 +1307,7 @@ class TestVendoredSkillsAreNotOursToDelete(unittest.TestCase):
 class TestVendoredAgentBusLayoutIsExplicit(unittest.TestCase):
     """ARC-272. The vendored skills name upstream's executable location, but
     this repository installs only skills and keeps bus in its checkout. The
-    local documentation must leave an operator with a command that exists."""
+    local documentation must leave an operator with a workflow that runs."""
 
     def test_the_readme_names_both_layouts_and_a_working_local_command(self):
         readme = (ROOT / "README.md").read_text()
@@ -1316,6 +1316,9 @@ class TestVendoredAgentBusLayoutIsExplicit(unittest.TestCase):
         section = readme.split(heading, 1)[1].split("\n### ", 1)[0]
 
         self.assertIn("`~/.agent-bus/bin/bus`", section)
+        self.assertIn('bus_state="${AGENT_BUS_HOME:-$HOME/.agent-bus}"',
+                      section)
+        self.assertIn('cp models.json "$bus_state/models.json"', section)
         self.assertIn("./bin/bus models --json", section)
         self.assertRegex(section, r"does\s+not install")
         self.assertIn("upstream", section.lower())
@@ -1325,6 +1328,38 @@ class TestVendoredAgentBusLayoutIsExplicit(unittest.TestCase):
         self.assertTrue(os.access(local_bus, os.X_OK),
                         "README's checkout-local bus is not executable")
 
+        with tempfile.TemporaryDirectory() as d:
+            isolated_home = Path(d) / "home"
+            isolated_home.mkdir()
+            registry = isolated_home / ".agent-bus" / "models.json"
+            legacy_bus = isolated_home / ".agent-bus" / "bin" / "bus"
+            env = dict(os.environ)
+            env["HOME"] = str(isolated_home)
+            env.pop("AGENT_BUS_HOME", None)
+
+            self.assertFalse(registry.exists(),
+                             "the absent-registry precondition is false")
+            self.assertFalse(legacy_bus.exists(),
+                             "the test accidentally supplied upstream bus")
+            missing = subprocess.run(
+                [str(local_bus), "models", "--json"], cwd=ROOT, env=env,
+                capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(missing.returncode, 0,
+                                "models unexpectedly needs no registry")
+            self.assertIn(str(registry), missing.stderr)
+
+            documented = section.split("```bash", 1)[1].split("```", 1)[0]
+            ran = subprocess.run(
+                ["sh", "-eu", "-c", documented], cwd=ROOT, env=env,
+                capture_output=True, text=True, timeout=30)
+            self.assertEqual(ran.returncode, 0, ran.stderr)
+            self.assertTrue(registry.is_file(),
+                            "the documented setup did not seed bus state")
+            rows = json.loads(ran.stdout)
+            expected = json.loads((ROOT / "models.json").read_text())
+            self.assertEqual({row["id"] for row in rows},
+                             {row["id"] for row in expected["models"]})
+
     def test_the_upstream_report_separates_executable_and_state_paths(self):
         report = (ROOT / "docs" /
                   "upstream-agent-bus-path-discovery.md").read_text()
@@ -1332,6 +1367,22 @@ class TestVendoredAgentBusLayoutIsExplicit(unittest.TestCase):
                          "~/.agent-bus/bin/bus", "AGENT_BUS_HOME"):
             self.assertIn(contract, report)
         self.assertIn("state lookup only", report)
+
+        references = {}
+        for skill in (ROOT / "skills").glob("*/SKILL.md"):
+            count = skill.read_text().count("~/.agent-bus/bin/bus")
+            if count:
+                references[skill.relative_to(ROOT).as_posix()] = count
+        expected = {
+            "skills/agent-bus/SKILL.md": 2,
+            "skills/paseo/SKILL.md": 2,
+            "skills/pi-fleet/SKILL.md": 5,
+            "skills/start-a-sprint/SKILL.md": 3,
+        }
+        self.assertEqual(references, expected)
+        for path, count in references.items():
+            self.assertIn(f"`{path}` ({count} hardcoded occurrences)", report)
+        self.assertIn("every bus invocation in all four skills", report)
 
 
 class TestTheTrackerTeamIsNotAQuestion(unittest.TestCase):

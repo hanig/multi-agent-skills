@@ -89,22 +89,42 @@ with them.
 The executable layout here is not the upstream install layout. `install.sh`
 installs skill directories only, into `~/.claude/skills` by default. It does
 not install the helper programs or create `~/.agent-bus/bin/bus`. In this
-checkout the bus executable is `bin/bus`, so run it from the repository root:
+checkout the bus executable is `bin/bus`. Model routing also needs bus state,
+so from the repository root seed the shipped starter registry only when the
+machine has none, then run the checkout-local executable:
 
 ```bash
+bus_state="${AGENT_BUS_HOME:-$HOME/.agent-bus}"
+mkdir -p "$bus_state"
+if [ ! -e "$bus_state/models.json" ]; then
+  cp models.json "$bus_state/models.json"
+fi
 ./bin/bus models --json
+```
+
+`bus models` reads `models.json` from `AGENT_BUS_HOME`, which defaults to
+`~/.agent-bus`; it does not read the repository-root copy directly. The setup
+above seeds an absent registry from this checkout without overwriting an
+existing machine-specific one. Review that starter registry before relying on
+its routing data. `install.sh` deliberately installs neither this user state
+nor the helper executable.
+
+Other checkout-local commands use the same executable path:
+
+```bash
 ./bin/bus launch-worker --help
 ./bin/bus await --help
 ```
 
 An absolute path to this checkout's `bin/bus` works from another directory.
-The `~/.agent-bus/bin/bus` commands in the vendored `paseo` and `agent-bus`
-skills assume upstream's installer has placed the executable there. They do
-not describe a path this repository installs. Until upstream discovers the
-executable instead of hardcoding an install layout, agents using only this
-repository need the checkout-local path above. Do not create the upstream
-path merely to make the instruction true: `~/.agent-bus` is user state that
-this installer deliberately does not claim to own.
+The `~/.agent-bus/bin/bus` commands in the vendored `agent-bus`, `paseo`,
+`pi-fleet`, and `start-a-sprint` skills assume upstream's installer has placed
+the executable there. They do not describe a path this repository installs.
+Until upstream discovers the executable instead of hardcoding an install
+layout, agents using only this repository need the checkout-local path above.
+Do not create `~/.agent-bus/bin/bus` merely to make the instruction true: the
+directory holds user state, while this installer deliberately claims neither
+that executable path nor the registry inside it.
 
 The upstream-ready report and proposed correction are in
 `docs/upstream-agent-bus-path-discovery.md`. The vendored skill files remain
