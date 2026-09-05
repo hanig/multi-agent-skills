@@ -39,10 +39,10 @@ record the following in the release artifact before approving the release:
 
 | Host agent and version | OS | Discovery observation | Representative invocation and result | Status / blocker |
 | --- | --- | --- | --- | --- |
-| Claude Code 2.1.261 | macOS 26.0, 2026-09-05 | CLI found by bounded read-only `--version` probe; no native load checked | not run | **unverified** — no native invocation was run |
-| Codex CLI 0.153.4 | macOS 26.0, 2026-09-05 | CLI found by bounded read-only `--version` probe; no native load checked | not run | **unverified** — no native invocation was run |
-| OpenCode | macOS 26.0, 2026-09-05 | `--version` did not complete inside the bounded two-second probe (CPU/AVX warning printed) | not run | **unverified** — version probe is dependency-limited |
-| Pi | macOS 26.0, 2026-09-05 | executable absent | not run | **unverified** — CLI unavailable |
+| Claude Code 2.1.261 | macOS 26.6.2, 2026-09-05 | CLI found by bounded read-only `--version` probe; no native load checked | not run | **unverified** — no native invocation was run |
+| Codex CLI 0.153.4 | macOS 26.6.2, 2026-09-05 | CLI found by bounded read-only `--version` probe; no native load checked | not run | **unverified** — no native invocation was run |
+| OpenCode | macOS 26.6.2, 2026-09-05 | `--version` did not complete inside the bounded two-second probe (CPU/AVX warning printed) | not run | **unverified** — version probe is dependency-limited |
+| Pi | macOS 26.6.2, 2026-09-05 | executable absent | not run | **unverified** — CLI unavailable |
 | Claude Code | Linux | pending | pending | unverified |
 | Codex | Linux | pending | pending | unverified |
 | OpenCode | Linux | pending | pending | unverified |
