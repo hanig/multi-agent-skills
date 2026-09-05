@@ -37,8 +37,11 @@ claim one layer up.
 ```bash
 git clone git@github.com:hanig/multi-agent-skills.git
 cd multi-agent-skills
-./install.sh --allow-org-shadow   # copies into ~/.claude/skills/
-./bin/doctor                      # what is installed, and does it still run
+# Inspect automatic selection first; this changes nothing.
+./install.sh --dry-run --json
+# Name targets explicitly for a portable, auditable install.
+./install.sh --agent claude --agent codex --agent opencode --agent pi --allow-org-shadow
+./bin/doctor --json                # installed skills, provenance, and health
 ```
 
 Then, on a cluster, in an empty directory or a half-finished repo:
@@ -575,9 +578,19 @@ record, including the native-CLI evidence that automated tests cannot supply,
 is in [`docs/cross-agent-acceptance.md`](docs/cross-agent-acceptance.md).
 
 ```bash
-./install.sh [--prefix DIR] [--mode copy|link] [--only NAME] [--dry-run]
+./install.sh [--agent NAME ... | --exclude-agent NAME ... | --prefix DIR]
+             [--mode copy|link] [--only NAME] [--dry-run] [--json]
              [--force] [--uninstall] [--allow-org-shadow]
 ```
+
+With no selector, the installer automatically targets every detected,
+version-verified supported agent.  `--agent` is repeatable and is the right
+choice for a deliberate subset or a bootstrap install of an absent CLI.
+`--exclude-agent` applies only to automatic selection.  `--prefix` remains the
+legacy single-root compatibility spelling; it cannot be combined with agent
+selectors.  Inspect the JSON payload before a broad install: it reports each
+target, physical root, verification, shared consumers, requested actions,
+diagnostics, and conflicts.
 
 **`--allow-org-shadow` is required here, and permanently.** A copy of these
 skills is maintained on Claude Science, so all five also arrive in the Arc org
