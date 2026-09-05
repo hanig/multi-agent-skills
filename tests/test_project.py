@@ -2409,36 +2409,49 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
              "basename", "readlink", "dirname", "mktemp", "sleep", "head",
              "rm", "cat")
 
-    def _bin(self, d, cli=False, python=True):
+    def _bin(self, d, cli=False, python=True, claude=True, overrides=None):
         """A PATH with nothing on it but what doctor needs, so this host's own
         ~/.local/bin cannot answer a question the test is asking. `claude` is
         stubbed only to stop doctor falling back to `bash -lic`, which is slow
         and reads whatever profile the machine happens to have."""
+        overrides = overrides or {}
         b = Path(d) / "bin"
         b.mkdir()
-        for name in (["paseo"] if cli else []) + ["claude"]:
+        for name in (["paseo"] if cli else []) + (["claude"] if claude else []):
             p = b / name
             p.write_text("#!/bin/sh\necho 0.0.0-test\n")
             p.chmod(0o755)
         for name in self.TOOLS:
+            if name in overrides:
+                p = b / name
+                p.write_text(overrides[name])
+                p.chmod(0o755)
+                continue
             real = shutil.which(name)
             if real:
                 os.symlink(real, b / name)
-        if python:
+        if python and "python3" in overrides:
+            p = b / "python3"
+            p.write_text(overrides["python3"])
+            p.chmod(0o755)
+        elif python:
             os.symlink(sys.executable, b / "python3")
         return b
 
     def _doctor(self, d, cli=False, python=True, listen=None, bus_home=None,
-                home=None):
+                home=None, claude=True, overrides=None, prefix=None):
         home = Path(home) if home else Path(d) / "home"
         home.mkdir(parents=True, exist_ok=True)
-        env = {"PATH": str(self._bin(d, cli, python)),
+        env = {"PATH": str(self._bin(d, cli, python, claude, overrides)),
                "HOME": str(home),
                "USER": os.environ.get("USER", "test"),
                "PASEO_LISTEN": listen or _closed_port()}
         if bus_home:
             env["AGENT_BUS_HOME"] = str(bus_home)
-        r = subprocess.run(["sh", str(DOCTOR)], capture_output=True,
+        argv = ["sh", str(DOCTOR)]
+        if prefix:
+            argv.extend(["--prefix", str(prefix)])
+        r = subprocess.run(argv, capture_output=True,
                            text=True, cwd=ROOT, env=env, timeout=120)
         self.assertIn("=== PREREQUISITES ===", r.stdout, r.stderr)
         return r
@@ -2521,17 +2534,110 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
             self.assertIn("listening", daemon)
             self.assertLess(elapsed, 60, "the health probe was not bounded")
 
-    def test_the_probe_is_bounded_and_never_waits_on_the_child(self):
-        """`wait` is the unbounded step: a child parked in an uninterruptible
-        syscall does not die when it is killed, and waiting on it hands the
-        hang to doctor. survey.py's run() bounds the kill for the same reason
-        (REAP_SECONDS); this is that shape in sh."""
+    def test_the_probe_bounds_both_the_command_and_its_reaper(self):
+        """The worker may wait for its command because the parent never waits
+        for the worker: it kills that worker under a second deadline. Thus an
+        uninterruptible child cannot hand its wait back to doctor."""
         src = DOCTOR.read_text()
-        for guard in ("PROBE_TICKS", "REAP_TICKS", "kill -TERM", "kill -KILL"):
+        for guard in ("RUN_TICKS", "PROBE_TICKS", "REAP_TICKS", "kill -TERM",
+                      "kill -KILL", 'wait "$_cp"'):
             self.assertIn(guard, src, "%s missing" % guard)
-        code = [l for l in src.splitlines()
-                if not l.lstrip().startswith("#")]
-        self.assertEqual([l for l in code if re.search(r"\bwait\b", l)], [])
+
+    def test_every_diagnostic_program_is_routed_through_the_deadline(self):
+        src = DOCTOR.read_text()
+        for invocation in (
+                'bounded "$RUN_TICKS" hostname',
+                'bounded "$RUN_TICKS" python3 --version',
+                'bounded "$RUN_TICKS" git --version',
+                'bounded "$RUN_TICKS" bash -lic',
+                'bounded "$PROBE_TICKS" python3 -c "$HEALTH_PY"',
+                'bounded "$RUN_TICKS" python3 -c "$COUNT_PY"',
+                'bounded "$RUN_TICKS" readlink "$d"',
+                'bounded "$RUN_TICKS" python3 -m py_compile "$py"',
+                'bounded "$RUN_TICKS" git -C "$REPO" rev-parse --git-dir',
+                'bounded "$RUN_TICKS" git -C "$REPO" rev-parse --short HEAD',
+                'bounded "$RUN_TICKS" git -C "$REPO" status --porcelain'):
+            self.assertIn(invocation, src, invocation)
+
+    @staticmethod
+    def _hanging_probe(marker, when, delegate):
+        return """#!/bin/sh
+if %s; then
+  printf invoked >%s
+  trap 'exit 0' TERM
+  while :; do sleep 10; done
+fi
+exec %s "$@"
+""" % (when, marker, delegate)
+
+    def test_a_hung_python_version_is_timeout_not_absence(self):
+        with tempfile.TemporaryDirectory() as d:
+            marker = Path(d) / "python-version-ran"
+            stub = self._hanging_probe(
+                marker, '[ "$1" = --version ]', sys.executable)
+            out = self._doctor(d, overrides={"python3": stub}).stdout
+            self.assertTrue(marker.exists(), "the hanging stub was not invoked")
+            self.assertIn("python3: TIMEOUT", out)
+            self.assertNotIn("python3: ABSENT", out)
+
+    def test_a_hung_git_version_is_timeout_not_absence(self):
+        with tempfile.TemporaryDirectory() as d:
+            marker = Path(d) / "git-version-ran"
+            stub = self._hanging_probe(
+                marker, '[ "$1" = --version ]', shutil.which("git"))
+            out = self._doctor(d, overrides={"git": stub}).stdout
+            self.assertTrue(marker.exists(), "the hanging stub was not invoked")
+            self.assertIn("git: TIMEOUT", out)
+            self.assertNotIn("git: ABSENT", out)
+
+    def test_a_hung_login_shell_is_unknown_not_claude_absence(self):
+        with tempfile.TemporaryDirectory() as d:
+            marker = Path(d) / "login-shell-ran"
+            stub = self._hanging_probe(marker, "true", shutil.which("bash"))
+            out = self._doctor(
+                d, claude=False, overrides={"bash": stub}).stdout
+            self.assertTrue(marker.exists(), "the hanging stub was not invoked")
+            self.assertIn("claude: COULD NOT DETERMINE", out)
+            self.assertIn("login shell timed out", out)
+            self.assertNotIn("claude: ABSENT", out)
+
+    def test_the_bounded_login_fallback_still_finds_cluster_claude(self):
+        with tempfile.TemporaryDirectory() as d:
+            bash = """#!/bin/sh
+printf 'profile chatter that is not the answer\n'
+printf 'found:/cluster/profile/bin/claude\n'
+"""
+            out = self._doctor(
+                d, claude=False, overrides={"bash": bash}).stdout
+            self.assertIn(
+                "claude: /cluster/profile/bin/claude (login shell only)", out)
+
+    def test_a_successful_silent_compiler_is_an_answer_not_a_timeout(self):
+        with tempfile.TemporaryDirectory() as d:
+            prefix = Path(d) / "skills"
+            script = prefix / "example" / "scripts" / "ok.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("print('valid')\n")
+            r = self._doctor(d, prefix=prefix)
+            self.assertIn("ok    example/ok.py", r.stdout)
+            self.assertNotIn("TIMEOUT  example/ok.py", r.stdout)
+            self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_a_hung_compiler_is_timeout_not_a_syntax_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            marker = Path(d) / "compiler-ran"
+            prefix = Path(d) / "skills"
+            script = prefix / "example" / "scripts" / "ok.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("print('valid')\n")
+            stub = self._hanging_probe(
+                marker, '[ "$1" = -m ] && [ "$2" = py_compile ]',
+                sys.executable)
+            r = self._doctor(d, overrides={"python3": stub}, prefix=prefix)
+            self.assertTrue(marker.exists(), "the hanging stub was not invoked")
+            self.assertIn("TIMEOUT  example/ok.py", r.stdout)
+            self.assertNotIn("FAIL  example/ok.py does not compile", r.stdout)
+            self.assertNotEqual(r.returncode, 0)
 
     # --- the registry bus models refuses without -----------------------------
 

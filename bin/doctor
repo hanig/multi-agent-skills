@@ -19,7 +19,15 @@ PREFIX="${HOME}/.claude/skills"
 while [ $# -gt 0 ]; do
   case "$1" in
     --prefix) PREFIX="$2"; shift 2 ;;
-    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+    -h|--help)
+      printf '%s\n' \
+        'doctor — what is installed here, where it came from, and whether it still works.' \
+        '' \
+        'First thing to run on a new host, and the answer to "why isn'"'"'t my skill' \
+        'loading?". Read-only.' \
+        '' \
+        'Usage: doctor [--prefix DIR] | doctor DIR'
+      exit 0 ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
     *) PREFIX="$1"; shift ;;
   esac
@@ -28,21 +36,166 @@ MARKER=".installed-by-multi-agent-skills"
 # The authorship namespace: this repo writes hanig-*, and vendors everything
 # else it ships. Same rule install.sh classifies by, read off the tree.
 OWN_PREFIX="hanig-"
-REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+
+case "$0" in */*) SCRIPT_DIR=${0%/*} ;; *) SCRIPT_DIR=. ;; esac
+REPO=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+
+# A probe that can hang is worse than no probe: this is the first command run
+# on a new host, often over a link that is why you are running it. The parent
+# holds a deadline over a worker shell, and the worker holds the command. If a
+# command overruns, the worker terminates it; the parent then gives the worker
+# a second, shorter deadline before killing it. The parent itself never waits,
+# so a process parked in an uninterruptible syscall cannot hand the hang back
+# to doctor. This is survey.py's run()/REAP_SECONDS shape expressed in sh.
+#
+# The completion signal is a status file, not output: py_compile says nothing
+# when it succeeds, and silence is not a timeout. RUN_TICKS is about 3s when
+# fractional sleep works and 15s otherwise. PROBE_TICKS is looser because the
+# health probe can spend PROBE_SECONDS first connecting and then reading.
+PROBE_SECONDS=2
+RUN_TICKS=15
+PROBE_TICKS=30
+REAP_TICKS=10
+TICK=
+
+# One tick is 0.2s wherever sleep takes a fraction -- every sleep(1) anyone
+# runs this on -- and 1s where it does not. The loops below count TICKS, not
+# seconds, so a sleep that silently rejects the fraction makes doctor slower
+# and never makes it unbounded. The capability test IS the first tick, so
+# asking costs nothing.
+tick() {
+  if [ -z "$TICK" ]; then
+    if sleep 0.2 2>/dev/null; then TICK=0.2; else TICK=1; fi
+    return 0
+  fi
+  sleep "$TICK"
+}
+
+# bounded TICKS CMD... -- run CMD under a real kill deadline. PROBE_STATE is
+# answered, timeout, or unknown; answered includes a non-zero return and empty
+# output, with PROBE_RC preserving that distinction. PROBE_OUT is the last line
+# written, which ignores login-profile chatter before our tagged answer.
+PROBE_STATE=unknown
+PROBE_OUT=
+PROBE_RC=127
+PROBE_WHY=
+bounded() {
+  _limit=$1
+  shift
+  PROBE_STATE=unknown
+  PROBE_OUT=
+  PROBE_RC=127
+  PROBE_WHY="the command could not be started"
+  _pt=$(mktemp -d 2>/dev/null) || {
+    PROBE_WHY="there is no mktemp here to give the probe a result directory"
+    return 1
+  }
+
+  (
+    _cp=
+    stop_child() {
+      [ -n "$_cp" ] || exit 124
+      kill -TERM "$_cp" 2>/dev/null
+      _r=0
+      while [ "$_r" -lt "$REAP_TICKS" ] && kill -0 "$_cp" 2>/dev/null; do
+        _r=$((_r + 1)); tick
+      done
+      kill -KILL "$_cp" 2>/dev/null
+      exit 124
+    }
+    trap 'stop_child' HUP INT TERM
+    "$@" >"$_pt/out" 2>&1 &
+    _cp=$!
+    wait "$_cp"
+    _rc=$?
+    printf '%s\n' "$_rc" >"$_pt/status"
+  ) &
+  _pp=$!
+
+  _i=0
+  while [ ! -f "$_pt/status" ]; do
+    _i=$((_i + 1))
+    if [ "$_i" -gt "$_limit" ]; then
+      kill -TERM "$_pp" 2>/dev/null
+      _j=0
+      while [ "$_j" -lt "$REAP_TICKS" ] && kill -0 "$_pp" 2>/dev/null; do
+        _j=$((_j + 1)); tick
+      done
+      kill -KILL "$_pp" 2>/dev/null
+      PROBE_STATE=timeout
+      PROBE_WHY="it timed out and was killed"
+      break
+    fi
+    tick
+  done
+
+  if [ -f "$_pt/status" ]; then
+    IFS= read -r PROBE_RC <"$_pt/status" || PROBE_RC=127
+    PROBE_STATE=answered
+    PROBE_WHY=
+  fi
+  if [ -f "$_pt/out" ]; then
+    while IFS= read -r _line || [ -n "$_line" ]; do
+      PROBE_OUT=$_line
+    done <"$_pt/out"
+  fi
+  rm -rf "$_pt"
+}
 
 printf '\n=== HOST ===\n'
-printf '  hostname: %s\n' "$(hostname 2>/dev/null || echo unknown)"
+if command -v hostname >/dev/null 2>&1; then
+  bounded "$RUN_TICKS" hostname
+  case "$PROBE_STATE:$PROBE_RC" in
+    answered:0) printf '  hostname: %s\n' "${PROBE_OUT:-unknown}" ;;
+    timeout:*)  printf '  hostname: COULD NOT DETERMINE — hostname timed out\n' ;;
+    *)          printf '  hostname: COULD NOT DETERMINE — hostname failed\n' ;;
+  esac
+else
+  printf '  hostname: COULD NOT DETERMINE — hostname is not available\n'
+fi
 printf '  user: %s\n' "${USER:-${LOGNAME:-unknown}}"
 printf '  home: %s\n' "$HOME"
-printf '  python3: %s\n' "$(python3 --version 2>&1 || echo ABSENT)"
-printf '  git: %s\n' "$(git --version 2>&1 || echo ABSENT)"
+
+if command -v python3 >/dev/null 2>&1; then
+  bounded "$RUN_TICKS" python3 --version
+  case "$PROBE_STATE:$PROBE_RC" in
+    answered:0) printf '  python3: %s\n' "$PROBE_OUT" ;;
+    timeout:*)  printf '  python3: TIMEOUT — version probe was killed\n' ;;
+    *)          printf '  python3: COULD NOT DETERMINE — version probe failed\n' ;;
+  esac
+else
+  printf '  python3: ABSENT\n'
+fi
+
+if command -v git >/dev/null 2>&1; then
+  bounded "$RUN_TICKS" git --version
+  case "$PROBE_STATE:$PROBE_RC" in
+    answered:0) printf '  git: %s\n' "$PROBE_OUT" ;;
+    timeout:*)  printf '  git: TIMEOUT — version probe was killed\n' ;;
+    *)          printf '  git: COULD NOT DETERMINE — version probe failed\n' ;;
+  esac
+else
+  printf '  git: ABSENT\n'
+fi
 
 # claude usually lives behind a conda/micromamba prefix loaded by .bashrc, so a
-# non-interactive shell will not see it. Check an interactive login shell too.
+# non-interactive shell will not see it. The measured cluster environments in
+# README.md require this fallback, but their profiles are untrusted work from a
+# diagnostic's perspective, so the interactive login shell gets a kill bound.
 cl=$(command -v claude 2>/dev/null)
 if [ -z "$cl" ]; then
-  cl=$(bash -lic 'command -v claude' 2>/dev/null | grep -v '^bash:' | head -n 1)
-  [ -n "$cl" ] && cl="$cl (login shell only)"
+  if command -v bash >/dev/null 2>&1; then
+    bounded "$RUN_TICKS" bash -lic \
+      'p=$(command -v claude); if [ -n "$p" ]; then printf "found:%s\n" "$p"; else printf "absent:\n"; fi'
+    case "$PROBE_STATE:$PROBE_RC:$PROBE_OUT" in
+      answered:0:found:*) cl="${PROBE_OUT#found:} (login shell only)" ;;
+      answered:0:absent:*) cl= ;;
+      timeout:*) cl="COULD NOT DETERMINE — login shell timed out" ;;
+      *) cl="COULD NOT DETERMINE — login shell probe failed" ;;
+    esac
+  else
+    cl="COULD NOT DETERMINE — not on current PATH and bash is unavailable"
+  fi
 fi
 printf '  claude: %s\n' "${cl:-ABSENT}"
 
@@ -66,70 +219,6 @@ printf '  claude: %s\n' "${cl:-ABSENT}"
 # third always says why -- survey.py's set/unrestricted/unknown rule, in the
 # words a person reads. Reporting silence as absence is the quiet lie
 # ARC-244, ARC-245 and ARC-251 were each about.
-
-# A probe that can hang is worse than no probe: this is the first command run
-# on a new host, often over a link that is why you are running it. Two bounds,
-# the shape survey.py's run() uses -- the child carries its own deadline, and a
-# child that overruns is killed and then reaped under a SECOND, shorter bound,
-# because a process parked in an uninterruptible syscall (a dead automount, a
-# stale NFS handle) does not die when it is killed. Nothing here ever calls
-# `wait`: `wait` is precisely the unbounded step, and doctor would inherit the
-# hang it was killing the child to avoid.
-# PROBE_SECONDS is the deadline the probe holds itself to; PROBE_TICKS is the
-# one held over it from out here, and is deliberately the looser of the two
-# (~6s against a worst case of connect-then-read at 2s each), so a probe that
-# is merely slow is answered rather than killed and then read as unknown.
-PROBE_SECONDS=2
-PROBE_TICKS=30
-REAP_TICKS=10
-TICK=
-
-# One tick is 0.2s wherever sleep takes a fraction -- every sleep(1) anyone
-# runs this on -- and 1s where it does not. The loops below count TICKS, not
-# seconds, so a sleep that silently rejects the fraction makes doctor slower
-# and never makes it unbounded. The capability test IS the first tick, so
-# asking costs nothing.
-tick() {
-  if [ -z "$TICK" ]; then
-    if sleep 0.2 2>/dev/null; then TICK=0.2; else TICK=1; fi
-    return 0
-  fi
-  sleep "$TICK"
-}
-
-# bounded CMD... -- run it, put its first line in PROBE_OUT, and leave
-# PROBE_OUT empty if it did not come back. The completion signal is the output
-# file, not the process: a background child is a zombie until someone waits on
-# it, so `kill -0` would report a finished probe as still running.
-PROBE_OUT=
-PROBE_WHY=
-bounded() {
-  PROBE_OUT=
-  PROBE_WHY="it returned nothing"
-  _pt=$(mktemp 2>/dev/null) || {
-    PROBE_WHY="there is no mktemp here to give the probe a file to answer in"
-    return 1
-  }
-  "$@" >"$_pt" 2>/dev/null &
-  _pp=$!
-  _i=0
-  while [ ! -s "$_pt" ]; do
-    _i=$((_i + 1))
-    if [ "$_i" -gt "$PROBE_TICKS" ]; then
-      kill -TERM "$_pp" 2>/dev/null
-      _j=0
-      while [ "$_j" -lt "$REAP_TICKS" ] && kill -0 "$_pp" 2>/dev/null; do
-        _j=$((_j + 1)); tick
-      done
-      kill -KILL "$_pp" 2>/dev/null
-      PROBE_WHY="it did not answer and was killed"
-      break
-    fi
-    tick
-  done
-  PROBE_OUT=$(head -n 1 "$_pt" 2>/dev/null)
-  rm -f "$_pt"
-}
 
 # Ask the daemon whether it answers, rather than whether a port is open: a
 # listening socket is evidence that something is there, and only /api/health
@@ -177,7 +266,7 @@ else:
 DAEMON=unknown
 WHY="no python3 here to open a socket with"
 if command -v python3 >/dev/null 2>&1; then
-  bounded python3 -c "$HEALTH_PY" "$LISTEN" "$PROBE_SECONDS"
+  bounded "$PROBE_TICKS" python3 -c "$HEALTH_PY" "$LISTEN" "$PROBE_SECONDS"
   case "$PROBE_OUT" in
     answering:*) DAEMON=up;      WHY=${PROBE_OUT#answering:} ;;
     listening:*) DAEMON=partial; WHY=${PROBE_OUT#listening:} ;;
@@ -274,7 +363,7 @@ if [ -d "$BUS_HOME" ] && { [ ! -r "$BUS_HOME" ] || [ ! -x "$BUS_HOME" ]; }; then
   printf '  models registry: COULD NOT DETERMINE — %s is not readable\n' "$BUS_HOME"
 elif [ -f "$REG" ] && [ -r "$REG" ]; then
   if command -v python3 >/dev/null 2>&1; then
-    bounded python3 -c "$COUNT_PY" "$REG"
+    bounded "$RUN_TICKS" python3 -c "$COUNT_PY" "$REG"
   else
     PROBE_OUT=; PROBE_WHY="there is no python3 here to read it with"
   fi
@@ -308,7 +397,12 @@ fi
 printf '\n=== SKILL STORES ===\n'
 printf '  personal prefix: %s' "$PREFIX"
 if [ -d "$PREFIX" ]; then
-  printf ' (%s entries)\n' "$(ls -1 "$PREFIX" 2>/dev/null | wc -l | tr -d ' ')"
+  entries=0
+  for entry in "$PREFIX"/*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    entries=$((entries + 1))
+  done
+  printf ' (%s entries)\n' "$entries"
 else
   printf ' — ABSENT\n'
 fi
@@ -316,8 +410,10 @@ fi
 org=0
 for d in "$HOME"/.claude-science/orgs/*/skills; do
   [ -d "$d" ] || continue
-  n=$(ls -1 "$d" 2>/dev/null | wc -l | tr -d ' ')
-  org=$((org + n))
+  for entry in "$d"/*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    org=$((org + 1))
+  done
 done
 if [ "$org" -gt 0 ]; then
   printf '  org store: %s skills\n' "$org"
@@ -332,17 +428,32 @@ else
   found=0
   for d in "$PREFIX"/*; do
     [ -e "$d" ] || continue
-    name=$(basename "$d")
+    name=${d##*/}
     found=$((found + 1))
     if [ -L "$d" ]; then
-      printf '  %-32s link -> %s\n' "$name" "$(readlink "$d")"
+      if command -v readlink >/dev/null 2>&1; then
+        bounded "$RUN_TICKS" readlink "$d"
+        case "$PROBE_STATE:$PROBE_RC" in
+          answered:0) printf '  %-32s link -> %s\n' "$name" "$PROBE_OUT" ;;
+          timeout:*)  printf '  %-32s link -> COULD NOT DETERMINE — readlink timed out\n' "$name" ;;
+          *)          printf '  %-32s link -> COULD NOT DETERMINE — readlink failed\n' "$name" ;;
+        esac
+      else
+        printf '  %-32s link -> COULD NOT DETERMINE — readlink is unavailable\n' "$name"
+      fi
     elif [ -f "$d/$MARKER" ]; then
-      v=$(sed -n 's/^version=//p' "$d/$MARKER" 2>/dev/null)
+      v=
+      o=
+      while IFS='=' read -r key value; do
+        case "$key" in
+          version) v=$value ;;
+          origin)  [ -n "$o" ] || o=$value ;;
+        esac
+      done <"$d/$MARKER"
       # "ours" was true of the FILE and misleading about the lineage: this
       # repo vendors eight skills verbatim from another author, and reporting
       # them as ours at our commit hides whose work is installed -- and hides
       # that --uninstall deliberately leaves them.
-      o=$(sed -n 's/^origin=//p' "$d/$MARKER" 2>/dev/null | head -n 1)
       if [ -z "$o" ] && [ -d "$REPO/skills/$name" ]; then
         case "$name" in "$OWN_PREFIX"*) o=authored ;; *) o=vendored ;; esac
       fi
@@ -372,10 +483,27 @@ for d in "$PREFIX"/*; do
   [ -d "$d" ] || continue
   for py in "$d"/scripts/*.py; do
     [ -f "$py" ] || continue
-    if python3 -m py_compile "$py" 2>/dev/null; then
-      printf '  ok    %s/%s\n' "$(basename "$d")" "$(basename "$py")"
+    skill=${d##*/}
+    script=${py##*/}
+    if ! command -v python3 >/dev/null 2>&1; then
+      printf '  UNKNOWN  %s/%s — python3 is ABSENT, so compilation could not be checked\n' \
+        "$skill" "$script"
+      bad=$((bad + 1))
+      continue
+    fi
+    bounded "$RUN_TICKS" python3 -m py_compile "$py"
+    if [ "$PROBE_STATE" = timeout ]; then
+      printf '  TIMEOUT  %s/%s — compilation timed out and was killed\n' \
+        "$skill" "$script"
+      bad=$((bad + 1))
+    elif [ "$PROBE_STATE" != answered ]; then
+      printf '  UNKNOWN  %s/%s — compilation could not be started\n' \
+        "$skill" "$script"
+      bad=$((bad + 1))
+    elif [ "$PROBE_RC" -eq 0 ]; then
+      printf '  ok    %s/%s\n' "$skill" "$script"
     else
-      printf '  FAIL  %s/%s does not compile\n' "$(basename "$d")" "$(basename "$py")"
+      printf '  FAIL  %s/%s does not compile\n' "$skill" "$script"
       bad=$((bad + 1))
     fi
   done
@@ -386,13 +514,28 @@ printf '\n=== SOURCE ===\n'
 printf '  repo: %s\n' "$REPO"
 # Ask git, never stat `.git`: it is a file in a worktree and a directory in a
 # clone, and this whole section vanished for every worktree.
-if command -v git >/dev/null 2>&1 &&
-   git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1; then
-  printf '  commit: %s\n' "$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-  if [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]; then
-    printf '  worktree: DIRTY\n'
-  else
-    printf '  worktree: clean\n'
+if command -v git >/dev/null 2>&1; then
+  bounded "$RUN_TICKS" git -C "$REPO" rev-parse --git-dir
+  if [ "$PROBE_STATE:$PROBE_RC" = answered:0 ]; then
+    bounded "$RUN_TICKS" git -C "$REPO" rev-parse --short HEAD
+    case "$PROBE_STATE:$PROBE_RC" in
+      answered:0) printf '  commit: %s\n' "$PROBE_OUT" ;;
+      timeout:*)  printf '  commit: COULD NOT DETERMINE — git timed out\n' ;;
+      *)          printf '  commit: COULD NOT DETERMINE — git failed\n' ;;
+    esac
+    bounded "$RUN_TICKS" git -C "$REPO" status --porcelain
+    case "$PROBE_STATE:$PROBE_RC" in
+      answered:0)
+        if [ -n "$PROBE_OUT" ]; then
+          printf '  worktree: DIRTY\n'
+        else
+          printf '  worktree: clean\n'
+        fi ;;
+      timeout:*) printf '  worktree: COULD NOT DETERMINE — git status timed out\n' ;;
+      *)         printf '  worktree: COULD NOT DETERMINE — git status failed\n' ;;
+    esac
+  elif [ "$PROBE_STATE" = timeout ]; then
+    printf '  repository: COULD NOT DETERMINE — git rev-parse timed out\n'
   fi
 fi
 
