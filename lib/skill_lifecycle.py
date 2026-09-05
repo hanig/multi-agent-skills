@@ -413,9 +413,23 @@ def _publish(item: PreflightItem, stage: Path) -> InstallResult:
     # staging a link's metadata file uses ``stage`` as a normal file; create a
     # distinct link after the predecessor is recoverably moved aside.
     backup: Path | None = None
+    sidecar_backup: Path | None = None
+    sidecar: Path | None = None
     moved_predecessor = False
+    moved_sidecar = False
     replacement_created = False
+    published_sidecar = False
     try:
+        if target.mode == "link":
+            sidecar = provenance_path(dest, target.provenance_path)
+            # The old sidecar is the only durable proof for the old link.  A
+            # failure after publishing a new sidecar must be able to restore
+            # that proof as well as the link it describes.
+            if sidecar.exists() or sidecar.is_symlink():
+                sidecar_backup = (sidecar.parent /
+                                  f".{target.name}.sidecar-backup-{uuid.uuid4().hex}")
+                os.replace(sidecar, sidecar_backup)
+                moved_sidecar = True
         if dest.exists() or dest.is_symlink():
             backup = dest.parent / f".{target.name}.backup-{uuid.uuid4().hex}"
             os.replace(dest, backup)
@@ -426,14 +440,22 @@ def _publish(item: PreflightItem, stage: Path) -> InstallResult:
         else:
             os.symlink(target.source, dest, target_is_directory=True)
             replacement_created = True
-            sidecar = provenance_path(dest, target.provenance_path)
+            assert sidecar is not None
             sidecar.parent.mkdir(parents=True, exist_ok=True)
             os.replace(stage, sidecar)
+            published_sidecar = True
             # The staged record knew the intended target.  Bind its sidecar to
             # the newly-created link object before it can authorize ownership.
             write_provenance(dest, replace(_record_for(target, item.previous),
                                             link_identity=_link_identity(dest)),
                              provenance_file=target.provenance_path)
+        if sidecar_backup:
+            try:
+                _remove_path(sidecar_backup)
+            except OSError as exc:
+                return InstallResult(target, "upgraded" if item.action == "upgrade" else "installed",
+                                     f"published; predecessor sidecar cleanup failed and was retained at {sidecar_backup}: {exc}",
+                                     predecessor_recoverable=True)
         if backup:
             try:
                 _remove_path(backup)
@@ -454,12 +476,37 @@ def _publish(item: PreflightItem, stage: Path) -> InstallResult:
                 _remove_path(dest)
             except OSError as remove_exc:
                 restore_problem = f"; incomplete replacement remains at {dest}: {remove_exc}"
+        # A freshly staged sidecar must not survive a failed link publish: it
+        # would describe a link that is gone (or has been restored to a prior
+        # identity).  Put the predecessor's sidecar back before rebinding it.
+        if published_sidecar and sidecar and (sidecar.exists() or sidecar.is_symlink()):
+            try:
+                _remove_path(sidecar)
+            except OSError as remove_exc:
+                restore_problem += f"; incomplete sidecar remains at {sidecar}: {remove_exc}"
         if moved_predecessor and backup and (backup.exists() or backup.is_symlink()):
             try:
                 os.replace(backup, dest)
                 restored = True
             except Exception as restore_exc:
                 restore_problem = f"; predecessor remains recoverable at {backup}: {restore_exc}"
+        if moved_sidecar and sidecar and sidecar_backup and (sidecar_backup.exists() or sidecar_backup.is_symlink()):
+            if not (sidecar.exists() or sidecar.is_symlink()):
+                try:
+                    os.replace(sidecar_backup, sidecar)
+                except Exception as restore_exc:
+                    restore_problem += f"; predecessor sidecar remains recoverable at {sidecar_backup}: {restore_exc}"
+        # Moving a link away and back changes its identity.  Rebind the
+        # restored sidecar so the old, known-owned link is immediately
+        # upgradeable/uninstallable rather than stranded by a failed upgrade.
+        if restored and target.mode == "link" and item.previous:
+            try:
+                write_provenance(
+                    dest, replace(item.previous, link_identity=_link_identity(dest)),
+                    provenance_file=target.provenance_path,
+                )
+            except Exception as restore_exc:
+                restore_problem += f"; restored link provenance could not be rebound: {restore_exc}"
         return InstallResult(target, "failed", f"publish failed: {exc}{restore_problem}",
                              predecessor_recoverable=bool(backup and (restored or backup.exists() or backup.is_symlink())))
 

@@ -919,7 +919,8 @@ class TestUninstallOnlyRemovesOurOwn(unittest.TestCase):
             prefix.mkdir()
             os.symlink(elsewhere / "hanig-swarm", prefix / "hanig-swarm")
             r = self._install_into(prefix)
-            self.assertIn("skip hanig-swarm", r.stdout,
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertIn("hanig-swarm", r.stderr,
                           "install replaced a symlink it did not create")
             self.assertEqual(
                 (elsewhere / "hanig-swarm" / "SKILL.md").read_text(),
@@ -967,21 +968,27 @@ class TestInstallerSymlinkEdgeCases(unittest.TestCase):
             self.assertTrue((outside / "SKILL.md").is_file())
 
     def test_a_link_into_this_checkout_IS_ours(self):
-        """--mode link installs a symlink into the repo; uninstall must clear
-        it, and must not touch what it points at."""
+        """A link created by the installer has sidecar provenance, so
+        uninstall may clear it without touching its source checkout."""
         with tempfile.TemporaryDirectory() as d:
             prefix = Path(d) / "prefix"
             prefix.mkdir()
-            os.symlink(ROOT / "skills" / "hanig-swarm", prefix / "ours-by-link")
-            self._install(prefix, "--uninstall")
-            self.assertFalse((prefix / "ours-by-link").is_symlink())
+            installed = self._install(prefix, "--mode", "link", "--only",
+                                      "hanig-swarm")
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            link = prefix / "hanig-swarm"
+            self.assertTrue(link.is_symlink())
+            removed = self._install(prefix, "--uninstall", "--only",
+                                    "hanig-swarm")
+            self.assertEqual(removed.returncode, 0, removed.stderr)
+            self.assertFalse(link.is_symlink())
             self.assertTrue((ROOT / "skills" / "hanig-swarm" / "SKILL.md")
                             .is_file(), "uninstall followed the link and "
-                                        "deleted the real skill")
+                            "deleted the real skill")
 
-    def test_prune_leaves_anything_without_our_marker(self):
-        """Prune deletes on a NEGATIVE condition -- absent from this repo --
-        which is the risky direction."""
+    def test_prune_leaves_legacy_marker_without_complete_provenance(self):
+        """Prune only deletes a current exact ownership record; a legacy
+        marker cannot prove authorship or a safe destructive target."""
         with tempfile.TemporaryDirectory() as d:
             base = Path(d)
             prefix = base / "prefix"
@@ -995,8 +1002,8 @@ class TestInstallerSymlinkEdgeCases(unittest.TestCase):
             (base / "elsewhere").mkdir()
             os.symlink(base / "elsewhere", prefix / "their-link")
             r = self._install(prefix)
-            self.assertIn("pruned 1", r.stdout)
-            self.assertFalse((prefix / "hanig-gone").exists())
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertTrue((prefix / "hanig-gone").exists())
             self.assertTrue((prefix / "their-dir" / "SKILL.md").is_file())
             self.assertTrue((prefix / "their-link").is_symlink())
 
@@ -1125,7 +1132,7 @@ class TestVendoredSkillsAreNotOursToDelete(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             prefix = Path(d) / "prefix"
             prefix.mkdir()
-            for name, keep in (("paseo", True), ("hanig-swarm", False)):
+            for name in ("paseo", "hanig-swarm"):
                 (prefix / name).mkdir()
                 (prefix / name / MARKER).write_text(
                     "repo=multi-agent-skills\nversion=19c5171\n")
@@ -1133,7 +1140,9 @@ class TestVendoredSkillsAreNotOursToDelete(unittest.TestCase):
             self.assertTrue((prefix / "paseo").is_dir(),
                             "an origin-less marker on a vendored name was "
                             "read as ours to delete")
-            self.assertFalse((prefix / "hanig-swarm").exists())
+            self.assertTrue((prefix / "hanig-swarm").is_dir(),
+                            "an origin-less marker cannot prove a payload is "
+                            "safe to delete, even in an authored namespace")
 
     # --- installing over somebody else's copy -------------------------------
 
@@ -1190,16 +1199,16 @@ class TestVendoredSkillsAreNotOursToDelete(unittest.TestCase):
             self.assertEqual((theirs / "SKILL.md").read_text(), "theirs\n",
                              "replacing the link must not follow it")
 
-    def test_an_authored_name_installed_by_someone_else_is_still_skipped(self):
-        """Unchanged: a foreign hanig-* is skipped, not refused. The vendored
-        refusal is about names we ship but did not write."""
+    def test_an_authored_name_installed_by_someone_else_blocks_atomic_install(self):
+        """A foreign authored name is left untouched and blocks the complete
+        multi-skill install, rather than yielding a half-installed root."""
         with tempfile.TemporaryDirectory() as d:
             base = Path(d)
             prefix = base / "prefix"
             self._upstream_install(base, prefix, name="hanig-swarm")
             r = self._install(prefix)
-            self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertIn("skip hanig-swarm", r.stdout)
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertIn("hanig-swarm", r.stderr)
             self.assertTrue((prefix / "hanig-swarm").is_symlink())
 
     # --- where "vendored" comes from ----------------------------------------

@@ -977,17 +977,24 @@ def repo(root):
 
     # Documents that answer "what is this and what was decided".
     docs = []
-    for pat in ("README*", "CONTEXT.md", "CLAUDE.md", "MEMORY.md", "PLAN*.md",
-                "docs/adr/*.md", "docs/*.md", "*.cff", "environment.y*ml",
-                "pyproject.toml", "requirements*.txt", "Snakefile",
-                "nextflow.config", "main.nf", "Makefile", "*.sbatch"):
-        for f in sorted(root.glob(pat))[:12]:
-            if f.is_file():
-                try:
-                    size = f.stat().st_size
-                except OSError:
-                    continue
-                docs.append({"path": str(f.relative_to(root)), "bytes": size})
+    # _walk's child is the hard boundary for a filesystem that does not
+    # answer.  Re-enumerating it with pathlib.glob would silently reintroduce
+    # an unbounded scandir after that child was killed, so a partial survey
+    # deliberately omits this convenience inventory.
+    if walk["state"] == WALK_OK:
+        for pat in ("README*", "CONTEXT.md", "CLAUDE.md", "MEMORY.md", "PLAN*.md",
+                    "docs/adr/*.md", "docs/*.md", "*.cff", "environment.y*ml",
+                    "pyproject.toml", "requirements*.txt", "Snakefile",
+                    "nextflow.config", "main.nf", "Makefile", "*.sbatch"):
+            for f in sorted(root.glob(pat))[:12]:
+                if f.is_file():
+                    try:
+                        size = f.stat().st_size
+                    except OSError:
+                        continue
+                    docs.append({"path": str(f.relative_to(root)), "bytes": size})
+    else:
+        out["documents_note"] = "not enumerated: the bounded repository walk did not finish"
     out["documents"] = docs[:40]
 
     # DO NOT OVERWRITE THESE. The skill is told to write PLAN.md and MEMORY.md,

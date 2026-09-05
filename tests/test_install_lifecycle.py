@@ -210,6 +210,29 @@ class LifecycleTest(unittest.TestCase):
         self.assertFalse(target.destination.exists())
         self.assertIn("another-installer", sidecar.read_text())
 
+    def test_failed_link_identity_write_restores_owned_predecessor(self):
+        target = self.target(mode="link", version="v1")
+        self.assertEqual(lifecycle.install([target])[0].status, "installed")
+        upgrade = self.target(source=self.source("alpha", "two"), mode="link",
+                              version="v2")
+        real_write = lifecycle.write_provenance
+
+        def fail_new_identity(destination, record, **kwargs):
+            if record.source_version == "v2":
+                raise OSError("simulated sidecar identity write failure")
+            return real_write(destination, record, **kwargs)
+
+        with mock.patch.object(lifecycle, "write_provenance",
+                               side_effect=fail_new_identity):
+            result = lifecycle.install([upgrade])
+        self.assertEqual(result[0].status, "failed")
+        self.assertTrue(target.destination.is_symlink())
+        restored = lifecycle.read_provenance(target.destination)
+        self.assertEqual(restored.source_version, "v1")
+        self.assertEqual(lifecycle.preflight([target])[0].action, "upgrade")
+        self.assertEqual(lifecycle.uninstall([target.destination])[0].status,
+                         "removed")
+
     def test_stale_link_sidecar_cannot_authorize_replaced_foreign_link(self):
         target = self.target(mode="link")
         lifecycle.install([target])

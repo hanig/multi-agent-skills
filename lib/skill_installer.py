@@ -296,6 +296,8 @@ def render_plan(plan: InstallPlan, options: InstallOptions, version: str) -> str
         lines.append(f"  {destination.path} <- {agents} ({consumers})")
     lines.append("Workflow dependency limits: skill payloads are installed only; "
                  "external CLIs and workflow dependencies are not installed.")
+    if options.prefix:
+        lines.append(f"Diagnostic: bin/doctor --prefix {plan.destinations[0].path}")
     return "\n".join(lines)
 
 
@@ -461,6 +463,15 @@ def _print(document: Mapping[str, Any], options: InstallOptions, plan: InstallPl
     for action in document["actions"]:
         print("%s: %s/%s — %s" % (action["status"], action["root"],
                                    action["skill"], action["detail"]))
+    if document["operation"] == "uninstall":
+        removed = sum(action["status"] == "removed" for action in document["actions"])
+        unowned = sum(action["status"] == "retained" and
+                      action["detail"] == "no matching recorded ownership"
+                      for action in document["actions"])
+        if removed:
+            print(f"removed {removed} skill(s)")
+        if unowned:
+            print(f"left {unowned} skill(s) without this repository's recorded ownership")
     for diagnostic in document["diagnostics"]:
         print("note: " + diagnostic, file=sys.stderr)
     for conflict in document["conflicts"]:
@@ -564,12 +575,24 @@ def run(argv: Sequence[str], *, repo: Path | None = None,
             return 0
         results = uninstall(candidates, consumers=selected_consumers,
                             include_vendored=options.include_vendored)
-        actions = [_action(result, result.status, result.detail, plan) for result in results]
+        # Scanning an entire root inevitably encounters payloads another
+        # installer owns.  They are deliberately retained, not a failed
+        # uninstall; the primitive keeps its ``blocked`` verdict for callers
+        # that explicitly name one unsafe destination.
+        actions = [_action(
+            result,
+            "retained" if (result.status == "blocked" and
+                           result.detail == "no matching recorded ownership")
+            else result.status,
+            result.detail,
+            plan,
+        ) for result in results]
         document = _document(operation="uninstall", dry_run=options.dry_run, plan=plan,
                              actions=actions, diagnostics=[], conflicts=[],
                              mode=options.mode, version=version)
         _print(document, options, plan, version)
-        return 0 if all(item.status in ("removed", "retained", "retained-shared") for item in results) else 1
+        return 0 if all(item["status"] in ("removed", "retained", "retained-shared")
+                        for item in actions) else 1
 
     sources = selected_sources(repo, options.only)
     from lib.skill_lifecycle import install, preflight
@@ -583,6 +606,9 @@ def run(argv: Sequence[str], *, repo: Path | None = None,
         detail = f"{item.target.name} at {item.target.destination}: {item.reason}"
         if item.target.destination.is_symlink():
             detail += f" (symlink target: {os.readlink(item.target.destination)})"
+        if item.target.origin == "vendored" and not options.allow_vendored_shadow:
+            detail += ("; use --allow-vendored-shadow to take over a vendored skill "
+                       "(this is NOT the --allow-org-shadow case)")
         blocked.append(detail)
     org_conflicts = _org_shadow_conflicts(plan, (name for name, _, _ in sources), context)
     if org_conflicts and not options.allow_org_shadow:

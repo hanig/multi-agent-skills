@@ -32,6 +32,19 @@ cwd.  Its required scenarios are:
 The test is contract coverage for the public commands.  It does not pretend to
 prove that an installed directory is natively loaded by a vendor CLI.
 
+### Current automated evidence (2026-09-05)
+
+The final focused installer, lifecycle, diagnostic, report-schema, cross-agent
+acceptance, and affected legacy compatibility suites pass in the supported
+local Python 3.9 environment: 112 tests in 196.765 seconds
+(`/tmp/arc-281-final-targeted.DFsa5J`).  A hermetic full-suite run completed
+1,539 tests in 568.709 seconds and initially exposed 15 integration
+regressions; the retained transcript is
+`/tmp/arc-281-full-regression.JPLo0k/full.log`.  The bounded follow-up fixes
+schema-4 report support, failure recovery for a linked payload's sidecar,
+foreign-entry uninstall reporting, prefix diagnostics, and a hard-stop survey
+path; no native-agent conclusion is inferred from that automated evidence.
+
 ## Native release record
 
 For each declared supported release of Claude Code, Codex, OpenCode, and Pi,
