@@ -1,7 +1,7 @@
 """Read-only, versioned user-skill discovery for supported coding agents.
 
 The public entry points are :func:`discover`, :func:`resolve_roots`,
-:func:`destination_consumers`, and :func:`select_target`.  They intentionally
+:func:`destination_consumers`, and :func:`select_targets`.  They intentionally
 do not create directories, read credentials, or start an agent session.
 """
 
@@ -9,19 +9,25 @@ from __future__ import annotations
 
 import os
 import re
+import select
 import signal
 import subprocess
-import tempfile
+import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 
 SCHEMA_VERSION = 1
 PROBE_TIMEOUT_SECONDS = 2.0
+PROBE_REAP_SECONDS = 0.5
+PROBE_OUTPUT_BYTES = 240
 STATES = ("executable_found", "configured", "absent", "undetermined")
 VERIFICATION = ("verified", "unverified")
 
-# These are exact releases whose directory behaviour was checked on 2026-09-05.
+# These are exact release gates. Root-policy evidence is tracked separately:
+# some upstreams do not publish a source snapshot for the matching package.
 # A newer release is deliberately reported as unverified until this table is
 # updated; treating a new layout as compatible would make an installer lie.
 ADAPTERS: dict[str, dict[str, Any]] = {
@@ -31,10 +37,13 @@ ADAPTERS: dict[str, dict[str, Any]] = {
         "verified_versions": ["2.1.261"],
         "invocation": ["claude", "--version"],
         "sources": [
+            "https://registry.npmjs.org/@anthropic-ai/claude-code/2.1.261",
             "https://code.claude.com/docs/en/env-vars",
             "https://code.claude.com/docs/en/claude-directory",
         ],
         "verified_on": "2026-09-05",
+        "source_verification": {"release": "package_manifest", "root_policy": "unverified",
+                                "native_discovery": "unverified", "invocation": "unverified"},
         "roots": [
             {"id": "claude-user", "kind": "native", "base": "claude", "suffix": "skills",
              "override": "CLAUDE_CONFIG_DIR", "preferred": True},
@@ -48,10 +57,13 @@ ADAPTERS: dict[str, dict[str, Any]] = {
         "verified_versions": ["0.153.4"],
         "invocation": ["codex", "--version"],
         "sources": [
+            "https://registry.npmjs.org/@openai/codex/0.153.4",
             "https://github.com/openai/codex/blob/main/codex-rs/core-skills/src/loader.rs",
             "https://github.com/openai/skills/blob/main/skills/.system/skill-installer/SKILL.md",
         ],
         "verified_on": "2026-09-05",
+        "source_verification": {"release": "package_manifest", "root_policy": "unverified",
+                                "native_discovery": "unverified", "invocation": "unverified"},
         "roots": [
             {"id": "agents-user", "kind": "shared", "base": "agents", "suffix": "skills",
              "override": None, "preferred": True},
@@ -67,18 +79,23 @@ ADAPTERS: dict[str, dict[str, Any]] = {
         "verified_versions": ["1.18.29"],
         "invocation": ["opencode", "--version"],
         "sources": [
+            "https://registry.npmjs.org/opencode-ai/1.18.29",
             "https://opencode.ai/docs/skills",
             "https://dev.opencode.ai/docs/config",
-            "https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/skill/index.ts",
+            "https://github.com/anomalyco/opencode/blob/v1.18.29/packages/opencode/src/skill/index.ts",
         ],
         "verified_on": "2026-09-05",
+        "source_verification": {"release": "package_manifest", "root_policy": "source_verified",
+                                "native_discovery": "unverified", "invocation": "unverified"},
         "roots": [
             {"id": "opencode-user", "kind": "native", "base": "opencode", "suffix": "skills",
              "override": None, "preferred": True},
             {"id": "opencode-home", "kind": "compatibility", "base": "opencode-home", "suffix": "skills",
              "override": None, "preferred": False},
-            {"id": "claude-user", "kind": "claude-compatible", "base": "claude", "suffix": "skills",
-             "override": "CLAUDE_CONFIG_DIR", "preferred": False},
+            # OpenCode's loader uses its own global.home/.claude; it does not
+            # inherit CLAUDE_CONFIG_DIR from a separately launched Claude CLI.
+            {"id": "opencode-claude-compatible", "kind": "claude-compatible", "base": "claude-home", "suffix": "skills",
+             "override": None, "preferred": False},
             {"id": "agents-user", "kind": "shared", "base": "agents", "suffix": "skills",
              "override": None, "preferred": False},
         ],
@@ -91,10 +108,13 @@ ADAPTERS: dict[str, dict[str, Any]] = {
         "verified_versions": ["0.73.1"],
         "invocation": ["pi", "--version"],
         "sources": [
-            "https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/skills.md",
-            "https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/src/config.ts",
+            "https://registry.npmjs.org/@mariozechner/pi-coding-agent/0.73.1",
+            "https://github.com/badlogic/pi-mono/blob/v0.73.1/packages/coding-agent/docs/skills.md",
+            "https://github.com/badlogic/pi-mono/blob/v0.73.1/packages/coding-agent/src/config.ts",
         ],
         "verified_on": "2026-09-05",
+        "source_verification": {"release": "package_manifest", "root_policy": "source_verified",
+                                "native_discovery": "unverified", "invocation": "unverified"},
         "roots": [
             {"id": "pi-user", "kind": "native", "base": "pi", "suffix": "skills",
              "override": "PI_CODING_AGENT_DIR", "preferred": True},
@@ -110,7 +130,8 @@ ADAPTERS: dict[str, dict[str, Any]] = {
 # destination.  They let an installer show that two requested copies will be
 # visible to the same loader before it writes either one.
 CONSUMER_EDGES = {
-    "claude-user": ("claude", "opencode"),
+    "claude-user": ("claude",),
+    "opencode-claude-compatible": ("opencode",),
     "agents-user": ("codex", "opencode", "pi"),
     "codex-legacy": ("codex",),
     "opencode-user": ("opencode",),
@@ -174,6 +195,8 @@ def _base(agent: str, env: Mapping[str, str]) -> str:
     home = env["HOME"]
     if agent == "claude":
         return _absolute(env.get("CLAUDE_CONFIG_DIR", os.path.join(home, ".claude")), env)
+    if agent == "claude-home":
+        return _absolute(os.path.join(home, ".claude"), env)
     if agent == "codex":
         return _absolute(env.get("CODEX_HOME", os.path.join(home, ".codex")), env)
     if agent == "opencode":
@@ -260,37 +283,140 @@ def _which(executable: str, env: Mapping[str, str]) -> Optional[str]:
     return None
 
 
-def _default_probe(path: str, timeout: float, env: Mapping[str, str]) -> tuple[bool, str]:
-    """Run the harmless version command with bounded output and process death."""
-    timeout = min(PROBE_TIMEOUT_SECONDS, max(0.1, float(timeout)))
+class _OutputTail:
+    """Thread-safe fixed-size output retention; discarded bytes never hit disk."""
+
+    def __init__(self, limit: int = PROBE_OUTPUT_BYTES) -> None:
+        self._limit, self._bytes, self._lock = limit, bytearray(), threading.Lock()
+
+    def add(self, chunk: bytes) -> None:
+        with self._lock:
+            self._bytes.extend(chunk)
+            del self._bytes[:-self._limit]
+
+    def text(self) -> str:
+        with self._lock:
+            return bytes(self._bytes).decode("utf-8", "replace").strip()
+
+
+def _drain(stream: Any, tail: _OutputTail) -> None:
     try:
-        # Files avoid pipe deadlocks and cap retained output.  A separate
-        # session lets timeout cleanup kill descendants on macOS/Linux too.
-        with open(os.devnull, "rb") as null, \
-                tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
-            proc = subprocess.Popen([path, "--version"], stdin=null, stdout=stdout, stderr=stderr,
-                                    env=dict(env), start_new_session=True)
+        while True:
+            chunk = stream.read(8192)
+            if not chunk:
+                return
+            tail.add(chunk)
+    except (OSError, ValueError):
+        # The parent closes descriptors after the fixed reap deadline.
+        return
+
+
+def _kill_group(proc: subprocess.Popen[Any]) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+_PROBE_SUPERVISOR = """import os, subprocess, sys, time
+fd = int(sys.argv[1])
+try:
+    child = subprocess.Popen(sys.argv[2:])
+    result = str(child.wait()).encode("ascii")
+except OSError as error:
+    result = ("OSError:" + str(error)).encode("utf-8", "replace")
+os.write(fd, result[:128])
+os.close(fd)
+os.close(1)
+os.close(2)
+while True:
+    time.sleep(3600)
+"""
+
+
+def _default_probe(path: str, timeout: float, env: Mapping[str, str]) -> tuple[bool, str]:
+    """Run ``--version`` with fixed deadline, bounded memory, and group cleanup."""
+    timeout = min(PROBE_TIMEOUT_SECONDS, max(0.1, float(timeout)))
+    deadline = time.monotonic() + timeout
+    proc: Optional[subprocess.Popen[Any]] = None
+    streams: list[Any] = []
+    readers: list[threading.Thread] = []
+    control_read: Optional[int] = None
+    control_write: Optional[int] = None
+    stdout_tail, stderr_tail = _OutputTail(), _OutputTail()
+    try:
+        control_read, control_write = os.pipe()
+        proc = subprocess.Popen([sys.executable, "-c", _PROBE_SUPERVISOR, str(control_write), path, "--version"],
+                                stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                env=dict(env), start_new_session=True, pass_fds=(control_write,))
+        os.close(control_write)
+        control_write = None
+        assert proc.stdout is not None and proc.stderr is not None
+        streams = [proc.stdout, proc.stderr]
+        for stream, tail in ((proc.stdout, stdout_tail), (proc.stderr, stderr_tail)):
+            reader = threading.Thread(target=_drain, args=(stream, tail), daemon=True)
+            reader.start()
+            readers.append(reader)
+        ready, _, _ = select.select([control_read], [], [], max(0.0, deadline - time.monotonic()))
+        if not ready:
+            _kill_group(proc)
             try:
-                code = proc.wait(timeout=timeout)
+                proc.wait(timeout=PROBE_REAP_SECONDS)
             except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
-                try:
-                    proc.wait(timeout=0.5)
-                except subprocess.TimeoutExpired:
-                    return False, "timeout; process group did not exit"
-                return False, "timeout"
-            # Keep the tail: version launchers often put their useful failure
-            # detail after a banner, while retaining only a fixed amount.
-            def tail(stream: Any) -> bytes:
-                stream.seek(0, os.SEEK_END)
-                stream.seek(max(0, stream.tell() - 240))
-                return stream.read(240)
-            output = (tail(stdout) or tail(stderr)).decode("utf-8", "replace").strip()
+                return False, "timeout; process group did not exit"
+            return False, "timeout"
+        status = os.read(control_read, 128).decode("utf-8", "replace")
+        if not status or status.startswith("OSError:"):
+            _kill_group(proc)
+            return False, status or "no child status"
+        try:
+            code = int(status)
+        except ValueError:
+            _kill_group(proc)
+            return False, "invalid child status"
+        # Normal pipes reach EOF when the direct child exits. Give their
+        # readers only the fixed reap window; if a descendant inherited a
+        # writer, it is killed rather than being allowed to hold the probe.
+        drain_deadline = min(deadline, time.monotonic() + PROBE_REAP_SECONDS)
+        for reader in readers:
+            reader.join(max(0.0, drain_deadline - time.monotonic()))
+        if any(reader.is_alive() for reader in readers):
+            _kill_group(proc)
+            reap_deadline = time.monotonic() + PROBE_REAP_SECONDS
+            for reader in readers:
+                reader.join(max(0.0, reap_deadline - time.monotonic()))
+        output = stdout_tail.text() or stderr_tail.text()
+        if code:
+            return False, "exit %d: %s" % (code, output)
+        return True, output
     except OSError as exc:
         return False, type(exc).__name__
-    if code:
-        return False, "exit %d: %s" % (code, output)
-    return True, output
+    finally:
+        if proc is not None:
+            _kill_group(proc)
+            try:
+                proc.wait(timeout=PROBE_REAP_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass
+        if control_read is not None:
+            try:
+                os.close(control_read)
+            except OSError:
+                pass
+        if control_write is not None:
+            try:
+                os.close(control_write)
+            except OSError:
+                pass
+        for stream in streams:
+            try:
+                stream.close()
+            except OSError:
+                pass
+        reap_deadline = time.monotonic() + PROBE_REAP_SECONDS
+        for reader in readers:
+            reader.join(max(0.0, reap_deadline - time.monotonic()))
 
 
 def _version(output: str) -> Optional[str]:
@@ -334,7 +460,8 @@ def discover(
             "verification": "verified" if verified else "unverified",
             "version": version, "verified_versions": spec["verified_versions"],
             "roots": roots, "evidence": evidence, "sources": spec["sources"],
-            "verified_on": spec["verified_on"], "duplicate_behavior": spec["duplicates"],
+            "verified_on": spec["verified_on"], "source_verification": spec["source_verification"],
+            "duplicate_behavior": spec["duplicates"],
             "eligible_for_automatic_target": state == "executable_found" and verified,
             "explicit_path_route": "select_target(report, agent_id) accepts this agent without a binary",
         }
@@ -377,6 +504,7 @@ def select_targets(
             continue
         coverage = next((item for item in direct.values() if agent in item["consumers"]), None)
         if coverage:
+            coverage["selected_agents"].append(agent)
             selected.append({"agent": agent, "status": "selected", "mode": mode,
                              "covered_by": coverage["target_agents"], "destination": coverage["destination"],
                              "consumers": coverage["consumers"]})
@@ -386,9 +514,12 @@ def select_targets(
         item = direct.get(root["physical_path"])
         if item is None:
             item = {"physical_path": root["physical_path"], "destination": root,
-                    "consumers": consumers, "target_agents": []}
+                    # consumers is loader exposure; selected_agents is this
+                    # plan's lifecycle registration. Never conflate them.
+                    "consumers": consumers, "target_agents": [], "selected_agents": []}
             direct[root["physical_path"]] = item
         item["target_agents"].append(agent)
+        item["selected_agents"].append(agent)
         selected.append({"agent": agent, "status": "selected", "mode": mode,
                          "covered_by": None, "destination": root, "consumers": consumers})
     conflicts = []
@@ -396,7 +527,7 @@ def select_targets(
         visible = [item for item in direct.values() if consumer in item["consumers"]]
         if len(visible) > 1:
             conflicts.append({"consumer": consumer, "physical_paths": [item["physical_path"] for item in visible],
-                              "target_agents": [agent for item in visible for agent in item["target_agents"]],
+                              "selected_agents": [agent for item in visible for agent in item["selected_agents"]],
                               "reason": "the loader can see multiple requested copies; consult adapter precedence"})
     return {"schema_version": SCHEMA_VERSION, "mode": mode, "selected": selected, "skipped": skipped,
             "destinations": list(direct.values()), "competing_visibility": conflicts}

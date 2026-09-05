@@ -6,11 +6,14 @@ the project skill, so a copied survey can import it without the source checkout.
 It does not make a directory, start an interactive agent, read credentials, or
 make a model request.
 
-The adapter data and source links were verified on 2026-09-05 against these
-exact releases: Claude Code 2.1.261, Codex CLI 0.153.4, OpenCode 1.18.29, and
-Pi coding agent 0.73.1. A detected executable at another version is useful
-evidence, but is deliberately `unverified`; do not describe it as compatible
-until its adapter is checked and versioned here.
+The version gates were recorded on 2026-09-05 from the exact package manifests:
+Claude Code 2.1.261, Codex CLI 0.153.4, OpenCode 1.18.29, and Pi coding agent
+0.73.1. `source_verification` separates that immutable release evidence from
+root-policy evidence and from native discovery/invocation; the latter two are
+explicitly `unverified` because this module does not start a real agent session.
+A detected executable at another version is useful evidence, but is deliberately
+`unverified`; do not describe it as compatible until its adapter is checked and
+versioned here.
 
 ## Consumer API
 
@@ -29,13 +32,17 @@ bootstrap = select_targets(report, agents=("pi",))  # binary may be absent
 `schema_version: 1`, an `agents` object, and a normalized `destinations` list.
 Each agent reports `state` (`executable_found`, `configured`, `absent`, or
 `undetermined`), `verification`, roots, evidence, source URLs, and duplicate
-behaviour. `adapters()` exposes the versioned static records for callers that
+behaviour, plus `source_verification` for the release/root-policy/native-runtime
+distinction. `adapters()` exposes the versioned static records for callers that
 need a UI without probing the machine.
 
 `discover()` accepts injectable `which` and `probe` callables. Its normal
-probe is `<resolved executable> --version` with a two-second timeout. It does
-not treat an existing configuration directory as a runnable installation: that
-is `configured` evidence only. Conversely, a successful, version-verified
+probe is `<resolved executable> --version` with a two-second monotonic deadline.
+It drains stdout/stderr into fixed 240-byte in-memory tails, uses a short-lived
+supervisor process group, and kills inherited writers after the direct child
+reports, so noisy or detached-looking probes neither spool output nor survive.
+It does not treat an existing configuration directory as a runnable installation:
+that is `configured` evidence only. Conversely, a successful, version-verified
 binary is eligible even if no skill directory exists yet.
 
 `select_targets(report, agents=(), exclude_agents=())` considers every detected
@@ -45,7 +52,10 @@ and reports absent, configured, failed-probe, and unverified-version agents in
 It collapses a later target when an already selected physical destination serves
 that agent, then returns `competing_visibility` for any unavoidable overlap.
 `select_target()` remains a compatibility helper for callers that need exactly
-one target.
+one target. In each planned destination, `consumers` is all loader exposure,
+whereas `selected_agents` is only the requested lifecycle ownership; a covered
+requested agent is included in `selected_agents`, but an exposed unrequested
+agent is not.
 
 ## Effective user roots
 
@@ -55,10 +65,10 @@ so a symlink alias is one destination rather than two writes.
 
 | Agent | User roots and environment behaviour | Probe | Official evidence |
 | --- | --- | --- | --- |
-| Claude Code | `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills`; `CLAUDE_CONFIG_DIR` replaces the complete user config root. | `claude --version` | [environment variables](https://code.claude.com/docs/en/env-vars), [Claude directory](https://code.claude.com/docs/en/claude-directory) |
-| Codex CLI | `$HOME/.agents/skills` is the current shared/preferred root. `${CODEX_HOME:-$HOME/.codex}/skills` remains a loader-supported legacy root. | `codex --version` | [loader source](https://github.com/openai/codex/blob/main/codex-rs/core-skills/src/loader.rs), [official skill installer](https://github.com/openai/skills/blob/main/skills/.system/skill-installer/SKILL.md) |
-| OpenCode | `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills` and the loader-supported `$HOME/.opencode/skills`; `OPENCODE_CONFIG_DIR/skills` is an additional (not replacing) config-directory source. | `opencode --version` | [skills](https://opencode.ai/docs/skills), [configuration](https://dev.opencode.ai/docs/config), [loader source](https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/skill/index.ts) |
-| Pi | `${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills`; the override replaces Pi's user config root. | `pi --version` | [skills source](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/skills.md), [config source](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/src/config.ts) |
+| Claude Code | `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills`; `CLAUDE_CONFIG_DIR` replaces the complete user config root. | `claude --version` (unverified native invocation) | [2.1.261 manifest](https://registry.npmjs.org/@anthropic-ai/claude-code/2.1.261), [environment variables](https://code.claude.com/docs/en/env-vars) |
+| Codex CLI | `$HOME/.agents/skills` is the current shared/preferred root. `${CODEX_HOME:-$HOME/.codex}/skills` remains a loader-supported legacy root. | `codex --version` (unverified native invocation) | [0.153.4 manifest](https://registry.npmjs.org/@openai/codex/0.153.4), [current loader](https://github.com/openai/codex/blob/main/codex-rs/core-skills/src/loader.rs) |
+| OpenCode | `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills` and the loader-supported `$HOME/.opencode/skills`; `OPENCODE_CONFIG_DIR/skills` is an additional (not replacing) config-directory source. Its Claude-compatible root is fixed `$HOME/.claude/skills`, not `CLAUDE_CONFIG_DIR`. | `opencode --version` (unverified native invocation) | [1.18.29 manifest](https://registry.npmjs.org/opencode-ai/1.18.29), [1.18.29 loader](https://github.com/anomalyco/opencode/blob/v1.18.29/packages/opencode/src/skill/index.ts) |
+| Pi | `${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills`; the override replaces Pi's user config root. Its automatic shared root is `$HOME/.agents/skills`. | `pi --version` (unverified native invocation) | [0.73.1 manifest](https://registry.npmjs.org/@mariozechner/pi-coding-agent/0.73.1), [0.73.1 skills source](https://github.com/badlogic/pi-mono/blob/v0.73.1/packages/coding-agent/docs/skills.md) |
 
 `CODEX_HOME` is intentionally not used to relocate `$HOME/.agents/skills`.
 The latter is a user-home shared root; the former is Codex's legacy config
@@ -74,15 +84,17 @@ show before copying a second copy of the same skill:
 
 | Destination root | Known consumers | Same-name/symlink result |
 | --- | --- | --- |
-| Claude user root | Claude, OpenCode | Claude's collision and symlink semantics are not documented in the verified source set: `unverified`. |
+| Claude user root | Claude; OpenCode only when it is the fixed `$HOME/.claude` path | Claude's collision and symlink semantics are not documented in the verified source set: `unverified`. |
 | `.agents` user root | Codex, OpenCode, Pi | Codex's collision and symlink semantics are `unverified`; OpenCode uses last registered name; Pi deduplicates canonical-path aliases. |
 | Codex legacy root | Codex | Codex collision and symlink semantics are `unverified`. Pi can consume it only if a user separately lists it in Pi settings, which this read-only contract does not infer. |
 | OpenCode native/custom roots | OpenCode | A duplicate name replaces the earlier registered item (the loader emits a warning); target-symlink equivalence remains `unverified`. |
 | Pi native root | Pi | Pi's documented source ordering makes later sources win; its current changelog records canonical-path symlink deduplication. |
 
-OpenCode's Claude and `.agents` compatibility stores, and Pi's `.agents` store,
-are represented as actual roots even though they are not every agent's preferred
-write root. Whether a particular Pi session loads a project resource can
+OpenCode's fixed-home Claude and `.agents` compatibility stores, and Pi's
+`.agents` store, are represented as actual roots even though they are not every
+agent's preferred write root. Pi does not automatically scan Claude or Codex
+roots; it can consume them only through a user settings entry, which this module
+does not parse. Whether a particular Pi session loads a project resource can
 additionally be gated by Pi project-trust/settings policy. The contract makes no claim that
 an unprobed version will load any root, and it cannot infer `skills` entries
 from a user-managed OpenCode or Pi settings file without a separate,
@@ -90,5 +102,6 @@ format-versioned configuration reader.
 
 For a fleet containing Claude and Codex, no single built-in user root serves
 both. A caller may explicitly request both destinations, but must surface that
-OpenCode and Pi can see both copies, with their documented precedence. The
-module does not hide that conflict or mutate configuration to resolve it.
+OpenCode can see both copies, with its documented precedence; Pi automatically
+sees only the `.agents` copy. The module does not hide that conflict or mutate
+configuration to resolve it.

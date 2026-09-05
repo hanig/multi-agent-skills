@@ -2,6 +2,7 @@
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -29,6 +30,13 @@ def probe_for(versions):
     return probe
 
 
+def fake_cli(directory, name, body):
+    path = directory / name
+    path.write_text("#!%s\n%s\n" % (sys.executable, body))
+    path.chmod(0o755)
+    return path
+
+
 class TestAgentDiscovery(unittest.TestCase):
     def test_schema_and_one_runnable_agent_select_automatically(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -39,7 +47,7 @@ class TestAgentDiscovery(unittest.TestCase):
         self.assertTrue(report["agents"]["claude"]["eligible_for_automatic_target"])
         self.assertEqual(discovery.select_target(report)["agent"], "claude")
 
-    def test_all_four_are_detected_but_require_an_explicit_choice(self):
+    def test_all_four_are_detected_and_covered_agents_are_selected_owners(self):
         with tempfile.TemporaryDirectory() as raw:
             paths = {agent: "/fixtures/" + agent for agent in discovery.adapters()}
             report = discovery.discover(fixture_env(raw), finder(paths), probe_for(VERSIONS))
@@ -49,6 +57,10 @@ class TestAgentDiscovery(unittest.TestCase):
         self.assertEqual([item["agent"] for item in plan["skipped"]], [])
         self.assertEqual({item["agent"] for item in plan["selected"] if item["covered_by"]}, {"opencode", "pi"})
         self.assertTrue(plan["competing_visibility"])
+        destinations = {item["destination"]["id"]: item for item in plan["destinations"]}
+        self.assertEqual(destinations["claude-user"]["selected_agents"], ["claude", "opencode"])
+        self.assertEqual(destinations["agents-user"]["selected_agents"], ["codex", "pi"])
+        self.assertNotIn("pi", destinations["claude-user"]["selected_agents"])
 
     def test_none_and_configured_but_not_on_path_are_not_runnable(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -73,6 +85,17 @@ class TestAgentDiscovery(unittest.TestCase):
         self.assertEqual(opencode_roots["opencode-user"], os.path.join(raw, "xdg/opencode/skills"))
         self.assertEqual(opencode_roots["opencode-config-dir"], os.path.join(raw, "custom/opencode/skills"))
         self.assertEqual(roots["pi"][0]["logical_path"], os.path.join(raw, "custom/pi/skills"))
+
+    def test_opencode_claude_compatibility_uses_home_not_claude_override(self):
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw)
+            report = discovery.discover(fixture_env(home, CLAUDE_CONFIG_DIR="custom/claude"), finder({}), probe_for({}))
+        claude_root = report["agents"]["claude"]["roots"][0]["logical_path"]
+        opencode_roots = {item["id"]: item["logical_path"] for item in report["agents"]["opencode"]["roots"]}
+        self.assertEqual(claude_root, os.path.join(raw, "custom/claude/skills"))
+        self.assertEqual(opencode_roots["opencode-claude-compatible"], os.path.join(raw, ".claude/skills"))
+        custom = next(item for item in report["destinations"] if item["physical_path"] == os.path.realpath(claude_root))
+        self.assertEqual(custom["consumers"], ["claude"])
 
     def test_duplicate_logical_paths_have_one_normalized_destination(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -108,6 +131,49 @@ class TestAgentDiscovery(unittest.TestCase):
             report = discovery.discover(fixture_env(home, PATH=str(bin_dir)))
         self.assertEqual(report["agents"]["claude"]["state"], "executable_found")
         self.assertEqual(report["agents"]["claude"]["verification"], "verified")
+
+    def test_real_noisy_cli_retains_only_a_bounded_tail(self):
+        with tempfile.TemporaryDirectory() as raw:
+            home, bin_dir = Path(raw) / "home", Path(raw) / "bin"
+            home.mkdir()
+            bin_dir.mkdir()
+            fake_cli(bin_dir, "claude", "import sys; sys.stdout.write('x' * 1000000 + ' 2.1.261')")
+            report = discovery.discover(fixture_env(home, PATH=str(bin_dir)))
+        output = report["agents"]["claude"]["evidence"]["executable"]["output"]
+        self.assertLessEqual(len(output.encode()), discovery.PROBE_OUTPUT_BYTES)
+        self.assertTrue(output.endswith("2.1.261"))
+
+    def test_real_hung_cli_times_out_with_a_fixed_deadline(self):
+        with tempfile.TemporaryDirectory() as raw:
+            home, bin_dir = Path(raw) / "home", Path(raw) / "bin"
+            home.mkdir()
+            bin_dir.mkdir()
+            fake_cli(bin_dir, "claude", "import time; time.sleep(10)")
+            start = time.monotonic()
+            report = discovery.discover(fixture_env(home, PATH=str(bin_dir)), timeout=0.1)
+            elapsed = time.monotonic() - start
+        self.assertLess(elapsed, 1.5)
+        self.assertEqual(report["agents"]["claude"]["state"], "undetermined")
+        self.assertIn("timeout", report["agents"]["claude"]["evidence"]["executable"]["output"])
+
+    def test_real_parent_exit_cannot_leave_inherited_output_writer(self):
+        with tempfile.TemporaryDirectory() as raw:
+            home, bin_dir, marker = Path(raw) / "home", Path(raw) / "bin", Path(raw) / "escaped"
+            home.mkdir()
+            bin_dir.mkdir()
+            fake_cli(bin_dir, "claude", "\n".join([
+                "import subprocess, sys",
+                "subprocess.Popen([sys.executable, '-c', 'import pathlib, time; time.sleep(.8); pathlib.Path(sys.argv[1]).write_text(\"escaped\")', %r])" % str(marker),
+                "print('2.1.261')",
+            ]))
+            start = time.monotonic()
+            report = discovery.discover(fixture_env(home, PATH=str(bin_dir)))
+            elapsed = time.monotonic() - start
+            time.sleep(0.9)
+            escaped = marker.exists()
+        self.assertLess(elapsed, 1.5)
+        self.assertEqual(report["agents"]["claude"]["state"], "executable_found")
+        self.assertFalse(escaped, "probe left an inherited writer running")
 
     def test_explicit_selection_is_bootstrap_safe_and_exclusions_are_visible(self):
         with tempfile.TemporaryDirectory() as raw:
