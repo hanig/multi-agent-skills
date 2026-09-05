@@ -168,10 +168,17 @@ substitute your own confidence for the review.
 
 **Whether to run another round is the user's call, not the agent's.**
 
-```bash
-R=~/.claude/skills/hanig-review-gate/scripts/review.py
+Set `HANIG_REVIEW_GATE_DIR` to the directory containing the `SKILL.md`
+instance this agent actually loaded. This normal shell variable has no
+agent-specific interpolation requirement; the quoted script path leaves the
+working directory, and therefore `--diff` or relative `--file` arguments,
+unchanged.
 
-python3 $R --escalate --diff \
+```bash
+export HANIG_REVIEW_GATE_DIR="/path/to/loaded/hanig-review-gate"
+R="$HANIG_REVIEW_GATE_DIR/scripts/review.py"
+
+python3 "$R" --escalate --diff \
   --context "what this change is for" \
   --claim "the specific thing being asserted" \
   --claim "another assertion being made"

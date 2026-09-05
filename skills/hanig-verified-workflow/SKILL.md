@@ -45,12 +45,18 @@ confirm — do not fill the gap with an assumption.
 
 ## The three commands
 
-```bash
-C=~/.claude/skills/hanig-verified-workflow/scripts/contract.py
+Set `HANIG_VERIFIED_WORKFLOW_DIR` to the directory containing the `SKILL.md`
+instance this agent actually loaded. It is a normal shell variable, not a
+Claude-only expansion; quoted commands work from any launch directory and keep
+relative run, input, and output paths relative to that directory.
 
-python3 $C init   <run-dir> --command "..." [--output P] [--input P] [--predicate JSON]
-python3 $C submit <run-dir> [--sbatch-arg ...]     # sbatches <run-dir>/job.sbatch
-python3 $C check  <run-dir> [--json]               # verdict + receipt
+```bash
+export HANIG_VERIFIED_WORKFLOW_DIR="/path/to/loaded/hanig-verified-workflow"
+C="$HANIG_VERIFIED_WORKFLOW_DIR/scripts/contract.py"
+
+python3 "$C" init   <run-dir> --command "..." [--output P] [--input P] [--predicate JSON]
+python3 "$C" submit <run-dir> [--sbatch-arg ...]     # sbatches <run-dir>/job.sbatch
+python3 "$C" check  <run-dir> [--json]               # verdict + receipt
 ```
 
 `init` records, before anything runs: the command, git commit and a digest of

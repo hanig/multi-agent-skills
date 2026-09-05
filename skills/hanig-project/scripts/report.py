@@ -29,7 +29,10 @@ import shutil
 import sys
 from pathlib import Path
 
-_SWARM_SCRIPTS = Path(__file__).resolve().parents[2] / "hanig-swarm" / "scripts"
+from skill_paths import sibling_skill_root
+
+_SWARM_SCRIPTS = sibling_skill_root(Path(__file__).parent.parent,
+                                    "hanig-project", "hanig-swarm") / "scripts"
 sys.path.insert(0, str(_SWARM_SCRIPTS))
 import coordinator_paths as CP  # noqa: E402
 

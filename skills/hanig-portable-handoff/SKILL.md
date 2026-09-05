@@ -32,12 +32,22 @@ from state already on disk, so neither should depend on remembering.
 **A handoff records identities and pointers. It never copies data, and it never
 decides anything a verifier already decided.**
 
-```bash
-H=~/.claude/skills/hanig-portable-handoff/scripts/handoff.py
+## Run from the loaded skill, not a checkout
 
-python3 $H capture run1 run2 --out handoff.json    # before you leave
-python3 $H resume handoff.json                     # where you land
-python3 $H memory .                                # regenerate MEMORY.md facts
+Before running a command, set `HANIG_PORTABLE_HANDOFF_DIR` to the directory
+containing the `SKILL.md` instance this agent actually loaded. This is an
+ordinary shell variable rather than agent-specific interpolation, so it works
+with Claude, Codex, OpenCode, and Pi; it may contain spaces. Commands retain
+your current project directory, so relative run, input, and output paths below
+still mean paths in that project.
+
+```bash
+export HANIG_PORTABLE_HANDOFF_DIR="/path/to/loaded/hanig-portable-handoff"
+H="$HANIG_PORTABLE_HANDOFF_DIR/scripts/handoff.py"
+
+python3 "$H" capture run1 run2 --out handoff.json    # before you leave
+python3 "$H" resume handoff.json                     # where you land
+python3 "$H" memory .                                # regenerate MEMORY.md facts
 ```
 
 ## `resume` exit codes
