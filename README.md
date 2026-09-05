@@ -84,6 +84,105 @@ dependency is the `paseo` binary, and copying markdown does not supply one.
 `bin/bus`, `bin/agent-manager`, `bin/agent-view` and `models.json` came across
 with them.
 
+### Agent bus executable, in this checkout
+
+The executable, model registry, and runtime state are three separate things.
+`install.sh` installs skill directories only, into `~/.claude/skills` by
+default; it deploys none of those three.
+
+#### Executable discovery
+
+In this checkout the executable is `bin/bus`. Set
+`MULTI_AGENT_SKILLS_CHECKOUT` to the checkout's absolute path and use
+`$MULTI_AGENT_SKILLS_CHECKOUT/bin/bus` from elsewhere. The vendored skills'
+fixed `~/.agent-bus/bin/bus` path belongs to upstream's install layout, not to
+this repository's installer.
+
+#### Model-routing registry input
+
+`bus models` reads `models.json` from `AGENT_BUS_HOME`; it does not read the
+repository-root copy directly. The root `models.json` is a starter input to
+copy into an explicitly chosen bus state directory and review before relying
+on its routing data. It is not an executable-discovery mechanism.
+
+#### Runtime state and cache ownership
+
+Every bus invocation creates `sessions`, `inbox`, `cursors`, and `cache` under
+`AGENT_BUS_HOME`. Live model-routing signals are cached there too. Therefore a
+one-off check should use disposable state, while a real messaging session
+should use a deliberately chosen durable state directory. Neither case should
+write runtime state into this checkout merely because the executable lives
+here.
+
+#### Disposable model-routing check
+
+After exporting `MULTI_AGENT_SKILLS_CHECKOUT` as the absolute checkout path,
+set `AGENT_BUS_SCRATCH` to an existing writable directory whose resolved path
+is outside both the checkout and `$HOME`. The block checks that precondition,
+then can run from any other directory. Its error-exit subshell makes every
+setup failure abort without changing the caller's shell options. It copies the
+shipped registry only into a private temporary state directory. A disposable
+`HOME` inside that same directory contains any side effects from live-signal
+collectors that `models` invokes. The EXIT and signal traps remove the printed
+directory on success, failure, or interruption, and refuse to delete anything
+except the temporary child they allocated.
+
+```bash
+(
+set -eu
+checkout="$(CDPATH= cd -- "${MULTI_AGENT_SKILLS_CHECKOUT:?set the checkout path}" && pwd -P)"
+home_dir="$(CDPATH= cd -- "$HOME" && pwd -P)"
+scratch="$(CDPATH= cd -- "${AGENT_BUS_SCRATCH:?set external scratch}" && pwd -P)"
+test -w "$scratch"
+case "$scratch" in
+  /|"$home_dir"|"$home_dir"/*|"$checkout"|"$checkout"/*)
+    echo "AGENT_BUS_SCRATCH must resolve outside HOME and the checkout" >&2
+    exit 2
+    ;;
+esac
+bus_bin="$checkout/bin/bus"
+test -x "$bus_bin"
+bus_state=""
+cleanup() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  if [ -n "$bus_state" ]; then
+    case "$bus_state" in
+      "$scratch"/agent-bus.*)
+        rm -rf "$bus_state" || status=1
+        ;;
+      *)
+        echo "refusing to clean unexpected path: $bus_state" >&2
+        status=1
+        ;;
+    esac
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+bus_state="$(mktemp -d "$scratch/agent-bus.XXXXXX")"
+printf 'disposable AGENT_BUS_HOME=%s\n' "$bus_state" >&2
+mkdir "$bus_state/home"
+cp "$checkout/models.json" "$bus_state/models.json"
+chmod 600 "$bus_state/models.json"
+HOME="$bus_state/home" AGENT_BUS_HOME="$bus_state" "$bus_bin" models --json
+)
+```
+
+The `~/.agent-bus/bin/bus` commands in the vendored `agent-bus`, `paseo`,
+`pi-fleet`, and `start-a-sprint` skills assume upstream's installer has placed
+the executable there. They do not describe a path this repository installs.
+Until upstream discovers the executable instead of hardcoding an install
+layout, agents using only this repository need the checkout-local path above.
+Do not create `~/.agent-bus/bin/bus` merely to make the instruction true.
+
+The upstream-ready report and proposed correction are in
+`docs/upstream-agent-bus-path-discovery.md`. The vendored skill files remain
+unchanged so a future upstream re-sync remains an honest diff.
+
 ### hanig-project
 
 Gets you from "I am on a server with an intention" to units of work that are
@@ -536,6 +635,17 @@ mkdir -p ~/.paseo && cp examples/orchestration-preferences.json ~/.paseo/
 Nothing reads it from the repo. `install.sh` does not deploy it, because the
 live file is user-specific configuration and overwriting a machine's routing
 policy from a skill install is not a thing an installer should do.
+
+**`models.json` is routing metadata, not a credential grant.** A model appearing
+in `models.json` means it can be considered for a Paseo dispatch; it does not
+mean a dispatched worker can call that or any other model from inside its task.
+`OPENAI_API_KEY` and `OPENROUTER_API_KEY` stay coordinator-side: `review.py` and
+`committee.py` use them directly, while `child_environment.py` removes both
+exact names from every coordinator child. Paseo may still start the worker with
+credentials held independently by its daemon, but that does not put either
+ambient API key in the worker's environment. Keep additional-model calls in the
+coordinator-side review and committee paths unless a separately designed proxy
+or named exception deliberately changes that boundary.
 
 **Copying it is not the end of the job.** The file was written on a machine
 with no Paseo and no `~/.paseo`, so nothing in it was dispatched at the time.

@@ -19,7 +19,15 @@ PREFIX="${HOME}/.claude/skills"
 while [ $# -gt 0 ]; do
   case "$1" in
     --prefix) PREFIX="$2"; shift 2 ;;
-    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+    -h|--help)
+      printf '%s\n' \
+        'doctor — what is installed here, where it came from, and whether it still works.' \
+        '' \
+        'First thing to run on a new host, and the answer to "why isn'"'"'t my skill' \
+        'loading?". Read-only.' \
+        '' \
+        'Usage: doctor [--prefix DIR] | doctor DIR'
+      exit 0 ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
     *) PREFIX="$1"; shift ;;
   esac
@@ -28,21 +36,423 @@ MARKER=".installed-by-multi-agent-skills"
 # The authorship namespace: this repo writes hanig-*, and vendors everything
 # else it ships. Same rule install.sh classifies by, read off the tree.
 OWN_PREFIX="hanig-"
-REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+
+case "$0" in */*) SCRIPT_DIR=${0%/*} ;; *) SCRIPT_DIR=. ;; esac
+REPO=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+
+# A probe that can hang is worse than no probe: this is the first command run
+# on a new host, often over a link that is why you are running it. Perl is the
+# execution substrate for bounded children, just as Python is the execution
+# substrate for survey.py's run()/REAP_SECONDS. Its monotonic clock, nonblocking
+# wait and in-process sleep need no mktemp/sleep/rm helpers of their own. If the
+# substrate is absent, no diagnostic child is launched and the answer is
+# unknown; an unbounded fallback would recreate the bug this function exists
+# to close.
+#
+# The direct command gets its own process group. Timeout is a one-way latch:
+# TERM is followed at one absolute grace deadline by KILL of the original
+# group, even if the direct child exited after TERM. The direct child is polled
+# for reaping but never waited on without a bound. That cleans up ordinary
+# profile children from bash -lic. A descendant that deliberately leaves the
+# group, or a direct child parked in an uninterruptible syscall, can survive;
+# neither can make doctor wait past the grace deadline. Arbitrary descendant
+# quiescence is not a guarantee a portable diagnostic can honestly make.
+#
+# Output is not the completion signal: py_compile says nothing on success, and
+# silence is not a timeout. RUN_SECONDS is the ordinary command deadline.
+# PROBE_RUN_SECONDS is looser because the health probe can spend PROBE_SECONDS
+# first connecting and then reading.
+PROBE_SECONDS=2
+RUN_SECONDS=3
+PROBE_RUN_SECONDS=6
+REAP_SECONDS=2
+
+PERL=
+if command -v perl >/dev/null 2>&1; then PERL=perl; fi
+
+# One supervisor invocation produces exactly three lines: state, return code,
+# and the last output line. It retains only the tail of a noisy child's output
+# and never waits for pipe EOF after the direct child finishes: a surviving
+# descendant may still own the writer.
+SUPERVISOR_PERL='use strict;
+use warnings;
+use POSIX qw(:sys_wait_h :signal_h setpgid sigprocmask _exit);
+use Time::HiRes qw(clock_gettime CLOCK_MONOTONIC sleep);
+use Fcntl qw(F_GETFL F_SETFL F_SETFD O_NONBLOCK FD_CLOEXEC);
+use Errno qw(EINTR);
+
+my ($limit, $reap, @cmd) = @ARGV;
+sub answer {
+    my ($state, $rc, $line) = @_;
+    $line = "" unless defined $line;
+    $line =~ s/\0//g;
+    $line =~ s/[\r\n]+\z//;
+    $line = (split /\n/, $line, -1)[-1] // "";
+    # Command substitution strips trailing newlines. A final non-empty record
+    # preserves an intentionally empty third field (successful silent child).
+    print "$state\n$rc\n$line\n__DOCTOR_END__";
+    exit 0;
+}
+
+# Configure every pipe before fork. A setup failure therefore cannot leave a
+# launched diagnostic behind. The setup writer closes atomically on exec.
+pipe(my $reader, my $writer) or answer("unknown", 127, "output pipe");
+pipe(my $setup_reader, my $setup_writer)
+    or answer("unknown", 127, "setup pipe");
+my $flags = fcntl($reader, F_GETFL, 0);
+answer("unknown", 127, "output pipe flags") unless defined $flags;
+fcntl($reader, F_SETFL, $flags | O_NONBLOCK)
+    or answer("unknown", 127, "output pipe nonblocking mode");
+my $setup_flags = fcntl($setup_reader, F_GETFL, 0);
+answer("unknown", 127, "setup pipe flags") unless defined $setup_flags;
+fcntl($setup_reader, F_SETFL, $setup_flags | O_NONBLOCK)
+    or answer("unknown", 127, "setup pipe nonblocking mode");
+fcntl($setup_writer, F_SETFD, FD_CLOEXEC)
+    or answer("unknown", 127, "setup close-on-exec mode");
+
+my $blocked_signals = POSIX::SigSet->new(SIGHUP, SIGINT, SIGTERM);
+my $old_signal_mask = POSIX::SigSet->new();
+sigprocmask(SIG_BLOCK, $blocked_signals, $old_signal_mask)
+    or answer("unknown", 127, "signal mask");
+# This supervisor is single-threaded and is sole reaper for the direct child.
+# Clear an inherited ignored/no-cld-wait disposition before launch. Therefore
+# a later non-EINTR wait error does not mean some other reaper released the
+# PID/PGID identity that bounded cleanup still holds.
+eval { $SIG{CHLD} = "DEFAULT"; 1 }
+    or answer("unknown", 127, "SIGCHLD disposition");
+my $active_pid = 0;
+my $interrupted = "";
+for my $signal_name (qw(HUP INT TERM)) {
+    $SIG{$signal_name} = sub {
+        return unless $active_pid;
+        return if length $interrupted;
+        $interrupted = $_[0];
+    };
+}
+
+my $SETUP_EXIT = 125;
+my $pid = fork();
+answer("unknown", 127, "fork") unless defined $pid;
+if ($pid == 0) {
+    close $reader;
+    close $setup_reader;
+    my $write_setup = sub {
+        my ($message) = @_;
+        $message .= "\n";
+        while (length $message) {
+            my $n = syswrite($setup_writer, $message);
+            next if !defined($n) && $! == EINTR;
+            return 0 unless defined($n) && $n > 0;
+            substr($message, 0, $n, "");
+        }
+        return 1;
+    };
+    for my $signal_name (qw(HUP INT TERM)) {
+        $SIG{$signal_name} = "DEFAULT";
+    }
+    unless (sigprocmask(SIG_SETMASK, $old_signal_mask)) {
+        $write_setup->("error:signal-mask");
+        _exit($SETUP_EXIT);
+    }
+    my $grouped = setpgid(0, 0);
+    unless (defined $grouped) {
+        $write_setup->("error:setpgid");
+        _exit($SETUP_EXIT);
+    }
+    unless (open STDOUT, ">&", $writer) {
+        $write_setup->("error:stdout");
+        _exit($SETUP_EXIT);
+    }
+    unless (open STDERR, ">&", $writer) {
+        $write_setup->("error:stderr");
+        _exit($SETUP_EXIT);
+    }
+    close $writer;
+    # A command can execute only after this complete handshake. Thus absence
+    # of ready is a setup failure without reserving any command exit status.
+    $write_setup->("ready") or _exit($SETUP_EXIT);
+    exec {$cmd[0]} @cmd or do {
+        $write_setup->("error:exec");
+        _exit($SETUP_EXIT);
+    };
+}
+close $writer;
+close $setup_writer;
+$active_pid = $pid;
+unless (sigprocmask(SIG_SETMASK, $old_signal_mask)) {
+    kill "TERM", -$pid;
+    kill "TERM", $pid;
+    kill "KILL", -$pid;
+    kill "KILL", $pid;
+    waitpid($pid, WNOHANG);
+    answer("unknown", 127, "signal mask restore");
+}
+
+my $started = clock_gettime(CLOCK_MONOTONIC);
+my $run_deadline = $started + $limit;
+my $grace_deadline = $run_deadline + $reap;
+my $state = "RUNNING";
+my ($status, $direct_reaped);
+my $tail = "";
+my $setup_error = "";
+my $wait_error = "";
+my $cleanup_deadline;
+my $DRAIN_READS = 8;
+my $DRAIN_BYTES = 65536;
+sub drain {
+    my ($reads, $bytes) = (0, 0);
+    while ($reads < $DRAIN_READS && $bytes < $DRAIN_BYTES) {
+        $reads++;
+        my $chunk = "";
+        my $want = $DRAIN_BYTES - $bytes;
+        $want = 8192 if $want > 8192;
+        my $n = sysread($reader, $chunk, $want);
+        next if !defined($n) && $! == EINTR;
+        last unless defined($n) && $n > 0;
+        $bytes += $n;
+        $tail .= $chunk;
+        $tail = substr($tail, -65536) if length($tail) > 65536;
+    }
+}
+sub drain_setup {
+    for (1 .. 4) {
+        my $chunk = "";
+        my $n = sysread($setup_reader, $chunk, 256);
+        next if !defined($n) && $! == EINTR;
+        last unless defined($n) && $n > 0;
+        $setup_error .= $chunk;
+        $setup_error = substr($setup_error, -1024)
+            if length($setup_error) > 1024;
+    }
+}
+
+while (1) {
+    drain();
+    drain_setup();
+    my $now = clock_gettime(CLOCK_MONOTONIC);
+
+    if (length($interrupted) && !$active_pid) {
+        answer("supervisor-error", 127,
+               "interrupted by SIG$interrupted; termination was attempted");
+    }
+    if (length($interrupted) && !defined($cleanup_deadline)) {
+        $cleanup_deadline = $now + $reap;
+        kill "TERM", -$active_pid if $active_pid;
+        kill "TERM", $active_pid if $active_pid;
+    }
+
+    if ($state eq "RUNNING" && !$wait_error && $now >= $run_deadline) {
+        $state = "TIMED_OUT";
+        $cleanup_deadline = $grace_deadline
+            unless defined $cleanup_deadline;
+        kill "TERM", -$active_pid if $active_pid;
+        kill "TERM", $active_pid if $active_pid;
+    }
+
+    unless ($direct_reaped || defined $cleanup_deadline) {
+        my $poll_mask = POSIX::SigSet->new();
+        unless (sigprocmask(SIG_BLOCK, $blocked_signals, $poll_mask)) {
+            $wait_error = "could not mask signals around waitpid: $!"
+                unless length $wait_error;
+            $cleanup_deadline = $now + $reap
+                unless defined $cleanup_deadline;
+            kill "TERM", -$active_pid if $active_pid;
+            kill "TERM", $active_pid if $active_pid;
+            next;
+        }
+        if (length $interrupted) {
+            # The signal was observed before completion. Do not reap and free
+            # the identity that the next loop iteration will clean up.
+            unless (sigprocmask(SIG_SETMASK, $poll_mask)) {
+                $wait_error = "could not restore signals before cleanup: $!"
+                    unless length $wait_error;
+            }
+            next;
+        }
+        my $got = waitpid($pid, WNOHANG);
+        if ($got == $pid) {
+            $status = $?;
+            $direct_reaped = 1;
+            $active_pid = 0;
+            $interrupted = "";
+        }
+        my $poll_errno_number = 0 + $!;
+        unless (sigprocmask(SIG_SETMASK, $poll_mask)) {
+            $wait_error = "could not restore signals after waitpid: $!"
+                unless length $wait_error;
+            if ($active_pid) {
+                $cleanup_deadline = $now + $reap
+                    unless defined $cleanup_deadline;
+                kill "TERM", -$active_pid;
+                kill "TERM", $active_pid;
+            }
+        }
+        if ($got == $pid) {
+            drain_setup();
+            # The active PID was cleared while interruption signals were
+            # blocked. Any pending signal is delivered only after restoration
+            # and can therefore never act on a reaped/reusable identity.
+            last;
+        } elsif ($got == -1 && $poll_errno_number != EINTR && !$wait_error) {
+            $! = $poll_errno_number;
+            $wait_error = "waitpid failed: $!";
+            $cleanup_deadline = $now + $reap
+                unless defined $cleanup_deadline;
+            kill "TERM", -$active_pid if $active_pid;
+            kill "TERM", $active_pid if $active_pid;
+        }
+    }
+
+    if (defined($cleanup_deadline) && $now >= $cleanup_deadline) {
+        # The group may still contain a TERM-ignoring child after its parent
+        # exited. Keep that parent unreaped to reserve its PID/PGID, signal the
+        # original group at grace, and only then make the final reap attempt.
+        kill "KILL", -$active_pid if $active_pid;
+        kill "KILL", $active_pid if $active_pid;
+        unless ($direct_reaped) {
+            # One final nonblocking attempt only. EINTR or any other failure
+            # cannot extend the already-expired cleanup deadline.
+            my $last = waitpid($pid, WNOHANG);
+            my $last_errno_number = 0 + $!;
+            if ($last == $pid) {
+                $status = $?;
+                $direct_reaped = 1;
+                $active_pid = 0;
+            } elsif ($last == -1 && $last_errno_number != EINTR
+                     && !$wait_error) {
+                $! = $last_errno_number;
+                $wait_error = "final waitpid failed: $!";
+            }
+        }
+        last;
+    }
+    sleep 0.02;
+}
+drain();
+drain_setup();
+if (length $interrupted) {
+    answer("supervisor-error", 127,
+           "interrupted by SIG$interrupted; termination was attempted");
+}
+if (length $wait_error) {
+    answer("supervisor-error", 127, $wait_error);
+}
+if ($setup_error =~ /(?:^|\n)error:([^\n]+)/) {
+    answer("setup-error", 127, $1);
+}
+if ($state eq "RUNNING" && $direct_reaped
+        && $setup_error !~ /(?:^|\n)ready(?:\n|$)/) {
+    answer("setup-error", 127, "setup handshake absent");
+}
+my $rc = 127;
+if ($state eq "TIMED_OUT") {
+    $rc = 124;
+} elsif (defined $status) {
+    $rc = WIFEXITED($status) ? WEXITSTATUS($status)
+        : WIFSIGNALED($status) ? 128 + WTERMSIG($status) : 127;
+}
+answer($state eq "TIMED_OUT" ? "timeout" : "answered", $rc, $tail);'
+
+# bounded SECONDS CMD... -- run CMD under a real kill deadline. PROBE_STATE is
+# answered, timeout, or unknown; answered includes a non-zero return and empty
+# output, with PROBE_RC preserving that distinction. PROBE_OUT is the last line
+# written, which ignores login-profile chatter before our tagged answer.
+PROBE_STATE=unknown
+PROBE_OUT=
+PROBE_RC=127
+PROBE_WHY=
+bounded() {
+  _limit=$1
+  shift
+  PROBE_STATE=unknown
+  PROBE_OUT=
+  PROBE_RC=127
+  PROBE_WHY="the command could not be started"
+  if [ -z "$PERL" ]; then
+    PROBE_WHY="perl is unavailable, so no bounded child can be launched"
+    return 1
+  fi
+  _answer=$($PERL -e "$SUPERVISOR_PERL" "$_limit" "$REAP_SECONDS" "$@") || {
+    PROBE_WHY="the bounded supervisor failed"
+    return 1
+  }
+  _nl='
+'
+  PROBE_STATE=${_answer%%"$_nl"*}
+  _answer=${_answer#*"$_nl"}
+  PROBE_RC=${_answer%%"$_nl"*}
+  PROBE_OUT=${_answer#*"$_nl"}
+  PROBE_OUT=${PROBE_OUT%"$_nl"__DOCTOR_END__}
+  case "$PROBE_STATE" in
+    answered) PROBE_WHY= ;;
+    timeout)  PROBE_WHY="it timed out; termination was attempted" ;;
+    setup-error)
+              PROBE_STATE=unknown
+              PROBE_WHY="the bounded supervisor setup failed: $PROBE_OUT"
+              PROBE_OUT= ;;
+    supervisor-error)
+              PROBE_STATE=unknown
+              PROBE_WHY="the bounded supervisor failed: $PROBE_OUT"
+              PROBE_OUT= ;;
+    *)        PROBE_STATE=unknown
+              PROBE_WHY="the bounded supervisor could not launch it" ;;
+  esac
+}
 
 printf '\n=== HOST ===\n'
-printf '  hostname: %s\n' "$(hostname 2>/dev/null || echo unknown)"
+if command -v hostname >/dev/null 2>&1; then
+  bounded "$RUN_SECONDS" hostname
+  case "$PROBE_STATE:$PROBE_RC" in
+    answered:0) printf '  hostname: %s\n' "${PROBE_OUT:-unknown}" ;;
+    timeout:*)  printf '  hostname: COULD NOT DETERMINE — hostname timed out\n' ;;
+    *)          printf '  hostname: COULD NOT DETERMINE — hostname failed\n' ;;
+  esac
+else
+  printf '  hostname: COULD NOT DETERMINE — hostname is not available\n'
+fi
 printf '  user: %s\n' "${USER:-${LOGNAME:-unknown}}"
 printf '  home: %s\n' "$HOME"
-printf '  python3: %s\n' "$(python3 --version 2>&1 || echo ABSENT)"
-printf '  git: %s\n' "$(git --version 2>&1 || echo ABSENT)"
+
+if command -v python3 >/dev/null 2>&1; then
+  bounded "$RUN_SECONDS" python3 --version
+  case "$PROBE_STATE:$PROBE_RC" in
+    answered:0) printf '  python3: %s\n' "$PROBE_OUT" ;;
+    timeout:*)  printf '  python3: TIMEOUT — version probe timed out; termination was attempted\n' ;;
+    *)          printf '  python3: COULD NOT DETERMINE — version probe failed\n' ;;
+  esac
+else
+  printf '  python3: ABSENT\n'
+fi
+
+if command -v git >/dev/null 2>&1; then
+  bounded "$RUN_SECONDS" git --version
+  case "$PROBE_STATE:$PROBE_RC" in
+    answered:0) printf '  git: %s\n' "$PROBE_OUT" ;;
+    timeout:*)  printf '  git: TIMEOUT — version probe timed out; termination was attempted\n' ;;
+    *)          printf '  git: COULD NOT DETERMINE — version probe failed\n' ;;
+  esac
+else
+  printf '  git: ABSENT\n'
+fi
 
 # claude usually lives behind a conda/micromamba prefix loaded by .bashrc, so a
-# non-interactive shell will not see it. Check an interactive login shell too.
+# non-interactive shell will not see it. The measured cluster environments in
+# README.md require this fallback, but their profiles are untrusted work from a
+# diagnostic's perspective, so the interactive login shell gets a kill bound.
 cl=$(command -v claude 2>/dev/null)
 if [ -z "$cl" ]; then
-  cl=$(bash -lic 'command -v claude' 2>/dev/null | grep -v '^bash:' | head -n 1)
-  [ -n "$cl" ] && cl="$cl (login shell only)"
+  if command -v bash >/dev/null 2>&1; then
+    bounded "$RUN_SECONDS" bash -lic \
+      'p=$(command -v claude); if [ -n "$p" ]; then printf "found:%s\n" "$p"; else printf "absent:\n"; fi'
+    case "$PROBE_STATE:$PROBE_RC:$PROBE_OUT" in
+      answered:0:found:*) cl="${PROBE_OUT#found:} (login shell only)" ;;
+      answered:0:absent:*) cl= ;;
+      timeout:*) cl="COULD NOT DETERMINE — login shell timed out" ;;
+      *) cl="COULD NOT DETERMINE — login shell probe failed" ;;
+    esac
+  else
+    cl="COULD NOT DETERMINE — not on current PATH and bash is unavailable"
+  fi
 fi
 printf '  claude: %s\n' "${cl:-ABSENT}"
 
@@ -66,70 +476,6 @@ printf '  claude: %s\n' "${cl:-ABSENT}"
 # third always says why -- survey.py's set/unrestricted/unknown rule, in the
 # words a person reads. Reporting silence as absence is the quiet lie
 # ARC-244, ARC-245 and ARC-251 were each about.
-
-# A probe that can hang is worse than no probe: this is the first command run
-# on a new host, often over a link that is why you are running it. Two bounds,
-# the shape survey.py's run() uses -- the child carries its own deadline, and a
-# child that overruns is killed and then reaped under a SECOND, shorter bound,
-# because a process parked in an uninterruptible syscall (a dead automount, a
-# stale NFS handle) does not die when it is killed. Nothing here ever calls
-# `wait`: `wait` is precisely the unbounded step, and doctor would inherit the
-# hang it was killing the child to avoid.
-# PROBE_SECONDS is the deadline the probe holds itself to; PROBE_TICKS is the
-# one held over it from out here, and is deliberately the looser of the two
-# (~6s against a worst case of connect-then-read at 2s each), so a probe that
-# is merely slow is answered rather than killed and then read as unknown.
-PROBE_SECONDS=2
-PROBE_TICKS=30
-REAP_TICKS=10
-TICK=
-
-# One tick is 0.2s wherever sleep takes a fraction -- every sleep(1) anyone
-# runs this on -- and 1s where it does not. The loops below count TICKS, not
-# seconds, so a sleep that silently rejects the fraction makes doctor slower
-# and never makes it unbounded. The capability test IS the first tick, so
-# asking costs nothing.
-tick() {
-  if [ -z "$TICK" ]; then
-    if sleep 0.2 2>/dev/null; then TICK=0.2; else TICK=1; fi
-    return 0
-  fi
-  sleep "$TICK"
-}
-
-# bounded CMD... -- run it, put its first line in PROBE_OUT, and leave
-# PROBE_OUT empty if it did not come back. The completion signal is the output
-# file, not the process: a background child is a zombie until someone waits on
-# it, so `kill -0` would report a finished probe as still running.
-PROBE_OUT=
-PROBE_WHY=
-bounded() {
-  PROBE_OUT=
-  PROBE_WHY="it returned nothing"
-  _pt=$(mktemp 2>/dev/null) || {
-    PROBE_WHY="there is no mktemp here to give the probe a file to answer in"
-    return 1
-  }
-  "$@" >"$_pt" 2>/dev/null &
-  _pp=$!
-  _i=0
-  while [ ! -s "$_pt" ]; do
-    _i=$((_i + 1))
-    if [ "$_i" -gt "$PROBE_TICKS" ]; then
-      kill -TERM "$_pp" 2>/dev/null
-      _j=0
-      while [ "$_j" -lt "$REAP_TICKS" ] && kill -0 "$_pp" 2>/dev/null; do
-        _j=$((_j + 1)); tick
-      done
-      kill -KILL "$_pp" 2>/dev/null
-      PROBE_WHY="it did not answer and was killed"
-      break
-    fi
-    tick
-  done
-  PROBE_OUT=$(head -n 1 "$_pt" 2>/dev/null)
-  rm -f "$_pt"
-}
 
 # Ask the daemon whether it answers, rather than whether a port is open: a
 # listening socket is evidence that something is there, and only /api/health
@@ -177,13 +523,13 @@ else:
 DAEMON=unknown
 WHY="no python3 here to open a socket with"
 if command -v python3 >/dev/null 2>&1; then
-  bounded python3 -c "$HEALTH_PY" "$LISTEN" "$PROBE_SECONDS"
-  case "$PROBE_OUT" in
-    answering:*) DAEMON=up;      WHY=${PROBE_OUT#answering:} ;;
-    listening:*) DAEMON=partial; WHY=${PROBE_OUT#listening:} ;;
-    closed:*)    DAEMON=down;    WHY=${PROBE_OUT#closed:} ;;
-    unknown:*)   DAEMON=unknown; WHY=${PROBE_OUT#unknown:} ;;
-    *)           DAEMON=unknown; WHY="the probe failed: $PROBE_WHY" ;;
+  bounded "$PROBE_RUN_SECONDS" python3 -c "$HEALTH_PY" "$LISTEN" "$PROBE_SECONDS"
+  case "$PROBE_STATE:$PROBE_RC:$PROBE_OUT" in
+    answered:0:answering:*) DAEMON=up;      WHY=${PROBE_OUT#answering:} ;;
+    answered:0:listening:*) DAEMON=partial; WHY=${PROBE_OUT#listening:} ;;
+    answered:0:closed:*)    DAEMON=down;    WHY=${PROBE_OUT#closed:} ;;
+    answered:0:unknown:*)   DAEMON=unknown; WHY=${PROBE_OUT#unknown:} ;;
+    *) DAEMON=unknown; WHY="the probe was indeterminate: $PROBE_WHY" ;;
   esac
 fi
 
@@ -274,13 +620,14 @@ if [ -d "$BUS_HOME" ] && { [ ! -r "$BUS_HOME" ] || [ ! -x "$BUS_HOME" ]; }; then
   printf '  models registry: COULD NOT DETERMINE — %s is not readable\n' "$BUS_HOME"
 elif [ -f "$REG" ] && [ -r "$REG" ]; then
   if command -v python3 >/dev/null 2>&1; then
-    bounded python3 -c "$COUNT_PY" "$REG"
+    bounded "$RUN_SECONDS" python3 -c "$COUNT_PY" "$REG"
   else
-    PROBE_OUT=; PROBE_WHY="there is no python3 here to read it with"
+    PROBE_STATE=unknown; PROBE_RC=127; PROBE_OUT=
+    PROBE_WHY="there is no python3 here to read it with"
   fi
-  case "$PROBE_OUT" in
-    ok:*)  printf '  models registry: %s (%s models)\n' "$REG" "${PROBE_OUT#ok:}" ;;
-    bad:*) printf '  models registry: %s — PRESENT BUT UNUSABLE (%s)\n' \
+  case "$PROBE_STATE:$PROBE_RC:$PROBE_OUT" in
+    answered:0:ok:*)  printf '  models registry: %s (%s models)\n' "$REG" "${PROBE_OUT#ok:}" ;;
+    answered:0:bad:*) printf '  models registry: %s — PRESENT BUT UNUSABLE (%s)\n' \
              "$REG" "${PROBE_OUT#bad:}"
            printf '      `bus models` fails on this exactly as it fails on no file at all.\n' ;;
     *)     printf '  models registry: %s — present, but its CONTENTS COULD NOT BE DETERMINED: %s\n' \
@@ -308,7 +655,12 @@ fi
 printf '\n=== SKILL STORES ===\n'
 printf '  personal prefix: %s' "$PREFIX"
 if [ -d "$PREFIX" ]; then
-  printf ' (%s entries)\n' "$(ls -1 "$PREFIX" 2>/dev/null | wc -l | tr -d ' ')"
+  entries=0
+  for entry in "$PREFIX"/*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    entries=$((entries + 1))
+  done
+  printf ' (%s entries)\n' "$entries"
 else
   printf ' — ABSENT\n'
 fi
@@ -316,8 +668,10 @@ fi
 org=0
 for d in "$HOME"/.claude-science/orgs/*/skills; do
   [ -d "$d" ] || continue
-  n=$(ls -1 "$d" 2>/dev/null | wc -l | tr -d ' ')
-  org=$((org + n))
+  for entry in "$d"/*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    org=$((org + 1))
+  done
 done
 if [ "$org" -gt 0 ]; then
   printf '  org store: %s skills\n' "$org"
@@ -332,17 +686,32 @@ else
   found=0
   for d in "$PREFIX"/*; do
     [ -e "$d" ] || continue
-    name=$(basename "$d")
+    name=${d##*/}
     found=$((found + 1))
     if [ -L "$d" ]; then
-      printf '  %-32s link -> %s\n' "$name" "$(readlink "$d")"
+      if command -v readlink >/dev/null 2>&1; then
+        bounded "$RUN_SECONDS" readlink "$d"
+        case "$PROBE_STATE:$PROBE_RC" in
+          answered:0) printf '  %-32s link -> %s\n' "$name" "$PROBE_OUT" ;;
+          timeout:*)  printf '  %-32s link -> COULD NOT DETERMINE — readlink timed out\n' "$name" ;;
+          *)          printf '  %-32s link -> COULD NOT DETERMINE — readlink failed\n' "$name" ;;
+        esac
+      else
+        printf '  %-32s link -> COULD NOT DETERMINE — readlink is unavailable\n' "$name"
+      fi
     elif [ -f "$d/$MARKER" ]; then
-      v=$(sed -n 's/^version=//p' "$d/$MARKER" 2>/dev/null)
+      v=
+      o=
+      while IFS='=' read -r key value; do
+        case "$key" in
+          version) v=$value ;;
+          origin)  [ -n "$o" ] || o=$value ;;
+        esac
+      done <"$d/$MARKER"
       # "ours" was true of the FILE and misleading about the lineage: this
       # repo vendors eight skills verbatim from another author, and reporting
       # them as ours at our commit hides whose work is installed -- and hides
       # that --uninstall deliberately leaves them.
-      o=$(sed -n 's/^origin=//p' "$d/$MARKER" 2>/dev/null | head -n 1)
       if [ -z "$o" ] && [ -d "$REPO/skills/$name" ]; then
         case "$name" in "$OWN_PREFIX"*) o=authored ;; *) o=vendored ;; esac
       fi
@@ -372,10 +741,27 @@ for d in "$PREFIX"/*; do
   [ -d "$d" ] || continue
   for py in "$d"/scripts/*.py; do
     [ -f "$py" ] || continue
-    if python3 -m py_compile "$py" 2>/dev/null; then
-      printf '  ok    %s/%s\n' "$(basename "$d")" "$(basename "$py")"
+    skill=${d##*/}
+    script=${py##*/}
+    if ! command -v python3 >/dev/null 2>&1; then
+      printf '  UNKNOWN  %s/%s — python3 is ABSENT, so compilation could not be checked\n' \
+        "$skill" "$script"
+      bad=$((bad + 1))
+      continue
+    fi
+    bounded "$RUN_SECONDS" python3 -m py_compile "$py"
+    if [ "$PROBE_STATE" = timeout ]; then
+      printf '  TIMEOUT  %s/%s — compilation timed out; termination was attempted\n' \
+        "$skill" "$script"
+      bad=$((bad + 1))
+    elif [ "$PROBE_STATE" != answered ]; then
+      printf '  UNKNOWN  %s/%s — compilation could not be started\n' \
+        "$skill" "$script"
+      bad=$((bad + 1))
+    elif [ "$PROBE_RC" -eq 0 ]; then
+      printf '  ok    %s/%s\n' "$skill" "$script"
     else
-      printf '  FAIL  %s/%s does not compile\n' "$(basename "$d")" "$(basename "$py")"
+      printf '  FAIL  %s/%s does not compile\n' "$skill" "$script"
       bad=$((bad + 1))
     fi
   done
@@ -386,13 +772,28 @@ printf '\n=== SOURCE ===\n'
 printf '  repo: %s\n' "$REPO"
 # Ask git, never stat `.git`: it is a file in a worktree and a directory in a
 # clone, and this whole section vanished for every worktree.
-if command -v git >/dev/null 2>&1 &&
-   git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1; then
-  printf '  commit: %s\n' "$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-  if [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]; then
-    printf '  worktree: DIRTY\n'
-  else
-    printf '  worktree: clean\n'
+if command -v git >/dev/null 2>&1; then
+  bounded "$RUN_SECONDS" git -C "$REPO" rev-parse --git-dir
+  if [ "$PROBE_STATE:$PROBE_RC" = answered:0 ]; then
+    bounded "$RUN_SECONDS" git -C "$REPO" rev-parse --short HEAD
+    case "$PROBE_STATE:$PROBE_RC" in
+      answered:0) printf '  commit: %s\n' "$PROBE_OUT" ;;
+      timeout:*)  printf '  commit: COULD NOT DETERMINE — git timed out\n' ;;
+      *)          printf '  commit: COULD NOT DETERMINE — git failed\n' ;;
+    esac
+    bounded "$RUN_SECONDS" git -C "$REPO" status --porcelain
+    case "$PROBE_STATE:$PROBE_RC" in
+      answered:0)
+        if [ -n "$PROBE_OUT" ]; then
+          printf '  worktree: DIRTY\n'
+        else
+          printf '  worktree: clean\n'
+        fi ;;
+      timeout:*) printf '  worktree: COULD NOT DETERMINE — git status timed out\n' ;;
+      *)         printf '  worktree: COULD NOT DETERMINE — git status failed\n' ;;
+    esac
+  elif [ "$PROBE_STATE" = timeout ]; then
+    printf '  repository: COULD NOT DETERMINE — git rev-parse timed out\n'
   fi
 fi
 

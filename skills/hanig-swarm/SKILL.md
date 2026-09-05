@@ -356,6 +356,16 @@ read that as an agent running without credentials:
   example, and a gated model will not download without it -- so exactness is
   the policy rather than an omission.
 
+The provider credentials held by Paseo start the selected worker; they are not
+a grant for that worker to call further models from inside its task.
+`models.json` is routing metadata, not a credential grant. In particular,
+`OPENAI_API_KEY` and `OPENROUTER_API_KEY` remain coordinator-side for
+`review.py` and `committee.py`; every coordinator child loses both exact names.
+Other-model work therefore belongs in those coordinator-side review and
+committee paths. Changing that reach requires a deliberately designed proxy or
+named credential exception -- never quietly deleting either name from the
+denylist.
+
 This is not a defect to re-file. A code unit is REQUIRED to push a branch and
 open a pull request, so an agent holding nothing could not close its own
 unit. The true claim is narrower than "the agent holds no credentials": the
