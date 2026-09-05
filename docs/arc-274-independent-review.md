@@ -254,3 +254,33 @@ record remains unverified for every listed agent/OS combination (macOS Claude
 and Codex have version-probe evidence only; OpenCode/Pi and all Linux rows lack
 even that complete evidence). That missing evidence is a release gap, not a
 pass, and none of the hermetic reproductions changes it.
+
+## Implementation follow-up (2026-09-05)
+
+The assigned implementation follow-up resolves the two P1s and the lifecycle,
+frontmatter, and public duplicate-visibility P2s in focused commits:
+
+| Review finding | Resolution | Evidence |
+| --- | --- | --- |
+| `--only` uninstall path escape | Resolved in `9123802` | Path-like, absolute, dot-prefixed, separator, empty, and NUL values are rejected before discovery or mutation; live/dry-run copy/link regressions preserve the outside owned fixture. |
+| Symlink-prefix source destruction | Resolved in `9123802` | CLI and lifecycle canonicalize source and destination-parent identities, reject overlapping payloads before staging, deduplicate aliases, and never follow a foreign final link during replacement. |
+| Foreign takeover imports consumers | Resolved in `c8c3650` | Preflight records exact prior ownership; consumer union occurs only for proven ownership, and a mismatched same-repository record no longer strands a phantom consumer. |
+| Link-to-copy sidecar orphan | Resolved in `c8c3650` | Successful transition removes the prior sidecar; injected failure restores and rebinds the old link record; link→copy→uninstall→link succeeds. |
+| Order-dependent/dropped duplicate visibility | Resolved across compatibility commit `07c1074`, `c8c3650`, and the independent-verification follow-up | Discovery uses fixed adapter precedence while preserving presentation order; public JSON and diagnostics retain `competing_visibility`. Expected mixed-host exposure proceeds with identical snapshots and a prominent precedence warning, while existing foreign/org collisions still fail closed. Combined public order coverage is in `b94bef5`. |
+| Malformed frontmatter accepted | Resolved in `c8c3650` plus the independent-verification follow-up | A 64-KiB-bounded stdlib parser requires delimited unique top-level fields, exact non-empty portable identity/description, and rejects malformed flow/mapping/quote syntax, YAML non-string scalars, and reserved indicators; every shipped bundle passes. |
+| Diagnostics/lifecycle encoding disagreement | Resolved across lifecycle commit `c8c3650` and diagnostics follow-up `266cf2f` | Both sides reject invalid UTF-8, duplicate/malformed fields, and incomplete or inconsistent schema-2 records while retaining empty consumers and normalizing consumer order. |
+
+Focused evidence after combining `07c1074` locally:
+
+- 68 installer/lifecycle/cross-agent/capability tests passed in 27.064 seconds;
+- 98 discovery/diagnostics/installer/lifecycle/cross-agent tests passed in
+  38.513 seconds; and
+- 30 older installer/portable compatibility tests initially exposed only a
+  logical-versus-canonical prefix display mismatch. The targeted regression
+  passed after retaining canonical mutation identity but printing the caller's
+  logical spelling in the `doctor --prefix` suggestion.
+
+The parent coordinator still owns a full regression on the integrated tree and
+native-loader release evidence. The unchanged `2414d8a` baseline full run was
+reported separately as 1,544 tests with two pre-existing failures; that result
+is neither evidence for these fixes nor a merge pass.

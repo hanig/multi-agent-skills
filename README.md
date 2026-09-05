@@ -41,7 +41,7 @@ cd multi-agent-skills
 ./install.sh --dry-run --json
 # Name targets explicitly for a portable, auditable install.
 ./install.sh --agent claude --agent codex --agent opencode --agent pi \
-  --allow-org-shadow --allow-duplicate-visibility
+  --allow-org-shadow
 ./bin/doctor --json                # installed skills, provenance, and health
 ```
 
@@ -585,7 +585,6 @@ is in [`docs/cross-agent-acceptance.md`](docs/cross-agent-acceptance.md).
              [--mode copy|link] [--only NAME] [--dry-run] [--json]
              [--force] [--uninstall] [--allow-org-shadow]
              [--allow-vendored-shadow] [--include-vendored]
-             [--allow-duplicate-visibility]
 ```
 
 With no selector, the installer automatically targets every detected agent
@@ -601,9 +600,12 @@ target, physical root, verification, shared consumers, requested actions,
 diagnostics, and conflicts.
 
 If one loader would see requested copies in multiple physical roots, the plan
-reports `competing_visibility` and refuses to write. Re-run with
-`--allow-duplicate-visibility` only after reviewing those paths and accepting
-that the copies can load with adapter-specific precedence and later drift.
+prominently reports `competing_visibility` and the unresolved adapter-specific
+precedence. The ordinary mixed-host install proceeds because every planned root
+receives the same source snapshot in that operation; deterministic selection
+prevents flag order from changing placement. Existing foreign paths and
+org-managed collisions remain hard failures, and separately edited copies can
+still drift later.
 
 **`--allow-org-shadow` is required here, and permanently.** A copy of these
 skills is maintained on Claude Science, so all five also arrive in the Arc org

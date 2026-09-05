@@ -33,6 +33,14 @@ WORKFLOW_DEPENDENCIES = {"hanig-project": ("hanig-swarm",)}
 MAX_FRONTMATTER_BYTES = 64 * 1024
 _FRONTMATTER_KEY = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):(?:[ \t]*(.*))?$")
 _BLOCK_SCALARS = frozenset((">", ">-", ">+", "|", "|-", "|+"))
+_SKILL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+_YAML_NON_STRING = re.compile(
+    r"(?i)(?:null|true|false|yes|no|on|off|~|"
+    r"[-+]?(?:[0-9][0-9_]*)(?:\.[0-9_]*)?(?:e[-+]?[0-9]+)?|"
+    r"[-+]?\.(?:inf|nan)|0[xob][0-9a-f_]+|"
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[t ].*)?)"
+)
+_NON_STRING = object()
 
 
 class InstallRequestError(ValueError):
@@ -50,7 +58,6 @@ class InstallOptions:
     force: bool
     allow_org_shadow: bool
     allow_vendored_shadow: bool
-    allow_duplicate_visibility: bool
     include_vendored: bool
     uninstall: bool
     json: bool
@@ -107,8 +114,6 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true")
     p.add_argument("--allow-org-shadow", action="store_true")
     p.add_argument("--allow-vendored-shadow", action="store_true")
-    p.add_argument("--allow-duplicate-visibility", action="store_true",
-                   help="permit multiple installed copies visible to one loader")
     p.add_argument("--include-vendored", action="store_true")
     p.add_argument("--uninstall", action="store_true")
     p.add_argument("--json", action="store_true", help="emit stable plan/result JSON")
@@ -143,7 +148,6 @@ def parse_options(argv: Sequence[str]) -> InstallOptions:
         force=ns.force,
         allow_org_shadow=ns.allow_org_shadow,
         allow_vendored_shadow=ns.allow_vendored_shadow,
-        allow_duplicate_visibility=ns.allow_duplicate_visibility,
         include_vendored=ns.include_vendored,
         uninstall=ns.uninstall,
         json=ns.json,
@@ -168,7 +172,7 @@ def _skill_names(names: Iterable[str], flag: str) -> tuple[str, ...]:
     """Return unique portable skill names, never caller-controlled paths."""
     result: list[str] = []
     for name in names:
-        if (not name or "\x00" in name or name.startswith(".") or
+        if (not name or "\x00" in name or not _SKILL_NAME.fullmatch(name) or
                 Path(name).is_absolute() or Path(name).name != name or
                 "/" in name or "\\" in name):
             raise InstallRequestError(
@@ -374,7 +378,8 @@ def render_plan(plan: InstallPlan, options: InstallOptions, version: str) -> str
     lines.append("Workflow dependency limits: skill payloads are installed only; "
                  "external CLIs and workflow dependencies are not installed.")
     if options.prefix:
-        lines.append(f"Diagnostic: bin/doctor --prefix {plan.destinations[0].path}")
+        logical_prefix = Path(os.path.abspath(options.prefix))
+        lines.append(f"Diagnostic: bin/doctor --prefix {logical_prefix}")
     return "\n".join(lines)
 
 
@@ -430,7 +435,7 @@ def selected_sources(repo: Path, only: Sequence[str]) -> list[tuple[str, Path, s
             for name in names]
 
 
-def _scalar(value: str) -> str:
+def _scalar(value: str) -> Any:
     """Parse the string subset used by portable skill frontmatter."""
     if value.startswith('"'):
         try:
@@ -443,18 +448,29 @@ def _scalar(value: str) -> str:
     if value.startswith("'"):
         if len(value) < 2 or not value.endswith("'"):
             raise ValueError("unterminated quoted frontmatter scalar")
-        return value[1:-1].replace("''", "'")
+        inner = value[1:-1]
+        index = 0
+        while index < len(inner):
+            if inner[index] != "'":
+                index += 1
+                continue
+            if index + 1 >= len(inner) or inner[index + 1] != "'":
+                raise ValueError("single-quoted frontmatter scalar has an unescaped quote")
+            index += 2
+        return inner.replace("''", "'")
     if value.endswith(("'", '"')):
         raise ValueError("frontmatter scalar has an unmatched quote")
-    if (value.startswith(("[", "{", "&", "*", "!", "? ", "- ")) or
+    if ((value and value[0] in "-?:,[]{}#&*!|>@`%") or
             ": " in value or " #" in value):
         raise ValueError("unsupported or malformed plain frontmatter scalar")
+    if _YAML_NON_STRING.fullmatch(value):
+        return _NON_STRING
     return value
 
 
-def _frontmatter(skill: Path) -> dict[str, str]:
+def _frontmatter(skill: Path) -> dict[str, Any]:
     """Read and validate a bounded, stdlib-only YAML-compatible subset."""
-    fields: dict[str, str] = {}
+    fields: dict[str, Any] = {}
     current_block: str | None = None
     consumed = 0
     try:
@@ -490,7 +506,7 @@ def _frontmatter(skill: Path) -> dict[str, str]:
                     content = raw.strip()
                     if content:
                         fields[current_block] = (
-                            fields[current_block] + " " + content
+                            str(fields[current_block]) + " " + content
                         ).strip()
                     continue
                 match = _FRONTMATTER_KEY.fullmatch(raw)
@@ -517,13 +533,18 @@ def validate_payload(path: Path) -> None:
         raise ValueError("missing SKILL.md")
     fields = _frontmatter(skill)
     name = fields.get("name", "")
-    if not name:
+    if not isinstance(name, str) or not name:
         raise ValueError("SKILL.md has no non-empty name field")
+    try:
+        _skill_names((name,), "SKILL.md name")
+    except InstallRequestError as exc:
+        raise ValueError(str(exc)) from exc
     if name != path.name:
         raise ValueError(
             f"SKILL.md name {name!r} does not match directory {path.name!r}"
         )
-    if not fields.get("description", ""):
+    description = fields.get("description", "")
+    if not isinstance(description, str) or not description:
         raise ValueError("SKILL.md has no non-empty description field")
     for script in path.glob("scripts/*.py"):
         try:
@@ -778,16 +799,11 @@ def run(argv: Sequence[str], *, repo: Path | None = None,
                        "(this is NOT the --allow-org-shadow case)")
         blocked.append(detail)
     visibility = [_visibility_detail(item) for item in plan.competing_visibility]
-    if visibility and not options.allow_duplicate_visibility:
-        blocked.extend(
-            item + "; use --allow-duplicate-visibility to acknowledge duplicate writes"
-            for item in visibility
-        )
-    visibility_notes = (
-        ["duplicate loader visibility explicitly allowed: " + item
-         for item in visibility]
-        if options.allow_duplicate_visibility else []
-    )
+    visibility_notes = [
+        "known competing loader visibility: " + item +
+        "; deterministic copies contain the same snapshot, but native precedence remains adapter-specific"
+        for item in visibility
+    ]
     org_conflicts = _org_shadow_conflicts(plan, (name for name, _, _ in sources), context)
     if org_conflicts and not options.allow_org_shadow:
         blocked.extend(org_conflicts)

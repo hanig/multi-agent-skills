@@ -90,13 +90,19 @@ class TestSelectionBeforeWrites(unittest.TestCase):
             "empty-name": "---\nname:\ndescription: present\n---\n",
             "wrong-name": "---\nname: beta\ndescription: present\n---\n",
             "empty-description": "---\nname: alpha\ndescription:\n---\n",
+            "null-description": "---\nname: alpha\ndescription: null\n---\n",
+            "reserved-description": "---\nname: alpha\ndescription: @invalid\n---\n",
             "bad-quote": ("---\nname: alpha\n"
                           "description: \"unterminated\n---\n"),
+            "bad-single-quote": ("---\nname: alpha\n"
+                                 "description: 'bad'quote'\n---\n"),
             "bad-indent": ("---\nname: alpha\n"
                            "  description: misplaced\n---\n"),
             "malformed-line": "---\nname alpha\ndescription: present\n---\n",
             "malformed-flow": ("---\nname: alpha\n"
                                "description: [unterminated\n---\n"),
+            "malformed-mapping": ("---\nname: alpha\n"
+                                  "description: {unterminated\n---\n"),
             "oversized": ("---\nname: alpha\ndescription: >-\n  " +
                           "x" * installer.MAX_FRONTMATTER_BYTES + "\n---\n"),
         }
@@ -108,6 +114,26 @@ class TestSelectionBeforeWrites(unittest.TestCase):
                     (path / "SKILL.md").write_text(content)
                     with self.assertRaises(ValueError):
                         installer.validate_payload(path)
+            reserved = Path(raw) / "reserved" / "true"
+            reserved.mkdir(parents=True)
+            (reserved / "SKILL.md").write_text(
+                "---\nname: true\ndescription: present\n---\n"
+            )
+            with self.assertRaises(ValueError):
+                installer.validate_payload(reserved)
+            invalid_name = Path(raw) / "reserved" / "@alpha"
+            invalid_name.mkdir()
+            (invalid_name / "SKILL.md").write_text(
+                "---\nname: \"@alpha\"\ndescription: present\n---\n"
+            )
+            with self.assertRaises(ValueError):
+                installer.validate_payload(invalid_name)
+            quoted = Path(raw) / "quoted" / "alpha"
+            quoted.mkdir(parents=True)
+            (quoted / "SKILL.md").write_text(
+                "---\nname: alpha\ndescription: 'it''s valid'\n---\n"
+            )
+            installer.validate_payload(quoted)
             from lib.skill_lifecycle import LifecycleTarget, install
             invalid_source = Path(raw) / "wrong-name" / "alpha"
             destination = Path(raw) / "store" / "alpha"
@@ -159,18 +185,8 @@ class TestPublicCli(unittest.TestCase):
         return result, home
 
     def test_default_dry_run_selects_all_verified_agents_without_writes(self):
-        blocked, blocked_home = self._run(
-            "--dry-run", "--json",
-            agents=("claude", "codex", "opencode", "pi"),
-        )
-        self.assertEqual(blocked.returncode, 1, blocked.stderr)
-        blocked_data = json.loads(blocked.stdout)
-        self.assertTrue(blocked_data["competing_visibility"])
-        self.assertTrue(any("--allow-duplicate-visibility" in item
-                            for item in blocked_data["conflicts"]))
-        self.assertFalse(blocked_home.exists())
         result, home = self._run(
-            "--dry-run", "--json", "--allow-duplicate-visibility",
+            "--dry-run", "--json",
             agents=("claude", "codex", "opencode", "pi"),
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -181,20 +197,30 @@ class TestPublicCli(unittest.TestCase):
                          {"claude", "codex", "opencode", "pi"})
         self.assertFalse(home.exists(), "dry run created a destination tree")
         self.assertTrue(all(action["status"] == "install" for action in data["actions"]))
-        self.assertTrue(any("duplicate loader visibility explicitly allowed" in item
+        self.assertTrue(data["competing_visibility"])
+        self.assertTrue(any("known competing loader visibility" in item
                             for item in data["diagnostics"]))
 
-    def test_duplicate_visibility_blocks_live_writes_without_acknowledgment(self):
+    def test_expected_duplicate_visibility_is_prominent_and_installs_same_snapshot(self):
         result, home = self._run(
             "--agent", "claude", "--agent", "codex",
             "--only", "hanig-swarm", "--json",
         )
-        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
         data = json.loads(result.stdout)
         self.assertEqual([item["consumer"] for item in data["competing_visibility"]],
                          ["opencode"])
-        self.assertTrue(data["conflicts"])
-        self.assertFalse(home.exists(), "known duplicate visibility wrote a target")
+        self.assertFalse(data["conflicts"])
+        self.assertTrue(any("native precedence remains adapter-specific" in item
+                            for item in data["diagnostics"]))
+        claude = home / ".claude" / "skills" / "hanig-swarm"
+        shared = home / ".agents" / "skills" / "hanig-swarm"
+        self.assertEqual((claude / "SKILL.md").read_bytes(),
+                         (shared / "SKILL.md").read_bytes())
+        self.assertIn("consumers=claude\n",
+                      (claude / ".installed-by-multi-agent-skills").read_text())
+        self.assertIn("consumers=codex\n",
+                      (shared / ".installed-by-multi-agent-skills").read_text())
 
     def test_public_topology_is_independent_of_agent_flag_order(self):
         documents = []
