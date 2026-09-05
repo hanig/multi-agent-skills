@@ -93,11 +93,17 @@ class HermeticRoots(unittest.TestCase):
         self.assertTrue(selected["destination"]["physical_path"].startswith(
             str(self.base.resolve())))
 
-    def test_all_agents_require_explicit_targets_not_arbitrary_default(self):
+    def test_all_agents_are_selected_without_duplicate_shared_writes(self):
         report = self.report(AGENTS)
+        plan = discovery.select_targets(report)
+        self.assertEqual([item["agent"] for item in plan["selected"]], list(AGENTS))
+        self.assertEqual(plan["selected"][2]["covered_by"], ["claude"])
+        self.assertEqual(plan["selected"][3]["covered_by"], ["codex"])
+        # The compatibility helper refuses to pick one of two physical writes
+        # by accident, but automatic multi-target installation uses the plan.
         selected = discovery.select_target(report)
         self.assertEqual(selected["status"], "requires_explicit_target")
-        self.assertEqual(selected["eligible_agents"], list(AGENTS))
+        self.assertEqual(selected["eligible_agents"], ["claude", "codex"])
 
     def test_no_agent_requires_an_explicit_target(self):
         report = self.report()
@@ -128,8 +134,10 @@ class HermeticRoots(unittest.TestCase):
         )
         self.assertEqual(
             report["agents"]["opencode"]["roots"][0]["logical_path"],
-            str(custom / "opencode" / "skills"),
+            str(self.config / "opencode" / "skills"),
         )
+        self.assertIn(str(custom / "opencode" / "skills"),
+                      [root["logical_path"] for root in report["agents"]["opencode"]["roots"]])
         self.assertEqual(
             report["agents"]["pi"]["roots"][0]["logical_path"],
             str(custom / "pi" / "skills"),
