@@ -743,9 +743,50 @@ CACHE.mkdir(parents=True, exist_ok=True)
 
 def load_models_registry() -> list[dict]:
     try:
-        return json.loads(MODELS_JSON.read_text()).get("models", [])
-    except (OSError, json.JSONDecodeError):
-        return []
+        raw = MODELS_JSON.read_text()
+    except FileNotFoundError:
+        sys.exit(f"error: models registry is absent at {MODELS_JSON}")
+    except OSError as exc:
+        sys.exit(f"error: cannot read models registry at {MODELS_JSON}: {exc}")
+
+    try:
+        document = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        sys.exit(
+            f"error: malformed models registry at {MODELS_JSON}: "
+            f"line {exc.lineno} column {exc.colno}: {exc.msg}"
+        )
+
+    if not isinstance(document, dict) or not isinstance(document.get("models"), list):
+        sys.exit(
+            f"error: invalid models registry at {MODELS_JSON}: "
+            "expected an object with a 'models' list"
+        )
+    if not document["models"]:
+        sys.exit(f"error: models registry at {MODELS_JSON} contains no models")
+    for index, model in enumerate(document["models"]):
+        if not isinstance(model, dict) or not isinstance(model.get("id"), str) \
+                or not model["id"]:
+            sys.exit(
+                f"error: invalid models registry at {MODELS_JSON}: "
+                f"models[{index}] must be an object with a non-empty string 'id'"
+            )
+        modalities = model.get("modalities", [])
+        if not isinstance(modalities, list) \
+                or not all(isinstance(item, str) for item in modalities):
+            sys.exit(
+                f"error: invalid models registry at {MODELS_JSON}: "
+                f"models[{index}].modalities must be a list of strings"
+            )
+        for field in ("intelligence_index", "coding_index"):
+            value = model.get(field)
+            if value is not None and (not isinstance(value, (int, float))
+                                      or isinstance(value, bool)):
+                sys.exit(
+                    f"error: invalid models registry at {MODELS_JSON}: "
+                    f"models[{index}].{field} must be a number or null"
+                )
+    return document["models"]
 
 
 def parse_iso(s: str):
@@ -880,8 +921,6 @@ def vllm_load(url: str = "http://localhost:8001/metrics", ttl_s: int = 10) -> st
 
 def cmd_models(args) -> None:
     registry = load_models_registry()
-    if not registry:
-        sys.exit(f"error: no models registry at {MODELS_JSON}")
 
     if args.need == "vision":
         registry = [m for m in registry if "image" in m.get("modalities", [])]

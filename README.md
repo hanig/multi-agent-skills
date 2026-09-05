@@ -79,6 +79,14 @@ not edited -- an upstream re-sync is meant to be a real diff -- so the routing
 decision they need goes in `~/.paseo/orchestration-preferences.json` instead
 (see "Orchestration preferences, per machine").
 
+The accompanying `bin/bus` has one deliberately tracked local correction for
+ARC-270 because the archived source has no reachable upstream remote. It keeps
+missing, unreadable, malformed, invalid, and empty model registries distinct
+without treating the runtime state directory as proof of a registry. The
+upstream report, provenance, and resync contract are in
+`docs/upstream-agent-bus-model-registry.md`; `tests/test_bus_models.py` pins the
+behavior so a future resync cannot silently discard the patch.
+
 Vendoring skills does **not** make this repo standalone at runtime: the hard
 dependency is the `paseo` binary, and copying markdown does not supply one.
 `bin/bus`, `bin/agent-manager`, `bin/agent-view` and `models.json` came across

@@ -612,7 +612,28 @@ except Exception as e:
     print("bad:" + type(e).__name__)
     raise SystemExit
 m = d.get("models") if isinstance(d, dict) else None
-print(("ok:%d" % len(m)) if isinstance(m, list) else "bad:no models list in it")
+if not isinstance(m, list):
+    print("bad:no models list in it")
+elif not m:
+    print("bad:models list is empty")
+else:
+    problem = None
+    for i, model in enumerate(m):
+        if not isinstance(model, dict) or not isinstance(model.get("id"), str) or not model["id"]:
+            problem = "models[%d] has no non-empty string id" % i
+            break
+        modalities = model.get("modalities", [])
+        if not isinstance(modalities, list) or not all(isinstance(x, str) for x in modalities):
+            problem = "models[%d].modalities is not a string list" % i
+            break
+        for field in ("intelligence_index", "coding_index"):
+            value = model.get(field)
+            if value is not None and (not isinstance(value, (int, float)) or isinstance(value, bool)):
+                problem = "models[%d].%s is not numeric" % (i, field)
+                break
+        if problem:
+            break
+    print("bad:" + problem if problem else "ok:%d" % len(m))
 '
 if [ -d "$BUS_HOME" ] && { [ ! -r "$BUS_HOME" ] || [ ! -x "$BUS_HOME" ]; }; then
   # Not readable is not empty. Whether the file is in there cannot be seen
@@ -629,7 +650,7 @@ elif [ -f "$REG" ] && [ -r "$REG" ]; then
     answered:0:ok:*)  printf '  models registry: %s (%s models)\n' "$REG" "${PROBE_OUT#ok:}" ;;
     answered:0:bad:*) printf '  models registry: %s — PRESENT BUT UNUSABLE (%s)\n' \
              "$REG" "${PROBE_OUT#bad:}"
-           printf '      `bus models` fails on this exactly as it fails on no file at all.\n' ;;
+           printf '      `bus models` reports malformed or invalid content separately from absence.\n' ;;
     *)     printf '  models registry: %s — present, but its CONTENTS COULD NOT BE DETERMINED: %s\n' \
              "$REG" "$PROBE_WHY" ;;
   esac
@@ -637,7 +658,7 @@ elif [ -e "$REG" ] || [ -L "$REG" ]; then
   printf '  models registry: COULD NOT DETERMINE — %s exists but is not a readable regular file\n' "$REG"
 else
   printf '  models registry: NOT PRESENT at %s\n' "$REG"
-  printf '      `bus models` exits with "no models registry" without it, and the\n'
+  printf '      `bus models` exits with "models registry is absent" without it, and the\n'
   printf '      paseo skill tells skills to run `bus models --json` to pick a model,\n'
   printf '      so routing has nothing to read.\n'
   if [ -f "$REPO/models.json" ]; then
