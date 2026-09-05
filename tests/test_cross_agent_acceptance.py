@@ -277,6 +277,30 @@ class LifecycleAcceptance(unittest.TestCase):
         self.assertEqual(removed.status, "removed")
         self.assertFalse(destination.exists())
 
+    def test_preflight_is_write_free_and_uninstall_keeps_unselected_skill(self):
+        first = self.source("hanig-verified-workflow")
+        second = self.source("hanig-portable-handoff")
+        root = self.home / ".agents" / "skills"
+        first_target = self.target(first, "claude", destination=root / first.name,
+                                   consumers=("claude",))
+        second_target = self.target(second, "pi", destination=root / second.name,
+                                    consumers=("pi",))
+        inspection = lifecycle.preflight([first_target, second_target])
+        self.assertEqual([item.action for item in inspection], ["install", "install"])
+        self.assertFalse(root.exists(), "dry-run/preflight must not create a root")
+        results = lifecycle.install([first_target, second_target])
+        self.assertEqual([result.status for result in results], ["installed", "installed"])
+        # Loader visibility is not lifecycle ownership: an explicit Claude
+        # install must not acquire a phantom OpenCode/Pi registration.
+        self.assertEqual(lifecycle.read_provenance(first_target.destination).consumers,
+                         ("claude",))
+        uninstalled = lifecycle.uninstall([first_target.destination], consumers=("claude",))[0]
+        self.assertEqual(uninstalled.status, "removed")
+        self.assertFalse(first_target.destination.exists())
+        self.assertTrue(second_target.destination.exists())
+        self.assertEqual(lifecycle.read_provenance(second_target.destination).consumers,
+                         ("pi",))
+
     def test_migration_plan_is_non_destructive(self):
         source = self.source()
         legacy = self.home / ".claude" / "skills" / source.name
