@@ -49,8 +49,13 @@ binary is eligible even if no skill directory exists yet.
 agent by default. Automatic mode selects only successful, exact-version probes
 and reports absent, configured, failed-probe, and unverified-version agents in
 `skipped`; an explicit `agents` sequence supports offline/bootstrap installation.
-It collapses a later target when an already selected physical destination serves
-that agent, then returns `competing_visibility` for any unavoidable overlap.
+It plans destinations in the fixed adapter declaration order, so reversing
+equivalent `--agent` flags does not change filesystem topology. The `selected`
+and `skipped` presentation records still retain caller order. It collapses a
+target when an already planned physical destination serves that agent, then
+returns `competing_visibility` for any unavoidable overlap; callers must carry
+that field into their public result rather than replacing it with lifecycle
+preflight conflicts.
 `select_target()` remains a compatibility helper for callers that need exactly
 one target. In each planned destination, `consumers` is all loader exposure,
 whereas `selected_agents` is only the requested lifecycle ownership; a covered

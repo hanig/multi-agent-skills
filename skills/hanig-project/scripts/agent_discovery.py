@@ -477,37 +477,44 @@ def select_targets(
     An empty ``agents`` sequence means automatic mode: every reported agent is
     considered, but only a verified executable is selected.  A non-empty
     sequence is explicit mode and therefore permits absent/configured agents.
-    Direct destinations are de-duplicated by physical path; if a previously
-    selected root already serves another requested consumer, that consumer is
-    marked ``covered_by`` instead of receiving an unnecessary second copy.
+    Direct destinations are de-duplicated by physical path.  Destination
+    planning uses the adapter declaration order, not flag order, so the same
+    semantic agent set always gets the same topology.  ``selected`` and
+    ``skipped`` retain caller order for display.  If a planned root already
+    serves another requested consumer, that consumer is marked ``covered_by``
+    instead of receiving an unnecessary second copy.
     """
     records = report["agents"]
-    requested, excluded = list(agents) or list(records), set(exclude_agents)
+    requested, excluded = list(agents) or list(ADAPTERS), set(exclude_agents)
     if len(set(requested)) != len(requested):
         raise ValueError("agents contains a duplicate agent id")
     unknown = (set(requested) | excluded) - set(ADAPTERS)
     if unknown:
         raise KeyError(sorted(unknown)[0])
     mode = "explicit" if agents else "automatic"
-    selected: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
-    direct: dict[str, dict[str, Any]] = {}
-    destination_index = {item["physical_path"]: item for item in report["destinations"]}
+    eligible: set[str] = set()
     for agent in requested:
         record = records[agent]
         if agent in excluded:
             skipped.append({"agent": agent, "reason": "excluded"})
-            continue
-        if not agents and not record["eligible_for_automatic_target"]:
+        elif not agents and not record["eligible_for_automatic_target"]:
             reason = "unverified_version" if record["state"] == "executable_found" else record["state"]
             skipped.append({"agent": agent, "reason": reason})
+        else:
+            eligible.add(agent)
+
+    direct: dict[str, dict[str, Any]] = {}
+    assignments: dict[str, tuple[dict[str, Any], bool]] = {}
+    destination_index = {item["physical_path"]: item for item in report["destinations"]}
+    for agent in ADAPTERS:
+        if agent not in eligible:
             continue
+        record = records[agent]
         coverage = next((item for item in direct.values() if agent in item["consumers"]), None)
         if coverage:
             coverage["selected_agents"].append(agent)
-            selected.append({"agent": agent, "status": "selected", "mode": mode,
-                             "covered_by": coverage["target_agents"], "destination": coverage["destination"],
-                             "consumers": coverage["consumers"]})
+            assignments[agent] = (coverage, True)
             continue
         root = next(root for root in record["roots"] if root["preferred"])
         consumers = destination_index[root["physical_path"]]["consumers"]
@@ -520,8 +527,16 @@ def select_targets(
             direct[root["physical_path"]] = item
         item["target_agents"].append(agent)
         item["selected_agents"].append(agent)
+        assignments[agent] = (item, False)
+
+    selected = []
+    for agent in requested:
+        if agent not in eligible:
+            continue
+        item, covered = assignments[agent]
         selected.append({"agent": agent, "status": "selected", "mode": mode,
-                         "covered_by": None, "destination": root, "consumers": consumers})
+                         "covered_by": list(item["target_agents"]) if covered else None,
+                         "destination": item["destination"], "consumers": item["consumers"]})
     conflicts = []
     for consumer in ADAPTERS:
         visible = [item for item in direct.values() if consumer in item["consumers"]]

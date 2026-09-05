@@ -182,3 +182,47 @@ class TestAgentDiscovery(unittest.TestCase):
         self.assertEqual(plan["selected"][0]["agent"], "claude")
         self.assertEqual(plan["selected"][0]["mode"], "explicit")
         self.assertEqual(plan["skipped"], [{"agent": "opencode", "reason": "excluded"}])
+
+    def test_flag_order_preserves_display_order_but_not_destination_topology(self):
+        with tempfile.TemporaryDirectory() as raw:
+            report = discovery.discover(fixture_env(raw), finder({}), probe_for({}))
+        forward = discovery.select_targets(report, agents=("codex", "opencode"))
+        reverse = discovery.select_targets(report, agents=("opencode", "codex"))
+
+        self.assertEqual([item["agent"] for item in forward["selected"]], ["codex", "opencode"])
+        self.assertEqual([item["agent"] for item in reverse["selected"]], ["opencode", "codex"])
+        self.assertEqual(forward["destinations"], reverse["destinations"])
+        self.assertEqual(forward["competing_visibility"], reverse["competing_visibility"])
+        self.assertEqual(len(reverse["destinations"]), 1)
+        self.assertEqual(reverse["destinations"][0]["destination"]["id"], "agents-user")
+        self.assertEqual(reverse["destinations"][0]["selected_agents"], ["codex", "opencode"])
+        self.assertEqual(reverse["selected"][0]["covered_by"], ["codex"])
+
+    def test_competing_visibility_is_stable_and_keeps_exposure_distinct_from_registration(self):
+        with tempfile.TemporaryDirectory() as raw:
+            report = discovery.discover(fixture_env(raw), finder({}), probe_for({}))
+        forward = discovery.select_targets(report, agents=("claude", "codex"))
+        reverse = discovery.select_targets(report, agents=("codex", "claude"))
+
+        self.assertEqual(forward["destinations"], reverse["destinations"])
+        self.assertEqual(forward["competing_visibility"], reverse["competing_visibility"])
+        conflict = forward["competing_visibility"][0]
+        self.assertEqual(conflict["consumer"], "opencode")
+        self.assertEqual(conflict["selected_agents"], ["claude", "codex"])
+        self.assertNotIn("opencode", conflict["selected_agents"])
+        self.assertIn("opencode", forward["destinations"][0]["consumers"])
+
+    def test_custom_root_remains_authoritative_under_deterministic_selection(self):
+        with tempfile.TemporaryDirectory() as raw:
+            report = discovery.discover(fixture_env(raw, CLAUDE_CONFIG_DIR="custom/claude"),
+                                        finder({}), probe_for({}))
+        forward = discovery.select_targets(report, agents=("claude", "opencode"))
+        reverse = discovery.select_targets(report, agents=("opencode", "claude"))
+
+        self.assertEqual(forward["destinations"], reverse["destinations"])
+        self.assertEqual(len(forward["destinations"]), 2)
+        self.assertEqual(forward["competing_visibility"], [])
+        claude = next(item for item in forward["destinations"]
+                      if item["destination"]["id"] == "claude-user")
+        self.assertEqual(claude["consumers"], ["claude"])
+        self.assertEqual(claude["selected_agents"], ["claude"])

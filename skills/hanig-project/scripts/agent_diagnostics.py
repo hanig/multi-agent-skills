@@ -51,19 +51,69 @@ def _read_fields(path: Path) -> tuple[Optional[dict[str, str]], Optional[str]]:
         return None, str(exc)
     if len(raw) > MAX_MARKER_BYTES:
         return None, "metadata exceeds bounded read limit"
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None, "metadata is not valid UTF-8"
     values: dict[str, str] = {}
-    for line in raw.decode("utf-8", "replace").splitlines():
+    for line in text.splitlines():
         if "=" in line:
             key, value = line.split("=", 1)
-            if key and key not in values:
-                values[key] = value
+            if not key:
+                continue
+            if key in values:
+                return None, f"metadata contains duplicate field: {key}"
+            values[key] = value
     return values, None
 
 
-def _sidecar(path: Path) -> Path:
+def _schema_two_problem(values: Mapping[str, str], destination: Path, *, linked: bool) -> Optional[str]:
+    """Validate the self-contained schema-2 ownership fields.
+
+    This mirrors lifecycle's conservative parser locally because installed
+    copies of this diagnostic have no checkout ``lib`` package to import.
+    """
+    required = ("repo", "origin", "source_version", "destination", "consumers",
+                "mode", "installed_at", "link_target", "link_identity")
+    missing = [key for key in required if key not in values]
+    if missing:
+        return "record is incomplete: missing " + ", ".join(missing)
+    if not values["repo"] or "=" in values["repo"]:
+        return "repository identity is invalid"
+    if values["origin"] not in ("authored", "vendored"):
+        return "origin is invalid"
+    if not values["source_version"]:
+        return "source version is empty"
+    if not values["installed_at"]:
+        return "installation timestamp is empty"
+    raw_consumers = values["consumers"]
+    consumers = [] if raw_consumers == "" else raw_consumers.split(",")
+    if any(not value or any(char in value for char in "\n\r=") for value in consumers):
+        return "consumer list is invalid"
+    expected_mode = "link" if linked else "copy"
+    if values["mode"] not in ("copy", "link"):
+        return "mode is invalid"
+    if values["mode"] != expected_mode:
+        return "recorded mode does not match this payload"
+    if (not values["destination"] or
+            _destination_identity(values["destination"]) != _destination_identity(destination)):
+        return "recorded destination does not match this payload"
+    if linked and (not values["link_target"] or not values["link_identity"]):
+        return "link ownership fields are incomplete"
+    return None
+
+
+def _destination_identity(path: Path | str) -> str:
+    """Resolve parent aliases without following a final payload link."""
     absolute = os.path.abspath(os.fspath(path))
-    digest = hashlib.sha256(os.fsencode(absolute)).hexdigest()[:24]
-    return path.parent / SIDECAR_DIR / f"{path.name}-{digest}.provenance"
+    return os.path.join(os.path.realpath(os.path.dirname(absolute)), os.path.basename(absolute))
+
+
+def _sidecar(path: Path) -> Path:
+    identity = _destination_identity(path)
+    digest = hashlib.sha256(os.fsencode(identity)).hexdigest()[:24]
+    destination = Path(identity)
+    return destination.parent / SIDECAR_DIR / f"{destination.name}-{digest}.provenance"
 
 
 def _link_identity(path: Path) -> Optional[str]:
@@ -95,14 +145,12 @@ def _marker(path: Path, *, linked: bool = False) -> tuple[dict[str, Any], Option
     if values.get("schema") != LIFECYCLE_SCHEMA:
         return {**base, "ownership": "unknown",
                 "provenance": _state("legacy", "not lifecycle schema 2", path=str(source))}, None
-    origin = values.get("origin")
-    destination = values.get("destination")
-    mode = values.get("mode")
-    expected = os.path.abspath(os.fspath(path))
-    if (origin not in ("authored", "vendored") or not values.get("source_version") or not destination or
-            destination != expected or mode != ("link" if linked else "copy")):
+    problem = _schema_two_problem(values, path, linked=linked)
+    if problem:
         return {**base, "ownership": "unknown",
-                "provenance": _state("stale", "record does not match this payload", path=str(source))}, None
+                "provenance": _state("stale", problem, path=str(source))}, None
+    origin = values["origin"]
+    mode = values["mode"]
     if linked:
         identity = _link_identity(path)
         try:

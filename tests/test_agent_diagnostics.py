@@ -16,6 +16,8 @@ DOCTOR = ROOT / "bin" / "doctor"
 SURVEY = SCRIPTS / "survey.py"
 sys.path.insert(0, str(SCRIPTS))
 import agent_diagnostics as D  # noqa: E402
+sys.path.insert(0, str(ROOT))
+from lib import skill_lifecycle as lifecycle  # noqa: E402
 
 
 class TestAgentDiagnostics(unittest.TestCase):
@@ -24,9 +26,9 @@ class TestAgentDiagnostics(unittest.TestCase):
 
     @staticmethod
     def _record(destination, *, origin="authored", mode="copy", source_version="abc123",
-                link_target="", link_identity="", repo=D.REPOSITORY_ID):
+                consumers="claude", link_target="", link_identity="", repo=D.REPOSITORY_ID):
         return (f"schema=2\nrepo={repo}\norigin={origin}\nsource_version={source_version}\n"
-                f"version={source_version}\ndestination={destination}\nconsumers=claude\n"
+                f"version={source_version}\ndestination={destination}\nconsumers={consumers}\n"
                 f"mode={mode}\ninstalled_at=2026-09-05T00:00:00Z\n"
                 f"link_target={link_target}\nlink_identity={link_identity}\n")
 
@@ -123,6 +125,92 @@ class TestAgentDiagnostics(unittest.TestCase):
         self.assertEqual(record["ownership"], "unknown")
         self.assertEqual(record["provenance"]["state"], "stale")
 
+    def test_parent_alias_uses_the_same_destination_identity_as_lifecycle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            physical = tmp / "physical"
+            physical.mkdir()
+            alias = tmp / "alias"
+            alias.symlink_to(physical, target_is_directory=True)
+            path = alias / "payload"
+            path.mkdir()
+            physical_path = physical / "payload"
+            (path / D.MARKER).write_text(self._record(physical_path))
+            record, _ = D._marker(path)
+        self.assertEqual(record["ownership"], "owned")
+        self.assertEqual(record["provenance"]["state"], "valid")
+
+    def test_parent_alias_finds_the_canonical_link_sidecar(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            source = tmp / "source"
+            source.mkdir()
+            (source / "SKILL.md").write_text("ok\n")
+            physical = tmp / "physical"
+            physical.mkdir()
+            alias = tmp / "alias"
+            alias.symlink_to(physical, target_is_directory=True)
+            destination = alias / "payload"
+            destination.symlink_to(source, target_is_directory=True)
+            sidecar = D._sidecar(destination)
+            sidecar.parent.mkdir()
+            sidecar.write_text(self._record(
+                physical / "payload", mode="link", link_target=str(source),
+                link_identity=D._link_identity(destination),
+            ))
+            record, _ = D._marker(destination, linked=True)
+        self.assertEqual(record["ownership"], "owned")
+        self.assertEqual(record["provenance"]["state"], "valid")
+
+    def test_schema_two_parser_rejects_malformed_field_corpus(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "payload"
+            path.mkdir()
+            marker = path / D.MARKER
+            valid = self._record(path)
+            cases = {
+                "invalid UTF-8": valid.encode() + b"\xff",
+                "duplicate key": (valid + "repo=multi-agent-skills\n").encode(),
+                "invalid consumer": self._record(path, consumers="claude=admin").encode(),
+                "invalid mode": self._record(path, mode="mirror").encode(),
+                "invalid origin": self._record(path, origin="unknown").encode(),
+                "wrong destination": self._record(path.parent / "elsewhere").encode(),
+                "incomplete record": valid.replace("installed_at=2026-09-05T00:00:00Z\n", "").encode(),
+            }
+            for label, content in cases.items():
+                with self.subTest(label=label):
+                    marker.write_bytes(content)
+                    record, _ = D._marker(path)
+                    self.assertEqual(record["ownership"], "unknown")
+                    self.assertNotEqual(record["provenance"]["state"], "valid")
+
+    def test_malformed_record_corpus_agrees_with_lifecycle_ownership(self):
+        """Pin shared rejection cases without importing lifecycle from diagnostics."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            source = tmp / "source"
+            source.mkdir()
+            (source / "SKILL.md").write_text("---\nname: payload\n---\n")
+            cases = {
+                "invalid UTF-8": lambda path: self._record(path).encode() + b"\xff",
+                "invalid consumer": lambda path: self._record(path, consumers="claude=admin").encode(),
+                "wrong destination": lambda path: self._record(path.parent / "elsewhere").encode(),
+            }
+            for label, content_for in cases.items():
+                with self.subTest(label=label):
+                    path = tmp / ("payload-" + label.replace(" ", "-"))
+                    path.mkdir()
+                    (path / "SKILL.md").write_text("---\nname: payload\n---\n")
+                    (path / D.MARKER).write_bytes(content_for(path))
+                    diagnostic, _ = D._marker(path)
+                    target = lifecycle.LifecycleTarget(
+                        name=path.name, source=source, destination=path,
+                        origin="authored", consumers=("claude",), source_version="next",
+                    )
+                    decision = lifecycle.preflight([target])[0]
+                    self.assertEqual(diagnostic["ownership"], "unknown")
+                    self.assertEqual(decision.action, "blocked")
+
     def test_valid_and_stale_link_sidecars_are_distinguished(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
@@ -140,9 +228,14 @@ class TestAgentDiagnostics(unittest.TestCase):
             foreign.mkdir()
             destination.symlink_to(foreign, target_is_directory=True)
             stale, _ = D._marker(destination, linked=True)
+            lifecycle_decision = lifecycle.preflight([lifecycle.LifecycleTarget(
+                name=destination.name, source=source, destination=destination,
+                origin="authored", consumers=("claude",), mode="link", source_version="next",
+            )])[0]
         self.assertEqual(valid["ownership"], "owned")
         self.assertEqual(stale["ownership"], "unknown")
         self.assertEqual(stale["provenance"]["state"], "stale")
+        self.assertEqual(lifecycle_decision.action, "blocked")
 
     def test_skill_without_a_loadable_skill_file_is_unusable_not_discovered(self):
         with tempfile.TemporaryDirectory() as tmp:
