@@ -1,0 +1,46 @@
+name: Release validation
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regression:
+    name: Regression (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.9'
+      - name: Run full suite without user configuration or credentials
+        shell: bash
+        run: |
+          test_root=$(mktemp -d "$RUNNER_TEMP/arc-274-tests.XXXXXX")
+          test_root=$(cd "$test_root" && pwd -P)
+          mkdir -p "$test_root/home" "$test_root/config" "$test_root/tmp"
+          env -i HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" \
+            TMPDIR="$test_root/tmp" PATH="$PATH" PYTHONDONTWRITEBYTECODE=1 \
+            python3 -B -u -m unittest discover -s tests -v \
+            2>&1 | tee "$RUNNER_TEMP/regression.log"
+      - name: Preserve regression evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: regression-${{ matrix.os }}
+          path: ${{ runner.temp }}/regression.log
+          retention-days: 7
