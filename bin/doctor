@@ -118,6 +118,7 @@ my $active_pid = 0;
 my $interrupted = "";
 for my $signal_name (qw(HUP INT TERM)) {
     $SIG{$signal_name} = sub {
+        return unless $active_pid;
         return if length $interrupted;
         $interrupted = $_[0];
     };
@@ -236,7 +237,8 @@ while (1) {
 
     if ($state eq "RUNNING" && !$wait_error && $now >= $run_deadline) {
         $state = "TIMED_OUT";
-        $cleanup_deadline = $grace_deadline;
+        $cleanup_deadline = $grace_deadline
+            unless defined $cleanup_deadline;
         kill "TERM", -$active_pid if $active_pid;
         kill "TERM", $active_pid if $active_pid;
     }
@@ -252,11 +254,21 @@ while (1) {
             kill "TERM", $active_pid if $active_pid;
             next;
         }
+        if (length $interrupted) {
+            # The signal was observed before completion. Do not reap and free
+            # the identity that the next loop iteration will clean up.
+            unless (sigprocmask(SIG_SETMASK, $poll_mask)) {
+                $wait_error = "could not restore signals before cleanup: $!"
+                    unless length $wait_error;
+            }
+            next;
+        }
         my $got = waitpid($pid, WNOHANG);
         if ($got == $pid) {
             $status = $?;
             $direct_reaped = 1;
             $active_pid = 0;
+            $interrupted = "";
         }
         my $poll_errno_number = 0 + $!;
         unless (sigprocmask(SIG_SETMASK, $poll_mask)) {
@@ -294,25 +306,16 @@ while (1) {
         unless ($direct_reaped) {
             # One final nonblocking attempt only. EINTR or any other failure
             # cannot extend the already-expired cleanup deadline.
-            my $final_mask = POSIX::SigSet->new();
-            if (sigprocmask(SIG_BLOCK, $blocked_signals, $final_mask)) {
-                my $last = waitpid($pid, WNOHANG);
-                my $last_errno_number = 0 + $!;
-                if ($last == $pid) {
-                    $status = $?;
-                    $direct_reaped = 1;
-                    $active_pid = 0;
-                } elsif ($last == -1 && $last_errno_number != EINTR
-                         && !$wait_error) {
-                    $! = $last_errno_number;
-                    $wait_error = "final waitpid failed: $!";
-                }
-                unless (sigprocmask(SIG_SETMASK, $final_mask)) {
-                    $wait_error = "could not restore signals after final waitpid: $!"
-                        unless length $wait_error;
-                }
-            } elsif (!$wait_error) {
-                $wait_error = "could not mask signals around final waitpid: $!";
+            my $last = waitpid($pid, WNOHANG);
+            my $last_errno_number = 0 + $!;
+            if ($last == $pid) {
+                $status = $?;
+                $direct_reaped = 1;
+                $active_pid = 0;
+            } elsif ($last == -1 && $last_errno_number != EINTR
+                     && !$wait_error) {
+                $! = $last_errno_number;
+                $wait_error = "final waitpid failed: $!";
             }
         }
         last;

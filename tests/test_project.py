@@ -2685,12 +2685,21 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
         self.assertIn('answer("supervisor-error", 127, $wait_error)', src)
         self.assertIn("unless ($direct_reaped || defined $cleanup_deadline)",
                       src)
+        timeout_start = src.index(
+            'if ($state eq "RUNNING" && !$wait_error && $now >= $run_deadline)')
+        timeout_end = src.index("\n    }", timeout_start)
+        timeout_transition = src[timeout_start:timeout_end]
+        self.assertIn("$state = \"TIMED_OUT\"", timeout_transition)
+        self.assertIn("$cleanup_deadline = $grace_deadline\n"
+                      "            unless defined $cleanup_deadline",
+                      timeout_transition)
         self.assertIn("for my $signal_name (qw(HUP INT TERM))", src)
         self.assertIn('"interrupted by SIG$interrupted; termination was attempted"',
                       src)
         handler_start = src.index('$SIG{$signal_name} = sub {')
         handler_end = src.index("\n    };", handler_start)
         handler = src[handler_start:handler_end]
+        self.assertIn("return unless $active_pid", handler)
         self.assertIn("$interrupted = $_[0]", handler)
         for forbidden in ("kill ", "waitpid(", "clock_gettime",
                           "cleanup_deadline", "answer("):
@@ -2698,12 +2707,16 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
                              "signal handler does more than latch state")
         poll_mask = src.index(
             "sigprocmask(SIG_BLOCK, $blocked_signals, $poll_mask)")
+        latched_before_poll = src.index("if (length $interrupted)", poll_mask)
         poll_wait = src.index("my $got = waitpid", poll_mask)
         active_clear = src.index("$active_pid = 0", poll_wait)
+        interrupt_clear = src.index('$interrupted = ""', active_clear)
         poll_restore = src.index(
-            "sigprocmask(SIG_SETMASK, $poll_mask)", active_clear)
-        self.assertLess(poll_mask, poll_wait)
+            "sigprocmask(SIG_SETMASK, $poll_mask)", interrupt_clear)
+        self.assertLess(poll_mask, latched_before_poll)
+        self.assertLess(latched_before_poll, poll_wait)
         self.assertLess(poll_wait, active_clear)
+        self.assertLess(active_clear, interrupt_clear)
         self.assertLess(active_clear, poll_restore)
         wait_classification = src.index("if (length $wait_error)")
         explicit_setup = src.index("if ($setup_error =~", wait_classification)
@@ -2728,6 +2741,8 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
         self.assertIn("$last_errno_number != EINTR", final)
         self.assertIn('final waitpid failed: $!', final)
         self.assertNotIn('kill "', final)
+        self.assertNotIn("sigprocmask", final,
+                         "a mask failure can skip the sole final reap")
         self.assertNotIn("cleanup_deadline =", final)
 
         r = subprocess.run(
@@ -2952,6 +2967,61 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
                     if proc.poll() is None:
                         os.killpg(proc.pid, signal.SIGKILL)
                         proc.communicate()
+
+    def test_near_deadline_interrupt_keeps_its_first_cleanup_deadline(self):
+        """An interrupt within one reap interval of the run deadline arms
+        cleanup first. Crossing the run deadline may latch TIMED_OUT, but must
+        not replace that earlier absolute cleanup deadline with timeout grace."""
+        with tempfile.TemporaryDirectory() as d:
+            leader_file = Path(d) / "leader.pid"
+            script = Path(d) / "ignore-term"
+            script.write_text(
+                "#!/bin/sh\n"
+                "trap '' HUP INT TERM\n"
+                "printf '%s' \"$$\" >" + str(leader_file) + "\n"
+                "while :; do :; done\n")
+            script.chmod(0o755)
+            proc = subprocess.Popen(
+                [shutil.which("perl"), "-e", self._supervisor_source(),
+                 "4", "2", str(script)], stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, start_new_session=True)
+            leader = None
+            try:
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    if leader_file.exists():
+                        leader = int(leader_file.read_text())
+                        break
+                    time.sleep(0.02)
+                else:
+                    self.fail("signal-ignoring probe did not start")
+
+                # Signal 1.5 seconds before the run deadline: its two-second
+                # grace expires about 2 seconds from here. The faulty timeout
+                # overwrite instead returns about 3.5 seconds from here.
+                time.sleep(2.5)
+                started = time.monotonic()
+                os.kill(proc.pid, signal.SIGTERM)
+                out, err = proc.communicate(timeout=3)
+                elapsed = time.monotonic() - started
+                self.assertGreaterEqual(elapsed, 1.7)
+                self.assertLess(elapsed, 2.7,
+                                "timeout moved the interruption deadline")
+                self.assertEqual(proc.returncode, 0, err)
+                self.assertEqual(out.splitlines()[:2],
+                                 ["supervisor-error", "127"])
+                self.assertIn("interrupted by SIGTERM", out)
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(leader, 0)
+            finally:
+                if leader is not None:
+                    try:
+                        os.kill(-leader, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                if proc.poll() is None:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.communicate()
 
     def test_timeout_does_not_wait_for_a_descendant_that_calls_setsid(self):
         """Arbitrary-grandchild quiescence is outside the declared boundary.
