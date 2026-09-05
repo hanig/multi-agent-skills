@@ -358,5 +358,82 @@ class LifecycleAcceptance(unittest.TestCase):
         self.assertIn("HANDOFF_CLEAN", resumed.stdout)
 
 
+class PublicCommandAcceptance(unittest.TestCase):
+    """Exercise the supported shell entrypoints from an unrelated cwd."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="cross-agent-cli-")
+        self.base = Path(self.temp.name)
+        self.home = self.base / "home"
+        self.config = self.base / "config"
+        self.project = self.base / "separate-project"
+        self.home.mkdir()
+        self.config.mkdir()
+        self.project.mkdir()
+        self.addCleanup(self.temp.cleanup)
+
+    def invoke(self, *args):
+        env = {
+            "HOME": str(self.home),
+            "XDG_CONFIG_HOME": str(self.config),
+            "PATH": "/usr/bin:/bin",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        return subprocess.run(["/bin/sh", str(ROOT / "install.sh"), *args],
+                              cwd=self.project, env=env, text=True,
+                              capture_output=True)
+
+    def payload(self, result):
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        value = json.loads(result.stdout)
+        self.assertEqual(value["schema_version"], 1)
+        self.assertIn(value["operation"], {"install", "uninstall", "migration-plan"})
+        self.assertIn("dry_run", value)
+        self.assertIn("targets", value)
+        self.assertIn("actions", value)
+        self.assertIn("diagnostics", value)
+        self.assertIn("conflicts", value)
+        return value
+
+    def test_explicit_absent_target_dry_run_has_complete_payload_and_no_writes(self):
+        result = self.invoke("--agent", "pi", "--only", "hanig-verified-workflow",
+                             "--dry-run", "--json")
+        value = self.payload(result)
+        self.assertTrue(value["dry_run"])
+        self.assertEqual([target["agent"] for target in value["targets"]], ["pi"])
+        self.assertEqual(value["targets"][0]["verification"], "unverified")
+        self.assertEqual({action["status"] for action in value["actions"]}, {"install"})
+        self.assertFalse((self.home / ".pi").exists())
+
+    def test_public_migration_plan_retains_legacy_source_and_writes_nothing(self):
+        legacy = self.base / "legacy" / "hanig-verified-workflow"
+        shutil.copytree(ROOT / "skills" / legacy.name, legacy)
+        result = self.invoke("--agent", "codex", "--only", legacy.name,
+                             "--migrate-from", str(legacy.parent), "--dry-run", "--json")
+        value = self.payload(result)
+        self.assertEqual(value["operation"], "migration-plan")
+        self.assertTrue(value["dry_run"])
+        self.assertEqual([action["status"] for action in value["actions"]],
+                         ["migration-ready"])
+        self.assertTrue(legacy.is_dir())
+        self.assertFalse((self.home / ".agents").exists())
+
+    def test_public_argument_rejections_preserve_the_disposable_roots(self):
+        for args, expected in (
+            (("--agent", "not-an-agent", "--dry-run"), "unknown agent"),
+            (("--agent", "claude", "--exclude-agent", "pi", "--dry-run"),
+             "only valid with automatic detection"),
+            (("--agent", "claude", "--prefix", str(self.base / "prefix"), "--dry-run"),
+             "cannot be combined"),
+            (("--agent", "claude", "--migrate-from", str(self.base)),
+             "requires --dry-run"),
+        ):
+            with self.subTest(args=args):
+                result = self.invoke(*args)
+                self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+                self.assertIn(expected, result.stderr)
+                self.assertFalse((self.home / ".claude").exists())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
