@@ -196,6 +196,27 @@ class TestPublicCli(unittest.TestCase):
         self.assertTrue(data["conflicts"])
         self.assertFalse(home.exists(), "known duplicate visibility wrote a target")
 
+    def test_public_topology_is_independent_of_agent_flag_order(self):
+        documents = []
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw) / "shared-home"
+            for order in (("opencode", "codex"), ("codex", "opencode")):
+                with self.subTest(order=order):
+                    result, _ = self._run(
+                        "--agent", order[0], "--agent", order[1],
+                        "--only", "hanig-swarm", "--dry-run", "--json",
+                        extra_env={"HOME": str(home)},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertFalse(home.exists())
+                    documents.append(json.loads(result.stdout))
+        roots = [{action["root"] for action in document["actions"]}
+                 for document in documents]
+        self.assertEqual(roots[0], roots[1])
+        self.assertEqual(len(roots[0]), 1)
+        self.assertEqual([document["competing_visibility"]
+                          for document in documents], [[], []])
+
     def test_explicit_subset_is_prepared_without_the_cli_and_marked_unverified(self):
         result, home = self._run("--agent", "codex", "--dry-run", "--json")
         self.assertEqual(result.returncode, 0, result.stderr)
