@@ -1,25 +1,33 @@
 # Native agent validation
 
 - Date: 2026-09-05
-- Integration under test: `2414d8a80e23ea8ae4e5638c65696b7a86f9f570`
+- Initial integration: `2414d8a80e23ea8ae4e5638c65696b7a86f9f570`
+- Consumed installer commits: `9123802c9464dafade0356664a4fa7f2698d0c56`,
+  then lifecycle hardening `c8c3650d725c42942888074690a3d752a210ac25`
+- First cross-host CI evidence: run `33974800468`, PR merge ref
+  `459841fdf3ed1e203fcf9b115d1931b3db31696f`, head `a1df089`
 - Representative skill: `hanig-portable-handoff`
-- Verdict: **macOS native discovery passed; cross-host/invocation evidence remains incomplete**
+- Verdict: **cross-host native discovery and the macOS no-Claude fixture passed;
+  final-fixture CI and model invocation remain unobserved**
 
 ## Result
 
-On the available macOS host, the combined installer made exactly two confined
-physical writes for the four requested agents. Claude Code 2.1.261 and Codex
-0.153.4 came from the host; official pinned OpenCode 1.18.29 and Pi 0.73.1
-packages came from a disposable npm prefix. All four gated native loaders found
-the installed skill, and the safe native harness exited zero with no observed
-failures. The installed Python helper also captured a disposable local artifact
-from a separate cwd, but that is only payload execution and is not native agent
-invocation.
+On the available macOS host, the original four-agent fixture passed and a
+separate non-Claude fixture passed against source commit `c8c3650`. The latter
+used a disposable home with no `~/.claude`, omitted `CLAUDE_CONFIG_DIR`, and
+used a one-directory `PATH` that contained symlinks only to the real Codex,
+OpenCode, and Pi executables plus `dirname`, `git`, `node`, `python3`, and `sh`.
+The explicit three-agent install produced one confined `.agents` snapshot;
+each real native loader returned that exact copy. The copied helper also
+captured a disposable local artifact, recorded separately as standalone script
+execution and explicitly not native agent invocation.
 
-The full macOS/Linux release evidence remains incomplete. No Linux target was
-authorized and no authenticated LLM-driven skill execution was run. The
-coordinator explicitly directed this worker not to assume the broken local
-Docker context was usable and not to use SSH or remote infrastructure.
+Earlier CI run `33974800468` supplies genuine Linux and macOS native-discovery
+evidence: both artifacts reported `safe_native_gate_passed=true`, no failures,
+no missing discovery, and no version gaps. Those jobs ran before this no-Claude
+fixture and installed-capture follow-up, so they do not prove the final harness
+on CI. No authenticated LLM-driven skill execution was run, and no SSH, remote
+host, global installation, user skill store, or personal credential was used.
 
 ## Evidence classes
 
@@ -51,6 +59,13 @@ model-driven invocation.
 | Disposable OpenCode | official npm `opencode-ai@1.18.29` |
 | Disposable Pi | official npm `@mariozechner/pi-coding-agent@0.73.1` |
 
+The first CI evidence used official pinned agent packages with Node 26.7.0 on
+both hosts. The Linux artifact reports Ubuntu 22.04, x86_64, kernel 6.8,
+glibc 2.35, and Python 3.9.25; the macOS artifact reports macOS 14.8.9, arm64,
+and Python 3.9.13. This report treats those downloaded JSON artifacts as the
+evidence for run `33974800468`, not as observations from the later local
+no-Claude fixture.
+
 The OpenCode executable is an x86_64 build. Every invocation warned that the
 CPU lacks AVX support and recommended a baseline Bun build. Its isolated
 `--version` probe took 2.013-2.539 seconds in repeated observations, exceeding
@@ -62,18 +77,15 @@ selected.
 
 | Agent | Gated version | macOS native discovery | macOS representative invocation | Linux evidence | Minimal missing requirement |
 |---|---:|---|---|---|---|
-| Claude Code | 2.1.261 | **Pass.** Native debug trace loaded one user skill from isolated `CLAUDE_CONFIG_DIR`; zero tokens and $0. | **Not passed.** Direct `/hanig-portable-handoff` resolved to the API boundary, then the invalid test key returned 401 with zero tokens and $0. | Not observed. | For actual invocation, a coordinator-owned test account/model and explicit spend authorization. For Linux, a disposable local Linux host exposing 2.1.261 in `PATH`. |
-| Codex | 0.153.4 | **Pass.** App-server `skills/list` returned the installed skill as `scope=user`, `enabled=true`, with no loader errors. | Not run; `skills/list` is discovery, not a model turn. | Not observed. | A coordinator-owned authenticated test model for invocation; a disposable local Linux host exposing 0.153.4 for Linux discovery. |
-| OpenCode | 1.18.29 | **Pass.** Official pinned 1.18.29 `opencode debug skill --pure` found the exact installed `.agents` copy. Host 1.15.12 was recorded separately and is not the gate evidence. | Not run; `debug skill` is discovery, not a provider/model turn. | Not observed. | A disposable local Linux host exposing 1.18.29 (baseline build if needed); configured test provider/model only if actual invocation is required. |
-| Pi | 0.73.1 | **Pass.** Official pinned 0.73.1 `DefaultResourceLoader.reload()`/`getSkills()` returned the exact installed `.agents` copy with no diagnostics. | Not run; native SDK discovery starts no model. | Not observed. | A disposable local Linux host with the importable 0.73.1 package; a configured test model only if `/skill:hanig-portable-handoff` execution is required. |
+| Claude Code | 2.1.261 | **Pass.** Native debug trace loaded one user skill from isolated `CLAUDE_CONFIG_DIR`; zero tokens and $0. | **Not passed.** Direct `/hanig-portable-handoff` resolved to the API boundary, then the invalid test key returned 401 with zero tokens and $0. | **Pass in run 33974800468.** Artifact gate has no failure, missing discovery, or version gap. | A coordinator-owned test account/model and explicit spend authorization only if actual invocation is required. |
+| Codex | 0.153.4 | **Pass.** App-server `skills/list` returned the installed skill as `scope=user`, `enabled=true`, with no loader errors; the separate no-Claude fixture also passed. | Not run; `skills/list` is discovery, not a model turn. | **Pass in run 33974800468.** Artifact gate has no failure, missing discovery, or version gap. | A coordinator-owned authenticated test model only if actual invocation is required. |
+| OpenCode | 1.18.29 | **Pass.** Official pinned 1.18.29 `opencode debug skill --pure` found the exact installed `.agents` copy in both macOS fixtures. | Not run; `debug skill` is discovery, not a provider/model turn. | **Pass in run 33974800468.** Artifact gate has no failure, missing discovery, or version gap. | A configured test provider/model only if actual invocation is required. |
+| Pi | 0.73.1 | **Pass.** Official pinned 0.73.1 `DefaultResourceLoader.reload()`/`getSkills()` found the exact installed `.agents` copy in both macOS fixtures, with no diagnostics. | Not run; native SDK discovery starts no model. | **Pass in run 33974800468.** Artifact gate has no failure, missing discovery, or version gap. | A configured test model only if `/skill:hanig-portable-handoff` execution is required. |
 
-For every Linux row, the exact bounded rerun requirement is a coordinator-
-approved **local disposable Linux** environment with checkout commit
-`2414d8a80e23ea8ae4e5638c65696b7a86f9f570`, Python 3, Git, and the versioned
-agent binaries on `PATH`. Official pinned npm packages may be placed in a
-temporary prefix as below, then the harness runs unchanged. No credential
-variables, external container, SSH target, global install, or user skill store
-is authorized by this report.
+The current bounded cross-host gap is narrower than model invocation: the
+updated no-Claude/capture fixture has not yet run in CI. The coordinator owns
+that final workflow rerun; this worker did not modify the workflow or use an
+unapproved local/remote Linux target.
 
 ## Pinned disposable package provenance
 
@@ -147,6 +159,50 @@ It returned zero, no conflicts, and these two actions:
 Both roots resolved below scratch. This confirms the combined plan's intended
 de-duplication: the shared `.agents` copy covers Codex, OpenCode, and Pi rather
 than publishing three identical copies.
+
+### Separate no-Claude fixture
+
+The additional fixture starts with another disposable home and never creates
+or exports a Claude config root. It builds a single-entry `PATH` directory from
+symlinks to the resolved real executables. The observed names were exactly:
+
+```text
+codex dirname git node opencode pi python3 sh
+```
+
+`claude` did not resolve through that `PATH`; `CLAUDE_CONFIG_DIR` was absent;
+and `$HOME/.claude` did not exist before installation or after all loader and
+payload checks. The agent targets resolved to host Codex 0.153.4, official
+scratch-installed OpenCode 1.18.29, and official scratch-installed Pi 0.73.1.
+The five helpers resolved to ordinary host `dirname`, Git, Node, Python, and
+`sh`; no wrapper or mocked agent loader was substituted.
+
+Against the disposable source checkout at `c8c3650`, the exact install was:
+
+```sh
+./install.sh \
+  --agent codex --agent opencode --agent pi \
+  --only hanig-portable-handoff --json
+```
+
+It returned one confined physical root, `HOME/.agents/skills`, whose action
+listed exactly Codex, OpenCode, and Pi and no Claude target. The installed
+skill directory and its two checked files were regular copied files, not
+symlinks. The captured SHA-256 values were:
+
+| Installed file | SHA-256 |
+|---|---|
+| `SKILL.md` | `469a115d44f54ebd20216a2453e56ebfb73e8384c51e165b1bce948010d48009` |
+| `scripts/handoff.py` | `76befbd8d43e2a6f3df120b3204acf6d0f10d05c8faec3984851d4181543b7e8` |
+
+Codex app-server `skills/list`, OpenCode `debug skill --pure`, and Pi
+`DefaultResourceLoader.reload()`/`getSkills()` each returned the exact
+installed shared path. All loader checks passed with no Codex loader errors or
+Pi diagnostics. A subsequent capture using the installed `handoff.py` passed
+the schema, run-count, artifact-pointer, and unresolved-receipt assertions.
+That latter observation remains `standalone_script_execution` with
+`native_agent_invocation=false`; `actual_llm_driven_invocation` remains
+`not_run`.
 
 ## Native observations
 
@@ -285,24 +341,32 @@ Run:
 python3 tests/native_agent_validation.py
 ```
 
+To test a staged combined source tree without changing the harness checkout:
+
+```sh
+python3 tests/native_agent_validation.py --source-root /path/to/source-tree
+```
+
 The harness emits a JSON record and uses these exit codes:
 
-- `0`: all four version and native-discovery checks passed on that host; this
-  still does not prove an LLM-driven invocation.
+- `0`: all four version/native-discovery checks and the separate no-Claude
+  fixture passed on that host; this still does not prove LLM invocation.
 - `1`: a check that could run contradicted expectations or failed.
 - `2`: bounded checks ran, but required evidence was unavailable/incomplete.
 
-The 2026-09-05 host-only macOS run exited `2` with no observed check failures:
-host OpenCode was the wrong version and Pi was absent. With the official pinned
-OpenCode/Pi package prefix first in `PATH`, the same harness exited `0`; all
-four version gates, all four native discovery checks, and standalone payload
-execution passed with no observed failures. `actual_llm_driven_invocation`
-remained `not_run` in both records.
+The unpinned host-only macOS run exited `2` with no observed failures: host
+OpenCode was the wrong version and Pi was absent, and the no-Claude fixture
+reported the exact missing executable rather than passing. With official
+pinned OpenCode/Pi first in the launch `PATH` and `--source-root` pointing at a
+disposable `c8c3650` checkout, the complete harness exited `0`. The four-agent
+fixture, the separate no-Claude fixture, all seven native-loader observations,
+both installed capture executions, and every version gate passed with no
+observed failures. Both LLM-invocation records remained `not_run`.
 
-The harness is suitable for a credentialless GitHub Actions Linux job without
-code changes: provision the same exact agent versions into job-local paths,
-put them first in `PATH`, and run it. That is a future route, not evidence from
-this macOS run.
+The earlier CI artifacts are real macOS/Linux evidence for the previous
+harness at head `a1df089`. The updated harness can run credentiallessly in the
+same jobs, but this report does not relabel the previous artifacts as final-
+fixture observations.
 
 A deterministic local mock provider could test per-agent prompt/tool plumbing
 without paid credentials, but it would require separate protocol adapters (for
@@ -314,12 +378,13 @@ out of scope and would not close a real-model invocation gate.
 
 ## Release blockers
 
-1. Run the harness on the coordinator-approved local disposable Linux host for
-   all four gated versions.
-2. If the release gate requires actual invocation, use explicitly authorized
+1. Run the updated no-Claude/capture harness in coordinator-owned macOS and
+   Linux CI; the first CI artifacts predate this follow-up.
+2. If the release gate requires actual LLM invocation, use explicitly authorized
    test accounts/models and record model/provider, prompt, loaded skill path,
    response, tokens, and cost. No worker-owned or personal credential may be
    reused for this.
 
-The macOS native-discovery gate is complete. Until the remaining observations
-exist, this is not a cross-host release or merge pass.
+The bounded macOS no-Claude investigation is complete, and first-pass native
+discovery is cross-host. PR and merge gates remain coordinator-owned; this
+report does not claim final CI or authenticated model execution.

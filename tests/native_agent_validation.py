@@ -17,6 +17,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -34,6 +35,8 @@ from typing import Any, Mapping, Sequence
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = "hanig-portable-handoff"
 AGENTS = ("claude", "codex", "opencode", "pi")
+NON_CLAUDE_AGENTS = ("codex", "opencode", "pi")
+NON_CLAUDE_HELPERS = ("dirname", "git", "node", "python3", "sh")
 EXPECTED_VERSIONS = {
     "claude": "2.1.261",
     "codex": "0.153.4",
@@ -182,10 +185,12 @@ def _confined(path: str, scratch: Path) -> bool:
         return False
 
 
-def _install(env: Mapping[str, str], scratch: Path) -> dict[str, Any]:
+def _install(
+    env: Mapping[str, str], scratch: Path, source_root: Path
+) -> dict[str, Any]:
     argv = [
         "sh",
-        str(ROOT / "install.sh"),
+        str(source_root / "install.sh"),
         "--agent",
         "claude",
         "--agent",
@@ -198,7 +203,7 @@ def _install(env: Mapping[str, str], scratch: Path) -> dict[str, Any]:
         SKILL,
         "--json",
     ]
-    result = _run(argv, cwd=ROOT, env=env, timeout=60)
+    result = _run(argv, cwd=source_root, env=env, timeout=60)
     record: dict[str, Any] = {
         "status": result["status"],
         "command": "./install.sh --agent claude --agent codex --agent opencode "
@@ -222,6 +227,149 @@ def _install(env: Mapping[str, str], scratch: Path) -> dict[str, Any]:
         record["status"] = "failed"
         record["reason"] = (
             f"expected two de-duplicated physical roots, found {len(roots)}"
+        )
+    return record
+
+
+def _filtered_non_claude_env(
+    paths: Mapping[str, Path], source_env: Mapping[str, str]
+) -> tuple[dict[str, str], dict[str, Any]]:
+    """Expose only real non-Claude agents and named system helpers."""
+    filtered_bin = paths["bin"]
+    filtered_bin.mkdir()
+    required = (*NON_CLAUDE_AGENTS, *NON_CLAUDE_HELPERS)
+    targets: dict[str, str] = {}
+    missing: list[str] = []
+    for name in required:
+        executable = shutil.which(name, path=source_env.get("PATH"))
+        if executable is None:
+            missing.append(name)
+            continue
+        resolved = Path(executable).resolve()
+        (filtered_bin / name).symlink_to(resolved)
+        targets[name] = str(resolved)
+
+    env = {
+        "PATH": str(filtered_bin),
+        "HOME": str(paths["home"]),
+        "XDG_CONFIG_HOME": str(paths["xdg"]),
+        "CODEX_HOME": str(paths["codex"]),
+        "PI_CODING_AGENT_DIR": str(paths["pi"]),
+        "TMPDIR": str(paths["tmp"]),
+        "TERM": "dumb",
+        "NO_COLOR": "1",
+        "LC_ALL": "C",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    exposed = sorted(path.name for path in filtered_bin.iterdir())
+    exact_names = sorted(required)
+    checks = {
+        "filtered_path_is_one_directory": os.pathsep not in env["PATH"],
+        "only_named_executables_exposed": exposed == exact_names,
+        "real_executables_are_symlinked": all(
+            (filtered_bin / name).is_symlink()
+            and str((filtered_bin / name).resolve()) == target
+            for name, target in targets.items()
+        ),
+        "claude_binary_not_resolvable": shutil.which("claude", path=env["PATH"])
+        is None,
+        "claude_config_variable_absent": "CLAUDE_CONFIG_DIR" not in env,
+        "home_claude_tree_absent_before": not (paths["home"] / ".claude").exists(),
+    }
+    status = (
+        "unavailable" if missing else ("passed" if all(checks.values()) else "failed")
+    )
+    return env, {
+        "status": status,
+        "path": env["PATH"],
+        "exposed_names": exposed,
+        "resolved_targets": targets,
+        "missing_executables": missing,
+        "checks": checks,
+        **(
+            {
+                "minimal_requirement": "real executables in the launch PATH: "
+                + ", ".join(missing)
+            }
+            if missing
+            else {}
+        ),
+    }
+
+
+def _installed_snapshot(paths: Mapping[str, Path]) -> dict[str, Any]:
+    root = paths["home"] / ".agents" / "skills" / SKILL
+    selected = (root / "SKILL.md", root / "scripts" / "handoff.py")
+    digests = {
+        str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in selected
+        if path.is_file()
+    }
+    checks = {
+        "installed_directory_is_not_symlink": root.is_dir() and not root.is_symlink(),
+        "skill_manifest_is_regular_file": selected[0].is_file()
+        and not selected[0].is_symlink(),
+        "handoff_helper_is_regular_file": selected[1].is_file()
+        and not selected[1].is_symlink(),
+        "representative_digests_captured": len(digests) == len(selected),
+    }
+    return {
+        "status": "passed" if all(checks.values()) else "failed",
+        "path": str(root),
+        "checks": checks,
+        "sha256": digests,
+    }
+
+
+def _install_non_claude(
+    env: Mapping[str, str], scratch: Path, source_root: Path
+) -> dict[str, Any]:
+    argv = ["sh", str(source_root / "install.sh")]
+    for agent in NON_CLAUDE_AGENTS:
+        argv.extend(("--agent", agent))
+    argv.extend(("--only", SKILL, "--json"))
+    result = _run(argv, cwd=source_root, env=env, timeout=60)
+    record: dict[str, Any] = {
+        "status": result["status"],
+        "command": "./install.sh --agent codex --agent opencode --agent pi "
+        f"--only {SKILL} --json",
+        "returncode": result["returncode"],
+        "stderr": result["stderr"].strip(),
+    }
+    try:
+        document = json.loads(result["stdout"])
+    except (TypeError, json.JSONDecodeError) as exc:
+        record.update(status="failed", reason=f"installer did not emit JSON: {exc}")
+        return record
+    actions = document.get("actions", [])
+    roots = sorted({action.get("root", "") for action in actions})
+    expected_root = Path(env["HOME"]) / ".agents" / "skills"
+    selected_agents = sorted(
+        {agent for action in actions for agent in action.get("agents", [])}
+    )
+    checks = {
+        "command_succeeded": result["returncode"] == 0,
+        "one_shared_physical_root": roots == [str(expected_root)],
+        "root_is_confined": all(_confined(root, scratch) for root in roots),
+        "only_non_claude_agents_selected": selected_agents == sorted(NON_CLAUDE_AGENTS),
+        "no_claude_action": all(
+            "claude" not in action.get("agents", []) for action in actions
+        ),
+        "no_claude_destination": not any(
+            ".claude" in Path(root).parts for root in roots
+        ),
+        "installed_snapshot_exists": (expected_root / SKILL / "SKILL.md").is_file(),
+    }
+    record.update(
+        document=document,
+        physical_roots=roots,
+        selected_agents=selected_agents,
+        checks=checks,
+        status="passed" if all(checks.values()) else "failed",
+    )
+    if record["status"] == "failed":
+        record["reason"] = (
+            "non-Claude installer plan contradicted its isolation contract"
         )
     return record
 
@@ -735,7 +883,131 @@ def _host() -> dict[str, Any]:
     return result
 
 
-def validate() -> tuple[dict[str, Any], int]:
+def _git_commit(root: Path) -> str | None:
+    result = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result.stdout.strip() or None
+
+
+def _non_claude_fixture(
+    source_env: Mapping[str, str], scratch: Path, source_root: Path
+) -> dict[str, Any]:
+    fixture_root = scratch / "non-claude"
+    fixture_root.mkdir()
+    paths = {
+        name: fixture_root / name
+        for name in ("home", "xdg", "codex", "pi", "tmp", "workspace", "bin")
+    }
+    for name, path in paths.items():
+        if name != "bin":
+            path.mkdir()
+    env, preconditions = _filtered_non_claude_env(paths, source_env)
+    versions = {
+        agent: _version(agent, cwd=paths["workspace"], env=env)
+        for agent in NON_CLAUDE_AGENTS
+    }
+
+    if preconditions["status"] == "passed":
+        installer = _install_non_claude(env, fixture_root, source_root)
+    else:
+        installer = {
+            "status": "unavailable",
+            "reason": "filtered executable preconditions were not satisfied",
+        }
+
+    if installer["status"] == "passed":
+        snapshot = _installed_snapshot(paths)
+        native = {
+            "codex": _codex_discovery(paths, env),
+            "opencode": _opencode_discovery(paths, env),
+            "pi": _pi_discovery(paths, env),
+        }
+        installed_execution = _payload_execution(paths, env)
+    else:
+        snapshot = {
+            "status": "unavailable",
+            "reason": "non-Claude installation did not pass",
+        }
+        native = {
+            agent: {
+                "status": "unavailable",
+                "kind": "native_discovery",
+                "reason": "non-Claude installation did not pass",
+                "invocation": {"status": "not_run"},
+            }
+            for agent in NON_CLAUDE_AGENTS
+        }
+        installed_execution = {
+            "status": "unavailable",
+            "kind": "standalone_script_execution",
+            "native_agent_invocation": False,
+            "reason": "non-Claude installation did not pass",
+        }
+
+    postconditions = {
+        "status": "passed",
+        "checks": {
+            "home_claude_tree_absent_after": not (paths["home"] / ".claude").exists(),
+            "claude_binary_still_not_resolvable": shutil.which(
+                "claude", path=env["PATH"]
+            )
+            is None,
+            "claude_config_variable_still_absent": "CLAUDE_CONFIG_DIR" not in env,
+        },
+    }
+    if not all(postconditions["checks"].values()):
+        postconditions["status"] = "failed"
+
+    named_checks = (
+        ("preconditions", preconditions),
+        ("installer", installer),
+        ("installed_snapshot", snapshot),
+        ("installed_snapshot_execution", installed_execution),
+        ("postconditions", postconditions),
+        *native.items(),
+    )
+    failures = [name for name, check in named_checks if check["status"] == "failed"]
+    unavailable = [
+        name for name, check in named_checks if check["status"] == "unavailable"
+    ]
+    version_gaps = [
+        agent
+        for agent, version in versions.items()
+        if version.get("version_gate") != "passed"
+    ]
+    status = (
+        "failed"
+        if failures
+        else ("unavailable" if unavailable or version_gaps else "passed")
+    )
+    return {
+        "status": status,
+        "purpose": "native discovery with no Claude binary or ~/.claude tree",
+        "preconditions": preconditions,
+        "versions": versions,
+        "installer": installer,
+        "installed_snapshot": snapshot,
+        "native_discovery": native,
+        "installed_snapshot_execution": installed_execution,
+        "actual_llm_driven_invocation": {
+            "status": "not_run",
+            "reason": "native discovery and direct helper execution start no model turn",
+        },
+        "postconditions": postconditions,
+        "gate": {
+            "passed": status == "passed",
+            "observed_failures": failures,
+            "unavailable_checks": unavailable,
+            "version_gaps": version_gaps,
+        },
+    }
+
+
+def validate(source_root: Path = ROOT) -> tuple[dict[str, Any], int]:
     with tempfile.TemporaryDirectory(prefix="native-agent-validation-") as raw:
         scratch = Path(raw).resolve()
         paths = {
@@ -748,7 +1020,7 @@ def validate() -> tuple[dict[str, Any], int]:
         versions = {
             agent: _version(agent, cwd=paths["workspace"], env=env) for agent in AGENTS
         }
-        installer = _install(env, scratch)
+        installer = _install(env, scratch, source_root)
 
         if installer["status"] == "passed":
             native = {
@@ -790,18 +1062,23 @@ def validate() -> tuple[dict[str, Any], int]:
             "status": "not_run",
             "reason": "this credentialless harness deliberately starts no paid/configured model",
         }
-        safe_gate_passed = not observed_failures and not missing and not version_gaps
+        non_claude = _non_claude_fixture(env, scratch, source_root)
+        if non_claude["status"] == "failed":
+            observed_failures.append("non_claude_fixture")
+        safe_gate_passed = (
+            not observed_failures
+            and not missing
+            and not version_gaps
+            and non_claude["status"] == "passed"
+        )
         report = {
             "schema_version": 1,
             "host": _host(),
             "repository": {
-                "root": str(ROOT),
-                "commit": subprocess.run(
-                    ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
-                    text=True,
-                    capture_output=True,
-                    check=False,
-                ).stdout.strip(),
+                "harness_root": str(ROOT),
+                "harness_commit": _git_commit(ROOT),
+                "installer_source_root": str(source_root),
+                "installer_source_commit": _git_commit(source_root),
             },
             "isolation": {
                 "temporary_root_deleted_on_exit": True,
@@ -813,12 +1090,14 @@ def validate() -> tuple[dict[str, Any], int]:
             "installer": installer,
             "native_discovery": native,
             "standalone_script_execution": payload,
+            "non_claude_fixture": non_claude,
             "actual_llm_driven_invocation": actual_invocation,
             "gate": {
                 "safe_native_gate_passed": safe_gate_passed,
                 "observed_failures": observed_failures,
                 "missing_native_discovery": missing,
                 "version_gaps": version_gaps,
+                "non_claude_fixture_status": non_claude["status"],
                 "actual_llm_invocation_is_not_proven": True,
             },
         }
@@ -832,8 +1111,17 @@ def validate() -> tuple[dict[str, Any], int]:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compact", action="store_true", help="emit compact JSON")
+    parser.add_argument(
+        "--source-root",
+        type=Path,
+        default=ROOT,
+        help="installer source tree to exercise (default: this checkout)",
+    )
     args = parser.parse_args(argv)
-    report, code = validate()
+    source_root = args.source_root.resolve()
+    if not (source_root / "install.sh").is_file():
+        parser.error(f"installer source tree has no install.sh: {source_root}")
+    report, code = validate(source_root)
     print(json.dumps(report, indent=None if args.compact else 2, sort_keys=True))
     return code
 
