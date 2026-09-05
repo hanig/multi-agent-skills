@@ -2683,6 +2683,16 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
         self.assertIn("elsif ($got == -1 && $! != EINTR", src)
         self.assertIn("unless defined $cleanup_deadline", src)
         self.assertIn('answer("supervisor-error", 127, $wait_error)', src)
+        final_start = src.index("# One final nonblocking attempt only")
+        final_end = src.index("\n        }\n        last;", final_start)
+        final = src[final_start:final_end]
+        self.assertEqual(final.count("waitpid("), 1,
+                         "final cleanup retries a nonblocking wait")
+        self.assertIn("elsif ($last == -1 && $! != EINTR && !$wait_error)",
+                      final)
+        self.assertIn('final waitpid failed: $!', final)
+        self.assertNotIn('kill "', final)
+        self.assertNotIn("cleanup_deadline =", final)
 
         r = subprocess.run(
             [shutil.which("perl"), "-e", src, "1", "1",
