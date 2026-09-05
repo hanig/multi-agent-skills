@@ -612,7 +612,28 @@ except Exception as e:
     print("bad:" + type(e).__name__)
     raise SystemExit
 m = d.get("models") if isinstance(d, dict) else None
-print(("ok:%d" % len(m)) if isinstance(m, list) else "bad:no models list in it")
+if not isinstance(m, list):
+    print("bad:no models list in it")
+elif not m:
+    print("bad:models list is empty")
+else:
+    problem = None
+    for i, model in enumerate(m):
+        if not isinstance(model, dict) or not isinstance(model.get("id"), str) or not model["id"]:
+            problem = "models[%d] has no non-empty string id" % i
+            break
+        modalities = model.get("modalities", [])
+        if not isinstance(modalities, list) or not all(isinstance(x, str) for x in modalities):
+            problem = "models[%d].modalities is not a string list" % i
+            break
+        for field in ("intelligence_index", "coding_index"):
+            value = model.get(field)
+            if value is not None and (not isinstance(value, (int, float)) or isinstance(value, bool)):
+                problem = "models[%d].%s is not numeric" % (i, field)
+                break
+        if problem:
+            break
+    print("bad:" + problem if problem else "ok:%d" % len(m))
 '
 if [ -d "$BUS_HOME" ] && { [ ! -r "$BUS_HOME" ] || [ ! -x "$BUS_HOME" ]; }; then
   # Not readable is not empty. Whether the file is in there cannot be seen

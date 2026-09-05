@@ -3590,6 +3590,31 @@ printf 'found:/cluster/profile/bin/claude\n'
             self.assertIn("UNUSABLE", field)
             self.assertIn("separately from absence", out)
 
+    def test_an_empty_registry_is_unusable_not_healthy(self):
+        """ARC-270: doctor must agree when bus models cannot route."""
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d) / "home"
+            self._registry(home / ".agent-bus" / "models.json",
+                           json.dumps({"models": []}))
+            field = self._field(self._doctor(d, cli=True, home=home).stdout,
+                                "models registry")
+            self.assertIn("PRESENT BUT UNUSABLE", field)
+            self.assertIn("models list is empty", field)
+            self.assertNotIn("(0 models)", field)
+
+    def test_an_invalid_model_entry_is_unusable_not_counted(self):
+        """The diagnostic and routing command share the entry contract."""
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d) / "home"
+            document = {"models": [{"id": "test/model", "modalities": "text"}]}
+            self._registry(home / ".agent-bus" / "models.json",
+                           json.dumps(document))
+            field = self._field(self._doctor(d, cli=True, home=home).stdout,
+                                "models registry")
+            self.assertIn("PRESENT BUT UNUSABLE", field)
+            self.assertIn("modalities is not a string list", field)
+            self.assertNotIn("(1 models)", field)
+
     def test_the_registry_is_looked_for_where_bus_would_look_for_it(self):
         """bin/bus honours AGENT_BUS_HOME, so a report about ~/.agent-bus on a
         host that sets it would be a fact about a path nothing reads."""
