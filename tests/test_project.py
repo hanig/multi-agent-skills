@@ -11,6 +11,7 @@ import http.server
 import json
 import os
 import re
+import signal
 import shutil
 import socket
 import subprocess
@@ -2623,40 +2624,52 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
     # list alone: leaving /usr/bin on it would put this host's python3 back
     # within reach, and then the "could not determine" branch could not be
     # reached on a machine that has one.
-    TOOLS = ("sh", "bash", "hostname", "git", "ls", "wc", "tr", "sed",
-             "basename", "readlink", "dirname", "mktemp", "sleep", "head",
-             "rm", "cat")
+    TOOLS = ("sh", "bash", "hostname", "git", "perl", "readlink",
+             "mktemp", "sleep", "rm")
 
-    def _bin(self, d, cli=False, python=True):
+    def _bin(self, d, cli=False, python=True, claude=True, overrides=None):
         """A PATH with nothing on it but what doctor needs, so this host's own
         ~/.local/bin cannot answer a question the test is asking. `claude` is
         stubbed only to stop doctor falling back to `bash -lic`, which is slow
         and reads whatever profile the machine happens to have."""
+        overrides = overrides or {}
         b = Path(d) / "bin"
         b.mkdir()
-        for name in (["paseo"] if cli else []) + ["claude"]:
+        for name in (["paseo"] if cli else []) + (["claude"] if claude else []):
             p = b / name
             p.write_text("#!/bin/sh\necho 0.0.0-test\n")
             p.chmod(0o755)
         for name in self.TOOLS:
+            if name in overrides:
+                p = b / name
+                p.write_text(overrides[name])
+                p.chmod(0o755)
+                continue
             real = shutil.which(name)
             if real:
                 os.symlink(real, b / name)
-        if python:
+        if python and "python3" in overrides:
+            p = b / "python3"
+            p.write_text(overrides["python3"])
+            p.chmod(0o755)
+        elif python:
             os.symlink(sys.executable, b / "python3")
         return b
 
     def _doctor(self, d, cli=False, python=True, listen=None, bus_home=None,
-                home=None):
+                home=None, claude=True, overrides=None, prefix=None):
         home = Path(home) if home else Path(d) / "home"
         home.mkdir(parents=True, exist_ok=True)
-        env = {"PATH": str(self._bin(d, cli, python)),
+        env = {"PATH": str(self._bin(d, cli, python, claude, overrides)),
                "HOME": str(home),
                "USER": os.environ.get("USER", "test"),
                "PASEO_LISTEN": listen or _closed_port()}
         if bus_home:
             env["AGENT_BUS_HOME"] = str(bus_home)
-        r = subprocess.run(["sh", str(DOCTOR)], capture_output=True,
+        argv = ["sh", str(DOCTOR)]
+        if prefix:
+            argv.extend(["--prefix", str(prefix)])
+        r = subprocess.run(argv, capture_output=True,
                            text=True, cwd=ROOT, env=env, timeout=120)
         self.assertIn("=== PREREQUISITES ===", r.stdout, r.stderr)
         return r
@@ -2670,6 +2683,12 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
             if line.strip().startswith(name + ":"):
                 return line.strip()[len(name) + 1:].strip()
         self.fail("doctor printed no %r line:%s" % (name, self._section(out)))
+
+    @staticmethod
+    def _supervisor_source():
+        src = DOCTOR.read_text()
+        return src.split("SUPERVISOR_PERL='", 1)[1].split(
+            "'\n\n# bounded SECONDS", 1)[0]
 
     # --- the four states, which are two facts and not one -------------------
 
@@ -2718,6 +2737,37 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
             self.assertNotIn("not running", daemon)
             self.assertIn("UNKNOWN -- not absent", self._section(out))
 
+    @staticmethod
+    def _plausible_python_then_hang(marker, needle, answer):
+        return ("#!/bin/sh\n"
+                "if [ \"$1\" = -c ]; then\n"
+                "  case \"$2\" in\n"
+                "    *%s*)\n"
+                "      printf '%s\\n' '%s'\n"
+                "      printf invoked >%s\n"
+                "      trap 'exit 0' TERM\n"
+                "      while :; do sleep 10; done ;;\n"
+                "  esac\n"
+                "fi\n"
+                "exec %s \"$@\"\n") % (
+                    needle, "%s", answer, marker, sys.executable)
+
+    def test_timed_out_health_output_cannot_report_the_daemon_up(self):
+        """Retained output is evidence only when the child answered. A probe
+        can print a plausible success prefix and then exceed its deadline."""
+        with tempfile.TemporaryDirectory() as d:
+            marker = Path(d) / "health-plausible-ran"
+            stub = self._plausible_python_then_hang(
+                marker, "socket.create_connection",
+                "answering:HTTP/1.1 200 OK")
+            out = self._doctor(d, cli=False,
+                               overrides={"python3": stub}).stdout
+            self.assertTrue(marker.exists(), "selective health stub did not run")
+            daemon = self._field(out, "daemon")
+            self.assertIn("COULD NOT DETERMINE", daemon)
+            self.assertIn("indeterminate", daemon)
+            self.assertNotIn("answering at", daemon)
+
     def test_the_CLI_and_the_daemon_are_never_collapsed_into_one_verdict(self):
         """A live daemon is what made the old report confident. It must not
         put a path on the CLI line."""
@@ -2739,17 +2789,357 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
             self.assertIn("listening", daemon)
             self.assertLess(elapsed, 60, "the health probe was not bounded")
 
-    def test_the_probe_is_bounded_and_never_waits_on_the_child(self):
-        """`wait` is the unbounded step: a child parked in an uninterruptible
-        syscall does not die when it is killed, and waiting on it hands the
-        hang to doctor. survey.py's run() bounds the kill for the same reason
-        (REAP_SECONDS); this is that shape in sh."""
+    def test_the_probe_bounds_both_the_command_and_its_reaper(self):
+        """The supervisor polls its direct child and stops polling after a
+        separate reap deadline. Thus an uninterruptible child cannot hand an
+        unbounded wait back to doctor."""
         src = DOCTOR.read_text()
-        for guard in ("PROBE_TICKS", "REAP_TICKS", "kill -TERM", "kill -KILL"):
+        for guard in ("RUN_SECONDS", "PROBE_RUN_SECONDS", "REAP_SECONDS",
+                      "CLOCK_MONOTONIC", "RUNNING", "TIMED_OUT", "WNOHANG",
+                      'kill "TERM"', 'kill "KILL"'):
             self.assertIn(guard, src, "%s missing" % guard)
-        code = [l for l in src.splitlines()
-                if not l.lstrip().startswith("#")]
-        self.assertEqual([l for l in code if re.search(r"\bwait\b", l)], [])
+
+    def test_every_diagnostic_program_is_routed_through_the_deadline(self):
+        src = DOCTOR.read_text()
+        for invocation in (
+                'bounded "$RUN_SECONDS" hostname',
+                'bounded "$RUN_SECONDS" python3 --version',
+                'bounded "$RUN_SECONDS" git --version',
+                'bounded "$RUN_SECONDS" bash -lic',
+                'bounded "$PROBE_RUN_SECONDS" python3 -c "$HEALTH_PY"',
+                'bounded "$RUN_SECONDS" python3 -c "$COUNT_PY"',
+                'bounded "$RUN_SECONDS" readlink "$d"',
+                'bounded "$RUN_SECONDS" python3 -m py_compile "$py"',
+                'bounded "$RUN_SECONDS" git -C "$REPO" rev-parse --git-dir',
+                'bounded "$RUN_SECONDS" git -C "$REPO" rev-parse --short HEAD',
+                'bounded "$RUN_SECONDS" git -C "$REPO" status --porcelain'):
+            self.assertIn(invocation, src, invocation)
+
+    def test_the_deadline_launches_no_unbounded_helper_programs(self):
+        """ARC-271's first fix put mktemp, every polling sleep, and rm outside
+        the watchdog. A hanging mktemp therefore wedged doctor before it could
+        bound anything. Poison all three: doctor must finish, and none may be
+        invoked. The hanging python test below proves the replacement deadline
+        still runs rather than merely avoiding these helpers."""
+        with tempfile.TemporaryDirectory() as d:
+            marker = Path(d) / "unbounded-helper-ran"
+            poison = ("#!/bin/sh\n"
+                      "printf 'invoked' >%s\n"
+                      "trap '' TERM\n"
+                      "while :; do :; done\n") % marker
+            start = time.monotonic()
+            r = self._doctor(
+                d, overrides={name: poison
+                              for name in ("mktemp", "sleep", "rm")})
+            self.assertLess(time.monotonic() - start, 20, r.stdout)
+            self.assertFalse(marker.exists(),
+                             "bounded() still invokes an unbounded helper")
+
+    def test_a_continuously_noisy_child_cannot_starve_its_deadline(self):
+        """An unbounded drain-until-EAGAIN loop can stay inside drain forever
+        when several writers keep the pipe readable. Each drain quantum must
+        yield to the monotonic state machine while retaining the 64 KiB tail."""
+        with tempfile.TemporaryDirectory() as d:
+            script = Path(d) / "noisy"
+            pidfile = Path(d) / "noisy.pid"
+            script.write_text(
+                "#!/bin/sh\n"
+                "printf '%s' \"$$\" >" + str(pidfile) + "\n"
+                "trap '' TERM\n"
+                "writer() { while :; do printf '%01024d' 0; done; }\n"
+                "writer & writer & writer & writer &\n"
+                "writer & writer & writer & writer &\n"
+                "wait\n")
+            script.chmod(0o755)
+            proc = subprocess.Popen(
+                [shutil.which("perl"), "-e", self._supervisor_source(),
+                 "1", "1", str(script)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                start_new_session=True)
+            child = None
+            try:
+                out, err = proc.communicate(timeout=5)
+                self.assertEqual(proc.returncode, 0, err)
+                lines = out.splitlines()
+                self.assertEqual(lines[:2], ["timeout", "124"], out[:200])
+                self.assertEqual(len(lines[2]), 65536,
+                                 "the retained output tail is not 64 KiB")
+                self.assertEqual(set(lines[2]), {"0"})
+            except subprocess.TimeoutExpired:
+                self.fail("continuous output starved the monotonic deadline")
+            finally:
+                if pidfile.exists():
+                    child = int(pidfile.read_text())
+                    try:
+                        os.kill(-child, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                if proc.poll() is None:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.communicate()
+
+    def test_group_setup_and_wait_errors_fail_closed(self):
+        """This is structural/code-inspection coverage: setpgid/waitpid
+        failures are impractical to inject portably without adding a broad
+        production seam. Guard ordering and classifications directly, then
+        prove the handshake does not reserve a command exit status."""
+        src = self._supervisor_source()
+        grouped = src.index("my $grouped = setpgid(0, 0)")
+        checked = src.index("unless (defined $grouped)", grouped)
+        refused = src.index("_exit($SETUP_EXIT)", checked)
+        ready = src.index('$write_setup->("ready")', refused)
+        executed = src.index("exec {$cmd[0]}", refused)
+        self.assertLess(grouped, checked)
+        self.assertLess(checked, refused)
+        self.assertLess(refused, executed,
+                        "a diagnostic can execute after setpgid failure")
+        self.assertLess(ready, executed,
+                        "a diagnostic can execute without the setup handshake")
+        self.assertIn('answer("setup-error", 127, $1)', src)
+        self.assertNotIn("while ($got == -1 && $! == EINTR)", src)
+        self.assertNotIn("while ($last == -1 && $! == EINTR)", src)
+        self.assertIn("elsif ($got == -1 && $! != EINTR", src)
+        self.assertIn("unless defined $cleanup_deadline", src)
+        self.assertIn('answer("supervisor-error", 127, $wait_error)', src)
+        wait_classification = src.index("if (length $wait_error)")
+        explicit_setup = src.index("if ($setup_error =~", wait_classification)
+        missing_ready = src.index(
+            'if ($state eq "RUNNING" && $direct_reaped', explicit_setup)
+        self.assertLess(wait_classification, explicit_setup)
+        self.assertLess(wait_classification, missing_ready)
+        final_start = src.index("# One final nonblocking attempt only")
+        final_end = src.index("\n        }\n        last;", final_start)
+        final = src[final_start:final_end]
+        self.assertEqual(final.count("waitpid("), 1,
+                         "final cleanup retries a nonblocking wait")
+        self.assertIn("elsif ($last == -1 && $! != EINTR && !$wait_error)",
+                      final)
+        self.assertIn('final waitpid failed: $!', final)
+        self.assertNotIn('kill "', final)
+        self.assertNotIn("cleanup_deadline =", final)
+
+        r = subprocess.run(
+            [shutil.which("perl"), "-e", src, "1", "1",
+             shutil.which("sh"), "-c", "exit 125"],
+            capture_output=True, text=True, timeout=5)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.splitlines()[:3], ["answered", "125", ""])
+
+        missing = str(Path(tempfile.gettempdir()) / "doctor-no-such-command")
+        r = subprocess.run(
+            [shutil.which("perl"), "-e", src, "1", "1", missing],
+            capture_output=True, text=True, timeout=5)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.splitlines()[:3],
+                         ["setup-error", "127", "exec"])
+
+    def test_timeout_wording_claims_only_a_termination_attempt(self):
+        src = DOCTOR.read_text()
+        self.assertNotIn("was killed", src)
+        self.assertNotIn("and was killed", src)
+        self.assertIn("termination was attempted", src)
+
+    def test_timeout_cleans_up_an_ordinary_login_profile_descendant(self):
+        """bash profiles commonly start a child without changing its process
+        group. The first fix killed bash alone and left that child behind.
+        Group cleanup is best-effort (a hostile setsid escape is out of scope),
+        but the ordinary case is both useful and runtime-testable."""
+        with tempfile.TemporaryDirectory() as d:
+            pidfile = Path(d) / "profile-child.pid"
+            bash = ("#!/bin/sh\n"
+                    "/bin/sleep 600 &\n"
+                    "printf '%s\\n' \"$!\" >%s\n"
+                    "trap '' TERM\n"
+                    "while :; do :; done\n") % ("%s", pidfile)
+            r = self._doctor(
+                d, claude=False, overrides={"bash": bash})
+            self.assertTrue(pidfile.exists(),
+                            "the descendant-producing profile did not run")
+            pid = int(pidfile.read_text())
+            try:
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        break
+                    time.sleep(0.05)
+                else:
+                    self.fail("login-profile descendant survived timeout")
+            finally:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            self.assertIn("login shell timed out", r.stdout)
+
+    def test_timeout_waits_for_grace_then_kills_group_after_parent_exits(self):
+        """Regression for the timeout state machine. The direct shell exits
+        when TERM arrives while its same-group child ignores TERM. Reaping the
+        shell must not turn TIMED_OUT back into completion or skip the KILL at
+        the one absolute grace deadline."""
+        with tempfile.TemporaryDirectory() as d:
+            pidfile = Path(d) / "term-ignoring-child.pid"
+            bash = ("#!/bin/sh\n"
+                    "(trap '' TERM; while :; do :; done) &\n"
+                    "printf '%s\\n' \"$!\" >%s\n"
+                    "trap 'exit 0' TERM\n"
+                    "while :; do :; done\n") % ("%s", pidfile)
+            start = time.monotonic()
+            r = self._doctor(
+                d, claude=False, overrides={"bash": bash})
+            elapsed = time.monotonic() - start
+            self.assertTrue(pidfile.exists(),
+                            "the TERM-ignoring group child did not run")
+            pid = int(pidfile.read_text())
+            try:
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        break
+                    time.sleep(0.05)
+                else:
+                    self.fail("group child survived the grace-deadline KILL")
+            finally:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            self.assertGreaterEqual(
+                elapsed, 4.5, "supervisor returned when the parent was reaped")
+            self.assertLess(elapsed, 15, "grace deadline did not bound timeout")
+            self.assertIn("claude: COULD NOT DETERMINE", r.stdout)
+            self.assertIn("login shell timed out", r.stdout)
+
+    def test_timeout_does_not_wait_for_a_descendant_that_calls_setsid(self):
+        """Arbitrary-grandchild quiescence is outside the declared boundary.
+        A child that deliberately leaves the dedicated group can survive, but
+        it cannot extend the supervisor's absolute grace deadline."""
+        with tempfile.TemporaryDirectory() as d:
+            pidfile = Path(d) / "setsid-child.pid"
+            code = ("use POSIX qw(setsid); setsid(); "
+                    "open(my $f, q(>), q(%s)) or die $!; "
+                    "print $f $$; close $f; sleep 600") % pidfile
+            bash = ("#!/bin/sh\n"
+                    "perl -e '%s' &\n"
+                    "trap 'exit 0' TERM\n"
+                    "while :; do :; done\n") % code
+            start = time.monotonic()
+            r = self._doctor(
+                d, claude=False, overrides={"bash": bash})
+            elapsed = time.monotonic() - start
+            self.assertTrue(pidfile.exists(), "the setsid child did not run")
+            pid = int(pidfile.read_text())
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                self.fail("the supervisor claimed quiescence outside its group")
+            finally:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            self.assertLess(elapsed, 15, "a setsid escape held doctor open")
+            self.assertIn("login shell timed out", r.stdout)
+
+    @staticmethod
+    def _hanging_probe(marker, when, delegate):
+        return """#!/bin/sh
+if %s; then
+  printf invoked >%s
+  trap 'exit 0' TERM
+  while :; do sleep 10; done
+fi
+exec %s "$@"
+""" % (when, marker, delegate)
+
+    def test_a_hung_python_version_is_timeout_not_absence(self):
+        with tempfile.TemporaryDirectory() as d:
+            marker = Path(d) / "python-version-ran"
+            stub = self._hanging_probe(
+                marker, '[ "$1" = --version ]', sys.executable)
+            out = self._doctor(d, overrides={"python3": stub}).stdout
+            self.assertTrue(marker.exists(), "the hanging stub was not invoked")
+            self.assertIn("python3: TIMEOUT", out)
+            self.assertNotIn("python3: ABSENT", out)
+
+    def test_a_hung_git_version_is_timeout_not_absence(self):
+        with tempfile.TemporaryDirectory() as d:
+            marker = Path(d) / "git-version-ran"
+            stub = self._hanging_probe(
+                marker, '[ "$1" = --version ]', shutil.which("git"))
+            out = self._doctor(d, overrides={"git": stub}).stdout
+            self.assertTrue(marker.exists(), "the hanging stub was not invoked")
+            self.assertIn("git: TIMEOUT", out)
+            self.assertNotIn("git: ABSENT", out)
+
+    def test_a_hung_login_shell_is_unknown_not_claude_absence(self):
+        with tempfile.TemporaryDirectory() as d:
+            marker = Path(d) / "login-shell-ran"
+            stub = self._hanging_probe(marker, "true", shutil.which("bash"))
+            out = self._doctor(
+                d, claude=False, overrides={"bash": stub}).stdout
+            self.assertTrue(marker.exists(), "the hanging stub was not invoked")
+            self.assertIn("claude: COULD NOT DETERMINE", out)
+            self.assertIn("login shell timed out", out)
+            self.assertNotIn("claude: ABSENT", out)
+
+    def test_the_bounded_login_fallback_still_finds_cluster_claude(self):
+        with tempfile.TemporaryDirectory() as d:
+            bash = """#!/bin/sh
+printf 'profile chatter that is not the answer\n'
+printf 'found:/cluster/profile/bin/claude\n'
+"""
+            out = self._doctor(
+                d, claude=False, overrides={"bash": bash}).stdout
+            self.assertIn(
+                "claude: /cluster/profile/bin/claude (login shell only)", out)
+
+    def test_a_successful_silent_compiler_is_an_answer_not_a_timeout(self):
+        with tempfile.TemporaryDirectory() as d:
+            prefix = Path(d) / "skills"
+            script = prefix / "example" / "scripts" / "ok.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("print('valid')\n")
+            r = self._doctor(d, prefix=prefix)
+            self.assertIn("ok    example/ok.py", r.stdout)
+            self.assertNotIn("TIMEOUT  example/ok.py", r.stdout)
+            self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_a_nonzero_compiler_is_a_syntax_failure_not_a_timeout(self):
+        with tempfile.TemporaryDirectory() as d:
+            prefix = Path(d) / "skills"
+            script = prefix / "example" / "scripts" / "bad.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("def nope(:\n")
+            r = self._doctor(d, prefix=prefix)
+            self.assertIn("FAIL  example/bad.py does not compile", r.stdout)
+            self.assertNotIn("TIMEOUT  example/bad.py", r.stdout)
+            self.assertNotEqual(r.returncode, 0)
+
+    def test_a_slow_valid_compiler_is_timeout_not_a_syntax_failure(self):
+        """The public deadline is a classification boundary, not a claim the
+        valid work would never finish. Slow valid work is indeterminate and
+        makes doctor nonzero; it is neither absent nor a syntax failure."""
+        with tempfile.TemporaryDirectory() as d:
+            marker = Path(d) / "compiler-ran"
+            prefix = Path(d) / "skills"
+            script = prefix / "example" / "scripts" / "ok.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("print('valid')\n")
+            stub = ("#!/bin/sh\n"
+                    "if [ \"$1\" = -m ] && [ \"$2\" = py_compile ]; then\n"
+                    "  printf invoked >%s\n"
+                    "  sleep 30\n"
+                    "fi\n"
+                    "exec %s \"$@\"\n") % (marker, sys.executable)
+            r = self._doctor(d, overrides={"python3": stub}, prefix=prefix)
+            self.assertTrue(marker.exists(), "the slow compiler was not invoked")
+            self.assertIn("TIMEOUT  example/ok.py", r.stdout)
+            self.assertNotIn("FAIL  example/ok.py does not compile", r.stdout)
+            self.assertNotEqual(r.returncode, 0)
 
     # --- the registry bus models refuses without -----------------------------
 
@@ -2758,6 +3148,24 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
         where.write_text(text if text is not None
                          else (ROOT / "models.json").read_text())
         return where
+
+    def test_timed_out_registry_output_cannot_report_a_model_count(self):
+        """A plausible retained count from a child that never completed is
+        indeterminate, not an answered registry inspection."""
+        with tempfile.TemporaryDirectory() as d:
+            marker = Path(d) / "registry-plausible-ran"
+            home = Path(d) / "home"
+            reg = self._registry(home / ".agent-bus" / "models.json")
+            stub = self._plausible_python_then_hang(
+                marker, "json.loads", "ok:999")
+            out = self._doctor(d, cli=True, home=home,
+                               overrides={"python3": stub}).stdout
+            self.assertTrue(marker.exists(),
+                            "selective registry stub did not run")
+            field = self._field(out, "models registry")
+            self.assertIn(str(reg), field)
+            self.assertIn("CONTENTS COULD NOT BE DETERMINED", field)
+            self.assertNotIn("999 models", field)
 
     def test_a_present_registry_is_reported_with_what_is_in_it(self):
         with tempfile.TemporaryDirectory() as d:
