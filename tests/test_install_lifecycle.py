@@ -67,6 +67,45 @@ class LifecycleTest(unittest.TestCase):
         item = lifecycle.preflight([self.target("foreign", destination=foreign)])[0]
         self.assertEqual(item.action, "blocked")
 
+    def test_schema_two_parser_is_strict_but_normalizes_consumer_order(self):
+        destination = self.home / ".claude" / "skills" / "alpha"
+        destination.mkdir(parents=True)
+        marker = destination / lifecycle.MARKER
+        record = lifecycle.Provenance(
+            repository=lifecycle.REPOSITORY_ID, origin="authored",
+            source_version="v1", destination=str(destination.resolve()),
+            consumers=(), mode="copy", installed_at="2026-09-05T00:00:00Z",
+        )
+        valid = lifecycle._serialize(record)
+        marker.write_text(valid)
+        self.assertEqual(lifecycle.read_provenance(destination).consumers, ())
+        marker.write_text(valid.replace("consumers=\n", "consumers=pi,claude,pi\n"))
+        self.assertEqual(lifecycle.read_provenance(destination).consumers,
+                         ("claude", "pi"))
+
+        malformed = {
+            "invalid-utf8": valid.encode() + b"\xff\n",
+            "duplicate": valid.replace("repo=multi-agent-skills\n",
+                                       "repo=multi-agent-skills\nrepo=other\n"),
+            "malformed-line": valid + "not-a-field\n",
+            "missing-field": valid.replace("installed_at=2026-09-05T00:00:00Z\n", ""),
+            "version-mismatch": valid.replace("\nversion=v1\n", "\nversion=v2\n"),
+            "invalid-origin": valid.replace("origin=authored\n", "origin=unknown\n"),
+            "relative-destination": valid.replace(
+                f"destination={destination.resolve()}\n", "destination=relative/alpha\n"),
+            "empty-consumer": valid.replace("consumers=\n", "consumers=claude,,pi\n"),
+            "copy-link-fields": valid.replace("link_target=\n", "link_target=/tmp/source\n"),
+            "link-without-identity": (valid.replace("mode=copy\n", "mode=link\n")
+                                      .replace("link_target=\n", "link_target=/tmp/source\n")),
+        }
+        for label, content in malformed.items():
+            with self.subTest(case=label):
+                if isinstance(content, bytes):
+                    marker.write_bytes(content)
+                else:
+                    marker.write_text(content)
+                self.assertIsNone(lifecycle.read_provenance(destination))
+
     def test_failed_copy_stages_before_touching_existing_destination(self):
         target = self.target()
         self.assertEqual(lifecycle.install([target])[0].status, "installed")
@@ -86,7 +125,8 @@ class LifecycleTest(unittest.TestCase):
         real_replace = lifecycle.os.replace
 
         def fail_stage_publish(source, destination):
-            if Path(source).name.startswith(".alpha.stage-") and Path(destination) == target.destination:
+            if (Path(source).parent.name.startswith(".alpha.stage-") and
+                    Path(destination) == target.destination):
                 raise OSError("simulated publish interruption")
             return real_replace(source, destination)
 
@@ -219,6 +259,32 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(lifecycle.install([upgrade])[0].status, "upgraded")
         self.assertEqual(lifecycle.read_provenance(target.destination).consumers, ("claude", "codex"))
 
+    def test_foreign_replacement_does_not_import_unproven_consumers(self):
+        source = self.source()
+        destination = self.home / ".claude" / "skills" / "alpha"
+        destination.mkdir(parents=True)
+        (destination / "SKILL.md").write_text("foreign\n")
+        forged = lifecycle.Provenance(
+            repository=lifecycle.REPOSITORY_ID, origin="authored",
+            source_version="foreign", destination=str(self.root / "elsewhere" / "alpha"),
+            consumers=("pi",), mode="copy", installed_at="2026-09-05T00:00:00Z",
+        )
+        lifecycle.write_provenance(destination, forged)
+        target = lifecycle.LifecycleTarget(
+            name="alpha", source=source, destination=destination,
+            origin="authored", consumers=("claude",), source_version="owned",
+            allow_foreign_replace=True,
+        )
+        inspection = lifecycle.preflight([target])[0]
+        self.assertEqual(inspection.action, "upgrade")
+        self.assertFalse(inspection.previous_owned)
+        self.assertEqual(lifecycle.install([target])[0].status, "upgraded")
+        record = lifecycle.read_provenance(destination)
+        self.assertEqual(record.consumers, ("claude",))
+        self.assertEqual(lifecycle.uninstall(
+            [destination], consumers=("claude",),
+        )[0].status, "removed")
+
     def test_selective_uninstall_retains_shared_payload_for_other_consumer(self):
         target = self.target(consumers=("claude", "codex"))
         lifecycle.install([target])
@@ -292,6 +358,50 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(lifecycle.preflight([target])[0].action, "upgrade")
         self.assertEqual(lifecycle.uninstall([target.destination])[0].status,
                          "removed")
+
+    def test_link_to_copy_transition_removes_sidecar_and_allows_fresh_link(self):
+        linked = self.target(mode="link", version="v1")
+        self.assertEqual(lifecycle.install([linked])[0].status, "installed")
+        sidecar = lifecycle.provenance_path(linked.destination)
+        self.assertTrue(sidecar.is_file())
+        copied = self.target(source=self.source("alpha", "two"), mode="copy",
+                             version="v2")
+        self.assertEqual(lifecycle.install([copied])[0].status, "upgraded")
+        self.assertFalse(sidecar.exists())
+        self.assertFalse(copied.destination.is_symlink())
+        self.assertEqual(lifecycle.uninstall([copied.destination])[0].status,
+                         "removed")
+        self.assertFalse(sidecar.exists())
+        fresh = self.target(source=linked.source, mode="link", version="v3")
+        self.assertEqual(lifecycle.preflight([fresh])[0].action, "install")
+        self.assertEqual(lifecycle.install([fresh])[0].status, "installed")
+
+    def test_failed_link_to_copy_transition_restores_link_and_sidecar(self):
+        linked = self.target(mode="link", version="v1")
+        self.assertEqual(lifecycle.install([linked])[0].status, "installed")
+        sidecar = lifecycle.provenance_path(linked.destination)
+        old_record = lifecycle.read_provenance(linked.destination)
+        copied = self.target(source=self.source("alpha", "two"), mode="copy",
+                             version="v2")
+        real_replace = lifecycle.os.replace
+
+        def fail_copy_publish(source, destination):
+            if (Path(source).parent.name.startswith(".alpha.stage-") and
+                    Path(destination) == copied.destination):
+                raise OSError("simulated copy publish failure")
+            return real_replace(source, destination)
+
+        with mock.patch.object(lifecycle.os, "replace",
+                               side_effect=fail_copy_publish):
+            result = lifecycle.install([copied])[0]
+        self.assertEqual(result.status, "failed")
+        self.assertTrue(linked.destination.is_symlink())
+        self.assertTrue(sidecar.is_file())
+        restored = lifecycle.read_provenance(linked.destination)
+        self.assertEqual(restored.source_version, old_record.source_version)
+        self.assertEqual(restored.consumers, old_record.consumers)
+        self.assertEqual(lifecycle.preflight([linked])[0].action, "upgrade")
+        self.assertFalse(list(sidecar.parent.glob(".alpha.sidecar-backup-*")))
 
     def test_stale_link_sidecar_cannot_authorize_replaced_foreign_link(self):
         target = self.target(mode="link")

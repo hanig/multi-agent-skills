@@ -76,6 +76,48 @@ class TestSelectionBeforeWrites(unittest.TestCase):
                                            "--only", "hanig-swarm"])
         self.assertEqual(options.only, ("hanig-swarm",))
 
+    def test_shipped_payloads_pass_bounded_frontmatter_validation(self):
+        for path in sorted((ROOT / "skills").iterdir()):
+            if path.is_dir():
+                with self.subTest(skill=path.name):
+                    installer.validate_payload(path)
+
+    def test_frontmatter_rejects_malformed_or_wrong_identity(self):
+        cases = {
+            "unterminated": "---\nname: alpha\ndescription: present\n",
+            "duplicate": ("---\nname: alpha\nname: alpha\n"
+                          "description: present\n---\n"),
+            "empty-name": "---\nname:\ndescription: present\n---\n",
+            "wrong-name": "---\nname: beta\ndescription: present\n---\n",
+            "empty-description": "---\nname: alpha\ndescription:\n---\n",
+            "bad-quote": ("---\nname: alpha\n"
+                          "description: \"unterminated\n---\n"),
+            "bad-indent": ("---\nname: alpha\n"
+                           "  description: misplaced\n---\n"),
+            "malformed-line": "---\nname alpha\ndescription: present\n---\n",
+            "malformed-flow": ("---\nname: alpha\n"
+                               "description: [unterminated\n---\n"),
+            "oversized": ("---\nname: alpha\ndescription: >-\n  " +
+                          "x" * installer.MAX_FRONTMATTER_BYTES + "\n---\n"),
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            for label, content in cases.items():
+                with self.subTest(case=label):
+                    path = Path(raw) / label / "alpha"
+                    path.mkdir(parents=True)
+                    (path / "SKILL.md").write_text(content)
+                    with self.assertRaises(ValueError):
+                        installer.validate_payload(path)
+            from lib.skill_lifecycle import LifecycleTarget, install
+            invalid_source = Path(raw) / "wrong-name" / "alpha"
+            destination = Path(raw) / "store" / "alpha"
+            result = install([LifecycleTarget(
+                name="alpha", source=invalid_source, destination=destination,
+                origin="authored", source_version="test",
+            )], validator=installer.validate_payload)[0]
+            self.assertEqual(result.status, "blocked")
+            self.assertFalse(destination.parent.exists())
+
     def test_no_automatic_matches_explains_explicit_selection(self):
         targets = installer.normalize_agents([
             {"id": "claude", "detected": False, "destinations": ["/tmp/a"]},
@@ -117,8 +159,20 @@ class TestPublicCli(unittest.TestCase):
         return result, home
 
     def test_default_dry_run_selects_all_verified_agents_without_writes(self):
-        result, home = self._run("--dry-run", "--json",
-                                 agents=("claude", "codex", "opencode", "pi"))
+        blocked, blocked_home = self._run(
+            "--dry-run", "--json",
+            agents=("claude", "codex", "opencode", "pi"),
+        )
+        self.assertEqual(blocked.returncode, 1, blocked.stderr)
+        blocked_data = json.loads(blocked.stdout)
+        self.assertTrue(blocked_data["competing_visibility"])
+        self.assertTrue(any("--allow-duplicate-visibility" in item
+                            for item in blocked_data["conflicts"]))
+        self.assertFalse(blocked_home.exists())
+        result, home = self._run(
+            "--dry-run", "--json", "--allow-duplicate-visibility",
+            agents=("claude", "codex", "opencode", "pi"),
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         data = json.loads(result.stdout)
         self.assertEqual(data["schema_version"], 1)
@@ -127,6 +181,20 @@ class TestPublicCli(unittest.TestCase):
                          {"claude", "codex", "opencode", "pi"})
         self.assertFalse(home.exists(), "dry run created a destination tree")
         self.assertTrue(all(action["status"] == "install" for action in data["actions"]))
+        self.assertTrue(any("duplicate loader visibility explicitly allowed" in item
+                            for item in data["diagnostics"]))
+
+    def test_duplicate_visibility_blocks_live_writes_without_acknowledgment(self):
+        result, home = self._run(
+            "--agent", "claude", "--agent", "codex",
+            "--only", "hanig-swarm", "--json",
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual([item["consumer"] for item in data["competing_visibility"]],
+                         ["opencode"])
+        self.assertTrue(data["conflicts"])
+        self.assertFalse(home.exists(), "known duplicate visibility wrote a target")
 
     def test_explicit_subset_is_prepared_without_the_cli_and_marked_unverified(self):
         result, home = self._run("--agent", "codex", "--dry-run", "--json")

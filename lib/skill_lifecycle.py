@@ -143,6 +143,7 @@ class PreflightItem:
     reason: str
     previous: Provenance | None = None
     fingerprint: tuple | None = None
+    previous_owned: bool = False
 
 
 @dataclass(frozen=True)
@@ -187,12 +188,18 @@ def _parse_marker(path: Path) -> Provenance | None:
     except (OSError, UnicodeError):
         return None
     data: dict[str, str] = {}
+    malformed = False
     for line in lines:
+        if not line:
+            continue
         if "=" not in line:
+            malformed = True
             continue
         key, value = line.split("=", 1)
-        if key and key not in data:
-            data[key] = value
+        if not key or key in data:
+            malformed = True
+            continue
+        data[key] = value
     repository = data.get("repo")
     if not repository:
         return None
@@ -201,21 +208,49 @@ def _parse_marker(path: Path) -> Provenance | None:
     # knowledge: particularly, never promote a legacy vendored/foreign copy to
     # authored merely because it happens to have a familiar name.
     legacy = data.get("schema") != SCHEMA_VERSION
-    origin = data.get("origin") if not legacy else "unknown"
-    if origin not in VALID_ORIGINS:
+    if not legacy:
+        required = {
+            "schema", "repo", "origin", "source_version", "version",
+            "destination", "consumers", "mode", "installed_at",
+            "link_target", "link_identity",
+        }
+        origin = data.get("origin")
+        mode = data.get("mode")
+        raw_consumers = data.get("consumers", "")
+        consumers = (() if raw_consumers == "" else
+                     tuple(raw_consumers.split(",")))
+        invalid_link = (
+            mode == "copy" and bool(data.get("link_target") or
+                                    data.get("link_identity"))
+        ) or (
+            mode == "link" and
+            (not data.get("link_target") or not data.get("link_identity") or
+             not os.path.isabs(data["link_target"]))
+        )
+        if (malformed or not required.issubset(data) or
+                origin not in VALID_ORIGINS - {"unknown"} or
+                mode not in VALID_MODES or
+                not data.get("source_version") or
+                data.get("version") != data.get("source_version") or
+                not data.get("destination") or
+                not os.path.isabs(data["destination"]) or
+                not data.get("installed_at") or
+                (raw_consumers and any(not value for value in consumers)) or
+                invalid_link):
+            return None
+    else:
         origin = "unknown"
-        legacy = True
-    mode = data.get("mode", "copy")
-    if mode not in VALID_MODES:
-        mode = "copy"
-        legacy = True
+        mode = data.get("mode", "copy")
+        if mode not in VALID_MODES:
+            mode = "copy"
+        consumers = tuple(filter(None, data.get("consumers", "").split(",")))
     try:
         return Provenance(
             repository=repository,
             origin=origin,
             source_version=data.get("source_version", data.get("version", "unknown")),
             destination=data.get("destination", ""),
-            consumers=tuple(filter(None, data.get("consumers", "").split(","))),
+            consumers=consumers,
             mode=mode,
             installed_at=data.get("installed_at", "unknown"),
             link_target=data.get("link_target", ""),
@@ -365,24 +400,43 @@ def preflight(targets: Sequence[LifecycleTarget], *,
         record = read_provenance(target.destination, provenance_file=target.provenance_path)
         fingerprint = _fingerprint(target.destination, target.provenance_path)
         sidecar = provenance_path(target.destination, target.provenance_path)
+        previous_owned = _owned_by(record, target)
         if target.mode == "link" and fingerprint is None and sidecar.exists():
-            if not _owned_by(record, target):
-                result.append(PreflightItem(target, "blocked", "link provenance sidecar exists without this repository's ownership record", record, fingerprint))
+            if not previous_owned:
+                result.append(PreflightItem(
+                    target, "blocked",
+                    "link provenance sidecar exists without this repository's ownership record",
+                    record, fingerprint, previous_owned,
+                ))
                 continue
         if fingerprint is None:
-            result.append(PreflightItem(target, "install", "destination is absent", record, fingerprint))
-        elif _owned_by(record, target):
-            result.append(PreflightItem(target, "upgrade", "existing destination is recorded as owned", record, fingerprint))
+            result.append(PreflightItem(
+                target, "install", "destination is absent", record, fingerprint,
+                previous_owned,
+            ))
+        elif previous_owned:
+            result.append(PreflightItem(
+                target, "upgrade", "existing destination is recorded as owned",
+                record, fingerprint, previous_owned,
+            ))
         elif target.allow_foreign_replace:
-            result.append(PreflightItem(target, "upgrade", "explicit foreign replacement requested", record, fingerprint))
+            result.append(PreflightItem(
+                target, "upgrade", "explicit foreign replacement requested",
+                record, fingerprint, previous_owned,
+            ))
         else:
-            result.append(PreflightItem(target, "blocked", "destination exists without this repository's ownership record", record, fingerprint))
+            result.append(PreflightItem(
+                target, "blocked",
+                "destination exists without this repository's ownership record",
+                record, fingerprint, previous_owned,
+            ))
     return result
 
 
-def _record_for(target: LifecycleTarget, previous: Provenance | None = None) -> Provenance:
+def _record_for(target: LifecycleTarget, previous: Provenance | None = None,
+                previous_owned: bool = False) -> Provenance:
     consumers = target.consumers
-    if previous and previous.repository == target.repository:
+    if previous and previous_owned:
         consumers = _clean_values((*previous.consumers, *consumers))
     return Provenance(
         repository=target.repository, origin=target.origin,
@@ -409,18 +463,29 @@ def _destination_lock(destination: Path):
 
 def _stage(item: PreflightItem, validator: Callable[[Path], None]) -> Path:
     target = item.target
-    stage = target.destination.parent / f".{target.name}.stage-{uuid.uuid4().hex}"
+    token = f".{target.name}.stage-{uuid.uuid4().hex}"
+    stage = (target.destination.parent / token / target.name
+             if target.mode == "copy" else target.destination.parent / token)
     try:
-        stage.parent.mkdir(parents=True, exist_ok=True)
         if target.mode == "copy":
+            stage.parent.mkdir(parents=True, exist_ok=False)
             shutil.copytree(target.source, stage, symlinks=True)
-            write_provenance(stage, _record_for(target, item.previous))
+            write_provenance(
+                stage,
+                _record_for(target, item.previous, item.previous_owned),
+            )
             validator(stage)
         else:
             # Link targets validate the source now, and stage their sidecar in
             # the destination filesystem before the old link is moved aside.
+            stage.parent.mkdir(parents=True, exist_ok=True)
             validator(target.source)
-            _write_atomic(stage, _serialize(_record_for(target, item.previous)))
+            _write_atomic(
+                stage,
+                _serialize(_record_for(
+                    target, item.previous, item.previous_owned,
+                )),
+            )
     except BaseException:
         _cleanup_stage(stage)
         raise
@@ -437,6 +502,13 @@ def _remove_path(path: Path) -> None:
 def _cleanup_stage(stage: Path) -> None:
     if stage.exists() or stage.is_symlink():
         _remove_path(stage)
+    container = stage.parent
+    if (container.name.startswith(f".{stage.name}.stage-") and
+            len(container.name) == len(stage.name) + len("..stage-") + 32):
+        try:
+            container.rmdir()
+        except FileNotFoundError:
+            pass
 
 
 def _publish(item: PreflightItem, stage: Path) -> InstallResult:
@@ -452,7 +524,10 @@ def _publish(item: PreflightItem, stage: Path) -> InstallResult:
     replacement_created = False
     published_sidecar = False
     try:
-        if target.mode == "link":
+        predecessor_was_owned_link = bool(
+            item.previous_owned and item.previous and item.previous.mode == "link"
+        )
+        if target.mode == "link" or predecessor_was_owned_link:
             sidecar = provenance_path(dest, target.provenance_path)
             # The old sidecar is the only durable proof for the old link.  A
             # failure after publishing a new sidecar must be able to restore
@@ -478,7 +553,10 @@ def _publish(item: PreflightItem, stage: Path) -> InstallResult:
             published_sidecar = True
             # The staged record knew the intended target.  Bind its sidecar to
             # the newly-created link object before it can authorize ownership.
-            write_provenance(dest, replace(_record_for(target, item.previous),
+            write_provenance(dest, replace(_record_for(
+                                                target, item.previous,
+                                                item.previous_owned,
+                                            ),
                                             link_identity=_link_identity(dest)),
                              provenance_file=target.provenance_path)
         if sidecar_backup:
@@ -531,7 +609,8 @@ def _publish(item: PreflightItem, stage: Path) -> InstallResult:
         # Moving a link away and back changes its identity.  Rebind the
         # restored sidecar so the old, known-owned link is immediately
         # upgradeable/uninstallable rather than stranded by a failed upgrade.
-        if restored and target.mode == "link" and item.previous:
+        if (restored and item.previous_owned and item.previous and
+                item.previous.mode == "link"):
             try:
                 write_provenance(
                     dest, replace(item.previous, link_identity=_link_identity(dest)),

@@ -13,6 +13,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -29,6 +30,9 @@ if str(_CHECKOUT_ROOT) not in sys.path:
 
 SUPPORTED_AGENTS = ("claude", "codex", "opencode", "pi")
 WORKFLOW_DEPENDENCIES = {"hanig-project": ("hanig-swarm",)}
+MAX_FRONTMATTER_BYTES = 64 * 1024
+_FRONTMATTER_KEY = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):(?:[ \t]*(.*))?$")
+_BLOCK_SCALARS = frozenset((">", ">-", ">+", "|", "|-", "|+"))
 
 
 class InstallRequestError(ValueError):
@@ -46,6 +50,7 @@ class InstallOptions:
     force: bool
     allow_org_shadow: bool
     allow_vendored_shadow: bool
+    allow_duplicate_visibility: bool
     include_vendored: bool
     uninstall: bool
     json: bool
@@ -81,6 +86,7 @@ class InstallPlan:
     selected: tuple[AgentTarget, ...]
     skipped: tuple[AgentTarget, ...]
     destinations: tuple[DestinationPlan, ...]
+    competing_visibility: tuple[Mapping[str, Any], ...] = ()
 
 
 def parser() -> argparse.ArgumentParser:
@@ -101,6 +107,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true")
     p.add_argument("--allow-org-shadow", action="store_true")
     p.add_argument("--allow-vendored-shadow", action="store_true")
+    p.add_argument("--allow-duplicate-visibility", action="store_true",
+                   help="permit multiple installed copies visible to one loader")
     p.add_argument("--include-vendored", action="store_true")
     p.add_argument("--uninstall", action="store_true")
     p.add_argument("--json", action="store_true", help="emit stable plan/result JSON")
@@ -135,6 +143,7 @@ def parse_options(argv: Sequence[str]) -> InstallOptions:
         force=ns.force,
         allow_org_shadow=ns.allow_org_shadow,
         allow_vendored_shadow=ns.allow_vendored_shadow,
+        allow_duplicate_visibility=ns.allow_duplicate_visibility,
         include_vendored=ns.include_vendored,
         uninstall=ns.uninstall,
         json=ns.json,
@@ -324,7 +333,17 @@ def build_discovery_plan(report: Mapping[str, Any], selection: Mapping[str, Any]
         consumers=tuple(item["consumers"]),
         logical_paths=(Path(item["destination"]["logical_path"]),),
     ) for item in selection["destinations"])
-    return InstallPlan(tuple(selected), skipped, destinations)
+    return InstallPlan(
+        tuple(selected), skipped, destinations,
+        tuple(selection.get("competing_visibility", ())),
+    )
+
+
+def _visibility_detail(item: Mapping[str, Any]) -> str:
+    consumer = item.get("consumer", "unknown consumer")
+    paths = ", ".join(str(path) for path in item.get("physical_paths", ()))
+    reason = item.get("reason", "one loader can see multiple requested copies")
+    return f"{consumer} sees duplicate requested skill roots ({paths}): {reason}"
 
 
 def render_plan(plan: InstallPlan, options: InstallOptions, version: str) -> str:
@@ -348,6 +367,10 @@ def render_plan(plan: InstallPlan, options: InstallOptions, version: str) -> str
         agents = ", ".join(destination.agents)
         consumers = ", ".join(destination.consumers) or "default consumer"
         lines.append(f"  {destination.path} <- {agents} ({consumers})")
+    if plan.competing_visibility:
+        lines.append("Competing loader visibility:")
+        lines.extend("  " + _visibility_detail(item)
+                     for item in plan.competing_visibility)
     lines.append("Workflow dependency limits: skill payloads are installed only; "
                  "external CLIs and workflow dependencies are not installed.")
     if options.prefix:
@@ -407,19 +430,101 @@ def selected_sources(repo: Path, only: Sequence[str]) -> list[tuple[str, Path, s
             for name in names]
 
 
+def _scalar(value: str) -> str:
+    """Parse the string subset used by portable skill frontmatter."""
+    if value.startswith('"'):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid quoted frontmatter scalar: {exc.msg}") from exc
+        if not isinstance(parsed, str):
+            raise ValueError("quoted frontmatter scalar must be a string")
+        return parsed
+    if value.startswith("'"):
+        if len(value) < 2 or not value.endswith("'"):
+            raise ValueError("unterminated quoted frontmatter scalar")
+        return value[1:-1].replace("''", "'")
+    if value.endswith(("'", '"')):
+        raise ValueError("frontmatter scalar has an unmatched quote")
+    if (value.startswith(("[", "{", "&", "*", "!", "? ", "- ")) or
+            ": " in value or " #" in value):
+        raise ValueError("unsupported or malformed plain frontmatter scalar")
+    return value
+
+
+def _frontmatter(skill: Path) -> dict[str, str]:
+    """Read and validate a bounded, stdlib-only YAML-compatible subset."""
+    fields: dict[str, str] = {}
+    current_block: str | None = None
+    consumed = 0
+    try:
+        with skill.open("rb") as handle:
+            first = handle.readline(MAX_FRONTMATTER_BYTES + 1)
+            consumed += len(first)
+            if consumed > MAX_FRONTMATTER_BYTES:
+                raise ValueError("SKILL.md frontmatter exceeds bounded read limit")
+            try:
+                first_text = first.decode("utf-8")
+            except UnicodeError as exc:
+                raise ValueError(f"cannot decode SKILL.md frontmatter: {exc}") from exc
+            if first_text.rstrip("\r\n") != "---":
+                raise ValueError("SKILL.md lacks YAML frontmatter")
+            while True:
+                line = handle.readline(MAX_FRONTMATTER_BYTES - consumed + 2)
+                if not line:
+                    raise ValueError("SKILL.md frontmatter is unterminated")
+                consumed += len(line)
+                if consumed > MAX_FRONTMATTER_BYTES:
+                    raise ValueError("SKILL.md frontmatter exceeds bounded read limit")
+                try:
+                    raw = line.decode("utf-8").rstrip("\r\n")
+                except UnicodeError as exc:
+                    raise ValueError(f"cannot decode SKILL.md frontmatter: {exc}") from exc
+                if raw == "---":
+                    break
+                if not raw or raw.startswith("#"):
+                    continue
+                if raw[0].isspace():
+                    if raw.startswith("\t") or current_block is None:
+                        raise ValueError("unexpected indented frontmatter content")
+                    content = raw.strip()
+                    if content:
+                        fields[current_block] = (
+                            fields[current_block] + " " + content
+                        ).strip()
+                    continue
+                match = _FRONTMATTER_KEY.fullmatch(raw)
+                if not match:
+                    raise ValueError(f"malformed frontmatter line: {raw!r}")
+                key, value = match.group(1), match.group(2) or ""
+                if key in fields:
+                    raise ValueError(f"duplicate frontmatter field: {key}")
+                if value in _BLOCK_SCALARS:
+                    fields[key] = ""
+                    current_block = key
+                else:
+                    fields[key] = _scalar(value)
+                    current_block = None
+    except OSError as exc:
+        raise ValueError(f"cannot read SKILL.md: {exc}") from exc
+    return fields
+
+
 def validate_payload(path: Path) -> None:
     """Validate without py_compile, so --dry-run cannot create bytecode caches."""
     skill = path / "SKILL.md"
     if not skill.is_file():
         raise ValueError("missing SKILL.md")
-    try:
-        text = skill.read_text(encoding="utf-8")
-    except UnicodeError as exc:
-        raise ValueError(f"cannot read SKILL.md: {exc}") from exc
-    if not text.startswith("---\n"):
-        raise ValueError("SKILL.md lacks YAML frontmatter")
-    if not any(line.startswith("name:") for line in text.splitlines()):
-        raise ValueError("SKILL.md has no name field")
+    fields = _frontmatter(skill)
+    name = fields.get("name", "")
+    if not name:
+        raise ValueError("SKILL.md has no non-empty name field")
+    if name != path.name:
+        raise ValueError(
+            f"SKILL.md name {name!r} does not match directory {path.name!r}"
+        )
+    if not fields.get("description", ""):
+        raise ValueError("SKILL.md has no non-empty description field")
     for script in path.glob("scripts/*.py"):
         try:
             compile(script.read_text(encoding="utf-8"), str(script), "exec")
@@ -509,6 +614,7 @@ def _document(*, operation: str, dry_run: bool, plan: InstallPlan,
             "targets": targets, "actions": list(actions),
             "skipped_agents": [{"agent": target.name, "status": target.state}
                                for target in plan.skipped],
+            "competing_visibility": [dict(item) for item in plan.competing_visibility],
             "diagnostics": list(diagnostics), "conflicts": list(conflicts)}
 
 
@@ -671,11 +777,23 @@ def run(argv: Sequence[str], *, repo: Path | None = None,
             detail += ("; use --allow-vendored-shadow to take over a vendored skill "
                        "(this is NOT the --allow-org-shadow case)")
         blocked.append(detail)
+    visibility = [_visibility_detail(item) for item in plan.competing_visibility]
+    if visibility and not options.allow_duplicate_visibility:
+        blocked.extend(
+            item + "; use --allow-duplicate-visibility to acknowledge duplicate writes"
+            for item in visibility
+        )
+    visibility_notes = (
+        ["duplicate loader visibility explicitly allowed: " + item
+         for item in visibility]
+        if options.allow_duplicate_visibility else []
+    )
     org_conflicts = _org_shadow_conflicts(plan, (name for name, _, _ in sources), context)
     if org_conflicts and not options.allow_org_shadow:
         blocked.extend(org_conflicts)
-    shadow_notes = (["org-managed shadow explicitly allowed: " + item
-                     for item in org_conflicts] if options.allow_org_shadow else [])
+    shadow_notes = ((["org-managed shadow explicitly allowed: " + item
+                      for item in org_conflicts] if options.allow_org_shadow else []) +
+                    visibility_notes)
     takeovers = [
         f"taking over '{target.name}' at {target.destination}: vendored skill already exists there"
         for target in targets

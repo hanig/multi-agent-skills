@@ -1,6 +1,6 @@
 # multi-agent-skills
 
-Portable Claude Code skills for dispatching autonomous work onto HPC clusters
+Portable coding-agent skills for dispatching autonomous work onto HPC clusters
 and refusing to call it done without evidence. Installable across laptops and
 login nodes with one script.
 
@@ -40,7 +40,8 @@ cd multi-agent-skills
 # Inspect automatic selection first; this changes nothing.
 ./install.sh --dry-run --json
 # Name targets explicitly for a portable, auditable install.
-./install.sh --agent claude --agent codex --agent opencode --agent pi --allow-org-shadow
+./install.sh --agent claude --agent codex --agent opencode --agent pi \
+  --allow-org-shadow --allow-duplicate-visibility
 ./bin/doctor --json                # installed skills, provenance, and health
 ```
 
@@ -98,8 +99,10 @@ with them.
 ### Agent bus executable, in this checkout
 
 The executable, model registry, and runtime state are three separate things.
-`install.sh` installs skill directories only, into `~/.claude/skills` by
-default; it deploys none of those three.
+`install.sh` installs skill directories only. With no selector it plans the
+preferred physical roots of all eligible detected agents; `--agent` chooses an
+explicit set and `--prefix` chooses one compatibility root. It deploys none of
+those three runtime artifacts.
 
 #### Executable discovery
 
@@ -581,16 +584,26 @@ is in [`docs/cross-agent-acceptance.md`](docs/cross-agent-acceptance.md).
 ./install.sh [--agent NAME ... | --exclude-agent NAME ... | --prefix DIR]
              [--mode copy|link] [--only NAME] [--dry-run] [--json]
              [--force] [--uninstall] [--allow-org-shadow]
+             [--allow-vendored-shadow] [--include-vendored]
+             [--allow-duplicate-visibility]
 ```
 
-With no selector, the installer automatically targets every detected,
-version-verified supported agent.  `--agent` is repeatable and is the right
-choice for a deliberate subset or a bootstrap install of an absent CLI.
+With no selector, the installer automatically targets every detected agent
+whose bounded `--version` probe exactly matches the adapter's allowlisted
+release. That is adapter-version eligibility, not proof that a native loader
+accepted a skill or that every loader/root behavior has been verified.
+`--agent` is repeatable and is the right choice for a deliberate subset or a
+bootstrap install of an absent CLI.
 `--exclude-agent` applies only to automatic selection.  `--prefix` remains the
 legacy single-root compatibility spelling; it cannot be combined with agent
 selectors.  Inspect the JSON payload before a broad install: it reports each
 target, physical root, verification, shared consumers, requested actions,
 diagnostics, and conflicts.
+
+If one loader would see requested copies in multiple physical roots, the plan
+reports `competing_visibility` and refuses to write. Re-run with
+`--allow-duplicate-visibility` only after reviewing those paths and accepting
+that the copies can load with adapter-specific precedence and later drift.
 
 **`--allow-org-shadow` is required here, and permanently.** A copy of these
 skills is maintained on Claude Science, so all five also arrive in the Arc org
@@ -608,10 +621,10 @@ checkout sits under a synced folder, when a branch switch silently mutates every
 installed skill, and when the checkout is mid-update. Use `--mode link` only
 when developing a skill.
 
-The installer validates frontmatter and script syntax before touching the
-destination, aborts on a name collision with an org-managed skill, prunes skills
-that are no longer shipped, and refuses to replace a directory it did not
-install.
+The installer performs bounded frontmatter validation (including exact skill
+identity) and script syntax checks before touching the destination, aborts on a
+name collision with an org-managed skill, prunes skills that are no longer
+shipped, and refuses to replace a directory it did not install.
 
 ### Paseo, per machine
 
@@ -631,13 +644,14 @@ a local process, so putting Paseo on a shared cluster login node means running
 those processes there, which is usually a sign the unit is on the wrong machine.
 `slurm` and `pipeline` units need none of this.
 
-**`--uninstall` deletes only what this repo installed**, determined by our own
-marker file or by a symlink whose target is inside this checkout. It is written
-that way because an earlier version inferred ownership from shape (`[ -L "$d" ]`,
-"any symlink is ours") and deleted two unrelated skills off a cluster. A
-symlink is not evidence that we created it. Read a destructive command and
-dry-run it before trusting it, including one you wrote yourself, and especially
-then, because familiarity feels like knowledge.
+**`--uninstall` deletes only what this repo installed**, determined by an exact
+copy marker or a sidecar bound to the installed link's destination, target, and
+link-object identity. It is written that way because an earlier version inferred
+ownership from shape (`[ -L "$d" ]`, "any symlink is ours") and deleted two
+unrelated skills off a cluster. A symlink, including one into this checkout, is
+not evidence that we created it. Read a destructive command and dry-run it
+before trusting it, including one you wrote yourself, and especially then,
+because familiarity feels like knowledge.
 
 ### Orchestration preferences, per machine
 
