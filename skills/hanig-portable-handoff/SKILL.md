@@ -13,6 +13,16 @@ description: >-
 
 # hanig-portable-handoff
 
+## Host capability boundary
+
+Read the active host's project instructions and preserve `AGENTS.md`,
+`CLAUDE.md`, and `MEMORY.md` as repository context, not host-owned state.  Any
+host may consume a handoff; `capture`, `resume`, and factual `MEMORY.md`
+refresh require usable local Python, Git, and referenced paths.  If one is
+unavailable, report that bounded limit and retain the handoff unchanged; never
+copy credentials, provision services, or alter approvals to make a resume
+appear clean.  See `docs/agent-compatibility.md` for the shared contract.
+
 Context switching between institutions and clusters loses two things: which
 code was running, and which of your runs were unfinished. Both are recoverable
 from state already on disk, so neither should depend on remembering.

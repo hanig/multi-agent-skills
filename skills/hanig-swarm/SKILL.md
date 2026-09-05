@@ -13,6 +13,17 @@ description: >-
 
 # hanig-swarm
 
+## Host capability boundary
+
+Read the project instructions exposed by the current host before acting.  This
+skill's Markdown can be loaded by another host, but that does not make its
+Paseo/Slurm tools, worker provider, credentials, or approvals available there.
+Use only capabilities actually present in the session; report missing Python,
+Git, scheduler, Paseo, or bus capabilities with the bounded fallback described
+in `docs/agent-compatibility.md`.  Never relax coordinator/worker credential
+containment, copy credentials, or infer that a host such as OpenCode is a
+supported worker backend.
+
 Step 1 of `docs/plan-swarm.md`: the unit contract.
 
 ## The default agent

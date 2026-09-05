@@ -12,6 +12,16 @@ description: >-
 
 # hanig-verified-workflow
 
+## Host capability boundary
+
+Read project instructions through the current host's conventions, then use
+only the shell/filesystem, Python, Git, and scheduler capabilities that are
+actually available.  A missing program or denied approval is absent evidence:
+state the blocked check and the resulting incomplete/unverified limit instead
+of fabricating output or changing the host's permissions.  Paseo and the agent
+bus are optional services, not prerequisites that this skill installs; their
+portable fallback is documented in `docs/agent-compatibility.md`.
+
 A scheduler reporting `COMPLETED` is not evidence that work was produced.
 
 These all look like success and are not:

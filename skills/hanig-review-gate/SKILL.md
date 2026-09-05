@@ -13,6 +13,16 @@ description: >-
 
 # hanig-review-gate
 
+## Host capability boundary
+
+Use the active host's real file, shell, and review capabilities under its
+normal approval policy.  A loaded skill does not supply reviewer providers,
+their configuration, or coordinator-held credentials; when they are absent,
+retain the evidence and report the change as **unreviewed** rather than
+substituting self-confidence or a paid worker-side call.  See
+`docs/agent-compatibility.md` for the portable capability and credential
+contract.
+
 My claim that code works is exactly as inadmissible as a scheduler's
 `COMPLETED`. Same principle as `hanig-verified-workflow`, turned on the author.
 

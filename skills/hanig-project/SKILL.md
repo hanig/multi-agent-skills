@@ -5,6 +5,17 @@ description: Start a swarm project on this machine, or adopt a half-finished rep
 
 # The front door
 
+## Host capability boundary
+
+Follow the active host's discovered project instructions and approval policy;
+`AGENTS.md`, `CLAUDE.md`, and `MEMORY.md` remain project context rather than a
+claim that a particular host has loaded a particular tool.  For tracker work,
+use only the current session's real connector and operation names.  If none is
+available, preserve the reviewed draft/outbox intent and report pending
+synchronization; do not invent a receipt, ticket reference, or confirmation.
+Installing this skill never provisions an account, copies credentials, changes
+permission/model defaults, or grants a worker the coordinator's authority.
+
 You are on a server. There is either an empty directory and an intention, or a
 half-finished repo and a vague plan. The job is to get from there to units of
 work that are dispatched, tracked, and verifiable, without asking the human
