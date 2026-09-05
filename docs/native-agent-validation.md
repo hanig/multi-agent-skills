@@ -26,8 +26,10 @@ Earlier CI run `33974800468` supplies genuine Linux and macOS native-discovery
 evidence: both artifacts reported `safe_native_gate_passed=true`, no failures,
 no missing discovery, and no version gaps. Those jobs ran before this no-Claude
 fixture and installed-capture follow-up, so they do not prove the final harness
-on CI. No authenticated LLM-driven skill execution was run, and no SSH, remote
-host, global installation, user skill store, or personal credential was used.
+on CI; their standalone helper evidence was `--help`, not the later installed
+capture. No authenticated LLM-driven skill execution was run, and no SSH,
+remote host, global installation, user skill store, or personal credential was
+used.
 
 ## Evidence classes
 
