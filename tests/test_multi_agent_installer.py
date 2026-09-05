@@ -224,6 +224,33 @@ class TestPublicCli(unittest.TestCase):
             self.assertEqual(allowed.returncode, 0, allowed.stderr)
             self.assertTrue((prefix / "paseo" / ".installed-by-multi-agent-skills").is_file())
 
+    def test_prune_detaches_only_the_agents_selected_for_this_reinstall(self):
+        from lib.skill_lifecycle import LifecycleTarget, install
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            home = base / "home"
+            shared = base / "shared config"
+            root = Path(os.path.realpath(shared / "opencode" / "skills"))
+            stale = root / "hanig-gone"
+            prepared = install([LifecycleTarget(
+                name="hanig-gone", source=ROOT / "skills" / "hanig-swarm",
+                destination=stale, origin="authored", consumers=("opencode", "pi"),
+                source_version="test",
+            )])
+            self.assertEqual(prepared[0].status, "installed")
+            env = {"HOME": str(home), "XDG_CONFIG_HOME": str(shared),
+                   "PI_CODING_AGENT_DIR": str(shared / "opencode")}
+            dry, _ = self._run("--agent", "opencode", "--dry-run", "--json",
+                               agents=("opencode",), extra_env=env)
+            self.assertEqual(dry.returncode, 0, dry.stderr)
+            self.assertIn("would-retain-shared",
+                          [action["status"] for action in json.loads(dry.stdout)["actions"]])
+            actual, _ = self._run("--agent", "opencode", "--json",
+                                  agents=("opencode",), extra_env=env)
+            self.assertEqual(actual.returncode, 0, actual.stdout + actual.stderr)
+            self.assertTrue(stale.exists())
+            self.assertIn("consumers=pi", (stale / ".installed-by-multi-agent-skills").read_text())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

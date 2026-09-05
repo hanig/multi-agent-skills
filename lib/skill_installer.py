@@ -480,6 +480,35 @@ def _migration_plan(plan: InstallPlan, source: Path, only: Sequence[str]):
     )
 
 
+def _stale_candidates(plan: InstallPlan, sources: Sequence[tuple[str, Path, str]]) -> list[Path]:
+    """Direct children no longer shipped; ownership stays lifecycle's decision."""
+    shipped = {name for name, _source, _origin in sources}
+    return [child for destination in plan.destinations if destination.path.is_dir()
+            for child in destination.path.iterdir()
+            if not child.name.startswith(".") and child.name not in shipped]
+
+
+def _preview_uninstall(candidates: Iterable[Path], *, consumers: Sequence[str],
+                       include_vendored: bool) -> list[tuple[Path, str, str]]:
+    """Read lifecycle provenance to describe a dry-run without changing it."""
+    from lib.skill_lifecycle import REPOSITORY_ID, read_provenance
+    preview = []
+    for candidate in candidates:
+        record = read_provenance(candidate)
+        if not record or record.repository != REPOSITORY_ID:
+            status, detail = "retained", "no matching recorded ownership"
+        elif record.origin == "vendored" and not include_vendored:
+            status, detail = "retained", "vendored payload requires include_vendored"
+        elif record.origin == "unknown":
+            status, detail = "retained", "legacy origin is unknown; refusing destructive removal"
+        elif consumers and set(record.consumers) - set(consumers):
+            status, detail = "would-retain-shared", "other recorded consumers remain"
+        else:
+            status, detail = "would-remove", "exact recorded owned destination"
+        preview.append((candidate, status, detail))
+    return preview
+
+
 def run(argv: Sequence[str], *, repo: Path | None = None,
         env: Mapping[str, str] | None = None) -> int:
     """Public CLI implementation.  All planning/preflight completes before writes."""
@@ -508,7 +537,7 @@ def run(argv: Sequence[str], *, repo: Path | None = None,
         return 0
 
     if options.uninstall:
-        from lib.skill_lifecycle import REPOSITORY_ID, read_provenance, uninstall
+        from lib.skill_lifecycle import uninstall
         candidates = []
         for destination in plan.destinations:
             if destination.path.is_dir():
@@ -520,18 +549,9 @@ def run(argv: Sequence[str], *, repo: Path | None = None,
         selected_consumers = () if options.prefix else tuple(target.name for target in plan.selected)
         if options.dry_run:
             actions = []
-            for candidate in candidates:
-                record = read_provenance(candidate)
-                if not record or record.repository != REPOSITORY_ID:
-                    status, detail = "retained", "no matching recorded ownership"
-                elif record.origin == "vendored" and not options.include_vendored:
-                    status, detail = "retained", "vendored payload requires include_vendored"
-                elif record.origin == "unknown":
-                    status, detail = "retained", "legacy origin is unknown; refusing destructive removal"
-                elif selected_consumers and set(record.consumers) - set(selected_consumers):
-                    status, detail = "would-retain-shared", "other recorded consumers remain"
-                else:
-                    status, detail = "would-remove", "exact recorded owned destination"
+            for candidate, status, detail in _preview_uninstall(
+                    candidates, consumers=selected_consumers,
+                    include_vendored=options.include_vendored):
                 class Preview:
                     destination = candidate
                     name = candidate.name
@@ -575,9 +595,20 @@ def run(argv: Sequence[str], *, repo: Path | None = None,
         if target.origin == "vendored" and target.allow_foreign_replace and
         (target.destination.exists() or target.destination.is_symlink())
     ]
+    prune_consumers = () if options.prefix else tuple(target.name for target in plan.selected)
+    stale = _stale_candidates(plan, sources) if not options.only else []
     if options.dry_run or blocked:
+        prune_actions = []
+        if options.dry_run:
+            for candidate, status, detail in _preview_uninstall(
+                    stale, consumers=prune_consumers,
+                    include_vendored=options.include_vendored):
+                class Preview:
+                    destination = candidate
+                    name = candidate.name
+                prune_actions.append(_action(Preview, status, detail, plan))
         document = _document(operation="install", dry_run=options.dry_run, plan=plan,
-                             actions=inspected,
+                             actions=inspected + prune_actions,
                              diagnostics=(["dry run — no destination or source files changed"] + shadow_notes + takeovers
                                           if options.dry_run else takeovers),
                              conflicts=blocked, mode=options.mode, version=version)
@@ -592,13 +623,15 @@ def run(argv: Sequence[str], *, repo: Path | None = None,
         # A removed source must not remain live forever, but lifecycle's exact
         # ownership proof remains the only authority to delete it.
         from lib.skill_lifecycle import uninstall
-        shipped = {name for name, _source, _origin in sources}
-        stale = [child for destination in plan.destinations if destination.path.is_dir()
-                 for child in destination.path.iterdir()
-                 if not child.name.startswith(".") and child.name not in shipped]
-        pruned = uninstall(stale, include_vendored=options.include_vendored)
+        from lib.skill_lifecycle import REPOSITORY_ID, read_provenance
+        owned_stale = {str(path) for path in stale
+                       if (record := read_provenance(path)) and record.repository == REPOSITORY_ID}
+        pruned = uninstall(stale, consumers=prune_consumers,
+                           include_vendored=options.include_vendored)
         actions.extend(_action(item, item.status, item.detail, plan) for item in pruned)
         removed = sum(item.status == "removed" for item in pruned)
+        failed.extend(item for item in pruned
+                      if str(item.destination) in owned_stale and item.status == "blocked")
         if removed:
             diagnostics.append(f"pruned {removed} no-longer-shipped owned skill(s)")
     document = _document(operation="install", dry_run=False, plan=plan,
