@@ -78,7 +78,8 @@ SUPERVISOR_PERL='use strict;
 use warnings;
 use POSIX qw(:sys_wait_h setpgid _exit);
 use Time::HiRes qw(clock_gettime CLOCK_MONOTONIC sleep);
-use Fcntl qw(F_GETFL F_SETFL O_NONBLOCK);
+use Fcntl qw(F_GETFL F_SETFL F_SETFD O_NONBLOCK FD_CLOEXEC);
+use Errno qw(EINTR);
 
 my ($limit, $reap, @cmd) = @ARGV;
 sub answer {
@@ -93,22 +94,63 @@ sub answer {
     exit 0;
 }
 
-pipe(my $reader, my $writer) or answer("unknown", 127, "");
+# Configure every pipe before fork. A setup failure therefore cannot leave a
+# launched diagnostic behind. The setup writer closes atomically on exec.
+pipe(my $reader, my $writer) or answer("unknown", 127, "output pipe");
+pipe(my $setup_reader, my $setup_writer)
+    or answer("unknown", 127, "setup pipe");
+my $flags = fcntl($reader, F_GETFL, 0);
+answer("unknown", 127, "output pipe flags") unless defined $flags;
+fcntl($reader, F_SETFL, $flags | O_NONBLOCK)
+    or answer("unknown", 127, "output pipe nonblocking mode");
+my $setup_flags = fcntl($setup_reader, F_GETFL, 0);
+answer("unknown", 127, "setup pipe flags") unless defined $setup_flags;
+fcntl($setup_reader, F_SETFL, $setup_flags | O_NONBLOCK)
+    or answer("unknown", 127, "setup pipe nonblocking mode");
+fcntl($setup_writer, F_SETFD, FD_CLOEXEC)
+    or answer("unknown", 127, "setup close-on-exec mode");
+
+my $SETUP_EXIT = 125;
 my $pid = fork();
-answer("unknown", 127, "") unless defined $pid;
+answer("unknown", 127, "fork") unless defined $pid;
 if ($pid == 0) {
     close $reader;
-    setpgid(0, 0);
-    open STDOUT, ">&", $writer or _exit(127);
-    open STDERR, ">&", $writer or _exit(127);
+    close $setup_reader;
+    my $write_setup = sub {
+        my ($message) = @_;
+        $message .= "\n";
+        while (length $message) {
+            my $n = syswrite($setup_writer, $message);
+            next if !defined($n) && $! == EINTR;
+            return 0 unless defined($n) && $n > 0;
+            substr($message, 0, $n, "");
+        }
+        return 1;
+    };
+    my $grouped = setpgid(0, 0);
+    unless (defined $grouped) {
+        $write_setup->("error:setpgid");
+        _exit($SETUP_EXIT);
+    }
+    unless (open STDOUT, ">&", $writer) {
+        $write_setup->("error:stdout");
+        _exit($SETUP_EXIT);
+    }
+    unless (open STDERR, ">&", $writer) {
+        $write_setup->("error:stderr");
+        _exit($SETUP_EXIT);
+    }
     close $writer;
-    exec {$cmd[0]} @cmd or _exit(127);
+    # A command can execute only after this complete handshake. Thus absence
+    # of ready is a setup failure without reserving any command exit status.
+    $write_setup->("ready") or _exit($SETUP_EXIT);
+    exec {$cmd[0]} @cmd or do {
+        $write_setup->("error:exec");
+        _exit($SETUP_EXIT);
+    };
 }
 close $writer;
-my $flags = fcntl($reader, F_GETFL, 0);
-answer("unknown", 127, "") unless defined $flags;
-fcntl($reader, F_SETFL, $flags | O_NONBLOCK)
-    or answer("unknown", 127, "");
+close $setup_writer;
 
 my $started = clock_gettime(CLOCK_MONOTONIC);
 my $run_deadline = $started + $limit;
@@ -116,42 +158,80 @@ my $grace_deadline = $run_deadline + $reap;
 my $state = "RUNNING";
 my ($status, $direct_reaped);
 my $tail = "";
+my $setup_error = "";
+my $wait_error = "";
+my $cleanup_deadline;
+my $DRAIN_READS = 8;
+my $DRAIN_BYTES = 65536;
 sub drain {
-    while (1) {
+    my ($reads, $bytes) = (0, 0);
+    while ($reads < $DRAIN_READS && $bytes < $DRAIN_BYTES) {
+        $reads++;
         my $chunk = "";
-        my $n = sysread($reader, $chunk, 8192);
+        my $want = $DRAIN_BYTES - $bytes;
+        $want = 8192 if $want > 8192;
+        my $n = sysread($reader, $chunk, $want);
+        next if !defined($n) && $! == EINTR;
         last unless defined($n) && $n > 0;
+        $bytes += $n;
         $tail .= $chunk;
         $tail = substr($tail, -65536) if length($tail) > 65536;
+    }
+}
+sub drain_setup {
+    for (1 .. 4) {
+        my $chunk = "";
+        my $n = sysread($setup_reader, $chunk, 256);
+        next if !defined($n) && $! == EINTR;
+        last unless defined($n) && $n > 0;
+        $setup_error .= $chunk;
+        $setup_error = substr($setup_error, -1024)
+            if length($setup_error) > 1024;
     }
 }
 
 while (1) {
     drain();
+    drain_setup();
     my $now = clock_gettime(CLOCK_MONOTONIC);
 
-    if ($state eq "RUNNING" && $now >= $run_deadline) {
+    if ($state eq "RUNNING" && !$wait_error && $now >= $run_deadline) {
         $state = "TIMED_OUT";
+        $cleanup_deadline = $grace_deadline;
         kill "TERM", -$pid;
         kill "TERM", $pid unless $direct_reaped;
     }
 
     unless ($direct_reaped) {
         my $got = waitpid($pid, WNOHANG);
+        while ($got == -1 && $! == EINTR) {
+            $got = waitpid($pid, WNOHANG);
+        }
         if ($got == $pid) {
             $status = $?;
             $direct_reaped = 1;
-            last if $state eq "RUNNING";
+            drain_setup();
+            if ($state eq "RUNNING" && !$wait_error) {
+                last;
+            }
+        } elsif ($got == -1 && !$wait_error) {
+            $wait_error = "waitpid failed: $!";
+            $cleanup_deadline = $now + $reap;
+            kill "TERM", -$pid;
+            kill "TERM", $pid unless $direct_reaped;
         }
     }
 
-    if ($state eq "TIMED_OUT" && $now >= $grace_deadline) {
+    if (defined($cleanup_deadline) && $now >= $cleanup_deadline) {
         # The group may still contain a TERM-ignoring child after its parent
         # exited and was reaped. Always signal the original group at grace.
         kill "KILL", -$pid;
         kill "KILL", $pid unless $direct_reaped;
         unless ($direct_reaped) {
             my $last = waitpid($pid, WNOHANG);
+            while ($last == -1 && $! == EINTR) {
+                $last = waitpid($pid, WNOHANG);
+            }
             if ($last == $pid) {
                 $status = $?;
                 $direct_reaped = 1;
@@ -162,6 +242,17 @@ while (1) {
     sleep 0.02;
 }
 drain();
+drain_setup();
+if ($setup_error =~ /(?:^|\n)error:([^\n]+)/) {
+    answer("setup-error", 127, $1);
+}
+if ($state eq "RUNNING" && $direct_reaped
+        && $setup_error !~ /(?:^|\n)ready(?:\n|$)/) {
+    answer("setup-error", 127, "setup handshake absent");
+}
+if (length $wait_error) {
+    answer("supervisor-error", 127, $wait_error);
+}
 my $rc = 127;
 if ($state eq "TIMED_OUT") {
     $rc = 124;
@@ -203,7 +294,15 @@ bounded() {
   PROBE_OUT=${PROBE_OUT%"$_nl"__DOCTOR_END__}
   case "$PROBE_STATE" in
     answered) PROBE_WHY= ;;
-    timeout)  PROBE_WHY="it timed out and was killed" ;;
+    timeout)  PROBE_WHY="it timed out; termination was attempted" ;;
+    setup-error)
+              PROBE_STATE=unknown
+              PROBE_WHY="the bounded supervisor setup failed: $PROBE_OUT"
+              PROBE_OUT= ;;
+    supervisor-error)
+              PROBE_STATE=unknown
+              PROBE_WHY="the bounded supervisor failed: $PROBE_OUT"
+              PROBE_OUT= ;;
     *)        PROBE_STATE=unknown
               PROBE_WHY="the bounded supervisor could not launch it" ;;
   esac
@@ -227,7 +326,7 @@ if command -v python3 >/dev/null 2>&1; then
   bounded "$RUN_SECONDS" python3 --version
   case "$PROBE_STATE:$PROBE_RC" in
     answered:0) printf '  python3: %s\n' "$PROBE_OUT" ;;
-    timeout:*)  printf '  python3: TIMEOUT — version probe was killed\n' ;;
+    timeout:*)  printf '  python3: TIMEOUT — version probe timed out; termination was attempted\n' ;;
     *)          printf '  python3: COULD NOT DETERMINE — version probe failed\n' ;;
   esac
 else
@@ -238,7 +337,7 @@ if command -v git >/dev/null 2>&1; then
   bounded "$RUN_SECONDS" git --version
   case "$PROBE_STATE:$PROBE_RC" in
     answered:0) printf '  git: %s\n' "$PROBE_OUT" ;;
-    timeout:*)  printf '  git: TIMEOUT — version probe was killed\n' ;;
+    timeout:*)  printf '  git: TIMEOUT — version probe timed out; termination was attempted\n' ;;
     *)          printf '  git: COULD NOT DETERMINE — version probe failed\n' ;;
   esac
 else
@@ -560,7 +659,7 @@ for d in "$PREFIX"/*; do
     fi
     bounded "$RUN_SECONDS" python3 -m py_compile "$py"
     if [ "$PROBE_STATE" = timeout ]; then
-      printf '  TIMEOUT  %s/%s — compilation timed out and was killed\n' \
+      printf '  TIMEOUT  %s/%s — compilation timed out; termination was attempted\n' \
         "$skill" "$script"
       bad=$((bad + 1))
     elif [ "$PROBE_STATE" != answered ]; then

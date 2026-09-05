@@ -2466,6 +2466,12 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
                 return line.strip()[len(name) + 1:].strip()
         self.fail("doctor printed no %r line:%s" % (name, self._section(out)))
 
+    @staticmethod
+    def _supervisor_source():
+        src = DOCTOR.read_text()
+        return src.split("SUPERVISOR_PERL='", 1)[1].split(
+            "'\n\n# bounded SECONDS", 1)[0]
+
     # --- the four states, which are two facts and not one -------------------
 
     def test_the_cli_on_PATH_is_reported_as_the_path_it_was_found_at(self):
@@ -2579,6 +2585,91 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
             self.assertLess(time.monotonic() - start, 20, r.stdout)
             self.assertFalse(marker.exists(),
                              "bounded() still invokes an unbounded helper")
+
+    def test_a_continuously_noisy_child_cannot_starve_its_deadline(self):
+        """An unbounded drain-until-EAGAIN loop can stay inside drain forever
+        when several writers keep the pipe readable. Each drain quantum must
+        yield to the monotonic state machine while retaining the 64 KiB tail."""
+        with tempfile.TemporaryDirectory() as d:
+            script = Path(d) / "noisy"
+            pidfile = Path(d) / "noisy.pid"
+            script.write_text(
+                "#!/bin/sh\n"
+                "printf '%s' \"$$\" >" + str(pidfile) + "\n"
+                "trap '' TERM\n"
+                "writer() { while :; do printf '%01024d' 0; done; }\n"
+                "writer & writer & writer & writer &\n"
+                "writer & writer & writer & writer &\n"
+                "wait\n")
+            script.chmod(0o755)
+            proc = subprocess.Popen(
+                [shutil.which("perl"), "-e", self._supervisor_source(),
+                 "1", "1", str(script)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                start_new_session=True)
+            child = None
+            try:
+                out, err = proc.communicate(timeout=5)
+                self.assertEqual(proc.returncode, 0, err)
+                lines = out.splitlines()
+                self.assertEqual(lines[:2], ["timeout", "124"], out[:200])
+                self.assertEqual(len(lines[2]), 65536,
+                                 "the retained output tail is not 64 KiB")
+                self.assertEqual(set(lines[2]), {"0"})
+            except subprocess.TimeoutExpired:
+                self.fail("continuous output starved the monotonic deadline")
+            finally:
+                if pidfile.exists():
+                    child = int(pidfile.read_text())
+                    try:
+                        os.kill(-child, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                if proc.poll() is None:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.communicate()
+
+    def test_group_setup_and_wait_errors_fail_closed(self):
+        """setpgid/waitpid failures are impractical to inject portably. Guard
+        the executable ordering and setup/error classifications directly,
+        then prove the handshake does not reserve a command exit status."""
+        src = self._supervisor_source()
+        grouped = src.index("my $grouped = setpgid(0, 0)")
+        checked = src.index("unless (defined $grouped)", grouped)
+        refused = src.index("_exit($SETUP_EXIT)", checked)
+        ready = src.index('$write_setup->("ready")', refused)
+        executed = src.index("exec {$cmd[0]}", refused)
+        self.assertLess(grouped, checked)
+        self.assertLess(checked, refused)
+        self.assertLess(refused, executed,
+                        "a diagnostic can execute after setpgid failure")
+        self.assertLess(ready, executed,
+                        "a diagnostic can execute without the setup handshake")
+        self.assertIn('answer("setup-error", 127, $1)', src)
+        self.assertIn("while ($got == -1 && $! == EINTR)", src)
+        self.assertIn("elsif ($got == -1 && !$wait_error)", src)
+        self.assertIn('answer("supervisor-error", 127, $wait_error)', src)
+
+        r = subprocess.run(
+            [shutil.which("perl"), "-e", src, "1", "1",
+             shutil.which("sh"), "-c", "exit 125"],
+            capture_output=True, text=True, timeout=5)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.splitlines()[:3], ["answered", "125", ""])
+
+        missing = str(Path(tempfile.gettempdir()) / "doctor-no-such-command")
+        r = subprocess.run(
+            [shutil.which("perl"), "-e", src, "1", "1", missing],
+            capture_output=True, text=True, timeout=5)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.splitlines()[:3],
+                         ["setup-error", "127", "exec"])
+
+    def test_timeout_wording_claims_only_a_termination_attempt(self):
+        src = DOCTOR.read_text()
+        self.assertNotIn("was killed", src)
+        self.assertNotIn("and was killed", src)
+        self.assertIn("termination was attempted", src)
 
     def test_timeout_cleans_up_an_ordinary_login_profile_descendant(self):
         """bash profiles commonly start a child without changing its process
