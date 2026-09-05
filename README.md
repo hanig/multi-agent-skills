@@ -117,21 +117,54 @@ here.
 #### Disposable model-routing check
 
 After exporting `MULTI_AGENT_SKILLS_CHECKOUT` as the absolute checkout path,
-this block can run from any other directory. It copies the shipped registry
-only into a new temporary state directory; it writes neither the checkout nor
-the home directory. A disposable `HOME` inside that same directory also
-contains any side effects from live-signal collectors that `models` invokes.
-The printed directory is safe to remove after inspection.
+set `AGENT_BUS_SCRATCH` to an existing writable directory whose resolved path
+is outside both the checkout and `$HOME`. The block checks that precondition,
+then can run from any other directory. It copies the shipped registry only
+into a private temporary state directory. A disposable `HOME` inside that
+same directory contains any side effects from live-signal collectors that
+`models` invokes. The EXIT and signal traps remove the printed directory on
+success, failure, or interruption, and refuse to delete anything except the
+temporary child they allocated.
 
 ```bash
-checkout="${MULTI_AGENT_SKILLS_CHECKOUT:?set this to the absolute checkout path}"
+checkout="$(CDPATH= cd -- "${MULTI_AGENT_SKILLS_CHECKOUT:?set the checkout path}" && pwd -P)"
+home_dir="$(CDPATH= cd -- "$HOME" && pwd -P)"
+scratch="$(CDPATH= cd -- "${AGENT_BUS_SCRATCH:?set external scratch}" && pwd -P)"
+test -w "$scratch"
+case "$scratch" in
+  /|"$home_dir"|"$home_dir"/*|"$checkout"|"$checkout"/*)
+    echo "AGENT_BUS_SCRATCH must resolve outside HOME and the checkout" >&2
+    exit 2
+    ;;
+esac
 bus_bin="$checkout/bin/bus"
 test -x "$bus_bin"
-bus_state="$(mktemp -d "${TMPDIR:-/tmp}/agent-bus.XXXXXX")"
+bus_state=""
+cleanup() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  if [ -n "$bus_state" ]; then
+    case "$bus_state" in
+      "$scratch"/agent-bus.*)
+        rm -rf "$bus_state" || status=1
+        ;;
+      *)
+        echo "refusing to clean unexpected path: $bus_state" >&2
+        status=1
+        ;;
+    esac
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+bus_state="$(mktemp -d "$scratch/agent-bus.XXXXXX")"
+printf 'disposable AGENT_BUS_HOME=%s\n' "$bus_state" >&2
 mkdir "$bus_state/home"
 cp "$checkout/models.json" "$bus_state/models.json"
 chmod 600 "$bus_state/models.json"
-printf 'disposable AGENT_BUS_HOME=%s\n' "$bus_state" >&2
 HOME="$bus_state/home" AGENT_BUS_HOME="$bus_state" "$bus_bin" models --json
 ```
 

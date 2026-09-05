@@ -1326,6 +1326,10 @@ class TestVendoredAgentBusLayoutIsExplicit(unittest.TestCase):
                       '"$bus_state/models.json"', section)
         self.assertIn('HOME="$bus_state/home" AGENT_BUS_HOME="$bus_state" '
                       '"$bus_bin" models --json', section)
+        self.assertIn("AGENT_BUS_SCRATCH must resolve outside HOME", section)
+        for trapped in ("trap cleanup EXIT", "trap 'exit 129' HUP",
+                        "trap 'exit 130' INT", "trap 'exit 143' TERM"):
+            self.assertIn(trapped, section)
         self.assertNotIn('AGENT_BUS_HOME="$checkout', section)
         self.assertNotIn('mkdir -p ~/.agent-bus', section)
         self.assertNotIn('cp models.json ~/.agent-bus', section)
@@ -1356,13 +1360,13 @@ class TestVendoredAgentBusLayoutIsExplicit(unittest.TestCase):
             sandbox = Path(d)
             fake_home = sandbox / "home"
             outside = sandbox / "outside"
-            temporary_states = sandbox / "temporary-states"
-            for path in (fake_home, outside, temporary_states):
+            external_scratch = sandbox / "external-scratch"
+            for path in (fake_home, outside, external_scratch):
                 path.mkdir()
             env = dict(os.environ)
             env.update({
                 "HOME": str(fake_home),
-                "TMPDIR": str(temporary_states),
+                "AGENT_BUS_SCRATCH": str(external_scratch),
                 "MULTI_AGENT_SKILLS_CHECKOUT": str(ROOT),
             })
             env.pop("AGENT_BUS_HOME", None)
@@ -1372,6 +1376,29 @@ class TestVendoredAgentBusLayoutIsExplicit(unittest.TestCase):
             checkout_before = snapshot(ROOT)
             check = section.split("#### Disposable model-routing check", 1)[1]
             documented = check.split("```bash", 1)[1].split("```", 1)[0]
+
+            # Inspect a real invocation before cleanup so the cache-location
+            # claim is tested independently of the example's EXIT trap.
+            runtime_state = sandbox / "runtime-probe"
+            runtime_home = runtime_state / "home"
+            runtime_home.mkdir(parents=True)
+            runtime_registry = runtime_state / "models.json"
+            shutil.copyfile(ROOT / "models.json", runtime_registry)
+            runtime_registry.chmod(0o600)
+            runtime_env = dict(env)
+            runtime_env.update({"HOME": str(runtime_home),
+                                "AGENT_BUS_HOME": str(runtime_state)})
+            probed = subprocess.run(
+                [str(local_bus), "models", "--json"], cwd=outside,
+                env=runtime_env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(probed.returncode, 0, probed.stderr)
+            for dirname in ("sessions", "inbox", "cursors", "cache"):
+                self.assertTrue((runtime_state / dirname).is_dir(), dirname)
+            cache_files = list((runtime_state / "cache").iterdir())
+            self.assertTrue(cache_files, "models produced no runtime cache")
+            self.assertTrue(all(path.is_file() for path in cache_files),
+                            cache_files)
+
             ran = subprocess.run(
                 ["sh", "-eu", "-c", documented], cwd=outside, env=env,
                 capture_output=True, text=True, timeout=30)
@@ -1381,26 +1408,94 @@ class TestVendoredAgentBusLayoutIsExplicit(unittest.TestCase):
             self.assertEqual({row["id"] for row in rows},
                              {row["id"] for row in expected["models"]})
 
-            states = list(temporary_states.iterdir())
-            self.assertEqual(len(states), 1, states)
-            bus_state = states[0]
-            registry = bus_state / "models.json"
-            self.assertEqual(registry.read_bytes(),
-                             (ROOT / "models.json").read_bytes())
-            self.assertEqual(registry.stat().st_mode & 0o777, 0o600)
-            for dirname in ("sessions", "inbox", "cursors", "cache"):
-                self.assertTrue((bus_state / dirname).is_dir(), dirname)
-            cache_files = list((bus_state / "cache").iterdir())
-            self.assertTrue(cache_files, "models produced no runtime cache")
-            self.assertTrue(all(path.is_file() for path in cache_files),
-                            cache_files)
-            self.assertIn(str(bus_state), ran.stderr)
+            match = re.search(r"^disposable AGENT_BUS_HOME=(.+)$",
+                              ran.stderr, re.MULTILINE)
+            self.assertIsNotNone(match, ran.stderr)
+            printed_state = Path(match.group(1))
+            self.assertFalse(printed_state.exists(),
+                             "EXIT trap left its private state behind")
+            self.assertEqual(list(external_scratch.iterdir()), [])
+            self.assertFalse((fake_home / ".agent-bus").exists())
             self.assertEqual(snapshot(fake_home), home_before,
                              "the disposable check wrote into HOME")
             self.assertEqual(snapshot(outside), outside_before,
                              "models wrote runtime cache into its cwd")
             self.assertEqual(snapshot(ROOT), checkout_before,
                              "the disposable check changed the checkout")
+
+            bad_home = sandbox / "bad-home"
+            bad_scratch = bad_home / "scratch"
+            bad_scratch.mkdir(parents=True)
+            bad_env = dict(env)
+            bad_env.update({"HOME": str(bad_home),
+                            "AGENT_BUS_SCRATCH": str(bad_scratch)})
+            bad_before = snapshot(bad_home)
+            refused = subprocess.run(
+                ["sh", "-eu", "-c", documented], cwd=outside, env=bad_env,
+                capture_output=True, text=True, timeout=30)
+            self.assertEqual(refused.returncode, 2, refused.stderr)
+            self.assertIn("must resolve outside HOME", refused.stderr)
+            self.assertEqual(snapshot(bad_home), bad_before,
+                             "a refused scratch path was modified")
+
+    def test_the_documented_trap_cleans_failure_and_interruption(self):
+        readme = (ROOT / "README.md").read_text()
+        section = readme.split("### Agent bus executable, in this checkout",
+                               1)[1].split("\n### ", 1)[0]
+        check = section.split("#### Disposable model-routing check", 1)[1]
+        documented = check.split("```bash", 1)[1].split("```", 1)[0]
+
+        def printed_path(stderr):
+            match = re.search(r"^disposable AGENT_BUS_HOME=(.+)$", stderr,
+                              re.MULTILINE)
+            self.assertIsNotNone(match, stderr)
+            return Path(match.group(1))
+
+        with tempfile.TemporaryDirectory() as d:
+            sandbox = Path(d)
+            fake_home = sandbox / "home"
+            outside = sandbox / "outside"
+            scratch = sandbox / "external-scratch"
+            checkout = sandbox / "fake-checkout"
+            fake_bin = checkout / "bin"
+            for path in (fake_home, outside, scratch, fake_bin):
+                path.mkdir(parents=True)
+            shutil.copyfile(ROOT / "models.json", checkout / "models.json")
+            fake_bus = fake_bin / "bus"
+            env = dict(os.environ)
+            env.update({"HOME": str(fake_home),
+                        "AGENT_BUS_SCRATCH": str(scratch),
+                        "TMPDIR": str(scratch),
+                        "MULTI_AGENT_SKILLS_CHECKOUT": str(checkout)})
+            env.pop("AGENT_BUS_HOME", None)
+
+            fake_bus.write_text("#!/bin/sh\nexit 7\n")
+            fake_bus.chmod(0o700)
+            failed = subprocess.run(
+                ["sh", "-eu", "-c", documented], cwd=outside, env=env,
+                capture_output=True, text=True, timeout=30)
+            self.assertEqual(failed.returncode, 7, failed.stderr)
+            self.assertFalse(printed_path(failed.stderr).exists())
+            self.assertEqual(list(scratch.iterdir()), [])
+
+            fake_bus.write_text(
+                "#!/bin/sh\n"
+                "trap 'exit 143' HUP INT TERM\n"
+                "while :; do sleep 1; done\n")
+            fake_bus.chmod(0o700)
+            proc = subprocess.Popen(
+                ["sh", "-eu", "-c", documented], cwd=outside, env=env,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                stdin=subprocess.DEVNULL, start_new_session=True)
+            line = proc.stderr.readline()
+            active_state = printed_path(line)
+            self.assertTrue(active_state.is_dir(), line)
+            os.killpg(os.getpgid(proc.pid), 15)
+            _out, err = proc.communicate(timeout=15)
+            self.assertEqual(proc.returncode, 143, line + err)
+            self.assertFalse(active_state.exists())
+            self.assertEqual(list(scratch.iterdir()), [])
+            self.assertFalse((fake_home / ".agent-bus").exists())
 
     def test_the_upstream_report_separates_executable_and_state_paths(self):
         report = (ROOT / "docs" /
