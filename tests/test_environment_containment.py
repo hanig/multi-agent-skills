@@ -138,6 +138,21 @@ def _spawn_offenders(root):
 
 
 class TestEnvironmentContainment(unittest.TestCase):
+    def test_other_model_credentials_are_documented_as_coordinator_side(self):
+        docs = (
+            ROOT / "README.md",
+            ROOT / "skills" / "hanig-swarm" / "SKILL.md",
+        )
+        for path in docs:
+            text = path.read_text()
+            with self.subTest(path=path.relative_to(ROOT)):
+                self.assertIn(
+                    "`models.json` is routing metadata, not a credential grant",
+                    text)
+                self.assertIn("`OPENAI_API_KEY`", text)
+                self.assertIn("`OPENROUTER_API_KEY`", text)
+                self.assertIn("coordinator-side", text)
+
     def test_huggingface_token_is_not_denied_under_either_name(self):
         """HF_TOKEN and HUGGINGFACE_TOKEN are one credential, two spellings,
         and the same library reads both. Denying either fails a gated model
