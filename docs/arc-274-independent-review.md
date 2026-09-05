@@ -290,5 +290,5 @@ was executed or inferred as passing in this child worktree.
 
 The parent coordinator still owns a full regression on the integrated tree and
 native-loader release evidence. The unchanged `2414d8a` baseline full run was
-reported separately as 1,544 tests with two pre-existing failures; that result
+reported separately as 1,544 tests with two test-assumption failures; that result
 is neither evidence for these fixes nor a merge pass.
