@@ -292,6 +292,45 @@ class LifecycleAcceptance(unittest.TestCase):
         self.assertTrue(legacy.is_dir(), "planning migration must retain legacy content")
         self.assertFalse(plan[0].destination.exists())
 
+    def test_handoff_from_a_claude_root_is_consumed_from_a_codex_root(self):
+        """Portable handoff uses the installed producer and consumer copies.
+
+        This is hermetic transport coverage, not a claim that either native
+        host loaded the skill.  Native discovery/invocation remains a release
+        record requirement in the accompanying acceptance document.
+        """
+        workflow_source = self.source("hanig-verified-workflow")
+        handoff_source = self.source("hanig-portable-handoff")
+        claude_workflow = self.home / ".claude" / "skills" / workflow_source.name
+        codex_handoff = self.home / ".agents" / "skills" / handoff_source.name
+        results = lifecycle.install([
+            self.target(workflow_source, "claude", destination=claude_workflow),
+            self.target(handoff_source, "codex", destination=codex_handoff),
+        ])
+        self.assertEqual([result.status for result in results], ["installed", "installed"])
+        shutil.rmtree(self.base / "source-copy")
+        contract = claude_workflow / "scripts" / "contract.py"
+        handoff = codex_handoff / "scripts" / "handoff.py"
+        run_dir, output, handoff_file = (self.project / "run", self.project / "out.tsv",
+                                         self.project / "handoff.json")
+        init = subprocess.run([sys.executable, str(contract), "init", str(run_dir),
+                               "--command", "/bin/true", "--output", str(output)],
+                              cwd=self.project, capture_output=True, text=True)
+        self.assertEqual(init.returncode, 0, init.stderr)
+        output.write_text("handoffable\n")
+        recorded = subprocess.run([sys.executable, str(contract), "record", str(run_dir),
+                                   "--exit-code", "0"], cwd=self.project,
+                                  capture_output=True, text=True)
+        self.assertEqual(recorded.returncode, 0, recorded.stderr)
+        captured = subprocess.run([sys.executable, str(handoff), "capture", str(run_dir),
+                                  "--out", str(handoff_file)], cwd=self.project,
+                                 capture_output=True, text=True)
+        self.assertEqual(captured.returncode, 0, captured.stderr)
+        resumed = subprocess.run([sys.executable, str(handoff), "resume", str(handoff_file)],
+                                cwd=self.project, capture_output=True, text=True)
+        self.assertEqual(resumed.returncode, 0, resumed.stderr + resumed.stdout)
+        self.assertIn("HANDOFF_CLEAN", resumed.stdout)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
