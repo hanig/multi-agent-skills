@@ -3007,12 +3007,58 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
                         "a diagnostic can execute after setpgid failure")
         self.assertLess(ready, executed,
                         "a diagnostic can execute without the setup handshake")
+        launch_mask = src.index(
+            "sigprocmask(SIG_BLOCK, $blocked_signals, $old_signal_mask)")
+        chld_default = src.index('$SIG{CHLD} = "DEFAULT"', launch_mask)
+        chld_failure = src.index(
+            'or answer("unknown", 127, "SIGCHLD disposition")', chld_default)
+        forked = src.index("my $pid = fork()", chld_default)
+        self.assertLess(launch_mask, chld_default)
+        self.assertLess(chld_default, chld_failure)
+        self.assertLess(chld_failure, forked)
+        self.assertLess(chld_default, forked,
+                        "an inherited ignored SIGCHLD can auto-reap the child")
         self.assertIn('answer("setup-error", 127, $1)', src)
         self.assertNotIn("while ($got == -1 && $! == EINTR)", src)
         self.assertNotIn("while ($last == -1 && $! == EINTR)", src)
-        self.assertIn("elsif ($got == -1 && $! != EINTR", src)
+        self.assertIn("elsif ($got == -1 && $poll_errno_number != EINTR", src)
         self.assertIn("unless defined $cleanup_deadline", src)
         self.assertIn('answer("supervisor-error", 127, $wait_error)', src)
+        self.assertIn("unless ($direct_reaped || defined $cleanup_deadline)",
+                      src)
+        timeout_start = src.index(
+            'if ($state eq "RUNNING" && !$wait_error && $now >= $run_deadline)')
+        timeout_end = src.index("\n    }", timeout_start)
+        timeout_transition = src[timeout_start:timeout_end]
+        self.assertIn("$state = \"TIMED_OUT\"", timeout_transition)
+        self.assertIn("$cleanup_deadline = $grace_deadline\n"
+                      "            unless defined $cleanup_deadline",
+                      timeout_transition)
+        self.assertIn("for my $signal_name (qw(HUP INT TERM))", src)
+        self.assertIn('"interrupted by SIG$interrupted; termination was attempted"',
+                      src)
+        handler_start = src.index('$SIG{$signal_name} = sub {')
+        handler_end = src.index("\n    };", handler_start)
+        handler = src[handler_start:handler_end]
+        self.assertIn("return unless $active_pid", handler)
+        self.assertIn("$interrupted = $_[0]", handler)
+        for forbidden in ("kill ", "waitpid(", "clock_gettime",
+                          "cleanup_deadline", "answer("):
+            self.assertNotIn(forbidden, handler,
+                             "signal handler does more than latch state")
+        poll_mask = src.index(
+            "sigprocmask(SIG_BLOCK, $blocked_signals, $poll_mask)")
+        latched_before_poll = src.index("if (length $interrupted)", poll_mask)
+        poll_wait = src.index("my $got = waitpid", poll_mask)
+        active_clear = src.index("$active_pid = 0", poll_wait)
+        interrupt_clear = src.index('$interrupted = ""', active_clear)
+        poll_restore = src.index(
+            "sigprocmask(SIG_SETMASK, $poll_mask)", interrupt_clear)
+        self.assertLess(poll_mask, latched_before_poll)
+        self.assertLess(latched_before_poll, poll_wait)
+        self.assertLess(poll_wait, active_clear)
+        self.assertLess(active_clear, interrupt_clear)
+        self.assertLess(active_clear, poll_restore)
         wait_classification = src.index("if (length $wait_error)")
         explicit_setup = src.index("if ($setup_error =~", wait_classification)
         missing_ready = src.index(
@@ -3022,12 +3068,22 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
         final_start = src.index("# One final nonblocking attempt only")
         final_end = src.index("\n        }\n        last;", final_start)
         final = src[final_start:final_end]
+        cleanup_start = src.index(
+            "if (defined($cleanup_deadline) && $now >= $cleanup_deadline)")
+        group_kill = src.index(
+            'kill "KILL", -$active_pid if $active_pid', cleanup_start)
+        final_wait = src.index("my $last = waitpid", group_kill)
+        self.assertLess(group_kill, final_wait,
+                        "the group leader was reaped before final group KILL")
+        self.assertNotIn('kill "KILL", -$pid',
+                         src[cleanup_start:final_wait])
         self.assertEqual(final.count("waitpid("), 1,
                          "final cleanup retries a nonblocking wait")
-        self.assertIn("elsif ($last == -1 && $! != EINTR && !$wait_error)",
-                      final)
+        self.assertIn("$last_errno_number != EINTR", final)
         self.assertIn('final waitpid failed: $!', final)
         self.assertNotIn('kill "', final)
+        self.assertNotIn("sigprocmask", final,
+                         "a mask failure can skip the sole final reap")
         self.assertNotIn("cleanup_deadline =", final)
 
         r = subprocess.run(
@@ -3044,6 +3100,30 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.splitlines()[:3],
                          ["setup-error", "127", "exec"])
+
+    def test_inherited_ignored_sigchld_cannot_auto_reap_the_probe(self):
+        """POSIX preserves ignored dispositions across exec. Start the Perl
+        supervisor that way and prove its short child remains waitable rather
+        than disappearing before the supervisor's sole-reaper state machine."""
+        outer = (
+            'my $program = shift @ARGV; '
+            '$SIG{CHLD} = "IGNORE"; '
+            'exec {$program} $program, @ARGV or die $!;')
+        # Some Perl runtimes normalize SIGCHLD while starting the interpreter.
+        # Seed it again at the supervisor boundary so the waitability claim is
+        # exercised on every supported host, while the outer exec still models
+        # the inherited-disposition launch that prompted the fix.
+        inherited_source = (
+            '$SIG{CHLD} = "IGNORE";\n' + self._supervisor_source())
+        r = subprocess.run(
+            [shutil.which("perl"), "-e", outer,
+             shutil.which("perl"), "-e", inherited_source,
+             "2", "1", shutil.which("sh"), "-c",
+             "printf inherited-sigchld-ok"],
+            capture_output=True, text=True, timeout=5)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.splitlines()[:3],
+                         ["answered", "0", "inherited-sigchld-ok"])
 
     def test_timeout_wording_claims_only_a_termination_attempt(self):
         src = DOCTOR.read_text()
@@ -3124,6 +3204,189 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
             self.assertLess(elapsed, 15, "grace deadline did not bound timeout")
             self.assertIn("claude: COULD NOT DETERMINE", r.stdout)
             self.assertIn("login shell timed out", r.stdout)
+
+    def test_timed_out_group_leader_reserves_its_pid_until_group_kill(self):
+        """After TERM the direct parent exits while a same-group child ignores
+        it. The parent must remain an unreaped zombie until the absolute grace
+        deadline, reserving the PID/PGID that the final negative-PID KILL uses."""
+        with tempfile.TemporaryDirectory() as d:
+            leader_file = Path(d) / "leader.pid"
+            child_file = Path(d) / "child.pid"
+            script = Path(d) / "term-parent"
+            script.write_text(
+                "#!/bin/sh\n"
+                "(trap '' HUP INT TERM; while :; do :; done) &\n"
+                "printf '%s' \"$!\" >" + str(child_file) + "\n"
+                "printf '%s' \"$$\" >" + str(leader_file) + "\n"
+                "trap 'exit 0' TERM\n"
+                "while :; do :; done\n")
+            script.chmod(0o755)
+            started = time.monotonic()
+            proc = subprocess.Popen(
+                [shutil.which("perl"), "-e", self._supervisor_source(),
+                 "1", "3", str(script)], stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, start_new_session=True)
+            leader = child = None
+            try:
+                deadline = started + 3
+                while time.monotonic() < deadline:
+                    if leader_file.exists() and child_file.exists():
+                        leader = int(leader_file.read_text())
+                        child = int(child_file.read_text())
+                        state = subprocess.run(
+                            ["ps", "-o", "stat=", "-p", str(leader)],
+                            capture_output=True, text=True).stdout.strip()
+                        if state.startswith("Z"):
+                            break
+                    time.sleep(0.02)
+                else:
+                    self.fail("TERM-exited group leader was reaped before grace")
+                self.assertLess(time.monotonic() - started, 3.5)
+                out, err = proc.communicate(timeout=4)
+                self.assertEqual(proc.returncode, 0, err)
+                self.assertEqual(out.splitlines()[:2], ["timeout", "124"])
+                self.assertGreaterEqual(time.monotonic() - started, 3.5)
+                gone = time.monotonic() + 3
+                while time.monotonic() < gone:
+                    try:
+                        os.kill(child, 0)
+                    except ProcessLookupError:
+                        break
+                    time.sleep(0.02)
+                else:
+                    self.fail("TERM-ignoring group child survived final KILL")
+            finally:
+                if leader is not None:
+                    try:
+                        os.kill(-leader, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                if proc.poll() is None:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.communicate()
+
+    def test_interrupt_signals_clean_up_the_isolated_probe_group(self):
+        """The supervisor receives the interruption, not its isolated probe.
+        Each supported signal must trigger real group cleanup and a bounded
+        supervisor answer; merely installing handlers would make this vacuous."""
+        for signum, signame in ((signal.SIGHUP, "HUP"),
+                                (signal.SIGINT, "INT"),
+                                (signal.SIGTERM, "TERM")):
+            with self.subTest(signal=signame), tempfile.TemporaryDirectory() as d:
+                leader_file = Path(d) / "leader.pid"
+                child_file = Path(d) / "child.pid"
+                script = Path(d) / "ignore-signals"
+                script.write_text(
+                    "#!/bin/sh\n"
+                    "trap '' HUP INT TERM\n"
+                    "(trap '' HUP INT TERM; while :; do :; done) &\n"
+                    "printf '%s' \"$!\" >" + str(child_file) + "\n"
+                    "printf '%s' \"$$\" >" + str(leader_file) + "\n"
+                    "while :; do :; done\n")
+                script.chmod(0o755)
+                proc = subprocess.Popen(
+                    [shutil.which("perl"), "-e", self._supervisor_source(),
+                     "30", "2", str(script)], stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True, start_new_session=True)
+                leader = child = None
+                try:
+                    deadline = time.monotonic() + 3
+                    while time.monotonic() < deadline:
+                        if leader_file.exists() and child_file.exists():
+                            leader = int(leader_file.read_text())
+                            child = int(child_file.read_text())
+                            break
+                        time.sleep(0.02)
+                    else:
+                        self.fail("signal-ignoring probe group did not start")
+                    started = time.monotonic()
+                    # Repeated delivery must not move the first interruption's
+                    # absolute cleanup deadline. An implementation that resets
+                    # it on every signal takes well over this test's bound.
+                    for _ in range(5):
+                        os.kill(proc.pid, signum)
+                        time.sleep(0.3)
+                    out, err = proc.communicate(timeout=3)
+                    self.assertLess(time.monotonic() - started, 2.8)
+                    self.assertEqual(proc.returncode, 0, err)
+                    self.assertEqual(out.splitlines()[:2],
+                                     ["supervisor-error", "127"])
+                    self.assertIn("interrupted by SIG" + signame, out)
+                    for pid in (leader, child):
+                        gone = time.monotonic() + 3
+                        while time.monotonic() < gone:
+                            try:
+                                os.kill(pid, 0)
+                            except ProcessLookupError:
+                                break
+                            time.sleep(0.02)
+                        else:
+                            self.fail("%s left probe pid %s alive" %
+                                      (signame, pid))
+                finally:
+                    if leader is not None:
+                        try:
+                            os.kill(-leader, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    if proc.poll() is None:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                        proc.communicate()
+
+    def test_near_deadline_interrupt_keeps_its_first_cleanup_deadline(self):
+        """An interrupt within one reap interval of the run deadline arms
+        cleanup first. Crossing the run deadline may latch TIMED_OUT, but must
+        not replace that earlier absolute cleanup deadline with timeout grace."""
+        with tempfile.TemporaryDirectory() as d:
+            leader_file = Path(d) / "leader.pid"
+            script = Path(d) / "ignore-term"
+            script.write_text(
+                "#!/bin/sh\n"
+                "trap '' HUP INT TERM\n"
+                "printf '%s' \"$$\" >" + str(leader_file) + "\n"
+                "while :; do :; done\n")
+            script.chmod(0o755)
+            proc = subprocess.Popen(
+                [shutil.which("perl"), "-e", self._supervisor_source(),
+                 "4", "2", str(script)], stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, start_new_session=True)
+            leader = None
+            try:
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    if leader_file.exists():
+                        leader = int(leader_file.read_text())
+                        break
+                    time.sleep(0.02)
+                else:
+                    self.fail("signal-ignoring probe did not start")
+
+                # Signal 1.5 seconds before the run deadline: its two-second
+                # grace expires about 2 seconds from here. The faulty timeout
+                # overwrite instead returns about 3.5 seconds from here.
+                time.sleep(2.5)
+                started = time.monotonic()
+                os.kill(proc.pid, signal.SIGTERM)
+                out, err = proc.communicate(timeout=3)
+                elapsed = time.monotonic() - started
+                self.assertGreaterEqual(elapsed, 1.7)
+                self.assertLess(elapsed, 2.7,
+                                "timeout moved the interruption deadline")
+                self.assertEqual(proc.returncode, 0, err)
+                self.assertEqual(out.splitlines()[:2],
+                                 ["supervisor-error", "127"])
+                self.assertIn("interrupted by SIGTERM", out)
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(leader, 0)
+            finally:
+                if leader is not None:
+                    try:
+                        os.kill(-leader, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                if proc.poll() is None:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.communicate()
 
     def test_timeout_does_not_wait_for_a_descendant_that_calls_setsid(self):
         """Arbitrary-grandchild quiescence is outside the declared boundary.
