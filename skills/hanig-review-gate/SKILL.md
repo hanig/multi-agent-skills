@@ -13,6 +13,16 @@ description: >-
 
 # hanig-review-gate
 
+## Host capability boundary
+
+Use the active host's real file, shell, and review capabilities under its
+normal approval policy.  A loaded skill does not supply reviewer providers,
+their configuration, or coordinator-held credentials; when they are absent,
+retain the evidence and report the change as **unreviewed** rather than
+substituting self-confidence or a paid worker-side call.  See
+`docs/agent-compatibility.md` for the portable capability and credential
+contract.
+
 My claim that code works is exactly as inadmissible as a scheduler's
 `COMPLETED`. Same principle as `hanig-verified-workflow`, turned on the author.
 
@@ -158,10 +168,17 @@ substitute your own confidence for the review.
 
 **Whether to run another round is the user's call, not the agent's.**
 
-```bash
-R=~/.claude/skills/hanig-review-gate/scripts/review.py
+Set `HANIG_REVIEW_GATE_DIR` to the directory containing the `SKILL.md`
+instance this agent actually loaded. This normal shell variable has no
+agent-specific interpolation requirement; the quoted script path leaves the
+working directory, and therefore `--diff` or relative `--file` arguments,
+unchanged.
 
-python3 $R --escalate --diff \
+```bash
+export HANIG_REVIEW_GATE_DIR="/path/to/loaded/hanig-review-gate"
+R="$HANIG_REVIEW_GATE_DIR/scripts/review.py"
+
+python3 "$R" --escalate --diff \
   --context "what this change is for" \
   --claim "the specific thing being asserted" \
   --claim "another assertion being made"

@@ -13,6 +13,16 @@ description: >-
 
 # hanig-portable-handoff
 
+## Host capability boundary
+
+Read the active host's project instructions and preserve `AGENTS.md`,
+`CLAUDE.md`, and `MEMORY.md` as repository context, not host-owned state.  Any
+host may consume a handoff; `capture`, `resume`, and factual `MEMORY.md`
+refresh require usable local Python, Git, and referenced paths.  If one is
+unavailable, report that bounded limit and retain the handoff unchanged; never
+copy credentials, provision services, or alter approvals to make a resume
+appear clean.  See `docs/agent-compatibility.md` for the shared contract.
+
 Context switching between institutions and clusters loses two things: which
 code was running, and which of your runs were unfinished. Both are recoverable
 from state already on disk, so neither should depend on remembering.
@@ -22,12 +32,22 @@ from state already on disk, so neither should depend on remembering.
 **A handoff records identities and pointers. It never copies data, and it never
 decides anything a verifier already decided.**
 
-```bash
-H=~/.claude/skills/hanig-portable-handoff/scripts/handoff.py
+## Run from the loaded skill, not a checkout
 
-python3 $H capture run1 run2 --out handoff.json    # before you leave
-python3 $H resume handoff.json                     # where you land
-python3 $H memory .                                # regenerate MEMORY.md facts
+Before running a command, set `HANIG_PORTABLE_HANDOFF_DIR` to the directory
+containing the `SKILL.md` instance this agent actually loaded. This is an
+ordinary shell variable rather than agent-specific interpolation, so it works
+with Claude, Codex, OpenCode, and Pi; it may contain spaces. Commands retain
+your current project directory, so relative run, input, and output paths below
+still mean paths in that project.
+
+```bash
+export HANIG_PORTABLE_HANDOFF_DIR="/path/to/loaded/hanig-portable-handoff"
+H="$HANIG_PORTABLE_HANDOFF_DIR/scripts/handoff.py"
+
+python3 "$H" capture run1 run2 --out handoff.json    # before you leave
+python3 "$H" resume handoff.json                     # where you land
+python3 "$H" memory .                                # regenerate MEMORY.md facts
 ```
 
 ## `resume` exit codes

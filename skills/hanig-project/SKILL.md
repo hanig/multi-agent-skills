@@ -5,17 +5,51 @@ description: Start a swarm project on this machine, or adopt a half-finished rep
 
 # The front door
 
+## Host capability boundary
+
+Follow the active host's discovered project instructions and approval policy;
+`AGENTS.md`, `CLAUDE.md`, and `MEMORY.md` remain project context rather than a
+claim that a particular host has loaded a particular tool.  For tracker work,
+use only the current session's real connector and operation names.  If none is
+available, preserve the reviewed draft/outbox intent and report pending
+synchronization; do not invent a receipt, ticket reference, or confirmation.
+Installing this skill never provisions an account, copies credentials, changes
+permission/model defaults, or grants a worker the coordinator's authority.
+
 You are on a server. There is either an empty directory and an intention, or a
 half-finished repo and a vague plan. The job is to get from there to units of
 work that are dispatched, tracked, and verifiable, without asking the human
 anything a machine could have looked up.
+
+## Run from the loaded skills
+
+Set `HANIG_PROJECT_DIR` to the directory containing this agent's actually
+loaded `hanig-project/SKILL.md`. The resolver derives both this installed skill
+and its declared `hanig-swarm` sibling from there, not from a Claude path or
+the shell cwd. It reports a missing sibling before use; an `--only`
+installation must include `hanig-swarm` in the same prefix. These variables
+only locate programs: project-relative plan, state, input, and output paths
+remain relative to the current project directory.
+
+For a deliberate mixed or link installation, set
+`HANIG_SKILL_DEP_ROOTS` to the known parent directory (or directories,
+colon-separated) that contains the installed `hanig-swarm`; the resolver never
+searches arbitrary agent stores. This is only needed when the two skills do
+not share the loaded skill's parent.
+
+```sh
+export HANIG_PROJECT_DIR="/path/to/loaded/hanig-project"
+P="$HANIG_PROJECT_DIR"
+python3 "$P/scripts/skill_paths.py" self "$P" hanig-project >/dev/null || exit $?
+S="$(python3 "$P/scripts/skill_paths.py" sibling "$P" hanig-project hanig-swarm)" || exit $?
+```
 
 Run in this order. Each step's output is the next step's input.
 
 ## 1. Survey. Never ask what you can read.
 
 ```sh
-python3 scripts/survey.py --repo . --out .swarm/survey.json
+python3 "$P/scripts/survey.py" --repo . --out .swarm/survey.json
 ```
 
 This reports the host, python, schedulers, partitions, accounts, whether
@@ -103,7 +137,7 @@ So before you finish the interview, list every value the plan needs to
 dispatch, and check each one is settled. The list is not a matter of taste:
 
 ```sh
-python3 ../hanig-swarm/scripts/swarm.py schema
+python3 "$S/scripts/swarm.py" schema
 ```
 
 prints every field, whether it is required for that kind, and what it couples
@@ -273,7 +307,7 @@ for.
 **Read the field reference before writing units, not after being refused:**
 
 ```sh
-python3 ../hanig-swarm/scripts/swarm.py schema
+python3 "$S/scripts/swarm.py" schema
 ```
 
 Every field, whether it is required for that kind, and what it couples to.
@@ -331,7 +365,7 @@ recoverable mistake.
 Then, always:
 
 ```sh
-python3 ../hanig-swarm/scripts/swarm.py validate plan.json
+python3 "$S/scripts/swarm.py" validate plan.json
 ```
 
 It refuses a partition this cluster does not have, so a plan written for
@@ -340,7 +374,7 @@ another server fails here in one line instead of half-dispatching.
 ## 4. Tickets. Draft everything, create on ONE approval.
 
 ```sh
-python3 scripts/tickets.py draft plan.json --brief brief.json
+python3 "$P/scripts/tickets.py" draft plan.json --brief brief.json
 ```
 
 This writes `tickets.json`. It talks to nothing: the coordinator runs on a
@@ -364,7 +398,7 @@ it is manual.
 The human clears it by saying so, and you record that:
 
 ```sh
-python3 scripts/tickets.py approve tickets.json --approver <name>
+python3 "$P/scripts/tickets.py" approve tickets.json --approver <name>
 ```
 
 **One phrase skips the gate for a whole run: `swarm autopilot`.** If the
@@ -408,7 +442,7 @@ by diffing the plan against what you tell it the tracker holds:
 # Each key is the BLOCKED issue; handles may be unit ids, identifiers
 # (ARC-236) or uuids. An issue with no blockers MUST appear with an empty
 # list: omitting it is indistinguishable from not having looked.
-python3 scripts/tickets.py draft plan.json --tracker-edges edges.json
+python3 "$P/scripts/tickets.py" draft plan.json --tracker-edges edges.json
 ```
 
 The draft then carries, per issue, `add_blocked_by`, `remove_blocked_by` and
@@ -432,7 +466,7 @@ the write rather than trust in it.
 Verify the two never drift:
 
 ```sh
-python3 scripts/tickets.py check plan.json tickets.json
+python3 "$P/scripts/tickets.py" check plan.json tickets.json
 ```
 
 It reports both halves: the unit/issue mapping, and the blockedBy edges as
@@ -441,8 +475,8 @@ read at a stated time. It never says "in sync" without naming that time.
 ## 5. Dispatch.
 
 ```sh
-python3 ../hanig-swarm/scripts/swarm.py run plan.json --dry-run   # shape first
-python3 ../hanig-swarm/scripts/swarm.py run plan.json
+python3 "$S/scripts/swarm.py" run plan.json --dry-run   # shape first
+python3 "$S/scripts/swarm.py" run plan.json
 ```
 
 Then schedule `advance` (cron or a Paseo schedule). Overlapping runs are safe:
@@ -453,7 +487,7 @@ the coordinator takes an OS lock, so a second advance exits without acting.
 The coordinator records tracker intents as units change state:
 
 ```sh
-python3 ../hanig-swarm/scripts/swarm.py outbox --json
+python3 "$S/scripts/swarm.py" outbox --json
 ```
 
 In a session with the connector, apply each pending intent to its issue, then
@@ -488,9 +522,9 @@ mark it applied. The rules are not negotiable:
 unit reaches DONE, and not when the issues close.
 
 ```sh
-python3 scripts/report.py . --out report.html            # standalone
-python3 scripts/report.py . --fragment --out frag.html   # to publish
-python3 scripts/report.py . --json                       # for a machine
+python3 "$P/scripts/report.py" . --out report.html            # standalone
+python3 "$P/scripts/report.py" . --fragment --out frag.html   # to publish
+python3 "$P/scripts/report.py" . --json                       # for a machine
 ```
 
 Then publish the fragment as an artifact and give the human the link.

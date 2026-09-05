@@ -1,0 +1,93 @@
+name: Release validation
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regression:
+    name: Regression (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.9'
+      - name: Run full suite without user configuration or credentials
+        shell: bash
+        run: |
+          test_root=$(mktemp -d "$RUNNER_TEMP/arc-274-tests.XXXXXX")
+          test_root=$(cd "$test_root" && pwd -P)
+          mkdir -p "$test_root/home" "$test_root/config" "$test_root/tmp"
+          env -i HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" \
+            TMPDIR="$test_root/tmp" PATH="$PATH" PYTHONDONTWRITEBYTECODE=1 \
+            python3 -B -u -m unittest discover -s tests -v \
+            2>&1 | tee "$RUNNER_TEMP/regression.log"
+      - name: Preserve regression evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: regression-${{ matrix.os }}
+          path: ${{ runner.temp }}/regression.log
+          retention-days: 7
+
+  native-discovery:
+    name: Native discovery (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.9'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '26.7.0'
+      - name: Install exact official agent releases in job-local prefix
+        shell: bash
+        run: |
+          package_root="$RUNNER_TEMP/native-agent-packages"
+          mkdir -p "$package_root/home" "$package_root/cache"
+          env -i PATH="$PATH" HOME="$package_root/home" \
+            NPM_CONFIG_USERCONFIG=/dev/null NPM_CONFIG_CACHE="$package_root/cache" \
+            NPM_CONFIG_REGISTRY=https://registry.npmjs.org/ \
+            NPM_CONFIG_AUDIT=false NPM_CONFIG_FUND=false NO_UPDATE_NOTIFIER=1 \
+            npm install --prefix "$package_root" --no-save --package-lock=false \
+              @anthropic-ai/claude-code@2.1.261 @openai/codex@0.153.4 \
+              opencode-ai@1.18.29 @mariozechner/pi-coding-agent@0.73.1
+      - name: Validate native loaders and installed helper without accounts
+        shell: bash
+        run: |
+          # A passing loader check does not waive the separate live-invocation gate.
+          PATH="$RUNNER_TEMP/native-agent-packages/node_modules/.bin:$PATH" \
+            python3 -B tests/native_agent_validation.py \
+            > "$RUNNER_TEMP/native-agent-validation.json"
+      - name: Preserve native loader evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-discovery-${{ matrix.os }}
+          path: ${{ runner.temp }}/native-agent-validation.json
+          retention-days: 7

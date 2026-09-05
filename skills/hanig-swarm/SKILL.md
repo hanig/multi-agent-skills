@@ -13,6 +13,17 @@ description: >-
 
 # hanig-swarm
 
+## Host capability boundary
+
+Read the project instructions exposed by the current host before acting.  This
+skill's Markdown can be loaded by another host, but that does not make its
+Paseo/Slurm tools, worker provider, credentials, or approvals available there.
+Use only capabilities actually present in the session; report missing Python,
+Git, scheduler, Paseo, or bus capabilities with the bounded fallback described
+in `docs/agent-compatibility.md`.  Never relax coordinator/worker credential
+containment, copy credentials, or infer that a host such as OpenCode is a
+supported worker backend.
+
 Step 1 of `docs/plan-swarm.md`: the unit contract.
 
 ## The default agent
@@ -406,19 +417,28 @@ take it from the launch intent.
 
 ## Usage
 
+Set `HANIG_SWARM_DIR` to the directory containing the `SKILL.md` instance this
+agent actually loaded. It is a regular shell variable rather than a
+Claude-specific expansion, and quoting it supports spaces. This only resolves
+the installed script; it never changes the project cwd, so declared relative
+inputs and outputs keep their normal meaning. `paseo` (for `code` units) and
+the external `bus` tooling remain separately installed dependencies, not files
+bundled by this skill.
+
 ```bash
-U=skills/hanig-swarm/scripts/unit.py
+export HANIG_SWARM_DIR="/path/to/loaded/hanig-swarm"
+U="$HANIG_SWARM_DIR/scripts/unit.py"
 
 # 1. allocate an exclusive write root (prints the path on stdout)
-D=$(python3 $U allocate --root /external/swarm-runs --task align-reads --kind slurm \
+D=$(python3 "$U" allocate --root /external/swarm-runs --task align-reads --kind slurm \
       --command "bwa mem ref.fa r1.fq r2.fq > out.bam" \
       --output out.bam --input ref.fa --gpu-hours 4 --charge-to hani)
 
 # 2. submit however you like, then bind the job to the attempt
-python3 $U bind "$D" --job-id 187196
+python3 "$U" bind "$D" --job-id 187196
 
 # 3. the done predicate
-python3 $U check "$D"        # DONE 0 | RUNNING 1 | FAILED 2 | PREEMPTED 3 | INCOMPLETE 4
+python3 "$U" check "$D"        # DONE 0 | RUNNING 1 | FAILED 2 | PREEMPTED 3 | INCOMPLETE 4
 ```
 
 Declared outputs are **relative to the run-dir**. One that resolves outside it is
@@ -477,7 +497,7 @@ enough: a run that executes 40,000 steps, exits 0 and writes a checkpoint is
 DONE by that predicate even if the loss was flat for the last 30,000.
 
 ```bash
-python3 skills/hanig-swarm/scripts/converge.py check metrics.jsonl \
+python3 "$HANIG_SWARM_DIR/scripts/converge.py" check metrics.jsonl \
   --criterion '{"metric":"val_loss","mode":"min","rel_improvement_below":0.002,"over_evals":5,"min_steps":10000}' \
   --diverge '{"metric":"train_loss","above":1e9}' --budget 40000
 # 0 CONVERGED | 1 NOT_YET | 2 DIVERGED | 3 BUDGET_EXHAUSTED | 4 INCOMPLETE

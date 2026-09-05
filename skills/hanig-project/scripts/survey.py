@@ -21,6 +21,11 @@ import tempfile
 import time
 from pathlib import Path
 
+# survey is read-only unless --out was explicitly requested; importing the
+# additive agent diagnostics must not create bytecode beside copied scripts.
+sys.dont_write_bytecode = True
+import agent_diagnostics
+
 MAX_TREE_ENTRIES = 4000
 MAX_DEPTH = 6
 MAX_DIRS = 20_000        # a fan-out can leave hundreds of thousands of empty dirs
@@ -972,17 +977,24 @@ def repo(root):
 
     # Documents that answer "what is this and what was decided".
     docs = []
-    for pat in ("README*", "CONTEXT.md", "CLAUDE.md", "MEMORY.md", "PLAN*.md",
-                "docs/adr/*.md", "docs/*.md", "*.cff", "environment.y*ml",
-                "pyproject.toml", "requirements*.txt", "Snakefile",
-                "nextflow.config", "main.nf", "Makefile", "*.sbatch"):
-        for f in sorted(root.glob(pat))[:12]:
-            if f.is_file():
-                try:
-                    size = f.stat().st_size
-                except OSError:
-                    continue
-                docs.append({"path": str(f.relative_to(root)), "bytes": size})
+    # _walk's child is the hard boundary for a filesystem that does not
+    # answer.  Re-enumerating it with pathlib.glob would silently reintroduce
+    # an unbounded scandir after that child was killed, so a partial survey
+    # deliberately omits this convenience inventory.
+    if walk["state"] == WALK_OK:
+        for pat in ("README*", "CONTEXT.md", "CLAUDE.md", "MEMORY.md", "PLAN*.md",
+                    "docs/adr/*.md", "docs/*.md", "*.cff", "environment.y*ml",
+                    "pyproject.toml", "requirements*.txt", "Snakefile",
+                    "nextflow.config", "main.nf", "Makefile", "*.sbatch"):
+            for f in sorted(root.glob(pat))[:12]:
+                if f.is_file():
+                    try:
+                        size = f.stat().st_size
+                    except OSError:
+                        continue
+                    docs.append({"path": str(f.relative_to(root)), "bytes": size})
+    else:
+        out["documents_note"] = "not enumerated: the bounded repository walk did not finish"
     out["documents"] = docs[:40]
 
     # DO NOT OVERWRITE THESE. The skill is told to write PLAN.md and MEMORY.md,
@@ -1067,8 +1079,12 @@ def main():
     # so a consumer can tell "this cluster restricts nothing" from "this
     # survey is older than the question", and "the walk finished" from "this
     # survey predates anyone asking".
-    data = {"schema_version": 3, "machine": machine(),
-            "scheduler": scheduler(), "repo": repo(args.repo)}
+    data = {"schema_version": 4, "machine": machine(),
+            "scheduler": scheduler(), "repo": repo(args.repo),
+            # Additive: consumers of the pre-existing machine/scheduler/repo
+            # keys keep working while automation gets a stable readiness
+            # report.  agent_diagnostics never starts an agent session.
+            "agent_diagnostics": agent_diagnostics.diagnostics()}
     # DEDUPE. Surveying a home directory printed the same filesystem twice,
     # on every host, because home and the repo resolve to the same path.
     seen, paths = set(), []
@@ -1100,6 +1116,11 @@ def main():
     print(f"  host      {m['hostname']}  ({m['system']}, python {m['python']}, "
           f"{m['cpus']} cpus)")
     print(f"  tools     {', '.join(sorted(m['tools'])) or 'none found'}")
+    for name, agent in data["agent_diagnostics"]["agents"].items():
+        print(f"  agent     {name}: present={agent['agent_present']['state']}, "
+              f"installed={agent['installation']['state']}, "
+              f"discovery={agent['discovery']['state']}, "
+              f"workflow={agent['workflow']['state']}")
     if s.get("present"):
         parts = [p["partition"] + ("*" if p["default"] else "")
                  for p in s.get("partitions", [])]

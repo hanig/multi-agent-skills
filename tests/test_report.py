@@ -744,7 +744,7 @@ def _survey(tmp, obj):
 # to assume. hostname/user/python all live under `machine` and `accounts`
 # under `scheduler`; none of them has ever been at the top level.
 REAL_SURVEY = {
-    "schema_version": 3,
+    "schema_version": 4,
     "machine": {
         "hostname": "chimera01", "system": "Linux", "release": "5.14.0",
         "user": "hanig", "home": "/home/hanig", "python": "3.11.4",
@@ -928,6 +928,12 @@ class TestASurveyVersionTheReportCannotReadSaysSo(unittest.TestCase):
         self.assertNotIn("not the shape this report reads",
                          self._render(REAL_SURVEY))
 
+    def test_the_current_schema_renders_additive_agent_diagnostics(self):
+        survey = dict(REAL_SURVEY, agent_diagnostics={
+            "agents": {"codex": {"agent_present": {"state": "present"}}}})
+        html = self._render(survey)
+        self.assertNotIn("not the shape this report reads", html)
+
     def test_a_newer_survey_is_named_as_a_limit_of_this_reader(self):
         html = self._render(dict(REAL_SURVEY, schema_version=99))
         self.assertIn("not the shape this report reads", html)
@@ -939,6 +945,11 @@ class TestASurveyVersionTheReportCannotReadSaysSo(unittest.TestCase):
     def test_an_older_survey_says_the_file_is_short_not_the_host(self):
         html = self._render(dict(REAL_SURVEY, schema_version=1))
         self.assertIn("missing from the file rather than from the host", html)
+
+    def test_schema_three_remains_readable_but_is_marked_older(self):
+        html = self._render(dict(REAL_SURVEY, schema_version=3))
+        self.assertIn("missing from the file rather than from the host", html)
+        self.assertIn("chimera01", html)
 
     def test_an_unversioned_survey_is_flagged_as_unverified(self):
         html = self._render(

@@ -12,6 +12,16 @@ description: >-
 
 # hanig-verified-workflow
 
+## Host capability boundary
+
+Read project instructions through the current host's conventions, then use
+only the shell/filesystem, Python, Git, and scheduler capabilities that are
+actually available.  A missing program or denied approval is absent evidence:
+state the blocked check and the resulting incomplete/unverified limit instead
+of fabricating output or changing the host's permissions.  Paseo and the agent
+bus are optional services, not prerequisites that this skill installs; their
+portable fallback is documented in `docs/agent-compatibility.md`.
+
 A scheduler reporting `COMPLETED` is not evidence that work was produced.
 
 These all look like success and are not:
@@ -35,12 +45,18 @@ confirm — do not fill the gap with an assumption.
 
 ## The three commands
 
-```bash
-C=~/.claude/skills/hanig-verified-workflow/scripts/contract.py
+Set `HANIG_VERIFIED_WORKFLOW_DIR` to the directory containing the `SKILL.md`
+instance this agent actually loaded. It is a normal shell variable, not a
+Claude-only expansion; quoted commands work from any launch directory and keep
+relative run, input, and output paths relative to that directory.
 
-python3 $C init   <run-dir> --command "..." [--output P] [--input P] [--predicate JSON]
-python3 $C submit <run-dir> [--sbatch-arg ...]     # sbatches <run-dir>/job.sbatch
-python3 $C check  <run-dir> [--json]               # verdict + receipt
+```bash
+export HANIG_VERIFIED_WORKFLOW_DIR="/path/to/loaded/hanig-verified-workflow"
+C="$HANIG_VERIFIED_WORKFLOW_DIR/scripts/contract.py"
+
+python3 "$C" init   <run-dir> --command "..." [--output P] [--input P] [--predicate JSON]
+python3 "$C" submit <run-dir> [--sbatch-arg ...]     # sbatches <run-dir>/job.sbatch
+python3 "$C" check  <run-dir> [--json]               # verdict + receipt
 ```
 
 `init` records, before anything runs: the command, git commit and a digest of
