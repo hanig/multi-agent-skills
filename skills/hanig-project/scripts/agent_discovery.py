@@ -279,9 +279,13 @@ def _default_probe(path: str, timeout: float, env: Mapping[str, str]) -> tuple[b
                 except subprocess.TimeoutExpired:
                     return False, "timeout; process group did not exit"
                 return False, "timeout"
-            stdout.seek(0)
-            stderr.seek(0)
-            output = (stdout.read(240) or stderr.read(240)).decode("utf-8", "replace").strip()
+            # Keep the tail: version launchers often put their useful failure
+            # detail after a banner, while retaining only a fixed amount.
+            def tail(stream: Any) -> bytes:
+                stream.seek(0, os.SEEK_END)
+                stream.seek(max(0, stream.tell() - 240))
+                return stream.read(240)
+            output = (tail(stdout) or tail(stderr)).decode("utf-8", "replace").strip()
     except OSError as exc:
         return False, type(exc).__name__
     if code:
