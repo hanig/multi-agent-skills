@@ -34,6 +34,23 @@ prove that an installed directory is natively loaded by a vendor CLI.
 
 ### Current automated evidence (2026-09-05)
 
+Release-validation follow-ups are collected in draft
+[PR #6](https://github.com/hanig/multi-agent-skills/pull/6). Independent safety
+review and fix verification are recorded in
+[the review report](arc-274-independent-review.md) and
+[the verification report](arc-274-fix-verification.md).
+
+The coordinator passed 111 integrated focused tests in 45.389 seconds, then
+11 final frontmatter/default-selection tests in 3.888 seconds after the last
+scalar fix. The first CI run with both native and regression jobs ran 1,564
+tests on each OS, with one error on each: the shallow checkout lacked the
+`origin/main` reference required by the vendored-source audit. CI now fetches
+the baseline refs; the final full-suite result is a separate required PR check,
+not inferred from these focused passes. Exact evidence is retained in the PR
+checks and workflow artifacts.
+
+### Historical implementation checkpoint
+
 The final focused installer, lifecycle, diagnostic, report-schema, cross-agent
 acceptance, and affected legacy compatibility suites pass in the supported
 local Python 3.9 environment: 112 tests in 196.765 seconds
@@ -52,14 +69,19 @@ record the following in the release artifact before approving the release:
 
 | Host agent and version | OS | Discovery observation | Representative invocation and result | Status / blocker |
 | --- | --- | --- | --- | --- |
-| Claude Code 2.1.261 | macOS 26.6.2, 2026-09-05 | CLI found by bounded read-only `--version` probe; no native load checked | not run | **unverified** — no native invocation was run |
-| Codex CLI 0.153.4 | macOS 26.6.2, 2026-09-05 | CLI found by bounded read-only `--version` probe; no native load checked | not run | **unverified** — no native invocation was run |
-| OpenCode | macOS 26.6.2, 2026-09-05 | `--version` did not complete inside the bounded two-second probe (CPU/AVX warning printed) | not run | **unverified** — version probe is dependency-limited |
-| Pi | macOS 26.6.2, 2026-09-05 | executable absent | not run | **unverified** — CLI unavailable |
-| Claude Code | Linux | pending | pending | unverified |
-| Codex | Linux | pending | pending | unverified |
-| OpenCode | Linux | pending | pending | unverified |
-| Pi | Linux | pending | pending | unverified |
+| Claude Code 2.1.261 | macOS and Linux | Native skill debug trace found the installed copy | Not passed; credentialless resolution reached the model boundary only | Discovery verified; invocation unverified |
+| Codex CLI 0.153.4 | macOS and Linux | Native app-server skills/list returned the installed copy without errors | Not run | Discovery verified; invocation unverified |
+| OpenCode 1.18.29 | macOS and Linux | Native debug skill command returned the installed copy | Not run | Discovery verified; invocation unverified |
+| Pi 0.73.1 | macOS and Linux | Native SDK DefaultResourceLoader returned the installed copy without diagnostics | Not run | Discovery verified; invocation unverified |
+
+Exact commands, package provenance, OS versions, and the distinction between
+discovery, standalone capture, and model invocation are in
+[native-agent-validation.md](native-agent-validation.md). The first two-platform
+native pass is [CI run 33974800468](https://github.com/hanig/multi-agent-skills/actions/runs/33974800468),
+on PR head `a1df089` (merge ref `459841f`). The later no-Claude fixture and
+installed handoff capture passed locally with pinned packages; their final CI
+checks remain distinct from that earlier run. None of these observations proves
+model-driven invocation or cross-host agent handoff consumption.
 
 Use a bundled workflow with a deterministic local script and run it from an
 unrelated project directory.  In non-Claude rows, ensure no `claude` executable
