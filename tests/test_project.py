@@ -6,6 +6,7 @@ back". These test the rules, not the plumbing.
 """
 import ast
 import contextlib
+import hashlib
 import http.server
 import json
 import os
@@ -1316,11 +1317,18 @@ class TestVendoredAgentBusLayoutIsExplicit(unittest.TestCase):
         section = readme.split(heading, 1)[1].split("\n### ", 1)[0]
 
         self.assertIn("`~/.agent-bus/bin/bus`", section)
-        self.assertIn('bus_state="${AGENT_BUS_HOME:-$HOME/.agent-bus}"',
-                      section)
-        self.assertIn('cp models.json "$bus_state/models.json"', section)
-        self.assertIn("./bin/bus models --json", section)
-        self.assertRegex(section, r"does\s+not install")
+        for boundary in ("#### Executable discovery",
+                         "#### Model-routing registry input",
+                         "#### Runtime state and cache ownership",
+                         "#### Disposable model-routing check"):
+            self.assertIn(boundary, section)
+        self.assertIn('cp "$checkout/models.json" '
+                      '"$bus_state/models.json"', section)
+        self.assertIn('HOME="$bus_state/home" AGENT_BUS_HOME="$bus_state" '
+                      '"$bus_bin" models --json', section)
+        self.assertNotIn('AGENT_BUS_HOME="$checkout', section)
+        self.assertNotIn('mkdir -p ~/.agent-bus', section)
+        self.assertNotIn('cp models.json ~/.agent-bus', section)
         self.assertIn("upstream", section.lower())
 
         local_bus = ROOT / "bin" / "bus"
@@ -1328,37 +1336,71 @@ class TestVendoredAgentBusLayoutIsExplicit(unittest.TestCase):
         self.assertTrue(os.access(local_bus, os.X_OK),
                         "README's checkout-local bus is not executable")
 
+        def snapshot(root):
+            # Deliberately walk the filesystem rather than `git status`: the
+            # contract includes ignored and untracked artifacts too.
+            entries = []
+            for path in sorted(root.rglob("*")):
+                rel = path.relative_to(root).as_posix()
+                mode = path.lstat().st_mode
+                if path.is_symlink():
+                    entries.append((rel, "link", mode, os.readlink(path)))
+                elif path.is_file():
+                    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                    entries.append((rel, "file", mode, digest))
+                else:
+                    entries.append((rel, "dir", mode, None))
+            return entries
+
         with tempfile.TemporaryDirectory() as d:
-            isolated_home = Path(d) / "home"
-            isolated_home.mkdir()
-            registry = isolated_home / ".agent-bus" / "models.json"
-            legacy_bus = isolated_home / ".agent-bus" / "bin" / "bus"
+            sandbox = Path(d)
+            fake_home = sandbox / "home"
+            outside = sandbox / "outside"
+            temporary_states = sandbox / "temporary-states"
+            for path in (fake_home, outside, temporary_states):
+                path.mkdir()
             env = dict(os.environ)
-            env["HOME"] = str(isolated_home)
+            env.update({
+                "HOME": str(fake_home),
+                "TMPDIR": str(temporary_states),
+                "MULTI_AGENT_SKILLS_CHECKOUT": str(ROOT),
+            })
             env.pop("AGENT_BUS_HOME", None)
 
-            self.assertFalse(registry.exists(),
-                             "the absent-registry precondition is false")
-            self.assertFalse(legacy_bus.exists(),
-                             "the test accidentally supplied upstream bus")
-            missing = subprocess.run(
-                [str(local_bus), "models", "--json"], cwd=ROOT, env=env,
-                capture_output=True, text=True, timeout=30)
-            self.assertNotEqual(missing.returncode, 0,
-                                "models unexpectedly needs no registry")
-            self.assertIn(str(registry), missing.stderr)
-
-            documented = section.split("```bash", 1)[1].split("```", 1)[0]
+            home_before = snapshot(fake_home)
+            outside_before = snapshot(outside)
+            checkout_before = snapshot(ROOT)
+            check = section.split("#### Disposable model-routing check", 1)[1]
+            documented = check.split("```bash", 1)[1].split("```", 1)[0]
             ran = subprocess.run(
-                ["sh", "-eu", "-c", documented], cwd=ROOT, env=env,
+                ["sh", "-eu", "-c", documented], cwd=outside, env=env,
                 capture_output=True, text=True, timeout=30)
             self.assertEqual(ran.returncode, 0, ran.stderr)
-            self.assertTrue(registry.is_file(),
-                            "the documented setup did not seed bus state")
             rows = json.loads(ran.stdout)
             expected = json.loads((ROOT / "models.json").read_text())
             self.assertEqual({row["id"] for row in rows},
                              {row["id"] for row in expected["models"]})
+
+            states = list(temporary_states.iterdir())
+            self.assertEqual(len(states), 1, states)
+            bus_state = states[0]
+            registry = bus_state / "models.json"
+            self.assertEqual(registry.read_bytes(),
+                             (ROOT / "models.json").read_bytes())
+            self.assertEqual(registry.stat().st_mode & 0o777, 0o600)
+            for dirname in ("sessions", "inbox", "cursors", "cache"):
+                self.assertTrue((bus_state / dirname).is_dir(), dirname)
+            cache_files = list((bus_state / "cache").iterdir())
+            self.assertTrue(cache_files, "models produced no runtime cache")
+            self.assertTrue(all(path.is_file() for path in cache_files),
+                            cache_files)
+            self.assertIn(str(bus_state), ran.stderr)
+            self.assertEqual(snapshot(fake_home), home_before,
+                             "the disposable check wrote into HOME")
+            self.assertEqual(snapshot(outside), outside_before,
+                             "models wrote runtime cache into its cwd")
+            self.assertEqual(snapshot(ROOT), checkout_before,
+                             "the disposable check changed the checkout")
 
     def test_the_upstream_report_separates_executable_and_state_paths(self):
         report = (ROOT / "docs" /

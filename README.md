@@ -86,45 +86,61 @@ with them.
 
 ### Agent bus executable, in this checkout
 
-The executable layout here is not the upstream install layout. `install.sh`
-installs skill directories only, into `~/.claude/skills` by default. It does
-not install the helper programs or create `~/.agent-bus/bin/bus`. In this
-checkout the bus executable is `bin/bus`. Model routing also needs bus state,
-so from the repository root seed the shipped starter registry only when the
-machine has none, then run the checkout-local executable:
+The executable, model registry, and runtime state are three separate things.
+`install.sh` installs skill directories only, into `~/.claude/skills` by
+default; it deploys none of those three.
+
+#### Executable discovery
+
+In this checkout the executable is `bin/bus`. Set
+`MULTI_AGENT_SKILLS_CHECKOUT` to the checkout's absolute path and use
+`$MULTI_AGENT_SKILLS_CHECKOUT/bin/bus` from elsewhere. The vendored skills'
+fixed `~/.agent-bus/bin/bus` path belongs to upstream's install layout, not to
+this repository's installer.
+
+#### Model-routing registry input
+
+`bus models` reads `models.json` from `AGENT_BUS_HOME`; it does not read the
+repository-root copy directly. The root `models.json` is a starter input to
+copy into an explicitly chosen bus state directory and review before relying
+on its routing data. It is not an executable-discovery mechanism.
+
+#### Runtime state and cache ownership
+
+Every bus invocation creates `sessions`, `inbox`, `cursors`, and `cache` under
+`AGENT_BUS_HOME`. Live model-routing signals are cached there too. Therefore a
+one-off check should use disposable state, while a real messaging session
+should use a deliberately chosen durable state directory. Neither case should
+write runtime state into this checkout merely because the executable lives
+here.
+
+#### Disposable model-routing check
+
+After exporting `MULTI_AGENT_SKILLS_CHECKOUT` as the absolute checkout path,
+this block can run from any other directory. It copies the shipped registry
+only into a new temporary state directory; it writes neither the checkout nor
+the home directory. A disposable `HOME` inside that same directory also
+contains any side effects from live-signal collectors that `models` invokes.
+The printed directory is safe to remove after inspection.
 
 ```bash
-bus_state="${AGENT_BUS_HOME:-$HOME/.agent-bus}"
-mkdir -p "$bus_state"
-if [ ! -e "$bus_state/models.json" ]; then
-  cp models.json "$bus_state/models.json"
-fi
-./bin/bus models --json
+checkout="${MULTI_AGENT_SKILLS_CHECKOUT:?set this to the absolute checkout path}"
+bus_bin="$checkout/bin/bus"
+test -x "$bus_bin"
+bus_state="$(mktemp -d "${TMPDIR:-/tmp}/agent-bus.XXXXXX")"
+mkdir "$bus_state/home"
+cp "$checkout/models.json" "$bus_state/models.json"
+chmod 600 "$bus_state/models.json"
+printf 'disposable AGENT_BUS_HOME=%s\n' "$bus_state" >&2
+HOME="$bus_state/home" AGENT_BUS_HOME="$bus_state" "$bus_bin" models --json
 ```
 
-`bus models` reads `models.json` from `AGENT_BUS_HOME`, which defaults to
-`~/.agent-bus`; it does not read the repository-root copy directly. The setup
-above seeds an absent registry from this checkout without overwriting an
-existing machine-specific one. Review that starter registry before relying on
-its routing data. `install.sh` deliberately installs neither this user state
-nor the helper executable.
-
-Other checkout-local commands use the same executable path:
-
-```bash
-./bin/bus launch-worker --help
-./bin/bus await --help
-```
-
-An absolute path to this checkout's `bin/bus` works from another directory.
 The `~/.agent-bus/bin/bus` commands in the vendored `agent-bus`, `paseo`,
 `pi-fleet`, and `start-a-sprint` skills assume upstream's installer has placed
 the executable there. They do not describe a path this repository installs.
 Until upstream discovers the executable instead of hardcoding an install
 layout, agents using only this repository need the checkout-local path above.
-Do not create `~/.agent-bus/bin/bus` merely to make the instruction true: the
-directory holds user state, while this installer deliberately claims neither
-that executable path nor the registry inside it.
+Do not create `~/.agent-bus/bin/bus` merely to make the instruction true.
 
 The upstream-ready report and proposed correction are in
 `docs/upstream-agent-bus-path-discovery.md`. The vendored skill files remain
