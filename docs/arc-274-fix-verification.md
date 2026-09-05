@@ -16,8 +16,13 @@ commits:
 - lifecycle/installer P2 implementation supplied as `c8c3650`, cherry-picked
   here as `b059f0d`;
 - narrow diagnostic schema alignment: `266cf2f`;
-- verification corpus/report: recorded in the final worker receipt after this
-  document and its tests are committed.
+- verification corpus/report: `fafded3`;
+- frontmatter/visibility follow-up supplied as `c67a1ab`, cherry-picked here as
+  `e6cdf02` (its sibling-worktree review-document delta was intentionally not
+  introduced); deterministic public-plan coverage supplied as `b94bef5`,
+  cherry-picked as `6a4bb2e`;
+- numeric/control-scalar follow-up supplied as `4b61185`, cherry-picked here as
+  `211c7b8`.
 
 ## Provenance parser contract and parity
 
@@ -95,31 +100,63 @@ python3 -m unittest -v \
   tests.test_install_lifecycle.LifecycleTest.test_schema_two_parser_is_strict_but_normalizes_consumer_order \
   tests.test_install_lifecycle.LifecycleTest.test_foreign_replacement_does_not_import_unproven_consumers \
   tests.test_install_lifecycle.LifecycleTest.test_link_to_copy_transition_removes_sidecar_and_allows_fresh_link \
-  tests.test_install_lifecycle.LifecycleTest.test_failed_link_to_copy_transition_restores_link_and_sidecar \
-  tests.test_install_lifecycle.LifecycleTest.test_source_destination_alias_overlap_is_rejected_before_writes \
-  tests.test_install_lifecycle.LifecycleTest.test_destination_parent_aliases_have_one_identity \
-  tests.test_multi_agent_installer.TestSelectionBeforeWrites.test_frontmatter_rejects_malformed_or_wrong_identity \
-  tests.test_multi_agent_installer.TestPublicCli.test_default_dry_run_selects_all_verified_agents_without_writes \
-  tests.test_multi_agent_installer.TestPublicCli.test_duplicate_visibility_blocks_live_writes_without_acknowledgment
-Ran 9 tests ... OK
+  tests.test_install_lifecycle.LifecycleTest.test_failed_link_to_copy_transition_restores_link_and_sidecar
+Included in final combined gate ... OK
 ```
 
-## Pending findings at this checkpoint
+## Installer follow-up findings and resolution
 
-Two installer-level findings were sent to the coordinator and assigned back to
-the implementation owner before this gate can pass:
+Independent review found two installer-level gaps in `c8c3650`; both were sent
+to the coordinator before the gate was closed:
 
-1. The bounded frontmatter subset currently accepts YAML implicit non-string
+1. The first bounded frontmatter subset accepted YAML implicit non-string
    scalars. A disposable directory named `true` with `name: true` and
    `description: null` was accepted even though standard YAML yields a boolean
    and null rather than the promised nonempty strings; reserved invalid plain
    scalar starts have the same class of problem.
-2. The consumed installer currently blocks an ordinary all-verified automatic
+2. The first consumed installer blocked an ordinary all-verified automatic
    plan solely because the expected Claude-root plus `.agents` topology is both
    visible to OpenCode. The result correctly publishes `competing_visibility`,
    but requiring `--allow-duplicate-visibility` conflicts with the confirmed
    default all-detected contract, which treats this deterministic unavoidable
    exposure as warning-only.
 
-Until follow-up commits resolve both findings and the focused tests are rerun,
-this document records a **pending / do-not-merge** gate rather than a pass.
+`c67a1ab` resolved both: required frontmatter values are checked as strings,
+reserved/implicit non-string scalars and bad quoting are refused, while expected
+deterministic visibility is prominent warning evidence rather than a hard
+failure. `4b61185` then closed the remaining scalar subset for leading-dot
+numbers, signed radix values, sexagesimal values, and raw control bytes. The
+automatic all-detected dry run now succeeds, reports `competing_visibility`,
+and a live disposable Claude+Codex overlap installs byte-identical skill
+snapshots with only the selected registration recorded at each root.
+
+## Final bounded gate
+
+The final run combined the five P1 boundary cases, four lifecycle/parser P2
+cases, frontmatter validation, automatic visibility, live identical-snapshot
+publication, flag-order topology, and the complete diagnostics module:
+
+```text
+python3 -m unittest -v \
+  tests.test_multi_agent_installer.TestPublicCli.test_only_uninstall_never_escapes_an_absent_prefix \
+  tests.test_multi_agent_installer.TestPublicCli.test_prefix_alias_into_source_is_rejected_before_copy_or_link \
+  tests.test_install_lifecycle.LifecycleTest.test_source_destination_alias_overlap_is_rejected_before_writes \
+  tests.test_install_lifecycle.LifecycleTest.test_destination_parent_aliases_have_one_identity \
+  tests.test_install_lifecycle.LifecycleTest.test_foreign_final_symlink_target_is_not_followed_on_replacement \
+  tests.test_install_lifecycle.LifecycleTest.test_schema_two_parser_is_strict_but_normalizes_consumer_order \
+  tests.test_install_lifecycle.LifecycleTest.test_foreign_replacement_does_not_import_unproven_consumers \
+  tests.test_install_lifecycle.LifecycleTest.test_link_to_copy_transition_removes_sidecar_and_allows_fresh_link \
+  tests.test_install_lifecycle.LifecycleTest.test_failed_link_to_copy_transition_restores_link_and_sidecar \
+  tests.test_multi_agent_installer.TestSelectionBeforeWrites.test_frontmatter_rejects_malformed_or_wrong_identity \
+  tests.test_multi_agent_installer.TestPublicCli.test_default_dry_run_selects_all_verified_agents_without_writes \
+  tests.test_multi_agent_installer.TestPublicCli.test_expected_duplicate_visibility_is_prominent_and_installs_same_snapshot \
+  tests.test_multi_agent_installer.TestPublicCli.test_public_topology_is_independent_of_agent_flag_order \
+  tests.test_agent_diagnostics
+Ran 35 tests in 16.227s ... OK
+```
+
+`git diff --check` is clean. No remaining P1 boundary, lifecycle provenance,
+consumer-takeover, link/copy transition, deterministic-placement, visibility,
+or frontmatter P2 was found in the final reviewed commits. This is a focused
+code-safety pass: native agent loading and the coordinator's full cross-platform
+regression remain separate evidence and were not inferred from these tests.
