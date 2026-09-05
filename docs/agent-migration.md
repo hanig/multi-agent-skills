@@ -6,11 +6,15 @@ copy skill directories between agent stores by hand.
 
 ## Before changing anything
 
-Run the diagnostic command in dry-run/read-only mode and save its machine
-readable result.  It identifies selected targets, resolved roots, managed
-skills and their provenance, conflicts, and anything it cannot safely remove.
-An absent host is reported as absent; it is never silently interpreted as a
-different host.
+Run the diagnostic command in read-only JSON mode and save its result.  It
+identifies selected targets, resolved roots, managed skills and their
+provenance, conflicts, and anything it cannot safely remove.  An absent host
+is reported as absent; it is never silently interpreted as a different host.
+
+```sh
+./bin/doctor --json
+./install.sh --dry-run --json
+```
 
 Use explicit target selectors for migrations.  The default target selection is
 convenient for a first install, but a migration should declare both the source
@@ -46,15 +50,25 @@ directory name or symlink shape, decides whether the installer owns a skill.
 
 ## Upgrade, recovery, and removal
 
-1. Run the upgrade in dry-run mode and inspect the target, path, provenance,
-   permission, conflict, and action payloads.
-2. Run the upgrade in copy mode for a durable snapshot, then run diagnostics
-   again to confirm the recorded version and health.
+1. Run the install command in dry-run mode and inspect the target, path,
+   provenance, permission, conflict, and action payloads.  A re-run over an
+   owned skill is the public upgrade operation; its action is reported as
+   `upgraded`, not as a fresh install.
+2. Run the same selected install in copy mode for a durable snapshot, then run
+   diagnostics again to confirm the recorded version and health.
 3. If an interruption or simulated failure is reported, rerun diagnostics
    first.  Recovery must either remove its own incomplete staging data or
    restore the previous managed version; it must not remove foreign skills.
 4. Use selective uninstall for one host.  Use the broad uninstall only after
    diagnostics show every selected target and shared-root consequence.
+
+Migration itself is deliberately planning-only.  Name one destination and a
+legacy source, then keep `--dry-run`; the command emits a `migration-plan`
+payload and never deletes the legacy content:
+
+```sh
+./install.sh --agent codex --migrate-from "$HOME/.codex/skills" --dry-run --json
+```
 
 ## Verifying a move
 
