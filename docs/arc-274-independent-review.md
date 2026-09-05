@@ -280,11 +280,13 @@ Focused evidence after combining `07c1074` locally:
   passed after retaining canonical mutation identity but printing the caller's
   logical spelling in the `doctor --prefix` suggestion.
 
-After also combining diagnostics parser alignment `266cf2f`, the final focused
+After also combining diagnostics parser alignment `266cf2f`, the focused
 discovery/diagnostics/installer/lifecycle/cross-agent/capability seam passed all
-104 tests in 40.491 seconds. Remaining validation is limited to the parent-owned
-full regression and native-loader release-evidence matrix; neither was executed
-or inferred as passing in this child worktree.
+104 tests in 40.491 seconds. After adding the verifier-requested leading-dot,
+signed-base, sexagesimal, and control-character scalar cases, the same 104-test
+seam passed again in 39.476 seconds. Remaining validation is limited to the
+parent-owned full regression and native-loader release-evidence matrix; neither
+was executed or inferred as passing in this child worktree.
 
 The parent coordinator still owns a full regression on the integrated tree and
 native-loader release evidence. The unchanged `2414d8a` baseline full run was
