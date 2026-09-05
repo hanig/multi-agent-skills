@@ -112,15 +112,27 @@ class TestSkillCapabilities(unittest.TestCase):
             with self.subTest(bundle=name):
                 self.assertIn(phrase, (SKILLS / name / "SKILL.md").read_text())
 
-    def test_vendored_sources_remain_unmodified_in_this_change(self):
-        """The audit records limitations rather than patching upstream Markdown."""
+    def test_vendored_sources_are_not_rewritten_on_this_branch(self):
+        """The audit records limitations rather than patching upstream Markdown.
+
+        Compares the working tree against origin/main and requires that any
+        skill bundle it touches is one we author. A branch that touches no
+        skill at all (including main itself) trivially satisfies this; the
+        earlier form demanded the diff equal AUTHORED exactly, which could
+        only hold for the one change that introduced the contract.
+        """
         changed = subprocess.run(
             ["git", "diff", "--name-only", "origin/main", "--", "skills"],
             cwd=ROOT, text=True, capture_output=True, check=True,
         ).stdout.splitlines()
+        touched = {Path(path).parts[1] for path in changed}
         self.assertEqual(
-            {Path(path).parts[1] for path in changed}, AUTHORED,
+            touched & VENDORED, set(),
             "a portability edit must not rewrite vendored skill documents",
+        )
+        self.assertLessEqual(
+            touched, AUTHORED,
+            "a changed skill bundle must be listed in AUTHORED or VENDORED",
         )
 
 
