@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """Hermetic acceptance seam for portable agent skill installation.
 
-These tests deliberately exercise the discovery/selection contract without a
-real agent binary, account, or user configuration directory.  Filesystem
-lifecycle tests are added beside this seam once install.sh consumes the public
-planner contract; native loader proof belongs in docs/cross-agent-acceptance.
+These tests deliberately exercise discovery, selection, and lifecycle without
+a real agent binary, account, or user configuration directory.  Native loader
+proof belongs in docs/cross-agent-acceptance.
 """
 
 import importlib.util
+import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -22,6 +25,8 @@ SPEC = importlib.util.spec_from_file_location("agent_discovery_acceptance",
 discovery = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = discovery
 SPEC.loader.exec_module(discovery)
+sys.path.insert(0, str(ROOT))
+from lib import skill_lifecycle as lifecycle  # noqa: E402
 
 AGENTS = ("claude", "codex", "opencode", "pi")
 
@@ -143,6 +148,141 @@ class HermeticRoots(unittest.TestCase):
         self.assertEqual(len(destinations), 1)
         self.assertEqual(destinations[0]["root_ids"], ["claude-user", "pi-user"])
         self.assertEqual(destinations[0]["consumers"], ["claude", "opencode", "pi"])
+
+
+class LifecycleAcceptance(unittest.TestCase):
+    """Lifecycle coverage uses real modules but never a native agent loader.
+
+    The source used here is a disposable checkout copy, not this worktree.  A
+    passing copy-mode workflow after that copy is removed catches accidental
+    links back into the checkout and proves the installed payload is runnable
+    from a separate project cwd.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="cross-agent-lifecycle-")
+        self.base = Path(self.temp.name)
+        self.home = self.base / "home"
+        self.project = self.base / "separate-project"
+        self.home.mkdir()
+        self.project.mkdir()
+        self.addCleanup(self.temp.cleanup)
+
+    def source(self, name="hanig-verified-workflow"):
+        source = self.base / "source-copy" / name
+        shutil.copytree(ROOT / "skills" / name, source)
+        return source
+
+    def target(self, source, agent, *, destination=None, consumers=(), version="acceptance"):
+        root = destination or self.home / ".agents" / "skills"
+        return lifecycle.LifecycleTarget(
+            name=source.name,
+            source=source,
+            destination=root / source.name if destination is None else destination,
+            origin="authored",
+            consumers=consumers or (agent,),
+            source_version=version,
+        )
+
+    def test_copy_installs_all_four_and_runs_without_source_or_claude_tree(self):
+        source = self.source()
+        roots = {
+            "claude": self.home / ".claude" / "skills",
+            "codex": self.home / ".agents" / "skills",
+            "opencode": self.home / ".config" / "opencode" / "skills",
+            "pi": self.home / ".pi" / "agent" / "skills",
+        }
+        targets = [self.target(source, agent, destination=roots[agent] / source.name,
+                               consumers=(agent,)) for agent in AGENTS]
+        installed = lifecycle.install(targets)
+        self.assertEqual([item.status for item in installed], ["installed"] * 4)
+        for target in targets:
+            record = lifecycle.read_provenance(target.destination)
+            self.assertEqual(record.mode, "copy")
+            self.assertEqual(record.consumers, target.consumers)
+            self.assertFalse(target.destination.is_symlink())
+            self.assertEqual(target.destination.stat().st_mode & 0o022, 0,
+                             f"payload must not be group/world writable: {target.destination}")
+
+        # Test a non-Claude payload on its own so a Claude tree cannot
+        # accidentally satisfy the workflow lookup.
+        self.assertTrue((roots["codex"] / source.name).is_dir())
+        shutil.rmtree(source.parent)
+        shutil.rmtree(roots["claude"].parent)
+        self.assertFalse(source.exists())
+        self.assertFalse((self.home / ".claude").exists())
+        script = roots["codex"] / "hanig-verified-workflow" / "scripts" / "contract.py"
+        run_dir, output = self.project / "run", self.project / "result.tsv"
+        init = subprocess.run(
+            [sys.executable, str(script), "init", str(run_dir), "--command", "/bin/true",
+             "--output", str(output)], cwd=self.project, capture_output=True, text=True)
+        self.assertEqual(init.returncode, 0, init.stderr)
+        output.write_text("value\n1\n")
+        record = subprocess.run([sys.executable, str(script), "record", str(run_dir),
+                                 "--exit-code", "0"], cwd=self.project,
+                                capture_output=True, text=True)
+        self.assertEqual(record.returncode, 0, record.stderr)
+        checked = subprocess.run([sys.executable, str(script), "check", str(run_dir), "--json"],
+                                 cwd=self.project, capture_output=True, text=True)
+        self.assertEqual(checked.returncode, 0, checked.stderr + checked.stdout)
+        self.assertEqual(json.loads(checked.stdout)["state"], "SCIENTIFIC_PASS")
+
+    def test_foreign_conflict_upgrade_and_failure_recovery_are_honest(self):
+        source = self.source()
+        destination = self.home / ".agents" / "skills" / source.name
+        destination.mkdir(parents=True)
+        foreign = destination / "SKILL.md"
+        foreign.write_text("foreign\n")
+        target = self.target(source, "codex", destination=destination)
+        blocked = lifecycle.install([target])[0]
+        self.assertEqual(blocked.status, "blocked")
+        self.assertEqual(foreign.read_text(), "foreign\n")
+
+        target = lifecycle.LifecycleTarget(
+            name=source.name, source=source, destination=destination,
+            origin="authored", consumers=("codex",), source_version="v1",
+            allow_foreign_replace=True)
+        self.assertEqual(lifecycle.install([target])[0].status, "upgraded")
+        original = (destination / "SKILL.md").read_text()
+        replacement = self.base / "replacement"
+        shutil.copytree(source, replacement)
+        (replacement / "SKILL.md").write_text("---\nname: hanig-verified-workflow\n---\nreplacement\n")
+        upgrade = lifecycle.LifecycleTarget(
+            name=source.name, source=replacement, destination=destination,
+            origin="authored", consumers=("codex",), source_version="v2")
+        with mock.patch.object(lifecycle.shutil, "copytree", side_effect=OSError("simulated full disk")):
+            result = lifecycle.install([upgrade])[0]
+        self.assertEqual(result.status, "failed")
+        self.assertIn("staging failed", result.detail)
+        self.assertEqual((destination / "SKILL.md").read_text(), original)
+
+    def test_shared_consumer_is_retained_until_the_last_selective_uninstall(self):
+        source = self.source()
+        destination = self.home / "shared" / "skills" / source.name
+        target = self.target(source, "claude", destination=destination,
+                             consumers=("claude", "pi"))
+        self.assertEqual(lifecycle.install([target])[0].status, "installed")
+        retained = lifecycle.uninstall([destination], consumers=("pi",))[0]
+        self.assertEqual(retained.status, "retained-shared")
+        self.assertEqual(lifecycle.read_provenance(destination).consumers, ("claude",))
+        removed = lifecycle.uninstall([destination], consumers=("claude",))[0]
+        self.assertEqual(removed.status, "removed")
+        self.assertFalse(destination.exists())
+
+    def test_migration_plan_is_non_destructive(self):
+        source = self.source()
+        legacy = self.home / ".claude" / "skills" / source.name
+        legacy.parent.mkdir(parents=True)
+        shutil.copytree(source, legacy)
+        plan = lifecycle.plan_migration(
+            legacy_roots_by_consumer={"claude": legacy.parent},
+            destination_for=lambda consumer, name, old: self.home / ".agents" / "skills" / name,
+            selected_names=(source.name,),
+        )
+        self.assertEqual([(item.legacy_consumer, item.status) for item in plan],
+                         [("claude", "ready")])
+        self.assertTrue(legacy.is_dir(), "planning migration must retain legacy content")
+        self.assertFalse(plan[0].destination.exists())
 
 
 if __name__ == "__main__":
