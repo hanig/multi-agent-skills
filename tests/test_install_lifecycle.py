@@ -152,6 +152,66 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(lifecycle.read_provenance(target.destination).repository, lifecycle.REPOSITORY_ID)
         self.assertFalse(list(target.destination.parent.glob(".alpha.stage-*")))
 
+    def test_source_destination_alias_overlap_is_rejected_before_writes(self):
+        source = self.source()
+        alias = self.root / "checkout-alias"
+        alias.symlink_to(source.parent, target_is_directory=True)
+        before = (source / "SKILL.md").read_bytes()
+        for mode in ("copy", "link"):
+            with self.subTest(mode=mode):
+                with self.assertRaisesRegex(ValueError, "payloads overlap"):
+                    self.target(destination=alias / source.name, mode=mode)
+                with self.assertRaisesRegex(ValueError, "payloads overlap"):
+                    self.target(destination=source / "nested", mode=mode)
+                self.assertEqual((source / "SKILL.md").read_bytes(), before)
+                self.assertFalse(source.is_symlink())
+                self.assertFalse(list(source.parent.glob(".alpha.*")))
+
+    def test_destination_parent_aliases_have_one_identity(self):
+        source = self.source()
+        physical = self.home / "physical" / "skills"
+        physical.mkdir(parents=True)
+        alias = self.home / "alias"
+        alias.symlink_to(physical, target_is_directory=True)
+        direct = self.target(source=source, destination=physical / "alpha")
+        indirect = self.target(source=source, destination=alias / "alpha")
+        self.assertEqual(direct.destination, indirect.destination)
+        inspection = lifecycle.preflight([direct, indirect])
+        self.assertEqual([item.action for item in inspection], ["install", "blocked"])
+        self.assertIn("one destination", inspection[1].reason)
+        self.assertFalse((physical / "alpha").exists())
+
+    def test_foreign_final_symlink_target_is_not_followed_on_replacement(self):
+        source = self.source()
+        foreign = self.root / "foreign"
+        foreign.mkdir()
+        sentinel = foreign / "sentinel.txt"
+        sentinel.write_text("do not touch\n")
+        for mode in ("copy", "link"):
+            with self.subTest(mode=mode):
+                destination = self.home / mode / "alpha"
+                destination.parent.mkdir(parents=True)
+                destination.symlink_to(foreign, target_is_directory=True)
+                target = lifecycle.LifecycleTarget(
+                    name="alpha", source=source, destination=destination,
+                    origin="authored", mode=mode, source_version="test",
+                    allow_foreign_replace=True,
+                )
+                self.assertEqual(
+                    target.destination,
+                    Path(os.path.realpath(destination.parent)) / destination.name,
+                )
+                result = lifecycle.install([target])[0]
+                self.assertEqual(result.status, "upgraded")
+                self.assertEqual(sentinel.read_text(), "do not touch\n")
+                self.assertTrue(foreign.is_dir())
+                if mode == "copy":
+                    self.assertTrue(destination.is_dir())
+                    self.assertFalse(destination.is_symlink())
+                else:
+                    self.assertTrue(destination.is_symlink())
+                    self.assertEqual(os.path.realpath(destination), str(source.resolve()))
+
     def test_upgrade_unions_prior_recorded_consumers(self):
         target = self.target(consumers=("claude", "codex"))
         lifecycle.install([target])

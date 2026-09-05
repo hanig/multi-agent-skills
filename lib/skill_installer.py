@@ -130,7 +130,7 @@ def parse_options(argv: Sequence[str]) -> InstallOptions:
         excluded_agents=excluded,
         prefix=Path(ns.prefix).expanduser() if ns.prefix else None,
         mode=ns.mode,
-        only=tuple(ns.only),
+        only=_skill_names(ns.only, "--only"),
         dry_run=ns.dry_run,
         force=ns.force,
         allow_org_shadow=ns.allow_org_shadow,
@@ -153,6 +153,57 @@ def _names(names: Iterable[str], flag: str) -> tuple[str, ...]:
         if name not in result:
             result.append(name)
     return tuple(result)
+
+
+def _skill_names(names: Iterable[str], flag: str) -> tuple[str, ...]:
+    """Return unique portable skill names, never caller-controlled paths."""
+    result: list[str] = []
+    for name in names:
+        if (not name or "\x00" in name or name.startswith(".") or
+                Path(name).is_absolute() or Path(name).name != name or
+                "/" in name or "\\" in name):
+            raise InstallRequestError(
+                f"{flag} requires a non-empty skill name, not a path: {name!r}"
+            )
+        if name not in result:
+            result.append(name)
+    return tuple(result)
+
+
+def _canonical_root(path: Path | str) -> Path:
+    """Canonicalize an operated directory, including a root symlink."""
+    return Path(os.path.realpath(os.path.abspath(os.path.expanduser(os.fspath(path)))))
+
+
+def _canonical_destination(path: Path | str) -> Path:
+    """Resolve parent aliases while retaining the final directory entry."""
+    absolute = Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
+    return _canonical_root(absolute.parent) / absolute.name
+
+
+def _contains(parent: Path, child: Path) -> bool:
+    try:
+        return os.path.commonpath((str(parent), str(child))) == str(parent)
+    except ValueError:
+        return False
+
+
+def _overlaps_source(source: Path, destination: Path) -> bool:
+    canonical_source = _canonical_root(source)
+    canonical_destination = _canonical_destination(destination)
+    return (_contains(canonical_source, canonical_destination) or
+            _contains(canonical_destination, canonical_source))
+
+
+def _direct_child(root: Path, name: str) -> Path:
+    """Construct one canonical child and re-prove the selected root boundary."""
+    canonical_root = _canonical_root(root)
+    destination = _canonical_destination(canonical_root / name)
+    if destination.parent != canonical_root:
+        raise InstallRequestError(
+            f"skill destination escapes selected root {canonical_root}: {name!r}"
+        )
+    return destination
 
 
 def normalize_agents(records: Iterable[Any]) -> tuple[AgentTarget, ...]:
@@ -224,7 +275,7 @@ def build_plan(targets: Iterable[AgentTarget], options: InstallOptions) -> Insta
         if not target.destinations:
             raise InstallRequestError(f"{target.name} has no skill destination")
         for destination in target.destinations:
-            by_destination.setdefault(destination, []).append(target)
+            by_destination.setdefault(_canonical_root(destination), []).append(target)
     destinations = tuple(
         DestinationPlan(
             path=path,
@@ -250,7 +301,7 @@ def build_discovery_plan(report: Mapping[str, Any], selection: Mapping[str, Any]
     for item in selection["selected"]:
         name = item["agent"]
         record = report["agents"][name]
-        path = Path(item["destination"]["physical_path"])
+        path = _canonical_root(Path(item["destination"]["physical_path"]))
         selected_by_path.setdefault(path, []).append(name)
         selected.append(AgentTarget(
             name=name, state=record["state"],
@@ -265,8 +316,11 @@ def build_discovery_plan(report: Mapping[str, Any], selection: Mapping[str, Any]
         destinations=(), consumers=(),
     ) for item in selection["skipped"])
     destinations = tuple(DestinationPlan(
-        path=Path(item["physical_path"]),
-        agents=tuple(item.get("selected_agents", selected_by_path[Path(item["physical_path"])])),
+        path=_canonical_root(Path(item["physical_path"])),
+        agents=tuple(item.get(
+            "selected_agents",
+            selected_by_path[_canonical_root(Path(item["physical_path"]))],
+        )),
         consumers=tuple(item["consumers"]),
         logical_paths=(Path(item["destination"]["logical_path"]),),
     ) for item in selection["destinations"])
@@ -380,7 +434,7 @@ def validate_payload(path: Path) -> None:
 
 def _legacy_prefix_plan(prefix: Path, options: InstallOptions) -> InstallPlan:
     target = AgentTarget("prefix", "compatibility destination", False, True,
-                         (Path(os.path.abspath(prefix)),), ())
+                         (_canonical_root(prefix),), ())
     return build_plan((target,), options)
 
 
@@ -408,10 +462,11 @@ def _lifecycle_targets(plan: InstallPlan, sources: Sequence[tuple[str, Path, str
     targets = []
     for destination in plan.destinations:
         for name, source, origin in sources:
-            final_destination = destination.path / name
-            if os.path.commonpath((str(source), str(final_destination))) == str(source):
+            final_destination = _direct_child(destination.path, name)
+            if _overlaps_source(source, final_destination):
                 raise InstallRequestError(
-                    f"refusing destination inside source payload: {final_destination}"
+                    "refusing overlapping source and destination payloads: "
+                    f"{source} and {final_destination}"
                 )
             targets.append(LifecycleTarget(
                 name=name, source=source, destination=final_destination,
@@ -428,9 +483,12 @@ def _lifecycle_targets(plan: InstallPlan, sources: Sequence[tuple[str, Path, str
 
 
 def _action(target, status: str, detail: str, plan: InstallPlan) -> dict[str, Any]:
-    root = target.destination.parent
-    destination = next(item for item in plan.destinations if item.path == root)
-    return {"agents": list(destination.agents), "root": str(root),
+    root = _canonical_root(target.destination.parent)
+    destination = next(
+        (item for item in plan.destinations if _canonical_root(item.path) == root),
+        None,
+    )
+    return {"agents": list(destination.agents) if destination else [], "root": str(root),
             "skill": getattr(target, "name", target.destination.name),
             "status": status, "detail": detail}
 
@@ -556,7 +614,8 @@ def run(argv: Sequence[str], *, repo: Path | None = None,
                                   if not path.name.startswith(".") and
                                   (not options.only or path.name in options.only))
             elif options.only:
-                candidates.extend(destination.path / name for name in options.only)
+                candidates.extend(_direct_child(destination.path, name)
+                                  for name in options.only)
         selected_consumers = () if options.prefix else tuple(target.name for target in plan.selected)
         if options.dry_run:
             actions = []

@@ -64,6 +64,18 @@ class TestSelectionBeforeWrites(unittest.TestCase):
         with self.assertRaisesRegex(installer.InstallRequestError, "only valid"):
             installer.parse_options(["--agent", "claude", "--exclude-agent", "pi"])
 
+    def test_only_accepts_skill_names_and_never_paths(self):
+        invalid = ("", ".", "..", ".hidden", "../victim", "nested/victim",
+                   "/tmp/victim", "nested\\victim", "bad\x00name")
+        for name in invalid:
+            with self.subTest(name=repr(name)):
+                with self.assertRaisesRegex(installer.InstallRequestError,
+                                            "skill name, not a path"):
+                    installer.parse_options(["--only", name])
+        options = installer.parse_options(["--only", "hanig-swarm",
+                                           "--only", "hanig-swarm"])
+        self.assertEqual(options.only, ("hanig-swarm",))
+
     def test_no_automatic_matches_explains_explicit_selection(self):
         targets = installer.normalize_agents([
             {"id": "claude", "detected": False, "destinations": ["/tmp/a"]},
@@ -234,6 +246,66 @@ class TestPublicCli(unittest.TestCase):
                                   "--only", "hanig-swarm", "--json")
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual((foreign / "SKILL.md").read_text(), "foreign\n")
+
+    def test_only_uninstall_never_escapes_an_absent_prefix(self):
+        from lib.skill_lifecycle import LifecycleTarget, install
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            source = base / "source" / "victim"
+            source.mkdir(parents=True)
+            (source / "SKILL.md").write_text("---\nname: victim\n---\nkeep\n")
+            victim = base / "victim"
+            prepared = install([LifecycleTarget(
+                name="victim", source=source, destination=victim,
+                origin="authored", source_version="test",
+            )])
+            self.assertEqual(prepared[0].status, "installed")
+            before = {path.name: path.read_bytes() for path in victim.iterdir()}
+            prefix = base / "missing-root"
+            for mode in ("copy", "link"):
+                for dry_run in (False, True):
+                    with self.subTest(mode=mode, dry_run=dry_run):
+                        args = ["--prefix", str(prefix), "--uninstall",
+                                "--only", "../victim", "--mode", mode, "--json"]
+                        if dry_run:
+                            args.append("--dry-run")
+                        result, _ = self._run(*args)
+                        self.assertEqual(result.returncode, 2, result.stderr)
+                        self.assertIn("skill name, not a path", result.stderr)
+                        self.assertFalse(prefix.exists())
+                        self.assertEqual(
+                            {path.name: path.read_bytes() for path in victim.iterdir()},
+                            before,
+                        )
+
+    def test_prefix_alias_into_source_is_rejected_before_copy_or_link(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            source = base / "repo" / "skills" / "hanig-demo"
+            source.mkdir(parents=True)
+            skill = source / "SKILL.md"
+            skill.write_text("---\nname: hanig-demo\n---\noriginal\n")
+            alias = base / "prefix"
+            alias.symlink_to(source.parent, target_is_directory=True)
+            for mode in ("copy", "link"):
+                for dry_run in (False, True):
+                    with self.subTest(mode=mode, dry_run=dry_run):
+                        args = ["--prefix", str(alias), "--mode", mode,
+                                "--force", "--only", "hanig-demo"]
+                        if dry_run:
+                            args.append("--dry-run")
+                        options = installer.parse_options(args)
+                        plan = installer._legacy_prefix_plan(options.prefix, options)
+                        with self.assertRaisesRegex(
+                                installer.InstallRequestError,
+                                "overlapping source and destination"):
+                            installer._lifecycle_targets(
+                                plan, [("hanig-demo", source, "authored")],
+                                options, "test",
+                            )
+                        self.assertEqual(skill.read_text().splitlines()[-1], "original")
+                        self.assertFalse(source.is_symlink())
+                        self.assertFalse((source / ".installed-by-multi-agent-skills").exists())
 
     def test_prune_detaches_only_the_agents_selected_for_this_reinstall(self):
         from lib.skill_lifecycle import LifecycleTarget, install

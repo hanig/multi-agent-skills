@@ -35,6 +35,28 @@ def _absolute(path: Path | str) -> Path:
     return Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
 
 
+def _canonical_source(path: Path | str) -> Path:
+    """Resolve every source alias because sources are read, never replaced."""
+    return Path(os.path.realpath(_absolute(path)))
+
+
+def _canonical_destination(path: Path | str) -> Path:
+    """Resolve parent aliases without following or replacing a final link target."""
+    absolute = _absolute(path)
+    return Path(os.path.realpath(absolute.parent)) / absolute.name
+
+
+def _contains(parent: Path, child: Path) -> bool:
+    try:
+        return os.path.commonpath((str(parent), str(child))) == str(parent)
+    except ValueError:
+        return False
+
+
+def _destinations_match(left: Path | str, right: Path | str) -> bool:
+    return _canonical_destination(left) == _canonical_destination(right)
+
+
 def _clean_values(values: Iterable[str]) -> tuple[str, ...]:
     values = tuple(sorted(set(values)))
     if any(not value or any(c in value for c in "\n\r,=") for value in values):
@@ -92,7 +114,8 @@ class LifecycleTarget:
     allow_foreign_replace: bool = False
 
     def __post_init__(self) -> None:
-        if not self.name or "/" in self.name or self.name in (".", ".."):
+        if (not self.name or "\x00" in self.name or self.name.startswith(".") or
+                "/" in self.name or "\\" in self.name):
             raise ValueError("target name must be a single path component")
         if self.origin not in VALID_ORIGINS - {"unknown"}:
             raise ValueError("new installs must declare authored or vendored origin")
@@ -100,8 +123,14 @@ class LifecycleTarget:
             raise ValueError("mode must be copy or link")
         if not self.source_version or "\n" in self.source_version or "\r" in self.source_version:
             raise ValueError("source_version must be a non-empty single-line value")
-        object.__setattr__(self, "source", _absolute(self.source))
-        object.__setattr__(self, "destination", _absolute(self.destination))
+        source = _canonical_source(self.source)
+        destination = _canonical_destination(self.destination)
+        if _contains(source, destination) or _contains(destination, source):
+            raise ValueError(
+                f"source and destination payloads overlap: {source} and {destination}"
+            )
+        object.__setattr__(self, "source", source)
+        object.__setattr__(self, "destination", destination)
         object.__setattr__(self, "consumers", _clean_values(self.consumers))
         if self.provenance_path is not None:
             object.__setattr__(self, "provenance_path", _absolute(self.provenance_path))
@@ -148,7 +177,8 @@ def _sidecar_path(destination: Path) -> Path:
 
 def provenance_path(destination: Path | str, explicit: Path | str | None = None) -> Path:
     """Return the link sidecar path (or the caller's resolved path)."""
-    return _absolute(explicit) if explicit is not None else _sidecar_path(_absolute(destination))
+    return (_canonical_destination(explicit) if explicit is not None else
+            _sidecar_path(_canonical_destination(destination)))
 
 
 def _parse_marker(path: Path) -> Provenance | None:
@@ -211,8 +241,10 @@ def _record_location(destination: Path, explicit: Path | None = None) -> tuple[P
 
 def read_provenance(destination: Path | str, *, provenance_file: Path | str | None = None) -> Provenance | None:
     """Read a marker conservatively; unrecognized content is never ownership."""
-    record, _ = _record_location(_absolute(destination),
-                                 _absolute(provenance_file) if provenance_file else None)
+    record, _ = _record_location(
+        _canonical_destination(destination),
+        _canonical_destination(provenance_file) if provenance_file else None,
+    )
     return record
 
 
@@ -249,8 +281,8 @@ def _write_atomic(path: Path, content: str) -> None:
 def write_provenance(destination: Path | str, record: Provenance,
                      *, provenance_file: Path | str | None = None) -> Path:
     """Persist a record, using an external sidecar for links and other files."""
-    dest = _absolute(destination)
-    explicit = _absolute(provenance_file) if provenance_file else None
+    dest = _canonical_destination(destination)
+    explicit = _canonical_destination(provenance_file) if provenance_file else None
     path = dest / MARKER if dest.is_dir() and not dest.is_symlink() else provenance_path(dest, explicit)
     _write_atomic(path, _serialize(record))
     return path
@@ -290,7 +322,7 @@ def _record_matches_link(destination: Path, record: Provenance) -> bool:
 def _owned_by(record: Provenance | None, target: LifecycleTarget) -> bool:
     if not record or record.repository != target.repository:
         return False
-    if record.destination and record.destination != str(target.destination):
+    if record.destination and not _destinations_match(record.destination, target.destination):
         return False
     if record.mode != "link":
         return True
@@ -560,10 +592,11 @@ def uninstall(destinations: Iterable[Path | str], *, consumers: Iterable[str] = 
     loader may still make a same-name payload visible.
     """
     wanted_consumers = _clean_values(consumers)
-    sidecars = {_absolute(k): _absolute(v) for k, v in (provenance_files or {}).items()}
+    sidecars = {_canonical_destination(k): _canonical_destination(v)
+                for k, v in (provenance_files or {}).items()}
     results: list[UninstallResult] = []
     for raw_dest in destinations:
-        dest = _absolute(raw_dest)
+        dest = _canonical_destination(raw_dest)
         explicit = sidecars.get(dest)
         with _destination_lock(dest):
             record, location = _record_location(dest, explicit)
@@ -573,7 +606,7 @@ def uninstall(destinations: Iterable[Path | str], *, consumers: Iterable[str] = 
             if not record or record.repository != repository:
                 results.append(UninstallResult(dest, "blocked", "no matching recorded ownership"))
                 continue
-            if record.destination != str(dest):
+            if not record.destination or not _destinations_match(record.destination, dest):
                 results.append(UninstallResult(dest, "blocked", "recorded destination does not match this path"))
                 continue
             if record.mode == "link" and not _record_matches_link(dest, record):
