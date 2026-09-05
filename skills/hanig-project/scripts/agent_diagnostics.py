@@ -57,13 +57,16 @@ def _read_fields(path: Path) -> tuple[Optional[dict[str, str]], Optional[str]]:
         return None, "metadata is not valid UTF-8"
     values: dict[str, str] = {}
     for line in text.splitlines():
-        if "=" in line:
-            key, value = line.split("=", 1)
-            if not key:
-                continue
-            if key in values:
-                return None, f"metadata contains duplicate field: {key}"
-            values[key] = value
+        if not line:
+            continue
+        if "=" not in line:
+            return None, "metadata contains a malformed nonempty line"
+        key, value = line.split("=", 1)
+        if not key:
+            return None, "metadata contains an empty field name"
+        if key in values:
+            return None, f"metadata contains duplicate field: {key}"
+        values[key] = value
     return values, None
 
 
@@ -73,8 +76,9 @@ def _schema_two_problem(values: Mapping[str, str], destination: Path, *, linked:
     This mirrors lifecycle's conservative parser locally because installed
     copies of this diagnostic have no checkout ``lib`` package to import.
     """
-    required = ("repo", "origin", "source_version", "destination", "consumers",
-                "mode", "installed_at", "link_target", "link_identity")
+    required = ("schema", "repo", "origin", "source_version", "version",
+                "destination", "consumers", "mode", "installed_at",
+                "link_target", "link_identity")
     missing = [key for key in required if key not in values]
     if missing:
         return "record is incomplete: missing " + ", ".join(missing)
@@ -82,8 +86,8 @@ def _schema_two_problem(values: Mapping[str, str], destination: Path, *, linked:
         return "repository identity is invalid"
     if values["origin"] not in ("authored", "vendored"):
         return "origin is invalid"
-    if not values["source_version"]:
-        return "source version is empty"
+    if not values["source_version"] or values["source_version"] != values["version"]:
+        return "source version is empty or does not match compatibility version"
     if not values["installed_at"]:
         return "installation timestamp is empty"
     raw_consumers = values["consumers"]
@@ -95,11 +99,15 @@ def _schema_two_problem(values: Mapping[str, str], destination: Path, *, linked:
         return "mode is invalid"
     if values["mode"] != expected_mode:
         return "recorded mode does not match this payload"
-    if (not values["destination"] or
+    if (not values["destination"] or not os.path.isabs(values["destination"]) or
             _destination_identity(values["destination"]) != _destination_identity(destination)):
         return "recorded destination does not match this payload"
-    if linked and (not values["link_target"] or not values["link_identity"]):
-        return "link ownership fields are incomplete"
+    if linked:
+        if (not values["link_target"] or not os.path.isabs(values["link_target"]) or
+                not values["link_identity"]):
+            return "link ownership fields are incomplete or invalid"
+    elif values["link_target"] or values["link_identity"]:
+        return "copy record contains link ownership fields"
     return None
 
 
@@ -139,16 +147,19 @@ def _marker(path: Path, *, linked: bool = False) -> tuple[dict[str, Any], Option
                 "provenance": _state("unknown", error, path=str(source))}, error
     if values is None:
         return base, None
-    repository = values.get("repo")
-    if repository != REPOSITORY_ID:
-        return {**base, "provenance": _state("foreign", path=str(source), repo=repository)}, None
     if values.get("schema") != LIFECYCLE_SCHEMA:
+        repository = values.get("repo")
+        if repository != REPOSITORY_ID:
+            return {**base, "provenance": _state("foreign", path=str(source), repo=repository)}, None
         return {**base, "ownership": "unknown",
                 "provenance": _state("legacy", "not lifecycle schema 2", path=str(source))}, None
     problem = _schema_two_problem(values, path, linked=linked)
     if problem:
         return {**base, "ownership": "unknown",
                 "provenance": _state("stale", problem, path=str(source))}, None
+    repository = values["repo"]
+    if repository != REPOSITORY_ID:
+        return {**base, "provenance": _state("foreign", path=str(source), repo=repository)}, None
     origin = values["origin"]
     mode = values["mode"]
     if linked:
