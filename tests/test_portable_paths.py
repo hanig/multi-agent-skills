@@ -41,7 +41,8 @@ class InstalledSnapshot(unittest.TestCase):
         # the portability defect with this test repository.
         shutil.rmtree(source.parent)
         self.prefix = prefix
-        self.env = dict(os.environ, HOME=str(self.home))
+        # Portability must not depend on coordinator credentials or config.
+        self.env = {"HOME": str(self.home), "PATH": os.defpath}
 
     def tearDown(self):
         self.temp.cleanup()
@@ -86,7 +87,17 @@ class InstalledSnapshot(unittest.TestCase):
 
     def test_review_configuration_and_project_sibling_are_portable(self):
         review = self.invoke("hanig-review-gate/scripts/review.py", "--list", "--no-probe")
-        self.assertEqual(review.returncode, 0, review.stderr)
+        # Loading a valid copied config is distinct from having provider keys.
+        # An empty HOME/environment honestly reports REVIEW_UNAVAILABLE (2).
+        self.assertEqual(review.returncode, 2, review.stderr + review.stdout)
+        config = json.loads((self.prefix / "hanig-review-gate" / "reviewers.json").read_text())
+        expected = [reviewer for reviewer in config["reviewers"]
+                    if config["default_profile"] in reviewer.get("profiles", [])]
+        self.assertTrue(expected)
+        for reviewer in expected:
+            self.assertIn(reviewer["name"], review.stdout)
+        self.assertIn("No reviewer can run", review.stdout)
+        self.assertNotIn("REVIEW_ERROR", review.stdout + review.stderr)
 
         resolver = self.prefix / "hanig-project" / "scripts" / "skill_paths.py"
         found = subprocess.run([sys.executable, str(resolver), "sibling",

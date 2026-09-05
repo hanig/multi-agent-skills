@@ -1276,10 +1276,15 @@ class TestVendoredSkillsAreNotOursToDelete(unittest.TestCase):
                                   "--prefix", str(prefix)],
                                  capture_output=True, text=True,
                                  cwd=ROOT).stdout
-            line = next(l for l in out.splitlines()
+            # Ancillary prerequisite warnings can also mention a skill name.
+            # Ownership is asserted only against its installed-skills row.
+            _, header, installed = out.partition("=== INSTALLED SKILLS ===")
+            self.assertTrue(header, out)
+            installed = installed.split("===", 1)[0]
+            line = next(l for l in installed.splitlines()
                         if l.strip().startswith("paseo "))
             self.assertIn("vendored", line)
-            ours = next(l for l in out.splitlines()
+            ours = next(l for l in installed.splitlines()
                         if l.strip().startswith("hanig-swarm "))
             self.assertIn("ours", ours)
 
