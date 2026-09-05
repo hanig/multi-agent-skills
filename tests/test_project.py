@@ -2677,6 +2677,17 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
                         "a diagnostic can execute after setpgid failure")
         self.assertLess(ready, executed,
                         "a diagnostic can execute without the setup handshake")
+        launch_mask = src.index(
+            "sigprocmask(SIG_BLOCK, $blocked_signals, $old_signal_mask)")
+        chld_default = src.index('$SIG{CHLD} = "DEFAULT"', launch_mask)
+        chld_failure = src.index(
+            'or answer("unknown", 127, "SIGCHLD disposition")', chld_default)
+        forked = src.index("my $pid = fork()", chld_default)
+        self.assertLess(launch_mask, chld_default)
+        self.assertLess(chld_default, chld_failure)
+        self.assertLess(chld_failure, forked)
+        self.assertLess(chld_default, forked,
+                        "an inherited ignored SIGCHLD can auto-reap the child")
         self.assertIn('answer("setup-error", 127, $1)', src)
         self.assertNotIn("while ($got == -1 && $! == EINTR)", src)
         self.assertNotIn("while ($last == -1 && $! == EINTR)", src)
@@ -2759,6 +2770,30 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.splitlines()[:3],
                          ["setup-error", "127", "exec"])
+
+    def test_inherited_ignored_sigchld_cannot_auto_reap_the_probe(self):
+        """POSIX preserves ignored dispositions across exec. Start the Perl
+        supervisor that way and prove its short child remains waitable rather
+        than disappearing before the supervisor's sole-reaper state machine."""
+        outer = (
+            'my $program = shift @ARGV; '
+            '$SIG{CHLD} = "IGNORE"; '
+            'exec {$program} $program, @ARGV or die $!;')
+        # Some Perl runtimes normalize SIGCHLD while starting the interpreter.
+        # Seed it again at the supervisor boundary so the waitability claim is
+        # exercised on every supported host, while the outer exec still models
+        # the inherited-disposition launch that prompted the fix.
+        inherited_source = (
+            '$SIG{CHLD} = "IGNORE";\n' + self._supervisor_source())
+        r = subprocess.run(
+            [shutil.which("perl"), "-e", outer,
+             shutil.which("perl"), "-e", inherited_source,
+             "2", "1", shutil.which("sh"), "-c",
+             "printf inherited-sigchld-ok"],
+            capture_output=True, text=True, timeout=5)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.splitlines()[:3],
+                         ["answered", "0", "inherited-sigchld-ok"])
 
     def test_timeout_wording_claims_only_a_termination_attempt(self):
         src = DOCTOR.read_text()

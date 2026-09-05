@@ -114,6 +114,12 @@ my $blocked_signals = POSIX::SigSet->new(SIGHUP, SIGINT, SIGTERM);
 my $old_signal_mask = POSIX::SigSet->new();
 sigprocmask(SIG_BLOCK, $blocked_signals, $old_signal_mask)
     or answer("unknown", 127, "signal mask");
+# This supervisor is single-threaded and is sole reaper for the direct child.
+# Clear an inherited ignored/no-cld-wait disposition before launch. Therefore
+# a later non-EINTR wait error does not mean some other reaper released the
+# PID/PGID identity that bounded cleanup still holds.
+eval { $SIG{CHLD} = "DEFAULT"; 1 }
+    or answer("unknown", 127, "SIGCHLD disposition");
 my $active_pid = 0;
 my $interrupted = "";
 for my $signal_name (qw(HUP INT TERM)) {
