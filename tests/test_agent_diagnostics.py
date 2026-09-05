@@ -32,6 +32,41 @@ class TestAgentDiagnostics(unittest.TestCase):
                 f"mode={mode}\ninstalled_at=2026-09-05T00:00:00Z\n"
                 f"link_target={link_target}\nlink_identity={link_identity}\n")
 
+    @staticmethod
+    def _without_field(record, field):
+        return "".join(line for line in record.splitlines(keepends=True)
+                       if not line.startswith(field + "="))
+
+    @classmethod
+    def _invalid_copy_records(cls, destination):
+        valid = cls._record(destination)
+        records = {
+            "invalid UTF-8": valid.encode() + b"\xff",
+            "duplicate key": (valid + "repo=multi-agent-skills\n").encode(),
+            "malformed nonempty line": (valid + "not-a-field\n").encode(),
+            "empty field name": (valid + "=value\n").encode(),
+            "empty repository": valid.replace("repo=multi-agent-skills\n", "repo=\n").encode(),
+            "empty source version": valid.replace("source_version=abc123\n", "source_version=\n").encode(),
+            "version mismatch": valid.replace(
+                "\nversion=abc123\n", "\nversion=different\n").encode(),
+            "invalid consumer equals": cls._record(destination, consumers="claude=admin").encode(),
+            "invalid consumer empty component": cls._record(destination, consumers="claude,,pi").encode(),
+            "invalid consumer newline": cls._record(destination, consumers="claude\npi").encode(),
+            "invalid consumer carriage return": cls._record(destination, consumers="claude\rpi").encode(),
+            "invalid mode": cls._record(destination, mode="mirror").encode(),
+            "invalid origin": cls._record(destination, origin="unknown").encode(),
+            "relative destination": valid.replace(
+                f"destination={destination}\n", "destination=relative/payload\n").encode(),
+            "empty installed at": valid.replace(
+                "installed_at=2026-09-05T00:00:00Z\n", "installed_at=\n").encode(),
+            "copy link target": valid.replace("link_target=\n", "link_target=/tmp/source\n").encode(),
+            "copy link identity": valid.replace("link_identity=\n", "link_identity=1:2:3\n").encode(),
+        }
+        for field in ("repo", "origin", "source_version", "version", "destination",
+                      "consumers", "mode", "installed_at", "link_target", "link_identity"):
+            records["missing " + field] = cls._without_field(valid, field).encode()
+        return records
+
     def test_no_claude_still_reports_every_agent_and_each_fact(self):
         with tempfile.TemporaryDirectory() as tmp:
             data = D.diagnostics(env=self._env(Path(tmp)))
@@ -167,16 +202,8 @@ class TestAgentDiagnostics(unittest.TestCase):
             path = Path(tmp) / "payload"
             path.mkdir()
             marker = path / D.MARKER
-            valid = self._record(path)
-            cases = {
-                "invalid UTF-8": valid.encode() + b"\xff",
-                "duplicate key": (valid + "repo=multi-agent-skills\n").encode(),
-                "invalid consumer": self._record(path, consumers="claude=admin").encode(),
-                "invalid mode": self._record(path, mode="mirror").encode(),
-                "invalid origin": self._record(path, origin="unknown").encode(),
-                "wrong destination": self._record(path.parent / "elsewhere").encode(),
-                "incomplete record": valid.replace("installed_at=2026-09-05T00:00:00Z\n", "").encode(),
-            }
+            cases = self._invalid_copy_records(path)
+            cases["wrong destination identity"] = self._record(path.parent / "elsewhere").encode()
             for label, content in cases.items():
                 with self.subTest(label=label):
                     marker.write_bytes(content)
@@ -191,17 +218,17 @@ class TestAgentDiagnostics(unittest.TestCase):
             source = tmp / "source"
             source.mkdir()
             (source / "SKILL.md").write_text("---\nname: payload\n---\n")
-            cases = {
-                "invalid UTF-8": lambda path: self._record(path).encode() + b"\xff",
-                "invalid consumer": lambda path: self._record(path, consumers="claude=admin").encode(),
-                "wrong destination": lambda path: self._record(path.parent / "elsewhere").encode(),
-            }
-            for label, content_for in cases.items():
+            labels = list(self._invalid_copy_records(tmp / "placeholder"))
+            labels.append("wrong destination identity")
+            for label in labels:
                 with self.subTest(label=label):
                     path = tmp / ("payload-" + label.replace(" ", "-"))
                     path.mkdir()
                     (path / "SKILL.md").write_text("---\nname: payload\n---\n")
-                    (path / D.MARKER).write_bytes(content_for(path))
+                    cases = self._invalid_copy_records(path)
+                    cases["wrong destination identity"] = self._record(
+                        path.parent / "elsewhere").encode()
+                    (path / D.MARKER).write_bytes(cases[label])
                     diagnostic, _ = D._marker(path)
                     target = lifecycle.LifecycleTarget(
                         name=path.name, source=source, destination=path,
@@ -210,6 +237,35 @@ class TestAgentDiagnostics(unittest.TestCase):
                     decision = lifecycle.preflight([target])[0]
                     self.assertEqual(diagnostic["ownership"], "unknown")
                     self.assertEqual(decision.action, "blocked")
+                    if label != "wrong destination identity":
+                        self.assertIsNone(lifecycle.read_provenance(path))
+
+    def test_valid_historical_schema_two_records_keep_empty_and_normalized_consumers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            source = tmp / "source"
+            source.mkdir()
+            (source / "SKILL.md").write_text("ok\n")
+            for label, consumers, expected in (
+                    ("empty", "", ()),
+                    ("unsorted-duplicates", "pi,claude,pi", ("claude", "pi"))):
+                with self.subTest(label=label):
+                    path = tmp / label
+                    path.mkdir()
+                    (path / "SKILL.md").write_text("ok\n")
+                    (path / D.MARKER).write_text(self._record(path, consumers=consumers))
+                    diagnostic, _ = D._marker(path)
+                    parsed = lifecycle.read_provenance(path)
+                    target = lifecycle.LifecycleTarget(
+                        name=path.name, source=source, destination=path,
+                        origin="authored", consumers=(), source_version="next",
+                    )
+                    decision = lifecycle.preflight([target])[0]
+                    self.assertEqual(diagnostic["ownership"], "owned")
+                    self.assertEqual(diagnostic["provenance"]["state"], "valid")
+                    self.assertIsNotNone(parsed)
+                    self.assertEqual(parsed.consumers, expected)
+                    self.assertEqual(decision.action, "upgrade")
 
     def test_valid_and_stale_link_sidecars_are_distinguished(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -236,6 +292,55 @@ class TestAgentDiagnostics(unittest.TestCase):
         self.assertEqual(stale["ownership"], "unknown")
         self.assertEqual(stale["provenance"]["state"], "stale")
         self.assertEqual(lifecycle_decision.action, "blocked")
+
+    def test_link_schema_and_object_identity_match_lifecycle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            source = tmp / "source"
+            source.mkdir()
+            (source / "SKILL.md").write_text("ok\n")
+            for label in ("valid", "relative-target", "missing-target", "missing-identity",
+                          "wrong-target", "wrong-identity"):
+                with self.subTest(label=label):
+                    destination = tmp / ("link-" + label)
+                    destination.symlink_to(source, target_is_directory=True)
+                    target = str(source)
+                    identity = D._link_identity(destination)
+                    if label == "relative-target":
+                        target = "relative/source"
+                    elif label == "missing-target":
+                        target = ""
+                    elif label == "missing-identity":
+                        identity = ""
+                    elif label == "wrong-target":
+                        other = tmp / "other"
+                        other.mkdir(exist_ok=True)
+                        target = str(other)
+                    elif label == "wrong-identity":
+                        identity = "0:0:0"
+                    sidecar = D._sidecar(destination)
+                    sidecar.parent.mkdir(exist_ok=True)
+                    sidecar.write_text(self._record(
+                        destination, mode="link", link_target=target,
+                        link_identity=identity,
+                    ))
+                    diagnostic, _ = D._marker(destination, linked=True)
+                    parsed = lifecycle.read_provenance(destination)
+                    lifecycle_target = lifecycle.LifecycleTarget(
+                        name=destination.name, source=source, destination=destination,
+                        origin="authored", consumers=("claude",), mode="link",
+                        source_version="next",
+                    )
+                    decision = lifecycle.preflight([lifecycle_target])[0]
+                    if label == "valid":
+                        self.assertEqual(diagnostic["ownership"], "owned")
+                        self.assertIsNotNone(parsed)
+                        self.assertEqual(decision.action, "upgrade")
+                    else:
+                        self.assertEqual(diagnostic["ownership"], "unknown")
+                        self.assertEqual(decision.action, "blocked")
+                        if label in ("relative-target", "missing-target", "missing-identity"):
+                            self.assertIsNone(parsed)
 
     def test_skill_without_a_loadable_skill_file_is_unusable_not_discovered(self):
         with tempfile.TemporaryDirectory() as tmp:
