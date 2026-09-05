@@ -242,15 +242,15 @@ while (1) {
 }
 drain();
 drain_setup();
+if (length $wait_error) {
+    answer("supervisor-error", 127, $wait_error);
+}
 if ($setup_error =~ /(?:^|\n)error:([^\n]+)/) {
     answer("setup-error", 127, $1);
 }
 if ($state eq "RUNNING" && $direct_reaped
         && $setup_error !~ /(?:^|\n)ready(?:\n|$)/) {
     answer("setup-error", 127, "setup handshake absent");
-}
-if (length $wait_error) {
-    answer("supervisor-error", 127, $wait_error);
 }
 my $rc = 127;
 if ($state eq "TIMED_OUT") {

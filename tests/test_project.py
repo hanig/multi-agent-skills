@@ -2683,6 +2683,12 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
         self.assertIn("elsif ($got == -1 && $! != EINTR", src)
         self.assertIn("unless defined $cleanup_deadline", src)
         self.assertIn('answer("supervisor-error", 127, $wait_error)', src)
+        wait_classification = src.index("if (length $wait_error)")
+        explicit_setup = src.index("if ($setup_error =~", wait_classification)
+        missing_ready = src.index(
+            'if ($state eq "RUNNING" && $direct_reaped', explicit_setup)
+        self.assertLess(wait_classification, explicit_setup)
+        self.assertLess(wait_classification, missing_ready)
         final_start = src.index("# One final nonblocking attempt only")
         final_end = src.index("\n        }\n        last;", final_start)
         final = src[final_start:final_end]
