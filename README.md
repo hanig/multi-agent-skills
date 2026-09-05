@@ -569,6 +569,11 @@ across five Linear issues, each closed only on a predicate receipt.
 
 ## Install
 
+Cross-agent installation and target selection are documented in
+[`docs/agent-migration.md`](docs/agent-migration.md).  The release acceptance
+record, including the native-CLI evidence that automated tests cannot supply,
+is in [`docs/cross-agent-acceptance.md`](docs/cross-agent-acceptance.md).
+
 ```bash
 ./install.sh [--prefix DIR] [--mode copy|link] [--only NAME] [--dry-run]
              [--force] [--uninstall] [--allow-org-shadow]
