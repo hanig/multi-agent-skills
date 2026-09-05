@@ -22,6 +22,14 @@ class TestAgentDiagnostics(unittest.TestCase):
     def _env(self, home):
         return {"HOME": str(home), "PATH": ""}
 
+    @staticmethod
+    def _record(destination, *, origin="authored", mode="copy", source_version="abc123",
+                link_target="", link_identity="", repo=D.REPOSITORY_ID):
+        return (f"schema=2\nrepo={repo}\norigin={origin}\nsource_version={source_version}\n"
+                f"version={source_version}\ndestination={destination}\nconsumers=claude\n"
+                f"mode={mode}\ninstalled_at=2026-09-05T00:00:00Z\n"
+                f"link_target={link_target}\nlink_identity={link_identity}\n")
+
     def test_no_claude_still_reports_every_agent_and_each_fact(self):
         with tempfile.TemporaryDirectory() as tmp:
             data = D.diagnostics(env=self._env(Path(tmp)))
@@ -42,7 +50,8 @@ class TestAgentDiagnostics(unittest.TestCase):
                 skill = root / "hanig-example"
                 skill.mkdir(parents=True)
                 (skill / "SKILL.md").write_text("---\nname: example\n---\n")
-            (claude / "hanig-example" / D.MARKER).write_text("version=abc123\norigin=authored\n")
+            target = claude / "hanig-example"
+            (target / D.MARKER).write_text(self._record(target))
             env = self._env(home)
             env["CLAUDE_CONFIG_DIR"] = str(home / "custom")
             data = D.diagnostics(env=env)
@@ -67,11 +76,62 @@ class TestAgentDiagnostics(unittest.TestCase):
         self.assertEqual(result["state"], "unusable")
         self.assertNotEqual(result["state"], "absent")
 
-    def test_workflow_does_not_claim_linear_ready_without_a_credential_probe(self):
+    def test_workflow_separates_baseline_optional_and_per_skill_requirements(self):
         with tempfile.TemporaryDirectory() as tmp:
-            workflow = D._workflow(self._env(Path(tmp)))
-        self.assertEqual(workflow["dependencies"]["linear"]["state"], "unverified")
-        self.assertEqual(workflow["dependencies"]["paseo"]["state"], "absent")
+            root = Path(tmp) / "skills"
+            skill = root / "paseo"
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text("ok\n")
+            workflow = D._workflow(self._env(Path(tmp)), [D._installation(
+                {"id": "fixture", "kind": "native", "preferred": True,
+                 "logical_path": str(root), "physical_path": str(root), "override": None})])
+        self.assertEqual(workflow["optional_dependencies"]["linear"]["state"], "unverified")
+        self.assertEqual(workflow["optional_dependencies"]["paseo_executable"]["state"], "absent")
+        self.assertIn("agent_bus_registry", workflow["skills"]["paseo"]["requirements"])
+
+    def test_foreign_marker_is_not_promoted_to_owned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "foreign"
+            path.mkdir()
+            (path / D.MARKER).write_text(self._record(path, repo="another-installer"))
+            record, _ = D._marker(path)
+        self.assertEqual(record["ownership"], "foreign")
+        self.assertEqual(record["provenance"]["state"], "foreign")
+
+    def test_oversized_or_legacy_marker_is_never_claimed_as_owned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "payload"
+            path.mkdir()
+            marker = path / D.MARKER
+            marker.write_bytes(b"repo=multi-agent-skills\n" + b"x" * D.MAX_MARKER_BYTES)
+            oversized, _ = D._marker(path)
+            marker.write_text("repo=multi-agent-skills\norigin=authored\nversion=old\n")
+            legacy, _ = D._marker(path)
+        self.assertEqual(oversized["ownership"], "unknown")
+        self.assertEqual(oversized["provenance"]["state"], "unknown")
+        self.assertEqual(legacy["ownership"], "unknown")
+        self.assertEqual(legacy["provenance"]["state"], "legacy")
+
+    def test_valid_and_stale_link_sidecars_are_distinguished(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            source, destination = tmp / "source", tmp / "link"
+            source.mkdir()
+            (source / "SKILL.md").write_text("ok\n")
+            destination.symlink_to(source, target_is_directory=True)
+            sidecar = D._sidecar(destination)
+            sidecar.parent.mkdir()
+            sidecar.write_text(self._record(destination, mode="link", link_target=str(source),
+                                             link_identity=D._link_identity(destination)))
+            valid, _ = D._marker(destination, linked=True)
+            destination.unlink()
+            foreign = tmp / "foreign"
+            foreign.mkdir()
+            destination.symlink_to(foreign, target_is_directory=True)
+            stale, _ = D._marker(destination, linked=True)
+        self.assertEqual(valid["ownership"], "owned")
+        self.assertEqual(stale["ownership"], "unknown")
+        self.assertEqual(stale["provenance"]["state"], "stale")
 
     def test_skill_without_a_loadable_skill_file_is_unusable_not_discovered(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -130,6 +190,50 @@ class TestDoctorAndSurveyAgentOutput(unittest.TestCase):
         value = json.loads(result.stdout)
         self.assertEqual(set(value["agents"]), {"claude", "codex", "opencode", "pi"})
         self.assertEqual(value["agents"]["claude"]["installation"]["roots"][0]["logical_path"], str(prefix))
+
+    def test_doctor_without_prefix_uses_effective_claude_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            home, config = tmp / "home", tmp / "custom-claude"
+            (config / "skills" / "fixture").mkdir(parents=True)
+            (config / "skills" / "fixture" / "SKILL.md").write_text("ok\n")
+            env = {"HOME": str(home), "PATH": str(self._bin(tmp)),
+                   "CLAUDE_CONFIG_DIR": str(config)}
+            result = subprocess.run(["sh", str(DOCTOR), "--json"], cwd=ROOT, env=env,
+                                    text=True, capture_output=True, timeout=20)
+        value = json.loads(result.stdout)
+        self.assertEqual(value["agents"]["claude"]["installation"]["roots"][0]["logical_path"],
+                         str(config / "skills"))
+
+    def test_doctor_json_returns_a_complete_truncation_record_for_large_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            prefix = tmp / "large-skills"
+            for number in range(500):
+                skill = prefix / ("skill-" + str(number).zfill(4) + "-metadata" * 3)
+                skill.mkdir(parents=True)
+                (skill / "SKILL.md").write_text("ok\n")
+            env = {"HOME": str(tmp / "home"), "PATH": str(self._bin(tmp))}
+            result = subprocess.run(["sh", str(DOCTOR), "--prefix", str(prefix), "--json"],
+                                    cwd=ROOT, env=env, text=True, capture_output=True, timeout=30)
+        value = json.loads(result.stdout)
+        self.assertTrue(value.get("truncated"), value)
+        self.assertEqual(value["state"], "unknown")
+
+    def test_doctor_json_keeps_an_ordinary_thirteen_skill_install_complete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            prefix = tmp / "normal-skills"
+            for number in range(13):
+                skill = prefix / f"skill-{number}"
+                skill.mkdir(parents=True)
+                (skill / "SKILL.md").write_text("ok\n")
+            env = {"HOME": str(tmp / "home"), "PATH": str(self._bin(tmp))}
+            result = subprocess.run(["sh", str(DOCTOR), str(prefix), "--json"],
+                                    cwd=ROOT, env=env, text=True, capture_output=True, timeout=20)
+        value = json.loads(result.stdout)
+        self.assertNotIn("truncated", value)
+        self.assertEqual(len(value["agents"]["claude"]["installation"]["roots"][0]["payloads"]), 13)
 
     def test_survey_preserves_existing_keys_and_adds_agent_diagnostics_without_claude(self):
         with tempfile.TemporaryDirectory() as tmp:

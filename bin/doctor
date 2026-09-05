@@ -16,10 +16,11 @@
 set -u
 
 PREFIX="${HOME}/.claude/skills"
+PREFIX_EXPLICIT=0
 DOCTOR_JSON=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --prefix) PREFIX="$2"; shift 2 ;;
+    --prefix) PREFIX="$2"; PREFIX_EXPLICIT=1; shift 2 ;;
     --json) DOCTOR_JSON=1; shift ;;
     -h|--help)
       printf '%s\n' \
@@ -31,7 +32,7 @@ while [ $# -gt 0 ]; do
         'Usage: doctor [--prefix DIR] [--json] | doctor DIR'
       exit 0 ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
-    *) PREFIX="$1"; shift ;;
+    *) PREFIX="$1"; PREFIX_EXPLICIT=1; shift ;;
   esac
 done
 MARKER=".installed-by-multi-agent-skills"
@@ -412,7 +413,11 @@ if [ "$DOCTOR_JSON" -eq 1 ]; then
   elif ! command -v python3 >/dev/null 2>&1; then
     printf '%s\n' '{"schema_version":1,"state":"unknown","reason":"python3 is unavailable"}'
   else
-    bounded "$PROBE_RUN_SECONDS" python3 "$DIAGNOSTICS" --json --claude-prefix "$PREFIX"
+    if [ "$PREFIX_EXPLICIT" -eq 1 ]; then
+      bounded "$PROBE_RUN_SECONDS" python3 "$DIAGNOSTICS" --doctor-json --claude-prefix "$PREFIX"
+    else
+      bounded "$PROBE_RUN_SECONDS" python3 "$DIAGNOSTICS" --doctor-json
+    fi
     if [ "$PROBE_STATE:$PROBE_RC" = answered:0 ]; then
       printf '%s\n' "$PROBE_OUT"
     else
@@ -819,7 +824,11 @@ if [ ! -f "$DIAGNOSTICS" ]; then
 elif ! command -v python3 >/dev/null 2>&1; then
   printf '  COULD NOT DETERMINE — python3 is unavailable; run `bin/doctor --json` after installing Python\n'
 else
-  bounded "$PROBE_RUN_SECONDS" python3 "$DIAGNOSTICS" --claude-prefix "$PREFIX"
+  if [ "$PREFIX_EXPLICIT" -eq 1 ]; then
+    bounded "$PROBE_RUN_SECONDS" python3 "$DIAGNOSTICS" --claude-prefix "$PREFIX"
+  else
+    bounded "$PROBE_RUN_SECONDS" python3 "$DIAGNOSTICS"
+  fi
   if [ "$PROBE_STATE:$PROBE_RC" = answered:0 ]; then
     printf '  %s\n' "$PROBE_OUT"
     printf '      Installed, discovery, and workflow are separate facts; use `bin/doctor --json` for roots, payload ownership, versions, duplicates, and next steps.\n'

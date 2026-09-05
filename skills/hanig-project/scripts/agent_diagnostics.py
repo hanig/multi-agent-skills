@@ -9,6 +9,7 @@ readiness remain three separately machine-readable facts.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -22,6 +23,10 @@ SCHEMA_VERSION = 1
 MARKER = ".installed-by-multi-agent-skills"
 MAX_ROOT_ENTRIES = 4_000
 MAX_MARKER_BYTES = 16_384
+DOCTOR_JSON_BYTES = 48_000
+REPOSITORY_ID = "multi-agent-skills"
+LIFECYCLE_SCHEMA = "2"
+SIDECAR_DIR = ".multi-agent-skills-provenance"
 
 
 def _state(state: str, reason: Optional[str] = None, **extra: Any) -> dict[str, Any]:
@@ -32,22 +37,83 @@ def _state(state: str, reason: Optional[str] = None, **extra: Any) -> dict[str, 
     return item
 
 
-def _marker(path: Path) -> tuple[dict[str, Any], Optional[str]]:
-    marker = path / MARKER
+def _read_fields(path: Path) -> tuple[Optional[dict[str, str]], Optional[str]]:
+    """Read lifecycle metadata without allowing a payload to exhaust memory."""
     try:
-        raw = marker.read_text(encoding="utf-8", errors="replace")[:MAX_MARKER_BYTES]
+        with path.open("rb") as handle:
+            raw = handle.read(MAX_MARKER_BYTES + 1)
     except FileNotFoundError:
-        return {"ownership": "foreign", "installed_source_version": None}, None
+        return None, None
     except OSError as exc:
-        return {"ownership": "unknown", "installed_source_version": None}, str(exc)
-    values = {}
-    for line in raw.splitlines():
+        return None, str(exc)
+    if len(raw) > MAX_MARKER_BYTES:
+        return None, "metadata exceeds bounded read limit"
+    values: dict[str, str] = {}
+    for line in raw.decode("utf-8", "replace").splitlines():
         if "=" in line:
             key, value = line.split("=", 1)
-            values.setdefault(key, value)
+            if key and key not in values:
+                values[key] = value
+    return values, None
+
+
+def _sidecar(path: Path) -> Path:
+    absolute = os.path.abspath(os.fspath(path))
+    digest = hashlib.sha256(os.fsencode(absolute)).hexdigest()[:24]
+    return path.parent / SIDECAR_DIR / f"{path.name}-{digest}.provenance"
+
+
+def _link_identity(path: Path) -> Optional[str]:
+    try:
+        stat = path.lstat()
+    except OSError:
+        return None
+    return f"{stat.st_dev}:{stat.st_ino}:{stat.st_ctime_ns}"
+
+
+def _marker(path: Path, *, linked: bool = False) -> tuple[dict[str, Any], Optional[str]]:
+    """Classify only a complete lifecycle record as owned provenance.
+
+    This deliberately mirrors the on-disk schema, not lifecycle's Python API:
+    a copied survey has no source checkout or ``lib`` package to import.
+    """
+    source = _sidecar(path) if linked else path / MARKER
+    values, error = _read_fields(source)
+    base = {"ownership": "foreign", "installed_source_version": None,
+            "provenance": _state("absent", path=str(source))}
+    if error:
+        return {**base, "ownership": "unknown",
+                "provenance": _state("unknown", error, path=str(source))}, error
+    if values is None:
+        return base, None
+    repository = values.get("repo")
+    if repository != REPOSITORY_ID:
+        return {**base, "provenance": _state("foreign", path=str(source), repo=repository)}, None
+    if values.get("schema") != LIFECYCLE_SCHEMA:
+        return {**base, "ownership": "unknown",
+                "provenance": _state("legacy", "not lifecycle schema 2", path=str(source))}, None
     origin = values.get("origin")
-    ownership = "vendored" if origin == "vendored" else "owned"
-    return {"ownership": ownership, "installed_source_version": values.get("version")}, None
+    destination = values.get("destination")
+    mode = values.get("mode")
+    expected = os.path.abspath(os.fspath(path))
+    if (origin not in ("authored", "vendored") or not destination or
+            destination != expected or mode != ("link" if linked else "copy")):
+        return {**base, "ownership": "unknown",
+                "provenance": _state("stale", "record does not match this payload", path=str(source))}, None
+    if linked:
+        identity = _link_identity(path)
+        try:
+            target_matches = bool(values.get("link_target")) and (
+                os.path.realpath(path) == os.path.realpath(values["link_target"]))
+        except OSError:
+            target_matches = False
+        if not identity or identity != values.get("link_identity") or not target_matches:
+            return {**base, "ownership": "unknown",
+                    "provenance": _state("stale", "link object or target changed", path=str(source))}, None
+    return {"ownership": "vendored" if origin == "vendored" else "owned",
+            "installed_source_version": values.get("source_version", values.get("version")),
+            "provenance": _state("valid", path=str(source), schema=LIFECYCLE_SCHEMA,
+                                 mode=mode)}, None
 
 
 def _payload(entry: os.DirEntry[str]) -> dict[str, Any]:
@@ -59,6 +125,10 @@ def _payload(entry: os.DirEntry[str]) -> dict[str, Any]:
     except OSError as exc:
         return {**item, **_state("unusable", f"could not inspect entry: {exc}"),
                 "ownership": "unknown", "installed_source_version": None}
+    marker, marker_error = _marker(path, linked=is_link)
+    item.update(marker)
+    if marker_error:
+        item["marker_error"] = marker_error
     if is_link:
         try:
             item["link_target"] = os.readlink(path)
@@ -68,10 +138,6 @@ def _payload(entry: os.DirEntry[str]) -> dict[str, Any]:
     if not is_dir:
         return {**item, **_state("unusable", "not a directory"),
                 "ownership": "unknown", "installed_source_version": None}
-    marker, marker_error = _marker(path)
-    item.update(marker)
-    if marker_error:
-        item["marker_error"] = marker_error
     skill = path / "SKILL.md"
     try:
         skill_exists = skill.is_file()
@@ -114,8 +180,16 @@ def _installation(root: Mapping[str, Any]) -> dict[str, Any]:
     return {**base, **_state(status), "payloads": payloads}
 
 
-def _workflow(env: Mapping[str, str]) -> dict[str, Any]:
-    """Report only dependency facts that can be checked without credentials."""
+def _on_path(name: str, env: Mapping[str, str]) -> Optional[str]:
+    for directory in env.get("PATH", "").split(os.pathsep):
+        candidate = Path(directory or os.curdir) / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
+def _workflow(env: Mapping[str, str], roots: list[dict[str, Any]]) -> dict[str, Any]:
+    """Report baseline and optional workflow evidence without probing agents."""
     home = Path(env.get("HOME", str(Path.home())))
     bus_home = Path(env.get("AGENT_BUS_HOME", home / ".agent-bus"))
     registry = bus_home / "models.json"
@@ -123,7 +197,7 @@ def _workflow(env: Mapping[str, str]) -> dict[str, Any]:
         try:
             models = json.loads(registry.read_text(encoding="utf-8", errors="replace"))
             valid_registry = isinstance(models, dict) and isinstance(models.get("models"), list)
-            bus = _state("ready" if valid_registry else "unusable",
+            bus = _state("present" if valid_registry else "unusable",
                          None if valid_registry else "models.json has no models list",
                          path=str(registry))
         except (OSError, json.JSONDecodeError) as exc:
@@ -133,26 +207,51 @@ def _workflow(env: Mapping[str, str]) -> dict[str, Any]:
         bus = _state("unusable", "models.json is not a readable regular file", path=str(registry))
     else:
         bus = _state("absent", "models.json is absent", path=str(registry))
-    paseo = None
-    for directory in env.get("PATH", "").split(os.pathsep):
-        candidate = Path(directory or os.curdir) / "paseo"
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            paseo = str(candidate)
-            break
-    deps = {
+    paseo, bus_helper, git = (_on_path("paseo", env), _on_path("bus", env),
+                               _on_path("git", env))
+    baseline = {
         "python": _state("ready", path=sys.executable),
-        "paseo": _state("ready", path=paseo) if paseo else _state("absent", "paseo is not on PATH"),
-        "agent_bus": bus,
-        # Testing a Linear token or opening a native agent session would make a
-        # diagnostic credential-bearing.  This is intentionally an unknown,
-        # not a negative capability assertion.
+        "git": _state("ready", path=git) if git else _state("absent", "git is not on PATH"),
+    }
+    optional = {
+        # An executable on PATH is not proof that its daemon/service is up.
+        "paseo_executable": _state("found", path=paseo) if paseo else _state("absent", "paseo is not on PATH"),
+        "paseo_service": _state("unverified", "no service health probe was run"),
+        # The registry is input data, not a successful `bus models` run.
+        "agent_bus_registry": bus,
+        "agent_bus_helper": (_state("found", path=bus_helper) if bus_helper else
+                             _state("absent", "bus is not on PATH")),
         "linear": _state("unverified", "credential-free diagnostics do not test Linear capability"),
     }
-    blocked = [name for name, item in deps.items() if item["state"] in ("absent", "unusable")]
-    status = "unready" if blocked else "unverified"
-    next_step = ("Install or expose " + ", ".join(blocked) + "." if blocked else
-                 "Confirm Linear capability in the intended coordinator session; no credential probe was run.")
-    return {"state": status, "dependencies": deps, "next_step": next_step}
+    blocked = [name for name, item in baseline.items() if item["state"] != "ready"]
+    payloads = [payload for root in roots for payload in root.get("payloads", [])
+                if payload.get("state") == "present"]
+    per_skill: dict[str, Any] = {}
+    for payload in payloads:
+        name = payload["name"]
+        requirements = ["python", "git"]
+        if name.startswith(("paseo", "hanig-swarm", "pi-fleet")):
+            requirements.extend(("paseo_executable", "paseo_service"))
+        if name in ("paseo", "paseo-loop", "paseo-committee", "agent-bus", "pi-fleet"):
+            requirements.extend(("agent_bus_registry", "agent_bus_helper"))
+        if name.startswith(("hanig-project", "hanig-swarm", "start-a-sprint")):
+            requirements.append("linear")
+        facts = {**baseline, **optional}
+        unavailable = [requirement for requirement in requirements
+                       if facts[requirement]["state"] in ("absent", "unusable")]
+        uncertain = [requirement for requirement in requirements
+                     if facts[requirement]["state"] in ("unverified", "present", "found")]
+        per_skill[name] = {"state": "unready" if unavailable else
+                            "unverified" if uncertain else "baseline_ready",
+                           "requirements": requirements,
+                           "next_step": ("Install or expose " + ", ".join(unavailable) + "." if unavailable else
+                                         "Confirm optional service/connector readiness without starting an agent session."
+                                         if uncertain else None)}
+    return {"state": "baseline_unready" if blocked else "baseline_ready",
+            "baseline_dependencies": baseline, "optional_dependencies": optional,
+            "skills": per_skill,
+            "next_step": ("Install or expose " + ", ".join(blocked) + "." if blocked else
+                          "Inspect each installed skill's optional readiness separately; no agent sessions were started.")}
 
 
 def _duplicate_names(roots: list[dict[str, Any]]) -> dict[str, list[str]]:
@@ -198,7 +297,7 @@ def diagnostics(env: Optional[Mapping[str, str]] = None,
             "discovery": _state(discovery_state, discovery_reason,
                                 verification=adapter["verification"],
                                 native_probe="not run"),
-            "workflow": _workflow(context),
+            "workflow": _workflow(context, installations),
             "next_step": ("Use an explicitly supported version or pass an explicit target; this executable version is unverified."
                           if adapter["state"] == "executable_found" and adapter["verification"] == "unverified"
                           else "Install the agent executable or select this agent explicitly for an offline install."
@@ -216,11 +315,22 @@ def diagnostics(env: Optional[Mapping[str, str]] = None,
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="emit compact stable JSON")
+    parser.add_argument("--doctor-json", action="store_true",
+                        help="emit complete JSON or a bounded truncation record for doctor")
     parser.add_argument("--claude-prefix", help="doctor compatibility diagnostic root")
     args = parser.parse_args(argv)
     value = diagnostics(claude_prefix=args.claude_prefix)
-    if args.json:
-        print(json.dumps(value, sort_keys=True, separators=(",", ":")))
+    if args.json or args.doctor_json:
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
+        if args.doctor_json and len(encoded.encode("utf-8")) > DOCTOR_JSON_BYTES:
+            # doctor transports a child result through a fixed 64 KiB tail.
+            # Never emit a clipped JSON document into that protocol.
+            encoded = json.dumps({"schema_version": SCHEMA_VERSION, "state": "unknown",
+                                  "truncated": True,
+                                  "reason": "agent diagnostics exceed doctor's bounded transport; run agent_diagnostics.py --json directly",
+                                  "estimated_bytes": len(encoded.encode("utf-8"))},
+                                 sort_keys=True, separators=(",", ":"))
+        print(encoded)
     else:
         # One line is intentional: bin/doctor's bounded supervisor retains a
         # final output line, so this remains readable when doctor calls us.
