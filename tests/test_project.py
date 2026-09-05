@@ -1304,6 +1304,36 @@ class TestVendoredSkillsAreNotOursToDelete(unittest.TestCase):
             self.assertEqual(skills(positional), skills(flagged))
 
 
+class TestVendoredAgentBusLayoutIsExplicit(unittest.TestCase):
+    """ARC-272. The vendored skills name upstream's executable location, but
+    this repository installs only skills and keeps bus in its checkout. The
+    local documentation must leave an operator with a command that exists."""
+
+    def test_the_readme_names_both_layouts_and_a_working_local_command(self):
+        readme = (ROOT / "README.md").read_text()
+        heading = "### Agent bus executable, in this checkout"
+        self.assertIn(heading, readme)
+        section = readme.split(heading, 1)[1].split("\n### ", 1)[0]
+
+        self.assertIn("`~/.agent-bus/bin/bus`", section)
+        self.assertIn("./bin/bus models --json", section)
+        self.assertRegex(section, r"does\s+not install")
+        self.assertIn("upstream", section.lower())
+
+        local_bus = ROOT / "bin" / "bus"
+        self.assertTrue(local_bus.is_file(), local_bus)
+        self.assertTrue(os.access(local_bus, os.X_OK),
+                        "README's checkout-local bus is not executable")
+
+    def test_the_upstream_report_separates_executable_and_state_paths(self):
+        report = (ROOT / "docs" /
+                  "upstream-agent-bus-path-discovery.md").read_text()
+        for contract in ("AGENT_BUS_BIN", "command -v bus",
+                         "~/.agent-bus/bin/bus", "AGENT_BUS_HOME"):
+            self.assertIn(contract, report)
+        self.assertIn("state lookup only", report)
+
+
 class TestTheTrackerTeamIsNotAQuestion(unittest.TestCase):
     """A draft with no team made the session stop and ask, mid-run, with 1.42
     TiB of hashing already in flight. It also guessed "goodarzilab", which is

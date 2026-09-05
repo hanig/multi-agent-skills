@@ -84,6 +84,32 @@ dependency is the `paseo` binary, and copying markdown does not supply one.
 `bin/bus`, `bin/agent-manager`, `bin/agent-view` and `models.json` came across
 with them.
 
+### Agent bus executable, in this checkout
+
+The executable layout here is not the upstream install layout. `install.sh`
+installs skill directories only, into `~/.claude/skills` by default. It does
+not install the helper programs or create `~/.agent-bus/bin/bus`. In this
+checkout the bus executable is `bin/bus`, so run it from the repository root:
+
+```bash
+./bin/bus models --json
+./bin/bus launch-worker --help
+./bin/bus await --help
+```
+
+An absolute path to this checkout's `bin/bus` works from another directory.
+The `~/.agent-bus/bin/bus` commands in the vendored `paseo` and `agent-bus`
+skills assume upstream's installer has placed the executable there. They do
+not describe a path this repository installs. Until upstream discovers the
+executable instead of hardcoding an install layout, agents using only this
+repository need the checkout-local path above. Do not create the upstream
+path merely to make the instruction true: `~/.agent-bus` is user state that
+this installer deliberately does not claim to own.
+
+The upstream-ready report and proposed correction are in
+`docs/upstream-agent-bus-path-discovery.md`. The vendored skill files remain
+unchanged so a future upstream re-sync remains an honest diff.
+
 ### hanig-project
 
 Gets you from "I am on a server with an intention" to units of work that are
