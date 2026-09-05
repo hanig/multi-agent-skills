@@ -38,7 +38,7 @@ import coordinator_paths as CP  # noqa: E402
 
 SCHEMA = 1
 
-# The survey.json shape this file knows how to read: {"schema_version": 3,
+# The survey.json shape this file knows how to read: {"schema_version": 4,
 # "machine": {...}, "scheduler": {...}, "repo": {...}, "storage": [...]}. The
 # Environment section used to read hostname/user/python/accounts off the TOP
 # level, where survey.py has never written them, so three fields rendered as
@@ -48,7 +48,7 @@ SCHEMA = 1
 # empty section reads as a host with nothing on it. Pinned as a number so a
 # survey this reader does not understand is announced rather than rendered as
 # a page of blanks.
-SURVEY_SCHEMA = 3
+SURVEY_SCHEMA = 4
 
 TERMINAL_OK = ("DONE",)
 # FAILED_EVIDENCE is terminal in the coordinator: `advance` skips it
