@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
+import signal
 import subprocess
-from collections import defaultdict
+import tempfile
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
 
@@ -40,7 +40,7 @@ ADAPTERS: dict[str, dict[str, Any]] = {
              "override": "CLAUDE_CONFIG_DIR", "preferred": True},
         ],
         "duplicates": {"same_name": "unverified", "symlink_identity": "unverified",
-                       "consumed_by": ["claude", "opencode", "pi"]},
+                       "consumed_by": ["claude", "opencode"]},
     },
     "codex": {
         "identity": "Codex CLI",
@@ -74,7 +74,13 @@ ADAPTERS: dict[str, dict[str, Any]] = {
         "verified_on": "2026-09-05",
         "roots": [
             {"id": "opencode-user", "kind": "native", "base": "opencode", "suffix": "skills",
-             "override": "OPENCODE_CONFIG_DIR", "preferred": True},
+             "override": None, "preferred": True},
+            {"id": "opencode-home", "kind": "compatibility", "base": "opencode-home", "suffix": "skills",
+             "override": None, "preferred": False},
+            {"id": "claude-user", "kind": "claude-compatible", "base": "claude", "suffix": "skills",
+             "override": "CLAUDE_CONFIG_DIR", "preferred": False},
+            {"id": "agents-user", "kind": "shared", "base": "agents", "suffix": "skills",
+             "override": None, "preferred": False},
         ],
         "duplicates": {"same_name": "last_registered_wins", "symlink_identity": "unverified",
                        "consumed_by": ["opencode"]},
@@ -92,8 +98,10 @@ ADAPTERS: dict[str, dict[str, Any]] = {
         "roots": [
             {"id": "pi-user", "kind": "native", "base": "pi", "suffix": "skills",
              "override": "PI_CODING_AGENT_DIR", "preferred": True},
+            {"id": "agents-user", "kind": "shared", "base": "agents", "suffix": "skills",
+             "override": None, "preferred": False},
         ],
-        "duplicates": {"same_name": "later_source_wins", "symlink_identity": "unverified",
+        "duplicates": {"same_name": "later_source_wins", "symlink_identity": "canonical_path_deduplicated",
                        "consumed_by": ["pi"]},
     },
 }
@@ -102,10 +110,12 @@ ADAPTERS: dict[str, dict[str, Any]] = {
 # destination.  They let an installer show that two requested copies will be
 # visible to the same loader before it writes either one.
 CONSUMER_EDGES = {
-    "claude-user": ("claude", "opencode", "pi"),
+    "claude-user": ("claude", "opencode"),
     "agents-user": ("codex", "opencode", "pi"),
-    "codex-legacy": ("codex", "pi"),
+    "codex-legacy": ("codex",),
     "opencode-user": ("opencode",),
+    "opencode-home": ("opencode",),
+    "opencode-config-dir": ("opencode",),
     "pi-user": ("pi",),
 }
 
@@ -148,7 +158,11 @@ def _environment(env: Optional[Mapping[str, str]]) -> dict[str, str]:
 
 
 def _absolute(value: str, env: Mapping[str, str]) -> str:
-    value = os.path.expandvars(value)
+    # ``os.path.expandvars`` observes this Python process's environment, which
+    # would make fixture and caller-provided environments lie.  Expand only
+    # variables supplied to this discovery call instead.
+    value = re.sub(r"\$(?:\{([^}]+)\}|([A-Za-z_][A-Za-z0-9_]*))",
+                   lambda match: env.get(match.group(1) or match.group(2), match.group(0)), value)
     if value.startswith("~/"):
         value = os.path.join(env["HOME"], value[2:])
     if not os.path.isabs(value):
@@ -163,8 +177,9 @@ def _base(agent: str, env: Mapping[str, str]) -> str:
     if agent == "codex":
         return _absolute(env.get("CODEX_HOME", os.path.join(home, ".codex")), env)
     if agent == "opencode":
-        default = os.path.join(env.get("XDG_CONFIG_HOME", os.path.join(home, ".config")), "opencode")
-        return _absolute(env.get("OPENCODE_CONFIG_DIR", default), env)
+        return _absolute(os.path.join(env.get("XDG_CONFIG_HOME", os.path.join(home, ".config")), "opencode"), env)
+    if agent == "opencode-home":
+        return _absolute(os.path.join(home, ".opencode"), env)
     if agent == "pi":
         return _absolute(env.get("PI_CODING_AGENT_DIR", os.path.join(home, ".pi", "agent")), env)
     if agent == "agents":
@@ -174,6 +189,16 @@ def _base(agent: str, env: Mapping[str, str]) -> str:
 
 def _root_path(root: Mapping[str, Any], env: Mapping[str, str]) -> str:
     return os.path.join(_base(root["base"], env), root["suffix"])
+
+
+def _config_bases(agent: str, env: Mapping[str, str]) -> list[str]:
+    """Configuration directories which are evidence, never proof of a CLI."""
+    bases = [_base(agent, env)]
+    if agent == "opencode":
+        bases.append(_base("opencode-home", env))
+        if env.get("OPENCODE_CONFIG_DIR"):
+            bases.append(_absolute(env["OPENCODE_CONFIG_DIR"], env))
+    return list(dict.fromkeys(bases))
 
 
 def resolve_roots(agent: str, env: Optional[Mapping[str, str]] = None) -> list[dict[str, Any]]:
@@ -193,6 +218,13 @@ def resolve_roots(agent: str, env: Optional[Mapping[str, str]] = None) -> list[d
             "logical_path": logical, "physical_path": os.path.realpath(logical), "exists": exists,
             "override": root["override"],
         })
+    # OpenCode's ConfigPaths keeps its normal global directory and appends
+    # OPENCODE_CONFIG_DIR.  It is additive, not a replacement of XDG config.
+    if agent == "opencode" and context.get("OPENCODE_CONFIG_DIR"):
+        logical = os.path.join(_absolute(context["OPENCODE_CONFIG_DIR"], context), "skills")
+        result.append({"id": "opencode-config-dir", "kind": "custom", "preferred": False,
+                       "logical_path": logical, "physical_path": os.path.realpath(logical),
+                       "exists": os.path.isdir(logical), "override": "OPENCODE_CONFIG_DIR"})
     return result
 
 
@@ -217,15 +249,44 @@ def destination_consumers(env: Optional[Mapping[str, str]] = None) -> list[dict[
     return sorted(grouped.values(), key=lambda entry: entry["physical_path"])
 
 
-def _default_probe(path: str, timeout: float) -> tuple[bool, str]:
+def _which(executable: str, env: Mapping[str, str]) -> Optional[str]:
+    """A ``which`` whose result belongs to the supplied, not host, environment."""
+    if os.path.dirname(executable):
+        return executable if os.path.isfile(executable) and os.access(executable, os.X_OK) else None
+    for directory in env.get("PATH", "").split(os.pathsep):
+        candidate = os.path.join(directory or os.curdir, executable)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _default_probe(path: str, timeout: float, env: Mapping[str, str]) -> tuple[bool, str]:
+    """Run the harmless version command with bounded output and process death."""
+    timeout = min(PROBE_TIMEOUT_SECONDS, max(0.1, float(timeout)))
     try:
-        proc = subprocess.run([path, "--version"], text=True, capture_output=True,
-                              timeout=timeout, check=False)
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        # Files avoid pipe deadlocks and cap retained output.  A separate
+        # session lets timeout cleanup kill descendants on macOS/Linux too.
+        with open(os.devnull, "rb") as null, \
+                tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+            proc = subprocess.Popen([path, "--version"], stdin=null, stdout=stdout, stderr=stderr,
+                                    env=dict(env), start_new_session=True)
+            try:
+                code = proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                try:
+                    proc.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    return False, "timeout; process group did not exit"
+                return False, "timeout"
+            stdout.seek(0)
+            stderr.seek(0)
+            output = (stdout.read(240) or stderr.read(240)).decode("utf-8", "replace").strip()
+    except OSError as exc:
         return False, type(exc).__name__
-    if proc.returncode:
-        return False, "exit %d: %s" % (proc.returncode, (proc.stderr or proc.stdout).strip()[:240])
-    return True, (proc.stdout or proc.stderr).strip()[:240]
+    if code:
+        return False, "exit %d: %s" % (code, output)
+    return True, output
 
 
 def _version(output: str) -> Optional[str]:
@@ -244,13 +305,16 @@ def discover(
     ``which`` and ``probe`` are dependency-injection points for fixture tests;
     neither needs an agent account, a config write, or a model invocation.
     """
-    context, finder, runner = _environment(env), (which or shutil.which), (probe or _default_probe)
+    context = _environment(env)
+    finder = which or (lambda executable: _which(executable, context))
+    runner = probe or (lambda path, seconds: _default_probe(path, seconds, context))
     found_agents: dict[str, Any] = {}
     for key, spec in ADAPTERS.items():
         roots = resolve_roots(key, context)
-        base = _base(key, context)
+        config_bases = _config_bases(key, context)
         executable = finder(spec["executable"])
-        evidence: dict[str, Any] = {"config_directory": {"path": base, "exists": os.path.isdir(base)}}
+        evidence: dict[str, Any] = {"config_directories": [
+            {"path": path, "exists": os.path.isdir(path)} for path in config_bases]}
         if executable:
             ok, output = runner(executable, timeout)
             evidence["executable"] = {"path": executable, "probe": "--version", "ok": ok, "output": output}
@@ -259,7 +323,7 @@ def discover(
             else:
                 state, version = "executable_found", _version(output)
         else:
-            state, version = ("configured", None) if evidence["config_directory"]["exists"] else ("absent", None)
+            state, version = ("configured", None) if any(item["exists"] for item in evidence["config_directories"]) else ("absent", None)
         verified = bool(version and version in spec["verified_versions"])
         found_agents[key] = {
             "identity": spec["identity"], "state": state,
@@ -274,27 +338,74 @@ def discover(
             "destinations": destination_consumers(context)}
 
 
-def select_target(report: Mapping[str, Any], agent_id: Optional[str] = None) -> dict[str, Any]:
-    """Choose one preferred destination, or return an explicit-selection route.
+def select_targets(
+    report: Mapping[str, Any], agents: Sequence[str] = (), exclude_agents: Sequence[str] = (),
+) -> dict[str, Any]:
+    """Plan targets for all detected agents or an explicit offline/bootstrap set.
 
-    Automatic selection only accepts a single, version-verified executable.  An
-    explicit agent is allowed for offline/bootstrap installs, including an
-    absent binary; consumers should still surface the report's verification.
+    An empty ``agents`` sequence means automatic mode: every reported agent is
+    considered, but only a verified executable is selected.  A non-empty
+    sequence is explicit mode and therefore permits absent/configured agents.
+    Direct destinations are de-duplicated by physical path; if a previously
+    selected root already serves another requested consumer, that consumer is
+    marked ``covered_by`` instead of receiving an unnecessary second copy.
     """
-    agents = report["agents"]
+    records = report["agents"]
+    requested, excluded = list(agents) or list(records), set(exclude_agents)
+    if len(set(requested)) != len(requested):
+        raise ValueError("agents contains a duplicate agent id")
+    unknown = (set(requested) | excluded) - set(ADAPTERS)
+    if unknown:
+        raise KeyError(sorted(unknown)[0])
+    mode = "explicit" if agents else "automatic"
+    selected: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+    direct: dict[str, dict[str, Any]] = {}
+    destination_index = {item["physical_path"]: item for item in report["destinations"]}
+    for agent in requested:
+        record = records[agent]
+        if agent in excluded:
+            skipped.append({"agent": agent, "reason": "excluded"})
+            continue
+        if not agents and not record["eligible_for_automatic_target"]:
+            reason = "unverified_version" if record["state"] == "executable_found" else record["state"]
+            skipped.append({"agent": agent, "reason": reason})
+            continue
+        coverage = next((item for item in direct.values() if agent in item["consumers"]), None)
+        if coverage:
+            selected.append({"agent": agent, "status": "selected", "mode": mode,
+                             "covered_by": coverage["target_agents"], "destination": coverage["destination"],
+                             "consumers": coverage["consumers"]})
+            continue
+        root = next(root for root in record["roots"] if root["preferred"])
+        consumers = destination_index[root["physical_path"]]["consumers"]
+        item = direct.get(root["physical_path"])
+        if item is None:
+            item = {"physical_path": root["physical_path"], "destination": root,
+                    "consumers": consumers, "target_agents": []}
+            direct[root["physical_path"]] = item
+        item["target_agents"].append(agent)
+        selected.append({"agent": agent, "status": "selected", "mode": mode,
+                         "covered_by": None, "destination": root, "consumers": consumers})
+    conflicts = []
+    for consumer in ADAPTERS:
+        visible = [item for item in direct.values() if consumer in item["consumers"]]
+        if len(visible) > 1:
+            conflicts.append({"consumer": consumer, "physical_paths": [item["physical_path"] for item in visible],
+                              "target_agents": [agent for item in visible for agent in item["target_agents"]],
+                              "reason": "the loader can see multiple requested copies; consult adapter precedence"})
+    return {"schema_version": SCHEMA_VERSION, "mode": mode, "selected": selected, "skipped": skipped,
+            "destinations": list(direct.values()), "competing_visibility": conflicts}
+
+
+def select_target(report: Mapping[str, Any], agent_id: Optional[str] = None) -> dict[str, Any]:
+    """Compatibility helper for callers that need exactly one chosen target."""
     if agent_id is not None:
-        if agent_id not in ADAPTERS:
-            raise KeyError(agent_id)
-        chosen, mode = agent_id, "explicit"
-    else:
-        eligible = [name for name, item in agents.items() if item["eligible_for_automatic_target"]]
-        if len(eligible) != 1:
-            return {"status": "requires_explicit_target", "eligible_agents": eligible,
-                    "reason": "no verified executable" if not eligible else "multiple verified executables"}
-        chosen, mode = eligible[0], "automatic"
-    root = next(root for root in agents[chosen]["roots"] if root["preferred"])
-    consumers = next(item["consumers"] for item in report["destinations"]
-                     if item["physical_path"] == root["physical_path"])
-    return {"status": "selected", "mode": mode, "agent": chosen, "destination": root,
-            "consumers": consumers,
-            "warning": "shared destination is visible to: " + ", ".join(consumers) if len(consumers) > 1 else None}
+        plan = select_targets(report, (agent_id,))
+        return plan["selected"][0]
+    plan = select_targets(report)
+    direct = [item for item in plan["selected"] if item["covered_by"] is None]
+    if len(direct) == 1:
+        return direct[0]
+    return {"status": "requires_explicit_target", "eligible_agents": [item["agent"] for item in direct],
+            "reason": "no verified executable" if not direct else "multiple verified executables"}
