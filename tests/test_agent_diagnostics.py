@@ -112,6 +112,16 @@ class TestAgentDiagnostics(unittest.TestCase):
         self.assertEqual(legacy["ownership"], "unknown")
         self.assertEqual(legacy["provenance"]["state"], "legacy")
 
+    def test_schema_two_record_without_source_version_is_stale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "payload"
+            path.mkdir()
+            content = self._record(path).replace("source_version=abc123\n", "")
+            (path / D.MARKER).write_text(content)
+            record, _ = D._marker(path)
+        self.assertEqual(record["ownership"], "unknown")
+        self.assertEqual(record["provenance"]["state"], "stale")
+
     def test_valid_and_stale_link_sidecars_are_distinguished(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)

@@ -96,7 +96,7 @@ def _marker(path: Path, *, linked: bool = False) -> tuple[dict[str, Any], Option
     destination = values.get("destination")
     mode = values.get("mode")
     expected = os.path.abspath(os.fspath(path))
-    if (origin not in ("authored", "vendored") or not destination or
+    if (origin not in ("authored", "vendored") or not values.get("source_version") or not destination or
             destination != expected or mode != ("link" if linked else "copy")):
         return {**base, "ownership": "unknown",
                 "provenance": _state("stale", "record does not match this payload", path=str(source))}, None
