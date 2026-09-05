@@ -37,7 +37,9 @@ _SKILL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 _YAML_NON_STRING = re.compile(
     r"(?i)(?:null|true|false|yes|no|on|off|~|"
     r"[-+]?(?:[0-9][0-9_]*)(?:\.[0-9_]*)?(?:e[-+]?[0-9]+)?|"
-    r"[-+]?\.(?:inf|nan)|0[xob][0-9a-f_]+|"
+    r"[-+]?\.[0-9_]+(?:e[-+]?[0-9]+)?|[-+]?\.(?:inf|nan)|"
+    r"[-+]?0[xob][0-9a-f_]+|"
+    r"[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+|"
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[t ].*)?)"
 )
 _NON_STRING = object()
@@ -496,6 +498,9 @@ def _frontmatter(skill: Path) -> dict[str, Any]:
                     raw = line.decode("utf-8").rstrip("\r\n")
                 except UnicodeError as exc:
                     raise ValueError(f"cannot decode SKILL.md frontmatter: {exc}") from exc
+                if any(ord(character) < 0x20 or 0x7f <= ord(character) <= 0x9f
+                       for character in raw):
+                    raise ValueError("SKILL.md frontmatter contains a control character")
                 if raw == "---":
                     break
                 if not raw or raw.startswith("#"):

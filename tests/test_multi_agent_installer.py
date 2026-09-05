@@ -92,6 +92,10 @@ class TestSelectionBeforeWrites(unittest.TestCase):
             "empty-description": "---\nname: alpha\ndescription:\n---\n",
             "null-description": "---\nname: alpha\ndescription: null\n---\n",
             "reserved-description": "---\nname: alpha\ndescription: @invalid\n---\n",
+            "leading-dot-number": "---\nname: alpha\ndescription: .5\n---\n",
+            "signed-hex-number": "---\nname: alpha\ndescription: +0xFF\n---\n",
+            "sexagesimal-number": "---\nname: alpha\ndescription: 1:30\n---\n",
+            "control-byte": "---\nname: alpha\ndescription: bad\x00byte\n---\n",
             "bad-quote": ("---\nname: alpha\n"
                           "description: \"unterminated\n---\n"),
             "bad-single-quote": ("---\nname: alpha\n"

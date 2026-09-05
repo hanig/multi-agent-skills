@@ -624,9 +624,11 @@ installed skill, and when the checkout is mid-update. Use `--mode link` only
 when developing a skill.
 
 The installer performs bounded frontmatter validation (including exact skill
-identity) and script syntax checks before touching the destination, aborts on a
-name collision with an org-managed skill, prunes skills that are no longer
-shipped, and refuses to replace a directory it did not install.
+identity) and script syntax checks before touching the destination. Its
+conservative stdlib-only scalar subset requires ambiguous YAML-like values such
+as numbers, dates, booleans, nulls, and sexagesimal forms to be quoted. It also
+aborts on a name collision with an org-managed skill, prunes skills that are no
+longer shipped, and refuses to replace a directory it did not install.
 
 ### Paseo, per machine
 
