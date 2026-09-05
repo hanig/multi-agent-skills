@@ -61,12 +61,13 @@ class TestAgentDiagnostics(unittest.TestCase):
         self.assertEqual(payload["ownership"], "owned")
         self.assertEqual(payload["installed_source_version"], "abc123")
         self.assertEqual(data["agents"]["codex"]["installation"]["roots"][0]["id"], "agents-user")
-        # OpenCode consumes both configured Claude and shared .agents roots,
-        # so it gets an explicit same-name conflict instead of a claim about
-        # which copy it actually loaded.
-        self.assertEqual(data["agents"]["opencode"]["installation"]
-                         ["duplicate_names"]["hanig-example"],
-                         ["claude-user", "agents-user"])
+        # The shared .agents payload is visible through OpenCode's explicit
+        # compatibility root, while a separately configured Claude root is
+        # not silently treated as OpenCode configuration.
+        open_roots = data["agents"]["opencode"]["installation"]["roots"]
+        shared_root = next(root for root in open_roots if root["id"] == "agents-user")
+        self.assertEqual(shared_root["payloads"][0]["name"], "hanig-example")
+        self.assertNotIn("hanig-example", data["agents"]["opencode"]["installation"]["duplicate_names"])
 
     def test_unreadable_root_blocks_discovery_instead_of_claiming_absence(self):
         root = {"id": "fixture", "kind": "native", "preferred": True,
