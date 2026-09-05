@@ -155,7 +155,9 @@ class HermeticRoots(unittest.TestCase):
                         == (shared / "skills").resolve()]
         self.assertEqual(len(destinations), 1)
         self.assertEqual(destinations[0]["root_ids"], ["claude-user", "pi-user"])
-        self.assertEqual(destinations[0]["consumers"], ["claude", "opencode", "pi"])
+        # OpenCode's compatibility root is fixed at HOME/.claude; it must not
+        # follow Claude's relocated config root and create a phantom overlap.
+        self.assertEqual(destinations[0]["consumers"], ["claude", "pi"])
 
 
 class LifecycleAcceptance(unittest.TestCase):
