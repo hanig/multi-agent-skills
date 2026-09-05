@@ -21,6 +21,8 @@ import tempfile
 import time
 from pathlib import Path
 
+import agent_diagnostics
+
 MAX_TREE_ENTRIES = 4000
 MAX_DEPTH = 6
 MAX_DIRS = 20_000        # a fan-out can leave hundreds of thousands of empty dirs
@@ -1067,8 +1069,12 @@ def main():
     # so a consumer can tell "this cluster restricts nothing" from "this
     # survey is older than the question", and "the walk finished" from "this
     # survey predates anyone asking".
-    data = {"schema_version": 3, "machine": machine(),
-            "scheduler": scheduler(), "repo": repo(args.repo)}
+    data = {"schema_version": 4, "machine": machine(),
+            "scheduler": scheduler(), "repo": repo(args.repo),
+            # Additive: consumers of the pre-existing machine/scheduler/repo
+            # keys keep working while automation gets a stable readiness
+            # report.  agent_diagnostics never starts an agent session.
+            "agent_diagnostics": agent_diagnostics.diagnostics()}
     # DEDUPE. Surveying a home directory printed the same filesystem twice,
     # on every host, because home and the repo resolve to the same path.
     seen, paths = set(), []
@@ -1100,6 +1106,11 @@ def main():
     print(f"  host      {m['hostname']}  ({m['system']}, python {m['python']}, "
           f"{m['cpus']} cpus)")
     print(f"  tools     {', '.join(sorted(m['tools'])) or 'none found'}")
+    for name, agent in data["agent_diagnostics"]["agents"].items():
+        print(f"  agent     {name}: present={agent['agent_present']['state']}, "
+              f"installed={agent['installation']['state']}, "
+              f"discovery={agent['discovery']['state']}, "
+              f"workflow={agent['workflow']['state']}")
     if s.get("present"):
         parts = [p["partition"] + ("*" if p["default"] else "")
                  for p in s.get("partitions", [])]

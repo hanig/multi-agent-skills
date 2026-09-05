@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""Read-only readiness evidence layered on :mod:`agent_discovery`.
+
+``agent_discovery`` answers where a supported agent is expected to look.  This
+module deliberately does *not* turn a directory listing or a SKILL.md into a
+claim that a native loader accepted it: installed, discovery, and workflow
+readiness remain three separately machine-readable facts.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Any, Mapping, Optional
+
+import agent_discovery
+
+
+SCHEMA_VERSION = 1
+MARKER = ".installed-by-multi-agent-skills"
+MAX_ROOT_ENTRIES = 4_000
+MAX_MARKER_BYTES = 16_384
+
+
+def _state(state: str, reason: Optional[str] = None, **extra: Any) -> dict[str, Any]:
+    item: dict[str, Any] = {"state": state}
+    if reason:
+        item["reason"] = reason
+    item.update(extra)
+    return item
+
+
+def _marker(path: Path) -> tuple[dict[str, Any], Optional[str]]:
+    marker = path / MARKER
+    try:
+        raw = marker.read_text(encoding="utf-8", errors="replace")[:MAX_MARKER_BYTES]
+    except FileNotFoundError:
+        return {"ownership": "foreign", "installed_source_version": None}, None
+    except OSError as exc:
+        return {"ownership": "unknown", "installed_source_version": None}, str(exc)
+    values = {}
+    for line in raw.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            values.setdefault(key, value)
+    origin = values.get("origin")
+    ownership = "vendored" if origin == "vendored" else "owned"
+    return {"ownership": ownership, "installed_source_version": values.get("version")}, None
+
+
+def _payload(entry: os.DirEntry[str]) -> dict[str, Any]:
+    path = Path(entry.path)
+    item: dict[str, Any] = {"name": entry.name, "path": str(path)}
+    try:
+        is_link = entry.is_symlink()
+        is_dir = entry.is_dir(follow_symlinks=True)
+    except OSError as exc:
+        return {**item, **_state("unusable", f"could not inspect entry: {exc}"),
+                "ownership": "unknown", "installed_source_version": None}
+    if is_link:
+        try:
+            item["link_target"] = os.readlink(path)
+        except OSError as exc:
+            return {**item, **_state("unusable", f"could not read link: {exc}"),
+                    "ownership": "unknown", "installed_source_version": None}
+    if not is_dir:
+        return {**item, **_state("unusable", "not a directory"),
+                "ownership": "unknown", "installed_source_version": None}
+    marker, marker_error = _marker(path)
+    item.update(marker)
+    if marker_error:
+        item["marker_error"] = marker_error
+    skill = path / "SKILL.md"
+    try:
+        skill_exists = skill.is_file()
+        skill_readable = os.access(skill, os.R_OK) if skill_exists else False
+    except OSError as exc:
+        return {**item, **_state("unusable", f"could not inspect SKILL.md: {exc}"),
+                "skill_file": _state("unknown")}
+    item["skill_file"] = _state("present" if skill_readable else
+                                ("unusable" if skill_exists else "absent"))
+    if not skill_exists:
+        return {**item, **_state("unusable", "SKILL.md is absent")}
+    if not skill_readable:
+        return {**item, **_state("unusable", "SKILL.md is not readable")}
+    return {**item, **_state("present")}
+
+
+def _installation(root: Mapping[str, Any]) -> dict[str, Any]:
+    path = Path(root["logical_path"])
+    base = {key: root[key] for key in ("id", "kind", "preferred", "logical_path",
+                                       "physical_path", "override")}
+    try:
+        with os.scandir(path) as entries:
+            payloads = []
+            for index, entry in enumerate(entries):
+                if index >= MAX_ROOT_ENTRIES:
+                    return {**base, **_state("unknown", "root entry limit reached"),
+                            "payloads": payloads, "truncated": True}
+                if entry.name.startswith("."):
+                    continue
+                payloads.append(_payload(entry))
+    except FileNotFoundError:
+        return {**base, **_state("absent"), "payloads": []}
+    except NotADirectoryError:
+        return {**base, **_state("unusable", "root is not a directory"), "payloads": []}
+    except PermissionError:
+        return {**base, **_state("unusable", "root is not readable"), "payloads": []}
+    except OSError as exc:
+        return {**base, **_state("unknown", f"could not read root: {exc}"), "payloads": []}
+    status = "present" if payloads else "absent"
+    return {**base, **_state(status), "payloads": payloads}
+
+
+def _workflow(env: Mapping[str, str]) -> dict[str, Any]:
+    """Report only dependency facts that can be checked without credentials."""
+    home = Path(env.get("HOME", str(Path.home())))
+    bus_home = Path(env.get("AGENT_BUS_HOME", home / ".agent-bus"))
+    registry = bus_home / "models.json"
+    if registry.is_file() and os.access(registry, os.R_OK):
+        try:
+            models = json.loads(registry.read_text(encoding="utf-8", errors="replace"))
+            valid_registry = isinstance(models, dict) and isinstance(models.get("models"), list)
+            bus = _state("ready" if valid_registry else "unusable",
+                         None if valid_registry else "models.json has no models list",
+                         path=str(registry))
+        except (OSError, json.JSONDecodeError) as exc:
+            bus = _state("unusable", f"could not parse models.json: {type(exc).__name__}",
+                         path=str(registry))
+    elif registry.exists() or registry.is_symlink():
+        bus = _state("unusable", "models.json is not a readable regular file", path=str(registry))
+    else:
+        bus = _state("absent", "models.json is absent", path=str(registry))
+    paseo = None
+    for directory in env.get("PATH", "").split(os.pathsep):
+        candidate = Path(directory or os.curdir) / "paseo"
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            paseo = str(candidate)
+            break
+    deps = {
+        "python": _state("ready", path=sys.executable),
+        "paseo": _state("ready", path=paseo) if paseo else _state("absent", "paseo is not on PATH"),
+        "agent_bus": bus,
+        # Testing a Linear token or opening a native agent session would make a
+        # diagnostic credential-bearing.  This is intentionally an unknown,
+        # not a negative capability assertion.
+        "linear": _state("unverified", "credential-free diagnostics do not test Linear capability"),
+    }
+    blocked = [name for name, item in deps.items() if item["state"] in ("absent", "unusable")]
+    status = "unready" if blocked else "unverified"
+    next_step = ("Install or expose " + ", ".join(blocked) + "." if blocked else
+                 "Confirm Linear capability in the intended coordinator session; no credential probe was run.")
+    return {"state": status, "dependencies": deps, "next_step": next_step}
+
+
+def _duplicate_names(roots: list[dict[str, Any]]) -> dict[str, list[str]]:
+    locations: dict[str, list[str]] = {}
+    for root in roots:
+        for payload in root.get("payloads", []):
+            if payload.get("state") == "present":
+                locations.setdefault(payload["name"], []).append(root["id"])
+    return {name: ids for name, ids in sorted(locations.items()) if len(ids) > 1}
+
+
+def diagnostics(env: Optional[Mapping[str, str]] = None,
+                claude_prefix: Optional[str] = None) -> dict[str, Any]:
+    """Return stable, additive installation/discovery/workflow facts.
+
+    ``claude_prefix`` exists solely for ``doctor --prefix`` compatibility; it
+    does not alter the adapter's selection contract or create a directory.
+    """
+    context = dict(os.environ if env is None else env)
+    context.setdefault("HOME", str(Path.home()))
+    report = agent_discovery.discover(env=context)
+    agents: dict[str, Any] = {}
+    for name, adapter in report["agents"].items():
+        roots = list(adapter["roots"])
+        if name == "claude" and claude_prefix is not None:
+            logical = os.path.abspath(claude_prefix)
+            roots[0] = {**roots[0], "logical_path": logical,
+                        "physical_path": os.path.realpath(logical), "exists": os.path.isdir(logical),
+                        "override": "doctor --prefix"}
+        installations = [_installation(root) for root in roots]
+        barriers = [root for root in installations if root["state"] in ("unusable", "unknown")]
+        discovery_state = "blocked" if barriers else "unverified"
+        discovery_reason = ("configured root is unreadable or indeterminate" if barriers else
+                            "no known read-only native skill-loading probe was run")
+        agents[name] = {
+            "identity": adapter["identity"],
+            "agent_present": _state(adapter["state"], version=adapter["version"],
+                                      executable=adapter["evidence"].get("executable")),
+            "installation": {"state": ("present" if any(r["state"] == "present" for r in installations)
+                                         else "unusable" if barriers else "absent"),
+                             "roots": installations,
+                             "duplicate_names": _duplicate_names(installations)},
+            "discovery": _state(discovery_state, discovery_reason,
+                                verification=adapter["verification"],
+                                native_probe="not run"),
+            "workflow": _workflow(context),
+            "next_step": ("Use an explicitly supported version or pass an explicit target; this executable version is unverified."
+                          if adapter["state"] == "executable_found" and adapter["verification"] == "unverified"
+                          else "Install the agent executable or select this agent explicitly for an offline install."
+                          if adapter["state"] == "absent" else None),
+        }
+    return {"schema_version": SCHEMA_VERSION, "adapter_schema_version": report["schema_version"],
+            "read_only": True, "credential_free": True, "agents": agents,
+            "destinations": report["destinations"],
+            # Keep the exact planner result alongside the observations so
+            # automation sees the same shared-root/duplicate decision that
+            # install.sh will consume, rather than a parallel approximation.
+            "selection": agent_discovery.select_targets(report)}
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--json", action="store_true", help="emit compact stable JSON")
+    parser.add_argument("--claude-prefix", help="doctor compatibility diagnostic root")
+    args = parser.parse_args(argv)
+    value = diagnostics(claude_prefix=args.claude_prefix)
+    if args.json:
+        print(json.dumps(value, sort_keys=True, separators=(",", ":")))
+    else:
+        # One line is intentional: bin/doctor's bounded supervisor retains a
+        # final output line, so this remains readable when doctor calls us.
+        facts = []
+        for name, agent in value["agents"].items():
+            facts.append(f"{name}[agent={agent['agent_present']['state']},"
+                         f"installed={agent['installation']['state']},"
+                         f"discovery={agent['discovery']['state']},"
+                         f"workflow={agent['workflow']['state']}]")
+        print("; ".join(facts))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

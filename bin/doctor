@@ -4,7 +4,7 @@
 # First thing to run on a new host, and the answer to "why isn't my skill
 # loading?". Read-only.
 #
-# Usage: doctor [--prefix DIR] | doctor DIR
+# Usage: doctor [--prefix DIR] [--json] | doctor DIR
 #
 # install.sh spells the install root --prefix and doctor took it positionally,
 # so the line install.sh prints to verify an install was wrong for any prefix
@@ -16,9 +16,11 @@
 set -u
 
 PREFIX="${HOME}/.claude/skills"
+DOCTOR_JSON=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --prefix) PREFIX="$2"; shift 2 ;;
+    --json) DOCTOR_JSON=1; shift ;;
     -h|--help)
       printf '%s\n' \
         'doctor — what is installed here, where it came from, and whether it still works.' \
@@ -26,7 +28,7 @@ while [ $# -gt 0 ]; do
         'First thing to run on a new host, and the answer to "why isn'"'"'t my skill' \
         'loading?". Read-only.' \
         '' \
-        'Usage: doctor [--prefix DIR] | doctor DIR'
+        'Usage: doctor [--prefix DIR] [--json] | doctor DIR'
       exit 0 ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
     *) PREFIX="$1"; shift ;;
@@ -398,6 +400,27 @@ bounded() {
               PROBE_WHY="the bounded supervisor could not launch it" ;;
   esac
 }
+
+# Stable automation output is deliberately an opt-in mode.  The Python helper
+# uses the same adapter and root selection contract as survey.py and only runs
+# bounded --version probes; it never opens an agent session or a credentialed
+# Linear connection.  Keep the legacy text output untouched by default.
+if [ "$DOCTOR_JSON" -eq 1 ]; then
+  DIAGNOSTICS="$REPO/skills/hanig-project/scripts/agent_diagnostics.py"
+  if [ ! -f "$DIAGNOSTICS" ]; then
+    printf '%s\n' '{"schema_version":1,"state":"unknown","reason":"agent diagnostics helper is absent"}'
+  elif ! command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' '{"schema_version":1,"state":"unknown","reason":"python3 is unavailable"}'
+  else
+    bounded "$PROBE_RUN_SECONDS" python3 "$DIAGNOSTICS" --json --claude-prefix "$PREFIX"
+    if [ "$PROBE_STATE:$PROBE_RC" = answered:0 ]; then
+      printf '%s\n' "$PROBE_OUT"
+    else
+      printf '%s\n' '{"schema_version":1,"state":"unknown","reason":"bounded agent diagnostics probe did not complete"}'
+    fi
+  fi
+  exit 0
+fi
 
 printf '\n=== HOST ===\n'
 if command -v hostname >/dev/null 2>&1; then
@@ -788,6 +811,22 @@ for d in "$PREFIX"/*; do
   done
 done
 [ "$bad" -eq 0 ] && printf '  (no problems)\n'
+
+printf '\n=== AGENT READINESS ===\n'
+DIAGNOSTICS="$REPO/skills/hanig-project/scripts/agent_diagnostics.py"
+if [ ! -f "$DIAGNOSTICS" ]; then
+  printf '  COULD NOT DETERMINE — agent diagnostics helper is absent\n'
+elif ! command -v python3 >/dev/null 2>&1; then
+  printf '  COULD NOT DETERMINE — python3 is unavailable; run `bin/doctor --json` after installing Python\n'
+else
+  bounded "$PROBE_RUN_SECONDS" python3 "$DIAGNOSTICS" --claude-prefix "$PREFIX"
+  if [ "$PROBE_STATE:$PROBE_RC" = answered:0 ]; then
+    printf '  %s\n' "$PROBE_OUT"
+    printf '      Installed, discovery, and workflow are separate facts; use `bin/doctor --json` for roots, payload ownership, versions, duplicates, and next steps.\n'
+  else
+    printf '  COULD NOT DETERMINE — bounded agent diagnostics probe did not complete\n'
+  fi
+fi
 
 printf '\n=== SOURCE ===\n'
 printf '  repo: %s\n' "$REPO"
