@@ -577,12 +577,14 @@ def run(argv: Sequence[str], *, repo: Path | None = None,
                             include_vendored=options.include_vendored)
         # Scanning an entire root inevitably encounters payloads another
         # installer owns.  They are deliberately retained, not a failed
-        # uninstall; the primitive keeps its ``blocked`` verdict for callers
-        # that explicitly name one unsafe destination.
+        # uninstall.  An ``--only`` request explicitly names the destination,
+        # however, so preserve lifecycle's blocked verdict for that unsafe
+        # destructive request.
         actions = [_action(
             result,
             "retained" if (result.status == "blocked" and
-                           result.detail == "no matching recorded ownership")
+                           result.detail == "no matching recorded ownership" and
+                           not options.only)
             else result.status,
             result.detail,
             plan,

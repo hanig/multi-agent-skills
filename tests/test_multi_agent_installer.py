@@ -224,6 +224,17 @@ class TestPublicCli(unittest.TestCase):
             self.assertEqual(allowed.returncode, 0, allowed.stderr)
             self.assertTrue((prefix / "paseo" / ".installed-by-multi-agent-skills").is_file())
 
+    def test_only_uninstall_refuses_an_explicit_foreign_destination(self):
+        with tempfile.TemporaryDirectory() as raw:
+            prefix = Path(raw) / "prefix"
+            foreign = prefix / "hanig-swarm"
+            foreign.mkdir(parents=True)
+            (foreign / "SKILL.md").write_text("foreign\n")
+            result, _ = self._run("--prefix", str(prefix), "--uninstall",
+                                  "--only", "hanig-swarm", "--json")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual((foreign / "SKILL.md").read_text(), "foreign\n")
+
     def test_prune_detaches_only_the_agents_selected_for_this_reinstall(self):
         from lib.skill_lifecycle import LifecycleTarget, install
         with tempfile.TemporaryDirectory() as raw:

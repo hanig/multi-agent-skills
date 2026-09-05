@@ -1199,9 +1199,9 @@ class TestVendoredSkillsAreNotOursToDelete(unittest.TestCase):
             self.assertEqual((theirs / "SKILL.md").read_text(), "theirs\n",
                              "replacing the link must not follow it")
 
-    def test_an_authored_name_installed_by_someone_else_blocks_atomic_install(self):
+    def test_an_authored_name_installed_by_someone_else_blocks_preflight_install(self):
         """A foreign authored name is left untouched and blocks the complete
-        multi-skill install, rather than yielding a half-installed root."""
+        preflight install, rather than yielding a half-installed root."""
         with tempfile.TemporaryDirectory() as d:
             base = Path(d)
             prefix = base / "prefix"
