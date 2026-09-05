@@ -9,6 +9,8 @@ A set of Claude Code skills for running a swarm of agents against scientific
 compute, installed per server and used on that server for that server's
 projects. Cross-machine portability is explicitly NOT a goal: skills go on
 chimera, lambda and andromeda, and a project runs entirely on one of them.
+Each cluster's partitions, rules and gotchas are in `docs/clusters.md`; of the
+35 partitions across the three, only `preemptible` and `standard` repeat.
 
 The repo's thesis, arrived at after three plans died: **isolation replaces
 attribution.** Observation across a time window can show that an artifact
