@@ -12,8 +12,9 @@ physical writes for the four requested agents. Claude Code 2.1.261 and Codex
 0.153.4 came from the host; official pinned OpenCode 1.18.29 and Pi 0.73.1
 packages came from a disposable npm prefix. All four gated native loaders found
 the installed skill, and the safe native harness exited zero with no observed
-failures. The installed Python helper also started from a separate cwd, but
-that is only payload execution and is not native agent invocation.
+failures. The installed Python helper also captured a disposable local artifact
+from a separate cwd, but that is only payload execution and is not native agent
+invocation.
 
 The full macOS/Linux release evidence remains incomplete. No Linux target was
 authorized and no authenticated LLM-driven skill execution was run. The
@@ -258,16 +259,23 @@ gate.
 
 ## Standalone payload execution
 
-After installation, this command ran from `$SCRATCH/workspace` and returned
-zero:
+After installation, the harness created a minimal local `contract.json` and
+`result.tsv` below `$SCRATCH/workspace/capture-fixture`. This command ran from
+the separate workspace cwd and returned zero:
 
 ```sh
-python3 "$SCRATCH/home/.agents/skills/hanig-portable-handoff/scripts/handoff.py" --help
+python3 "$SCRATCH/home/.agents/skills/hanig-portable-handoff/scripts/handoff.py" \
+  capture "$SCRATCH/workspace/capture-fixture/run" \
+  --out "$SCRATCH/workspace/capture-fixture/handoff.json" \
+  --cwd "$SCRATCH/workspace"
 ```
 
-Its output listed `capture`, `resume`, and `memory`. This proves that the copied
-helper starts independently of the checkout. It does **not** prove that any
-agent loaded, chose, or invoked the skill.
+The emitted handoff had schema version 1, one workflow run, and one existing
+artifact pointer with the expected path and size. Because the fixture
+deliberately had no verification receipt, the run remained in `unresolved`;
+the harness does not invent a verdict. This proves that the copied helper can
+perform a representative local capture independently of the checkout. It does
+**not** prove that any agent loaded, chose, or invoked the skill.
 
 ## Reusable harness
 

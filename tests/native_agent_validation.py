@@ -656,25 +656,67 @@ def _payload_execution(
     paths: Mapping[str, Path], env: Mapping[str, str]
 ) -> dict[str, Any]:
     script = paths["home"] / ".agents" / "skills" / SKILL / "scripts" / "handoff.py"
+    fixture = paths["workspace"] / "capture-fixture"
+    run_dir = fixture / "run"
+    artifact = fixture / "result.tsv"
+    handoff = fixture / "handoff.json"
+    run_dir.mkdir(parents=True)
+    artifact.write_text("value\n1\n", encoding="utf-8")
+    (run_dir / "contract.json").write_text(
+        json.dumps(
+            {
+                "contract_id": "native-agent-validation-fixture",
+                "cwd": str(fixture),
+                "declared_outputs": [str(artifact)],
+                "environment": {},
+            }
+        ),
+        encoding="utf-8",
+    )
     result = _run(
-        [sys.executable, str(script), "--help"], cwd=paths["workspace"], env=env
+        [
+            sys.executable,
+            str(script),
+            "capture",
+            str(run_dir),
+            "--out",
+            str(handoff),
+            "--cwd",
+            str(paths["workspace"]),
+        ],
+        cwd=paths["workspace"],
+        env=env,
     )
-    passed = (
-        result["returncode"] == 0
-        and "capture" in result["stdout"]
-        and "resume" in result["stdout"]
-    )
+    try:
+        captured = json.loads(handoff.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        captured = {}
+    runs = captured.get("runs") or []
+    pointers = runs[0].get("pointers", []) if len(runs) == 1 else []
+    checks = {
+        "command_succeeded": result["returncode"] == 0,
+        "handoff_schema": captured.get("schema_version") == 1,
+        "one_run_captured": len(runs) == 1,
+        "local_artifact_pointer": bool(
+            len(pointers) == 1
+            and pointers[0].get("path") == str(artifact)
+            and pointers[0].get("exists") is True
+            and pointers[0].get("size") == artifact.stat().st_size
+        ),
+        "missing_receipt_remains_unresolved": captured.get("unresolved")
+        == [str(run_dir)],
+    }
+    passed = all(checks.values())
     return {
         "status": "passed" if passed else "failed",
         "kind": "standalone_script_execution",
-        "command": "python3 $SCRATCH/home/.agents/skills/hanig-portable-handoff/"
-        "scripts/handoff.py --help",
+        "command": "python3 $INSTALLED_HANDOFF capture $SCRATCH/workspace/"
+        "capture-fixture/run --out $SCRATCH/workspace/capture-fixture/handoff.json "
+        "--cwd $SCRATCH/workspace",
         "returncode": result["returncode"],
-        "evidence": (
-            "installed helper starts from a separate cwd"
-            if passed
-            else result["stderr"].strip()
-        ),
+        "checks": checks,
+        "evidence": "installed helper captured a local artifact pointer from a separate cwd",
+        "stderr": result["stderr"].strip(),
         "native_agent_invocation": False,
     }
 
