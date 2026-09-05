@@ -738,6 +738,8 @@ which a one-string category cannot express. Those gaps are recorded in
 ## Deployment targets
 
 Measured 2026-08-25 with `bin/probe.sh`. Full output in `docs/probes/`.
+Partition names, the rules for each cluster and which partition to use for what
+are in [docs/clusters.md](docs/clusters.md).
 
 | | chimera | lambda | andromeda |
 |---|---|---|---|
