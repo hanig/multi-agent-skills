@@ -10,6 +10,7 @@ import http.server
 import json
 import os
 import re
+import signal
 import shutil
 import socket
 import subprocess
@@ -2405,9 +2406,8 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
     # list alone: leaving /usr/bin on it would put this host's python3 back
     # within reach, and then the "could not determine" branch could not be
     # reached on a machine that has one.
-    TOOLS = ("sh", "bash", "hostname", "git", "ls", "wc", "tr", "sed",
-             "basename", "readlink", "dirname", "mktemp", "sleep", "head",
-             "rm", "cat")
+    TOOLS = ("sh", "bash", "hostname", "git", "perl", "readlink",
+             "mktemp", "sleep", "rm")
 
     def _bin(self, d, cli=False, python=True, claude=True, overrides=None):
         """A PATH with nothing on it but what doctor needs, so this host's own
@@ -2535,29 +2535,84 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
             self.assertLess(elapsed, 60, "the health probe was not bounded")
 
     def test_the_probe_bounds_both_the_command_and_its_reaper(self):
-        """The worker may wait for its command because the parent never waits
-        for the worker: it kills that worker under a second deadline. Thus an
-        uninterruptible child cannot hand its wait back to doctor."""
+        """The supervisor polls its direct child and stops polling after a
+        separate reap deadline. Thus an uninterruptible child cannot hand an
+        unbounded wait back to doctor."""
         src = DOCTOR.read_text()
-        for guard in ("RUN_TICKS", "PROBE_TICKS", "REAP_TICKS", "kill -TERM",
-                      "kill -KILL", 'wait "$_cp"'):
+        for guard in ("RUN_SECONDS", "PROBE_RUN_SECONDS", "REAP_SECONDS",
+                      "CLOCK_MONOTONIC", "WNOHANG", 'kill "TERM"',
+                      'kill "KILL"'):
             self.assertIn(guard, src, "%s missing" % guard)
 
     def test_every_diagnostic_program_is_routed_through_the_deadline(self):
         src = DOCTOR.read_text()
         for invocation in (
-                'bounded "$RUN_TICKS" hostname',
-                'bounded "$RUN_TICKS" python3 --version',
-                'bounded "$RUN_TICKS" git --version',
-                'bounded "$RUN_TICKS" bash -lic',
-                'bounded "$PROBE_TICKS" python3 -c "$HEALTH_PY"',
-                'bounded "$RUN_TICKS" python3 -c "$COUNT_PY"',
-                'bounded "$RUN_TICKS" readlink "$d"',
-                'bounded "$RUN_TICKS" python3 -m py_compile "$py"',
-                'bounded "$RUN_TICKS" git -C "$REPO" rev-parse --git-dir',
-                'bounded "$RUN_TICKS" git -C "$REPO" rev-parse --short HEAD',
-                'bounded "$RUN_TICKS" git -C "$REPO" status --porcelain'):
+                'bounded "$RUN_SECONDS" hostname',
+                'bounded "$RUN_SECONDS" python3 --version',
+                'bounded "$RUN_SECONDS" git --version',
+                'bounded "$RUN_SECONDS" bash -lic',
+                'bounded "$PROBE_RUN_SECONDS" python3 -c "$HEALTH_PY"',
+                'bounded "$RUN_SECONDS" python3 -c "$COUNT_PY"',
+                'bounded "$RUN_SECONDS" readlink "$d"',
+                'bounded "$RUN_SECONDS" python3 -m py_compile "$py"',
+                'bounded "$RUN_SECONDS" git -C "$REPO" rev-parse --git-dir',
+                'bounded "$RUN_SECONDS" git -C "$REPO" rev-parse --short HEAD',
+                'bounded "$RUN_SECONDS" git -C "$REPO" status --porcelain'):
             self.assertIn(invocation, src, invocation)
+
+    def test_the_deadline_launches_no_unbounded_helper_programs(self):
+        """ARC-271's first fix put mktemp, every polling sleep, and rm outside
+        the watchdog. A hanging mktemp therefore wedged doctor before it could
+        bound anything. Poison all three: doctor must finish, and none may be
+        invoked. The hanging python test below proves the replacement deadline
+        still runs rather than merely avoiding these helpers."""
+        with tempfile.TemporaryDirectory() as d:
+            marker = Path(d) / "unbounded-helper-ran"
+            poison = ("#!/bin/sh\n"
+                      "printf 'invoked' >%s\n"
+                      "trap '' TERM\n"
+                      "while :; do :; done\n") % marker
+            start = time.monotonic()
+            r = self._doctor(
+                d, overrides={name: poison
+                              for name in ("mktemp", "sleep", "rm")})
+            self.assertLess(time.monotonic() - start, 20, r.stdout)
+            self.assertFalse(marker.exists(),
+                             "bounded() still invokes an unbounded helper")
+
+    def test_timeout_cleans_up_an_ordinary_login_profile_descendant(self):
+        """bash profiles commonly start a child without changing its process
+        group. The first fix killed bash alone and left that child behind.
+        Group cleanup is best-effort (a hostile setsid escape is out of scope),
+        but the ordinary case is both useful and runtime-testable."""
+        with tempfile.TemporaryDirectory() as d:
+            pidfile = Path(d) / "profile-child.pid"
+            bash = ("#!/bin/sh\n"
+                    "/bin/sleep 600 &\n"
+                    "printf '%s\\n' \"$!\" >%s\n"
+                    "trap '' TERM\n"
+                    "while :; do :; done\n") % ("%s", pidfile)
+            r = self._doctor(
+                d, claude=False, overrides={"bash": bash})
+            self.assertTrue(pidfile.exists(),
+                            "the descendant-producing profile did not run")
+            pid = int(pidfile.read_text())
+            try:
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        break
+                    time.sleep(0.05)
+                else:
+                    self.fail("login-profile descendant survived timeout")
+            finally:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            self.assertIn("login shell timed out", r.stdout)
 
     @staticmethod
     def _hanging_probe(marker, when, delegate):
