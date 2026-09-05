@@ -21,6 +21,9 @@ import tempfile
 import time
 from pathlib import Path
 
+# survey is read-only unless --out was explicitly requested; importing the
+# additive agent diagnostics must not create bytecode beside copied scripts.
+sys.dont_write_bytecode = True
 import agent_diagnostics
 
 MAX_TREE_ENTRIES = 4000

@@ -16,6 +16,9 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
+# This module is copied into user skill stores and is itself a diagnostic.
+# Importing its shared adapter must not leave a __pycache__ write behind.
+sys.dont_write_bytecode = True
 import agent_discovery
 
 

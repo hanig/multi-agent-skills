@@ -259,3 +259,16 @@ class TestDoctorAndSurveyAgentOutput(unittest.TestCase):
         self.assertEqual(value["schema_version"], 4)
         self.assertTrue({"machine", "scheduler", "repo", "storage"}.issubset(value))
         self.assertEqual(value["agent_diagnostics"]["agents"]["claude"]["agent_present"]["state"], "absent")
+
+    def test_read_only_diagnostics_do_not_write_bytecode_into_copied_scripts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            copied = tmp / "scripts"
+            copied.mkdir()
+            for name in ("agent_diagnostics.py", "agent_discovery.py"):
+                shutil.copy2(SCRIPTS / name, copied / name)
+            env = {"HOME": str(tmp / "home"), "PATH": str(self._bin(tmp))}
+            result = subprocess.run([sys.executable, str(copied / "agent_diagnostics.py"), "--json"],
+                                    cwd=tmp, env=env, text=True, capture_output=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((copied / "__pycache__").exists())
