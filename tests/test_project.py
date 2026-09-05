@@ -2519,6 +2519,37 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
             self.assertNotIn("not running", daemon)
             self.assertIn("UNKNOWN -- not absent", self._section(out))
 
+    @staticmethod
+    def _plausible_python_then_hang(marker, needle, answer):
+        return ("#!/bin/sh\n"
+                "if [ \"$1\" = -c ]; then\n"
+                "  case \"$2\" in\n"
+                "    *%s*)\n"
+                "      printf '%s\\n' '%s'\n"
+                "      printf invoked >%s\n"
+                "      trap 'exit 0' TERM\n"
+                "      while :; do sleep 10; done ;;\n"
+                "  esac\n"
+                "fi\n"
+                "exec %s \"$@\"\n") % (
+                    needle, "%s", answer, marker, sys.executable)
+
+    def test_timed_out_health_output_cannot_report_the_daemon_up(self):
+        """Retained output is evidence only when the child answered. A probe
+        can print a plausible success prefix and then exceed its deadline."""
+        with tempfile.TemporaryDirectory() as d:
+            marker = Path(d) / "health-plausible-ran"
+            stub = self._plausible_python_then_hang(
+                marker, "socket.create_connection",
+                "answering:HTTP/1.1 200 OK")
+            out = self._doctor(d, cli=False,
+                               overrides={"python3": stub}).stdout
+            self.assertTrue(marker.exists(), "selective health stub did not run")
+            daemon = self._field(out, "daemon")
+            self.assertIn("COULD NOT DETERMINE", daemon)
+            self.assertIn("indeterminate", daemon)
+            self.assertNotIn("answering at", daemon)
+
     def test_the_CLI_and_the_daemon_are_never_collapsed_into_one_verdict(self):
         """A live daemon is what made the old report confident. It must not
         put a path on the CLI line."""
@@ -2630,9 +2661,10 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
                     proc.communicate()
 
     def test_group_setup_and_wait_errors_fail_closed(self):
-        """setpgid/waitpid failures are impractical to inject portably. Guard
-        the executable ordering and setup/error classifications directly,
-        then prove the handshake does not reserve a command exit status."""
+        """This is structural/code-inspection coverage: setpgid/waitpid
+        failures are impractical to inject portably without adding a broad
+        production seam. Guard ordering and classifications directly, then
+        prove the handshake does not reserve a command exit status."""
         src = self._supervisor_source()
         grouped = src.index("my $grouped = setpgid(0, 0)")
         checked = src.index("unless (defined $grouped)", grouped)
@@ -2646,8 +2678,10 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
         self.assertLess(ready, executed,
                         "a diagnostic can execute without the setup handshake")
         self.assertIn('answer("setup-error", 127, $1)', src)
-        self.assertIn("while ($got == -1 && $! == EINTR)", src)
-        self.assertIn("elsif ($got == -1 && !$wait_error)", src)
+        self.assertNotIn("while ($got == -1 && $! == EINTR)", src)
+        self.assertNotIn("while ($last == -1 && $! == EINTR)", src)
+        self.assertIn("elsif ($got == -1 && $! != EINTR", src)
+        self.assertIn("unless defined $cleanup_deadline", src)
         self.assertIn('answer("supervisor-error", 127, $wait_error)', src)
 
         r = subprocess.run(
@@ -2880,6 +2914,24 @@ printf 'found:/cluster/profile/bin/claude\n'
         where.write_text(text if text is not None
                          else (ROOT / "models.json").read_text())
         return where
+
+    def test_timed_out_registry_output_cannot_report_a_model_count(self):
+        """A plausible retained count from a child that never completed is
+        indeterminate, not an answered registry inspection."""
+        with tempfile.TemporaryDirectory() as d:
+            marker = Path(d) / "registry-plausible-ran"
+            home = Path(d) / "home"
+            reg = self._registry(home / ".agent-bus" / "models.json")
+            stub = self._plausible_python_then_hang(
+                marker, "json.loads", "ok:999")
+            out = self._doctor(d, cli=True, home=home,
+                               overrides={"python3": stub}).stdout
+            self.assertTrue(marker.exists(),
+                            "selective registry stub did not run")
+            field = self._field(out, "models registry")
+            self.assertIn(str(reg), field)
+            self.assertIn("CONTENTS COULD NOT BE DETERMINED", field)
+            self.assertNotIn("999 models", field)
 
     def test_a_present_registry_is_reported_with_what_is_in_it(self):
         with tempfile.TemporaryDirectory() as d:
