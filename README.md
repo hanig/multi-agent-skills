@@ -119,14 +119,17 @@ here.
 After exporting `MULTI_AGENT_SKILLS_CHECKOUT` as the absolute checkout path,
 set `AGENT_BUS_SCRATCH` to an existing writable directory whose resolved path
 is outside both the checkout and `$HOME`. The block checks that precondition,
-then can run from any other directory. It copies the shipped registry only
-into a private temporary state directory. A disposable `HOME` inside that
-same directory contains any side effects from live-signal collectors that
-`models` invokes. The EXIT and signal traps remove the printed directory on
-success, failure, or interruption, and refuse to delete anything except the
-temporary child they allocated.
+then can run from any other directory. Its error-exit subshell makes every
+setup failure abort without changing the caller's shell options. It copies the
+shipped registry only into a private temporary state directory. A disposable
+`HOME` inside that same directory contains any side effects from live-signal
+collectors that `models` invokes. The EXIT and signal traps remove the printed
+directory on success, failure, or interruption, and refuse to delete anything
+except the temporary child they allocated.
 
 ```bash
+(
+set -eu
 checkout="$(CDPATH= cd -- "${MULTI_AGENT_SKILLS_CHECKOUT:?set the checkout path}" && pwd -P)"
 home_dir="$(CDPATH= cd -- "$HOME" && pwd -P)"
 scratch="$(CDPATH= cd -- "${AGENT_BUS_SCRATCH:?set external scratch}" && pwd -P)"
@@ -166,6 +169,7 @@ mkdir "$bus_state/home"
 cp "$checkout/models.json" "$bus_state/models.json"
 chmod 600 "$bus_state/models.json"
 HOME="$bus_state/home" AGENT_BUS_HOME="$bus_state" "$bus_bin" models --json
+)
 ```
 
 The `~/.agent-bus/bin/bus` commands in the vendored `agent-bus`, `paseo`,

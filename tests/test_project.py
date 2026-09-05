@@ -1326,6 +1326,7 @@ class TestVendoredAgentBusLayoutIsExplicit(unittest.TestCase):
                       '"$bus_state/models.json"', section)
         self.assertIn('HOME="$bus_state/home" AGENT_BUS_HOME="$bus_state" '
                       '"$bus_bin" models --json', section)
+        self.assertIn("(\nset -eu\n", section)
         self.assertIn("AGENT_BUS_SCRATCH must resolve outside HOME", section)
         for trapped in ("trap cleanup EXIT", "trap 'exit 129' HUP",
                         "trap 'exit 130' INT", "trap 'exit 143' TERM"):
@@ -1399,8 +1400,12 @@ class TestVendoredAgentBusLayoutIsExplicit(unittest.TestCase):
             self.assertTrue(all(path.is_file() for path in cache_files),
                             cache_files)
 
+            wrapped = ("caller_options_before=$-\n" + documented +
+                       "\ncaller_options_after=$-\n"
+                       "printf 'caller-options-before=%s after=%s\\n' "
+                       '"$caller_options_before" "$caller_options_after" >&2\n')
             ran = subprocess.run(
-                ["sh", "-eu", "-c", documented], cwd=outside, env=env,
+                ["sh", "-c", wrapped], cwd=outside, env=env,
                 capture_output=True, text=True, timeout=30)
             self.assertEqual(ran.returncode, 0, ran.stderr)
             rows = json.loads(ran.stdout)
@@ -1412,6 +1417,11 @@ class TestVendoredAgentBusLayoutIsExplicit(unittest.TestCase):
                               ran.stderr, re.MULTILINE)
             self.assertIsNotNone(match, ran.stderr)
             printed_state = Path(match.group(1))
+            options = re.search(r"caller-options-before=(\S*) after=(\S*)",
+                                ran.stderr)
+            self.assertIsNotNone(options, ran.stderr)
+            self.assertEqual(options.group(1), options.group(2),
+                             "the pasted block changed caller shell options")
             self.assertFalse(printed_state.exists(),
                              "EXIT trap left its private state behind")
             self.assertEqual(list(external_scratch.iterdir()), [])
@@ -1431,7 +1441,7 @@ class TestVendoredAgentBusLayoutIsExplicit(unittest.TestCase):
                             "AGENT_BUS_SCRATCH": str(bad_scratch)})
             bad_before = snapshot(bad_home)
             refused = subprocess.run(
-                ["sh", "-eu", "-c", documented], cwd=outside, env=bad_env,
+                ["sh", "-c", documented], cwd=outside, env=bad_env,
                 capture_output=True, text=True, timeout=30)
             self.assertEqual(refused.returncode, 2, refused.stderr)
             self.assertIn("must resolve outside HOME", refused.stderr)
@@ -1472,7 +1482,7 @@ class TestVendoredAgentBusLayoutIsExplicit(unittest.TestCase):
             fake_bus.write_text("#!/bin/sh\nexit 7\n")
             fake_bus.chmod(0o700)
             failed = subprocess.run(
-                ["sh", "-eu", "-c", documented], cwd=outside, env=env,
+                ["sh", "-c", documented], cwd=outside, env=env,
                 capture_output=True, text=True, timeout=30)
             self.assertEqual(failed.returncode, 7, failed.stderr)
             self.assertFalse(printed_path(failed.stderr).exists())
@@ -1484,7 +1494,7 @@ class TestVendoredAgentBusLayoutIsExplicit(unittest.TestCase):
                 "while :; do sleep 1; done\n")
             fake_bus.chmod(0o700)
             proc = subprocess.Popen(
-                ["sh", "-eu", "-c", documented], cwd=outside, env=env,
+                ["sh", "-c", documented], cwd=outside, env=env,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 stdin=subprocess.DEVNULL, start_new_session=True)
             line = proc.stderr.readline()
@@ -1492,10 +1502,112 @@ class TestVendoredAgentBusLayoutIsExplicit(unittest.TestCase):
             self.assertTrue(active_state.is_dir(), line)
             os.killpg(os.getpgid(proc.pid), 15)
             _out, err = proc.communicate(timeout=15)
-            self.assertEqual(proc.returncode, 143, line + err)
+            # The wrapper `sh -c` may itself die from the group signal before
+            # the documented subshell exits 143; cleanup is the contract.
+            self.assertIn(proc.returncode, (-15, 143), line + err)
             self.assertFalse(active_state.exists())
             self.assertEqual(list(scratch.iterdir()), [])
             self.assertFalse((fake_home / ".agent-bus").exists())
+
+    def test_setup_failures_never_reach_bus_or_escape_scratch(self):
+        readme = (ROOT / "README.md").read_text()
+        section = readme.split("### Agent bus executable, in this checkout",
+                               1)[1].split("\n### ", 1)[0]
+        check = section.split("#### Disposable model-routing check", 1)[1]
+        documented = check.split("```bash", 1)[1].split("```", 1)[0]
+
+        def snapshot(root):
+            entries = []
+            for path in sorted(root.rglob("*")):
+                rel = path.relative_to(root).as_posix()
+                mode = path.lstat().st_mode
+                if path.is_symlink():
+                    value = os.readlink(path)
+                elif path.is_file():
+                    value = hashlib.sha256(path.read_bytes()).hexdigest()
+                else:
+                    value = None
+                entries.append((rel, mode, value))
+            return entries
+
+        with tempfile.TemporaryDirectory() as d:
+            sandbox = Path(d)
+            fake_home = sandbox / "home"
+            outside = sandbox / "outside"
+            scratch = sandbox / "external-scratch"
+            checkout = sandbox / "fake-checkout"
+            fake_bin = checkout / "bin"
+            for path in (fake_home, outside, scratch, fake_bin):
+                path.mkdir(parents=True)
+            shutil.copyfile(ROOT / "models.json", checkout / "models.json")
+            invoked = sandbox / "bus-invoked"
+            fake_bus = fake_bin / "bus"
+            fake_bus.write_text(
+                "#!/bin/sh\n"
+                "printf invoked > \"$BUS_INVOKED\"\n"
+                "mkdir -p \"${AGENT_BUS_HOME:-.}/cache\"\n")
+            fake_bus.chmod(0o700)
+            base_env = dict(os.environ)
+            base_env.update({"HOME": str(fake_home),
+                             "AGENT_BUS_SCRATCH": str(scratch),
+                             "MULTI_AGENT_SKILLS_CHECKOUT": str(checkout),
+                             "BUS_INVOKED": str(invoked)})
+            base_env.pop("AGENT_BUS_HOME", None)
+
+            def assert_setup_failure(label, run_env, candidate_scratch,
+                                     expected_code=None):
+                before = tuple(snapshot(path)
+                               for path in (fake_home, outside, checkout))
+                result = subprocess.run(
+                    ["sh", "-c", documented], cwd=outside, env=run_env,
+                    capture_output=True, text=True, timeout=30)
+                self.assertNotEqual(result.returncode, 0,
+                                    f"{label} unexpectedly continued")
+                if expected_code is not None:
+                    self.assertEqual(result.returncode, expected_code,
+                                     f"{label} failed at the wrong step")
+                self.assertFalse(invoked.exists(),
+                                 f"{label} reached the bus executable")
+                self.assertFalse((fake_home / ".agent-bus").exists())
+                self.assertEqual(
+                    tuple(snapshot(path)
+                          for path in (fake_home, outside, checkout)), before,
+                    f"{label} wrote outside disposable scratch")
+                if candidate_scratch.exists():
+                    self.assertEqual(list(candidate_scratch.iterdir()), [],
+                                     f"{label} left scratch artifacts")
+
+            original_path = base_env.get("PATH", "")
+            # Start with cp so the non-vacuity run against the old README is
+            # contained in a valid scratch directory before it exposes that
+            # the block continued to bus.
+            for command, exit_code in (("cp", 33), ("mktemp", 31),
+                                       ("mkdir", 32), ("chmod", 34)):
+                tools = sandbox / ("fail-" + command)
+                tools.mkdir()
+                failing = tools / command
+                failing.write_text("#!/bin/sh\nexit %d\n" % exit_code)
+                failing.chmod(0o700)
+                failed_env = dict(base_env)
+                failed_env["PATH"] = str(tools) + os.pathsep + original_path
+                assert_setup_failure(command, failed_env, scratch, exit_code)
+
+            missing = sandbox / "does-not-exist"
+            missing_env = dict(base_env)
+            missing_env["AGENT_BUS_SCRATCH"] = str(missing)
+            assert_setup_failure("missing scratch", missing_env, missing)
+
+            unwritable = sandbox / "unwritable"
+            unwritable.mkdir()
+            unwritable.chmod(0o500)
+            try:
+                if not os.access(unwritable, os.W_OK):
+                    unwritable_env = dict(base_env)
+                    unwritable_env["AGENT_BUS_SCRATCH"] = str(unwritable)
+                    assert_setup_failure("unwritable scratch", unwritable_env,
+                                         unwritable)
+            finally:
+                unwritable.chmod(0o700)
 
     def test_the_upstream_report_separates_executable_and_state_paths(self):
         report = (ROOT / "docs" /
