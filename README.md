@@ -537,6 +537,17 @@ Nothing reads it from the repo. `install.sh` does not deploy it, because the
 live file is user-specific configuration and overwriting a machine's routing
 policy from a skill install is not a thing an installer should do.
 
+**`models.json` is routing metadata, not a credential grant.** A model appearing
+in `models.json` means it can be considered for a Paseo dispatch; it does not
+mean a dispatched worker can call that or any other model from inside its task.
+`OPENAI_API_KEY` and `OPENROUTER_API_KEY` stay coordinator-side: `review.py` and
+`committee.py` use them directly, while `child_environment.py` removes both
+exact names from every coordinator child. Paseo may still start the worker with
+credentials held independently by its daemon, but that does not put either
+ambient API key in the worker's environment. Keep additional-model calls in the
+coordinator-side review and committee paths unless a separately designed proxy
+or named exception deliberately changes that boundary.
+
 **Copying it is not the end of the job.** The file was written on a machine
 with no Paseo and no `~/.paseo`, so nothing in it was dispatched at the time.
 Two of its three distinct provider strings have been since — `claude/opus` and
