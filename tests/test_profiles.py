@@ -94,5 +94,26 @@ class TestEscalationOverAnEmptyLadderRefuses(unittest.TestCase):
             "the shipped roster must be able to escalate")
 
 
+class TestShippedLadderAddsReviewers(unittest.TestCase):
+    def test_each_enabled_tier_is_a_strict_superset_of_the_previous_tier(self):
+        import json
+        cfg = json.loads((REVIEW.parent.parent / "reviewers.json").read_text())
+
+        def enabled_members(profile):
+            return {
+                reviewer["name"]
+                for reviewer in cfg["reviewers"]
+                if reviewer.get("enabled", True)
+                and R.in_profile(reviewer, profile)
+            }
+
+        for lower, upper in zip(R.LADDER, R.LADDER[1:]):
+            with self.subTest(lower=lower, upper=upper):
+                self.assertLess(
+                    enabled_members(lower), enabled_members(upper),
+                    "%s must add at least one enabled reviewer beyond %s"
+                    % (upper, lower))
+
+
 if __name__ == "__main__":
     unittest.main()

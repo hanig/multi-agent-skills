@@ -4,11 +4,9 @@ description: >-
   Adversarial multi-model review before anything is called done. Use before
   reporting work complete, before committing or opening a PR, and whenever a
   claim is being asserted about code that was just written — "this works", "this
-  is covered", "this handles X". Sends the diff and the claims to independent
-  models (DeepSeek-V4-Pro, GPT-5.6-Luna, Kimi-K2.7-Code, GLM-5.3, and
-  GPT-5.6-Sol at xhigh) prompted to refute
-  rather than approve. Use also when asked to double-check, get a second
-  opinion, or verify a change against other models.
+  is covered", "this handles X". Sends the diff and the claims to independently
+  routed models prompted to refute rather than approve. Use also when asked to
+  double-check, get a second opinion, or verify a change against other models.
 ---
 
 # hanig-review-gate
@@ -41,9 +39,9 @@ because these rules were written down once and drifted from anyway.
 | | plan review | implementation review |
 |---|---|---|
 | when | before code exists | after the change is written |
-| panel | **two contrasting models** | cheapest-first ladder |
-| escalation | **never** | `--escalate`, always from `fast` |
-| flag | `--kind plan` | `--kind implementation --escalate --round N` |
+| panel | **two contrasting models** | fixed profile or cheapest-first ladder |
+| escalation | **never** | optional; `--escalate` starts at `fast` |
+| flag | `--kind plan` | `--kind implementation --round N [--escalate]` |
 | judged against | do these criteria hold together | does the code meet them |
 
 **Two contrasting models for a plan, never escalated.** A third adds agreement,
@@ -188,11 +186,11 @@ python3 "$R" --escalate --diff \
 failure, adding only the reviewers the previous tier did not run:
 
 ```
-fast      deepseek-v4-pro + luna          ~2-3 min   ~$0.03
+fast      luna + kimi-k2.7-code
   ↓ pass
-standard  + kimi-k2.7-code                ~+3 min    ~+$0.06
+standard  + glm-5.3
   ↓ pass
-deep      + sol @ xhigh                   ~+5 min    ~+$0.18
+deep      + astra @ high
 ```
 
 A failing change costs one cheap tier, not the whole panel. Only code that
@@ -288,18 +286,19 @@ and availability is resolved live by `--list` rather than asserted in a file.
 
 | Name | Provider | Model | Needs |
 |---|---|---|---|
-| `sol` | OpenAI | `gpt-5.6-sol` (effort `xhigh`) | `OPENAI_API_KEY` |
-| `kimi-k3` | OpenRouter | `moonshotai/kimi-k3` | `OPENROUTER_API_KEY` |
-| `deepseek-v4-pro` | OpenRouter | `deepseek/deepseek-v4-pro` | `OPENROUTER_API_KEY` |
+| `luna` | OpenAI | `gpt-5.6-luna` (effort `high`) | `OPENAI_API_KEY` |
+| `kimi-k2.7-code` | OpenRouter | `moonshotai/kimi-k2.7-code` | `OPENROUTER_API_KEY` |
+| `glm-5.3` | OpenRouter | `z-ai/glm-5.3` | `OPENROUTER_API_KEY` |
+| `astra` | OpenAI | `gpt-6-astra` (effort `high`) | `OPENAI_API_KEY` |
 
 Both keys are exported from `~/.zshrc`. A non-interactive shell does not source
 it, so run through a login shell (`zsh -ic`) or export the keys explicitly —
 otherwise the gate reports `REVIEW_UNAVAILABLE`, which is correct behaviour but
 not what you wanted.
 
-`sol` at `xhigh` is slow (several minutes) because reasoning tokens count
-against `max_output_tokens`; its ceiling is set high enough that the JSON verdict
-is not truncated. Reviewers run in parallel, so wall time is the slowest one.
+`sol` and `kimi-k3` remain disabled. Sol writes code in the current routing and
+an author does not review its own work; DeepSeek V4 Pro is a committee member,
+not a gate reviewer. Reviewers run in parallel, so wall time is the slowest one.
 
 Transient 5xx and 429 responses are retried with backoff — a gateway hiccup must
 not silently shrink the panel and make the gate weaker than it reports.

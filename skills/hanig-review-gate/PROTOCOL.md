@@ -13,10 +13,16 @@ enforces them.
 | | plan review | implementation review |
 |---|---|---|
 | when | before code exists | after the change is written |
-| panel | **two contrasting models** | cheapest-first ladder |
-| escalation | **never** | `--escalate`, always from `fast` |
-| flag | `--kind plan` | `--kind implementation --escalate --round N` |
+| panel | **two contrasting models** | fixed profile or cheapest-first ladder |
+| escalation | **never** | optional; `--escalate` starts at `fast` |
+| flag | `--kind plan` | `--kind implementation --round N [--escalate]` |
 | judged against | do these criteria hold together | does the code meet the criteria |
+
+The shipped implementation ladder is cumulative: every tier's enabled panel
+is a strict superset of the tier below it. `tests/test_profiles.py` pins that
+configuration invariant so an enabled `deep` panel cannot silently collapse to
+`standard` again. This is a repository test of the shipped routing file, not a
+runtime validation of a locally edited installed copy.
 
 **Plan review is Phase 1 and it is where the value is.** Three plan reviews
 cost about ten cents and twelve minutes and rejected two designs before any
