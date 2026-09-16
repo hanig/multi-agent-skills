@@ -277,6 +277,40 @@ isolate principals. `worktree.py`'s `WORKTREE_REF_ISOLATION_LIMIT` states that
 at the judgment boundary, and judgment therefore checks branch, descendant
 history, changed tree and a clean index together rather than trusting the path.
 
+## Verifier admissibility includes the corpus it reads
+
+An authorized verifier policy may declare the exact repository-relative files
+its verdict depends on:
+
+```json
+{"schema_version": 1, "verifiers": [
+  {"name": "tests", "sha256": "...", "claims": ["tests-pass"],
+   "corpus": ["tests/test_api.py", "tests/fixtures/api.json"]}
+]}
+```
+
+`AUTHORIZED` and `PINNED` cover the verifier program. They do not cover a test
+suite that program reads from the subject checkout. For a non-empty `corpus`,
+verification therefore compares the subject commit with the anchored base,
+refuses if any declared corpus file changed, and names both that path and the
+claim the receipt would have established. An honest source-only change still
+runs the pinned verifier in its detached subject checkout.
+
+The receipt records `subject_changed_paths` for the complete base-to-subject
+diff and `corpus_base_sha256` for every declared file. Admission re-derives both
+from the coordinator-held repository, base, and produced commit instead of
+taking those receipt fields as authority. This also refuses an older persisted
+receipt that predates corpus evidence rather than correcting only future runs.
+
+The bound is exactly the declared list. Dependencies outside it -- generated
+fixtures, configuration, imported helper code, toolchains, and environment --
+are not protected unless the policy names their repository files too. Entries
+are exact files, not directories or globs. One policy entry is bounded to
+10,000 paths, 256 MB per file, and 1 GB total. An absent or empty `corpus` is
+the compatibility path: it performs no new Git reads and adds no receipt
+fields, so existing policy behavior and serialized receipts stay byte-for-byte
+unchanged.
+
 ## What isolates a code unit
 
 The paragraph above says what a per-attempt worktree does NOT do. What it

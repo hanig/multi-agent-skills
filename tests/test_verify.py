@@ -171,6 +171,22 @@ class TestPinningIsByContent(Base):
         _d, _s, err = V.digest_file(self.tmp)
         self.assertIn("not a regular file", err)
 
+    def test_a_string_corpus_is_refused_instead_of_iterated(self):
+        paths, refusal = V.declared_corpus(
+            {"name": "tests", "corpus": "tests/test_api.py"})
+        self.assertIsNone(paths)
+        self.assertIn("not a list", refusal)
+
+    def test_no_corpus_does_not_even_ask_git(self):
+        def unexpected(*_args, **_kwargs):
+            self.fail("legacy verification asked Git for corpus evidence")
+
+        evidence, refusal = V.corpus_evidence(
+            unexpected, None, None, None,
+            {"name": "tests", "claims": ["tests-pass"]})
+        self.assertIsNone(refusal)
+        self.assertEqual(evidence, {})
+
 
 class TestAdmissionIsBound(unittest.TestCase):
 
@@ -389,6 +405,113 @@ class TestRoundOneFindings(Base):
         listed = git(self.repo, "worktree", "list").stdout
         self.assertEqual(listed.count("\n"), 1,
                          "a verification worktree was left behind")
+
+
+class TestCodexCannotRewriteItsOwnExam(Base):
+    """The coding agent under suspicion is this repo's default: Codex.
+
+    A pinned verifier that exits zero after Codex edits the tests is still a
+    verifier over candidate-controlled inputs. The corpus binding, not the
+    exit code, is what must refuse that receipt.
+    """
+
+    CORPUS = "tests/test_answer.py"
+    CLAIM = "tests-pass"
+
+    def _declare_corpus(self):
+        path = Path(self.repo) / self.CORPUS
+        path.parent.mkdir(parents=True, exist_ok=True)
+        original = b"assert answer() == 42\n"
+        path.write_bytes(original)
+        self.commit_policy({"schema_version": 1, "verifiers": [
+            {"name": "tests", "sha256": self.digest,
+             "claims": [self.CLAIM], "corpus": [self.CORPUS]}]})
+        policy, policy_digest, err = V.read_policy(
+            U.run, self.repo, self.base)
+        self.assertIsNone(err, err)
+        return policy, policy_digest, original
+
+    def _commit_subject(self, path, content):
+        subject = Path(self.repo) / path
+        subject.parent.mkdir(parents=True, exist_ok=True)
+        subject.write_text(content)
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "candidate change")
+        return git(self.repo, "rev-parse", "HEAD").stdout.strip()
+
+    def _receipt(self, policy_digest, head, evidence):
+        rec = {"unit": "u1", "claim": self.CLAIM, "verifier": "tests",
+               "verifier_sha256": self.digest,
+               "policy_sha256": policy_digest, "subject_head": head,
+               "result": "pass"}
+        rec.update(evidence)
+        with open(Path(self.tmp) / S.VERIFY_RECEIPTS, "w") as fh:
+            fh.write(json.dumps(rec) + "\n")
+
+    def test_a_passing_verifier_cannot_certify_a_test_codex_edited(self):
+        policy, policy_digest, original = self._declare_corpus()
+        head = self._commit_subject(
+            self.CORPUS,
+            "# Codex made its own judge accept the answer\nassert True\n")
+
+        outcome, err = V.run_in_checkout(
+            U.run, self.repo, head, self.script, self.digest)
+        self.assertIsNone(err, err)
+        self.assertEqual(outcome["exit_code"], 0,
+                         "the reward-hacked verifier should appear to pass")
+
+        entry = policy["verifiers"][0]
+        evidence, err = V.corpus_evidence(
+            U.run, self.repo, self.base, head, entry)
+        self.assertIsNone(err, err)
+        self.assertIn(self.CORPUS, evidence["subject_changed_paths"])
+        self.assertEqual(
+            evidence["corpus_base_sha256"][self.CORPUS],
+            V.digest_bytes(original))
+        self._receipt(policy_digest, head, evidence)
+
+        admitted, refusal = S.admit_verification(
+            self.tmp, "u1", self.CLAIM, head, policy_digest, policy,
+            repo=self.repo, base_commit=self.base)
+        self.assertIsNone(admitted)
+        self.assertIn(self.CORPUS, refusal)
+        self.assertIn(self.CLAIM, refusal)
+
+    def test_an_honest_non_corpus_change_still_passes(self):
+        policy, policy_digest, original = self._declare_corpus()
+        head = self._commit_subject("solution.py", "def answer():\n    return 42\n")
+        entry = policy["verifiers"][0]
+        evidence, err = V.corpus_evidence(
+            U.run, self.repo, self.base, head, entry)
+        self.assertIsNone(err, err)
+        self.assertEqual(evidence["subject_changed_paths"], ["solution.py"])
+        self.assertEqual(
+            evidence["corpus_base_sha256"][self.CORPUS],
+            V.digest_bytes(original))
+        self.assertIsNone(
+            V.corpus_change_refusal(entry, evidence, self.CLAIM))
+
+        outcome, err = V.run_in_checkout(
+            U.run, self.repo, head, self.script, self.digest)
+        self.assertIsNone(err, err)
+        self.assertEqual(outcome["exit_code"], 0)
+        self._receipt(policy_digest, head, evidence)
+        admitted, refusal = S.admit_verification(
+            self.tmp, "u1", self.CLAIM, head, policy_digest, policy,
+            repo=self.repo, base_commit=self.base)
+        self.assertIsNone(refusal)
+        self.assertIsNotNone(admitted)
+
+    def test_an_older_receipt_without_corpus_evidence_is_not_grandfathered(self):
+        policy, policy_digest, _original = self._declare_corpus()
+        head = self._commit_subject("solution.py", "def answer():\n    return 42\n")
+        self._receipt(policy_digest, head, {})
+
+        admitted, refusal = S.admit_verification(
+            self.tmp, "u1", self.CLAIM, head, policy_digest, policy,
+            repo=self.repo, base_commit=self.base)
+        self.assertIsNone(admitted)
+        self.assertIn("does not match", refusal)
 
 
 class TestAnUnreadablePolicyRefuses(unittest.TestCase):
