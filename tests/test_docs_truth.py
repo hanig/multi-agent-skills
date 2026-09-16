@@ -1,0 +1,374 @@
+"""Executable checks for registered suite-count and reviewer-roster prose."""
+import collections
+import json
+import re
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+INVENTORY = {
+    "README.md": {"suite-count": "scalar", "review-profiles": "table"},
+    "MEMORY.md": {"suite-count": "scalar", "review-rosters": "table"},
+    "CLAUDE.md": {"suite-count": "scalar", "disabled-reviewers": "scalar"},
+}
+MARKER = re.compile(r"<!-- docs-truth:(?P<id>[a-z0-9][a-z0-9-]*) -->")
+FENCE_OPEN = re.compile(r" {0,3}(?P<fence>`{3,}|~{3,})")
+COUNT = re.compile(
+    r"(?<![\d,])(?P<count>(?:\d{1,3}(?:,\d{3})+|\d+)) tests\b")
+NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def normalized_lines(text):
+    return [line.rstrip(" \t") for line in text.splitlines()]
+
+
+def has_unescaped_pipe(text):
+    escaped = False
+    code_delimiter = None
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if char == "\\" and code_delimiter is None:
+            escaped = True
+            index += 1
+        elif char == "`":
+            end = index
+            while end < len(text) and text[end] == "`":
+                end += 1
+            run = end - index
+            if code_delimiter is None:
+                code_delimiter = run
+            elif run == code_delimiter:
+                code_delimiter = None
+            index = end
+        elif char == "|" and code_delimiter is None:
+            return True
+        else:
+            index += 1
+    return False
+
+
+def marker_positions(filename, text):
+    positions = []
+    open_fence = None
+    for index, line in enumerate(normalized_lines(text)):
+        fence = FENCE_OPEN.match(line)
+        if open_fence is not None:
+            closing = re.fullmatch(
+                r" {0,3}" + re.escape(open_fence[0])
+                + "{" + str(open_fence[1]) + r",}\s*", line)
+            if closing:
+                open_fence = None
+            continue
+        if fence:
+            token = fence.group("fence")
+            open_fence = (token[0], len(token))
+            continue
+        if "<!-- docs-truth:" in line and not MARKER.fullmatch(line):
+            raise AssertionError(f"{filename}: malformed docs-truth marker")
+        match = MARKER.fullmatch(line)
+        if match:
+            positions.append((match.group("id"), index))
+    return positions
+
+
+def registered_units(filename, text):
+    all_lines = normalized_lines(text)
+    positions = marker_positions(filename, text)
+    counts = collections.Counter(identifier for identifier, _ in positions)
+    expected = INVENTORY[filename]
+    if set(counts) != set(expected):
+        raise AssertionError(
+            f"{filename}: docs-truth marker inventory disagrees; "
+            f"expected {sorted(expected)}, found {sorted(counts)}")
+    duplicates = sorted(identifier for identifier, count in counts.items()
+                        if count != 1)
+    if duplicates:
+        raise AssertionError(
+            f"{filename}: duplicate docs-truth marker(s): "
+            f"{', '.join(duplicates)}")
+
+    units = {}
+    for identifier, index in positions:
+        body_index = index + 1
+        if body_index >= len(all_lines) or not all_lines[body_index]:
+            raise AssertionError(
+                f"{filename}: orphaned docs-truth marker {identifier!r}")
+        if MARKER.fullmatch(all_lines[body_index]):
+            raise AssertionError(
+                f"{filename}: stacked docs-truth marker {identifier!r}")
+        if expected[identifier] == "scalar":
+            if (all_lines[body_index].lstrip().startswith(
+                    ("#", "```", "~~~", "<!--"))
+                    or has_unescaped_pipe(all_lines[body_index])):
+                raise AssertionError(
+                    f"{filename}: scalar marker {identifier!r} owns markup")
+            units[identifier] = [all_lines[body_index]]
+            continue
+        body = []
+        for line in all_lines[body_index:]:
+            if not line:
+                break
+            body.append(line)
+        if not body:
+            raise AssertionError(
+                f"{filename}: marker {identifier!r} does not own a table")
+        units[identifier] = body
+    return units
+
+
+def suite_count(filename, unit):
+    matches = list(COUNT.finditer(unit[0]))
+    if len(matches) != 1:
+        raise AssertionError(
+            f"{filename}: suite-count claim has {len(matches)} count values")
+    return int(matches[0].group("count").replace(",", ""))
+
+
+def markdown_cells(line):
+    stripped = line.strip()
+    if not stripped.startswith("|") or not stripped.endswith("|"):
+        raise AssertionError("not a complete Markdown table row")
+    cells = []
+    cell = []
+    escaped = False
+    code_delimiter = None
+    content = stripped[1:-1]
+    index = 0
+    while index < len(content):
+        char = content[index]
+        if escaped:
+            cell.extend(("\\", char))
+            escaped = False
+            index += 1
+        elif char == "\\" and code_delimiter is None:
+            escaped = True
+            index += 1
+        elif char == "`":
+            end = index
+            while end < len(content) and content[end] == "`":
+                end += 1
+            token = content[index:end]
+            run = len(token)
+            if code_delimiter is None:
+                code_delimiter = run
+            elif run == code_delimiter:
+                code_delimiter = None
+            cell.append(token)
+            index = end
+        elif char == "|" and code_delimiter is None:
+            cells.append("".join(cell).strip())
+            cell = []
+            index += 1
+        else:
+            cell.append(char)
+            index += 1
+    if escaped or code_delimiter is not None:
+        raise AssertionError("malformed Markdown table row")
+    cells.append("".join(cell).strip())
+    return cells
+
+
+def table_rows(filename, unit, expected_header):
+    try:
+        rows = [markdown_cells(line) for line in unit]
+    except AssertionError as exc:
+        raise AssertionError(f"{filename}: {exc}") from exc
+    if not rows or rows[0] != expected_header:
+        raise AssertionError(f"{filename}: marked table has the wrong header")
+    if len(rows) < 3 or len(rows[1]) != len(expected_header):
+        raise AssertionError(f"{filename}: marked table has no valid separator")
+    if not all(re.fullmatch(r":?-{3,}:?", cell) for cell in rows[1]):
+        raise AssertionError(f"{filename}: marked table has an invalid separator")
+    if any(len(row) != len(expected_header) for row in rows[2:]):
+        raise AssertionError(f"{filename}: marked table has a malformed row")
+    return rows[2:]
+
+
+def roster(filename, label, cell):
+    raw_names = re.split(r"\s*,\s*|\s+and\s+", cell.strip())
+    names = []
+    for raw in raw_names:
+        quoted = raw.startswith("`") and raw.endswith("`")
+        if raw.startswith("`") != raw.endswith("`"):
+            raise AssertionError(f"{filename}: malformed {label} reviewer {raw!r}")
+        name = raw[1:-1] if quoted else raw
+        if not NAME.fullmatch(name):
+            raise AssertionError(f"{filename}: malformed {label} reviewer {raw!r}")
+        names.append(name)
+    if len(names) != len(set(names)):
+        raise AssertionError(f"{filename}: duplicate reviewer in {label}")
+    return set(names)
+
+
+def roster_rows(filename, rows, labels, membership_column):
+    parsed = {}
+    documented = [row[0].strip("`") for row in rows]
+    if len(documented) != len(set(documented)):
+        raise AssertionError(f"{filename}: duplicate reviewer claim row")
+    for label in labels:
+        matches = [row for row in rows if row[0].strip("`") == label]
+        if len(matches) != 1:
+            raise AssertionError(
+                f"{filename}: expected one {label!r} reviewer claim, "
+                f"found {len(matches)}")
+        parsed[label] = roster(filename, label, matches[0][membership_column])
+    if set(documented) != set(labels):
+        raise AssertionError(
+            f"{filename}: documented reviewer profiles disagree with config")
+    return parsed
+
+
+def disabled_roster(filename, unit):
+    match = re.fullmatch(r"Disabled reviewers: (?P<members>none|.+)\.", unit[0])
+    if not match:
+        raise AssertionError(f"{filename}: malformed disabled-reviewer claim")
+    if match.group("members") == "none":
+        return set()
+    return roster(filename, "disabled", match.group("members"))
+
+
+class TestDocsTruth(unittest.TestCase):
+
+    def test_registered_claims_match_live_sources(self):
+        discovered = unittest.TestLoader().discover(
+            str(ROOT / "tests")).countTestCases()
+        documents = {name: (ROOT / name).read_text() for name in INVENTORY}
+        units = {
+            name: registered_units(name, text)
+            for name, text in documents.items()
+        }
+        for filename in INVENTORY:
+            with self.subTest(document=filename, claim="suite-count"):
+                self.assertEqual(
+                    suite_count(filename, units[filename]["suite-count"]),
+                    discovered,
+                    f"{filename}: documented suite count does not match "
+                    f"the {discovered} tests discovered by unittest")
+
+        config = json.loads((
+            ROOT / "skills" / "hanig-review-gate" / "reviewers.json"
+        ).read_text())
+        reviewers = config["reviewers"]
+        gate_profiles = set(config["_profiles"]) - {"committee"}
+        expected_profiles = {
+            profile: {
+                reviewer["name"] for reviewer in reviewers
+                if reviewer.get("enabled", True)
+                and profile in (reviewer.get("profiles") or [])
+            }
+            for profile in gate_profiles
+        }
+        readme_rows = table_rows(
+            "README.md", units["README.md"]["review-profiles"],
+            ["profile", "membership", "use"])
+        self.assertEqual(
+            roster_rows("README.md", readme_rows, expected_profiles, 1),
+            expected_profiles)
+
+        enabled_gate = {
+            reviewer["name"] for reviewer in reviewers
+            if reviewer.get("enabled", True)
+            and gate_profiles.intersection(reviewer.get("profiles") or [])
+        }
+        enabled_committee = {
+            reviewer["name"] for reviewer in reviewers
+            if reviewer.get("enabled", True)
+            and "committee" in (reviewer.get("profiles") or [])
+        }
+        memory_rows = table_rows(
+            "MEMORY.md", units["MEMORY.md"]["review-rosters"],
+            ["Piece", "File", "State"])
+        memory_rosters = roster_rows(
+            "MEMORY.md",
+            [row for row in memory_rows
+             if row[0] in {"Review gate", "Committee"}],
+            {"Review gate", "Committee"}, 2)
+        self.assertEqual(
+            memory_rosters,
+            {"Review gate": enabled_gate, "Committee": enabled_committee})
+
+        disabled = {
+            reviewer["name"] for reviewer in reviewers
+            if not reviewer.get("enabled", True)
+        }
+        self.assertEqual(
+            disabled_roster(
+                "CLAUDE.md", units["CLAUDE.md"]["disabled-reviewers"]),
+            disabled)
+
+        # The live document, never this source file, supplies every marker.
+        for filename, text in documents.items():
+            marker = f"<!-- docs-truth:{next(iter(INVENTORY[filename]))} -->"
+            with self.subTest(document=filename, mutation="missing marker"):
+                with self.assertRaisesRegex(AssertionError, filename):
+                    registered_units(filename, text.replace(marker, "", 1))
+            with self.subTest(document=filename, mutation="duplicate marker"):
+                duplicate = text.replace(marker, marker + "\n" + marker, 1)
+                with self.assertRaisesRegex(AssertionError, filename):
+                    registered_units(filename, duplicate)
+            with self.subTest(document=filename, mutation="CRLF and whitespace"):
+                variant = text.replace(marker, marker + " \t", 1)
+                self.assertEqual(
+                    set(registered_units(filename, variant.replace("\n", "\r\n"))),
+                    set(INVENTORY[filename]))
+
+        with self.subTest(mutation="unknown marker"):
+            variant = documents["README.md"] + "\n<!-- docs-truth:unknown -->\n"
+            with self.assertRaisesRegex(AssertionError, "README.md"):
+                registered_units("README.md", variant)
+        with self.subTest(mutation="same-line duplicate count"):
+            with self.assertRaisesRegex(AssertionError, "README.md"):
+                suite_count("README.md", ["1,568 tests and 1568 tests"])
+        with self.subTest(mutation="scalar owns table"):
+            marker = "<!-- docs-truth:suite-count -->"
+            variant, changed = re.subn(
+                re.escape(marker) + r"\n([^\n]+)",
+                marker + r"\n| \1 |", documents["README.md"], count=1)
+            self.assertEqual(changed, 1)
+            with self.assertRaisesRegex(AssertionError, "README.md"):
+                registered_units("README.md", variant)
+        with self.subTest(mutation="scalar owns unpiped table"):
+            marker = "<!-- docs-truth:suite-count -->"
+            variant, changed = re.subn(
+                re.escape(marker) + r"\n([^\n]+)",
+                marker + r"\n\1 | note", documents["README.md"], count=1)
+            self.assertEqual(changed, 1)
+            with self.assertRaisesRegex(AssertionError, "README.md"):
+                registered_units("README.md", variant)
+        with self.subTest(mutation="escaped table pipe"):
+            self.assertEqual(
+                markdown_cells(r"| key | prose with \| a pipe |"),
+                ["key", r"prose with \| a pipe"])
+        with self.subTest(mutation="multi-backtick table pipe"):
+            self.assertEqual(
+                markdown_cells("| key | ``prose | pipe`` |"),
+                ["key", "``prose | pipe``"])
+        with self.subTest(mutation="unpiped continuation row"):
+            marker = "<!-- docs-truth:review-profiles -->"
+            table_text = documents["README.md"].replace(
+                "\n\n**Two contrasting models", "\nrogue | members | prose\n\n"
+                "**Two contrasting models", 1)
+            self.assertIn(marker, table_text)
+            with self.assertRaisesRegex(AssertionError, "README.md"):
+                bad_units = registered_units("README.md", table_text)
+                table_rows(
+                    "README.md", bad_units["review-profiles"],
+                    ["profile", "membership", "use"])
+        with self.subTest(mutation="all reviewers enabled"):
+            self.assertEqual(
+                disabled_roster("CLAUDE.md", ["Disabled reviewers: none."]),
+                set())
+        with self.subTest(mutation="dotted reviewer"):
+            self.assertEqual(
+                roster("README.md", "plan", "a.and.b and `luna`"),
+                {"a.and.b", "luna"})
+
+
+if __name__ == "__main__":
+    unittest.main()
