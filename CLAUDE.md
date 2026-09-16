@@ -9,7 +9,7 @@ Private repository: it carries cluster hostnames, partitions, account names and 
 ## Commands
 
 ```sh
-python3 -m unittest discover -s tests            # full suite, ~8 min; 1567 tests on 2026-09-16
+python3 -m unittest discover -s tests            # full suite, ~8 min; 1572 tests on 2026-09-16
 python3 -m unittest tests.test_swarm             # one module
 python3 skills/hanig-swarm/scripts/swarm.py schema           # every unit field, before writing a plan
 python3 skills/hanig-review-gate/scripts/review.py --kind implementation --staged --round 1
@@ -23,7 +23,11 @@ Automatic install selection is dead on this host: `./install.sh --dry-run --json
 
 No linter, no formatter, no build. Standard library only, and three floors exist for three reasons: the import floor is 3.7 in `contract.py` and `handoff.py` and 3.8 in the swarm, review and installer code, while the host floor is 3.10, because andromeda and chimera both run 3.10.12. Test against 3.10, not the newest. A third-party import in a skill script or test is a defect.
 
-Two tests in `tests/test_dispatch_claims.py::TestUnknownIsNotFree` fail on a host with real Slurm on PATH, measured on chimera, because `fake_bin` at `tests/test_dispatch_claims.py:51` prepends to PATH instead of replacing it and the "squeue deliberately missing" cases reach `/usr/bin/squeue`. The module passes 33 tests under a PATH holding only symlinks to `sh bash git python3 dirname env cat ls rm mkdir`. That is a fixture defect to fix, not a baseline to accept, and neither assertion may be weakened to make it green. CI never sees it: the runners have no Slurm, and they run the suite under `env -i` with a disposable `HOME`, `XDG_CONFIG_HOME` and `TMPDIR`, so a test must supply its own home, config and executable fixtures instead of borrowing the host's.
+Scheduler-isolation fixtures replace PATH rather than prepending to it, so a
+tool deliberately absent from a fixture cannot leak in from a real Slurm
+installation on the host. `tests/test_stdlib_imports.py` parses every authored
+skill script and installer module and rejects imports outside the standard
+library or the scanned repo-local modules.
 
 ## Structure
 
