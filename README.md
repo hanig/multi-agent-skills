@@ -323,12 +323,13 @@ python3 scripts/review.py --list          # live provider probe
 
 Panels, from `reviewers.json`:
 
+<!-- docs-truth:review-profiles -->
 | profile | membership | use |
 |---|---|---|
-| `plan` | deepseek-v4-pro, luna | acceptance criteria and designs, before code exists |
-| `fast` | deepseek-v4-pro, luna | cheapest implementation panel, first tier of `--escalate` |
-| `standard` | fast + kimi-k2.7-code, kimi-k3, glm-5.3 | the usual implementation panel |
-| `deep` | everything, including sol at `xhigh` | reached only via `--escalate` |
+| `plan` | `luna`, `kimi-k2.7-code` | acceptance criteria and designs, before code exists |
+| `fast` | `luna`, `kimi-k2.7-code` | cheapest implementation panel, first tier of `--escalate` |
+| `standard` | `luna`, `kimi-k2.7-code`, `glm-5.3` | the usual implementation panel |
+| `deep` | `luna`, `kimi-k2.7-code`, `glm-5.3` | reached only via `--escalate`; disabled reviewers do not run |
 
 **Two contrasting models for a plan, never escalated.** A third adds agreement,
 not insight. That is measured, not assumed. `reviewers.json` carries routing
@@ -538,9 +539,10 @@ USAGE_ERROR 64
 ```
 
 `READY_FOR_PR` is a coordinator-level state for `code` units whose declared
-outputs exist but whose PR has not merged. No mechanism can leave that state
-today, so `status` explains it explicitly rather than letting a DAG stall
-silently.
+outputs exist but whose PR has not merged. `advance` reconsiders a unit already
+in that state, so a merge receipt recorded after production can move it to
+`DONE`; `tests/test_merge_closure.py::TestReadyForPRIsNotADeadEnd` pins that
+transition.
 
 Per-attempt files: `unit.json`, `events.jsonl`, `receipt.json`.
 
@@ -778,16 +780,17 @@ are in [docs/clusters.md](docs/clusters.md).
 python3 -m unittest discover -s tests
 ```
 
-621 tests, standard library only, no network and no cluster required. Green on
+<!-- docs-truth:suite-count -->
+1568 tests, standard library only, no network and no cluster required. Green on
 macOS 3.10.16 and on all three clusters (3.10.12, 3.12.3, 3.10.12).
 
 | file | lines | classes |
 |---|---|---|
 | `test_contract.py` | 2077 | 28 |
-| `test_outbox.py` | 2654 | 39 |
-| `test_review.py` | 1628 | 37 |
-| `test_project.py` | 1093 | 15 |
-| `test_swarm.py` | 854 | 8 |
+| `test_outbox.py` | 3062 | 41 |
+| `test_review.py` | 1635 | 37 |
+| `test_project.py` | 3658 | 24 |
+| `test_swarm.py` | 1107 | 9 |
 | `test_handoff.py` | 612 | 8 |
 
 Two failure modes this suite has actually suffered, both worth knowing:

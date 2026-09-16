@@ -4,12 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Private repository: it carries cluster hostnames, partitions, account names and measured host probes. Do not publish any of it.
 
-`MEMORY.md` is a dated snapshot, not live truth. It holds model routing and the reasoning behind the design, and both its counts and its "next" list have gone stale while the code moved: it lists C11, a worktree per code attempt, as owed, and `swarm.py`, `worktree.py` and `tests/test_attempt_worktrees.py` ship it. `docs/plan-field-reports.md` is the live plan. `README.md` is the CLI reference for every skill, with the same caveat on its numbers. Routing truth is the `enabled` flags in `skills/hanig-review-gate/reviewers.json` plus `models.json`, never a roster or count quoted in prose. Verify any owed item against the tree before acting on it.
+`MEMORY.md` is a dated snapshot, not live truth. It holds model routing and the reasoning behind the design; `docs/plan-field-reports.md` is the live plan, and `README.md` is the CLI reference for every skill. `tests/test_docs_truth.py` pins their suite counts and reviewer rosters to discovered tests and configuration. Routing truth is the `enabled` flags in `skills/hanig-review-gate/reviewers.json` plus `models.json`, never a roster or count quoted in prose. Verify any owed item against the tree before acting on it.
 
 ## Commands
 
+<!-- docs-truth:suite-count -->
+Full suite: 1568 tests on 2026-09-16.
+
 ```sh
-python3 -m unittest discover -s tests            # full suite, ~8 min; 1567 tests on 2026-09-16
+python3 -m unittest discover -s tests            # full suite, ~8 min
 python3 -m unittest tests.test_swarm             # one module
 python3 skills/hanig-swarm/scripts/swarm.py schema           # every unit field, before writing a plan
 python3 skills/hanig-review-gate/scripts/review.py --kind implementation --staged --round 1
@@ -63,7 +66,12 @@ Every authored skill locates its own programs through a variable, not the cwd: e
 
 ## Editing rules this repo paid for
 
-Do not report a change complete, or assert that code works, until `hanig-review-gate` has run and passed. Exit 2 (`REVIEW_UNAVAILABLE`) and 3 (`REVIEW_PARTIAL`) are not a pass; if the gate cannot run, the change is unreviewed and must be described that way. The provider keys are exported from `~/.zshrc`, which a non-interactive shell does not source, so invoke through `zsh -ic` or export them explicitly. Reproduce a finding before acting on it, and keep an author off the panel reviewing its own work. Note that `--escalate` currently buys nothing: `sol` and `kimi-k3` are disabled, so the `deep` panel's enabled membership equals `standard`'s.
+Do not report a change complete, or assert that code works, until `hanig-review-gate` has run and passed. Exit 2 (`REVIEW_UNAVAILABLE`) and 3 (`REVIEW_PARTIAL`) are not a pass; if the gate cannot run, the change is unreviewed and must be described that way. The provider keys are exported from `~/.zshrc`, which a non-interactive shell does not source, so invoke through `zsh -ic` or export them explicitly. Reproduce a finding before acting on it, and keep an author off the panel reviewing its own work.
+
+<!-- docs-truth:disabled-reviewers -->
+Disabled reviewers: `sol`, `kimi-k3`.
+
+Therefore `--escalate` currently buys nothing: the `deep` panel's enabled membership equals `standard`'s.
 
 Never edit a vendored skill document. A needed correction goes in `docs/upstream-*.md` plus a test that pins the behavior, the way the `bin/bus` patch is pinned; routing decisions go in `~/.paseo/orchestration-preferences.json` (example in `examples/`). `tests/test_skill_capabilities.py::test_vendored_sources_are_not_rewritten_on_this_branch` diffs `skills/` against `origin/main` and fails on any vendored path. Agreement with `origin/main` is not upstream provenance, only a guard against editing here.
 

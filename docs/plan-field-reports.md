@@ -15,7 +15,7 @@
 > plan (2026-08-30 committee, its own items 1-8, largely delivered); do not
 > read the two numbering schemes as one.
 
-Status verified against code on 2026-09-03, not against memory of the session.
+Status verified against code on 2026-09-16, not against memory of the session.
 
 ## Tracker
 
@@ -24,8 +24,8 @@ issue holds the state. Project: **Swarm skills: field-report hardening**
 (`linear.app/arc-projects/project/swarm-skills-field-report-hardening-4978bafcf9e3`),
 team Arc.
 
-Field-report items, and where each ended up. **Every one is now closed and on
-`dev`**, except the two that were never code:
+Field-report items, and where each ended up. The implementation items are
+closed; the two product/external items retain their explicit non-done states:
 
 | Item | Issue | Item | Issue |
 |---|---|---|---|
@@ -97,26 +97,28 @@ the receipt are now **audit-only**, and authority lives in coordinator state.
 See "The authority work" below. That section replaces the earlier sealing
 design, which a committee rejected and which is no longer what the code does.
 
-## Open, in the order to do them
+## Open, in tracker order
 
-> **Read the Tracker table above for what is still open.** C14, B4, B9, A8, A4
-> and E2 are DONE and live on `dev`; their sections are kept below because the
-> reasoning is why the fix looks the way it does, and deleting it would lose
-> the failure that paid for it. B1 and B6 are the two field-report items that
-> remain.
->
-> Shipped to `origin/main` at `d8591d4`: items 10 and 13, the authority work,
-> the model routing, E1, C11 and C12. Everything since is on `dev` and has not
-> been pushed.
->
-> On estimating: C11 took four review rounds and 26 findings; C12 took one
-> round and three, all three against "can an agent actually FOLLOW this",
-> which no test checks. The second wave cost less per item and found more --
-> nine issues that no field report contained, two of them (ARC-244, ARC-248)
-> more serious than most of the list they came from. Dispatching against a
-> written plan surfaces the plan's own blind spots.
+1. **ARC-246:** enforce `--mem` requirements and check the account against the
+   selected partition.
+2. **ARC-247:** enforce the documented `findings.json` artifact.
+3. **ARC-248:** finish the cross-node exclusion evidence; the current `flock`
+   claim remains limited to same-node trials.
 
-### C14. The receipt flags untracked files not in `produces`. DO FIRST.
+ARC-238 (wandb integration) is deferred pending a product decision. ARC-239
+(provider pinning in vendored Paseo skills) is blocked on an upstream-capable
+change. Those are non-done states, but neither is actionable in this codebase
+under the current constraints.
+
+## Completed field-report detail
+
+The sections below are retained because the reasoning explains the shipped
+shape. They are history, not an open queue. C11 took four review rounds and 26
+findings; C12 took one round and three, all three against whether an agent could
+actually follow the protocol. The second wave found nine issues absent from the
+field reports, including ARC-244 and ARC-248.
+
+### C14. The receipt flags untracked files not in `produces`.
 
 18 bytes of test debris (`phase0b/--reflink=auto`) appeared from a stubbed
 `cp` writing into the source directory, and nothing surfaced it. `repo_status`
@@ -127,11 +129,11 @@ outputs, and that list is visible in the report.
 
 ### B1. Snapshot external artifact paths BEFORE the unit runs.
 
-The strongest remaining correctness item. Post-hoc observation cannot tell an
-input from an output: a unit that passed its input path to the receipt with no
-`--out` would have recorded a file it never wrote as produced evidence and
-read DONE. A pre-dispatch digest of every declared external path, required to
-differ at completion, catches it.
+This was the strongest remaining correctness item. Post-hoc observation cannot
+tell an input from an output: a unit that passed its input path to the receipt
+with no `--out` would have recorded a file it never wrote as produced evidence
+and read DONE. A pre-dispatch digest of every declared external path, required
+to differ at completion, catches it.
 
 Interim named by the reporter: refuse any artifact whose mtime predates the
 attempt directory's creation.
