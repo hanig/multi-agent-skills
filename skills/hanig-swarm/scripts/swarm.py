@@ -4241,7 +4241,7 @@ def load_verifications(state_dir):
 
 
 def admit_verification(state_dir, unit, claim, produced, policy_digest,
-                       policy):
+                       policy, repo=None, base_commit=None):
     """(receipt, refusal) for one required claim.
 
     Four bindings, and all of them must hold. Any one missing turns the
@@ -4269,6 +4269,7 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
                       f"it:\n  swarm.py verify --unit {unit} --claim {claim} "
                       f"--verifier NAME --path PATH")
     stale, wrong_policy, failed, unauthorized = [], [], [], []
+    corpus_refusals = []
     for r in mine:
         if str(r.get("subject_head")) != str(produced):
             stale.append(str(r.get("subject_head"))[:12])
@@ -4289,6 +4290,21 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
         if refusal:
             unauthorized.append(refusal)
             continue
+        evidence, refusal = V.corpus_evidence(
+            U.run, repo, base_commit, produced, entry)
+        if refusal:
+            corpus_refusals.append(refusal)
+            continue
+        refusal = V.corpus_change_refusal(entry, evidence, claim)
+        if refusal:
+            corpus_refusals.append(refusal)
+            continue
+        if evidence and any(r.get(field) != value
+                            for field, value in evidence.items()):
+            corpus_refusals.append(
+                f"receipt corpus evidence does not match the anchored base "
+                f"and produced commit for claim {claim!r}")
+            continue
         return r, None
     if failed:
         return None, (f"the verifier ran against the produced commit and "
@@ -4299,6 +4315,8 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
         return None, (f"a verification receipt for {unit!r} is bound to the "
                       f"right head and policy, but the verifier it names is "
                       f"not authorized by that policy: {unauthorized[0]}")
+    if corpus_refusals:
+        return None, corpus_refusals[0]
     if wrong_policy:
         return None, (f"verification for {unit!r} ran under policy "
                       f"{', '.join(sorted(set(wrong_policy)))}, but this "
@@ -5584,7 +5602,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                     break
                 _vr, vrefusal = admit_verification(
                     state_dir, uid, claim, produced, policy_digest,
-                    policy=_pol)
+                    policy=_pol, repo=(launch_facts or {}).get("repo"),
+                    base_commit=base)
                 if vrefusal:
                     break
 
@@ -6692,6 +6711,16 @@ def cmd_verify(args):
         sys.stderr.write(f"error: {refusal}\n")
         return EXIT_USAGE
 
+    corpus_evidence, refusal = V.corpus_evidence(
+        U.run, repo, base, produced, entry)
+    if refusal:
+        sys.stderr.write(f"error: {refusal}\n")
+        return EXIT_USAGE
+    refusal = V.corpus_change_refusal(entry, corpus_evidence, args.claim)
+    if refusal:
+        sys.stderr.write(f"error: {refusal}\n")
+        return EXIT_FAILED_UNIT
+
     outcome, rerr = V.run_in_checkout(U.run, repo, produced, args.path,
                                       digest, args=args.arg,
                                       timeout=args.timeout)
@@ -6707,6 +6736,7 @@ def cmd_verify(args):
            "stdout_tail": outcome["stdout"], "stderr_tail": outcome["stderr"],
            "by": os.environ.get("USER") or "?",
            "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "schema_version": 1}
+    rec.update(corpus_evidence)
     bad = _verify_shape_problem(rec)
     if bad:
         sys.stderr.write(f"error: this would not be admissible: {bad}\n")
