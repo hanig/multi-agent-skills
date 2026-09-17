@@ -33,6 +33,7 @@ Python 3.8+, standard library only.
 
 import argparse
 import concurrent.futures
+import hashlib
 import json
 import os
 import re
@@ -55,6 +56,9 @@ DEFAULT_PROFILE = "standard"
 # produced rounds 3, 4 and 5 each finding a defect in the previous round's fix.
 # That is the signal to step back to root cause, not to review again.
 MAX_ROUNDS = 3
+
+HONEST_RUN_CLAIM = "This change cannot make an honest run fail."
+DISPOSITIONS = {"reproduced", "not-reproduced", "deferred"}
 
 # Keep payloads bounded; an oversized diff silently truncated is a lie about
 # what was reviewed, so truncation is always reported in the output.
@@ -659,13 +663,113 @@ def gather(args):
     return body, (label or "nothing")
 
 
-def build_prompt(body, claims, truncated, context, threat_model=None):
+def finding_digest(location, summary):
+    """Stable key for a prior finding's human-visible identity."""
+    identity = json.dumps([location, summary], ensure_ascii=False,
+                          separators=(",", ":"))
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def reject_duplicate_keys(pairs):
+    """JSON object hook that refuses data lost by duplicate-key overwrite."""
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError(f"duplicate object key {key!r}")
+        obj[key] = value
+    return obj
+
+
+def load_dispositions(path):
+    """Read and validate a digest-keyed prior-finding disposition map."""
+    p = Path(path)
+    if not p.exists():
+        config_error(f"no dispositions file at {path}. Pass an existing JSON "
+                     f"file to --dispositions.")
+    raw, err = read_text_bounded(p)
+    if err:
+        config_error(f"cannot read dispositions file {path}: {err}. Pass a "
+                     f"readable regular JSON file to --dispositions.")
+    try:
+        data = json.loads(raw, object_pairs_hook=reject_duplicate_keys)
+    except (json.JSONDecodeError, ValueError) as e:
+        config_error(f"invalid JSON in dispositions file {path}: {e}. Pass a "
+                     f"JSON object keyed by finding digest.")
+    if not isinstance(data, dict):
+        config_error("--dispositions must contain a JSON object keyed by "
+                     "finding digest. Pass an object, not a list or scalar.")
+
+    entries = []
+    for digest, entry in data.items():
+        if not isinstance(digest, str) or not isinstance(entry, dict):
+            config_error("each --dispositions key must be a digest and each "
+                         "value must be an object. Pass digest: {...} entries.")
+        location = entry.get("location")
+        summary = entry.get("summary")
+        disposition = entry.get("disposition")
+        reason = entry.get("reason")
+        if not isinstance(location, str) or not location.strip():
+            config_error(f"disposition {digest!r} needs a non-empty location. "
+                         f"Pass the prior finding's file:line location.")
+        if not isinstance(summary, str) or not summary.strip():
+            config_error(f"disposition {digest!r} needs a non-empty summary. "
+                         f"Pass the prior confirmed finding's summary.")
+        try:
+            expected = finding_digest(location, summary)
+        except UnicodeEncodeError:
+            config_error(
+                f"disposition {digest!r} has a location or summary that is "
+                f"not valid UTF-8 text. Pass text without lone surrogates.")
+        if digest != expected:
+            config_error(
+                f"disposition key {digest!r} does not match the SHA-256 digest "
+                f"of its location and summary (expected {expected}). Recompute "
+                f"the key with finding_digest(location, summary), then Pass "
+                f"that digest as the map key.")
+        if not isinstance(disposition, str) or disposition not in DISPOSITIONS:
+            config_error(
+                f"disposition {digest} must be reproduced, not-reproduced, or "
+                f"deferred, got {disposition!r}. Pass one of those values.")
+        if (not isinstance(reason, str) or not reason.strip()
+                or reason.splitlines() != [reason]):
+            config_error(f"disposition {digest} needs a non-empty one-line "
+                         f"reason. Pass the reason without a line break.")
+        try:
+            reason.encode("utf-8")
+        except UnicodeEncodeError:
+            config_error(f"disposition {digest!r} has a reason that is not "
+                         f"valid UTF-8 text. Pass text without lone surrogates.")
+        entries.append(entry)
+    return entries
+
+
+def has_honest_run_claim(claims):
+    """The required assertion may vary only in case and a terminal period."""
+    allowed = {HONEST_RUN_CLAIM.casefold(),
+               HONEST_RUN_CLAIM.rstrip(".").casefold()}
+    return any(isinstance(claim, str)
+               and claim.strip().casefold() in allowed
+               for claim in claims)
+
+
+def build_prompt(body, claims, truncated, context, threat_model=None,
+                 dispositions=None):
     out = []
     if context:
         out.append(f"CONTEXT\n{context}\n")
     if threat_model:
         out.append(f"THREAT MODEL — what this code does and does not defend "
                    f"against:\n{threat_model}\n")
+    disputed = [entry for entry in (dispositions or [])
+                if entry["disposition"] == "not-reproduced"]
+    if disputed:
+        out.append("PRIOR CONFIRMED FINDINGS REPORTED AS NOT REPRODUCED — "
+                   "re-evaluate these disagreements; do not silently filter "
+                   "them:")
+        for entry in disputed:
+            out.append(f"  - {entry['location']}: {entry['summary']}")
+            out.append(f"    reason: {entry['reason']}")
+        out.append("")
     if claims:
         out.append("CLAIMS ASSERTED ABOUT THIS WORK — assess each one:")
         for c in claims:
@@ -1137,6 +1241,10 @@ def main():
                     help="which round this is for the change under review. "
                          "Past MAX_ROUNDS the gate refuses: more rounds on one "
                          "change means the framing is wrong, not the code.")
+    ap.add_argument("--dispositions", metavar="FILE",
+                    help="round 2 and later: digest-keyed JSON mapping every "
+                         "prior confirmed finding to reproduced, "
+                         "not-reproduced, or deferred with a one-line reason")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--list", action="store_true", help="show reviewers and availability")
     args = ap.parse_args()
@@ -1168,6 +1276,19 @@ def main():
             f"--kind implementation requires --round N (1..{MAX_ROUNDS}), so "
             f"the bound on rounds per change can be applied. Pass --round 1 if "
             f"this is the first round for this change.")
+    if (args.kind == "implementation" and not args.list
+            and not has_honest_run_claim(args.claim)):
+        config_error(
+            f"every implementation review must assert the required "
+            f"counter-claim: {HONEST_RUN_CLAIM!r} Pass it with --claim so the "
+            f"gate checks that honest work still succeeds.")
+    if (args.kind == "implementation" and args.round is not None
+            and args.round >= 2 and not args.list and not args.dispositions):
+        config_error(
+            "implementation round 2 and later requires --dispositions FILE "
+            "mapping every prior confirmed finding to reproduced, "
+            "not-reproduced, or deferred with a one-line reason. Pass the "
+            "digest-keyed JSON file from the prior round.")
     if args.kind == "plan":
         if args.escalate:
             config_error("--plan and --escalate are contradictory: a plan "
@@ -1261,6 +1382,9 @@ def main():
     if not (args.diff or args.staged or args.range or args.file):
         args.diff = True  # reviewing the current change is the common case
 
+    dispositions = (load_dispositions(args.dispositions)
+                    if args.dispositions else [])
+
     body, label = gather(args)
     if not body.strip():
         print(f"nothing to review ({label} is empty)")
@@ -1269,7 +1393,7 @@ def main():
     if truncated:
         body = body[:MAX_CHARS]
     prompt = build_prompt(body, args.claim, truncated, args.context,
-                          args.threat_model)
+                          args.threat_model, dispositions)
 
     runnable, unavailable = [], []
     for rev in reviewers:

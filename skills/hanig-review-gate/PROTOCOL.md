@@ -51,6 +51,9 @@ of the actual one is what made the first version bypassable):
 | a review declares its kind | it cannot; `--kind` is required |
 | an implementation review declares its round | it cannot; `--round` is required with `--kind implementation` |
 | at most 3 rounds per change | claiming `--round 1` forever. Not detectable without a change identity the tool does not have. |
+| an implementation review asserts the honest-run counter-claim | it cannot; every implementation invocation must include `--claim "This change cannot make an honest run fail."` |
+| round 2+ dispositions every prior confirmed finding | completeness rests on the supplied map, but `--dispositions FILE` is mandatory, every entry is digest-bound to its location and summary, and every disposition needs a one-line reason |
+| a not-reproduced finding reaches the next panel | it cannot; its summary is injected verbatim into the next round's prompt |
 | a plan panel is exactly two | it cannot; size is checked after selection |
 | the two are on different providers | it cannot; providers are compared after selection |
 | a plan review is never escalated | it cannot |
@@ -77,11 +80,11 @@ of the actual one is what made the first version bypassable):
   cannot see that a finding is about the previous fix.
 - **Excluding a design's author from the panel judging it.** The tool does not
   know who wrote the thing under review.
-- **Declaring acceptance criteria before implementing**, and **asserting the
-  counter-claim**. Both are properties of the claims passed in, not of the
-  invocation.
+- **Declaring acceptance criteria before implementing.** The tool does not
+  carry a receipt proving that the criteria predate the implementation.
 
-Four of those five are judgement. The first is a gap with a known fix.
+The remaining items require judgment or state that this invocation does not
+possess. The round identity is a gap with a deliberately rejected fix.
 
 ## Review against declared criteria, never against perfection
 
@@ -97,6 +100,11 @@ fail."** Without it each round tightens the screws with no counter-pressure.
 The first round that asserted it caught a real regression that two reviewers
 found independently: a stricter key check that refused honest criteria carrying
 a harmless annotation.
+
+`review.py` enforces the canonical assertion **"This change cannot make an
+honest run fail."** for every implementation review. Case and terminal
+period may vary; omitting the assertion is `REVIEW_ERROR` before any reviewer
+runs.
 
 ## Bound it to three rounds per change
 
@@ -133,6 +141,28 @@ not thinner comments.
 
 Cost of not verifying: seven fixes to code that was already correct, each one a
 new chance to break something that worked.
+
+For round 2 and later, `--dispositions FILE` is mandatory. The file is a JSON
+object mapping each prior confirmed finding's digest to its disposition:
+
+```json
+{
+  "SHA256": {
+    "location": "path/to/file.py:123",
+    "summary": "the prior finding text",
+    "disposition": "reproduced",
+    "reason": "one line explaining the reproduction result"
+  }
+}
+```
+
+The key is the lowercase SHA-256 hex digest of the UTF-8 JSON encoding of
+`[location, summary]`, with `ensure_ascii=False` and separators `(",", ":")`.
+The disposition is exactly `reproduced`, `not-reproduced`, or `deferred`, and
+the reason must be one non-empty line. Every `not-reproduced` summary is copied
+verbatim into the next round's prompt so disagreement cannot be silently
+filtered. The invocation cannot independently know whether the map omitted a
+prior finding; completeness of the supplied map remains caller-attested.
 
 ## Convergence
 
