@@ -6,8 +6,8 @@ the change is any good, and `PRODUCTION_DENIES` spells that out. A verifier is
 what can say more: tests pass, a schema validates, a benchmark did not
 regress.
 
-Three properties make a verifier's word admissible, and all three must hold or
-none of it means anything:
+Four properties make a verifier's word admissible when its policy declares a
+corpus. The existing three still apply unchanged when it does not:
 
   AUTHORIZED   the policy naming it is read from the ANCHORED BASE COMMIT, not
                from the agent's branch. An agent that can add a verifier to
@@ -16,6 +16,9 @@ none of it means anything:
                bytes that run are the bytes that hashed. A path is not an
                identity: the file at that path can change between the check
                and the run.
+  CORPUS       every declared verdict input is unchanged from the anchored
+               base. Running pinned verifier bytes against candidate-edited
+               tests only pins the program that consumed the wrong tests.
   BOUND        the receipt names the production receipt and head it verified.
                A pass for some other commit is not a pass for this one.
 
@@ -35,9 +38,13 @@ Python 3.8+, standard library only.
 import hashlib
 import json
 import os
+import posixpath
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
+
+import child_environment as CE
 
 POLICY_FILE = "verifiers.json"
 
@@ -47,6 +54,9 @@ POLICY_SCHEMA = 1
 
 MAX_POLICY_BYTES = 1_000_000
 MAX_VERIFIER_BYTES = 5_000_000
+MAX_CORPUS_PATHS = 10_000
+MAX_CORPUS_FILE_BYTES = 256_000_000
+MAX_CORPUS_TOTAL_BYTES = 1_000_000_000
 
 
 def _git(runner, repo, *args, timeout=60):
@@ -149,6 +159,203 @@ def authorized(policy, name, digest, claim):
         f"verifier {name!r} hashes to {str(digest)[:12]}, and the policy "
         f"authorizes {known}. The file at that path is not the file that was "
         f"approved.")
+
+
+def declared_corpus(entry):
+    """(paths, refusal) for one authorized verifier entry.
+
+    Corpus entries are exact repository-relative file names, not pathspecs.
+    Refusing non-canonical spellings makes the policy, diff, and receipt use
+    one identity for each file instead of comparing aliases such as a/../b.
+    """
+    raw = entry.get("corpus")
+    if raw is None:
+        return [], None
+    if not isinstance(raw, list):
+        return None, (f"verifier {entry.get('name')!r} declares corpus="
+                      f"{raw!r}, which is not a list")
+    if len(raw) > MAX_CORPUS_PATHS:
+        return None, (f"verifier {entry.get('name')!r} declares "
+                      f"{len(raw)} corpus paths, over the "
+                      f"{MAX_CORPUS_PATHS} limit")
+    paths = []
+    for index, value in enumerate(raw):
+        if not isinstance(value, str) or not value:
+            return None, (f"verifier {entry.get('name')!r} corpus[{index}]="
+                          f"{value!r}; each corpus path must be a non-empty "
+                          f"string")
+        if "\x00" in value or value.startswith("/") or value != value.strip():
+            return None, (f"verifier {entry.get('name')!r} corpus path "
+                          f"{value!r} is not a repository-relative path")
+        normal = posixpath.normpath(value)
+        if normal != value or normal in (".", "..") \
+                or normal.startswith("../"):
+            return None, (f"verifier {entry.get('name')!r} corpus path "
+                          f"{value!r} is not canonical and repository-relative")
+        if value in paths:
+            return None, (f"verifier {entry.get('name')!r} declares corpus "
+                          f"path {value!r} more than once")
+        paths.append(value)
+    return paths, None
+
+
+def _digest_base_blob(repo, base_commit, path):
+    """(sha256, size, error) for exact blob bytes at the anchored base.
+
+    A blob is not necessarily a regular file: a symlink is a blob containing
+    its target spelling.  The verifier checkout would follow that link and
+    read different bytes, so admissibility starts with the anchored tree entry
+    mode rather than `cat-file`'s object type alone.
+
+    The normal coordinator runner returns decoded, stripped text, which is
+    intentionally convenient for commands but cannot hash a blob: leading or
+    trailing whitespace and non-UTF-8 bytes are content. `cat-file` therefore
+    writes its raw stdout to a temporary file under the same scrubbed child
+    environment, and Python hashes those bytes.
+    """
+    spec = f"{base_commit}:{path}"
+    argv = ["git", "-C", str(repo), "--no-replace-objects", "cat-file"]
+    try:
+        entry = subprocess.run(
+            ["git", "-C", str(repo), "--no-replace-objects", "ls-tree",
+             "-z", "--full-tree", str(base_commit), "--",
+             f":(literal){path}"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, env=CE.child_env(), close_fds=True,
+            timeout=60, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, None, f"cannot inspect corpus path {path!r}: {exc}"
+    if entry.returncode != 0:
+        detail = entry.stderr.decode("utf-8", "replace").strip()[:160]
+        return None, None, (f"cannot inspect corpus path {path!r} at the "
+                            f"anchored base: {detail}")
+    records = [record for record in entry.stdout.split(b"\0") if record]
+    exact = []
+    for record in records:
+        try:
+            metadata, found_path = record.split(b"\t", 1)
+            mode, kind, _object_id = metadata.split(b" ", 2)
+        except ValueError:
+            return None, None, (f"cannot parse the anchored tree entry for "
+                                f"corpus path {path!r}")
+        if found_path == os.fsencode(path):
+            exact.append((mode.decode("ascii", "replace"),
+                          kind.decode("ascii", "replace")))
+    if len(exact) != 1:
+        return None, None, (f"declared corpus path {path!r} has no exact tree "
+                            f"entry at anchored base "
+                            f"{str(base_commit)[:12]}")
+    mode, tree_kind = exact[0]
+    if mode not in ("100644", "100755"):
+        return None, None, (f"declared corpus path {path!r} has mode {mode} "
+                            f"at anchored base {str(base_commit)[:12]}; only "
+                            f"regular files (100644 or 100755) are admissible")
+    if tree_kind != "blob":
+        return None, None, (f"declared corpus path {path!r} has mode {mode} "
+                            f"but object type {tree_kind!r} at the anchored "
+                            f"base")
+    try:
+        kind = subprocess.run(
+            argv + ["-t", spec], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=CE.child_env(), close_fds=True, encoding="utf-8",
+            errors="replace", timeout=60, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, None, f"cannot inspect corpus path {path!r}: {exc}"
+    if kind.returncode != 0 or kind.stdout.strip() != "blob":
+        detail = kind.stderr.strip()[:160]
+        return None, None, (f"declared corpus path {path!r} is not a file at "
+                            f"anchored base {str(base_commit)[:12]}"
+                            f"{': ' + detail if detail else ''}")
+    try:
+        size_run = subprocess.run(
+            argv + ["-s", spec], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=CE.child_env(), close_fds=True, encoding="utf-8",
+            errors="replace", timeout=60, check=False)
+        size = int(size_run.stdout.strip()) if size_run.returncode == 0 else -1
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        return None, None, f"cannot size corpus path {path!r}: {exc}"
+    if size < 0:
+        return None, None, f"cannot size corpus path {path!r} at the base"
+    if size > MAX_CORPUS_FILE_BYTES:
+        return None, None, (f"corpus path {path!r} is {size} bytes at the "
+                            f"base, over the {MAX_CORPUS_FILE_BYTES} limit")
+    try:
+        with tempfile.TemporaryFile() as raw:
+            read = subprocess.run(
+                argv + ["blob", spec], stdin=subprocess.DEVNULL, stdout=raw,
+                stderr=subprocess.PIPE, env=CE.child_env(), close_fds=True,
+                timeout=60, check=False)
+            if read.returncode != 0:
+                detail = read.stderr.decode("utf-8", "replace").strip()[:160]
+                return None, None, (f"cannot read corpus path {path!r} at "
+                                    f"the base: {detail}")
+            raw.seek(0)
+            hashed, seen = hashlib.sha256(), 0
+            while True:
+                chunk = raw.read(1024 * 1024)
+                if not chunk:
+                    break
+                hashed.update(chunk)
+                seen += len(chunk)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, None, f"cannot read corpus path {path!r}: {exc}"
+    if seen != size:
+        return None, None, (f"corpus path {path!r} yielded {seen} bytes, but "
+                            f"Git reported {size}")
+    return hashed.hexdigest(), size, None
+
+
+def corpus_evidence(runner, repo, base_commit, subject_commit, entry):
+    """(receipt fields, error) binding a subject to its declared corpus.
+
+    An empty or absent corpus deliberately returns an empty mapping before it
+    asks Git anything. Updating a legacy receipt with that mapping is a no-op,
+    which keeps both its behavior and serialized bytes unchanged.
+    """
+    corpus, refusal = declared_corpus(entry)
+    if refusal:
+        return None, refusal
+    if not corpus:
+        return {}, None
+    if not repo or not base_commit or not subject_commit:
+        return None, ("a declared verifier corpus needs repository, anchored "
+                      "base, and subject commit identities")
+    rc, out, err = _git(
+        runner, repo, "--no-replace-objects", "diff", "--name-only", "-z",
+        "--no-renames", "--no-ext-diff", str(base_commit),
+        str(subject_commit), "--")
+    if rc != 0:
+        return None, (f"cannot compare subject {str(subject_commit)[:12]} to "
+                      f"anchored base {str(base_commit)[:12]}: {err[:200]}")
+    changed = sorted(p for p in out.split("\x00") if p)
+    digests, total = {}, 0
+    for path in corpus:
+        digest, size, derr = _digest_base_blob(repo, base_commit, path)
+        if derr:
+            return None, derr
+        total += size
+        if total > MAX_CORPUS_TOTAL_BYTES:
+            return None, (f"declared corpus exceeds the "
+                          f"{MAX_CORPUS_TOTAL_BYTES}-byte total limit")
+        digests[path] = digest
+    return {"subject_changed_paths": changed,
+            "corpus_base_sha256": digests}, None
+
+
+def corpus_change_refusal(entry, evidence, claim):
+    """Why this evidence cannot support `claim`, or None."""
+    corpus, refusal = declared_corpus(entry)
+    if refusal:
+        return refusal
+    changed = set((evidence or {}).get("subject_changed_paths") or [])
+    touched = sorted(changed.intersection(corpus))
+    if not touched:
+        return None
+    return (f"subject commit changed declared corpus path {touched[0]!r}; "
+            f"refusing the receipt that would have established claim "
+            f"{claim!r} from candidate-controlled verifier inputs")
 
 
 def run_in_checkout(runner, repo, commit, path, expect_digest, args=None,
