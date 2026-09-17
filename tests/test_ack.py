@@ -617,5 +617,61 @@ class TestHealingHappensUnderTheLock(unittest.TestCase):
             self.assertEqual(sorted(r["key"] for r in recs), ["k1", "k3"])
             self.assertEqual(problems, [])
 
+
+class TestDoneCodeDrain(unittest.TestCase):
+    def _receipt(self):
+        return {
+            "unit": "u", "repo": "git@github.com:hanig/private.git",
+            "pr": "https://github.com/hanig/private/pull/1",
+            "target": "main", "head": "a" * 40,
+            "merged_as": "b" * 40, "method": "merge",
+            "merged": True, "attested": True,
+        }
+
+    def test_done_code_emits_close_with_its_bound_merge_receipt(self):
+        with tempfile.TemporaryDirectory() as d:
+            receipt = self._receipt()
+            us = {
+                "attempt_dir": "/runs/u/attempt-1",
+                "attempt_produced_heads": {"attempt-1": receipt["head"]},
+                "merged_as": receipt["merged_as"],
+                "merge_pr": receipt["pr"], "merge_receipt": receipt,
+            }
+            S.emit_intent(d, "p", "u", "DONE", us,
+                          evidence={"receipt": receipt}, kind="code")
+            intent = S.read_outbox(d)[0]
+            self.assertEqual(intent["verb"], "close")
+            self.assertEqual(intent["closing_evidence"], "merged_pr")
+            self.assertEqual(intent["evidence"]["receipt"], receipt)
+
+    def test_code_close_without_bound_merge_evidence_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            S.emit_intent(d, "p", "u", "DONE",
+                          {"attempt_dir": "/runs/u/attempt-1"},
+                          evidence=None, kind="code")
+            intents = S.read_outbox(d)
+            self.assertFalse(any(i["verb"] == "close" for i in intents))
+            self.assertEqual(intents[0]["verb"], "open_pr")
+
+    def test_old_open_pr_key_does_not_suppress_the_bound_close(self):
+        with tempfile.TemporaryDirectory() as d:
+            attempt = "/runs/u/attempt-1"
+            S.emit_intent(d, "p", "u", "DONE",
+                          {"attempt_dir": attempt}, evidence=None,
+                          kind="code")
+            receipt = self._receipt()
+            us = {
+                "attempt_dir": attempt,
+                "attempt_produced_heads": {"attempt-1": receipt["head"]},
+                "merged_as": receipt["merged_as"],
+                "merge_pr": receipt["pr"], "merge_receipt": receipt,
+            }
+            S.emit_intent(d, "p", "u", "DONE", us,
+                          evidence={"receipt": receipt}, kind="code")
+            intents = S.read_outbox(d)
+            self.assertEqual([i["verb"] for i in intents],
+                             ["open_pr", "close"])
+            self.assertNotEqual(intents[0]["key"], intents[1]["key"])
+
 if __name__ == "__main__":
     unittest.main()

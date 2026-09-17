@@ -3661,6 +3661,35 @@ def outbox_key(project, uid, state, attempt_dir):
     return hashlib.sha256(basis.encode()).hexdigest()[:16]
 
 
+def _has_bound_merge_evidence(uid, us, evidence):
+    """Does *evidence* carry the merge already admitted for this attempt?"""
+    receipt = evidence.get("receipt") if isinstance(evidence, dict) else None
+    if not isinstance(receipt, dict) or us.get("merge_receipt") != receipt:
+        return False
+    attempt = Path(us.get("attempt_dir") or "").name
+    produced = (us.get("attempt_produced_heads") or {}).get(attempt)
+    return (bool(produced)
+            and receipt.get("unit") == uid
+            and receipt.get("head") == produced
+            and receipt.get("merged_as") == us.get("merged_as")
+            and receipt.get("pr") == us.get("merge_pr")
+            and receipt.get("merged") is True
+            and receipt.get("attested") is True
+            and _merge_shape_problem(receipt) is None)
+
+
+def _intent_key(project, uid, unit_state, us, verb, kind, evidence):
+    key = outbox_key(project, uid, unit_state, us.get("attempt_dir"))
+    if verb == "close" and closing_evidence_for(kind) == "merged_pr":
+        # Before merge-aware closure, a DONE code unit emitted open_pr under
+        # the base key. Include the admitted receipt only for merge closes so
+        # that stale entry cannot suppress the correction; compute keys retain
+        # their existing idempotency contract.
+        canonical = json.dumps(evidence, sort_keys=True, separators=(",", ":"))
+        key += "-" + hashlib.sha256(canonical.encode()).hexdigest()[:8]
+    return key
+
+
 def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
                 kind=None):
     """Append one tracker intent. Returns the key, or None if already emitted.
@@ -3672,15 +3701,18 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
         return None
     verb, why = action
 
-    # BELT AND BRACES. The state machine now yields READY_FOR_PR for a code
-    # unit rather than DONE, so this should be unreachable; it stays because
-    # a close intent for a kind that cannot be closed by a receipt must never
-    # exist, however it was reached.
-    if verb == "close" and closing_evidence_for(kind) != "predicate_receipt":
+    # A code predicate reaches READY_FOR_PR, but an admitted merge advances it
+    # to DONE. Only the exact merge receipt persisted by that admission may
+    # cross this last boundary into a close intent. Keeping the fallback is
+    # still belt-and-braces for malformed or legacy DONE state: it may request
+    # PR work, but it cannot manufacture a close without merge evidence.
+    if (verb == "close" and closing_evidence_for(kind) == "merged_pr"
+            and not _has_bound_merge_evidence(uid, us, evidence)):
         verb = "open_pr"
         why = ("the agent finished and its declared outputs exist, which "
                "makes this READY FOR A PR. It is not done: a code unit is "
-               "closed by a merged pull request, and no merge has been seen.")
+               "closed by a bound merged-pull-request receipt, and none is "
+               "available.")
     if verb == "close" and not evidence:
         # Three reviewers found this: the caller built evidence as
         # `{"receipt": rp} if rp else None`, so an NFS blip on the read
@@ -3694,7 +3726,7 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
               f"a self-report. It will be retried on the next advance.",
               file=sys.stderr)
         return None
-    key = outbox_key(project, uid, unit_state, us.get("attempt_dir"))
+    key = _intent_key(project, uid, unit_state, us, verb, kind, evidence)
     path = Path(state_dir) / OUTBOX
     try:
         if path.is_file():
@@ -5597,6 +5629,10 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 us["state"] = "DONE"
                 us["merged_as"] = receipt.get("merged_as")
                 us["merge_pr"] = receipt.get("pr")
+                # Persist the exact admitted receipt. The outbox is emitted
+                # after state is saved and must not re-infer closure from the
+                # predicate receipt, which establishes only READY_FOR_PR.
+                us["merge_receipt"] = dict(receipt)
                 report.append(
                     f"{uid}: DONE on a merged PR ({receipt.get('pr')}, "
                     f"{receipt.get('method')} as "
@@ -5941,22 +5977,53 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         if not now:
             continue
         evidence = None
+        kind = (units.get(uid) or {}).get("kind")
         if now == "DONE" and us.get("attempt_dir"):
             # The verdict itself, so a drain never closes on a self-report.
             # Attested, or it is a self-report by the other party: an
             # unattested receipt shipped into the tracker as "evidence" is
             # exactly the word this field exists to earn.
-            rp, _why = attested_receipt(state, uid, us["attempt_dir"])
+            if closing_evidence_for(kind) == "merged_pr":
+                rp = us.get("merge_receipt")
+                # Repair persisted state written by the old coordinator,
+                # which recorded the merge commit and PR but discarded the
+                # admitted receipt before the outbox could carry it.
+                if not _has_bound_merge_evidence(
+                        uid, us, {"receipt": rp} if rp else None) and not dry_run:
+                    produced = trusted_produced_head(
+                        state, uid, us["attempt_dir"])
+                    facts = trusted_launch_facts(
+                        state, uid, us["attempt_dir"])
+                    try:
+                        recovered, _why = admit_merge(
+                            state_dir, uid, produced,
+                            expect_repo=(facts or {}).get(
+                                "repository_remote"))
+                    except OutboxError:
+                        recovered = None
+                    if (recovered
+                            and recovered.get("merged_as") == us.get(
+                                "merged_as")
+                            and recovered.get("pr") == us.get("merge_pr")):
+                        us["merge_receipt"] = dict(recovered)
+                        save_state(state_dir, state)
+                        rp = recovered
+            else:
+                rp, _why = attested_receipt(
+                    state, uid, us["attempt_dir"])
             evidence = {"receipt": rp} if rp else None
-        kind = (units.get(uid) or {}).get("kind")
         if dry_run:
             action = TRACKER_EVENTS.get(now)
-            key = outbox_key(project, uid, now, us.get("attempt_dir"))
-            if action and key not in existing_outbox_keys:
+            if action:
                 verb = action[0]
                 if (verb == "close"
-                        and closing_evidence_for(kind) != "predicate_receipt"):
+                        and closing_evidence_for(kind) == "merged_pr"
+                        and not _has_bound_merge_evidence(
+                            uid, us, evidence)):
                     verb = "open_pr"
+                key = _intent_key(
+                    project, uid, now, us, verb, kind, evidence)
+            if action and key not in existing_outbox_keys:
                 if verb == "close" and not evidence:
                     report.append(
                         f"{uid}: DRY RUN -- would retry outbox emission for "

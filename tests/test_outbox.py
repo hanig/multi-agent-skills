@@ -559,6 +559,29 @@ class TestTheCodePredicate(unittest.TestCase):
             rc, out = self._check(d, env, basis)
             self.assertEqual(rc, 0, out)
 
+    def test_closed_with_every_output_is_done(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            env = self._env(t, {"Status": "closed",
+                                "PendingPermissions": []})
+            d = self._attempt(t)
+            basis = S._capture_artifact_basis(
+                {}, "u", str(d), {"outputs": ["o.txt"]})
+            (d / "o.txt").write_text("real\n")
+            rc, out = self._check(d, env, basis)
+            self.assertEqual(rc, 0, out)
+
+    def test_an_unknown_lifecycle_status_needs_a_human(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            env = self._env(t, {"Status": "retired",
+                                "PendingPermissions": []})
+            d = self._attempt(t)
+            (d / "o.txt").write_text("present\n")
+            rc, out = self._check(d, env)
+            self.assertEqual(rc, 5, out)
+            self.assertIn("unrecognised lifecycle status 'retired'", out)
+
     def test_a_pending_permission_is_its_own_state(self):
         """Found live: an agent under default permissions stopped at its first
         Write and sat `running` forever. Reporting that as RUNNING hides it
@@ -2541,7 +2564,7 @@ class TestACodeUnitIsNotDoneUntilMerged(unittest.TestCase):
     intent but left the unit DONE in durable state, so dependents dispatched
     before any merge and the DAG contradicted the tracker."""
 
-    def _advance(self, tmp, plan, verdict):
+    def _advance(self, tmp, plan, verdict, merge_receipt=None):
         import importlib.util
         spec = importlib.util.spec_from_file_location("sw_pr", SWARM)
         m = importlib.util.module_from_spec(spec)
@@ -2566,6 +2589,9 @@ class TestACodeUnitIsNotDoneUntilMerged(unittest.TestCase):
                 "c": {"state": "SUBMITTED", "job_id": "agent-1",
                       "attempt_dir": str(att), "attempts": [str(att)],
                       "gpu_hours": 0, **extra}}}))
+        if merge_receipt is not None:
+            (st / S.MERGE_RECEIPTS).write_text(
+                json.dumps(merge_receipt) + "\n")
         ok, _ = m.acquire_lease(str(st))
         self.assertTrue(ok)
         self.addCleanup(m.release_lease, str(st))
@@ -2634,6 +2660,26 @@ class TestACodeUnitIsNotDoneUntilMerged(unittest.TestCase):
             tmp = Path(d)
             _, _, state, _ = self._advance(tmp, plan, 0)
             self.assertEqual(state["units"]["c"]["state"], "DONE")
+
+    def test_a_bound_merge_reaches_the_drain_as_a_close(self):
+        receipt = {
+            "unit": "c", "repo": "/tmp/fixture-repo",
+            "pr": "https://github.com/hanig/private/pull/1",
+            "target": "main", "head": "c" * 40,
+            "merged_as": "d" * 40, "method": "merge",
+            "merged": True, "attested": True,
+        }
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            _, _, state, m = self._advance(
+                tmp, self.PLAN, 0, merge_receipt=receipt)
+            self.assertEqual(state["units"]["c"]["state"], "DONE")
+            self.assertEqual(state["units"]["c"]["merge_receipt"], receipt)
+            intents = m.read_outbox(str(tmp / "st"))
+            close = [i for i in intents if i["verb"] == "close"]
+            self.assertEqual(len(close), 1, intents)
+            self.assertEqual(close[0]["evidence"]["receipt"], receipt)
 
 
 class TestApprovalDoesNotCarryOntoChangedWork(unittest.TestCase):
