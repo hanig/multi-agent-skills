@@ -27,11 +27,17 @@ the same Unix user can write into the directory. Real isolation would need a
 container or mount namespace with the attempt directory as the only writable
 bind mount.
 
-## Status as of 2026-09-02
+## Status as of 2026-09-16
 
-Built and green: **1085 tests**. Sixteen commits ahead of where this session
-started (`413baca`), 30 files, ~4900 insertions.
+<!-- docs-truth:suite-count -->
+Measured suite size: **1580 tests**.
 
+`tests/test_docs_truth.py` discovers that count and compares it with the
+required suite-count claim in each of the three
+project-level documents, so the next added or hidden test makes stale prose
+fail.
+
+<!-- docs-truth:review-rosters -->
 | Piece | File | State |
 |---|---|---|
 | Unit contract | `skills/hanig-swarm/scripts/unit.py` | allocate / bind / check |
@@ -39,8 +45,8 @@ started (`413baca`), 30 files, ~4900 insertions.
 | Worktree judging | `skills/hanig-swarm/scripts/worktree.py` | git predicate over a coordinator-supplied snapshot |
 | External paths | `skills/hanig-swarm/scripts/coordinator_paths.py` | state and runs live OUTSIDE the operated repo |
 | Convergence | `skills/hanig-swarm/scripts/converge.py` | 5 states; a unit's declared `converge` block gates DONE in `advance` |
-| Review gate | `skills/hanig-review-gate/` | kimi-k2.7-code, luna, glm-5.3 |
-| Committee | `skills/hanig-review-gate/scripts/committee.py` | luna, deepseek, kimi; 2-3 members |
+| Review gate | `skills/hanig-review-gate/reviewers.json` | `luna`, `kimi-k2.7-code`, `astra`, `glm-5.3` |
+| Committee | `skills/hanig-review-gate/reviewers.json` | `deepseek-v4-pro`, `luna`, `kimi-k2.7-code` |
 | End-of-run report | `skills/hanig-project/scripts/report.py` | verdict from evidence, not from stored state |
 
 The big change this session: **the launch record and the receipt are
@@ -49,15 +55,19 @@ three-member committee got there. Full account, including the four ways the
 authority channel leaked and the limits that are declared rather than solved,
 is in `docs/plan-field-reports.md` under "The authority work".
 
-Shipped to `origin/main` at `8a6cbb4` on 2026-09-02: eighteen commits, 30
-files, ~4900 insertions. `main` and the worktree agree; the suite is green on
-`main` itself, not only in the worktree.
+Shipped in the current recorded base: the authority work, E1, C11, C12, C14,
+B1, B6, B4, B9, A8, A4 and E2. In particular, code attempts have exclusive
+worktrees, external artifacts have a coordinator-pinned pre-dispatch basis,
+and output claims prevent a second live plan from dispatching over them.
 
 **Next, in order** (full detail in `docs/plan-field-reports.md`):
 
-1. **C11, a worktree per code attempt.** The declared fix for the
-   shared-checkout TOCTOU, promised twice in answer to a MAJOR and still owed.
-2. Then C12, C14, B1, B6, B4, B9 and the `scontrol` note.
+1. **ARC-246:** enforce partition memory requirements and account eligibility.
+2. **ARC-247:** make the documented `findings.json` an enforced artifact.
+3. **ARC-248:** resolve the remaining cross-node `flock` evidence gap.
+
+ARC-238 (wandb) is deferred for a product decision and ARC-239 (vendored Paseo
+provider pinning) is blocked; neither is silently presented as completed work.
 
 E1 is DONE with an accepted residue: the coordinator no longer leaks
 credentials to children, but Paseo's daemon supplies the provider keys to the
@@ -65,9 +75,10 @@ agent independently, and `HOME` -- which a code agent must have -- is where
 codex's stored auth lives. Accepted 2026-09-02; closing it is a Paseo change,
 not a swarm one. Do not reopen it as a defect here.
 
-Model routing, set 2026-09-01: coding is `codex/gpt-5.6-sol` at thinking high;
-review is kimi/luna/glm; committee is luna/deepseek/kimi. Sol never reviews its
-own work. codex authenticates with an API key rather than the ChatGPT
+Model routing was set 2026-09-01. The live review and committee rosters are the
+enabled profile memberships in `skills/hanig-review-gate/reviewers.json`, not
+this dated snapshot. Sol never reviews its own work. codex authenticates with
+an API key rather than the ChatGPT
 subscription (`codex login --with-api-key`), which removed the wall-clock usage
 ceiling that stalled two agent runs — it is metered now, ~200k input tokens per
 substantial sol run.
@@ -99,7 +110,7 @@ found three more the targeted fix would have missed.
 
 ## Files
 
-- `docs/plan-field-reports.md` — **the live plan.** Field-report items by list (A/B/C), what is done, what is open, and the 3 open MAJOR in the sealing work.
+- `docs/plan-field-reports.md` — **the live plan.** Field-report items by list (A/B/C), what is done, what remains open, and what is deferred or blocked.
 - `docs/plan-next.md` — older 2026-08-30 committee plan, own numbering, largely delivered.
 - `docs/plan-swarm.md` — 7 steps, 45 acceptance criteria. Step 6 d/e/f now BUILT.
 - `docs/tracker-outbox.md` — the outbox and how to write a drain.
