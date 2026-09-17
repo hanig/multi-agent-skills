@@ -5,7 +5,7 @@
   "plan": "TWO contrasting models, never escalated. For acceptance criteria and designs, BEFORE code exists. A third reviewer adds agreement, not insight.",
   "fast": "cheapest implementation panel; the first tier of --escalate",
   "standard": "fast + mid-cost; the usual implementation panel",
-  "deep": "every enabled reviewer. Reached only via --escalate. sol is NOT here: it writes the code now, and an author does not review itself.",
+  "deep": "standard + astra. Final --escalate tier, or a fixed --profile deep panel. sol is NOT here: it writes the code now, and an author does not review itself.",
   "committee": "committee.py members. SEPARATE from the gate profiles on purpose: deepseek plans and concedes well but over-claims as a refuter, so it sits here and in no gate profile."
  },
  "reviewers": [
@@ -58,6 +58,16 @@
     "in": 0.67,
     "out": 3.4
    }
+  },
+  {
+   "name": "astra",
+   "provider": "openai",
+   "model": "gpt-6-astra",
+   "effort": "high",
+   "profiles": [
+    "deep"
+   ],
+   "enabled": true
   },
   {
    "name": "sol",
