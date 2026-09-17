@@ -114,6 +114,16 @@ SLURM_FAILED = {"FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL",
 SLURM_PREEMPTED = {"PREEMPTED", "REQUEUED", "RESIZING", "SUSPENDED"}
 SLURM_OK = {"COMPLETED"}
 
+# Paseo lifecycle values are an external protocol, so enumerate both sides
+# instead of treating every new spelling as RUNNING. A provider-added terminal
+# value must stop for a human classification rather than strand an attempt in
+# a state whose settle window never begins.
+PASEO_LIFECYCLE = {
+    "running": "RUNNING", "error": "FAILED", "failed": "FAILED",
+    "idle": None, "done": None, "complete": None, "completed": None,
+    "stopped": None, "closed": None,
+}
+
 # Every state in which Slurm has FINISHED with a job, DERIVED from the two sets
 # above rather than listed again. squeue keeps a finished job listed for
 # MinJobAge (default 300s), so treating any owned row as "still active" made
@@ -1019,8 +1029,7 @@ def _pipeline_state(unit_dir, spec, present, missing, notes):
 def _code_state(unit_dir, spec, present, missing, notes, launch_facts=None):
     """The done predicate for an agent run by Paseo.
 
-    DELEGATES lifecycle, judges artifacts. Paseo knows whether the agent
-    process is still working; it does not know whether the work is right, and
+    DELEGATES lifecycle, judges artifacts. Paseo knows whether the agent process is still working; it does not know whether the work is right, and
     `idle` is a lifecycle state exactly as `COMPLETED` is for Slurm. So the
     agent's own claim of success is not an input here, and neither is `idle`
     on its own: the declared outputs must also be present in the exclusive
@@ -1064,10 +1073,10 @@ def _code_state(unit_dir, spec, present, missing, notes, launch_facts=None):
     if not status:
         # Falling through an empty status reached DONE on outputs alone,
         # which throws away the lifecycle half of this predicate entirely.
-        notes.append(f"paseo returned no lifecycle status for agent {agent}, "
-                     f"so whether it has finished cannot be told. Check "
-                     f"`paseo inspect {agent}`.")
-        return "INCOMPLETE"
+        return notes.append(
+            f"paseo returned no lifecycle status for agent {agent}, so "
+            f"whether it has finished cannot be told. Check `paseo inspect "
+            f"{agent}`.") or "INCOMPLETE"
     pending = rec.get("PendingPermissions") or rec.get("pendingPermissions") or []
     if pending:
         # Distinct from every other state: nothing is wrong and nothing will
@@ -1079,14 +1088,18 @@ def _code_state(unit_dir, spec, present, missing, notes, launch_facts=None):
                      f"person answers. Run `paseo inspect {agent}` and "
                      f"respond, or `paseo permit`.")
         return "NEEDS_HUMAN"
-    if status and status not in ("idle", "done", "complete", "completed",
-                                "stopped", "error", "failed"):
-        notes.append(f"agent {agent} status {status!r}: still working.")
-        return "RUNNING"
-    if status in ("error", "failed"):
-        notes.append(f"agent {agent} status {status!r}. See `paseo logs "
-                     f"{agent}`.")
-        return "FAILED"
+    if status not in PASEO_LIFECYCLE:
+        return notes.append(
+            f"agent {agent} reported unrecognised lifecycle status "
+            f"{status!r}. It is not safe to guess whether that means active "
+            f"or terminal; inspect the agent and update the lifecycle "
+            f"mapping before retrying.") or "NEEDS_HUMAN"
+    lifecycle = PASEO_LIFECYCLE[status]
+    if lifecycle is not None:
+        return notes.append(
+            f"agent {agent} status {status!r}: " +
+            ("still working." if lifecycle == "RUNNING" else
+             f"see `paseo logs {agent}`.")) or lifecycle
     if missing:
         # `idle` is lifecycle, not completion. This is the whole point.
         # The machine-readable reason matters here: "settled and produced
