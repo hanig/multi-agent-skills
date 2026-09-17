@@ -63,11 +63,11 @@ def _fake_paseo(binp):
 
 @contextlib.contextmanager
 def paseo_on_path():
-    """Prepend a directory holding the stub `paseo` to PATH."""
+    """Replace PATH with a directory holding the stub `paseo`."""
     d = tempfile.mkdtemp(prefix="plan-shape-fakebin-")
     old = os.environ.get("PATH", "")
     try:
-        os.environ["PATH"] = _fake_paseo(d) + os.pathsep + old
+        os.environ["PATH"] = _fake_paseo(d)
         yield d
     finally:
         os.environ["PATH"] = old
@@ -1298,7 +1298,7 @@ class TestTheSurveyShapeIsTheRealOne(SurveyCase):
                 (binp / name).write_text(body)
                 (binp / name).chmod(0o755)
             env = dict(os.environ)
-            env["PATH"] = str(binp) + os.pathsep + env.get("PATH", "")
+            env["PATH"] = str(binp)
             r = subprocess.run(
                 [sys.executable,
                  str(ROOT / "skills" / "hanig-project" / "scripts"

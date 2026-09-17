@@ -1035,7 +1035,7 @@ class TestSafeUnattendedAdvance(Base):
         d = self.tmp / "runs" / "A" / "deadbeefcafe0001"
         d.mkdir(parents=True)
         old_path = os.environ["PATH"]
-        os.environ["PATH"] = self._fake_scheduler("778899") + os.pathsep + old_path
+        os.environ["PATH"] = self._fake_scheduler("778899")
         try:
             job, note = m.reconcile_orphan(str(d))
         finally:
@@ -1059,7 +1059,7 @@ class TestSafeUnattendedAdvance(Base):
             f.write_text("#!/bin/sh\nexit 0\n")   # success, no output
             f.chmod(0o755)
         old_path = os.environ["PATH"]
-        os.environ["PATH"] = str(binp) + os.pathsep + old_path
+        os.environ["PATH"] = str(binp)
         try:
             job, note = m.reconcile_orphan(str(d))
         finally:

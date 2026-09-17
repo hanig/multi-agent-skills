@@ -49,19 +49,20 @@ def _script(directory, name, body):
 
 @contextlib.contextmanager
 def fake_bin(**scripts):
-    """PATH with exactly these tools prepended.
+    """PATH containing exactly these tools.
 
     The same seam test_swarm.py::_fake_scheduler and test_plan_shape.py use:
-    there is no Slurm on a developer host, and swarm.py must know nothing
-    about the substitution -- a bypass flag would be a flag somebody sets in
-    anger on a real cluster.
+    a real Slurm installation outside this directory must not satisfy a tool
+    deliberately omitted from a fixture, and swarm.py must know nothing about
+    the substitution -- a bypass flag would be a flag somebody sets in anger
+    on a real cluster.
     """
     d = tempfile.mkdtemp(prefix="claims-fakebin-")
     old = os.environ.get("PATH", "")
     try:
         for name, body in scripts.items():
             _script(d, name, body)
-        os.environ["PATH"] = d + os.pathsep + old
+        os.environ["PATH"] = d
         yield d
     finally:
         os.environ["PATH"] = old
@@ -223,6 +224,26 @@ class TestUnknownIsNotFree(ClaimCase):
         self.assertEqual(dispatched, 0,
                          "a missing squeue was read as proof the other "
                          "attempt had finished")
+        self.assertEqual(self.unit_state(s2, "A")["state"],
+                         "PREFLIGHT_REFUSED")
+        text = "\n".join(report)
+        self.assertIn("squeue is not on PATH", text)
+        self.assertIn("UNKNOWN IS NOT FREE", text)
+
+    def test_an_absent_squeue_stays_absent_with_real_slurm_on_the_host(self):
+        host_squeue = shutil.which("squeue")
+        if host_squeue is None:
+            self.skipTest("this host has no real Slurm binary")
+
+        first = self.state_dir("state-1")
+        second = self.state_dir("state-2")
+        self._hold_a_claim(first)
+        with fake_bin(sbatch=SBATCH):          # squeue deliberately missing
+            self.assertIsNone(shutil.which("squeue"))
+            s2, report, dispatched = self.advance(
+                plan_of(slurm_unit()), second)
+
+        self.assertEqual(dispatched, 0, "\n".join(report))
         self.assertEqual(self.unit_state(s2, "A")["state"],
                          "PREFLIGHT_REFUSED")
         text = "\n".join(report)
