@@ -12,12 +12,14 @@ Offline: no API calls.
 """
 
 import importlib.util
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -441,6 +443,7 @@ class TestRound10Regressions(unittest.TestCase):
         # names one: the test is about quorum 0, not about the new flag.
         r = subprocess.run([sys.executable, str(SCRIPT), "--quorum", "0",
                             "--kind", "implementation", "--round", "1",
+                            "--claim", review.HONEST_RUN_CLAIM,
                             "--diff"], capture_output=True, text=True)
         self.assertEqual(r.returncode, 4, r.stderr)
         self.assertIn("at least 1", r.stderr)
@@ -938,7 +941,7 @@ class TestFailClosed(unittest.TestCase):
 
 class TestPortability(unittest.TestCase):
     def test_stdlib_only(self):
-        allowed = {"argparse", "concurrent", "json", "os", "re", "signal", "stat",
+        allowed = {"argparse", "concurrent", "hashlib", "json", "os", "re", "signal", "stat",
                    "subprocess", "sys", "time", "urllib", "pathlib"}
         for line in SCRIPT.read_text().splitlines():
             s = line.strip()
@@ -1442,9 +1445,12 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
 
     def run_cli(self, *argv):
         import subprocess
+        env = dict(os.environ)
+        env.pop("OPENAI_API_KEY", None)
+        env.pop("OPENROUTER_API_KEY", None)
         r = subprocess.run(
             [sys.executable, str(SCRIPT), "--file", str(SCRIPT), *argv],
-            capture_output=True, text=True, timeout=120)
+            capture_output=True, text=True, timeout=120, env=env)
         return r
 
     def assert_refused(self, r, *, because):
@@ -1461,14 +1467,40 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
                             because="--kind was omitted")
 
     def test_an_implementation_review_must_declare_its_round(self):
-        self.assert_refused(self.run_cli("--kind", "implementation"),
+        self.assert_refused(self.run_cli(
+            "--kind", "implementation", "--claim", review.HONEST_RUN_CLAIM),
                             because="--round was omitted")
 
     def test_the_round_bound_is_enforced_at_runtime(self):
         self.assert_refused(
             self.run_cli("--kind", "implementation", "--round",
-                         str(review.MAX_ROUNDS + 1)),
+                         str(review.MAX_ROUNDS + 1), "--claim",
+                         review.HONEST_RUN_CLAIM),
             because="the round exceeds MAX_ROUNDS")
+
+    def test_implementation_requires_the_honest_run_counter_claim(self):
+        r = self.run_cli("--kind", "implementation", "--round", "1",
+                         "--claim", "malformed input is rejected")
+        self.assert_refused(r, because="the honest-run counter-claim is absent")
+        self.assertIn(review.HONEST_RUN_CLAIM, r.stderr)
+
+    def test_implementation_with_no_claims_exits_review_error(self):
+        r = self.run_cli("--kind", "implementation", "--round", "1")
+        self.assert_refused(r, because="the claim list is empty")
+        self.assertIn(review.HONEST_RUN_CLAIM, r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_counter_claim_does_not_accept_multiple_terminal_periods(self):
+        r = self.run_cli("--kind", "implementation", "--round", "1",
+                         "--claim", review.HONEST_RUN_CLAIM + ".")
+        self.assert_refused(r, because="the counter-claim has extra punctuation")
+        self.assertIn(review.HONEST_RUN_CLAIM, r.stderr)
+
+    def test_round_two_requires_dispositions(self):
+        r = self.run_cli("--kind", "implementation", "--round", "2",
+                         "--claim", review.HONEST_RUN_CLAIM)
+        self.assert_refused(r, because="--dispositions was omitted")
+        self.assertIn("--dispositions FILE", r.stderr)
 
     def test_a_plan_review_cannot_be_escalated(self):
         self.assert_refused(self.run_cli("--kind", "plan", "--escalate"),
@@ -1543,6 +1575,139 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
                             f"a config_error names no action: {text[:130]}")
         self.assertGreater(checked, 6, "too few config_error messages "
                                        "recovered to be measuring anything")
+
+
+class TestFindingDispositions(unittest.TestCase):
+    def write_dispositions(self, data):
+        path = Path(tempfile.mkdtemp()) / "dispositions.json"
+        path.write_text(json.dumps(data))
+        return path
+
+    def entry(self, disposition="not-reproduced"):
+        location = "skills/hanig-review-gate/scripts/review.py:1170"
+        summary = "the original finding text survives into the next round"
+        digest = review.finding_digest(location, summary)
+        return digest, {
+            "location": location,
+            "summary": summary,
+            "disposition": disposition,
+            "reason": "the named branch rejects this input before dispatch",
+        }
+
+    def test_not_reproduced_finding_is_injected_verbatim(self):
+        digest, entry = self.entry()
+        dispositions = review.load_dispositions(
+            self.write_dispositions({digest: entry}))
+        prompt = review.build_prompt(
+            "code", [review.HONEST_RUN_CLAIM], False, "context",
+            dispositions=dispositions)
+        self.assertIn(entry["summary"], prompt)
+        self.assertIn(entry["reason"], prompt)
+
+    def test_cli_wires_not_reproduced_finding_into_reviewer_prompt(self):
+        digest, entry = self.entry()
+        path = self.write_dispositions({digest: entry})
+        captured = []
+        original = {
+            "argv": sys.argv,
+            "load_reviewers": review.load_reviewers,
+            "availability": review.availability,
+            "run_one": review.run_one,
+            "arm_watchdog": review.arm_watchdog,
+        }
+        reviewer = {"name": "offline", "provider": "offline", "model": "m",
+                    "profiles": ["standard"], "enabled": True}
+        try:
+            sys.argv = [str(SCRIPT), "--file", str(SCRIPT),
+                        "--kind", "implementation", "--round", "2",
+                        "--claim", review.HONEST_RUN_CLAIM,
+                        "--dispositions", str(path), "--quorum", "1",
+                        "--json"]
+            review.load_reviewers = lambda: [reviewer]
+            review.availability = lambda _reviewer: None
+            review.arm_watchdog = lambda _seconds: None
+
+            def run_one(_reviewer, prompt, *_args, **_kwargs):
+                captured.append(prompt)
+                return {"name": "offline", "ok": True, "elapsed_s": 0,
+                        "model": "m", "effort": None, "in_tokens": 0,
+                        "out_tokens": 0, "verdict": "upheld",
+                        "findings": [], "claims": [], "notes": ""}
+
+            review.run_one = run_one
+            with redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    review.main()
+            self.assertEqual(raised.exception.code,
+                             review.STATES["REVIEW_PASS"])
+        finally:
+            sys.argv = original["argv"]
+            review.load_reviewers = original["load_reviewers"]
+            review.availability = original["availability"]
+            review.run_one = original["run_one"]
+            review.arm_watchdog = original["arm_watchdog"]
+        self.assertEqual(len(captured), 1)
+        self.assertIn(entry["summary"], captured[0])
+
+    def test_reproduced_finding_is_not_injected_as_a_disagreement(self):
+        digest, entry = self.entry("reproduced")
+        dispositions = review.load_dispositions(
+            self.write_dispositions({digest: entry}))
+        prompt = review.build_prompt(
+            "code", [review.HONEST_RUN_CLAIM], False, "context",
+            dispositions=dispositions)
+        self.assertNotIn(entry["summary"], prompt)
+
+    def test_digest_must_match_location_and_summary(self):
+        _digest, entry = self.entry()
+        with self.assertRaises(SystemExit) as raised:
+            review.load_dispositions(self.write_dispositions({"0" * 64: entry}))
+        self.assertEqual(raised.exception.code, review.STATES["REVIEW_ERROR"])
+
+    def test_duplicate_digest_keys_are_rejected(self):
+        digest, entry = self.entry()
+        first = json.dumps({digest: entry})[1:-1]
+        entry["disposition"] = "reproduced"
+        second = json.dumps({digest: entry})[1:-1]
+        path = Path(tempfile.mkdtemp()) / "duplicate-dispositions.json"
+        path.write_text("{" + first + "," + second + "}")
+        with self.assertRaises(SystemExit) as raised:
+            review.load_dispositions(path)
+        self.assertEqual(raised.exception.code, review.STATES["REVIEW_ERROR"])
+
+    def test_lone_surrogate_is_review_error_not_a_traceback(self):
+        _digest, entry = self.entry()
+        entry["summary"] = "invalid lone surrogate: \ud800"
+        path = self.write_dispositions({"0" * 64: entry})
+        with self.assertRaises(SystemExit) as raised:
+            review.load_dispositions(path)
+        self.assertEqual(raised.exception.code, review.STATES["REVIEW_ERROR"])
+
+    def test_lone_surrogate_in_reason_is_review_error(self):
+        digest, entry = self.entry()
+        entry["reason"] = "invalid lone surrogate: \ud800"
+        path = self.write_dispositions({digest: entry})
+        with self.assertRaises(SystemExit) as raised:
+            review.load_dispositions(path)
+        self.assertEqual(raised.exception.code, review.STATES["REVIEW_ERROR"])
+
+    def test_reason_must_be_one_line(self):
+        digest, entry = self.entry()
+        entry["reason"] = "first line\nsecond line"
+        with self.assertRaises(SystemExit) as raised:
+            review.load_dispositions(self.write_dispositions({digest: entry}))
+        self.assertEqual(raised.exception.code, review.STATES["REVIEW_ERROR"])
+
+    def test_reason_rejects_unicode_line_separators(self):
+        for separator in ("\v", "\f", "\x1c", "\x85", "\u2028", "\u2029"):
+            with self.subTest(separator=repr(separator)):
+                digest, entry = self.entry()
+                entry["reason"] = "first line" + separator + "second line"
+                with self.assertRaises(SystemExit) as raised:
+                    review.load_dispositions(
+                        self.write_dispositions({digest: entry}))
+                self.assertEqual(raised.exception.code,
+                                 review.STATES["REVIEW_ERROR"])
 
 
 class TestQuorumGatesFailAsWellAsPass(unittest.TestCase):
