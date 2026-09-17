@@ -436,6 +436,242 @@ class TestEnvironmentContainment(unittest.TestCase):
             script = (attempt / "job.sbatch").read_text()
             self.assertIn("export SWARM_DEP_UPSTREAM=", script)
 
+    def _isolated_unit(self, input_path, backend="apptainer"):
+        return {
+            "id": "isolated", "kind": "slurm", "runtime": "none",
+            "command": "cp /shared/input.tsv result.tsv",
+            "inputs": [str(input_path)], "outputs": ["result.tsv"],
+            "isolation": {
+                "kind": "container", "backend": backend,
+                "image": "/images/tool.sif",
+                "writable": ["$SWARM_UNIT_DIR"],
+                "read_only": [str(input_path)],
+            },
+        }
+
+    def _write_isolation_receipt(
+            self, attempt, isolation_facts=None, expected="DONE",
+            isolation_required=False):
+        U.write_json(attempt / U.UNIT, {
+            "schema_version": 1, "task_id": "isolated",
+            "attempt_id": attempt.name, "kind": "slurm",
+            "job_id": "12345", "declared_outputs": ["result.tsv"],
+        })
+        args = mock.Mock(
+            unit_dir=str(attempt), launch_facts=None, artifact_basis=None,
+            isolation_facts=(json.dumps(isolation_facts)
+                             if isolation_facts else None),
+            isolation_required=isolation_required,
+            result_fd=None, json=False)
+        with mock.patch.object(U, "check_unit", return_value="DONE"):
+            self.assertEqual(U.cmd_check(args), U.STATES[expected])
+        return json.loads((attempt / U.RECEIPT).read_text())
+
+    def test_declared_container_isolation_renders_one_writable_bind_and_receipt(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            input_path = tmp / "input.tsv"
+            input_path.write_text("pinned\n")
+            attempt = tmp / "attempt-1"
+            attempt.mkdir()
+            unit = self._isolated_unit(input_path)
+
+            self.assertEqual(S.validate_plan({"units": [unit]})["units"], 1)
+            state = {"units": {"isolated": {}}}
+            marker = attempt / ".swarm-isolation-applied-v1"
+            marker.write_text("stale-from-an-earlier-launch\n")
+            with mock.patch.object(
+                    S.U, "run", return_value=(0, "12345", "")):
+                job, err = S._submit(
+                    unit, str(attempt), False, state=state,
+                    state_dir=str(tmp / "state"))
+            self.assertIsNone(err)
+            self.assertEqual(job, "12345")
+            self.assertFalse(marker.exists(),
+                             "submission must clear stale application proof")
+            script = (attempt / "job.sbatch").read_text()
+            root_bind = f"{attempt.resolve()}:{attempt.resolve()}:rw"
+            input_bind = f"{input_path}:{input_path}:ro"
+            self.assertEqual(script.count(":rw"), 1, script)
+            self.assertIn(shlex.quote(root_bind), script)
+            self.assertIn(shlex.quote(input_bind), script)
+            self.assertIn("--no-mount bind-paths", script)
+            self.assertIn("--writable-tmpfs", script)
+            self.assertNotIn("docker run", script)
+            self.assertNotIn("/bin/sh -c", script)
+            self.assertIn("cp /shared/input.tsv result.tsv", script)
+            self.assertIn("isolation_rc=0", script)
+            self.assertIn("|| :", script)
+            self.assertIn("-u APPTAINER_MOUNT", script)
+            self.assertIn("-u SINGULARITY_MOUNT", script)
+
+            facts = S.trusted_isolation_facts(state, unit, str(attempt))
+            self.assertIsNotNone(facts)
+            rendered_only = self._write_isolation_receipt(
+                attempt, facts, expected="INCOMPLETE")
+            self.assertIs(
+                rendered_only["basis"]["os_enforced_isolation"], False)
+            self.assertEqual(rendered_only["state"], "INCOMPLETE")
+            missing_facts = self._write_isolation_receipt(
+                attempt, expected="INCOMPLETE", isolation_required=True)
+            self.assertEqual(missing_facts["state"], "INCOMPLETE")
+            Path(facts["application_marker"]).write_text(
+                facts["application_token_sha256"] + "\n")
+            receipt = self._write_isolation_receipt(attempt, facts)
+            self.assertIs(receipt["basis"]["os_enforced_isolation"], True)
+            self.assertEqual(
+                receipt["basis"]["isolation_profile"][
+                    "writable_host_binds"], [str(attempt.resolve())])
+
+            # Re-entering submission for the same attempt retains the pinned
+            # random token but removes the old marker before the backend is
+            # contacted. A failed second invocation cannot inherit proof from
+            # the first one.
+            with mock.patch.object(
+                    S.U, "run", return_value=(1, "", "backend unavailable")):
+                _job, second_err = S._submit(
+                    unit, str(attempt), False, state=state,
+                    state_dir=str(tmp / "state"))
+            self.assertIn("sbatch refused", second_err)
+            self.assertFalse(marker.exists())
+            self.assertEqual(
+                S.trusted_isolation_facts(state, unit, str(attempt))[
+                    "application_token_sha256"],
+                facts["application_token_sha256"])
+
+            # Mutation 1: a second writable host path is a plan refusal.
+            outside = json.loads(json.dumps(unit))
+            outside["isolation"]["writable"].append("/tmp/outside")
+            with self.assertRaisesRegex(S.PlanError, "NOTHING ELSE"):
+                S.validate_plan({"units": [outside]})
+
+            # Mutation 2: without a declaration/applied fact the historical
+            # basis remains byte-for-byte explicit about the weaker boundary.
+            plain = self._write_isolation_receipt(attempt)
+            self.assertIs(plain["basis"]["os_enforced_isolation"], False)
+            self.assertEqual(
+                plain["basis"]["conclusive_because"],
+                "exclusive by coordinator allocation under a trusted-writer "
+                "convention")
+            self.assertEqual(
+                plain["basis"]["note"],
+                "not isolated from other processes running as the same Unix "
+                "user. OS-enforced isolation would need a container or mount "
+                "namespace with this directory as the only writable bind "
+                "mount.")
+
+    def test_isolation_backend_is_declared_not_selected_from_path(self):
+        with tempfile.TemporaryDirectory() as d:
+            input_path = Path(d) / "input.tsv"
+            input_path.write_text("pinned\n")
+            unit = self._isolated_unit(input_path, backend="docker")
+            with mock.patch.object(S.shutil, "which", return_value="/bin/docker"):
+                with self.assertRaisesRegex(S.PlanError, "never selects"):
+                    S.validate_plan({"units": [unit]})
+
+            unit = self._isolated_unit(input_path)
+            unit["isolation"]["image"] = "--help"
+            with self.assertRaisesRegex(S.PlanError, "runtime option"):
+                S.validate_plan({"units": [unit]})
+            unit["isolation"]["image"] = "tool.sif"
+            with self.assertRaisesRegex(S.PlanError, "absolute path"):
+                S.validate_plan({"units": [unit]})
+
+            unit = self._isolated_unit(input_path)
+            unit["outputs"] = ["./.swarm-isolation-applied-v1"]
+            with self.assertRaisesRegex(S.PlanError, "reserved"):
+                S.validate_plan({"units": [unit]})
+
+    def test_isolation_dry_run_does_not_clear_marker_or_persist_facts(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            input_path = tmp / "input.tsv"
+            input_path.write_text("pinned\n")
+            attempt = tmp / "attempt-1"
+            attempt.mkdir()
+            marker = attempt / ".swarm-isolation-applied-v1"
+            marker.write_text("existing\n")
+            state = {"units": {"isolated": {}}}
+            job, err = S._submit(
+                self._isolated_unit(input_path), attempt, True, state=state,
+                state_dir=str(tmp / "state"))
+            self.assertIsNone(err)
+            self.assertTrue(job.startswith("dry-"))
+            self.assertEqual(marker.read_text(), "existing\n")
+            self.assertNotIn(
+                "attempt_isolation_facts", state["units"]["isolated"])
+            self.assertFalse((tmp / "state" / "swarm-state.json").exists())
+
+    def test_isolation_wrapper_clears_proof_on_scheduler_reexecution(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            input_path = tmp / "input.tsv"
+            input_path.write_text("pinned\n")
+            attempt = tmp / "attempt-1"
+            attempt.mkdir()
+            bindir = tmp / "bin"
+            bindir.mkdir()
+            backend = bindir / "apptainer"
+            backend.write_text("#!/bin/sh\nexit 0\n")
+            backend.chmod(0o755)
+            rendered, facts, err = S._isolation_submission(
+                self._isolated_unit(input_path), attempt)
+            self.assertIsNone(err)
+            env = {"PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"}
+            with mock.patch.dict(os.environ, env):
+                rc, _out, _err = U.run(
+                    ["sh", "-c", rendered], cwd=str(attempt))
+                self.assertEqual(rc, 0)
+                marker = Path(facts["application_marker"])
+                self.assertEqual(
+                    marker.read_text().strip(),
+                    facts["application_token_sha256"])
+                backend.write_text("#!/bin/sh\nexit 19\n")
+                rc, _out, _err = U.run(
+                    ["sh", "-c", rendered], cwd=str(attempt))
+            self.assertEqual(rc, 19)
+            self.assertFalse(marker.exists())
+
+    def test_isolation_read_only_binds_must_match_declared_inputs(self):
+        with tempfile.TemporaryDirectory() as d:
+            input_path = Path(d) / "input.tsv"
+            input_path.write_text("pinned\n")
+            unit = self._isolated_unit(input_path)
+            unit["isolation"]["read_only"] = []
+            with self.assertRaisesRegex(S.PlanError, "exactly its declared"):
+                S.validate_plan({"units": [unit]})
+
+    def test_isolation_refuses_shell_program_instead_of_assuming_image_shell(self):
+        with tempfile.TemporaryDirectory() as d:
+            input_path = Path(d) / "input.tsv"
+            input_path.write_text("pinned\n")
+            unit = self._isolated_unit(input_path)
+            unit["command"] = "tool input.tsv &"
+            with self.assertRaisesRegex(S.PlanError, "shell syntax"):
+                S.validate_plan({"units": [unit]})
+            unit["command"] = "sh -c 'sleep 10 & exit 0'"
+            with self.assertRaisesRegex(S.PlanError, "is a shell"):
+                S.validate_plan({"units": [unit]})
+            unit["command"] = "ash -c 'sleep 10 & exit 0'"
+            with self.assertRaisesRegex(S.PlanError, "is a shell"):
+                S.validate_plan({"units": [unit]})
+            unit["command"] = "busybox ash -c 'sleep 10 & exit 0'"
+            with self.assertRaisesRegex(S.PlanError, "selects a shell"):
+                S.validate_plan({"units": [unit]})
+            unit["command"] = "/usr/bin/env sh -c 'sleep 10 & exit 0'"
+            with self.assertRaisesRegex(S.PlanError, "process launcher"):
+                S.validate_plan({"units": [unit]})
+
+    def test_isolation_allows_shell_characters_when_they_are_literal_arguments(self):
+        with tempfile.TemporaryDirectory() as d:
+            input_path = Path(d) / "input.tsv"
+            input_path.write_text("pinned\n")
+            unit = self._isolated_unit(input_path)
+            unit["command"] = "cp 'input#1.tsv' 'result[1].tsv'"
+            self.assertEqual(S.validate_plan({"units": [unit]})["units"], 1)
+            unit["command"] = "cp input#1.tsv result~1.tsv"
+            self.assertEqual(S.validate_plan({"units": [unit]})["units"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

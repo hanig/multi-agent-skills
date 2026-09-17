@@ -467,6 +467,216 @@ def account_problems(units, survey):
 RESOLUTIONS = ("direct", "path", "conda", "container", "module", "uv",
                "wrapper")
 
+# An isolation profile is deliberately narrower than a general container
+# launcher.  These two backends expose the same bind/contain interface on the
+# clusters this skill targets.  Docker being installed on a submit host is not
+# enough: its daemon, user mapping, environment forwarding, and mount host are
+# separate facts, so silently translating this contract to `docker run` would
+# claim an enforcement path the plan did not declare.
+ISOLATION_BACKENDS = ("apptainer", "singularity")
+ISOLATION_KEYS = frozenset(
+    {"kind", "backend", "image", "writable", "read_only"})
+ISOLATION_ROOT_TOKENS = ("$SWARM_UNIT_DIR", "${SWARM_UNIT_DIR}")
+ISOLATION_SHELL_EXECUTABLES = frozenset({
+    "sh", "ash", "bash", "dash", "zsh", "ksh", "mksh", "posh", "yash",
+    "csh", "tcsh", "fish",
+})
+ISOLATION_MULTICALL_EXECUTABLES = frozenset({"busybox", "toybox"})
+ISOLATION_LAUNCHER_EXECUTABLES = frozenset({
+    "env", "nice", "nohup", "setsid", "stdbuf", "timeout",
+})
+ISOLATION_MARKER_NAME = ".swarm-isolation-applied-v1"
+
+
+def _unquoted_shell_syntax(command):
+    """Return shell syntax outside single quotes (and expansions in double)."""
+    quote = None
+    escaped = False
+    word_start = True
+    syntax = ";&|<>(){}\n\r\x00$`*?["
+    for char in command:
+        if escaped:
+            escaped = False
+            word_start = False
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = None
+            continue
+        if quote == '"':
+            if char == '"':
+                quote = None
+            elif char == "\\":
+                escaped = True
+            elif char in "$`":
+                return char
+            continue
+        if char in "'\"":
+            quote = char
+            word_start = False
+        elif char == "\\":
+            escaped = True
+        elif char.isspace():
+            word_start = True
+        elif char in "#~" and word_start:
+            return char
+        elif char in syntax:
+            return char
+        else:
+            word_start = False
+    return None
+
+
+def _isolation_command_argv(command):
+    """Parse the deliberately small command language an isolated unit uses.
+
+    A container runtime accepts an argv, while an ordinary unit command is a
+    shell program.  Treating the latter as the former silently changes shell
+    expansion, and putting another shell inside the image both assumes that
+    image contains one and detaches background work from the pipeline
+    wrapper's process tree.  Refuse shell programs and preserve simple argv
+    commands exactly through shlex instead.
+    """
+    if not isinstance(command, str) or not command.strip():
+        return None, "its command must be a non-empty string"
+    # This is intentionally conservative.  Every spelling below has shell
+    # semantics that direct exec cannot preserve without assuming an
+    # interpreter exists inside the declared image.
+    found = _unquoted_shell_syntax(command)
+    if found is not None:
+        return None, (
+            f"its command contains shell syntax {found!r}; isolated commands "
+            f"must be one executable plus literal arguments")
+    try:
+        argv = shlex.split(command, posix=True)
+    except ValueError as e:
+        return None, f"its command cannot be parsed as a direct argv: {e}"
+    if not argv:
+        return None, "its command has no executable"
+    executable = os.path.basename(argv[0])
+    if executable in ISOLATION_SHELL_EXECUTABLES:
+        return None, (
+            f"its executable {argv[0]!r} is a shell; isolated commands must "
+            f"run the workload directly, not an image-side interpreter")
+    if executable in ISOLATION_LAUNCHER_EXECUTABLES:
+        return None, (
+            f"its executable {argv[0]!r} is a process launcher that can hide "
+            f"a shell; isolated commands must run the workload directly")
+    if (executable in ISOLATION_MULTICALL_EXECUTABLES and len(argv) > 1
+            and os.path.basename(argv[1]) in ISOLATION_SHELL_EXECUTABLES):
+        return None, (
+            f"its executable sequence {argv[:2]!r} selects a shell; "
+            f"isolated commands must run the workload directly")
+    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", argv[0]):
+        return None, (
+            "its command starts with a shell environment assignment; put "
+            "configuration in the workload or image instead")
+    return argv, None
+
+
+def isolation_problem(u):
+    """Why a unit's optional host-write isolation cannot be enforced.
+
+    This validates declarations only.  It does not choose a backend from PATH,
+    infer one from the image spelling, or claim that a submit-host executable
+    exists on a compute node.  Runtime availability remains a runtime/canary
+    fact; the shape of the writable host surface is knowable here.
+    """
+    profile = u.get("isolation")
+    if profile is None:
+        return None
+    uid = u.get("id", "?")
+    if u.get("kind") not in _NEEDS_RUNTIME:
+        return (f"unit {uid!r} is kind={u.get('kind')!r} and declares "
+                f"'isolation'. Only slurm and pipeline workloads are launched "
+                f"through a container backend; code units run in Paseo "
+                f"worktrees and cannot enforce this profile.")
+    if not isinstance(profile, dict):
+        return (f"unit {uid!r} has isolation={profile!r}, a "
+                f"{type(profile).__name__}; it must be an object")
+    unknown = sorted(set(profile) - ISOLATION_KEYS)
+    if unknown:
+        return (f"unit {uid!r} isolation has unrecognised key(s) "
+                f"{', '.join(unknown)}; it reads only "
+                f"{', '.join(sorted(ISOLATION_KEYS))}. A misspelled boundary "
+                f"must be refused rather than silently dropped.")
+    if profile.get("kind") != "container":
+        return (f"unit {uid!r} isolation.kind={profile.get('kind')!r}; the "
+                f"only enforced kind is 'container'.")
+    backend = profile.get("backend")
+    if backend not in ISOLATION_BACKENDS:
+        return (f"unit {uid!r} isolation.backend={backend!r}; use one of "
+                f"{', '.join(ISOLATION_BACKENDS)}. The coordinator never "
+                f"selects a backend from PATH or translates a profile to a "
+                f"different runtime.")
+    image = profile.get("image")
+    if not isinstance(image, str) or not image.strip():
+        return f"unit {uid!r} isolation declares no container image."
+    is_uri = re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", image) is not None
+    if (image.lstrip().startswith("-") or "\n" in image or "\r" in image
+            or _looks_unresolved(image)
+            or not (os.path.isabs(image) or is_uri)):
+        return (f"unit {uid!r} isolation.image={image!r} is not a concrete "
+                f"absolute path or container URI, or is parsed as a runtime "
+                f"option.")
+
+    for output in (u.get("outputs") or []):
+        if isinstance(output, str) and os.path.normpath(output) == (
+                ISOLATION_MARKER_NAME):
+            return (f"unit {uid!r} output {output!r} is reserved for the "
+                    f"coordinator's isolation application evidence. Choose "
+                    f"a different declared output path.")
+
+    writable = profile.get("writable")
+    if not isinstance(writable, list):
+        return (f"unit {uid!r} isolation.writable={writable!r}; it must be a "
+                f"list containing exactly '$SWARM_UNIT_DIR'.")
+    if len(writable) != 1 or writable[0] not in ISOLATION_ROOT_TOKENS:
+        return (f"unit {uid!r} isolation.writable must resolve to the attempt "
+                f"root and NOTHING ELSE. Declare exactly "
+                f'["$SWARM_UNIT_DIR"]; got {writable!r}.')
+
+    read_only = profile.get("read_only")
+    if not isinstance(read_only, list):
+        return (f"unit {uid!r} isolation.read_only={read_only!r}; it must be "
+                f"a list naming every declared input.")
+    inputs = u.get("inputs") or []
+    normalized = []
+    for path in read_only:
+        if not isinstance(path, str) or not path.strip():
+            return (f"unit {uid!r} isolation.read_only contains {path!r}; "
+                    f"every bind source must be a non-empty absolute path.")
+        if (not os.path.isabs(path) or _looks_unresolved(path)
+                or any(ch in path for ch in "*?[\n\r,:")):
+            return (f"unit {uid!r} isolation.read_only path {path!r} cannot "
+                    f"be enforced as one unambiguous read-only bind. Use a "
+                    f"concrete absolute path without glob, template, comma, "
+                    f"or colon syntax.")
+        norm = os.path.normpath(path)
+        if norm == os.path.sep:
+            return (f"unit {uid!r} isolation.read_only may not bind the host "
+                    f"filesystem root into the container.")
+        normalized.append(norm)
+    if len(set(normalized)) != len(normalized):
+        return f"unit {uid!r} isolation.read_only contains duplicate binds."
+
+    declared = []
+    for path in inputs:
+        if not isinstance(path, str):
+            return (f"unit {uid!r} input {path!r} cannot be matched to an "
+                    f"isolation.read_only bind.")
+        declared.append(os.path.normpath(path))
+    if sorted(normalized) != sorted(declared):
+        return (f"unit {uid!r} isolation.read_only must name exactly its "
+                f"declared inputs. Declared inputs are {inputs!r}; read-only "
+                f"binds are {read_only!r}.")
+    _argv, command_error = _isolation_command_argv(u.get("command"))
+    if command_error:
+        return (f"unit {uid!r} isolation cannot preserve {command_error}. "
+                f"Refusing the profile avoids relying on /bin/sh or another "
+                f"undeclared interpreter inside the image.")
+    return None
+
 # Kinds whose work runs somewhere else, so the runtime there is not knowable
 # from here and must be declared.
 _NEEDS_RUNTIME = ("slurm", "pipeline")
@@ -1271,6 +1481,17 @@ def validate_plan(plan, survey=None):
     # So: DECLARE the runtime, uniformly, and prove it where it actually
     # runs. Refusal never depends on spotting the word "python".
     _validate_runtimes(plan, units)
+
+    # Optional OS-backed containment is a declaration, never an inference
+    # from runtime.resolution, an image suffix, a partition, or whichever
+    # executable happens to be first on PATH.  Refuse the whole plan before
+    # dispatch when its writable host surface cannot be rendered exactly.
+    for u in units:
+        if not isinstance(u, dict):
+            continue
+        problem = isolation_problem(u)
+        if problem:
+            raise PlanError(problem)
 
     # --- can this plan actually RUN? -------------------------------------
     #
@@ -2153,6 +2374,158 @@ def _dep_env(u, state):
     return out
 
 
+_CONTAINER_BIND_ENV = (
+    "APPTAINER_BIND", "APPTAINER_BINDPATH",
+    "APPTAINER_MOUNT",
+    "SINGULARITY_BIND", "SINGULARITY_BINDPATH",
+    "SINGULARITY_MOUNT",
+)
+
+
+def _isolation_submission(u, unit_dir, existing_facts=None):
+    """Return (rendered command, trusted facts, error) for one profile.
+
+    The runtime receives no implicit administrator/user bind paths, no host
+    home, no hostfs mount, and no automatic cwd mount.  The attempt root is
+    added once as rw and every declared input once as ro.  The root filesystem
+    and container-private scratch may still be writable without creating a
+    writable HOST bind; this contract is specifically the host write surface.
+
+    Apptainer/Singularity still run as the invoking Unix user.  This confines
+    the dispatched workload's host writes; it does not stop another process
+    already running as that user from writing the attempt root, and it makes
+    no PID or network isolation claim.
+    """
+    problem = isolation_problem(u)
+    if problem:
+        return None, None, problem
+    profile = u.get("isolation")
+    if profile is None:
+        return u.get("command"), None, None
+
+    root = str(Path(unit_dir).resolve())
+    if any(ch in root for ch in "\n\r,:"):
+        return None, None, (
+            f"unit {u.get('id')!r}: attempt root {root!r} cannot be encoded "
+            f"as one unambiguous container bind; refusing rather than "
+            f"dropping or splitting the writable boundary")
+    read_only = [os.path.normpath(str(p))
+                 for p in (profile.get("read_only") or [])]
+    for source in read_only:
+        try:
+            source_path = Path(source)
+            root_path = Path(root)
+            if (source_path == root_path
+                    or _inside_dir(root_path, source_path)
+                    or _inside_dir(source_path, root_path)):
+                return None, None, (
+                    f"unit {u.get('id')!r}: read-only input {source!r} "
+                    f"overlaps attempt root {root!r}, so the rw and ro bind "
+                    f"surfaces cannot both be enforced")
+        except (OSError, ValueError):
+            return None, None, (
+                f"unit {u.get('id')!r}: cannot resolve isolation bind "
+                f"relationship for {source!r}")
+
+    canonical_profile = json.dumps(
+        profile, sort_keys=True, separators=(",", ":"))
+    marker = str(Path(root) / ISOLATION_MARKER_NAME)
+    reusable = (existing_facts if isinstance(existing_facts, dict)
+                and existing_facts.get("profile_sha256") == hashlib.sha256(
+                    canonical_profile.encode()).hexdigest()
+                and existing_facts.get("writable_host_binds") == [root]
+                else None)
+    marker_token = ((reusable or {}).get("application_token_sha256")
+                    or os.urandom(32).hex())
+
+    command_argv, command_error = _isolation_command_argv(u.get("command"))
+    if command_error:
+        return None, None, command_error
+    argv = ["env"]
+    for name in _CONTAINER_BIND_ENV:
+        argv += ["-u", name]
+    argv += [
+        profile["backend"], "exec",
+        "--contain", "--no-home", "--writable-tmpfs",
+        "--no-mount", "bind-paths",
+        "--no-mount", "hostfs",
+        "--no-mount", "cwd",
+        "--bind", f"{root}:{root}:rw",
+    ]
+    for source in read_only:
+        argv += ["--bind", f"{source}:{source}:ro"]
+    argv += ["--pwd", root, profile["image"]] + command_argv
+    runtime = " ".join(shlex.quote(str(part)) for part in argv)
+    # A zero exit from the directly executed workload proves the backend
+    # entered the image and ran it under these flags.  Record application only
+    # then.  A workload that failed after entry remains conservatively false:
+    # backend errors and workload errors cannot be distinguished portably.
+    # The marker is written by the existing host job shell after the runtime
+    # returns, so no interpreter is assumed inside the image and no nested
+    # shell can detach work from the pipeline wrapper's `wait`.
+    applied = ("umask 077 && printf '%s\\n' "
+               f"{shlex.quote(marker_token)} > {shlex.quote(marker)}")
+    # Evidence failure must not turn an otherwise successful honest workload
+    # into a failed unit.  Preserve the runtime status independently; a full
+    # filesystem or unwritable marker merely leaves the receipt's isolation
+    # bit false.  The final subshell restores the workload's exact status even
+    # under the Slurm script's `set -e`.
+    clear = f"rm -f -- {shlex.quote(marker)}"
+    rendered = (f"isolation_rc=0; {clear} || isolation_rc=$?; "
+                f"if [ \"$isolation_rc\" -eq 0 ]; then "
+                f"{runtime} || isolation_rc=$?; fi; "
+                f"if [ \"$isolation_rc\" -eq 0 ]; then {applied} || :; fi; "
+                f"(exit \"$isolation_rc\")")
+    facts = {
+        "schema_version": 1,
+        "unit_id": u.get("id"),
+        "attempt_id": Path(root).name,
+        "applied_to_submission": True,
+        "mechanism": "container-host-bind-write-scope",
+        "backend": profile["backend"],
+        "image": profile["image"],
+        "profile_sha256": hashlib.sha256(
+            canonical_profile.encode()).hexdigest(),
+        "writable_host_binds": [root],
+        "read_only_host_binds": read_only,
+        "application_marker": marker,
+        "application_token_sha256": marker_token,
+        "does_not_isolate": [
+            "other processes running as the same Unix user",
+            "networking",
+        ],
+    }
+    return rendered, facts, None
+
+
+def _record_isolation_facts(state, u, unit_dir, facts):
+    """Pin the exact wrapper facts once per attempt in coordinator state."""
+    us = state.setdefault("units", {}).setdefault(u["id"], {})
+    attempt = Path(unit_dir).name
+    stored = us.setdefault("attempt_isolation_facts", {})
+    existing = stored.get(attempt)
+    if existing is not None and existing != facts:
+        return (f"unit {u['id']!r}: attempt {attempt!r} already has a "
+                f"different isolation wrapper pinned in coordinator state; "
+                f"refusing to replace the boundary after allocation")
+    stored[attempt] = facts
+    return None
+
+
+def _clear_isolation_marker(facts):
+    """Remove evidence from an earlier launch before submitting this one."""
+    marker = Path(facts["application_marker"])
+    try:
+        marker.unlink()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return (f"cannot clear stale isolation application marker {marker}: "
+                f"{exc}. Refusing to submit: an old marker must never attest "
+                f"a new backend invocation")
+    return None
+
+
 def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
     """Submit, and return (job_id, error). Dispatch differs per kind; judging
     does not.
@@ -2258,6 +2631,30 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
                       f"without coordinator state and state_dir: launch "
                       f"authority must be durable before an external job or "
                       f"agent is created")
+    submission_command = u.get("command")
+    # The explicit guard is redundant with the return above by design: keep
+    # the new side-effecting isolation path visibly unreachable to dry runs.
+    if (not dry_run and kind in _NEEDS_RUNTIME
+            and u.get("isolation") is not None):
+        prior = (((state.get("units") or {}).get(u["id"]) or {})
+                 .get("attempt_isolation_facts") or {}).get(
+                     Path(unit_dir).name)
+        submission_command, isolation_facts, isolation_error = (
+            _isolation_submission(u, unit_dir, prior))
+        if isolation_error:
+            return None, isolation_error
+        isolation_error = _clear_isolation_marker(isolation_facts)
+        if isolation_error:
+            return None, isolation_error
+        isolation_error = _record_isolation_facts(
+            state, u, unit_dir, isolation_facts)
+        if isolation_error:
+            return None, isolation_error
+        # This is the fact the later receipt may report. Persist it before the
+        # external launcher sees the wrapper; a crash may repeat submission
+        # recovery, but it may never reconstruct or replace this boundary from
+        # the agent-writable job script or attempt spec.
+        save_state(state_dir, state)
     if kind == "slurm":
         deps = _dep_env(u, state or {})
         script = Path(unit_dir) / "job.sbatch"
@@ -2274,7 +2671,7 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
         # Quoted: a path is data. A directory with a space in its name must
         # not become two words in a shell script we generate.
         body += [f"export {n}={shlex.quote(v)}" for n, v in deps]
-        body += [u["command"], ""]
+        body += [submission_command, ""]
         for extra in (u.get("sbatch") or []):
             body.insert(1, f"#SBATCH {extra}")
         werr = U.write_json(Path(unit_dir) / "submitted.json",
@@ -2325,7 +2722,7 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
             # now says so. The declared-outputs check still applies, so a
             # false DONE additionally requires the background work to fail
             # AFTER writing every declared output.
-            wrapped = (f'(\n{u["command"]}\nrc=$?\nwait\nexit $rc\n)\n'
+            wrapped = (f'(\n{submission_command}\nrc=$?\nwait\nexit $rc\n)\n'
                        f'printf %s "$?" > {U.ENGINE_RC}\n')
             proc = subprocess.Popen(
                 ["sh", "-c", wrapped], cwd=str(unit_dir), env=CE.child_env({
@@ -3567,7 +3964,8 @@ def _authority_result_sink():
     return promoted
 
 
-def _check(unit_dir, launch_facts=None, artifact_basis=None):
+def _check(unit_dir, launch_facts=None, artifact_basis=None,
+           isolation_facts=None, isolation_required=False):
     argv = [sys.executable, str(_HERE / "unit.py"), "check", str(unit_dir)]
     # The separate judge receives the complete authority snapshot directly
     # from coordinator state. It never opens the launch audit record.
@@ -3583,6 +3981,11 @@ def _check(unit_dir, launch_facts=None, artifact_basis=None):
     if artifact_basis:
         argv += ["--artifact-basis", json.dumps(
             artifact_basis, sort_keys=True, separators=(",", ":"))]
+    if isolation_facts:
+        argv += ["--isolation-facts", json.dumps(
+            isolation_facts, sort_keys=True, separators=(",", ":"))]
+    if isolation_required:
+        argv.append("--isolation-required")
     # Anonymous coordinator-owned storage is the authority channel. stdout
     # contains diagnostics derived from agent-writable artifacts and cannot
     # become authority merely by printing a reserved-looking prefix.
@@ -4575,6 +4978,46 @@ def trusted_artifact_basis(state, unit, attempt_dir):
     return basis
 
 
+def trusted_isolation_facts(state, u, attempt_dir):
+    """Applied submission boundary for this attempt, from state only.
+
+    The job script and unit.json live in the attempt namespace and are
+    audit-only.  A declaration removed or changed after dispatch cannot reuse
+    stale facts: the canonical profile digest must still match the plan.
+    """
+    if not attempt_dir or not isinstance(u, dict) or not u.get("isolation"):
+        return None
+    attempt = Path(attempt_dir).name
+    us = (state.get("units") or {}).get(u.get("id")) or {}
+    facts = (us.get("attempt_isolation_facts") or {}).get(attempt)
+    if not isinstance(facts, dict):
+        return None
+    canonical = json.dumps(
+        u["isolation"], sort_keys=True, separators=(",", ":"))
+    expected_digest = hashlib.sha256(canonical.encode()).hexdigest()
+    expected_root = str(Path(attempt_dir).resolve())
+    expected_marker = str(Path(expected_root) / ISOLATION_MARKER_NAME)
+    token = facts.get("application_token_sha256")
+    if not (
+            facts.get("schema_version") == 1
+            and facts.get("unit_id") == u.get("id")
+            and facts.get("attempt_id") == attempt
+            and facts.get("applied_to_submission") is True
+            and facts.get("mechanism") == "container-host-bind-write-scope"
+            and facts.get("backend") == u["isolation"].get("backend")
+            and facts.get("image") == u["isolation"].get("image")
+            and facts.get("profile_sha256") == expected_digest
+            and facts.get("writable_host_binds") == [expected_root]
+            and facts.get("application_marker") == expected_marker
+            and isinstance(token, str)
+            and re.fullmatch(r"[0-9a-f]{64}", token) is not None
+            and facts.get("read_only_host_binds") == [
+                os.path.normpath(str(p))
+                for p in (u["isolation"].get("read_only") or [])]):
+        return None
+    return facts
+
+
 CHECK_RESULT_PREFIX = "SWARM_CHECK_RESULT"
 
 
@@ -5486,9 +5929,16 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         ran_check = not (u.get("kind") == "code" and pinned_before)
         protocol_problem = None
         if ran_check:
-            check_result = _check(
+            isolation_facts = trusted_isolation_facts(state, u, attempt)
+            check_args = (
                 attempt, trusted_launch_facts(state, uid, attempt),
                 trusted_artifact_basis(state, uid, attempt))
+            # Preserve the historical call shape for undeclared units and old
+            # embedders. A declared profile takes the fourth, trusted-by-value
+            # argument; there is no attempt-directory fallback.
+            check_result = (_check(
+                *check_args, isolation_facts, isolation_required=True)
+                if u.get("isolation") is not None else _check(*check_args))
             # Old embedders may omit diagnostic stderr or the new authority
             # channel. Missing authority fails closed; stdout is never used as
             # a compatibility fallback because agent-derived notes reach it.
@@ -5503,6 +5953,12 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 result_channel = ""
             check_report, protocol_problem = _reported_check_result(
                 result_channel)
+            if u.get("isolation") is not None and not isolation_facts:
+                protocol_problem = (
+                    "the unit declares OS-backed isolation, but coordinator "
+                    "state has no matching applied wrapper facts for this "
+                    "attempt. Refusing rather than degrading to the trusted-"
+                    "writer basis")
             if rc == DONE and not check_report and not protocol_problem:
                 protocol_problem = (
                     "a successful checker emitted no SWARM_CHECK_RESULT "
@@ -6617,6 +7073,12 @@ SCHEMA_FIELDS = [
     ("runtime", "slurm, pipeline", "required",
      'inline or a "runtimes" id, or the literal "none". Declares resolution, '
      "entrypoint, probe and verified_by"),
+    ("isolation", "slurm, pipeline", "optional",
+     '{"kind": "container", "backend": "apptainer", "image": "...", '
+     '"writable": ["$SWARM_UNIT_DIR"], "read_only": [...]}. Restricts the '
+     "dispatched workload's writable HOST binds to the attempt root and "
+     "binds every declared input read-only. It does not create another Unix "
+     "identity or isolate other same-UID host processes, PIDs, or networking"),
     ("sbatch", "slurm", "optional",
      "a LIST of scheduler flags. A string is iterated character by "
      "character. --mem is required when the survey reports "

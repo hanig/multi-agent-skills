@@ -168,6 +168,50 @@ report reprints it. Do not restate the predicate without that clause -- this
 project has claimed more than its mechanism establishes three times, and each
 time the claim was the part that got copied forward.
 
+A `slurm` or `pipeline` unit may declare a narrower, enforced host-write
+surface:
+
+```json
+"isolation": {"kind": "container", "backend": "apptainer",
+              "image": "/images/tool.sif",
+              "writable": ["$SWARM_UNIT_DIR"],
+              "read_only": ["/shared/pinned/input.tsv"]}
+```
+
+`writable` must contain exactly the attempt root and `read_only` must match the
+unit's declared inputs exactly. The coordinator disables implicit home, cwd,
+hostfs, administrator, and user-requested bind paths, then adds one read-write
+bind for the attempt root and one read-only bind per input. It requests a
+writable tmpfs overlay so missing in-image bind points can be created without
+adding another writable host bind. The backend and image are declarations:
+neither is inferred from an image name, partition, runtime resolution, or
+whichever executable happens to be on `PATH`.
+Unsupported or ambiguous profiles are refused rather than run with the weaker
+basis. An isolated command is deliberately limited to one executable plus
+literal arguments. Shell programs, expansions, redirections, pipelines, and
+backgrounding are refused: silently inserting an image-side `/bin/sh` would
+assume that interpreter exists and would change the pipeline runner's process
+tree. Before each submission the coordinator removes any earlier application
+marker and retains or creates a random token in per-attempt coordinator state.
+Only a successful, direct container execution writes that token afterward; a
+backend error and a failed workload both conservatively leave the basis false.
+A matching marker plus the coordinator-pinned wrapper fact makes the receipt's
+`basis.os_enforced_isolation` true; rendering the command alone does not.
+Without both it remains false, and a declared profile cannot close by silently
+degrading.
+
+The field's exact bound matters. It means the dispatched workload's writable
+HOST bind surface was restricted by a container mount namespace. Apptainer and
+Singularity still run as the invoking Unix user. They do not prevent another
+process already running as that user from writing the host-side attempt root,
+reading the submitted script and forging its application marker, and this
+profile claims no network isolation. It also uses filesystem
+containment rather than PID isolation. Container-private scratch or an overlay
+may be writable without being a writable host bind. A workload whose tools
+need a writable cache under the host `$HOME` cannot use this profile; it keeps
+the weaker trusted-writer basis instead. This is containment of the launched
+writer, not a new Unix principal and not proof of process-tree quiescence.
+
 Shreshth's repo had this all along: Paseo gives each agent its own git worktree,
 so his cheap `--base` predicate is conclusive because nothing else writes that
 tree. He never solved attribution; an exclusive namespace made it unnecessary.
