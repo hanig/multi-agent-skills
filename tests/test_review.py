@@ -12,6 +12,9 @@ Offline: no API calls.
 """
 
 import importlib.util
+import contextlib
+import hashlib
+import io
 import json
 import os
 import subprocess
@@ -938,8 +941,9 @@ class TestFailClosed(unittest.TestCase):
 
 class TestPortability(unittest.TestCase):
     def test_stdlib_only(self):
-        allowed = {"argparse", "concurrent", "json", "os", "re", "signal", "stat",
-                   "subprocess", "sys", "time", "urllib", "pathlib"}
+        allowed = {"argparse", "concurrent", "hashlib", "json", "os",
+                   "re", "signal", "stat", "subprocess", "sys", "tempfile",
+                   "time", "urllib", "pathlib"}
         for line in SCRIPT.read_text().splitlines():
             s = line.strip()
             if s.startswith("import ") and not s.startswith("import ("):
@@ -1629,6 +1633,182 @@ class TestBothProviderPathsShareTheirLimits(unittest.TestCase):
         self.assertIn(str(review.DEFAULT_MAX_OUTPUT_TOKENS), comment,
                      "reviewers.json documents a different default than the "
                      "code uses")
+
+
+class TestReviewJournal(unittest.TestCase):
+    CLAIM = "the append-only journal records this claim by digest"
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.saved = {
+            "argv": sys.argv,
+            "load_reviewers": review.load_reviewers,
+            "availability": review.availability,
+            "run_one": review.run_one,
+            "gather": review.gather,
+            "journal_path": review.review_journal_path,
+            "time_ns": review.time.time_ns,
+            "xdg": os.environ.get("XDG_STATE_HOME"),
+        }
+        os.environ["XDG_STATE_HOME"] = str(self.tmp / "state")
+        review.load_reviewers = lambda: [
+            {"name": "stub-reviewer", "provider": "stub", "model": "stub",
+             "profiles": ["standard"], "enabled": True},
+            {"name": "unselected-reviewer", "provider": "stub",
+             "model": "stub-2", "profiles": ["standard"], "enabled": True},
+        ]
+        review.availability = lambda _reviewer: None
+        review.gather = lambda _args: ("diff body", "test diff")
+        review.run_one = lambda reviewer, *_args, **_kwargs: {
+            "ok": True, "name": reviewer["name"], "verdict": "upheld",
+            "findings": [],
+            "claims": [{"claim_index": 0, "claim": self.CLAIM,
+                        "status": "supported",
+                        "why": "the test stub supplies a complete claim assessment"}],
+            "notes": "", "elapsed_s": 0, "in_tokens": 1,
+            "out_tokens": 1,
+        }
+
+    def tearDown(self):
+        sys.argv = self.saved["argv"]
+        review.load_reviewers = self.saved["load_reviewers"]
+        review.availability = self.saved["availability"]
+        review.run_one = self.saved["run_one"]
+        review.gather = self.saved["gather"]
+        review.review_journal_path = self.saved["journal_path"]
+        review.time.time_ns = self.saved["time_ns"]
+        if self.saved["xdg"] is None:
+            os.environ.pop("XDG_STATE_HOME", None)
+        else:
+            os.environ["XDG_STATE_HOME"] = self.saved["xdg"]
+
+    def invoke(self, profile="standard", only="stub-reviewer"):
+        sys.argv = [str(SCRIPT), "--kind", "implementation", "--round", "1",
+                    "--profile", profile, "--quorum", "1",
+                    "--claim", self.CLAIM,
+                    "--file", str(SCRIPT), "--json"]
+        if only is not None:
+            sys.argv.extend(["--only", only])
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as stopped:
+                review.main()
+        return stopped.exception.code, stdout.getvalue(), stderr.getvalue()
+
+    def records(self):
+        path = (Path(os.environ["XDG_STATE_HOME"]) / review.JOURNAL_DIR /
+                review.JOURNAL_NAME)
+        return [json.loads(line) for line in path.read_text().splitlines()]
+
+    def test_two_invocations_append_two_rounds_with_monotonic_timestamps(self):
+        wall_clock = iter((1_000_000_000, 2_000_000_000))
+        review.time.time_ns = lambda: next(wall_clock)
+        self.assertEqual(self.invoke()[0], review.STATES["REVIEW_PASS"])
+        self.assertEqual(self.invoke()[0], review.STATES["REVIEW_PASS"])
+        records = self.records()
+        rounds = [record for record in records
+                  if record.get("type") == "review_round"]
+        self.assertEqual(len(rounds), 2)
+        self.assertLess(rounds[0]["date"], rounds[1]["date"])
+        for record in rounds:
+            notice = record["journal_header"].lower()
+            self.assertIn("audit-only", notice)
+            self.assertIn("mandatory per-change receipt", notice)
+            self.assertIn("lock honest authors out", notice)
+            self.assertIn("non-gating", notice)
+            self.assertIn("cannot decide or block a verdict", notice)
+            self.assertEqual(record["kind"], "implementation")
+            self.assertEqual(record["round"], 1)
+            self.assertEqual(record["panel"], ["stub-reviewer"])
+            self.assertEqual(record["verdict"], "REVIEW_PASS")
+            self.assertEqual(record["claim_digests"],
+                             [hashlib.sha256(self.CLAIM.encode("utf-8"))
+                              .hexdigest()])
+
+    def test_profile_filtering_is_reflected_in_the_effective_panel(self):
+        review.load_reviewers = lambda: [
+            {"name": "standard-only", "provider": "stub", "model": "s",
+             "profiles": ["standard"], "enabled": True},
+            {"name": "deep-only", "provider": "stub", "model": "d",
+             "profiles": ["deep"], "enabled": True},
+        ]
+        code, stdout, _stderr = self.invoke(profile="deep", only=None)
+        self.assertEqual(code, review.STATES["REVIEW_PASS"])
+        self.assertEqual(json.loads(stdout)["state"], "REVIEW_PASS")
+        self.assertEqual(self.records()[-1]["panel"], ["deep-only"])
+
+    def test_existing_journal_history_cannot_decide_the_verdict(self):
+        path = review.review_journal_path([SCRIPT])
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({
+            "type": "review_round", "verdict": "REVIEW_FAIL",
+            "date": "9999-12-31T23:59:59.999999999Z",
+        }) + "\n")
+        code, stdout, _stderr = self.invoke()
+        self.assertEqual(code, review.STATES["REVIEW_PASS"])
+        self.assertEqual(json.loads(stdout)["state"], "REVIEW_PASS")
+        records = self.records()
+        self.assertEqual([record["verdict"] for record in records],
+                         ["REVIEW_FAIL", "REVIEW_PASS"])
+        self.assertGreater(records[0]["date"], records[1]["date"],
+                           "physical line order, not date, orders history")
+
+    def test_journal_is_write_only_on_the_verdict_path(self):
+        path = review.review_journal_path([SCRIPT])
+        path.parent.mkdir(parents=True)
+        path.write_text('{"type":"seed"}\n')
+        path.chmod(0o200)
+        try:
+            code, stdout, stderr = self.invoke()
+        finally:
+            path.chmod(0o600)
+        self.assertEqual(code, review.STATES["REVIEW_PASS"])
+        self.assertEqual(json.loads(stdout)["state"], "REVIEW_PASS")
+        self.assertNotIn("JOURNAL_WRITE_FAILED", stderr)
+        self.assertEqual(len(self.records()), 2,
+                         "write-only access did not append the round")
+
+    def test_read_only_journal_failure_is_loud_but_non_gating(self):
+        path = review.review_journal_path([SCRIPT])
+        path.parent.mkdir(parents=True)
+        path.write_text("occupied\n")
+        path.chmod(0o400)
+        try:
+            code, stdout, stderr = self.invoke()
+        finally:
+            path.chmod(0o600)
+        self.assertEqual(code, review.STATES["REVIEW_PASS"])
+        report = json.loads(stdout)
+        self.assertEqual(report["state"], "REVIEW_PASS")
+        self.assertFalse(report["journal"]["written"])
+        self.assertIn("JOURNAL_WRITE_FAILED", stderr)
+
+    def test_unexpected_path_failure_is_loud_but_non_gating(self):
+        def fail_path(_files):
+            raise RuntimeError("home lookup failed")
+        review.review_journal_path = fail_path
+        code, stdout, stderr = self.invoke()
+        self.assertEqual(code, review.STATES["REVIEW_PASS"])
+        self.assertEqual(json.loads(stdout)["state"], "REVIEW_PASS")
+        self.assertIn("JOURNAL_WRITE_FAILED", stderr)
+
+    def test_journal_state_home_never_resolves_inside_reviewed_worktree(self):
+        os.environ["XDG_STATE_HOME"] = str(REPO / ".state-in-repo")
+        path = review.review_journal_path([SCRIPT])
+        with self.assertRaises(ValueError):
+            path.relative_to(REPO.resolve())
+
+    def test_symlinked_journal_directory_cannot_escape_into_worktree(self):
+        base = Path(os.environ["XDG_STATE_HOME"])
+        base.mkdir(parents=True)
+        target = REPO / (".journal-target-" + self.tmp.name)
+        (base / review.JOURNAL_DIR).symlink_to(target, target_is_directory=True)
+        code, stdout, stderr = self.invoke()
+        self.assertEqual(code, review.STATES["REVIEW_PASS"])
+        self.assertEqual(json.loads(stdout)["state"], "REVIEW_PASS")
+        self.assertIn("JOURNAL_WRITE_FAILED", stderr)
+        self.assertIn("operated Git worktree", stderr)
+        self.assertFalse(target.exists())
 
 
 if __name__ == "__main__":

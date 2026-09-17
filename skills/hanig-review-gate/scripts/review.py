@@ -33,6 +33,7 @@ Python 3.8+, standard library only.
 
 import argparse
 import concurrent.futures
+import hashlib
 import json
 import os
 import re
@@ -40,6 +41,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -66,6 +68,14 @@ MAX_CHARS = 180_000
 # cost kimi-k2.7-code a whole session before the error message was made to say
 # so. Sized for the answer AFTER the thinking.
 DEFAULT_MAX_OUTPUT_TOKENS = 64_000
+
+JOURNAL_DIR = "hanig-review-gate"
+JOURNAL_NAME = "review-rounds.jsonl"
+JOURNAL_HEADER = (
+    "Audit-only, attested review history; this is not the rejected mandatory "
+    "per-change receipt. That receipt could lock honest authors out of the "
+    "gate, while this non-gating journal cannot decide or block a verdict."
+)
 
 
 SYSTEM = """You are an adversarial code reviewer. Your job is to REFUTE, not to approve.
@@ -159,6 +169,150 @@ def read_text_bounded(path):
 
 def now():
     return time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
+def journal_timestamp():
+    """Observed UTC date; physical JSONL position is the canonical order."""
+    stamp = time.time_ns()
+    seconds, nanos = divmod(stamp, 1_000_000_000)
+    return (time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(seconds))
+            + f".{nanos:09d}Z")
+
+
+def _resolved(path):
+    return Path(path).expanduser().resolve()
+
+
+def _inside(path, directory):
+    try:
+        _resolved(path).relative_to(_resolved(directory))
+        return True
+    except ValueError:
+        return False
+
+
+def _attached_worktrees(repo):
+    """Every ordinary worktree attached to an operated repository."""
+    found = {_resolved(repo)}
+    raw = git_out("-C", str(repo), "worktree", "list", "--porcelain")
+    for line in raw.splitlines():
+        if line.startswith("worktree "):
+            found.add(_resolved(line[len("worktree "):]))
+    return found
+
+
+def review_worktrees(files=()):
+    """All worktrees attached to repositories supplying review input."""
+    places = [Path.cwd()]
+    for value in files:
+        path = _resolved(value)
+        places.append(path if path.is_dir() else path.parent)
+    found = set()
+    for place in places:
+        top = git_out("-C", str(place), "rev-parse", "--show-toplevel").strip()
+        if top:
+            found.update(_attached_worktrees(top))
+    return sorted(found, key=str)
+
+
+def review_journal_path(files=()):
+    """Journal below an external state home, never an operated worktree.
+
+    This follows coordinator_paths.py's candidate order and containment
+    doctrine. A relative XDG_STATE_HOME is not an XDG state directory, and a
+    candidate inside any reviewed worktree is skipped rather than creating
+    state beside the code whose diff is under review.
+    """
+    worktrees = review_worktrees(files)
+    candidates = []
+    xdg = os.environ.get("XDG_STATE_HOME")
+    if xdg and os.path.isabs(os.path.expanduser(xdg)):
+        candidates.append(_resolved(xdg))
+    candidates.append(_resolved(Path.home() / ".local" / "state"))
+    candidates.append(_resolved(Path(tempfile.gettempdir()) /
+                                "hanig-review-gate-state"))
+    base = next((candidate for candidate in candidates
+                 if not any(_inside(candidate, worktree)
+                            for worktree in worktrees)), None)
+    if base is None:
+        raise OSError("no review journal state location is available outside "
+                      "the operated Git worktrees")
+    path = _resolved(base / JOURNAL_DIR / JOURNAL_NAME)
+    for worktree in worktrees:
+        if _inside(path, worktree):
+            raise OSError(f"review journal {str(path)!r} resolves inside "
+                          f"operated Git worktree {str(worktree)!r}")
+    if not _inside(path, base):
+        raise OSError(f"review journal {str(path)!r} resolves outside its "
+                      f"state home {str(base)!r}")
+    return path
+
+
+def effective_panel(reviewers, escalated=False):
+    """Enabled reviewer names after profile/--only selection."""
+    if escalated:
+        reviewers = [r for r in reviewers
+                     if any(in_profile(r, tier) for tier in LADDER)]
+    return [r["name"] for r in reviewers if r.get("enabled", True)]
+
+
+def claim_digests(claims):
+    """Ordered digests retain claim identity without copying claim text."""
+    return [hashlib.sha256(c.encode("utf-8")).hexdigest() for c in claims]
+
+
+def append_review_journal(path, kind, round_no, panel, verdict, claims):
+    """Append one audit-only round record without reading journal content."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "type": "review_round",
+        "schema_version": 1,
+        "journal_header": JOURNAL_HEADER,
+        "date": journal_timestamp(),
+        "kind": kind,
+        "round": round_no,
+        "panel": list(panel),
+        "verdict": verdict,
+        "claim_digests": claim_digests(claims),
+    }
+    line = (json.dumps(record, sort_keys=True) + "\n").encode()
+    fd = None
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        flags |= getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(path), flags, 0o600)
+        status = os.fstat(fd)
+        if not stat.S_ISREG(status.st_mode):
+            raise OSError(f"review journal {str(path)!r} is not a regular file")
+        # One O_APPEND write is the complete record. Physical line position,
+        # not the observed wall clock or mutable file metadata, defines order.
+        written = os.write(fd, line)
+        if written != len(line):
+            raise OSError(f"short journal append: wrote {written} of "
+                          f"{len(line)} bytes")
+        os.fsync(fd)
+    finally:
+        if fd is not None:
+            os.close(fd)
+    return record
+
+
+def record_review_round(args, reviewers, verdict):
+    """Best-effort audit write whose outcome never changes ``verdict``."""
+    try:
+        path = review_journal_path(args.file)
+        append_review_journal(
+            path, args.kind, args.round,
+            effective_panel(reviewers, escalated=args.escalate),
+            verdict, args.claim)
+        return {"path": str(path), "written": True, "error": None}
+    except Exception as exc:
+        error = redact(f"{type(exc).__name__}: {exc}")
+        print("JOURNAL_WRITE_FAILED — audit history was not recorded: "
+              f"{error}. The review verdict is unchanged because the "
+              "journal is non-gating.", file=sys.stderr)
+        return {"path": None, "written": False, "error": error}
 
 
 def deep_redact(obj):
@@ -1278,8 +1432,10 @@ def main():
             {"name": rev["name"], "reason": why} if why else rev)
 
     if not runnable:
+        journal = record_review_round(args, reviewers, "REVIEW_UNAVAILABLE")
         report = {"state": "REVIEW_UNAVAILABLE", "checked_at": now(),
-                  "reviewed": label, "unavailable": unavailable, "results": []}
+                  "reviewed": label, "unavailable": unavailable, "results": [],
+                  "journal": journal}
         if args.json:
             print(json.dumps(report, indent=2))
         else:
@@ -1299,6 +1455,7 @@ def main():
         completed, failed, unavailable, tiers_run = escalate(
             reviewers, prompt, args, truncated, label, len(body))
         if not completed and not failed:
+            record_review_round(args, reviewers, "REVIEW_UNAVAILABLE")
             print("no reviewer could run in any tier", file=sys.stderr)
             sys.exit(STATES["REVIEW_UNAVAILABLE"])
     else:
@@ -1334,6 +1491,7 @@ def main():
                          rejecting=rejecting, truncated=truncated,
                          quorum=args.quorum,
                          n_out_of_scope_critical=len(oos_critical))
+    journal = record_review_round(args, reviewers, state)
 
     report = {
         "state": state, "checked_at": now(), "reviewed": label,
@@ -1345,6 +1503,7 @@ def main():
         "confirmed_findings": confirmed, "refuted_claims": refuted_claims,
         "out_of_scope_findings": out_of_scope,
         "rejecting_reviewers": rejecting,
+        "journal": journal,
         "results": completed,
     }
 
