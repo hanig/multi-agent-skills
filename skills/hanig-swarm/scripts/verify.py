@@ -202,6 +202,11 @@ def declared_corpus(entry):
 def _digest_base_blob(repo, base_commit, path):
     """(sha256, size, error) for exact blob bytes at the anchored base.
 
+    A blob is not necessarily a regular file: a symlink is a blob containing
+    its target spelling.  The verifier checkout would follow that link and
+    read different bytes, so admissibility starts with the anchored tree entry
+    mode rather than `cat-file`'s object type alone.
+
     The normal coordinator runner returns decoded, stripped text, which is
     intentionally convenient for commands but cannot hash a blob: leading or
     trailing whitespace and non-UTF-8 bytes are content. `cat-file` therefore
@@ -210,6 +215,45 @@ def _digest_base_blob(repo, base_commit, path):
     """
     spec = f"{base_commit}:{path}"
     argv = ["git", "-C", str(repo), "--no-replace-objects", "cat-file"]
+    try:
+        entry = subprocess.run(
+            ["git", "-C", str(repo), "--no-replace-objects", "ls-tree",
+             "-z", "--full-tree", str(base_commit), "--",
+             f":(literal){path}"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, env=CE.child_env(), close_fds=True,
+            timeout=60, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, None, f"cannot inspect corpus path {path!r}: {exc}"
+    if entry.returncode != 0:
+        detail = entry.stderr.decode("utf-8", "replace").strip()[:160]
+        return None, None, (f"cannot inspect corpus path {path!r} at the "
+                            f"anchored base: {detail}")
+    records = [record for record in entry.stdout.split(b"\0") if record]
+    exact = []
+    for record in records:
+        try:
+            metadata, found_path = record.split(b"\t", 1)
+            mode, kind, _object_id = metadata.split(b" ", 2)
+        except ValueError:
+            return None, None, (f"cannot parse the anchored tree entry for "
+                                f"corpus path {path!r}")
+        if found_path == os.fsencode(path):
+            exact.append((mode.decode("ascii", "replace"),
+                          kind.decode("ascii", "replace")))
+    if len(exact) != 1:
+        return None, None, (f"declared corpus path {path!r} has no exact tree "
+                            f"entry at anchored base "
+                            f"{str(base_commit)[:12]}")
+    mode, tree_kind = exact[0]
+    if mode not in ("100644", "100755"):
+        return None, None, (f"declared corpus path {path!r} has mode {mode} "
+                            f"at anchored base {str(base_commit)[:12]}; only "
+                            f"regular files (100644 or 100755) are admissible")
+    if tree_kind != "blob":
+        return None, None, (f"declared corpus path {path!r} has mode {mode} "
+                            f"but object type {tree_kind!r} at the anchored "
+                            f"base")
     try:
         kind = subprocess.run(
             argv + ["-t", spec], stdin=subprocess.DEVNULL,

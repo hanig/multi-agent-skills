@@ -502,6 +502,68 @@ class TestCodexCannotRewriteItsOwnExam(Base):
         self.assertIsNone(refusal)
         self.assertIsNotNone(admitted)
 
+    def test_a_symlink_corpus_cannot_hide_a_changed_target(self):
+        corpus = "tests/fixtures/api.json"
+        target = "data/api.json"
+        corpus_path = Path(self.repo) / corpus
+        target_path = Path(self.repo) / target
+        corpus_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text('{"answer": 42}\n')
+        corpus_path.symlink_to("../../data/api.json")
+        self.commit_policy({"schema_version": 1, "verifiers": [
+            {"name": "tests", "sha256": self.digest,
+             "claims": [self.CLAIM], "corpus": [corpus]}]})
+        policy, policy_digest, err = V.read_policy(
+            U.run, self.repo, self.base)
+        self.assertIsNone(err, err)
+        head = self._commit_subject(target, '{"answer": "candidate"}\n')
+
+        # This is exactly the evidence the vulnerable implementation wrote:
+        # the diff names only the target, while cat-file hashes the unchanged
+        # symlink-target spelling rather than the bytes the verifier reads.
+        vulnerable_evidence = {
+            "subject_changed_paths": [target],
+            "corpus_base_sha256": {
+                corpus: V.digest_bytes(b"../../data/api.json")}}
+        self._receipt(policy_digest, head, vulnerable_evidence)
+
+        admitted, refusal = S.admit_verification(
+            self.tmp, "u1", self.CLAIM, head, policy_digest, policy,
+            repo=self.repo, base_commit=self.base)
+        self.assertIsNone(admitted)
+        self.assertIn(corpus, refusal)
+        self.assertIn("mode 120000", refusal)
+
+    def test_a_directory_corpus_is_refused_with_its_tree_mode(self):
+        policy, _policy_digest, _original = self._declare_corpus()
+        entry = dict(policy["verifiers"][0], corpus=["tests"])
+        evidence, refusal = V.corpus_evidence(
+            U.run, self.repo, self.base, self.base, entry)
+        self.assertIsNone(evidence)
+        self.assertIn("tests", refusal)
+        self.assertIn("mode 040000", refusal)
+
+    def test_a_gitlink_corpus_is_refused_with_its_tree_mode(self):
+        gitlink = "vendor/library"
+        policy = {"schema_version": 1, "verifiers": [
+            {"name": "tests", "sha256": self.digest,
+             "claims": [self.CLAIM], "corpus": [gitlink]}]}
+        with open(Path(self.repo) / V.POLICY_FILE, "w") as fh:
+            json.dump(policy, fh)
+        git(self.repo, "add", V.POLICY_FILE)
+        git(self.repo, "update-index", "--add", "--cacheinfo",
+            f"160000,{self.base},{gitlink}")
+        git(self.repo, "commit", "-qm", "policy with gitlink corpus")
+        self.base = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+
+        evidence, refusal = V.corpus_evidence(
+            U.run, self.repo, self.base, self.base,
+            policy["verifiers"][0])
+        self.assertIsNone(evidence)
+        self.assertIn(gitlink, refusal)
+        self.assertIn("mode 160000", refusal)
+
     def test_an_older_receipt_without_corpus_evidence_is_not_grandfathered(self):
         policy, policy_digest, _original = self._declare_corpus()
         head = self._commit_subject("solution.py", "def answer():\n    return 42\n")

@@ -305,11 +305,16 @@ receipt that predates corpus evidence rather than correcting only future runs.
 The bound is exactly the declared list. Dependencies outside it -- generated
 fixtures, configuration, imported helper code, toolchains, and environment --
 are not protected unless the policy names their repository files too. Entries
-are exact files, not directories or globs. One policy entry is bounded to
-10,000 paths, 256 MB per file, and 1 GB total. An absent or empty `corpus` is
-the compatibility path: it performs no new Git reads and adds no receipt
-fields, so existing policy behavior and serialized receipts stay byte-for-byte
-unchanged.
+are exact files, not directories or globs. Each path must have regular-file
+mode `100644` or `100755` in the anchored base tree. A symlink (`120000`),
+gitlink (`160000`), directory (`040000`), or any other mode is refused with the
+path and mode named: the verifier checkout follows a symlink to bytes that the
+symlink blob does not contain, and following that indirection while admitting
+the receipt would merely move the same trust question to its target (which may
+be outside the repository). One policy entry is bounded to 10,000 paths, 256 MB
+per file, and 1 GB total. An absent or empty `corpus` is the compatibility path:
+it performs no new Git reads and adds no receipt fields, so existing policy
+behavior and serialized receipts stay byte-for-byte unchanged.
 
 ## What isolates a code unit
 
