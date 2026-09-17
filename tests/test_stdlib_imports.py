@@ -8,6 +8,7 @@ needs those guarantees must establish them in its canary or preflight.
 
 import ast
 import sys
+import sysconfig
 import tempfile
 import tokenize
 import unittest
@@ -15,6 +16,42 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+
+def stdlib_module_roots():
+    """Top-level standard-library module names, on 3.9 as well as 3.10+.
+
+    ``sys.stdlib_module_names`` is 3.10+, and release validation pins 3.9, so
+    reading it unguarded raised AttributeError on both CI runners while passing
+    on a 3.12 developer host. The sweep then certified nothing exactly where it
+    was meant to run.
+
+    The fallback enumerates the interpreter's own stdlib directory rather than
+    carrying a hand-written list, because a list rots and a rotted list reads as
+    a third-party import.
+    """
+    names = set(sys.builtin_module_names)
+    modern = getattr(sys, "stdlib_module_names", None)
+    if modern is not None:
+        return names | set(modern)
+    for key in ("stdlib", "platstdlib"):
+        directory = sysconfig.get_paths().get(key)
+        if not directory:
+            continue
+        base = Path(directory)
+        if not base.is_dir():
+            continue
+        for entry in base.iterdir():
+            if entry.suffix == ".py":
+                names.add(entry.stem)
+            elif entry.is_dir() and (entry / "__init__.py").exists():
+                names.add(entry.name)
+        dynload = base / "lib-dynload"
+        if dynload.is_dir():
+            for entry in dynload.iterdir():
+                names.add(entry.name.split(".", 1)[0])
+    return names
 
 
 def authored_python_files():
@@ -109,7 +146,7 @@ class TestAuthoredScriptsUseOnlyTheStandardLibrary(unittest.TestCase):
         self.assertTrue(files, "the authored-script sweep matched no files")
 
         local_modules = repo_local_import_roots(files)
-        allowed = set(sys.stdlib_module_names) | local_modules
+        allowed = stdlib_module_roots() | local_modules
         outside = []
         for path in files:
             tree = parse_python(path)
