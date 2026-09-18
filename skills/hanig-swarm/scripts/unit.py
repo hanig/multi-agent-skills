@@ -1121,13 +1121,12 @@ def _code_state(unit_dir, spec, present, missing, notes, launch_facts=None):
     # only later, during merge admission, asked the agent-owned repository a
     # second time; if it had moved on, the head actually validated was gone
     # and a correct receipt for it was refused.
-    produced, judged_head, why = W.judge_detail(
+    produced, why = W.judge_and_capture(
         run, unit_dir, spec, launch_facts)
-    W.capture_code_judgment(spec, launch_facts, produced, judged_head)
     head = (f"agent {agent} is {status or 'idle'} and all {len(present)} "
             f"declared output(s) are present")
     if produced is False:
-        notes.append(f"REASON={REASON_NO_OUTPUTS}")
+        notes.append(f"REASON={W.code_failure_reason(spec.get('production_state'))}")
         notes.append(f"{head}, but the repository shows no produced "
                      f"change: {why}")
         return "INCOMPLETE"

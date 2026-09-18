@@ -966,8 +966,10 @@ def _code_completion_protocol(intent):
             "REPORT that no merge-evidence repository was recorded; do not "
             "guess another remote.")
     if judgment_ref:
+        ref_kind = ("remote branch" if str(judgment_ref).startswith(
+                    "refs/heads/") else "legacy remote-tracking")
         judgment_instruction = (
-            "The coordinator judges only the pre-anchored remote-tracking "
+            f"The coordinator judges only the pre-anchored {ref_kind} "
             f"ref {judgment_ref!r}; a commit left only in the worktree, or "
             "pushed under another ref, cannot close the attempt.")
     else:
@@ -1780,7 +1782,7 @@ def validate_plan(plan, survey=None):
         "branch": "swarm-protocol-validation-attempt",
         "target_branch": "main",
         "repository_remote": "ssh://git@example.invalid/project.git",
-        "judgment_ref": "refs/remotes/origin/swarm-protocol-validation-attempt",
+        "judgment_ref": "refs/heads/swarm-protocol-validation-attempt",
         "base_commit": "0" * 40,
     }
     for u in units:
@@ -3531,15 +3533,18 @@ def _capture_code_launch(unit_dir, u):
     rc, tree, _ = _git(repo, "rev-parse", head + "^{tree}")
     if rc != 0:
         return f"unit {u['id']!r}: cannot read the tree of {head[:12]}", None
-    rc, remote, _ = _git(repo, "remote", "get-url", "origin")
+    # `git push origin` writes to pushurl when one is configured.  Anchor that
+    # actual destination, not the fetch URL: otherwise an honest push can
+    # succeed while judgment looks for the branch in a different repository.
+    rc, remote, _ = _git(repo, "remote", "get-url", "--push", "origin")
     if rc != 0 or not remote.strip():
         return (f"unit {u.get('id')!r}: repository {repo!r} has no readable "
                 f"origin remote. Code attempts must push their generated "
                 f"branch to origin so the coordinator can judge the exact "
                 f"ref it anchored before the agent existed"), None
-    judgment_ref = f"refs/remotes/origin/{branch}"
+    judgment_ref = f"refs/heads/{branch}"
     remote_rc, _remote_head, remote_err = _git(
-        repo, "ls-remote", "--exit-code", "origin",
+        repo, "ls-remote", "--exit-code", remote,
         f"refs/heads/{branch}")
     if remote_rc == 0:
         return (f"unit {u.get('id')!r}: generated attempt branch {branch!r} "
@@ -3551,15 +3556,19 @@ def _capture_code_launch(unit_dir, u):
         return (f"unit {u.get('id')!r}: cannot establish that generated "
                 f"attempt branch {branch!r} is absent on origin: "
                 f"{detail[:200]}. Refusing before agent creation"), None
+    # The remote branch and the local branch are separate collision domains.
+    # Paseo must create the latter, while the former is the exact durable ref
+    # the checker will query. A remote-tracking ref is deliberately irrelevant:
+    # whether Git writes one after push is controlled by remote.origin.fetch.
+    local_ref = f"refs/heads/{branch}"
     ref_rc, _out, _err = _git(
-        repo, "show-ref", "--verify", "--quiet", judgment_ref)
+        repo, "show-ref", "--verify", "--quiet", local_ref)
     if ref_rc == 0:
-        return (f"unit {u.get('id')!r}: generated judgment ref "
-                f"{judgment_ref!r} already exists. A production ref must be "
-                f"absent when the launch intent is anchored; allocate a new "
-                f"attempt rather than inheriting its head"), None
+        return (f"unit {u.get('id')!r}: generated local attempt branch "
+                f"{branch!r} already exists. Allocate a new attempt rather "
+                f"than asking Paseo to reuse its history"), None
     intent = {
-        "schema_version": 2,
+        "schema_version": 3,
         "unit_id": u.get("id"),
         "attempt_id": Path(unit_dir).name,
         "repo": repo,
@@ -3569,9 +3578,9 @@ def _capture_code_launch(unit_dir, u):
         "worktree_slug": slug,
         "branch": branch,
         # The exact durable observation the checker will make after Paseo's
-        # managed worktree may already be gone. `git push origin <branch>`
-        # updates this remote-tracking ref in the shared source repository;
-        # a worktree-only commit leaves it absent and therefore cannot pass.
+        # managed worktree may already be gone. This is the remote ref NAME;
+        # the agent controls its VALUE by pushing, and the checker derives and
+        # validates that value rather than accepting an agent assertion.
         "judgment_ref": judgment_ref,
         "target_branch": target,
         # Makes the audit payload reproducible after a crash. Recovery can
@@ -3600,9 +3609,11 @@ def _code_launch_intent_problem(intent, u, attempt):
         if not intent.get(key):
             return (f"unit {u.get('id')!r}: worktree launch intent is "
                     f"incomplete (missing {key})")
-    if schema >= 2 and not intent.get("judgment_ref"):
-        return (f"unit {u.get('id')!r}: worktree launch intent is "
-                f"incomplete (missing judgment_ref)")
+    if schema >= 2:
+        for key in ("repository_remote", "judgment_ref"):
+            if not intent.get(key):
+                return (f"unit {u.get('id')!r}: worktree launch intent is "
+                        f"incomplete (missing {key})")
     for key in ("base_commit", "base_tree"):
         value = intent[key]
         if (not isinstance(value, str) or len(value) not in (40, 64)
@@ -3611,11 +3622,13 @@ def _code_launch_intent_problem(intent, u, attempt):
     if intent["target_branch"] == intent["branch"]:
         return (f"unit {u.get('id')!r}: trusted pull-request target equals "
                 f"its generated attempt branch {intent['branch']!r}")
-    expected_ref = f"refs/remotes/origin/{intent['branch']}"
+    expected_ref = (f"refs/heads/{intent['branch']}" if schema >= 3 else
+                    f"refs/remotes/origin/{intent['branch']}")
     if (intent.get("judgment_ref") is not None
             and intent["judgment_ref"] != expected_ref):
         return (f"unit {u.get('id')!r}: trusted judgment ref "
-                f"{intent['judgment_ref']!r} is not the remote-tracking ref "
+                f"{intent['judgment_ref']!r} is not the schema-{schema} "
+                "judgment ref "
                 f"for attempt branch {intent['branch']!r}")
     target = str(u.get("target_branch") or "").strip()
     if intent["target_branch"] != target:
@@ -3788,9 +3801,16 @@ def _complete_code_launch(state, u, unit_dir, workspace, workspace_id=None,
                 "git_dir": worktree_git_dir,
                 "git_dir_device": git_st.st_dev,
                 "git_dir_inode": git_st.st_ino}
+    intent_schema = intent.get("schema_version", 1)
     judgment_ref = intent.get("judgment_ref")
+    direct_remote_judgment = intent_schema >= 3
     facts = {
-        "schema_version": 3 if judgment_ref else 2,
+        # schema 3 was emitted by the preserved first attempt and names a
+        # local remote-tracking ref. Keep those facts byte-compatible for
+        # crash recovery, but worktree.py treats only schema 4 as the direct
+        # exact-remote contract.
+        "schema_version": (4 if direct_remote_judgment else
+                           3 if judgment_ref else 2),
         "unit_id": u.get("id"),
         "attempt_id": attempt,
         "repo": intent["repo"],

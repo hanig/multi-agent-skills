@@ -74,6 +74,13 @@ ALLOWED = {
     ("worktree.py", "_judge_anchored_ref"):
         "resolves only the ref named by the coordinator-state launch snapshot "
         "and validates its commit against the snapshot's base and tree",
+    ("worktree.py", "effective_remote_ref"):
+        "derives the exact wire ref only from generation-specific fields in "
+        "the already validated coordinator-state launch snapshot",
+    ("worktree.py", "_worktree_residue_state"):
+        "classifies coordinator-state worktree residue only after the "
+        "authoritative remote ref is absent; it supplies no produced head "
+        "and cannot change the refusal",
     ("worktree.py", "code_basis"):
         "formats the ref already captured during judgment into audit fields; "
         "it performs no repository observation",

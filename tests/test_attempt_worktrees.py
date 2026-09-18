@@ -133,6 +133,86 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         self.assertNotIn("judgment_ref", facts)
         self.assertTrue(facts["clean_at_launch"])
 
+    def test_schema3_tracking_ref_snapshot_uses_anchored_remote_after_cleanup(self):
+        attempt = self.attempt("code", "tracking-ref-legacy")
+        state = {"units": {}}
+        unit = code_unit(self.repo)
+        _job, error = self.submit(unit, attempt, False, state)
+        self.assertIsNone(error)
+        facts = state["units"]["code"]["attempt_launch_facts"][attempt.name]
+        facts = json.loads(json.dumps(facts))
+        facts["schema_version"] = 3
+        facts["judgment_ref"] = (
+            f"refs/remotes/origin/{facts['branch']}")
+        workspace = Path(facts["execution_workspace"])
+        (workspace / "legacy.txt").write_text("legacy\n")
+        git(workspace, "add", "-A")
+        git(workspace, "commit", "-qm", "legacy attempt work")
+        produced_head = git(workspace, "rev-parse", "HEAD")
+        push_attempt(workspace, facts)
+        git(self.repo, "worktree", "remove", "--force", str(workspace))
+        git(self.repo, "branch", "-D", facts["branch"])
+        git(self.repo, "update-ref", "-d", facts["judgment_ref"])
+        git(self.repo, "reflog", "expire", "--expire=now", "--all")
+        git(self.repo, "gc", "--prune=now")
+
+        judgment = {}
+        produced, head, why = W.judge_detail(
+            self.real_run, str(attempt), unit, facts, judgment)
+
+        self.assertTrue(produced, why)
+        self.assertEqual(head, produced_head)
+        spec = dict(unit, kind="code")
+        W.capture_code_judgment(spec, facts, produced, head, judgment)
+        self.assertEqual(spec["judgment_ref"],
+                         f"refs/heads/{facts['branch']}")
+        self.assertEqual(spec["launch_judgment_ref"],
+                         f"refs/remotes/origin/{facts['branch']}")
+        self.assertEqual(
+            spec["judgment_ref_derivation"],
+            "derived-from-coordinator-anchored-origin-and-branch")
+
+    def test_schema3_missing_remote_refuses_instead_of_downgrading(self):
+        attempt = self.attempt("code", "tracking-ref-missing-remote")
+        state = {"units": {}}
+        unit = code_unit(self.repo)
+        _job, error = self.submit(unit, attempt, False, state)
+        self.assertIsNone(error)
+        facts = json.loads(json.dumps(state["units"]["code"][
+            "attempt_launch_facts"][attempt.name]))
+        facts["schema_version"] = 3
+        facts["judgment_ref"] = (
+            f"refs/remotes/origin/{facts['branch']}")
+        facts.pop("repository_remote")
+
+        produced, _head, why = W.judge_detail(
+            self.real_run, str(attempt), unit, facts)
+
+        self.assertFalse(produced)
+        self.assertIn("no anchored origin URL", why)
+
+    def test_schema3_malformed_tracking_ref_refuses(self):
+        attempt = self.attempt("code", "tracking-ref-malformed")
+        state = {"units": {}}
+        unit = code_unit(self.repo)
+        _job, error = self.submit(unit, attempt, False, state)
+        self.assertIsNone(error)
+        facts = json.loads(json.dumps(state["units"]["code"][
+            "attempt_launch_facts"][attempt.name]))
+        facts["schema_version"] = 3
+        facts["judgment_ref"] = "refs/remotes/origin/not-this-attempt"
+
+        produced, _head, why = W.judge_detail(
+            self.real_run, str(attempt), unit, facts)
+
+        self.assertFalse(produced)
+        self.assertIn("not the schema-3 ref", why)
+
+    def test_remote_ref_movement_has_a_distinct_machine_reason(self):
+        self.assertEqual(
+            W.code_failure_reason("remote-ref-moved-during-judgment"),
+            "remote-ref-unreadable")
+
     def test_paseo_argv_uses_trusted_base_and_records_returned_worktree(self):
         attempt = self.attempt("code", "a1")
         before = git(self.repo, "rev-parse", "HEAD")
@@ -280,9 +360,22 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         def terminal(argv, **kwargs):
             if argv[:2] == ["paseo", "inspect"]:
                 # Paseo reports terminal, then cleanup wins before the judge
-                # can ask the checkout anything: the production race.
+                # can ask the checkout anything: the production race. Remove
+                # the local branch and collect its object too; durable
+                # judgment must be able to recover it from the exact remote
+                # ref rather than depend on local object retention.
                 git(self.repo, "worktree", "remove", "--force",
                     str(workspace))
+                git(self.repo, "branch", "-D", facts["branch"])
+                git(self.repo, "update-ref", "-d",
+                    f"refs/remotes/origin/{facts['branch']}")
+                git(self.repo, "reflog", "expire", "--expire=now", "--all")
+                git(self.repo, "gc", "--prune=now")
+                missing_object = subprocess.run(
+                    ["git", "-C", str(self.repo), "cat-file", "-e",
+                     produced + "^{commit}"], env=ENV,
+                    capture_output=True, text=True)
+                self.assertNotEqual(missing_object.returncode, 0)
                 return 0, json.dumps({"status": "closed"}), ""
             return real(argv, **kwargs)
 
@@ -296,14 +389,123 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         self.assertEqual(verdict, "DONE", notes)
         self.assertEqual(spec["produced_head"], produced)
         self.assertEqual(spec["judgment_ref"], facts["judgment_ref"])
-        self.assertIn("anchored pushed ref", "\n".join(notes))
+        self.assertIn("anchored remote ref", "\n".join(notes))
         basis = W.code_basis(
             lambda *_a, **_k: self.fail("basis re-observed Git"),
             str(attempt), spec, facts)
         self.assertTrue(basis["judgment_ref_anchored_before_agent"])
         self.assertEqual(basis["produced_head_derived_from"],
-                         "coordinator-resolved-anchored-pushed-ref")
+                         "coordinator-resolved-exact-remote-ref")
+        self.assertEqual(basis["production_state"],
+                         "pushed-ref-produced-change")
         self.assertIn("same-UID", basis["judgment_ref_limit"])
+
+    def test_narrow_fetch_refspec_does_not_hide_the_pushed_attempt(self):
+        attempt = self.attempt("code", "narrow-fetch")
+        state = {"units": {}}
+        unit = code_unit(self.repo)
+        _job, error = self.submit(unit, attempt, False, state)
+        self.assertIsNone(error)
+        facts = state["units"]["code"]["attempt_launch_facts"][attempt.name]
+        workspace = Path(facts["execution_workspace"])
+        (workspace / "made.txt").write_text("made\n")
+        git(workspace, "add", "-A")
+        git(workspace, "commit", "-qm", "attempt work")
+        produced = git(workspace, "rev-parse", "HEAD")
+        git(self.repo, "config", "remote.origin.fetch",
+            "+refs/heads/main:refs/remotes/origin/main")
+
+        push_attempt(workspace, facts)
+
+        tracking = f"refs/remotes/origin/{facts['branch']}"
+        absent = subprocess.run(
+            ["git", "-C", str(self.repo), "show-ref", "--verify", "--quiet",
+             tracking], env=ENV)
+        self.assertNotEqual(absent.returncode, 0)
+        judgment = {}
+        changed, head, why = W.judge_detail(
+            self.real_run, str(attempt), unit, facts, judgment)
+        self.assertTrue(changed, why)
+        self.assertEqual(head, produced)
+        self.assertEqual(judgment["production_state"],
+                         "pushed-ref-produced-change")
+
+    def test_pushurl_is_the_anchored_judgment_remote(self):
+        push_remote = self.tmp / "push-origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(push_remote)],
+                       check=True, env=ENV)
+        git(self.repo, "remote", "set-url", "--push", "origin",
+            str(push_remote))
+        attempt = self.attempt("code", "pushurl")
+        state = {"units": {}}
+        unit = code_unit(self.repo)
+
+        _job, error = self.submit(unit, attempt, False, state)
+
+        self.assertIsNone(error)
+        facts = state["units"]["code"]["attempt_launch_facts"][attempt.name]
+        self.assertEqual(facts["repository_remote"], str(push_remote))
+        workspace = Path(facts["execution_workspace"])
+        (workspace / "made.txt").write_text("made\n")
+        git(workspace, "add", "-A")
+        git(workspace, "commit", "-qm", "attempt work")
+        produced = git(workspace, "rev-parse", "HEAD")
+        push_attempt(workspace, facts)
+        fetch_side = subprocess.run(
+            ["git", "-C", str(self.repo), "ls-remote", "--exit-code",
+             str(self.remote), facts["judgment_ref"]], env=ENV,
+            capture_output=True, text=True)
+        self.assertEqual(fetch_side.returncode, 2)
+
+        changed, head, why = W.judge_detail(
+            self.real_run, str(attempt), unit, facts, {})
+
+        self.assertTrue(changed, why)
+        self.assertEqual(head, produced)
+
+    def test_absent_remote_ref_states_distinguish_cleanup_loss(self):
+        unit = code_unit(self.repo)
+
+        no_work = self.attempt("code", "no-work")
+        no_work_state = {"units": {}}
+        _job, error = self.submit(unit, no_work, False, no_work_state)
+        self.assertIsNone(error)
+        no_work_facts = no_work_state["units"]["code"][
+            "attempt_launch_facts"][no_work.name]
+        observed = {}
+        changed, _head, _why = W.judge_detail(
+            self.real_run, str(no_work), unit, no_work_facts, observed)
+        self.assertFalse(changed)
+        self.assertEqual(observed["production_state"], "no-produced-change")
+
+        pushed_base = self.attempt("code", "pushed-base")
+        pushed_state = {"units": {}}
+        _job, error = self.submit(unit, pushed_base, False, pushed_state)
+        self.assertIsNone(error)
+        pushed_facts = pushed_state["units"]["code"][
+            "attempt_launch_facts"][pushed_base.name]
+        push_attempt(Path(pushed_facts["execution_workspace"]), pushed_facts)
+        observed = {}
+        changed, _head, _why = W.judge_detail(
+            self.real_run, str(pushed_base), unit, pushed_facts, observed)
+        self.assertFalse(changed)
+        self.assertEqual(observed["production_state"],
+                         "pushed-ref-no-tree-change")
+
+        lost = self.attempt("code", "lost-before-push")
+        lost_state = {"units": {}}
+        _job, error = self.submit(unit, lost, False, lost_state)
+        self.assertIsNone(error)
+        lost_facts = lost_state["units"]["code"][
+            "attempt_launch_facts"][lost.name]
+        git(self.repo, "worktree", "remove", "--force",
+            lost_facts["execution_workspace"])
+        observed = {}
+        changed, _head, _why = W.judge_detail(
+            self.real_run, str(lost), unit, lost_facts, observed)
+        self.assertFalse(changed)
+        self.assertEqual(observed["production_state"],
+                         "worktree-lost-without-pushed-ref")
 
     def test_an_unanchored_pushed_ref_is_never_substituted(self):
         attempt = self.attempt("code", "wrong-pushed-ref")
@@ -681,7 +883,8 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         produced_head = git(workspace, "rev-parse", "HEAD")
         push_attempt(workspace, intent)
         self.assertEqual(
-            git(self.repo, "rev-parse", intent["judgment_ref"]),
+            git(self.repo, "ls-remote", intent["repository_remote"],
+                intent["judgment_ref"]).split()[0],
             produced_head,
             "the reviewer scenario requires the judgment ref to preexist "
             "when coordinator recovery starts")

@@ -604,8 +604,7 @@ Path(data["result"]).write_text(json.dumps(payload))
 class TestPinnedCommitIsNotAMovingRef(RepoCase):
     def test_code_state_captures_both_results_from_one_judgment(self):
         source = inspect.getsource(U._code_state)
-        self.assertEqual(source.count("W.judge_detail("), 1)
-        self.assertEqual(source.count("W.capture_code_judgment("), 1)
+        self.assertEqual(source.count("W.judge_and_capture("), 1)
 
     def test_receipt_basis_does_not_reobserve_the_repository(self):
         def unexpected_observation(*_args, **_kwargs):

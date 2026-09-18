@@ -319,32 +319,43 @@ isolate PATHS, which is what stops two ordinary agents and a human checkout
 from colliding by accident; they share one ref directory, so they do not
 isolate principals. New attempts are not judged from that checkout: before the
 agent exists, coordinator state anchors the exact
-`refs/remotes/origin/swarm-<attempt>` ref it will accept. The checker resolves
-only that ref in the trusted source repository, then independently requires its
-commit to descend from the anchored base and have a different tree. A commit
+`refs/heads/swarm-<attempt>` ref and origin push URL it will accept. The checker
+resolves only that exact ref directly from that remote, then independently
+requires its commit to descend from the anchored base and have a different
+tree. A narrow `remote.origin.fetch` therefore cannot hide a successful push,
+and the coordinator does not rewrite the user's fetch configuration. A commit
 left only in the worktree, or pushed under another ref, cannot close the
-attempt. The remote-tracking ref and its commit survive Paseo deleting the
-managed worktree, removing cleanup timing from the judgment boundary.
+attempt. The remote branch and its commit survive Paseo deleting the managed
+worktree, removing cleanup timing from the judgment boundary.
 
 This makes a readable `origin` and an absent exact attempt branch on that
 remote launch preconditions for a new code attempt. The coordinator checks
-both the remote branch and its local tracking ref before it creates the agent;
-an unreachable remote, a local-only repository, or either pre-existing ref is
+both the remote branch and the local attempt branch before it creates the agent;
+an unreachable remote, a local-only repository, or either pre-existing branch is
 refused rather than launching work that cannot supply the fixed pushed-ref and
 merged-PR closure evidence. This is a point-in-time availability/collision
 check, not a promise that the remote will remain reachable when the agent
 pushes.
 
-The ref name is authority; the ref value is not. The agent controls what it
-pushes, while the coordinator derives the value it judges and validates the
-immutable commit against its separately anchored base and tree. This establishes
-durable production on the preselected ref, not authorship, correctness, review,
-or merge. It also does not resist a hostile same-UID process directly rewriting
-shared refs or objects. The receipt records the ref, derivation, denied claims,
-and this same-UID limit in its `basis` block. Attempts whose launch snapshot
-predates this ref field retain schema-2 facts and the old live-worktree check as
-a migration path; no ref is retroactively called pre-anchored. New snapshots
-missing or changing the exact ref fail closed. Deleting coordinator state is
+The origin push URL and ref name are authority; the ref value is not. The agent
+controls what it pushes, while the coordinator derives the value it judges and
+validates the immutable commit against its separately anchored base and tree.
+This establishes durable production on the preselected remote ref, not
+authorship, correctness, review, merge, or protection against another writer
+who can mutate that remote ref. The receipt records the ref, derivation, denied
+claims, and this same-UID limit in its `basis` block. When the ref is absent it
+also distinguishes a live worktree still at the base, a worktree-only change,
+and a worktree already deleted by cleanup. Those residue observations are
+diagnostic and same-UID mutable; they never supply a produced head. Schema-1
+intents/schema-2 facts genuinely predate ref judgment and retain the old
+live-worktree check. The preserved first attempt's schema-2 intents/schema-3
+facts already anchored the origin URL and generated branch before launch, but
+recorded the local tracking spelling; their stored bytes remain unchanged while
+the reader derives `refs/heads/<branch>` from those primitive anchors. Receipts
+name both spellings and the derivation. New schema-3 intents/schema-4 facts use
+the exact remote spelling directly. A ref-era snapshot missing its anchored
+origin or carrying the wrong generation-specific ref fails closed rather than
+downgrading to a weaker worktree predicate. Deleting coordinator state is
 not a migration path: state is authority, so a same-attempt ref found without
 its persisted intent is refused rather than adopted.
 
@@ -633,7 +644,7 @@ rather than after a queued job has to be moved.
 |---|---|---|
 | `slurm` | exclusive run-dir + Slurm allocation | terminal-OK owned row AND declared output present |
 | `pipeline` | fresh work dir + fresh publish dir, boundary only | engine's terminal exit AND final outputs present |
-| `code` | per-attempt git worktree while running; anchored pushed ref for durable judgment | lifecycle settled + outputs + the anchored pushed ref resolves to a committed tree change over the base; a merged PR closes it |
+| `code` | per-attempt git worktree while running; anchored exact remote ref for durable judgment | lifecycle settled + outputs + the anchored remote ref resolves to a committed tree change over the base; a merged PR closes it |
 
 **A pipeline's interior is UNJUDGEABLE.** The engine owns its DAG, retries and
 work directory, so per-task success and which internal step produced which
