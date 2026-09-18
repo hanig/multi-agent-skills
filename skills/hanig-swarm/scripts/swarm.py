@@ -4510,6 +4510,13 @@ def _merge_shape_problem(rec):
         return (f"method {rec.get('method')!r} is not one of "
                 f"{', '.join(MERGE_METHODS)}; an unrecognised method means "
                 f"`merged_as` cannot be interpreted")
+    target_commit = rec.get("target_commit")
+    if target_commit is not None and (
+            not isinstance(target_commit, str)
+            or len(target_commit) not in (40, 64)
+            or any(ch not in "0123456789abcdef" for ch in target_commit)):
+        return ("target_commit is not an exact lowercase 40- or 64-character "
+                "Git object id")
     return None
 
 
@@ -4627,6 +4634,14 @@ def _verify_shape_problem(rec):
             return f"no {f}"
     if rec.get("result") not in ("pass", "fail"):
         return f"result {rec.get('result')!r} is not 'pass' or 'fail'"
+    if rec.get("claim") == V.INTEGRATION_CLAIM:
+        for field in ("produced_head", "target_commit", "merge_base",
+                      "candidate_tree"):
+            if not str(rec.get(field) or "").strip():
+                return f"integration receipt has no {field}"
+        if rec.get("produced_head") != rec.get("subject_head"):
+            return ("integration receipt produced_head disagrees with its "
+                    "subject_head")
     return None
 
 
@@ -4676,7 +4691,8 @@ def load_verifications(state_dir):
 
 
 def admit_verification(state_dir, unit, claim, produced, policy_digest,
-                       policy, repo=None, base_commit=None):
+                       policy, repo=None, base_commit=None,
+                       target_commit=None):
     """(receipt, refusal) for one required claim.
 
     Four bindings, and all of them must hold. Any one missing turns the
@@ -4695,6 +4711,17 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
                       "verifier a receipt names cannot be checked against "
                       "anything. Refusing rather than taking the receipt's "
                       "word for which verifier ran.")
+    integration_basis = None
+    if claim == V.INTEGRATION_CLAIM:
+        if not target_commit:
+            return None, (
+                "integration-tests evidence has no recorded pre-merge target "
+                "commit to bind to. Record the target commit in the merge "
+                "attestation; branch-local evidence cannot substitute for it.")
+        integration_basis, basis_error = V.candidate_merge_basis(
+            U.run, repo, produced, target_commit)
+        if basis_error:
+            return None, basis_error
     recs, _p = load_verifications(state_dir)
     mine = [r for r in recs if r.get("unit") == unit
             and r.get("claim") == claim]
@@ -4703,12 +4730,20 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
                       f"{claim!r}, which the unit declares it requires. Run "
                       f"it:\n  swarm.py verify --unit {unit} --claim {claim} "
                       f"--verifier NAME --path PATH")
-    stale, wrong_policy, failed, unauthorized = [], [], [], []
+    stale, moved_target, wrong_policy, failed, unauthorized = [], [], [], [], []
     corpus_refusals = []
     for r in mine:
         if str(r.get("subject_head")) != str(produced):
             stale.append(str(r.get("subject_head"))[:12])
             continue
+        if claim == V.INTEGRATION_CLAIM:
+            if str(r.get("target_commit")) != str(target_commit):
+                moved_target.append(str(r.get("target_commit"))[:12])
+                continue
+            if any(r.get(field) != value
+                   for field, value in integration_basis.items()):
+                moved_target.append(str(r.get("target_commit"))[:12])
+                continue
         if policy_digest and r.get("policy_sha256") != policy_digest:
             wrong_policy.append(str(r.get("policy_sha256"))[:12])
             continue
@@ -4742,7 +4777,9 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
             continue
         return r, None
     if failed:
-        return None, (f"the verifier ran against the produced commit and "
+        subject = ("the candidate merge" if claim == V.INTEGRATION_CLAIM
+                   else "the produced commit")
+        return None, (f"the verifier ran against {subject} and "
                       f"returned FAIL for {claim!r}. That is a result, not a "
                       f"missing receipt: fix the work rather than re-running "
                       f"until it passes.")
@@ -4752,6 +4789,13 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
                       f"not authorized by that policy: {unauthorized[0]}")
     if corpus_refusals:
         return None, corpus_refusals[0]
+    if moved_target:
+        return None, (
+            f"integration verification for {unit!r} tested target commit(s) "
+            f"{', '.join(sorted(set(moved_target)))}, but the merge was made "
+            f"from target {str(target_commit)[:12]}. The target moved after "
+            f"the check, so that evidence is invalid; re-run "
+            f"integration-tests against the new candidate merge.")
     if wrong_policy:
         return None, (f"verification for {unit!r} ran under policy "
                       f"{', '.join(sorted(set(wrong_policy)))}, but this "
@@ -5178,7 +5222,8 @@ def trusted_record_seal(state, unit, attempt_dir):
     return (us.get("attempt_record_seals") or {}).get(Path(attempt_dir).name)
 
 
-def admit_merge(state_dir, unit, produced, expect_repo=None):
+def admit_merge(state_dir, unit, produced, expect_repo=None, repo=None,
+                require_target_binding=False, expect_target=None):
     """(receipt, refusal). A merged-PR attestation, admitted or refused.
 
     `produced` is the commit this coordinator judged the attempt to have
@@ -5197,7 +5242,7 @@ def admit_merge(state_dir, unit, produced, expect_repo=None):
                       f"machine that can see the PR:\n  swarm.py merge "
                       f"--unit {unit} --pr URL --head {produced[:12]} "
                       f"--target BRANCH --merged-as SHA --method merge")
-    wrong_repo = []
+    wrong_repo, wrong_target, target_refusals = [], [], []
     for r in mine:
         if str(r.get("head")) != str(produced):
             continue
@@ -5207,6 +5252,34 @@ def admit_merge(state_dir, unit, produced, expect_repo=None):
             # after it, so one attester slip parked the unit forever.
             wrong_repo.append(str(r.get("repo")))
             continue
+        if expect_target and r.get("target") != expect_target:
+            wrong_target.append(str(r.get("target")))
+            continue
+        claimed_target = r.get("target_commit")
+        if require_target_binding:
+            if not claimed_target:
+                target_refusals.append(
+                    "the integration-tests unit has no recorded pre-merge "
+                    "target commit")
+                continue
+            if not repo:
+                target_refusals.append(
+                    "the receipt names a pre-merge target commit, but no "
+                    "coordinator-held repository was supplied to check it")
+                continue
+            actual_target, target_error = V.target_before_merge(
+                U.run, repo, produced, r.get("merged_as"), r.get("method"),
+                claimed_target)
+            if target_error:
+                target_refusals.append(target_error)
+                continue
+            if actual_target != claimed_target:
+                target_refusals.append(
+                    f"the merge object establishes pre-merge target "
+                    f"{actual_target[:12]}, not claimed target "
+                    f"{str(claimed_target)[:12]}; the target moved after the "
+                    f"integration check")
+                continue
         return r, None
     if wrong_repo:
         return None, (
@@ -5216,6 +5289,18 @@ def admit_merge(state_dir, unit, produced, expect_repo=None):
             f"is trusted to report what it saw, not to decide which "
             f"repository this unit belongs to. Record a corrected receipt; "
             f"the wrong one does not block it.")
+    if wrong_target:
+        return None, (
+            f"merge receipt(s) for {unit!r} target "
+            f"{', '.join(sorted(set(wrong_target)))}, not the plan's target "
+            f"{expect_target!r}. Record a corrected receipt; a wrong target "
+            f"does not block a later correct one.")
+    if target_refusals:
+        return None, (
+            f"no merge receipt for {unit!r} has an admissible pre-merge "
+            f"target: {target_refusals[0]}. A connected session must supply "
+            f"the merge Git objects locally; the coordinator never contacts "
+            f"a forge.")
     heads = ", ".join(sorted({str(r.get("head"))[:12] for r in mine}))
     return None, (
         f"{len(mine)} merge receipt(s) for {unit!r} pin head(s) {heads}, but "
@@ -6065,6 +6150,14 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             # nothing changes: a unit that never asked for a verifier is not
             # improved by demanding one, and a requirement everybody must
             # satisfy is one everybody learns to satisfy trivially.
+            merge_args = {
+                "expect_repo": (launch_facts or {}).get("repository_remote")}
+            if V.INTEGRATION_CLAIM in (u.get("requires_verification") or []):
+                merge_args["repo"] = (launch_facts or {}).get("repo")
+                merge_args["require_target_binding"] = True
+                merge_args["expect_target"] = u.get("target_branch")
+            merge_receipt, merge_refusal = admit_merge(
+                state_dir, uid, produced, **merge_args)
             vrefusal = None
             required = u.get("requires_verification") or []
             policy_digest, perr, _pol = None, None, None
@@ -6091,15 +6184,16 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 _vr, vrefusal = admit_verification(
                     state_dir, uid, claim, produced, policy_digest,
                     policy=_pol, repo=(launch_facts or {}).get("repo"),
-                    base_commit=base)
+                    base_commit=base,
+                    target_commit=((merge_receipt or {}).get("target_commit")
+                                   if claim == V.INTEGRATION_CLAIM else None))
                 if vrefusal:
                     break
 
             if immutable_problem and not vrefusal:
                 vrefusal = immutable_problem
-            receipt, refusal = (None, vrefusal) if vrefusal else admit_merge(
-                state_dir, uid, produced,
-                expect_repo=(launch_facts or {}).get("repository_remote"))
+            receipt, refusal = ((None, vrefusal) if vrefusal else
+                                (merge_receipt, merge_refusal))
             if receipt:
                 us["state"] = "DONE"
                 us["merged_as"] = receipt.get("merged_as")
@@ -6470,10 +6564,18 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                     facts = trusted_launch_facts(
                         state, uid, us["attempt_dir"])
                     try:
+                        recover_args = {
+                            "expect_repo": (facts or {}).get(
+                                "repository_remote")}
+                        if V.INTEGRATION_CLAIM in (
+                                (units.get(uid) or {}).get(
+                                    "requires_verification") or []):
+                            recover_args["repo"] = (facts or {}).get("repo")
+                            recover_args["require_target_binding"] = True
+                            recover_args["expect_target"] = (
+                                (units.get(uid) or {}).get("target_branch"))
                         recovered, _why = admit_merge(
-                            state_dir, uid, produced,
-                            expect_repo=(facts or {}).get(
-                                "repository_remote"))
+                            state_dir, uid, produced, **recover_args)
                     except OutboxError:
                         recovered = None
                     if (recovered
@@ -7069,7 +7171,9 @@ SCHEMA_FIELDS = [
      '{"max": N, "prompt": "..."}; bounded nudges when it settles without '
      "producing. Exhaustion FAILS the unit"),
     ("requires_verification", "code", "optional",
-     "claims an authorized verifier must establish before closing"),
+     "claims an authorized verifier must establish before closing. The "
+     "reserved integration-tests claim runs in a disposable candidate merge "
+     "and also binds the pre-merge target commit"),
     ("runtime", "slurm, pipeline", "required",
      'inline or a "runtimes" id, or the literal "none". Declares resolution, '
      "entrypoint, probe and verified_by"),
@@ -7250,9 +7354,28 @@ def cmd_verify(args):
         sys.stderr.write(f"error: {refusal}\n")
         return EXIT_FAILED_UNIT
 
-    outcome, rerr = V.run_in_checkout(U.run, repo, produced, args.path,
-                                      digest, args=args.arg,
-                                      timeout=args.timeout)
+    merge_evidence = {}
+    if args.claim == V.INTEGRATION_CLAIM:
+        target_commit = getattr(args, "target_commit", None)
+        if not target_commit:
+            sys.stderr.write(
+                "error: integration-tests requires --target-commit. Supply "
+                "that commit's Git object locally; this command never "
+                "contacts a forge.\n")
+            return EXIT_USAGE
+        outcome, merge_evidence, rerr = V.run_in_candidate_merge(
+            U.run, repo, produced, target_commit, args.path, digest,
+            args=args.arg, timeout=args.timeout)
+    else:
+        if getattr(args, "target_commit", None):
+            sys.stderr.write(
+                "error: --target-commit applies only to the "
+                "integration-tests claim. Ordinary verification remains "
+                "bound only to the produced head.\n")
+            return EXIT_USAGE
+        outcome, rerr = V.run_in_checkout(
+            U.run, repo, produced, args.path, digest, args=args.arg,
+            timeout=args.timeout)
     if rerr:
         sys.stderr.write(f"error: {rerr}\n")
         return EXIT_FAILED_UNIT
@@ -7266,6 +7389,7 @@ def cmd_verify(args):
            "by": os.environ.get("USER") or "?",
            "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "schema_version": 1}
     rec.update(corpus_evidence)
+    rec.update(merge_evidence)
     bad = _verify_shape_problem(rec)
     if bad:
         sys.stderr.write(f"error: this would not be admissible: {bad}\n")
@@ -7299,6 +7423,9 @@ def cmd_merge(args):
            "merged": True, "attested": True,
            "by": os.environ.get("USER") or "?",
            "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "schema_version": 1}
+    target_commit = getattr(args, "target_commit", None)
+    if target_commit:
+        rec["target_commit"] = target_commit
     bad = _merge_shape_problem(rec)
     if bad:
         sys.stderr.write(f"error: this would not be admissible: {bad}\n")
@@ -7643,6 +7770,11 @@ def main():
                         "policy recorded.")
     v.add_argument("--arg", action="append", default=[])
     v.add_argument("--timeout", type=int, default=900)
+    v.add_argument(
+        "--target-commit", default=None,
+        help="required only for claim integration-tests: the exact target "
+             "commit to merge the produced head into. Its object must "
+             "already exist locally; verify never fetches it.")
     v.set_defaults(fn=cmd_verify)
 
     m = sub.add_parser("merge", help="record an observed merged PR for a "
@@ -7654,6 +7786,10 @@ def main():
                    help="the PR head commit. Must be the commit this attempt "
                         "produced, or the receipt is refused.")
     m.add_argument("--target", required=True, help="the branch it merged into")
+    m.add_argument(
+        "--target-commit", default=None,
+        help="the target branch commit immediately before this merge. "
+             "Required for an integration-tests receipt to remain valid.")
     m.add_argument("--merged-as", required=True,
                    help="the resulting commit on the target")
     m.add_argument("--method", required=True, choices=MERGE_METHODS)

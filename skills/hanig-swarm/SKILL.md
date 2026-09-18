@@ -360,6 +360,59 @@ per file, and 1 GB total. An absent or empty `corpus` is the compatibility path:
 it performs no new Git reads and adds no receipt fields, so existing policy
 behavior and serialized receipts stay byte-for-byte unchanged.
 
+### Integration verification is a different claim
+
+A code unit may require the reserved `integration-tests` claim. The literal
+name is newly reserved: a pre-existing policy that used it for an ordinary
+head-bound check must either rename that ordinary claim or migrate its receipt
+producer to this candidate-merge protocol. Unlike an
+ordinary verifier claim, it does not run against the produced head alone. A
+connected session supplies the exact target commit and makes both Git objects
+available in the coordinator's local repository, then runs:
+
+```bash
+python3 "$HANIG_SWARM_DIR/scripts/swarm.py" verify \
+  --state-dir "$STATE" --unit impl --attempt "$ATTEMPT" \
+  --claim integration-tests --target-commit "$TARGET_COMMIT" \
+  --verifier tests --path /approved/run-tests
+```
+
+The coordinator creates a fresh disposable Git repository at that target
+commit, lends it only the supplied repository's object database, merges the
+produced head into it without committing, and runs the content-pinned verifier
+there. System and global Git configuration are disabled, and the fresh
+repository carries none of the operated repository's hooks, filters, merge
+drivers, or rerere state. Repository-selection and environment-supplied Git
+configuration, attributes, templates, HOME/XDG, and executable-path variables
+are scrubbed; candidate construction resolves `env` and `git` only on the
+system default path. Every integration Git read sets `GIT_NO_LAZY_FETCH=1`, so
+a promisor repository cannot turn a missing local object into network access.
+A textual conflict makes evidence unavailable. It never
+fetches: if either commit object is missing, a connected session must supply
+it locally. Equal commits, or a target that already contains the produced
+head, have no candidate change and are refused rather than recorded as a
+branch-local pass. The resulting candidate tree is also compared with the
+target tree; distinct commits that merge to no produced tree change are
+refused.
+
+The receipt binds the produced head, target commit, unique merge base,
+candidate-tree digest, verifier-policy digest, and verifier digest. Admission
+reconstructs that candidate tree before accepting the receipt. When recording the eventual merge,
+the connected session also supplies `swarm.py merge --target-commit SHA`, the
+target's head immediately before that merge. If it differs from the integration
+receipt, the target moved and the old evidence is invalid; re-run the candidate
+merge check. The supplied string is not trusted on its own: admission derives
+the pre-merge target from the locally supplied merge or squash commit and
+refuses missing or ambiguous topology without fetching. Rebase results do not
+encode an unambiguous boundary when target and replayed commits can carry the
+same patch, so integration evidence for a rebased PR is unavailable rather
+than caller-interpreted. Branch-local test receipts cannot satisfy
+`integration-tests`.
+
+This supplements closure; it does not replace it. A code unit still closes only
+on the existing bound merged-PR attestation. Every other verifier claim keeps
+its produced-head checkout and its existing receipt shape unchanged.
+
 ## What isolates a code unit
 
 The paragraph above says what a per-attempt worktree does NOT do. What it
