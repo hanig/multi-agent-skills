@@ -76,6 +76,7 @@ import re
 import shutil
 import paseo_io as PIO
 import worktree as W
+import isolation as ISO
 import coordinator_paths as CP
 import child_environment as CE
 import signal
@@ -1261,7 +1262,15 @@ def cmd_check(args):
     basis, basis_err = W.decode_artifact_basis(args.artifact_basis)
     if basis_err and args.artifact_basis:
         notes.append(basis_err)
+    isolation_payload = getattr(args, "isolation_facts", None)
+    isolation_fields, isolation_err = ISO.receipt_fields(
+        isolation_payload, unit_dir, spec)
+    if isolation_err: notes.append(isolation_err)
     state = check_unit(unit_dir, spec, notes, launch_facts, basis)
+    state = ISO.require_application(
+        getattr(args, "isolation_required", False)
+        or isolation_payload is not None,
+        isolation_fields, state, notes)
 
     receipt = {
         "schema_version": 1, "checked_at": now_iso(),
@@ -1283,9 +1292,7 @@ def cmd_check(args):
         # this spec is frozen. Claiming OS-enforced isolation here would be the
         # third time this project claimed more than its mechanism establishes.
         "basis": {
-            "conclusive_because": "exclusive by coordinator allocation under a "
-                                  "trusted-writer convention",
-            "os_enforced_isolation": False,
+            **isolation_fields,
             "attribution_by_observation": False,
             "interior_judged": spec.get("kind") != "pipeline",
             # A pipeline unit has no scheduler behind it, so its exit status
@@ -1304,10 +1311,6 @@ def cmd_check(args):
             # the size guard below the marker has none to spare, and the
             # answer to that is a callee in worktree.py, never a raised limit.
             **W.receipt_basis(run, unit_dir, spec, launch_facts),
-            "note": "not isolated from other processes running as the same "
-                    "Unix user. OS-enforced isolation would need a container "
-                    "or mount namespace with this directory as the only "
-                    "writable bind mount.",
         },
     }
     wrote = []
@@ -1371,6 +1374,10 @@ def main():
     # per-attempt coordinator state. Absent means DONE is unreachable, on
     # purpose: there is no re-observation fallback.
     c.add_argument("--artifact-basis", default=None)
+    # Applied wrapper facts serialized from per-attempt coordinator state.
+    # The attempt's own script/spec cannot set the receipt's isolation bit.
+    c.add_argument("--isolation-facts", default=None)
+    c.add_argument("--isolation-required", action="store_true", help=argparse.SUPPRESS)
     c.add_argument("--result-fd", type=int, default=None, help=argparse.SUPPRESS)
     c.set_defaults(fn=cmd_check)
 
