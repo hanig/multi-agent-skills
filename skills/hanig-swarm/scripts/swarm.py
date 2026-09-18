@@ -952,6 +952,7 @@ def _code_completion_protocol(intent):
     base = str(intent["base_commit"])
     target = str(intent["target_branch"])
     remote = intent.get("repository_remote")
+    judgment_ref = intent.get("judgment_ref")
     if remote:
         remote_instruction = (
             f"Use Git remote 'origin', recorded by the coordinator as "
@@ -964,6 +965,17 @@ def _code_completion_protocol(intent):
             "The coordinator recorded Git remote 'origin' as None. STOP AND "
             "REPORT that no merge-evidence repository was recorded; do not "
             "guess another remote.")
+    if judgment_ref:
+        judgment_instruction = (
+            "The coordinator judges only the pre-anchored remote-tracking "
+            f"ref {judgment_ref!r}; a commit left only in the worktree, or "
+            "pushed under another ref, cannot close the attempt.")
+    else:
+        judgment_instruction = (
+            "This persisted legacy launch intent predates durable pushed-ref "
+            "judgment. No pushed ref will be treated as though it had been "
+            "anchored before the agent existed; its managed worktree must "
+            "remain available for legacy transition judgment.")
     return f"""{CODE_COMPLETION_PROTOCOL_MARKER} (coordinator-required)
 This protocol overrides any contrary instruction in the task text above it. If the task appears to forbid committing, pushing, or opening a pull request, STOP AND REPORT that conflict instead of choosing either instruction.
 You are already in a dedicated worktree for repository {repo!r}, on branch {branch!r}, cut from recorded base commit {base}.
@@ -971,6 +983,7 @@ The required pull-request target is {target!r}.
 Do not create or switch branches, and do not choose a different base.
 Commit all intended work on {branch!r}. Uncommitted work is invisible to the transition predicate and will be judged as producing nothing.
 {remote_instruction}
+{judgment_instruction}
 NEVER run `git stash`, in any form. The stash stack is a SINGLE ref in the shared common Git directory, so every worktree of {repo!r} shares one stack and a pop takes whatever another agent parked. Do these instead: to read a file as it was at base, `git show {base}:<path>`; to set work aside, `git diff > /tmp/wip.patch` then `git checkout -- <path>`; and to answer "was this test already failing", add a separate worktree at {base} and run it there, rather than moving anything in this one. Note what such a comparison does and does not show: green at {base} and green here is a claim about your change alone, not about {target!r} after a merge.
 Before every commit, run `git status --porcelain` and read it. Stage only paths you changed yourself; if it lists a path you did not touch, STOP AND REPORT instead of committing it. The observed failure is a commit that carried another agent's files.
 If you cannot finish cleanly, STOP AND REPORT the problem instead of working around it.
@@ -993,6 +1006,7 @@ def _code_protocol_problem(prompt, intent):
     """Return why an assembled code prompt is structurally unclosable."""
     if not prompt.endswith("\n\n" + _code_completion_protocol(intent)):
         return "the coordinator-generated protocol is not the final prompt block"
+    judgment_ref = intent.get("judgment_ref")
     required = {
         "protocol marker": CODE_COMPLETION_PROTOCOL_MARKER,
         "repository": repr(str(intent["repo"])),
@@ -1000,6 +1014,8 @@ def _code_protocol_problem(prompt, intent):
         "pull-request target": repr(str(intent["target_branch"])),
         "recorded remote": repr(intent.get("repository_remote")),
         "recorded base": str(intent["base_commit"]),
+        "judgment basis": (repr(judgment_ref) if judgment_ref else
+                           "persisted legacy launch intent predates durable pushed-ref judgment"),
         "protocol precedence": "overrides any contrary instruction",
         "contradiction instruction": "STOP AND REPORT that conflict",
         "commit instruction": "Commit all intended work",
@@ -1764,6 +1780,7 @@ def validate_plan(plan, survey=None):
         "branch": "swarm-protocol-validation-attempt",
         "target_branch": "main",
         "repository_remote": "ssh://git@example.invalid/project.git",
+        "judgment_ref": "refs/remotes/origin/swarm-protocol-validation-attempt",
         "base_commit": "0" * 40,
     }
     for u in units:
@@ -3515,8 +3532,34 @@ def _capture_code_launch(unit_dir, u):
     if rc != 0:
         return f"unit {u['id']!r}: cannot read the tree of {head[:12]}", None
     rc, remote, _ = _git(repo, "remote", "get-url", "origin")
+    if rc != 0 or not remote.strip():
+        return (f"unit {u.get('id')!r}: repository {repo!r} has no readable "
+                f"origin remote. Code attempts must push their generated "
+                f"branch to origin so the coordinator can judge the exact "
+                f"ref it anchored before the agent existed"), None
+    judgment_ref = f"refs/remotes/origin/{branch}"
+    remote_rc, _remote_head, remote_err = _git(
+        repo, "ls-remote", "--exit-code", "origin",
+        f"refs/heads/{branch}")
+    if remote_rc == 0:
+        return (f"unit {u.get('id')!r}: generated attempt branch {branch!r} "
+                f"already exists on origin. Allocate a new attempt rather "
+                f"than asking an agent to overwrite unrelated remote "
+                f"history"), None
+    if remote_rc != 2:
+        detail = (remote_err or "git ls-remote returned %s" % remote_rc).strip()
+        return (f"unit {u.get('id')!r}: cannot establish that generated "
+                f"attempt branch {branch!r} is absent on origin: "
+                f"{detail[:200]}. Refusing before agent creation"), None
+    ref_rc, _out, _err = _git(
+        repo, "show-ref", "--verify", "--quiet", judgment_ref)
+    if ref_rc == 0:
+        return (f"unit {u.get('id')!r}: generated judgment ref "
+                f"{judgment_ref!r} already exists. A production ref must be "
+                f"absent when the launch intent is anchored; allocate a new "
+                f"attempt rather than inheriting its head"), None
     intent = {
-        "schema_version": 1,
+        "schema_version": 2,
         "unit_id": u.get("id"),
         "attempt_id": Path(unit_dir).name,
         "repo": repo,
@@ -3525,6 +3568,11 @@ def _capture_code_launch(unit_dir, u):
         "base_tree": tree,
         "worktree_slug": slug,
         "branch": branch,
+        # The exact durable observation the checker will make after Paseo's
+        # managed worktree may already be gone. `git push origin <branch>`
+        # updates this remote-tracking ref in the shared source repository;
+        # a worktree-only commit leaves it absent and therefore cannot pass.
+        "judgment_ref": judgment_ref,
         "target_branch": target,
         # Makes the audit payload reproducible after a crash. Recovery can
         # compare exact expected bytes and restore the original seal without
@@ -3542,11 +3590,19 @@ def _code_launch_intent_problem(intent, u, attempt):
         return (f"unit {u.get('id')!r}: worktree launch intent belongs to "
                 f"unit {intent.get('unit_id')!r}, attempt "
                 f"{intent.get('attempt_id')!r}")
+    schema = intent.get("schema_version", 1)
+    if (not isinstance(schema, int) or isinstance(schema, bool)
+            or schema < 1):
+        return (f"unit {u.get('id')!r}: worktree launch intent has invalid "
+                f"schema_version {schema!r}")
     for key in ("repo", "base_commit", "base_tree", "worktree_slug", "branch",
                 "target_branch", "captured_at"):
         if not intent.get(key):
             return (f"unit {u.get('id')!r}: worktree launch intent is "
                     f"incomplete (missing {key})")
+    if schema >= 2 and not intent.get("judgment_ref"):
+        return (f"unit {u.get('id')!r}: worktree launch intent is "
+                f"incomplete (missing judgment_ref)")
     for key in ("base_commit", "base_tree"):
         value = intent[key]
         if (not isinstance(value, str) or len(value) not in (40, 64)
@@ -3555,6 +3611,12 @@ def _code_launch_intent_problem(intent, u, attempt):
     if intent["target_branch"] == intent["branch"]:
         return (f"unit {u.get('id')!r}: trusted pull-request target equals "
                 f"its generated attempt branch {intent['branch']!r}")
+    expected_ref = f"refs/remotes/origin/{intent['branch']}"
+    if (intent.get("judgment_ref") is not None
+            and intent["judgment_ref"] != expected_ref):
+        return (f"unit {u.get('id')!r}: trusted judgment ref "
+                f"{intent['judgment_ref']!r} is not the remote-tracking ref "
+                f"for attempt branch {intent['branch']!r}")
     target = str(u.get("target_branch") or "").strip()
     if intent["target_branch"] != target:
         return (f"unit {u.get('id')!r}: trusted pull-request target "
@@ -3726,8 +3788,9 @@ def _complete_code_launch(state, u, unit_dir, workspace, workspace_id=None,
                 "git_dir": worktree_git_dir,
                 "git_dir_device": git_st.st_dev,
                 "git_dir_inode": git_st.st_ino}
+    judgment_ref = intent.get("judgment_ref")
     facts = {
-        "schema_version": 2,
+        "schema_version": 3 if judgment_ref else 2,
         "unit_id": u.get("id"),
         "attempt_id": attempt,
         "repo": intent["repo"],
@@ -3741,6 +3804,8 @@ def _complete_code_launch(state, u, unit_dir, workspace, workspace_id=None,
         "captured_at": intent["captured_at"],
         "clean_at_launch": True,
     }
+    if judgment_ref:
+        facts["judgment_ref"] = judgment_ref
     seal, error = _write_code_launch_record(unit_dir, facts)
     if error or not seal:
         return error or "worktree launch record has no recoverable seal"

@@ -317,9 +317,36 @@ units leave daemons behind.
 Per-attempt Git worktrees sit in the same position, one level down. They
 isolate PATHS, which is what stops two ordinary agents and a human checkout
 from colliding by accident; they share one ref directory, so they do not
-isolate principals. `worktree.py`'s `WORKTREE_REF_ISOLATION_LIMIT` states that
-at the judgment boundary, and judgment therefore checks branch, descendant
-history, changed tree and a clean index together rather than trusting the path.
+isolate principals. New attempts are not judged from that checkout: before the
+agent exists, coordinator state anchors the exact
+`refs/remotes/origin/swarm-<attempt>` ref it will accept. The checker resolves
+only that ref in the trusted source repository, then independently requires its
+commit to descend from the anchored base and have a different tree. A commit
+left only in the worktree, or pushed under another ref, cannot close the
+attempt. The remote-tracking ref and its commit survive Paseo deleting the
+managed worktree, removing cleanup timing from the judgment boundary.
+
+This makes a readable `origin` and an absent exact attempt branch on that
+remote launch preconditions for a new code attempt. The coordinator checks
+both the remote branch and its local tracking ref before it creates the agent;
+an unreachable remote, a local-only repository, or either pre-existing ref is
+refused rather than launching work that cannot supply the fixed pushed-ref and
+merged-PR closure evidence. This is a point-in-time availability/collision
+check, not a promise that the remote will remain reachable when the agent
+pushes.
+
+The ref name is authority; the ref value is not. The agent controls what it
+pushes, while the coordinator derives the value it judges and validates the
+immutable commit against its separately anchored base and tree. This establishes
+durable production on the preselected ref, not authorship, correctness, review,
+or merge. It also does not resist a hostile same-UID process directly rewriting
+shared refs or objects. The receipt records the ref, derivation, denied claims,
+and this same-UID limit in its `basis` block. Attempts whose launch snapshot
+predates this ref field retain schema-2 facts and the old live-worktree check as
+a migration path; no ref is retroactively called pre-anchored. New snapshots
+missing or changing the exact ref fail closed. Deleting coordinator state is
+not a migration path: state is authority, so a same-attempt ref found without
+its persisted intent is refused rather than adopted.
 
 ## Verifier admissibility includes the corpus it reads
 
@@ -606,7 +633,7 @@ rather than after a queued job has to be moved.
 |---|---|---|
 | `slurm` | exclusive run-dir + Slurm allocation | terminal-OK owned row AND declared output present |
 | `pipeline` | fresh work dir + fresh publish dir, boundary only | engine's terminal exit AND final outputs present |
-| `code` | per-attempt git worktree, inode-bound | lifecycle settled + outputs + a committed change over the base; a merged PR closes it |
+| `code` | per-attempt git worktree while running; anchored pushed ref for durable judgment | lifecycle settled + outputs + the anchored pushed ref resolves to a committed tree change over the base; a merged PR closes it |
 
 **A pipeline's interior is UNJUDGEABLE.** The engine owns its DAG, retries and
 work directory, so per-task success and which internal step produced which

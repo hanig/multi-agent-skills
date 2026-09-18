@@ -35,6 +35,10 @@ def repo_at(path):
     (path / "tracked.txt").write_text("base\n")
     git(path, "add", "-A")
     git(path, "commit", "-qm", "base")
+    remote = path.parent / (path.name + "-origin.git")
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)],
+                   check=True, env=ENV, capture_output=True, text=True)
+    git(path, "remote", "add", "origin", str(remote))
     return path
 
 

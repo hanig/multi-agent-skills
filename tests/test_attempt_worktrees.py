@@ -32,6 +32,11 @@ def repo_at(path):
     return path
 
 
+def push_attempt(workspace, facts, remote_branch=None):
+    branch = remote_branch or facts["branch"]
+    git(workspace, "push", "origin", f"HEAD:refs/heads/{branch}")
+
+
 def code_unit(repo, uid="code"):
     return {"id": uid, "kind": "code", "repo": str(repo),
             "target_branch": "main", "prompt": "work",
@@ -67,6 +72,10 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.repo = repo_at(self.tmp / "repo")
+        self.remote = self.tmp / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(self.remote)],
+                       check=True, env=ENV)
+        git(self.repo, "remote", "add", "origin", str(self.remote))
         self.real_run = S.U.run
         self.fake = FakePaseo(self, self.tmp / "managed", self.real_run)
         S.U.run = self.fake
@@ -89,6 +98,40 @@ class TestPerAttemptWorktrees(unittest.TestCase):
             "attempt_bases": {attempt.name: anchored["base"]},
             "attempt_launch_intents": {attempt.name: anchored["intent"]},
         }}}
+
+    def test_remote_attempt_branch_collision_refuses_without_local_tracking_ref(self):
+        attempt = self.attempt("code", "remote-collision")
+        branch = "swarm-remote-collision"
+        git(self.repo, "push", "origin", f"HEAD:refs/heads/{branch}")
+        git(self.repo, "update-ref", "-d", f"refs/remotes/origin/{branch}")
+        absent = subprocess.run(
+            ["git", "-C", str(self.repo), "show-ref", "--verify", "--quiet",
+             f"refs/remotes/origin/{branch}"], env=ENV)
+        self.assertNotEqual(absent.returncode, 0)
+
+        error, anchored = S._capture_code_launch(
+            str(attempt), code_unit(self.repo))
+        self.assertIsNone(anchored)
+        self.assertIn("already exists on origin", error)
+
+    def test_legacy_active_intent_completes_with_legacy_worktree_facts(self):
+        attempt = self.attempt("code", "legacy-intent")
+        unit, state = self.intent_state(attempt)
+        intent = state["units"]["code"]["attempt_launch_intents"][attempt.name]
+        intent["schema_version"] = 1
+        intent.pop("judgment_ref")
+        workspace = self.tmp / "legacy-managed" / intent["worktree_slug"]
+        workspace.parent.mkdir()
+        git(self.repo, "worktree", "add", "-q", "-b", intent["branch"],
+            str(workspace), intent["base_commit"])
+
+        error = S._complete_code_launch(
+            state, unit, str(attempt), workspace, "wks_legacy")
+        self.assertIsNone(error)
+        facts = state["units"]["code"]["attempt_launch_facts"][attempt.name]
+        self.assertEqual(facts["schema_version"], 2)
+        self.assertNotIn("judgment_ref", facts)
+        self.assertTrue(facts["clean_at_launch"])
 
     def test_paseo_argv_uses_trusted_base_and_records_returned_worktree(self):
         attempt = self.attempt("code", "a1")
@@ -125,8 +168,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
     def test_dispatched_prompt_names_source_target_base_and_survives_newlines(self):
         attempt = self.attempt("code", "prompt-facts")
         original = "fix the parser\nthen run the focused tests"
-        remote = "git@github.com:example/canonical.git"
-        git(self.repo, "remote", "add", "origin", remote)
+        remote = str(self.remote)
         unit = code_unit(self.repo)
         unit["prompt"] = original
         unit["target_branch"] = "release/next"
@@ -219,20 +261,69 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         self.assertFalse((workspace / "human-edit.txt").exists())
         self.assertEqual(git(workspace, "status", "--porcelain"), "")
 
-    def test_judging_reads_the_execution_worktree(self):
-        attempt = self.attempt("code", "judge")
+    def test_terminal_attempt_is_judged_after_paseo_deletes_its_worktree(self):
+        attempt = self.attempt("code", "deleted-before-judge")
         state = {"units": {}}
         _job, err = self.submit(code_unit(self.repo), attempt, False, state)
         self.assertIsNone(err)
-        facts = state["units"]["code"]["attempt_launch_facts"]["judge"]
+        facts = state["units"]["code"]["attempt_launch_facts"][attempt.name]
         workspace = Path(facts["execution_workspace"])
         (workspace / "made.txt").write_text("made\n")
         git(workspace, "add", "-A")
         git(workspace, "commit", "-qm", "attempt work")
-        produced, why = W.judge(S.U.run, str(attempt),
-                                code_unit(self.repo), facts)
-        self.assertTrue(produced, why)
-        self.assertFalse((self.repo / "made.txt").exists())
+        produced = git(workspace, "rev-parse", "HEAD")
+        push_attempt(workspace, facts)
+        (attempt / "evidence.md").write_text("done\n")
+        (attempt / "test-output.txt").write_text("ok\n")
+        real = self.real_run
+
+        def terminal(argv, **kwargs):
+            if argv[:2] == ["paseo", "inspect"]:
+                # Paseo reports terminal, then cleanup wins before the judge
+                # can ask the checkout anything: the production race.
+                git(self.repo, "worktree", "remove", "--force",
+                    str(workspace))
+                return 0, json.dumps({"status": "closed"}), ""
+            return real(argv, **kwargs)
+
+        S.U.run = terminal
+        spec = dict(code_unit(self.repo), task_id="code",
+                    job_id="agent-deleted-before-judge")
+        notes = []
+        verdict = S.U._code_state(
+            str(attempt), spec, ["evidence.md", "test-output.txt"], [],
+            notes, facts)
+        self.assertEqual(verdict, "DONE", notes)
+        self.assertEqual(spec["produced_head"], produced)
+        self.assertEqual(spec["judgment_ref"], facts["judgment_ref"])
+        self.assertIn("anchored pushed ref", "\n".join(notes))
+        basis = W.code_basis(
+            lambda *_a, **_k: self.fail("basis re-observed Git"),
+            str(attempt), spec, facts)
+        self.assertTrue(basis["judgment_ref_anchored_before_agent"])
+        self.assertEqual(basis["produced_head_derived_from"],
+                         "coordinator-resolved-anchored-pushed-ref")
+        self.assertIn("same-UID", basis["judgment_ref_limit"])
+
+    def test_an_unanchored_pushed_ref_is_never_substituted(self):
+        attempt = self.attempt("code", "wrong-pushed-ref")
+        state = {"units": {}}
+        unit = code_unit(self.repo)
+        _job, error = self.submit(unit, attempt, False, state)
+        self.assertIsNone(error)
+        facts = state["units"]["code"]["attempt_launch_facts"][attempt.name]
+        workspace = Path(facts["execution_workspace"])
+        (workspace / "made.txt").write_text("made\n")
+        git(workspace, "add", "-A")
+        git(workspace, "commit", "-qm", "attempt work")
+        push_attempt(workspace, facts, remote_branch="not-the-anchored-ref")
+        self.assertTrue(git(self.repo, "show-ref", "--verify",
+                            "refs/remotes/origin/not-the-anchored-ref"))
+        produced, _head, why = W.judge_detail(
+            self.real_run, str(attempt), unit, facts)
+        self.assertFalse(produced)
+        self.assertIn(facts["judgment_ref"], why)
+        self.assertIn("pushed under another ref", why)
 
     def test_dry_run_never_asks_paseo_to_create_a_worktree(self):
         state = {"units": {}}
@@ -374,6 +465,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         git(workspace, "add", "-A")
         git(workspace, "commit", "-qm", "attempt work")
         produced = git(workspace, "rev-parse", "HEAD")
+        push_attempt(workspace, facts)
         us = state["units"]["code"]
         us.update({"state": "SUBMITTED", "attempt_dir": str(attempt),
                    "attempts": [str(attempt)], "gpu_hours": 0,
@@ -475,6 +567,9 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         _job, error = self.submit(unit, attempt, False, state)
         self.assertIsNone(error)
         facts = state["units"]["code"]["attempt_launch_facts"][attempt.name]
+        facts = json.loads(json.dumps(facts))
+        facts["schema_version"] = 2
+        facts.pop("judgment_ref")
         workspace = Path(facts["execution_workspace"])
         moved = workspace.with_name("moved-original")
         workspace.rename(moved)
@@ -492,6 +587,9 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         _job, error = self.submit(unit, attempt, False, state)
         self.assertIsNone(error)
         facts = state["units"]["code"]["attempt_launch_facts"][attempt.name]
+        facts = json.loads(json.dumps(facts))
+        facts["schema_version"] = 2
+        facts.pop("judgment_ref")
         workspace = Path(facts["execution_workspace"])
         (workspace / "made.txt").write_text("made\n")
         git(workspace, "add", "-A")
@@ -530,6 +628,9 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         _job, error = self.submit(unit, attempt, False, state)
         self.assertIsNone(error)
         facts = state["units"]["code"]["attempt_launch_facts"][attempt.name]
+        facts = json.loads(json.dumps(facts))
+        facts["schema_version"] = 2
+        facts.pop("judgment_ref")
         workspace = Path(facts["execution_workspace"])
         (workspace / "made.txt").write_text("made\n")
         git(workspace, "add", "-A")
@@ -566,7 +667,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         self.assertIsNotNone(S.trusted_launch_facts(
             second, "code", str(attempt)))
 
-    def test_redispatch_recovers_existing_agent_instead_of_recreating(self):
+    def test_redispatch_recovers_after_anchored_ref_was_pushed(self):
         attempt = self.attempt("code", "recover")
         unit, state = self.intent_state(attempt)
         intent = state["units"]["code"]["attempt_launch_intents"][attempt.name]
@@ -574,6 +675,16 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         workspace.parent.mkdir()
         git(self.repo, "worktree", "add", "-q", "-b", intent["branch"],
             str(workspace), intent["base_commit"])
+        (workspace / "produced.txt").write_text("produced\n")
+        git(workspace, "add", "-A")
+        git(workspace, "commit", "-qm", "attempt work")
+        produced_head = git(workspace, "rev-parse", "HEAD")
+        push_attempt(workspace, intent)
+        self.assertEqual(
+            git(self.repo, "rev-parse", intent["judgment_ref"]),
+            produced_head,
+            "the reviewer scenario requires the judgment ref to preexist "
+            "when coordinator recovery starts")
         real = self.real_run
         calls = []
 
@@ -601,6 +712,15 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         self.assertFalse(any(call[:2] == ["paseo", "run"] for call in calls))
         self.assertIsNotNone(S.trusted_launch_facts(
             state, "code", str(attempt)))
+        produced, why = W.judge(
+            S.U.run, str(attempt), unit,
+            S.trusted_launch_facts(state, "code", str(attempt)))
+        self.assertTrue(produced, why)
+        self.assertEqual(
+            produced_head,
+            W.produced_head(
+                S.U.run, str(attempt), unit,
+                S.trusted_launch_facts(state, "code", str(attempt))))
 
     def test_recovery_succeeds_when_agent_committed_during_downtime(self):
         attempt = self.attempt("code", "recover-ahead")

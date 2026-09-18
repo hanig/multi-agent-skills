@@ -12,6 +12,13 @@ the worktree at all. And that predicate was never production evidence: the
 caller supplies the base, so HEAD may already be past the work, and a clean
 tree is clean precisely when nobody touched it.
 
+The live worktree then became a different false dependency: Paseo deletes it
+when an agent closes, so judgment raced cleanup. New attempts instead anchor an
+exact remote-tracking ref in coordinator state before the agent exists. A
+successful push updates that durable ref in the shared repository, and the
+judge derives and validates its immutable commit without opening the worktree.
+Legacy launch snapshots retain the old worktree route only until they finish.
+
 The second transition is the ARTIFACT one, and it is the same defect in the
 other half of the receipt. unit.py's premise is "isolation replaces
 attribution": the write root is exclusive, so an artifact found there was
@@ -418,6 +425,7 @@ def judge_artifacts(state, basis, unit_dir, spec, observed, notes):
 AUTHORITY_KEYS = frozenset({
     "repo", "remote", "workspace_identity", "branch", "base_commit",
     "base_tree", "execution_workspace", "clean_at_launch", "dirty_paths",
+    "judgment_ref",
 })
 
 
@@ -631,7 +639,56 @@ def launch_facts_problem(facts, unit_dir=None, spec=None):
         return ("the repository was already dirty at launch according to "
                 "the trusted launch snapshot, so production is "
                 "unattributable")
+    judgment_ref = facts.get("judgment_ref")
+    if facts.get("schema_version", 0) >= 3:
+        expected = f"refs/remotes/origin/{facts.get('branch')}"
+        if judgment_ref != expected:
+            return (f"the trusted launch snapshot has judgment_ref "
+                    f"{judgment_ref!r}, not the anchored remote-tracking ref "
+                    f"{expected!r}")
     return None
+
+
+def _judge_anchored_ref(runner, facts):
+    """Resolve and validate the one durable ref selected before launch.
+
+    The ref name is authority from coordinator state. Its value is not: the
+    checker derives that value with Git and validates the resulting immutable
+    commit against the separately anchored base and base tree. A different
+    pushed ref is deliberately never searched or substituted.
+    """
+    repo = facts["repo"]
+    ref = facts["judgment_ref"]
+    rc, head, _ = _git(runner, repo, "rev-parse", "--verify",
+                        ref + "^{commit}")
+    if rc != 0:
+        return False, None, (
+            f"the anchored pushed ref {ref!r} is absent. A commit left only "
+            f"in the Paseo worktree, or pushed under another ref, is not the "
+            f"durable production ref this attempt anchored before launch")
+    base = facts["base_commit"]
+    if head == base:
+        return False, None, (
+            f"the anchored pushed ref {ref!r} still names the launch base, "
+            "so it contains no produced commit")
+    rc, _, _ = _git(runner, repo, "merge-base", "--is-ancestor", base, head)
+    if rc != 0:
+        return False, None, (
+            f"the anchored pushed ref {ref!r} names {head[:12]}, which does "
+            f"not descend from anchored base {base[:12]}")
+    rc, tree, _ = _git(runner, repo, "rev-parse", head + "^{tree}")
+    if rc != 0:
+        return False, None, (
+            f"cannot read the tree of {head[:12]} from anchored pushed ref "
+            f"{ref!r}")
+    if tree == facts["base_tree"]:
+        return False, None, (
+            f"the anchored pushed ref {ref!r} advanced, but its tree is "
+            "identical to the launch base tree")
+    return True, head, (
+        f"coordinator resolved anchored pushed ref {ref!r} to {head[:12]}; "
+        f"its tree {tree[:12]} differs from anchored base tree "
+        f"{facts['base_tree'][:12]}, and it descends from {base[:12]}")
 
 
 def workspace_identity_problem(runner, facts):
@@ -723,7 +780,7 @@ def judge_detail(runner, unit_dir, spec, launch_facts=None):
     nothing to judge; False when a repository was declared and did not
     transition; True when it did.
 
-    Every clause exists because its absence admits work that never happened:
+    Every history clause exists because its absence admits work that never happened:
 
       descends-from-base  else an unrelated-history reset, or a branch already
                           ahead at launch, reads as production.
@@ -731,9 +788,10 @@ def judge_detail(runner, unit_dir, spec, launch_facts=None):
                           committing, reads as production. The comparison is
                           TREE to TREE, not commit to commit, because a commit
                           always differs from its parent.
-      clean at both ends  dirty output is unattributable, and dirt at launch
-                          means there was no clean state to start from.
-      same repo/branch    else a transition somewhere else counts here.
+      selected ref        else a push somewhere else counts here.
+
+    The clean-worktree and inode clauses below apply only to launch snapshots
+    predating durable-ref judgment.
     """
     # The SPEC decides whether there is anything to judge. Asking the launch
     # record first conflated "declared no repository" with "was never
@@ -750,6 +808,14 @@ def judge_detail(runner, unit_dir, spec, launch_facts=None):
     if err:
         return False, None, err
     rec = launch_facts
+    # New attempts are judged from the durable ref the coordinator selected
+    # before the agent existed. This intentionally precedes every worktree
+    # observation: Paseo may delete that directory as soon as the agent
+    # closes. Snapshots predating schema 3 retain worktree-only judgment as a
+    # bounded migration path; a schema-3 snapshot missing the ref was already
+    # refused by launch_facts_problem above.
+    if rec.get("judgment_ref"):
+        return _judge_anchored_ref(runner, rec)
     err = workspace_identity_problem(runner, rec)
     if err:
         return False, None, err
@@ -863,6 +929,22 @@ def basis(runner, unit_dir, spec, launch_facts=None):
     return "produced-committed-change" if produced else "no-produced-change"
 
 
+def capture_code_judgment(spec, launch_facts, produced, judged_head):
+    """Freeze the single repository observation for receipt formatting."""
+    judgment_ref = (launch_facts or {}).get("judgment_ref")
+    spec.update({
+        "produced_head": judged_head,
+        "judgment_ref": judgment_ref,
+        "produced_head_derived_from": (
+            "coordinator-resolved-anchored-pushed-ref" if judgment_ref
+            else "legacy-live-worktree"),
+        "worktree_judged": (
+            "no-repository-declared" if produced is None else
+            "produced-committed-change" if produced else
+            "no-produced-change"),
+    })
+
+
 def code_basis(runner, unit_dir, spec, launch_facts=None):
     """The code-only fields of a receipt's `basis`.
 
@@ -875,10 +957,29 @@ def code_basis(runner, unit_dir, spec, launch_facts=None):
     """
     if spec.get("kind") != "code":
         return {"worktree_judged": None, "produced_head": None,
-                "production_denies": None}
+                "production_denies": None, "judgment_ref": None,
+                "produced_head_derived_from": None,
+                "judgment_ref_anchored_before_agent": None,
+                "judgment_ref_value_controlled_by": None,
+                "judgment_ref_limit": None}
     return {"worktree_judged": spec.get("worktree_judged"),
             "produced_head": spec.get("produced_head"),
-            "production_denies": list(PRODUCTION_DENIES)}
+            "production_denies": list(PRODUCTION_DENIES),
+            "judgment_ref": spec.get("judgment_ref"),
+            "produced_head_derived_from": spec.get(
+                "produced_head_derived_from"),
+            "judgment_ref_anchored_before_agent": bool(
+                spec.get("judgment_ref")),
+            "judgment_ref_value_controlled_by": (
+                "agent push / shared same-UID Git refs"
+                if spec.get("judgment_ref") else None),
+            "judgment_ref_limit": ((
+                "the coordinator anchored the ref name and independently "
+                "validated its resolved commit against the launch base/tree; "
+                "the agent controls the pushed ref value, and hostile "
+                "same-UID ref mutation is not prevented")
+                if spec.get("judgment_ref") else
+                "legacy attempt was judged from its live worktree")}
 
 
 def receipt_basis(runner, unit_dir, spec, launch_facts=None):
