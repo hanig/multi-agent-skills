@@ -3533,18 +3533,20 @@ def _capture_code_launch(unit_dir, u):
     rc, tree, _ = _git(repo, "rev-parse", head + "^{tree}")
     if rc != 0:
         return f"unit {u['id']!r}: cannot read the tree of {head[:12]}", None
-    # `git push origin` writes to pushurl when one is configured.  Anchor that
-    # actual destination, not the fetch URL: otherwise an honest push can
-    # succeed while judgment looks for the branch in a different repository.
-    rc, remote, _ = _git(repo, "remote", "get-url", "--push", "origin")
-    if rc != 0 or not remote.strip():
+    # `git push origin` writes to pushurl when one is configured. Anchor both
+    # its raw spelling and its once-expanded destination. Reusing only the
+    # expanded spelling would let Git apply a second `insteadOf` rewrite when
+    # the judge passes it back to ls-remote or fetch.
+    remote_raw, remote, remote_problem = W.remote_push_transport(U.run, repo)
+    if remote_problem:
         return (f"unit {u.get('id')!r}: repository {repo!r} has no readable "
-                f"origin remote. Code attempts must push their generated "
+                f"single origin push destination ({remote_problem}). Code "
+                f"attempts must push their generated "
                 f"branch to origin so the coordinator can judge the exact "
                 f"ref it anchored before the agent existed"), None
     judgment_ref = f"refs/heads/{branch}"
     remote_rc, _remote_head, remote_err = _git(
-        repo, "ls-remote", "--exit-code", remote,
+        repo, "ls-remote", "--exit-code", remote_raw,
         f"refs/heads/{branch}")
     if remote_rc == 0:
         return (f"unit {u.get('id')!r}: generated attempt branch {branch!r} "
@@ -3568,11 +3570,12 @@ def _capture_code_launch(unit_dir, u):
                 f"{branch!r} already exists. Allocate a new attempt rather "
                 f"than asking Paseo to reuse its history"), None
     intent = {
-        "schema_version": 3,
+        "schema_version": 4,
         "unit_id": u.get("id"),
         "attempt_id": Path(unit_dir).name,
         "repo": repo,
-        "repository_remote": remote if rc == 0 else None,
+        "repository_remote": remote,
+        "repository_remote_raw": remote_raw,
         "base_commit": head,
         "base_tree": tree,
         "worktree_slug": slug,
@@ -3614,6 +3617,9 @@ def _code_launch_intent_problem(intent, u, attempt):
             if not intent.get(key):
                 return (f"unit {u.get('id')!r}: worktree launch intent is "
                         f"incomplete (missing {key})")
+    if schema >= 4 and not intent.get("repository_remote_raw"):
+        return (f"unit {u.get('id')!r}: worktree launch intent is "
+                "incomplete (missing repository_remote_raw)")
     for key in ("base_commit", "base_tree"):
         value = intent[key]
         if (not isinstance(value, str) or len(value) not in (40, 64)
@@ -3805,11 +3811,12 @@ def _complete_code_launch(state, u, unit_dir, workspace, workspace_id=None,
     judgment_ref = intent.get("judgment_ref")
     direct_remote_judgment = intent_schema >= 3
     facts = {
-        # schema 3 was emitted by the preserved first attempt and names a
-        # local remote-tracking ref. Keep those facts byte-compatible for
-        # crash recovery, but worktree.py treats only schema 4 as the direct
-        # exact-remote contract.
-        "schema_version": (4 if direct_remote_judgment else
+        # Schema 3 facts were emitted by the preserved first attempt and name
+        # a local remote-tracking ref. Schema 4 facts are the first direct-ref
+        # generation but predate the raw URL anchor. Keep both migrations
+        # byte-compatible; schema 5 records the raw and once-expanded route.
+        "schema_version": (5 if intent_schema >= 4 else
+                           4 if direct_remote_judgment else
                            3 if judgment_ref else 2),
         "unit_id": u.get("id"),
         "attempt_id": attempt,
@@ -3824,6 +3831,8 @@ def _complete_code_launch(state, u, unit_dir, workspace, workspace_id=None,
         "captured_at": intent["captured_at"],
         "clean_at_launch": True,
     }
+    if intent.get("repository_remote_raw") is not None:
+        facts["repository_remote_raw"] = intent["repository_remote_raw"]
     if judgment_ref:
         facts["judgment_ref"] = judgment_ref
     seal, error = _write_code_launch_record(unit_dir, facts)

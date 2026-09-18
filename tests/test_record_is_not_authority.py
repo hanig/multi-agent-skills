@@ -81,6 +81,10 @@ ALLOWED = {
         "classifies coordinator-state worktree residue only after the "
         "authoritative remote ref is absent; it supplies no produced head "
         "and cannot change the refusal",
+    ("worktree.py", "_anchored_remote_transport"):
+        "revalidates the raw and expanded push route against the trusted "
+        "coordinator-state launch snapshot before remote judgment; it never "
+        "reads the audit record",
     ("worktree.py", "code_basis"):
         "formats the ref already captured during judgment into audit fields; "
         "it performs no repository observation",

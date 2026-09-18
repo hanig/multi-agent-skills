@@ -424,9 +424,9 @@ def judge_artifacts(state, basis, unit_dir, spec, observed, notes):
 # particular `repo`, whose earlier omission let a record choose where verify
 # operated even though the base was later cross-checked against state.
 AUTHORITY_KEYS = frozenset({
-    "repo", "remote", "repository_remote", "workspace_identity", "branch",
-    "base_commit", "base_tree", "execution_workspace", "clean_at_launch",
-    "dirty_paths", "judgment_ref",
+    "repo", "remote", "repository_remote", "repository_remote_raw",
+    "workspace_identity", "branch", "base_commit", "base_tree",
+    "execution_workspace", "clean_at_launch", "dirty_paths", "judgment_ref",
 })
 
 
@@ -652,6 +652,9 @@ def launch_facts_problem(facts, unit_dir=None, spec=None):
         if not facts.get("repository_remote"):
             return ("the trusted launch snapshot has no anchored origin URL "
                     "for direct remote-ref judgment")
+        if schema >= 5 and not facts.get("repository_remote_raw"):
+            return ("the trusted launch snapshot has no anchored raw origin "
+                    "push URL for single-pass URL rewriting")
     return None
 
 
@@ -669,6 +672,58 @@ def effective_remote_ref(facts):
     if schema >= 4:
         return facts.get("judgment_ref")
     return None
+
+
+def remote_push_transport(runner, repo):
+    """Return (raw push URL, once-expanded URL, problem) for origin.
+
+    `git remote get-url --push` returns an already-expanded URL. Passing that
+    value back to Git can apply another `url.*.insteadOf` rule and reach a
+    different repository. Read the configured raw spelling, require one push
+    destination, and expand it exactly once for the anchored identity.
+    """
+    rc, raw, err = _git(
+        runner, repo, "config", "--null", "--get-all",
+        "remote.origin.pushurl")
+    if rc not in (0, 1):
+        return None, None, (err or "cannot read remote.origin.pushurl")
+    values = [v for v in raw.split("\0") if v] if rc == 0 else []
+    if not values:
+        rc, raw, err = _git(
+            runner, repo, "config", "--null", "--get-all",
+            "remote.origin.url")
+        if rc != 0:
+            return None, None, (err or "origin has no configured URL")
+        values = [v for v in raw.split("\0") if v]
+    if len(values) != 1:
+        return None, None, (
+            f"origin has {len(values)} push destinations; one code attempt "
+            "can anchor and judge exactly one repository")
+    raw_url = values[0]
+    rc, resolved, err = _git(
+        runner, repo, "ls-remote", "--get-url", raw_url)
+    if rc != 0 or not resolved:
+        return None, None, (
+            err or f"cannot expand origin push URL {raw_url!r}")
+    return raw_url, resolved, None
+
+
+def _anchored_remote_transport(runner, facts):
+    """Revalidate the push route and return its raw, single-pass spelling."""
+    raw, resolved, problem = remote_push_transport(runner, facts["repo"])
+    if problem:
+        return None, problem
+    anchored_raw = facts.get("repository_remote_raw")
+    if anchored_raw is not None and raw != anchored_raw:
+        return None, (
+            f"origin raw push URL changed after launch ({anchored_raw!r} -> "
+            f"{raw!r}); refusing to select a new repository")
+    if resolved != facts.get("repository_remote"):
+        return None, (
+            f"origin push destination changed after launch "
+            f"({facts.get('repository_remote')!r} -> {resolved!r}); refusing "
+            "to select a new repository")
+    return raw, None
 
 
 def _set_judgment_state(judgment, state):
@@ -705,8 +760,11 @@ def _judge_anchored_ref(runner, facts, judgment=None):
     pushed ref is deliberately never searched or substituted.
     """
     repo = facts["repo"]
-    remote = facts["repository_remote"]
+    remote, route_problem = _anchored_remote_transport(runner, facts)
     ref = effective_remote_ref(facts)
+    if route_problem:
+        _set_judgment_state(judgment, "remote-route-changed")
+        return False, None, route_problem
     rc, out, err = _git(runner, repo, "ls-remote", "--exit-code",
                          remote, ref)
     if rc == 2:
@@ -749,7 +807,8 @@ def _judge_anchored_ref(runner, facts, judgment=None):
     cache_ref = ("refs/hanig-swarm/judgments/" +
                  str(facts["attempt_id"]))
     rc, _fetch_out, fetch_err = _git(
-        runner, repo, "fetch", "--no-tags", "--force", remote,
+        runner, repo, "fetch", "--no-tags", "--force",
+        "--recurse-submodules=no", remote,
         f"+{ref}:{cache_ref}", timeout=120)
     if rc != 0:
         _set_judgment_state(judgment, "remote-head-unavailable-locally")
@@ -1046,6 +1105,9 @@ def capture_code_judgment(spec, launch_facts, produced, judged_head,
         "produced_head": judged_head,
         "judgment_ref": judgment_ref,
         "launch_judgment_ref": launch_judgment_ref,
+        "repository_remote": (launch_facts or {}).get("repository_remote"),
+        "repository_remote_raw": (launch_facts or {}).get(
+            "repository_remote_raw"),
         "judgment_ref_derivation": derivation,
         "produced_head_derived_from": (
             "coordinator-resolved-exact-remote-ref" if judgment_ref
@@ -1079,6 +1141,7 @@ def code_failure_reason(production_state):
         "remote-ref-unreadable": "remote-ref-unreadable",
         "remote-head-unavailable-locally": "remote-ref-unreadable",
         "remote-ref-moved-during-judgment": "remote-ref-unreadable",
+        "remote-route-changed": "remote-ref-unreadable",
     }.get(production_state, "outputs-absent")
 
 
@@ -1100,7 +1163,8 @@ def code_basis(runner, unit_dir, spec, launch_facts=None):
                 "judgment_ref_value_controlled_by": None,
                 "judgment_ref_limit": None, "production_state": None,
                 "launch_judgment_ref": None,
-                "judgment_ref_derivation": None}
+                "judgment_ref_derivation": None,
+                "repository_remote": None, "repository_remote_raw": None}
     return {"worktree_judged": spec.get("worktree_judged"),
             "produced_head": spec.get("produced_head"),
             "production_denies": list(PRODUCTION_DENIES),
@@ -1108,6 +1172,8 @@ def code_basis(runner, unit_dir, spec, launch_facts=None):
             "launch_judgment_ref": spec.get("launch_judgment_ref"),
             "judgment_ref_derivation": spec.get(
                 "judgment_ref_derivation"),
+            "repository_remote": spec.get("repository_remote"),
+            "repository_remote_raw": spec.get("repository_remote_raw"),
             "produced_head_derived_from": spec.get(
                 "produced_head_derived_from"),
             "production_state": spec.get("production_state"),

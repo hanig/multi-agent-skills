@@ -319,8 +319,11 @@ isolate PATHS, which is what stops two ordinary agents and a human checkout
 from colliding by accident; they share one ref directory, so they do not
 isolate principals. New attempts are not judged from that checkout: before the
 agent exists, coordinator state anchors the exact
-`refs/heads/swarm-<attempt>` ref and origin push URL it will accept. The checker
-resolves only that exact ref directly from that remote, then independently
+`refs/heads/swarm-<attempt>` ref plus the raw and once-expanded origin push URL
+it will accept. Keeping both prevents Git from applying a chained `insteadOf`
+rewrite twice when the expanded URL is passed back to it. The checker
+revalidates that route, resolves only the exact ref through the raw spelling,
+fetches it with submodule recursion disabled, then independently
 requires its commit to descend from the anchored base and have a different
 tree. A narrow `remote.origin.fetch` therefore cannot hide a successful push,
 and the coordinator does not rewrite the user's fetch configuration. A commit
@@ -352,8 +355,10 @@ live-worktree check. The preserved first attempt's schema-2 intents/schema-3
 facts already anchored the origin URL and generated branch before launch, but
 recorded the local tracking spelling; their stored bytes remain unchanged while
 the reader derives `refs/heads/<branch>` from those primitive anchors. Receipts
-name both spellings and the derivation. New schema-3 intents/schema-4 facts use
-the exact remote spelling directly. A ref-era snapshot missing its anchored
+name both spellings and the derivation. Schema-3 intents/schema-4 facts use the
+exact remote ref spelling directly and revalidate their one stored URL against
+the current single origin push route. New schema-4 intents/schema-5 facts also
+anchor the raw push URL used for exactly-once rewriting. A ref-era snapshot missing its anchored
 origin or carrying the wrong generation-specific ref fails closed rather than
 downgrading to a weaker worktree predicate. Deleting coordinator state is
 not a migration path: state is authority, so a same-attempt ref found without

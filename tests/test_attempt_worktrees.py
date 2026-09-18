@@ -465,6 +465,94 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         self.assertTrue(changed, why)
         self.assertEqual(head, produced)
 
+    def test_expanded_push_url_is_not_rewritten_a_second_time(self):
+        primary_dir = self.tmp / "primary"
+        mirror_dir = self.tmp / "mirror"
+        primary_dir.mkdir()
+        mirror_dir.mkdir()
+        primary = primary_dir / "origin.git"
+        mirror = mirror_dir / "origin.git"
+        for remote in (primary, mirror):
+            subprocess.run(["git", "init", "-q", "--bare", str(remote)],
+                           check=True, env=ENV)
+        git(self.repo, "remote", "set-url", "origin", "arc642:origin.git")
+        git(self.repo, "config", f"url.{primary_dir}/.insteadOf", "arc642:")
+        git(self.repo, "config", f"url.{mirror_dir}/.insteadOf",
+            f"{primary_dir}/")
+        attempt = self.attempt("code", "url-rewrite")
+        state = {"units": {}}
+        unit = code_unit(self.repo)
+        _job, error = self.submit(unit, attempt, False, state)
+        self.assertIsNone(error)
+        facts = state["units"]["code"]["attempt_launch_facts"][attempt.name]
+        self.assertEqual(facts["repository_remote"], str(primary))
+        workspace = Path(facts["execution_workspace"])
+        (workspace / "made.txt").write_text("made\n")
+        git(workspace, "add", "-A")
+        git(workspace, "commit", "-qm", "attempt work")
+        produced = git(workspace, "rev-parse", "HEAD")
+
+        push_attempt(workspace, facts)
+
+        self.assertEqual(git(primary, "rev-parse", facts["judgment_ref"]),
+                         produced)
+        mirror_ref = subprocess.run(
+            ["git", "--git-dir", str(mirror), "show-ref", "--verify",
+             "--quiet", facts["judgment_ref"]], env=ENV)
+        self.assertNotEqual(mirror_ref.returncode, 0)
+        changed, head, why = W.judge_detail(
+            self.real_run, str(attempt), unit, facts, {})
+        self.assertTrue(changed, why)
+        self.assertEqual(head, produced)
+
+    def test_multiple_push_destinations_are_refused_before_agent_creation(self):
+        second = self.tmp / "second-origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(second)],
+                       check=True, env=ENV)
+        git(self.repo, "config", "--add", "remote.origin.pushurl",
+            str(self.remote))
+        git(self.repo, "config", "--add", "remote.origin.pushurl",
+            str(second))
+        attempt = self.attempt("code", "multiple-pushurls")
+
+        job, error = self.submit(
+            code_unit(self.repo), attempt, False, {"units": {}})
+
+        self.assertIsNone(job)
+        self.assertIn("origin has 2 push destinations", error)
+        self.assertEqual(self.fake.launches, [])
+
+    def test_judgment_fetch_does_not_recurse_into_submodules(self):
+        subrepo = repo_at(self.tmp / "subrepo")
+        subprocess.run(
+            ["git", "-c", "protocol.file.allow=always", "-C", str(self.repo),
+             "submodule", "add", "-q", str(subrepo), "vendor/lib"],
+            check=True, env=ENV, capture_output=True, text=True)
+        git(self.repo, "commit", "-qam", "add submodule")
+        git(self.repo, "config", "fetch.recurseSubmodules", "true")
+        git(self.repo, "config", "submodule.vendor/lib.url",
+            str(self.tmp / "unavailable-submodule.git"))
+        git(self.repo / "vendor" / "lib", "remote", "set-url", "origin",
+            str(self.tmp / "unavailable-submodule.git"))
+        attempt = self.attempt("code", "submodule-fetch")
+        state = {"units": {}}
+        unit = code_unit(self.repo)
+        _job, error = self.submit(unit, attempt, False, state)
+        self.assertIsNone(error)
+        facts = state["units"]["code"]["attempt_launch_facts"][attempt.name]
+        workspace = Path(facts["execution_workspace"])
+        (workspace / "made.txt").write_text("made\n")
+        git(workspace, "add", "-A")
+        git(workspace, "commit", "-qm", "attempt work")
+        produced = git(workspace, "rev-parse", "HEAD")
+        push_attempt(workspace, facts)
+
+        changed, head, why = W.judge_detail(
+            self.real_run, str(attempt), unit, facts, {})
+
+        self.assertTrue(changed, why)
+        self.assertEqual(head, produced)
+
     def test_terminal_watcher_checks_without_scheduled_advance(self):
         attempt = self.attempt("code", "terminal-watch")
         plan = {"name": "watch-test", "units": [code_unit(self.repo)]}
@@ -955,7 +1043,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         produced_head = git(workspace, "rev-parse", "HEAD")
         push_attempt(workspace, intent)
         self.assertEqual(
-            git(self.repo, "ls-remote", intent["repository_remote"],
+            git(self.repo, "ls-remote", intent["repository_remote_raw"],
                 intent["judgment_ref"]).split()[0],
             produced_head,
             "the reviewer scenario requires the judgment ref to preexist "
