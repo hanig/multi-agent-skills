@@ -359,6 +359,17 @@ downgrading to a weaker worktree predicate. Deleting coordinator state is
 not a migration path: state is authority, so a same-attempt ref found without
 its persisted intent is refused rather than adopted.
 
+For newly bound code attempts the coordinator also starts a detached local
+watcher that waits for Paseo to report the agent idle, then immediately invokes
+the ordinary locked `advance` path with dispatch disabled. This narrows the
+cleanup window without creating a second judge: `unit.py check` still makes the
+only decision, and the produced head still enters authority through coordinator
+state. The watcher is best effort, same-host, and waits at most 60 seconds for a
+busy coordinator lock after terminal observation; a crash, unavailable Paseo,
+or longer lock holder leaves the scheduled advance as the fallback. It does not
+make the managed worktree durable and is not a substitute for remote-ref
+judgment.
+
 ## Verifier admissibility includes the corpus it reads
 
 An authorized verifier policy may declare the exact repository-relative files

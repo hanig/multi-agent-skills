@@ -7120,6 +7120,136 @@ def _load_plan(path):
     return plan
 
 
+CODE_TERMINAL_WATCH_LOG = "code-terminal-watch.log"
+
+
+def _start_code_terminal_watchers(plan, state, args, report):
+    """Start one best-effort event-driven checker for each live code attempt.
+
+    The watcher waits in Paseo, then runs the ordinary advance path under the
+    same project lock. It has no separate judgment authority: unit.py remains
+    the only checker and the resulting head still crosses the normal
+    coordinator-controlled result channel.
+    """
+    units = {u["id"]: u for u in plan.get("units") or []}
+    started = False
+    for uid, u in sorted(units.items()):
+        if u.get("kind") != "code":
+            continue
+        us = _unit_state(state, uid)
+        attempt_dir = us.get("attempt_dir")
+        job_id = us.get("job_id")
+        if (not attempt_dir or not job_id or us.get("state") not in LIVE_STATES
+                or trusted_produced_head(state, uid, attempt_dir)):
+            continue
+        attempt = Path(attempt_dir).name
+        watches = us.setdefault("code_terminal_watches", {})
+        if isinstance(watches.get(attempt), dict):
+            continue
+        log_path = Path(attempt_dir) / CODE_TERMINAL_WATCH_LOG
+        # Persist the one watcher intent before starting its process. A crash
+        # after spawn must not make the next advance launch an unbounded set
+        # of duplicate waiters. This record is diagnostic and deduplication
+        # state only; it never supplies a judgment fact.
+        watch = {
+            "agent_id": str(job_id),
+            "host": os.uname().nodename,
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "log": str(log_path),
+            "status": "starting",
+        }
+        watches[attempt] = watch
+        save_state(args.state_dir, state)
+        try:
+            log = open(log_path, "ab")
+        except OSError as exc:
+            watches.pop(attempt, None)
+            save_state(args.state_dir, state)
+            report.append(f"{uid}: could not open terminal-watch log: {exc}. "
+                          "Scheduled advance remains the fallback.")
+            continue
+        argv = [
+            sys.executable, str(Path(__file__).resolve()),
+            "watch-code-terminal", str(Path(args.plan).resolve()),
+            "--state-dir", str(args.state_dir),
+            "--root", str(args.root),
+            "--unit", uid,
+            "--attempt", attempt,
+            "--agent", str(job_id),
+        ]
+        try:
+            proc = subprocess.Popen(
+                argv, stdin=subprocess.DEVNULL, stdout=log,
+                stderr=subprocess.STDOUT, env=CE.child_env(),
+                start_new_session=True)
+        except OSError as exc:
+            log.close()
+            watches.pop(attempt, None)
+            save_state(args.state_dir, state)
+            report.append(f"{uid}: could not start terminal watcher: {exc}. "
+                          "Scheduled advance remains the fallback.")
+            continue
+        log.close()
+        watch["pid"] = proc.pid
+        watch["status"] = "waiting"
+        save_state(args.state_dir, state)
+        report.append(f"{uid}: watching agent {job_id} for an immediate "
+                      "terminal judgment")
+        started = True
+    return started
+
+
+def cmd_watch_code_terminal(args):
+    """Wait for one agent, then immediately run the normal locked checker."""
+    rc, out, err = U.run(
+        ["paseo", "wait", str(args.agent), "--json"],
+        timeout=30 * 24 * 60 * 60)
+    if rc != 0:
+        print(f"terminal watch ended without an idle observation: "
+              f"{(err or out or ('paseo wait exited %s' % rc))[:400]}")
+        return EXIT_HALTED
+
+    # Usually the dispatching controller releases this lock milliseconds
+    # after it starts us. Never steal it: wait briefly for the kernel-owned
+    # flock, then leave the scheduled advance as the durable fallback.
+    holder = None
+    for _ in range(240):
+        ok, holder = acquire_lease(args.state_dir)
+        if ok:
+            break
+        time.sleep(0.25)
+    else:
+        print(f"terminal agent was observed, but the project lock remained "
+              f"busy for 60s ({holder}); scheduled advance will judge it")
+        return EXIT_HALTED
+
+    try:
+        plan = _load_plan(args.plan)
+        state = load_state(args.state_dir)
+        us = _unit_state(state, args.unit)
+        current_attempt = (Path(us.get("attempt_dir") or "").name
+                           if us.get("attempt_dir") else None)
+        if (current_attempt != args.attempt
+                or str(us.get("job_id") or "") != str(args.agent)):
+            print("terminal watch is obsolete: coordinator state now names "
+                  "a different attempt or agent")
+            return EXIT_OK
+        report, _dispatched, halted = advance(
+            plan, state, args.state_dir, args.root, False, max_new=0)
+        watch = (us.setdefault("code_terminal_watches", {})
+                 .setdefault(args.attempt, {}))
+        watch["status"] = "checked"
+        watch["checked_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        watch["produced_head"] = trusted_produced_head(
+            state, args.unit, us.get("attempt_dir"))
+        save_state(args.state_dir, state)
+        for line in report:
+            print(line)
+        return EXIT_HALTED if halted else EXIT_OK
+    finally:
+        release_lease(args.state_dir)
+
+
 def _prepare_command_paths(args, plan=None, extra_repos=(), need_root=False):
     """Apply the one external path policy before any command can write."""
     raw_state = getattr(args, "state_dir", None)
@@ -7230,6 +7360,9 @@ def cmd_run(args):
             plan, state, args.state_dir, args.root, args.dry_run,
             args.max_new_dispatches,
             accept_plan_change=getattr(args, "accept_plan_change", False))
+        if (not args.dry_run
+                and _start_code_terminal_watchers(plan, state, args, report)):
+            save_state(args.state_dir, state)
     finally:
         release_lease(args.state_dir)
     for line in report:
@@ -8238,6 +8371,18 @@ def main():
     a = sub.add_parser("advance", help="idempotent; for a schedule or cron")
     common(a)
     a.set_defaults(fn=cmd_advance)
+
+    # Internal detached helper. It carries no independent authority and is
+    # intentionally absent from the public CLI reference: `run`/`advance`
+    # create it only after persisting the exact attempt and agent binding.
+    w = sub.add_parser("watch-code-terminal", help=argparse.SUPPRESS)
+    w.add_argument("plan")
+    w.add_argument("--state-dir", required=True)
+    w.add_argument("--root", required=True)
+    w.add_argument("--unit", required=True)
+    w.add_argument("--attempt", required=True)
+    w.add_argument("--agent", required=True)
+    w.set_defaults(fn=cmd_watch_code_terminal)
 
     pr = sub.add_parser("promote",
                         help="copy a DONE unit's outputs to its declared "

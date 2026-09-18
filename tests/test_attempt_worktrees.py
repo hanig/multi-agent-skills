@@ -6,7 +6,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "hanig-swarm" / "scripts"
@@ -462,6 +464,76 @@ class TestPerAttemptWorktrees(unittest.TestCase):
 
         self.assertTrue(changed, why)
         self.assertEqual(head, produced)
+
+    def test_terminal_watcher_checks_without_scheduled_advance(self):
+        attempt = self.attempt("code", "terminal-watch")
+        plan = {"name": "watch-test", "units": [code_unit(self.repo)]}
+        state = {"plan_digest": S.plan_digest(plan), "units": {"code": {
+            "attempt_dir": str(attempt), "job_id": "agent-watch",
+            "state": "SUBMITTED", "attempts": [str(attempt)],
+            "gpu_hours": 0.0,
+            "code_terminal_watches": {attempt.name: {
+                "agent_id": "agent-watch", "status": "waiting"}},
+        }}}
+        order = []
+
+        def immediate_advance(_plan, current, *_args, **_kwargs):
+            order.append("advance")
+            current["units"]["code"].setdefault(
+                "attempt_produced_heads", {})[attempt.name] = "a" * 40
+            return ["code: READY_FOR_PR"], 0, None
+
+        args = Namespace(
+            plan=str(self.tmp / "plan.json"),
+            state_dir=str(self.tmp / "watch-state"),
+            root=str(self.tmp / "runs"), unit="code",
+            attempt=attempt.name, agent="agent-watch")
+        with mock.patch.object(
+                S.U, "run",
+                side_effect=lambda *_a, **_k: (
+                    order.append("wait") or (0, '{"status":"idle"}', ""))), \
+             mock.patch.object(S, "acquire_lease", return_value=(True, None)), \
+             mock.patch.object(S, "release_lease"), \
+             mock.patch.object(S, "_load_plan", return_value=plan), \
+             mock.patch.object(S, "load_state", return_value=state), \
+             mock.patch.object(S, "save_state"), \
+             mock.patch.object(S, "advance", side_effect=immediate_advance):
+            result = S.cmd_watch_code_terminal(args)
+
+        self.assertEqual(result, S.EXIT_OK)
+        self.assertEqual(order, ["wait", "advance"])
+        self.assertEqual(
+            state["units"]["code"]["attempt_produced_heads"][attempt.name],
+            "a" * 40)
+        self.assertEqual(
+            state["units"]["code"]["code_terminal_watches"]
+            [attempt.name]["status"], "checked")
+
+    def test_live_code_attempt_starts_only_one_terminal_watcher(self):
+        attempt = self.attempt("code", "start-watch")
+        plan = {"units": [code_unit(self.repo)]}
+        state = {"units": {"code": {
+            "attempt_dir": str(attempt), "job_id": "agent-start",
+            "state": "SUBMITTED", "attempts": [str(attempt)],
+            "gpu_hours": 0.0,
+        }}}
+        args = Namespace(
+            plan=str(self.tmp / "plan.json"),
+            state_dir=str(self.tmp / "state"), root=str(self.tmp / "runs"))
+        report = []
+        proc = mock.Mock(pid=1234)
+
+        with mock.patch.object(S.subprocess, "Popen", return_value=proc) as popen:
+            self.assertTrue(S._start_code_terminal_watchers(
+                plan, state, args, report))
+            self.assertFalse(S._start_code_terminal_watchers(
+                plan, state, args, report))
+
+        popen.assert_called_once()
+        self.assertIn("watch-code-terminal", popen.call_args.args[0])
+        watch = state["units"]["code"]["code_terminal_watches"][attempt.name]
+        self.assertEqual(watch["pid"], 1234)
+        self.assertEqual(watch["status"], "waiting")
 
     def test_absent_remote_ref_states_distinguish_cleanup_loss(self):
         unit = code_unit(self.repo)
