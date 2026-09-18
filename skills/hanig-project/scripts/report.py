@@ -35,6 +35,7 @@ _SWARM_SCRIPTS = sibling_skill_root(Path(__file__).parent.parent,
                                     "hanig-project", "hanig-swarm") / "scripts"
 sys.path.insert(0, str(_SWARM_SCRIPTS))
 import coordinator_paths as CP  # noqa: E402
+import swarm as SWARM_CONTRACT  # noqa: E402
 
 SCHEMA = 1
 
@@ -466,9 +467,10 @@ def _read_attestations(project, state_dir=None):
                 fatal.append("receipt line %d was written in full and does "
                              "not parse" % (idx + 1))
             continue
-        if not isinstance(rec, dict) or rec.get("attested") is not True:
-            fatal.append("receipt line %d does not assert success"
-                         % (idx + 1))
+        shape_problem = SWARM_CONTRACT._receipt_shape_problem(rec)
+        if shape_problem:
+            fatal.append("receipt line %d: %s" %
+                         (idx + 1, shape_problem))
             continue
         key = str(rec.get("key") or "").strip()
         ref = str(rec.get("ref") or "").strip()

@@ -1,9 +1,9 @@
 """Acknowledgment: did the drain actually land?
 
 Every intent used to be written {"applied": false} and nothing ever set it
-true, so after a clean run all eight still read pending. Re-draining is keyed
-and safe, so this was never a correctness bug; it was worse in a quieter way,
-because the outbox could not answer the one question it exists to answer.
+true, so after a clean run all eight still read pending. The key permits
+receiver-side deduplication but never makes a blind replay safe; the outbox
+also could not answer the one question it exists to answer.
 
 Sol's three corrections are what these tests pin, since each is a thing I had
 wrong: append-only JSONL is not automatically crash-safe; status is derived
@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -21,6 +22,54 @@ ROOT = Path(__file__).resolve().parents[1]
 SWARM = ROOT / "skills" / "hanig-swarm" / "scripts" / "swarm.py"
 sys.path.insert(0, str(SWARM.parent))
 import swarm as S  # noqa: E402
+
+
+_REAL_RECORD_RECEIPT = S.record_receipt
+
+
+def _persist_intent(state_dir, key, op=None):
+    """Give receipt tests the same persisted authority as a real drain."""
+    normalized_key = str(key or "").strip()
+    if not normalized_key:
+        return None
+    matches = [intent for intent in S.read_outbox(state_dir)
+               if intent.get("key") == normalized_key]
+    if matches:
+        return matches[0]
+    intent = {
+        "key": normalized_key, "project": "fixture", "unit": "u",
+        "verb": op or "close", "attempt_dir": None,
+        "unit_state": "DONE", "why": "fixture",
+        "evidence": {"fixture": True},
+    }
+    intent["envelope"] = S._intent_envelope(
+        intent["project"], intent["unit"], None, intent["key"],
+        intent["verb"], intent["evidence"])
+    S._fsync_append(Path(state_dir) / S.OUTBOX, intent)
+    return S.read_outbox(state_dir)[-1]
+
+
+def _record_receipt(state_dir, key, ref, op=None, by=None, at=None,
+                    source="receiver_readback"):
+    """Build the complete confirmed observation used by journal tests."""
+    intent = _persist_intent(state_dir, key, op)
+    observation = None
+    if source is not None and intent is not None:
+        envelope = intent["envelope"]
+        observation = {
+            "schema_version": S.OBSERVATION_SCHEMA_VERSION,
+            "project": envelope["project"], "unit": envelope["unit"],
+            "attempt": envelope["attempt"],
+            "idempotency_key": envelope["idempotency_key"],
+            "requested_operation": envelope["requested_operation"],
+            "evidence_digest": envelope["evidence_digest"],
+            "connector_capability":
+                envelope["required_connector_capability"],
+            "outcome": S.RECEIPT_CONFIRMED, "source": source,
+            "matched": True, "reference": ref, "by": by,
+        }
+    return _REAL_RECORD_RECEIPT(state_dir, key, ref, op=op,
+                                by=by, at=at, observation=observation)
 
 
 class TestStatusIsDerivedNotStored(unittest.TestCase):
@@ -33,25 +82,28 @@ class TestStatusIsDerivedNotStored(unittest.TestCase):
 
     def test_a_receipt_makes_the_key_acknowledged(self):
         with tempfile.TemporaryDirectory() as d:
-            S.record_receipt(d, "k1", "ARC-1")
+            receipt = _record_receipt(d, "k1", "ARC-1")
+            self.assertEqual(receipt["outcome"], "confirmed_by_readback")
             st, _ = S.acknowledgment_status(d)
             self.assertEqual(st["k1"][0], S.ACKNOWLEDGED)
 
     def test_the_same_ref_twice_stays_acknowledged(self):
-        """Re-draining is safe, so re-recording must not manufacture a
-        conflict out of an idempotent repeat."""
+        """Repeating a local receipt must not manufacture a conflict from an
+        equivalent receiver observation."""
         with tempfile.TemporaryDirectory() as d:
-            S.record_receipt(d, "k1", "ARC-1")
-            S.record_receipt(d, "k1", "ARC-1")
+            _record_receipt(d, "k1", "ARC-1")
+            _record_receipt(d, "k1", "ARC-1")
             st, _ = S.acknowledgment_status(d)
             self.assertEqual(st["k1"][0], S.ACKNOWLEDGED)
 
-    def test_two_refs_for_one_key_is_a_conflict(self):
+    def test_writer_refuses_a_second_ref_for_one_key(self):
         with tempfile.TemporaryDirectory() as d:
-            S.record_receipt(d, "k1", "ARC-1")
-            S.record_receipt(d, "k1", "ARC-2")
+            _record_receipt(d, "k1", "ARC-1")
+            with self.assertRaises(S.OutboxError):
+                _record_receipt(d, "k1", "ARC-2")
             st, _ = S.acknowledgment_status(d)
-            self.assertEqual(st["k1"][0], S.CONFLICT)
+            self.assertEqual(st["k1"][0], S.ACKNOWLEDGED)
+            self.assertEqual([r["ref"] for r in st["k1"][1]], ["ARC-1"])
 
     def test_intents_no_longer_carry_the_misleading_applied_field(self):
         src = SWARM.read_text()
@@ -60,6 +112,36 @@ class TestStatusIsDerivedNotStored(unittest.TestCase):
         self.assertNotIn('"applied": False', src[i:j],
                          "a permanently-false field reads as 'not filed' "
                          "when the truth is 'this machine does not know'")
+
+
+class TestReceiptAdmissionIsAtomic(unittest.TestCase):
+
+    def test_concurrent_drainers_cannot_admit_two_references(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as d:
+            _persist_intent(d, "k1")
+            program = (
+                "import sys,time; sys.path.insert(0,sys.argv[1]); "
+                "import swarm as S; start=float(sys.argv[3]); "
+                "\nwhile time.time()<start: pass"
+                "\ntry: S.record_receipt(sys.argv[2],'k1',sys.argv[4])"
+                "\nexcept S.OutboxError: sys.exit(23)"
+            )
+            start = time.time() + 0.5
+            processes = [subprocess.Popen(
+                [sys.executable, "-c", program, str(SWARM.parent), d,
+                 str(start), "ARC-%d" % (index % 2)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                for index in range(8)]
+            for process in processes:
+                process.communicate(timeout=20)
+            returncodes = [process.returncode for process in processes]
+            records, problems = S.load_acknowledgments(d)
+            self.assertEqual(problems, [])
+            self.assertEqual(len({record["ref"] for record in records}), 1)
+            self.assertEqual(len(records), 1)
+            self.assertIn(0, returncodes)
+            self.assertIn(23, returncodes)
 
 
 class TestJournalDurability(unittest.TestCase):
@@ -71,7 +153,7 @@ class TestJournalDurability(unittest.TestCase):
 
     def test_a_truncated_final_line_is_dropped_and_reported(self):
         with tempfile.TemporaryDirectory() as d:
-            S.record_receipt(d, "k1", "ARC-1")
+            _record_receipt(d, "k1", "ARC-1")
             with open(self._path(d), "a") as fh:
                 fh.write('{"key": "k2", "ref": "ARC-2"')   # no newline, cut
             j = S._read_receipts_raw(d)
@@ -85,7 +167,7 @@ class TestJournalDurability(unittest.TestCase):
         """Skipping a bad middle line is how a missing acknowledgment turns
         into a false one."""
         with tempfile.TemporaryDirectory() as d:
-            S.record_receipt(d, "k1", "ARC-1")
+            _record_receipt(d, "k1", "ARC-1")
             # Append the bad line and the following good one WITHOUT
             # record_receipt: it now refuses to extend a broken journal, which
             # is the point. This fixture builds the damaged state directly.
@@ -109,10 +191,21 @@ class TestJournalDurability(unittest.TestCase):
     def test_records_survive_a_reopen(self):
         with tempfile.TemporaryDirectory() as d:
             for n in range(5):
-                S.record_receipt(d, "k%d" % n, "ARC-%d" % n)
+                _record_receipt(d, "k%d" % n, "ARC-%d" % n)
             j = S._read_receipts_raw(d)
             recs, problems = j._records, j.problems
             self.assertEqual(len(recs), 5)
+            self.assertEqual(problems, [])
+
+    def test_a_complete_json_record_without_newline_is_preserved(self):
+        with tempfile.TemporaryDirectory() as d:
+            first = _record_receipt(d, "k1", "ARC-1")
+            path = Path(d) / S.RECEIPTS
+            path.write_text(json.dumps(first))
+            _record_receipt(d, "k2", "ARC-2")
+            records, problems = S.load_acknowledgments(d)
+            self.assertEqual([record["key"] for record in records],
+                             ["k1", "k2"])
             self.assertEqual(problems, [])
 
 
@@ -122,7 +215,7 @@ class TestReceiptsRequireAKnownIntent(unittest.TestCase):
         os.makedirs(d, exist_ok=True)
         with open(Path(d) / S.OUTBOX, "w") as fh:
             fh.write(json.dumps({
-                "key": key, "verb": "close", "unit": "u1",
+                "key": key, "project": "p", "verb": "close", "unit": "u1",
                 "unit_state": "DONE", "why": "w", "evidence": {"x": 1}}) + "\n")
 
     def _args(self, d, **kw):
@@ -133,6 +226,8 @@ class TestReceiptsRequireAKnownIntent(unittest.TestCase):
             record_receipt = None
             ref = None
             op = None
+            source = None
+            matched = False
         a = A()
         for k, v in kw.items():
             setattr(a, k, v)
@@ -159,13 +254,44 @@ class TestReceiptsRequireAKnownIntent(unittest.TestCase):
                                          ref="ARC-171"))
             self.assertEqual(rc, S.EXIT_OK)
             st, _ = S.acknowledgment_status(d)
-            self.assertEqual(st["abc"][0], S.ACKNOWLEDGED)
+            self.assertEqual(st["abc"][0], S.ATTESTED_UNSPECIFIED)
+
+    def test_flags_cannot_synthesize_the_stronger_grade(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._outbox(d)
+            rc = S.cmd_outbox(self._args(
+                d, record_receipt="abc", ref="ARC-171",
+                source="receiver_readback", matched=True))
+            self.assertEqual(rc, S.EXIT_USAGE)
+            self.assertFalse((Path(d) / S.RECEIPTS).exists())
+
+    def test_historical_cli_form_still_records_the_weaker_grade(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as d:
+            self._outbox(d)
+            result = subprocess.run(
+                [sys.executable, str(SWARM), "outbox", "--state-dir", d,
+                 "--record-receipt", "abc", "--ref", "ARC-171"],
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, S.EXIT_OK, result.stderr)
+            status, _ = S.acknowledgment_status(d)
+            self.assertEqual(status["abc"][0], S.ATTESTED_UNSPECIFIED)
+
+    def test_help_routes_confirmed_observations_to_the_contract_cli(self):
+        import subprocess
+        result = subprocess.run(
+            [sys.executable, str(SWARM), "outbox", "--help"],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("drain_contract.py", result.stdout)
+        self.assertNotIn("receipt when --source", result.stdout)
 
     def test_a_conflict_exits_nonzero(self):
         with tempfile.TemporaryDirectory() as d:
             self._outbox(d)
-            S.record_receipt(d, "abc", "ARC-1")
-            S.record_receipt(d, "abc", "ARC-2")
+            first = _record_receipt(d, "abc", "ARC-1")
+            second = dict(first, ref="ARC-2")
+            S._fsync_append(Path(d) / S.RECEIPTS, second)
             self.assertEqual(S.cmd_outbox(self._args(d)), S.EXIT_CONFLICT)
 
 class TestReviewFindings(unittest.TestCase):
@@ -185,7 +311,7 @@ class TestReviewFindings(unittest.TestCase):
             with mock.patch.object(S.fcntl, "flock",
                                    side_effect=OSError("nolock")):
                 with self.assertRaises(S.OutboxError) as c:
-                    S.record_receipt(d, "k1", "ARC-1")
+                    _record_receipt(d, "k1", "ARC-1")
             self.assertIn("serialise", str(c.exception))
 
     def test_corruption_fails_closed_rather_than_reporting_survivors(self):
@@ -193,9 +319,10 @@ class TestReviewFindings(unittest.TestCase):
             with open(Path(d) / S.OUTBOX, "w") as fh:
                 for k in ("k1", "k2"):
                     fh.write(json.dumps({
-                        "key": k, "verb": "close", "unit": "u", "why": "w",
+                        "key": k, "project": "p", "verb": "close",
+                        "unit": "u", "why": "w",
                         "unit_state": "DONE", "evidence": {"x": 1}}) + "\n")
-            S.record_receipt(d, "k1", "ARC-1")
+            _record_receipt(d, "k1", "ARC-1")
             with open(Path(d) / S.RECEIPTS, "a") as fh:
                 fh.write("NOT JSON\n")
                 fh.write('{"key": "k2", "ref": "ARC-2", "attested": true}\n')
@@ -213,7 +340,7 @@ class TestReviewFindings(unittest.TestCase):
         """The coordinator has no network imports, so it cannot check that
         ARC-171 really closed. The label must carry that weakness."""
         with tempfile.TemporaryDirectory() as d:
-            rec = S.record_receipt(d, "k1", "ARC-1")
+            rec = _record_receipt(d, "k1", "ARC-1")
             self.assertTrue(rec["attested"])
         doc = S.record_receipt.__doc__
         self.assertIn("NOT verified evidence", doc)
@@ -227,15 +354,16 @@ class TestTheWireValueCarriesTheWeakness(unittest.TestCase):
     def _fixture(self, d):
         with open(Path(d) / S.OUTBOX, "w") as fh:
             fh.write(json.dumps({
-                "key": "k1", "verb": "close", "unit": "u", "why": "w",
+                "key": "k1", "project": "p", "verb": "close",
+                "unit": "u", "why": "w",
                 "unit_state": "DONE", "evidence": {"x": 1}}) + "\n")
-        S.record_receipt(d, "k1", "ARC-1")
+        _record_receipt(d, "k1", "ARC-1", source=None)
 
     def test_the_status_value_itself_says_attested(self):
         with tempfile.TemporaryDirectory() as d:
             self._fixture(d)
             st, _ = S.acknowledgment_status(d)
-            self.assertEqual(st["k1"][0], "attested")
+            self.assertEqual(st["k1"][0], S.ATTESTED_UNSPECIFIED)
 
     def test_no_output_path_ever_says_acknowledged(self):
         src = SWARM.read_text()
@@ -262,8 +390,10 @@ class TestTheWireValueCarriesTheWeakness(unittest.TestCase):
             with contextlib.redirect_stdout(buf):
                 S.cmd_outbox(A())
             payload = json.loads(buf.getvalue())
-            self.assertEqual(payload["intents"][0]["ack_status"], "attested")
-            self.assertIn("not verified tracker state", payload["note"])
+            self.assertEqual(payload["intents"][0]["ack_status"],
+                             S.ATTESTED_UNSPECIFIED)
+            self.assertIn("Neither is independently verified tracker state",
+                          payload["note"])
 
 
 class TestRoundThreeFindings(unittest.TestCase):
@@ -273,7 +403,8 @@ class TestRoundThreeFindings(unittest.TestCase):
     def _intent(self, d, key="k1"):
         with open(Path(d) / S.OUTBOX, "w") as fh:
             fh.write(json.dumps({
-                "key": key, "verb": "close", "unit": "u", "why": "w",
+                "key": key, "project": "p", "verb": "close", "unit": "u",
+                "why": "w",
                 "unit_state": "DONE", "evidence": {"x": 1}}) + "\n")
 
     def _args(self, d, **kw):
@@ -284,6 +415,8 @@ class TestRoundThreeFindings(unittest.TestCase):
             record_receipt = None
             ref = None
             op = None
+            source = None
+            matched = False
         a = A()
         for k, v in kw.items():
             setattr(a, k, v)
@@ -293,7 +426,7 @@ class TestRoundThreeFindings(unittest.TestCase):
         """splitlines() cannot tell an interrupted write from a finished one.
         A trailing newline means the line was written in full."""
         with tempfile.TemporaryDirectory() as d:
-            S.record_receipt(d, "k1", "ARC-1")
+            _record_receipt(d, "k1", "ARC-1")
             with open(Path(d) / S.RECEIPTS, "a") as fh:
                 fh.write("NOT JSON\n")           # note: complete line
             problems = S._read_receipts_raw(d).problems
@@ -317,6 +450,84 @@ class TestRoundThreeFindings(unittest.TestCase):
             recs, problems = j._records, j.problems
             self.assertEqual(recs, [])
             self.assertEqual([p["kind"] for p in problems], ["malformed"])
+
+    def test_lifecycle_completion_is_not_an_acknowledgment_receipt(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(Path(d) / S.RECEIPTS, "w") as fh:
+                fh.write(json.dumps({
+                    "key": "k1", "ref": "a2a-task-1", "attested": True,
+                    "outcome": "asynchronously_completed",
+                    "source": "a2a_lifecycle", "schema_version": 2,
+                }) + "\n")
+            journal = S._read_receipts_raw(d)
+            self.assertEqual(journal._records, [])
+            self.assertEqual([p["kind"] for p in journal.problems],
+                             ["malformed"])
+
+    def test_explicit_lifecycle_source_is_rejected_on_legacy_receipt(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(Path(d) / S.RECEIPTS, "w") as fh:
+                fh.write(json.dumps({
+                    "key": "k1", "ref": "a2a-task-1", "attested": True,
+                    "source": "a2a_lifecycle", "schema_version": 1,
+                }) + "\n")
+            journal = S._read_receipts_raw(d)
+            self.assertEqual(journal._records, [])
+            self.assertEqual([p["kind"] for p in journal.problems],
+                             ["malformed"])
+
+    def test_legacy_schema_cannot_claim_the_confirmed_grade(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(Path(d) / S.RECEIPTS, "w") as fh:
+                fh.write(json.dumps({
+                    "key": "k1", "ref": "ARC-1", "attested": True,
+                    "outcome": S.CONFIRMED_BY_READBACK,
+                    "source": S.RECEIVER_READBACK, "matched": True,
+                    "schema_version": 1,
+                }) + "\n")
+            journal = S._read_receipts_raw(d)
+            self.assertEqual(journal._records, [])
+            self.assertEqual([p["kind"] for p in journal.problems],
+                             ["malformed"])
+
+    def test_boolean_is_not_a_legacy_receipt_schema(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(Path(d) / S.RECEIPTS, "w") as fh:
+                fh.write(json.dumps({
+                    "key": "k1", "ref": "ARC-1", "attested": True,
+                    "schema_version": True,
+                }) + "\n")
+            journal = S._read_receipts_raw(d)
+            self.assertEqual(journal._records, [])
+            self.assertEqual([p["kind"] for p in journal.problems],
+                             ["malformed"])
+
+    def test_lifecycle_completion_cannot_enter_through_the_writer(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(S.OutboxError):
+                _record_receipt(d, "k1", "a2a-task-1",
+                                 source="a2a_lifecycle")
+            self.assertFalse((Path(d) / S.RECEIPTS).exists())
+
+    def test_legacy_key_and_ref_form_is_a_weaker_attestation(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._intent(d)
+            rec = _REAL_RECORD_RECEIPT(d, "k1", "ARC-1")
+            self.assertIsNone(rec["outcome"])
+            status, _ = S.acknowledgment_status(d)
+            self.assertEqual(status["k1"][0], S.ATTESTED_UNSPECIFIED)
+
+    def test_invalid_evidence_less_close_cannot_mint_a_receipt(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(Path(d) / S.OUTBOX, "w") as fh:
+                fh.write(json.dumps({
+                    "key": "k1", "project": "p", "unit": "u",
+                    "verb": "close", "attempt_dir": None,
+                    "evidence": None,
+                }) + "\n")
+            with self.assertRaises(S.OutboxError):
+                _REAL_RECORD_RECEIPT(d, "k1", "ARC-1")
+            self.assertFalse((Path(d) / S.RECEIPTS).exists())
 
     def test_an_unreadable_journal_fails_closed(self):
         """Keying the failure on the word 'corruption' meant an OSError
@@ -361,6 +572,7 @@ class TestTheRefusalCannotBeBypassed(unittest.TestCase):
 
     CHOKEPOINT = "load_acknowledgments"
     RAW = "_read_receipts_raw"
+    WRITER = "_append_receipt_atomic"
 
     def _analyse(self):
         """(name, lineno) -> (references_journal, calls_chokepoint, calls_raw).
@@ -426,7 +638,8 @@ class TestTheRefusalCannotBeBypassed(unittest.TestCase):
         offenders = sorted(
             name for (name, _line), (refs, choke, _) in
             self._analyse().items()
-            if refs and not choke and name not in (self.RAW, self.CHOKEPOINT))
+            if refs and not choke and name not in (
+                self.RAW, self.CHOKEPOINT, self.WRITER))
         self.assertEqual(offenders, [],
                          "these reach the receipt journal without accepting "
                          "its refusal, which is how one cause produced four "
@@ -440,6 +653,24 @@ class TestTheRefusalCannotBeBypassed(unittest.TestCase):
                          "the raw reader reports problems; it does not "
                          "refuse. Anything deciding on it must go through "
                          "the chokepoint, got: %s" % callers)
+
+    def test_atomic_writer_is_the_only_admission_exception(self):
+        """The writer must inspect and append while holding one lock."""
+        import ast
+        fn = next(node for node in ast.parse(SWARM.read_text()).body
+                  if isinstance(node, ast.FunctionDef)
+                  and node.name == self.WRITER)
+        calls = {}
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Call):
+                continue
+            name = (getattr(node.func, "id", None)
+                    or getattr(node.func, "attr", None))
+            if name in ("flock", "_parse_receipt_text", "write", "fsync"):
+                calls.setdefault(name, node.lineno)
+        self.assertLess(calls["flock"], calls["_parse_receipt_text"])
+        self.assertLess(calls["_parse_receipt_text"], calls["write"])
+        self.assertLess(calls["write"], calls["fsync"])
 
     def test_the_records_are_not_reachable_without_the_refusal(self):
         """The real barrier. `_RawJournal` hands back no records at all, so
@@ -501,11 +732,11 @@ class TestTheRefusalCannotBeBypassed(unittest.TestCase):
             with self.assertRaises(S.OutboxError):
                 S.acknowledgment_status(d)
             with self.assertRaises(S.OutboxError):
-                S.record_receipt(d, "k1", "ARC-1")
+                _record_receipt(d, "k1", "ARC-1")
 
     def test_a_healthy_journal_passes_through(self):
         with tempfile.TemporaryDirectory() as d:
-            S.record_receipt(d, "k1", "ARC-1")
+            _record_receipt(d, "k1", "ARC-1")
             recs, problems = S.load_acknowledgments(d)
             self.assertEqual(len(recs), 1)
             self.assertEqual(problems, [])
@@ -518,21 +749,21 @@ class TestARefIsRequiredWhereItIsWritten(unittest.TestCase):
     def test_a_none_ref_is_refused_at_the_writer(self):
         with tempfile.TemporaryDirectory() as d:
             with self.assertRaises(S.OutboxError):
-                S.record_receipt(d, "k1", None)
+                _record_receipt(d, "k1", None)
 
     def test_a_whitespace_ref_is_refused(self):
         with tempfile.TemporaryDirectory() as d:
             with self.assertRaises(S.OutboxError):
-                S.record_receipt(d, "k1", "   ")
+                _record_receipt(d, "k1", "   ")
 
     def test_an_empty_key_is_refused(self):
         with tempfile.TemporaryDirectory() as d:
             with self.assertRaises(S.OutboxError):
-                S.record_receipt(d, "  ", "ARC-1")
+                _record_receipt(d, "  ", "ARC-1")
 
     def test_a_ref_is_stored_stripped(self):
         with tempfile.TemporaryDirectory() as d:
-            rec = S.record_receipt(d, " k1 ", "  ARC-1  ")
+            rec = _record_receipt(d, " k1 ", "  ARC-1  ")
             self.assertEqual((rec["key"], rec["ref"]), ("k1", "ARC-1"))
 
 
@@ -542,10 +773,10 @@ class TestAppendingAfterACrashDoesNotDestroyTwoRecords(unittest.TestCase):
 
     def test_a_half_written_tail_is_dropped_before_appending(self):
         with tempfile.TemporaryDirectory() as d:
-            S.record_receipt(d, "k1", "ARC-1")
+            _record_receipt(d, "k1", "ARC-1")
             with open(Path(d) / S.RECEIPTS, "a") as fh:
                 fh.write('{"key": "k2", "ref": "ARC')     # crash mid-write
-            S.record_receipt(d, "k3", "ARC-3")
+            _record_receipt(d, "k3", "ARC-3")
             recs, problems = S.load_acknowledgments(d)
             self.assertEqual(sorted(r["key"] for r in recs), ["k1", "k3"])
             self.assertEqual(problems, [],
@@ -554,9 +785,9 @@ class TestAppendingAfterACrashDoesNotDestroyTwoRecords(unittest.TestCase):
 
     def test_a_clean_journal_is_untouched(self):
         with tempfile.TemporaryDirectory() as d:
-            S.record_receipt(d, "k1", "ARC-1")
+            _record_receipt(d, "k1", "ARC-1")
             before = (Path(d) / S.RECEIPTS).read_bytes()
-            S.record_receipt(d, "k2", "ARC-2")
+            _record_receipt(d, "k2", "ARC-2")
             after = (Path(d) / S.RECEIPTS).read_bytes()
             self.assertTrue(after.startswith(before))
 
@@ -565,7 +796,7 @@ class TestAppendingAfterACrashDoesNotDestroyTwoRecords(unittest.TestCase):
             os.makedirs(d, exist_ok=True)
             with open(Path(d) / S.RECEIPTS, "w") as fh:
                 fh.write('{"key": "k1"')
-            S.record_receipt(d, "k2", "ARC-2")
+            _record_receipt(d, "k2", "ARC-2")
             recs, problems = S.load_acknowledgments(d)
             self.assertEqual([r["key"] for r in recs], ["k2"])
             self.assertEqual(problems, [])
@@ -595,11 +826,11 @@ class TestHealingHappensUnderTheLock(unittest.TestCase):
             if isinstance(node, ast.Call):
                 name = (getattr(node.func, "attr", None)
                         or getattr(node.func, "id", None))
-                if name in ("flock", "truncate"):
+                if name in ("flock", "_heal_jsonl_tail"):
                     calls.setdefault(name, node.lineno)
         self.assertIn("flock", calls)
-        self.assertIn("truncate", calls)
-        self.assertLess(calls["flock"], calls["truncate"],
+        self.assertIn("_heal_jsonl_tail", calls)
+        self.assertLess(calls["flock"], calls["_heal_jsonl_tail"],
                         "the tail is repaired before the lock is held, so a "
                         "concurrent writer's receipt can be truncated away")
 
@@ -609,10 +840,10 @@ class TestHealingHappensUnderTheLock(unittest.TestCase):
 
     def test_healing_still_works_through_the_locked_path(self):
         with tempfile.TemporaryDirectory() as d:
-            S.record_receipt(d, "k1", "ARC-1")
+            _record_receipt(d, "k1", "ARC-1")
             with open(Path(d) / S.RECEIPTS, "a") as fh:
                 fh.write('{"key": "k2", "ref": "ARC')
-            S.record_receipt(d, "k3", "ARC-3")
+            _record_receipt(d, "k3", "ARC-3")
             recs, problems = S.load_acknowledgments(d)
             self.assertEqual(sorted(r["key"] for r in recs), ["k1", "k3"])
             self.assertEqual(problems, [])

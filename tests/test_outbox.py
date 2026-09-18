@@ -17,6 +17,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SWARM = ROOT / "skills" / "hanig-swarm" / "scripts" / "swarm.py"
 sys.path.insert(0, str(SWARM.parent))
 import swarm as S  # noqa: E402
+PROJECT_SCRIPTS = ROOT / "skills" / "hanig-project" / "scripts"
+sys.path.insert(0, str(PROJECT_SCRIPTS))
+import drain_contract as D  # noqa: E402
 
 PLAN = {"name": "rna-bench", "units": [
     {"id": "prep", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o"],
@@ -31,6 +34,234 @@ def run(tmp, *argv):
         [sys.executable, str(SWARM), *argv, str(tmp / "plan.json"),
          "--dry-run", "--state-dir", str(tmp / "st")],
         capture_output=True, text=True, cwd=tmp)
+
+
+class TestDrainRestartReconciliation(unittest.TestCase):
+    """The first failure scenario: mutation landed and acknowledgment died."""
+
+    def _intent(self, state_dir):
+        S.emit_intent(
+            state_dir, "p", "u", "DONE",
+            {"attempt_dir": "/runs/u/attempt-1", "job_id": "17"},
+            evidence={"receipt": {"state": "DONE"}}, kind="slurm")
+        return S.read_outbox(state_dir)[0]
+
+    def _observation(self, intent, outcome, source, **extra):
+        envelope = intent["envelope"]
+        observation = {
+            "schema_version": D.OBSERVATION_SCHEMA_VERSION,
+            "project": envelope["project"],
+            "unit": envelope["unit"],
+            "attempt": envelope["attempt"],
+            "idempotency_key": envelope["idempotency_key"],
+            "requested_operation": envelope["requested_operation"],
+            "evidence_digest": envelope["evidence_digest"],
+            "connector_capability":
+                envelope["required_connector_capability"],
+            "outcome": outcome,
+            "source": source,
+        }
+        observation.update(extra)
+        return observation
+
+    def test_restart_resolves_only_a_confirmed_receiver_match(self):
+        # The mutation response was observed, but the draining session died
+        # before it could durably acknowledge the intent.
+        with tempfile.TemporaryDirectory() as directory:
+            intent = self._intent(directory)
+            accepted = self._observation(
+                intent, D.OPERATION_ACCEPTED, D.MUTATION_RESPONSE,
+                reference="ARC-17")
+            result = D.record_reconciliation(directory, intent, accepted)
+            self.assertEqual(result["outcome"], D.OPERATION_ACCEPTED)
+            self.assertIsNone(result["receipt"])
+            self.assertEqual(S.acknowledgment_status(directory)[0], {})
+
+            # On restart, the receiver reports the same idempotency-key match.
+            # This records the ORIGINAL reference without filing again.
+            matched = self._observation(
+                intent, D.CONFIRMED_BY_READBACK, D.RECEIVER_DEDUPLICATION,
+                matched=True, reference="ARC-17")
+            result = D.record_reconciliation(directory, intent, matched)
+            self.assertFalse(result["replay"])
+            status, _ = S.acknowledgment_status(directory)
+            self.assertEqual(status[intent["key"]][0], S.ACKNOWLEDGED)
+            self.assertEqual(
+                [record["ref"] for record in status[intent["key"]][1]],
+                ["ARC-17"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            intent = self._intent(directory)
+            ambiguous = self._observation(
+                intent, D.UNKNOWN, D.RECEIVER_READBACK,
+                reference=None, matched=False)
+            result = D.record_reconciliation(directory, intent, ambiguous)
+            self.assertEqual(result["outcome"], D.UNKNOWN)
+            self.assertFalse(result["replay"])
+            self.assertIsNone(result["receipt"])
+            self.assertEqual(S.acknowledgment_status(directory)[0], {},
+                             "an ambiguous read-back records neither success "
+                             "nor absence")
+
+        with tempfile.TemporaryDirectory() as directory:
+            intent = self._intent(directory)
+            lifecycle = self._observation(
+                intent, D.ASYNC_COMPLETED, D.A2A_LIFECYCLE,
+                reference="a2a-task-9", remote_state="TASK_STATE_COMPLETED")
+            result = D.record_reconciliation(directory, intent, lifecycle)
+            self.assertEqual(result["outcome"], D.ASYNC_COMPLETED)
+            self.assertFalse(result["closing_evidence"])
+            self.assertIsNone(result["receipt"])
+            self.assertEqual(S.acknowledgment_status(directory)[0], {},
+                             "A2A completed is lifecycle, not the missing "
+                             "tracker receipt")
+
+    def test_reconciliation_preserves_a_valid_newline_less_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / D.RECONCILIATIONS
+            path.write_text(json.dumps({"idempotency_key": "old"}))
+            S._fsync_append(path, {"idempotency_key": "new"})
+            records = [json.loads(line) for line in path.read_text().splitlines()]
+            self.assertEqual([record["idempotency_key"] for record in records],
+                             ["old", "new"])
+
+    def test_stateful_reconciliation_uses_the_persisted_intent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            intent = self._intent(directory)
+            forged = json.loads(json.dumps(intent))
+            forged["project"] = "forged"
+            forged["envelope"]["project"] = "forged"
+            observation = self._observation(
+                forged, D.CONFIRMED_BY_READBACK, D.RECEIVER_READBACK,
+                matched=True, reference="ARC-forged")
+            with self.assertRaises(D.ContractError):
+                D.record_reconciliation(directory, forged, observation)
+            self.assertEqual(S.acknowledgment_status(directory)[0], {})
+
+    def test_stateful_reconciliation_refuses_an_incomplete_outbox(self):
+        with tempfile.TemporaryDirectory() as directory:
+            intent = self._intent(directory)
+            with open(Path(directory) / S.OUTBOX, "a") as fh:
+                fh.write('{"key": "torn"')
+            observation = self._observation(
+                intent, D.CONFIRMED_BY_READBACK, D.RECEIVER_READBACK,
+                matched=True, reference="ARC-1")
+            with self.assertRaises(D.ContractError):
+                D.record_reconciliation(directory, intent, observation)
+            self.assertEqual(S.acknowledgment_status(directory)[0], {})
+
+
+class TestIntentEnvelope(unittest.TestCase):
+    def test_every_intent_carries_the_versioned_drain_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = {"receipt": {"state": "DONE", "value": 7}}
+            S.emit_intent(
+                directory, "project", "unit", "DONE",
+                {"attempt_dir": "/runs/unit/attempt-4", "job_id": "9"},
+                evidence=evidence, kind="slurm")
+            intent = S.read_outbox(directory)[0]
+            envelope = intent["envelope"]
+            self.assertEqual(envelope["schema_version"], 1)
+            self.assertEqual((envelope["project"], envelope["unit"]),
+                             ("project", "unit"))
+            self.assertEqual(envelope["attempt"], {
+                "id": "attempt-4", "directory": "/runs/unit/attempt-4"})
+            self.assertEqual(envelope["idempotency_key"], intent["key"])
+            self.assertEqual(envelope["requested_operation"], intent["verb"])
+            self.assertEqual(envelope["evidence_digest"],
+                             D.canonical_digest(evidence))
+            self.assertEqual(envelope["required_connector_capability"],
+                             D.CONNECTOR_CAPABILITY)
+            self.assertEqual(D.validate_intent(intent), [])
+
+    def test_a_persisted_legacy_intent_is_normalized_on_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            legacy = {
+                "key": "legacy-key", "project": "p", "unit": "u",
+                "verb": "reopen", "unit_state": "FAILED",
+                "attempt_dir": "/runs/u/attempt-1", "evidence": None,
+            }
+            Path(directory, S.OUTBOX).write_text(json.dumps(legacy) + "\n")
+            restored = S.read_outbox(directory)[0]
+            self.assertEqual(restored["envelope"]["idempotency_key"],
+                             "legacy-key")
+            self.assertEqual(D.validate_intent(restored), [])
+            self.assertEqual(D.validate_intent(legacy), [],
+                             "the offline validator must normalize the same "
+                             "persisted record as swarm.read_outbox")
+            self.assertEqual(D.main(["validate", str(Path(
+                directory, S.OUTBOX))]), 0)
+
+    def test_surrogateescaped_evidence_is_digestible_and_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = {"filename": "bad\udcff"}
+            S.emit_intent(
+                directory, "p", "u", "DONE", {"attempt_dir": "/r/u/a1"},
+                evidence=evidence, kind="slurm")
+            intent = S.read_outbox(directory)[0]
+            self.assertEqual(intent["evidence"], evidence)
+            self.assertEqual(intent["envelope"]["evidence_digest"],
+                             D.canonical_digest(evidence))
+
+    def test_offline_validation_refuses_tampered_evidence_and_capabilities(self):
+        with tempfile.TemporaryDirectory() as directory:
+            intent = self._valid_intent(directory)
+            intent["evidence"]["receipt"]["state"] = "FAILED"
+            problems = D.validate_intent(
+                intent, connector_capabilities={"some.older.connector"})
+            self.assertTrue(any("evidence_digest" in item for item in problems))
+            self.assertTrue(any("required capability" in item
+                                for item in problems))
+
+    def test_boolean_is_not_an_integer_schema_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            intent = self._valid_intent(directory)
+            intent["envelope"]["schema_version"] = True
+            self.assertTrue(any("schema_version" in problem for problem in
+                                D.validate_intent(intent)))
+
+            intent = self._valid_intent(directory)
+            envelope = intent["envelope"]
+            observation = {
+                "schema_version": True,
+                "project": envelope["project"], "unit": envelope["unit"],
+                "attempt": envelope["attempt"],
+                "idempotency_key": envelope["idempotency_key"],
+                "requested_operation": envelope["requested_operation"],
+                "evidence_digest": envelope["evidence_digest"],
+                "connector_capability":
+                    envelope["required_connector_capability"],
+                "outcome": D.CONFIRMED_BY_READBACK,
+                "source": D.RECEIVER_READBACK,
+                "matched": True, "reference": "ARC-1",
+            }
+            self.assertTrue(any("schema_version" in problem for problem in
+                                D.validate_observation(intent, observation)))
+
+    def test_outcome_sources_cannot_be_swapped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            intent = self._valid_intent(directory)
+            envelope = intent["envelope"]
+            observation = {
+                "schema_version": D.OBSERVATION_SCHEMA_VERSION,
+                "project": envelope["project"], "unit": envelope["unit"],
+                "attempt": envelope["attempt"],
+                "idempotency_key": envelope["idempotency_key"],
+                "requested_operation": envelope["requested_operation"],
+                "evidence_digest": envelope["evidence_digest"],
+                "connector_capability":
+                    envelope["required_connector_capability"],
+                "outcome": D.ASYNC_COMPLETED,
+                "source": D.RECEIVER_READBACK,
+            }
+            self.assertTrue(any("a2a_lifecycle" in problem for problem in
+                                D.validate_observation(intent, observation)))
+
+    def _valid_intent(self, directory):
+        S.emit_intent(
+            directory, "p", "u", "DONE", {"attempt_dir": "/r/u/a1"},
+            evidence={"receipt": {"state": "DONE"}}, kind="slurm")
+        return S.read_outbox(directory)[0]
 
 
 class TestIdempotency(unittest.TestCase):

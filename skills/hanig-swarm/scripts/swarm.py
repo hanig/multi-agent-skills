@@ -4011,12 +4011,35 @@ def _check(unit_dir, launch_facts=None, artifact_basis=None,
 #
 #   - a tracker outage NEVER alters swarm state; the swarm is authoritative and
 #     the tracker is a view of it
-#   - every intent carries an idempotency key, so a re-run of the drain cannot
-#     create a second issue for one unit
+#   - every intent carries an idempotency key that a capable receiver can use
+#     for deduplication; the key alone does not make a blind replay safe
 #   - a CLOSE intent is emitted only from a predicate verdict, never from a
 #     unit's own report. An agent saying "done" on a ticket is exactly the
 #     self-assertion this whole family refuses.
 OUTBOX = "outbox.jsonl"
+INTENT_SCHEMA_VERSION = 1
+OBSERVATION_SCHEMA_VERSION = 1
+RECEIPT_SCHEMA_VERSION = 2
+RECONCILIATION_SCHEMA_VERSION = 1
+INTENT_CONNECTOR_CAPABILITY = (
+    "tracker.intent.idempotent-mutation-readback.v1")
+INTENT_OPERATIONS = frozenset(
+    ("start", "close", "reopen", "note", "block", "open_pr"))
+OPERATION_ACCEPTED = "operation_accepted"
+ASYNC_COMPLETED = "asynchronously_completed"
+CONFIRMED_BY_READBACK = "confirmed_by_readback"
+UNKNOWN = "unknown"
+OBSERVATION_OUTCOMES = frozenset(
+    (OPERATION_ACCEPTED, ASYNC_COMPLETED, CONFIRMED_BY_READBACK, UNKNOWN))
+MUTATION_RESPONSE = "mutation_response"
+A2A_LIFECYCLE = "a2a_lifecycle"
+RECEIVER_READBACK = "receiver_readback"
+RECEIVER_DEDUPLICATION = "receiver_deduplication"
+CONFIRMING_SOURCES = frozenset(
+    (RECEIVER_READBACK, RECEIVER_DEDUPLICATION))
+OBSERVATION_SOURCES = frozenset(
+    (MUTATION_RESPONSE, A2A_LIFECYCLE,
+     RECEIVER_READBACK, RECEIVER_DEDUPLICATION))
 
 # Unit states that justify a tracker mutation, and what each means to a reader.
 TRACKER_EVENTS = {
@@ -4059,9 +4082,225 @@ def closing_evidence_for(kind):
 
 def outbox_key(project, uid, state, attempt_dir):
     """Idempotency key. Same project, unit, state and attempt yields the same
-    key, so draining twice is a no-op rather than a duplicate issue."""
+    key, allowing receiver-side deduplication after an ambiguous drain."""
     basis = f"{project}\x00{uid}\x00{state}\x00{attempt_dir or ''}"
     return hashlib.sha256(basis.encode()).hexdigest()[:16]
+
+
+def _intent_evidence_digest(evidence):
+    """Digest the exact evidence value carried by the intent envelope."""
+    # Keep json.dumps' ASCII escaping. The existing outbox writer accepts
+    # surrogateescaped filesystem names by persisting them as ``\udxxx``;
+    # ensure_ascii=False would make the following UTF-8 encode crash.
+    canonical = json.dumps(evidence, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _intent_attempt_identity(attempt_dir):
+    directory = str(attempt_dir) if attempt_dir else None
+    return {"id": Path(directory).name if directory else None,
+            "directory": directory}
+
+
+def _intent_envelope(project, uid, attempt_dir, key, verb, evidence):
+    """The connector-independent, versioned routing and binding contract."""
+    return {
+        "schema_version": INTENT_SCHEMA_VERSION,
+        "project": project,
+        "unit": uid,
+        "attempt": _intent_attempt_identity(attempt_dir),
+        "idempotency_key": key,
+        "requested_operation": verb,
+        "evidence_digest": _intent_evidence_digest(evidence),
+        "required_connector_capability": INTENT_CONNECTOR_CAPABILITY,
+    }
+
+
+def normalize_intent(intent):
+    """Give persisted pre-envelope intents the same read contract as new ones.
+
+    Old JSONL records are append-only audit history and are not rewritten in
+    place.  Normalizing them at the sole reader keeps a restart from exposing
+    the obsolete connector shape while preserving their original bytes.
+    """
+    if not isinstance(intent, dict) or "envelope" in intent:
+        return intent
+    normalized = dict(intent)
+    normalized["envelope"] = _intent_envelope(
+        intent.get("project"), intent.get("unit"), intent.get("attempt_dir"),
+        intent.get("key"), intent.get("verb"), intent.get("evidence"))
+    return normalized
+
+
+# Compatibility name for existing internal callers. The contract owner is
+# this module; the project-side drain CLI delegates here rather than carrying
+# another implementation.
+_with_intent_envelope = normalize_intent
+
+
+def _nonblank_text(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _schema_is(value, expected):
+    """JSON booleans are not integer schema versions (`True == 1` in Python)."""
+    return type(value) is int and value == expected
+
+
+def validate_intent(intent, connector_capabilities=None):
+    """Return envelope problems after explicit legacy normalization."""
+    if not isinstance(intent, dict):
+        return ["intent is not an object"]
+    intent = normalize_intent(intent)
+    envelope = intent.get("envelope")
+    if not isinstance(envelope, dict):
+        return ["intent has no versioned `envelope` object"]
+    problems = []
+    if not _schema_is(envelope.get("schema_version"), INTENT_SCHEMA_VERSION):
+        problems.append("unsupported envelope schema_version %r "
+                        "(understands %d)" %
+                        (envelope.get("schema_version"),
+                         INTENT_SCHEMA_VERSION))
+    for field in ("project", "unit", "idempotency_key",
+                  "requested_operation", "evidence_digest",
+                  "required_connector_capability"):
+        if not _nonblank_text(envelope.get(field)):
+            problems.append("envelope.%s is missing or blank" % field)
+    if envelope.get("requested_operation") not in INTENT_OPERATIONS:
+        problems.append("envelope.requested_operation is not one of %s" %
+                        ", ".join(sorted(INTENT_OPERATIONS)))
+    if (envelope.get("required_connector_capability") !=
+            INTENT_CONNECTOR_CAPABILITY):
+        problems.append("envelope requires unsupported connector capability "
+                        "%r" % envelope.get(
+                            "required_connector_capability"))
+    digest = envelope.get("evidence_digest")
+    if (_nonblank_text(digest) and
+            (len(digest) != 64 or
+             any(c not in "0123456789abcdef" for c in digest))):
+        problems.append("envelope.evidence_digest is not a lowercase SHA-256")
+    attempt = envelope.get("attempt")
+    if not isinstance(attempt, dict):
+        problems.append("envelope.attempt is not an object")
+    else:
+        aid, directory = attempt.get("id"), attempt.get("directory")
+        if (aid is None) != (directory is None):
+            problems.append("envelope.attempt id and directory must both be "
+                            "null or both be present")
+        elif directory is not None:
+            if not _nonblank_text(aid) or not _nonblank_text(directory):
+                problems.append("envelope.attempt id and directory must be "
+                                "non-blank strings")
+            elif Path(directory).name != aid:
+                problems.append("envelope.attempt.id does not name its "
+                                "directory")
+    aliases = (("project", "project"), ("unit", "unit"),
+               ("idempotency_key", "key"),
+               ("requested_operation", "verb"))
+    for envelope_field, payload_field in aliases:
+        if envelope.get(envelope_field) != intent.get(payload_field):
+            problems.append("envelope.%s does not match intent.%s" %
+                            (envelope_field, payload_field))
+    if (isinstance(attempt, dict) and
+            attempt.get("directory") != intent.get("attempt_dir")):
+        problems.append("envelope.attempt.directory does not match "
+                        "intent.attempt_dir")
+    if envelope.get("evidence_digest") != _intent_evidence_digest(
+            intent.get("evidence")):
+        problems.append("envelope.evidence_digest does not match the "
+                        "intent evidence")
+    if intent.get("verb") == "close" and intent.get("evidence") is None:
+        problems.append("a close intent has no evidence")
+    if connector_capabilities is not None:
+        capability = envelope.get("required_connector_capability")
+        if capability not in set(connector_capabilities):
+            problems.append("connector does not declare required capability "
+                            "%r" % capability)
+    return problems
+
+
+def validate_observation(intent, observation):
+    """Return problems binding one connected-session report to an intent."""
+    problems = []
+    if not isinstance(observation, dict):
+        return ["observation is not an object"]
+    if not _schema_is(observation.get("schema_version"),
+                      OBSERVATION_SCHEMA_VERSION):
+        problems.append("unsupported observation schema_version %r" %
+                        observation.get("schema_version"))
+    outcome = observation.get("outcome")
+    if outcome not in OBSERVATION_OUTCOMES:
+        problems.append("observation.outcome is not one of %s" %
+                        ", ".join(sorted(OBSERVATION_OUTCOMES)))
+    source = observation.get("source")
+    if source not in OBSERVATION_SOURCES:
+        problems.append("observation.source is not one of %s" %
+                        ", ".join(sorted(OBSERVATION_SOURCES)))
+    envelope = intent.get("envelope") or {}
+    bindings = (("project", "project"), ("unit", "unit"),
+                ("idempotency_key", "idempotency_key"),
+                ("requested_operation", "requested_operation"),
+                ("evidence_digest", "evidence_digest"),
+                ("connector_capability",
+                 "required_connector_capability"))
+    for observed, expected in bindings:
+        if observation.get(observed) != envelope.get(expected):
+            problems.append("observation.%s does not match envelope.%s" %
+                            (observed, expected))
+    if observation.get("attempt") != envelope.get("attempt"):
+        problems.append("observation.attempt does not match envelope.attempt")
+    if outcome == CONFIRMED_BY_READBACK:
+        if source not in CONFIRMING_SOURCES:
+            problems.append("confirmed_by_readback requires receiver_readback "
+                            "or receiver_deduplication, not %r" % source)
+        if observation.get("matched") is not True:
+            problems.append("confirmed_by_readback requires matched=true")
+        if not _nonblank_text(observation.get("reference")):
+            problems.append("confirmed_by_readback requires the receiver's "
+                            "reference")
+    elif outcome == OPERATION_ACCEPTED and source != MUTATION_RESPONSE:
+        problems.append("operation_accepted requires mutation_response")
+    elif outcome == ASYNC_COMPLETED and source != A2A_LIFECYCLE:
+        problems.append("asynchronously_completed requires a2a_lifecycle")
+    elif outcome == UNKNOWN and observation.get("matched") is True:
+        problems.append("unknown cannot claim matched=true")
+    return problems
+
+
+def require_valid_intent(intent, connector_capabilities=None):
+    intent = normalize_intent(intent)
+    problems = validate_intent(intent, connector_capabilities)
+    if problems:
+        raise OutboxError("; ".join(problems))
+    return intent
+
+
+def _receipt_admissible(outcome, source, matched):
+    """The single policy boundary between remote hints and receipts."""
+    return (outcome == CONFIRMED_BY_READBACK
+            and source in CONFIRMING_SOURCES
+            and matched is True)
+
+
+def reconcile_observation(intent, observation):
+    """Classify offline data; ambiguity and lifecycle never authorize replay."""
+    intent = require_valid_intent(intent)
+    problems = validate_observation(intent, observation)
+    if problems:
+        raise OutboxError("; ".join(problems))
+    confirmed = _receipt_admissible(
+        observation["outcome"], observation.get("source"),
+        observation.get("matched"))
+    return {
+        "schema_version": RECONCILIATION_SCHEMA_VERSION,
+        "idempotency_key": intent["envelope"]["idempotency_key"],
+        "outcome": observation["outcome"],
+        "source": observation["source"],
+        "reference": observation.get("reference"),
+        "receipt_admissible": confirmed,
+        "replay": False,
+        "closing_evidence": False,
+    }
 
 
 def _has_bound_merge_evidence(uid, us, evidence):
@@ -4097,8 +4336,9 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
                 kind=None):
     """Append one tracker intent. Returns the key, or None if already emitted.
 
-    Deterministic from state: replaying the same transitions produces the same
-    keys, which is what makes the drain safe to retry."""
+    Deterministic from state: replaying the same local transition produces the
+    same key. A connected drainer must deduplicate or read back before retrying
+    a remote mutation; the key alone cannot establish what landed."""
     action = TRACKER_EVENTS.get(unit_state)
     if not action:
         return None
@@ -4155,10 +4395,11 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
         # cannot see the evidence must refuse to close.
         "evidence": evidence,
     }
+    intent["envelope"] = _intent_envelope(
+        project, uid, us.get("attempt_dir"), key, verb, evidence)
     try:
-        with path.open("a") as fh:
-            fh.write(json.dumps(intent, sort_keys=True) + "\n")
-    except OSError as e:
+        _fsync_append(path, intent)
+    except (OSError, OutboxError) as e:
         print(f"WARNING: could not append a tracker intent: {e}",
               file=sys.stderr)
         return None
@@ -4168,10 +4409,10 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
 # --- acknowledgment: did the drain actually land? -------------------------
 #
 # Every intent was written {"applied": false} and NOTHING ever set it true, so
-# after a clean run all eight intents still read pending. Re-draining is a
-# no-op (idempotent by key), so this was never a correctness bug. It was worse
-# in a quieter way: the outbox could not answer the one question it exists to
-# answer, and a record that never advances is not a record.
+# after a clean run all eight intents still read pending. A receiver can use
+# the key for deduplication, but a blind re-drain after ambiguity is unsafe.
+# Worse, the outbox could not answer the one question it exists to answer, and
+# a record that never advances is not a record.
 #
 # Sol's three corrections to my first design, each of which I had wrong:
 #
@@ -4191,14 +4432,39 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
 #    operation may well have happened and the acknowledgment been lost.
 #    Saying "not applied" claims knowledge this machine does not have.
 RECEIPTS = "outbox-receipts.jsonl"
+RECEIPT_CONFIRMED = CONFIRMED_BY_READBACK
+RECEIPT_CONFIRMING_SOURCES = CONFIRMING_SOURCES
 
 # The WIRE VALUES matter as much as the printed ones. Round 2 caught me
 # relabelling only the text output: --json still emitted "acknowledged", so a
 # machine consumer read an attestation as verified tracker success. The value
 # itself now carries the weakness, so both paths say the same thing.
 UNACKNOWLEDGED = "unacknowledged"
-ACKNOWLEDGED = "attested"
+ATTESTED_UNSPECIFIED = "attested"  # historical wire value: source unspecified
+ATTESTED_CONFIRMED = "attested_confirmed"
+ACKNOWLEDGED = ATTESTED_CONFIRMED   # compatibility name, stronger grade
 CONFLICT = "conflict"
+
+
+def _heal_jsonl_tail(fh):
+    """Under an exclusive lock, preserve complete JSON and drop only a tear."""
+    fh.seek(0, os.SEEK_END)
+    if not fh.tell():
+        return
+    fh.seek(-1, os.SEEK_END)
+    if fh.read(1) == b"\n":
+        return
+    fh.seek(0)
+    data = fh.read()
+    cut = data.rfind(b"\n")
+    tail = data[cut + 1:]
+    try:
+        json.loads(tail.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        fh.truncate(0 if cut < 0 else cut + 1)
+    else:
+        fh.seek(0, os.SEEK_END)
+        fh.write(b"\n")
 
 
 def _fsync_append(path, record):
@@ -4228,9 +4494,10 @@ def _fsync_append(path, record):
         except OSError as exc:
             raise OutboxError(
                 f"cannot take an exclusive lock on {path}: {exc}. Receipt "
-                f"writes must be serialised, and this filesystem will not "
+                f"journal writes must be serialised, and this filesystem "
+                f"will not "
                 f"serialise them, so two drainers could interleave and "
-                f"corrupt the journal. Record receipts from a filesystem "
+                f"corrupt the journal. Record state on a filesystem "
                 f"that supports flock.")
 
         # HEAL, now that nobody else can be writing. A crash can leave the
@@ -4238,14 +4505,7 @@ def _fsync_append(path, record):
         # the new receipt to the broken one, turning a recoverable interrupted
         # write into corruption that takes the next record with it. An
         # incomplete record has no meaning, so dropping it loses nothing.
-        fh.seek(0, os.SEEK_END)
-        if fh.tell():
-            fh.seek(-1, os.SEEK_END)
-            if fh.read(1) != b"\n":
-                fh.seek(0)
-                data = fh.read()
-                cut = data.rfind(b"\n")
-                fh.truncate(0 if cut < 0 else cut + 1)
+        _heal_jsonl_tail(fh)
 
         fh.seek(0, os.SEEK_END)
         fh.write(line)
@@ -4279,6 +4539,42 @@ class _RawJournal:
         self.problems = problems
 
 
+def _parse_receipt_text(raw_text):
+    """Parse already-read receipt bytes into the guarded journal result."""
+    lines = raw_text.splitlines()
+    complete_tail = raw_text.endswith("\n")
+    out, problems = [], []
+    for idx, line in enumerate(lines):
+        if not line.strip():
+            continue
+        is_last = idx == len(lines) - 1
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            if is_last and not complete_tail:
+                problems.append({
+                    "kind": "truncated_tail",
+                    "detail": "the last receipt line is truncated, which is "
+                              "what an interrupted write looks like. It was "
+                              "dropped; repeat offline reconciliation after "
+                              "the receiver resolves that key."})
+            else:
+                problems.append({
+                    "kind": "corrupt",
+                    "detail": "receipt line %d was written in full and does "
+                              "not parse, so this is corruption rather than "
+                              "an interrupted write." % (idx + 1)})
+            continue
+        bad = _receipt_shape_problem(rec)
+        if bad:
+            problems.append({"kind": "malformed",
+                             "detail": "receipt line %d: %s" %
+                                       (idx + 1, bad)})
+            continue
+        out.append(rec)
+    return _RawJournal(out, problems)
+
+
 def _read_receipts_raw(state_dir):
     """Parse the journal. PRIVATE: everything goes through the chokepoint.
 
@@ -4297,7 +4593,7 @@ def _read_receipts_raw(state_dir):
     reported every intent as unacknowledged and exited zero.
 
     So the KIND is data:
-      truncated_tail  an interrupted write; recoverable by re-draining
+      truncated_tail  interrupted local write; repeat reconciliation
       corrupt         a complete but unreadable record; fail closed
       unreadable      the journal itself cannot be read; fail closed
       malformed       parsed as JSON but not a receipt; fail closed
@@ -4321,42 +4617,7 @@ def _read_receipts_raw(state_dir):
         return _RawJournal(
             [], [{"kind": "unreadable", "detail": f"cannot read {p}: {exc}"}])
 
-    lines = raw_text.splitlines()
-    # A final line WITHOUT a trailing newline is an interrupted write. One
-    # WITH a trailing newline was written in full, so if it does not parse it
-    # is corruption, not a crash. Reviewer round 3 caught this: splitlines()
-    # cannot tell the two apart, and every malformed last line was being
-    # forgiven.
-    complete_tail = raw_text.endswith("\n")
-
-    out, problems = [], []
-    for idx, line in enumerate(lines):
-        if not line.strip():
-            continue
-        is_last = idx == len(lines) - 1
-        try:
-            rec = json.loads(line)
-        except ValueError:
-            if is_last and not complete_tail:
-                problems.append({
-                    "kind": "truncated_tail",
-                    "detail": "the last receipt line is truncated, which is "
-                              "what an interrupted write looks like. It was "
-                              "dropped; re-drain to re-record that key."})
-            else:
-                problems.append({
-                    "kind": "corrupt",
-                    "detail": f"receipt line {idx + 1} was written in full "
-                              f"and does not parse, so this is corruption "
-                              f"rather than an interrupted write."})
-            continue
-        bad = _receipt_shape_problem(rec)
-        if bad:
-            problems.append({"kind": "malformed",
-                             "detail": f"receipt line {idx + 1}: {bad}"})
-            continue
-        out.append(rec)
-    return _RawJournal(out, problems)
+    return _parse_receipt_text(raw_text)
 
 
 def _receipt_shape_problem(rec):
@@ -4373,6 +4634,31 @@ def _receipt_shape_problem(rec):
     if rec.get("attested") is not True:
         return ("attested is not true, so this record does not assert that "
                 "anything succeeded")
+    schema = rec.get("schema_version")
+    if (schema is not None and
+            not (_schema_is(schema, 1) or
+                 _schema_is(schema, RECEIPT_SCHEMA_VERSION))):
+        return "unsupported receipt schema_version %r" % schema
+    if not _schema_is(schema, RECEIPT_SCHEMA_VERSION):
+        if any(rec.get(field) is not None
+               for field in ("outcome", "source", "matched")):
+            return ("legacy receipts cannot claim a version-2 outcome or "
+                    "source")
+    else:
+        if rec.get("op") not in INTENT_OPERATIONS:
+            return "version-2 receipt has no valid requested operation"
+        digest = rec.get("evidence_digest")
+        if (not _nonblank_text(digest) or len(digest) != 64 or
+                any(c not in "0123456789abcdef" for c in digest)):
+            return "version-2 receipt has no lowercase SHA-256 evidence digest"
+    outcome, source = rec.get("outcome"), rec.get("source")
+    if outcome is None:
+        if source is not None or rec.get("matched") is not None:
+            return "a legacy receipt with no outcome cannot claim a source"
+    elif not _receipt_admissible(outcome, source, rec.get("matched")):
+        return ("only matched receiver read-back or receiver-side "
+                "deduplication may create a confirmed receipt; accepted "
+                "operations and lifecycle reports are hints")
     return None
 
 
@@ -4411,8 +4697,69 @@ def load_acknowledgments(state_dir):
     return journal._records, problems
 
 
-def record_receipt(state_dir, key, ref, op=None, by=None, at=None):
-    """Record the drainer's ATTESTATION that this operation succeeded.
+def _receipt_grade(rec):
+    if (_schema_is(rec.get("schema_version"), RECEIPT_SCHEMA_VERSION) and
+            _receipt_admissible(rec.get("outcome"), rec.get("source"),
+                                rec.get("matched"))):
+        return ATTESTED_CONFIRMED
+    return ATTESTED_UNSPECIFIED
+
+
+def _append_receipt_atomic(state_dir, rec):
+    """Read, decide and append one receipt under the journal's single lock."""
+    bad = _receipt_shape_problem(rec)
+    if bad:
+        raise OutboxError("refusing malformed receipt: %s" % bad)
+    path = Path(state_dir) / RECEIPTS
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.touch()
+    with open(path, "r+b") as fh:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        except OSError as exc:
+            raise OutboxError(
+                "cannot serialise receipt admission on %s: %s. The existing "
+                "records must be read under the same lock as the append, or "
+                "two drainers can admit different references." % (path, exc))
+        _heal_jsonl_tail(fh)
+        fh.seek(0)
+        try:
+            raw = fh.read().decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise OutboxError("receipt journal is not UTF-8: %s" % exc)
+        journal = _parse_receipt_text(raw)
+        fatal = fatal_problems(journal.problems)
+        if fatal:
+            raise OutboxError(
+                "the receipt journal cannot be read in full, so no receipt "
+                "may be admitted:\n" +
+                "\n".join("  [%s] %s" % (f["kind"], f["detail"])
+                          for f in fatal))
+        same_key = [old for old in journal._records
+                    if old.get("key") == rec["key"]]
+        refs = {old.get("ref") for old in same_key}
+        if refs and refs != {rec["ref"]}:
+            raise OutboxError(
+                "intent %s already has receipt reference(s) %s; refusing "
+                "conflicting %s" %
+                (rec["key"], ", ".join(sorted(refs)), rec["ref"]))
+        # An equivalent repeat adds no bytes. A confirmed observation may
+        # still upgrade a legacy attestation naming the same reference.
+        if same_key and (_receipt_grade(rec) == ATTESTED_UNSPECIFIED or
+                         any(_receipt_grade(old) == ATTESTED_CONFIRMED
+                             for old in same_key)):
+            return same_key[-1]
+        fh.seek(0, os.SEEK_END)
+        fh.write((json.dumps(rec, sort_keys=True) + "\n").encode("utf-8"))
+        fh.flush()
+        os.fsync(fh.fileno())
+    return rec
+
+
+def record_receipt(state_dir, key, ref, op=None, by=None, at=None,
+                   observation=None):
+    """Record a legacy attestation or a bound receiver confirmation.
 
     Read that word carefully, because a reviewer caught me overclaiming here.
     This is NOT verified evidence and cannot be. The coordinator has no
@@ -4428,28 +4775,47 @@ def record_receipt(state_dir, key, ref, op=None, by=None, at=None):
     verified. A reader can then go and check the reference by hand, which is
     the only thing that would settle it.
 
-    Written only after the tracker confirms to the drainer. A false
-    attestation is strictly worse than a missing one: re-draining is safe,
-    un-filing is not."""
-    load_acknowledgments(state_dir)      # refuse to extend a broken journal
-    # Validated HERE, not only in the CLI. A direct caller passing ref=None
-    # used to store the literal string "None", and a whitespace-only ref
-    # passed a truthiness check and poisoned the journal later.
+    The historical key/ref form remains a weaker attestation whose source is
+    unspecified. Passing a complete observation records the stronger
+    read-back-confirmed grade. Neither is verified by this offline process."""
     key = str(key or "").strip()
     ref = str(ref if ref is not None else "").strip()
-    if not key:
-        raise OutboxError("a receipt needs the intent key it acknowledges")
-    if not ref:
-        raise OutboxError(
-            "a receipt needs the tracker's own reference. Without one there "
-            "is nothing to check by hand later, and checking by hand is the "
-            "only thing that ever settles an attestation.")
-    rec = {"key": key, "ref": ref, "op": op, "attested": True,
-           "by": by or os.environ.get("USER") or "?",
-           "at": at or time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-           "schema_version": 1}
-    _fsync_append(Path(state_dir) / RECEIPTS, rec)
-    return rec
+    if not key or not ref:
+        raise OutboxError("a receipt needs a non-blank intent key and tracker "
+                          "reference")
+    matches = [intent for intent in load_outbox_contract(state_dir)
+               if intent.get("key") == key]
+    if len(matches) != 1:
+        raise OutboxError("no unique persisted outbox intent has key %r" % key)
+    intent = require_valid_intent(matches[0])
+    envelope = intent["envelope"]
+    requested = op or envelope["requested_operation"]
+    if requested != envelope["requested_operation"]:
+        raise OutboxError("receipt operation %r does not match persisted %r" %
+                          (requested, envelope["requested_operation"]))
+    outcome = None
+    source = None
+    matched = None
+    if observation is not None:
+        result = reconcile_observation(intent, observation)
+        if not result["receipt_admissible"]:
+            raise OutboxError("only confirmed_by_readback may create a "
+                              "confirmed receipt")
+        if str(observation.get("reference") or "").strip() != ref:
+            raise OutboxError("observation reference does not match --ref")
+        outcome = observation["outcome"]
+        source = observation["source"]
+        matched = observation.get("matched")
+    rec = {"key": key, "ref": ref, "op": requested,
+           "outcome": outcome, "source": source, "matched": matched,
+           "evidence_digest": envelope["evidence_digest"],
+           "attested": True,
+           "by": by or ((observation or {}).get("by")) or
+                 os.environ.get("USER") or "?",
+           "at": at or ((observation or {}).get("at")) or time.strftime(
+               "%Y-%m-%dT%H:%M:%S%z"),
+           "schema_version": RECEIPT_SCHEMA_VERSION}
+    return _append_receipt_atomic(state_dir, rec)
 
 
 def acknowledgment_status(state_dir):
@@ -4467,7 +4833,13 @@ def acknowledgment_status(state_dir):
     status = {}
     for key, rs in by_key.items():
         refs = {r.get("ref") for r in rs}
-        status[key] = (CONFLICT if len(refs) > 1 else ACKNOWLEDGED, rs)
+        if len(refs) > 1:
+            grade = CONFLICT
+        elif any(_receipt_grade(r) == ATTESTED_CONFIRMED for r in rs):
+            grade = ATTESTED_CONFIRMED
+        else:
+            grade = ATTESTED_UNSPECIFIED
+        status[key] = (grade, rs)
     return status, problems
 
 
@@ -5318,12 +5690,43 @@ def read_outbox(state_dir):
         for line in p.read_text().splitlines():
             if line.strip():
                 try:
-                    out.append(json.loads(line))
+                    out.append(_with_intent_envelope(json.loads(line)))
                 except ValueError:
                     continue
     except OSError:
         pass
     return out
+
+
+def load_outbox_contract(state_dir):
+    """Read every persisted intent or fail closed for drain decisions."""
+    path = Path(state_dir) / OUTBOX
+    try:
+        raw = path.read_text()
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise OutboxError("cannot read persisted outbox: %s" % exc)
+    intents = []
+    keys = set()
+    for number, line in enumerate(raw.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            intent = normalize_intent(json.loads(line))
+        except ValueError as exc:
+            raise OutboxError("outbox line %d is not JSON: %s" %
+                              (number, exc))
+        problems = validate_intent(intent)
+        if problems:
+            raise OutboxError("outbox line %d: %s" %
+                              (number, "; ".join(problems)))
+        key = intent["envelope"]["idempotency_key"]
+        if key in keys:
+            raise OutboxError("outbox has duplicate idempotency key %r" % key)
+        keys.add(key)
+        intents.append(intent)
+    return intents
 
 
 # --- the DAG --------------------------------------------------------------
@@ -7462,8 +7865,9 @@ def cmd_outbox(args):
 
 def _cmd_outbox_inner(args, intents):
     if args.record_receipt:
-        keys = {i.get("key") for i in intents}
-        if args.record_receipt not in keys:
+        selected = next((i for i in intents
+                         if i.get("key") == args.record_receipt), None)
+        if selected is None:
             sys.stderr.write(
                 f"error: no intent with key {args.record_receipt!r} in this "
                 f"outbox. A receipt for an unknown key would acknowledge "
@@ -7472,19 +7876,32 @@ def _cmd_outbox_inner(args, intents):
         if not args.ref:
             sys.stderr.write(
                 "error: --ref is required. The receipt records the tracker's "
-                "own reference for the operation the drainer watched "
-                "succeed; without it there is nothing to check later.\n")
+                "own reference for the operation the drainer confirmed by "
+                "read-back; without it there is nothing to check later.\n")
+            return EXIT_USAGE
+        source = getattr(args, "source", None)
+        matched = getattr(args, "matched", False)
+        if source or matched:
+            sys.stderr.write(
+                "error: this compatibility command records only the weaker "
+                "legacy attestation. Reconcile a complete observation file "
+                "with drain_contract.py --state-dir to record the stronger "
+                "receiver-confirmed grade.\n")
             return EXIT_USAGE
         rec = record_receipt(args.state_dir, args.record_receipt, args.ref,
                              op=args.op)
         print(f"  recorded: {rec['key']} -> {rec['ref']}")
+        if _receipt_grade(rec) == ATTESTED_UNSPECIFIED:
+            print("  grade: attested (compatible legacy form; "
+                  "no read-back basis was supplied)")
         return EXIT_OK
 
     status, problems = acknowledgment_status(args.state_dir)
 
     # FAIL CLOSED. Corruption is not the same as an interrupted tail: a
-    # truncated last line is a write that did not finish, and re-draining
-    # fixes it. A bad line in the middle means the journal cannot be read in
+    # truncated last line is a local write that did not finish, and repeating
+    # reconciliation fixes it. A bad line in the middle means the journal
+    # cannot be read in
     # full, so no status derived from it can be trusted, including the
     # comfortable ones.
     for i in intents:
@@ -7497,10 +7914,11 @@ def _cmd_outbox_inner(args, intents):
 
     if args.json:
         print(json.dumps(
-            {"note": "ack_status 'attested' is the drainer's claim, not "
-                     "verified tracker state: this process cannot reach the "
-                     "tracker. 'unacknowledged' means no confirmation either "
-                     "way, NOT that nothing was filed.",
+            {"note": "ack_status 'attested' is an unspecified legacy claim; "
+                     "'attested_confirmed' is bound to receiver read-back or "
+                     "receiver deduplication. Neither is independently "
+                     "verified tracker state. 'unacknowledged' means no "
+                     "receipt either way, NOT that nothing was filed.",
              "intents": intents if args.all else unack},
             indent=2, sort_keys=True))
         return EXIT_CONFLICT if conflicts else EXIT_OK
@@ -7522,7 +7940,9 @@ def _cmd_outbox_inner(args, intents):
           + (f", {len(conflicts)} in CONFLICT" if conflicts else "") + "\n")
     for i in show:
         ev = "with evidence" if i.get("evidence") else "no evidence"
-        label = {ACKNOWLEDGED: "attested", CONFLICT: "CONFLICT",
+        label = {ATTESTED_UNSPECIFIED: "attested",
+                 ATTESTED_CONFIRMED: "confirmed",
+                 CONFLICT: "CONFLICT",
                  UNACKNOWLEDGED: "unack"}[i["ack_status"]]
         # same string in both modes; see the note on ACKNOWLEDGED
         print(f"  [{label:8}] {i['verb']:6} {i['unit']:12} "
@@ -7540,10 +7960,12 @@ def _cmd_outbox_inner(args, intents):
           "what\n  landed:  swarm.py outbox --state-dir DIR "
           "--record-receipt KEY --ref ID")
     print("  UNACKNOWLEDGED does NOT mean 'not filed'. It means this machine "
-          "has\n  no confirmation either way. Re-draining is safe: intents "
-          "are keyed.")
-    print("  ATTESTED is the drainer's word, not proof. Nothing here can ask "
-          "the\n  tracker; check the reference by hand if it matters.")
+          "has\n  no receipt either way. After an ambiguous drain, do not "
+          "replay: resolve\n  it with receiver-side deduplication or "
+          "read-back.")
+    print("  ATTESTED is a compatible legacy claim with no recorded basis; "
+          "CONFIRMED\n  is bound to receiver read-back. Neither is "
+          "independent verification.")
     return EXIT_CONFLICT if conflicts else EXIT_OK
 
 
@@ -7806,13 +8228,19 @@ def main():
                    help="include already-acknowledged intents")
     o.add_argument("--json", action="store_true")
     o.add_argument("--record-receipt", metavar="KEY",
-                   help="record that the drainer OBSERVED this intent's "
-                        "operation succeed. Only after the tracker confirms: "
-                        "a false acknowledgment is worse than a missing one, "
-                        "because re-draining is safe and un-filing is not.")
+                   help="record the compatible legacy attestation for this "
+                        "intent. Receiver-confirmed observations go through "
+                        "drain_contract.py with their complete bindings; a "
+                        "false acknowledgment is worse than a missing one.")
     o.add_argument("--ref", help="the tracker's own reference for the "
                                  "operation that succeeded, e.g. ARC-171")
     o.add_argument("--op", help="optional: which operation was performed")
+    o.add_argument("--source", choices=sorted(RECEIPT_CONFIRMING_SOURCES),
+                   help="reserved for compatibility; use drain_contract.py "
+                        "with a complete observation file")
+    o.add_argument("--matched", action="store_true",
+                   help="reserved for compatibility; use drain_contract.py "
+                        "with a complete observation file")
     o.set_defaults(fn=cmd_outbox)
 
     s = sub.add_parser("status", help="what every unit is doing")

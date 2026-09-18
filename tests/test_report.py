@@ -180,6 +180,19 @@ class TestAcknowledgmentComesFromTheReceiptJournal(unittest.TestCase):
             body = R.render(R.collect(t))
             self.assertNotIn("1 tracker intent(s) are unacknowledged", body)
 
+    def test_a2a_completion_cannot_substitute_for_a_tracker_receipt(self):
+        with tempfile.TemporaryDirectory() as t:
+            _project(t, outbox=[{"key": "k1", "unit": "a",
+                                 "verb": "close"}], tickets=self.TICKETS)
+            self._receipts(t, [json.dumps({
+                "key": "k1", "ref": "a2a-task-1", "attested": True,
+                "outcome": "asynchronously_completed",
+                "source": "a2a_lifecycle", "schema_version": 2,
+            })])
+            body = R.render(R.collect(t))
+            self.assertIn("cannot be read in full", body)
+            self.assertNotIn("tracker update(s) attested", body)
+
     def test_conflicting_refs_are_surfaced(self):
         with tempfile.TemporaryDirectory() as t:
             _project(t, outbox=[{"key": "k1", "unit": "a", "verb": "close"}],
