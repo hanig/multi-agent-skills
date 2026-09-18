@@ -523,6 +523,10 @@ class TestANonEmptyStashStackRefusesACodeDispatch(unittest.TestCase):
         (self.repo / "tracked.txt").write_text("base\n")
         git(self.repo, "add", "-A")
         git(self.repo, "commit", "-qm", "base")
+        self.remote = self.tmp / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(self.remote)],
+                       check=True, env=ENV)
+        git(self.repo, "remote", "add", "origin", str(self.remote))
         self.attempt = self.tmp / "runs" / "code" / "a1"
         self.attempt.mkdir(parents=True)
 
@@ -539,6 +543,13 @@ class TestANonEmptyStashStackRefusesACodeDispatch(unittest.TestCase):
         err, anchored = S._capture_code_launch(str(self.attempt), self.unit())
         self.assertIsNone(err)
         self.assertTrue(anchored["base"])
+
+    def test_a_repository_without_origin_refuses_before_agent_creation(self):
+        git(self.repo, "remote", "remove", "origin")
+        err, anchored = S._capture_code_launch(str(self.attempt), self.unit())
+        self.assertIsNone(anchored)
+        self.assertIn("has no readable origin remote", err)
+        self.assertIn("must push", err)
 
     def test_a_parked_entry_refuses_the_launch(self):
         self.park_something()
