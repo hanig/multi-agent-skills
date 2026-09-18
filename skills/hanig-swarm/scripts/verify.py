@@ -22,6 +22,11 @@ corpus. The existing three still apply unchanged when it does not:
   BOUND        the receipt names the production receipt and head it verified.
                A pass for some other commit is not a pass for this one.
 
+The reserved integration-tests claim adds a second binding: it runs in a
+disposable candidate merge of the produced head into an exact target commit,
+and its receipt names that target and their unique merge base. Other claims
+keep the existing produced-head checkout and receipt unchanged.
+
 WHAT THIS DOES NOT ESTABLISH. The agent runs as the same Unix user as the
 coordinator, so it can write any file the coordinator can, including the
 launch record and the attempt receipts. No arrangement of files defends
@@ -47,6 +52,7 @@ from pathlib import Path
 import child_environment as CE
 
 POLICY_FILE = "verifiers.json"
+INTEGRATION_CLAIM = "integration-tests"
 
 # A mixed-version rollout must fail closed rather than silently accept a
 # policy written for different rules.
@@ -63,6 +69,88 @@ def _git(runner, repo, *args, timeout=60):
     rc, out, err = runner(["git", "-C", str(repo)] + list(args),
                           timeout=timeout)
     return rc, (out or ""), (err or "").strip()
+
+
+def _isolated_git(runner, repo, *args, timeout=60):
+    """Run Git without host or user configuration.
+
+    Candidate construction must not inherit hooks, filters, merge drivers, or
+    rerere state from the operated repository. ``env`` is used instead of a
+    process-global environment mutation so concurrent coordinator work keeps
+    its own environment.
+    """
+    unset = (
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_EXEC_PATH",
+        "GIT_NAMESPACE", "GIT_PREFIX", "GIT_SHALLOW_FILE",
+        "GIT_ATTRIBUTES_FILE", "GIT_TEMPLATE_DIR",
+    )
+    env_program = shutil.which("env", path=os.defpath)
+    git_program = shutil.which("git", path=os.defpath)
+    if not env_program or not git_program:
+        return 127, "", "system env or git executable is unavailable"
+    argv = [env_program]
+    for name in unset:
+        argv.extend(("-u", name))
+    argv.extend((
+        "GIT_CONFIG_COUNT=0", "GIT_CONFIG_NOSYSTEM=1",
+        f"GIT_CONFIG_SYSTEM={os.devnull}",
+        f"GIT_CONFIG_GLOBAL={os.devnull}", "GIT_ATTR_NOSYSTEM=1",
+        f"HOME={os.devnull}", f"XDG_CONFIG_HOME={os.devnull}",
+        f"PATH={os.defpath}", "GIT_NO_LAZY_FETCH=1",
+        "GIT_TERMINAL_PROMPT=0", git_program, "-C", str(repo),
+    ))
+    rc, out, err = runner(argv + list(args), timeout=timeout)
+    return rc, (out or ""), (err or "").strip()
+
+
+def _isolated_checkout(runner, repo, commit, prefix):
+    """Create a fresh repository that borrows only ``repo``'s object bytes."""
+    tmp = tempfile.mkdtemp(prefix=prefix)
+    tree = os.path.join(tmp, "tree")
+    try:
+        os.mkdir(tree)
+    except OSError as exc:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None, None, f"cannot create isolated checkout: {exc}"
+    init_args = ["init", "--quiet", "--template="]
+    if len(str(commit)) == 64:
+        init_args.append("--object-format=sha256")
+    rc, _out, err = _isolated_git(
+        runner, tree, *init_args, timeout=60)
+    if rc != 0:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None, None, f"cannot initialize isolated checkout: {err[:200]}"
+    rc, objects, err = _isolated_git(
+        runner, repo, "--no-replace-objects", "rev-parse", "--git-path",
+        "objects")
+    if rc != 0 or not objects.strip():
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None, None, (
+            f"cannot locate the supplied repository objects: {err[:200]}")
+    object_dir = objects.strip()
+    if not os.path.isabs(object_dir):
+        object_dir = os.path.join(str(repo), object_dir)
+    object_dir = os.path.realpath(object_dir)
+    if "\n" in object_dir or not os.path.isdir(object_dir):
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None, None, "the supplied Git object directory is unavailable"
+    alternate = os.path.join(tree, ".git", "objects", "info", "alternates")
+    try:
+        with open(alternate, "w") as fh:
+            fh.write(object_dir + "\n")
+    except OSError as exc:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None, None, f"cannot bind supplied Git objects: {exc}"
+    rc, _out, err = _isolated_git(
+        runner, tree, "-c", "core.hooksPath=/dev/null", "checkout",
+        "--detach", "--quiet", str(commit), timeout=300)
+    if rc != 0:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None, None, (
+            f"cannot check out {str(commit)[:12]} in isolation: {err[:200]}")
+    return tmp, tree, None
 
 
 def digest_bytes(data):
@@ -387,6 +475,194 @@ def run_in_checkout(runner, repo, commit, path, expect_digest, args=None,
                           timeout=timeout, cwd=tree)
     finally:
         _git(runner, repo, "worktree", "remove", "--force", tree, timeout=120)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def integration_basis(runner, repo, produced_head, target_commit):
+    """Return the immutable identities needed to test a candidate merge.
+
+    Both commits must already exist locally.  This module has no fetch path:
+    a connected session may add objects to the repository, while an object
+    that is still absent makes integration evidence unavailable.
+    """
+    for label, commit in (("produced head", produced_head),
+                          ("target commit", target_commit)):
+        if not commit:
+            return None, f"no {label} was supplied"
+        if (not isinstance(commit, str) or len(commit) not in (40, 64)
+                or any(ch not in "0123456789abcdef" for ch in commit)):
+            return None, (
+                f"{label} must be an exact 40- or 64-character lowercase "
+                f"hexadecimal object id, not a ref or abbreviated name")
+        rc, _out, err = _isolated_git(
+            runner, repo, "--no-replace-objects", "cat-file", "-e",
+            f"{commit}^{{commit}}")
+        if rc != 0:
+            return None, (
+                f"{label} {str(commit)[:12]} is not available in the local "
+                f"repository ({err[:160]}). A connected session must supply "
+                f"the Git object; verification never contacts a forge.")
+    if produced_head == target_commit:
+        return None, (
+            "produced head and target commit are the same commit, so there "
+            "is no candidate merge to verify; branch-local evidence cannot "
+            "satisfy integration-tests")
+    rc, _out, err = _isolated_git(
+        runner, repo, "--no-replace-objects", "merge-base", "--is-ancestor",
+        str(produced_head), str(target_commit))
+    if rc == 0:
+        return None, (
+            f"target commit {str(target_commit)[:12]} already contains "
+            f"produced head {str(produced_head)[:12]}, so Git has no "
+            "candidate change to merge; branch-local evidence cannot "
+            "satisfy integration-tests")
+    if rc != 1:
+        return None, (
+            f"cannot compare produced head {str(produced_head)[:12]} with "
+            f"target {str(target_commit)[:12]}: {err[:160]}")
+    rc, out, err = _isolated_git(
+        runner, repo, "--no-replace-objects", "merge-base", "--all",
+        str(target_commit), str(produced_head))
+    bases = [line.strip() for line in out.splitlines() if line.strip()]
+    if rc != 0 or not bases:
+        return None, (
+            f"cannot find a merge base for produced head "
+            f"{str(produced_head)[:12]} and target "
+            f"{str(target_commit)[:12]} ({err[:160]})")
+    if len(bases) != 1:
+        return None, (
+            f"produced head {str(produced_head)[:12]} and target "
+            f"{str(target_commit)[:12]} have {len(bases)} best merge bases; "
+            f"the receipt format binds one, so this history is unavailable "
+            f"to integration verification")
+    return {"produced_head": str(produced_head),
+            "target_commit": str(target_commit),
+            "merge_base": bases[0]}, None
+
+
+def target_before_merge(runner, repo, produced_head, merged_as, method,
+                        claimed_target):
+    """Return the target commit established by locally supplied Git objects.
+
+    A merge attester may state the pre-merge target, but its string does not
+    establish that fact.  Merge and squash commits expose it as their first
+    parent. A rebase does not encode that boundary: a target commit can be
+    patch-equivalent to a replayed produced commit. It is unavailable rather
+    than accepting a caller-selected interpretation of that topology.
+    """
+    for label, commit in (("produced head", produced_head),
+                          ("merged commit", merged_as),
+                          ("claimed target", claimed_target)):
+        if (not isinstance(commit, str) or len(commit) not in (40, 64)
+                or any(ch not in "0123456789abcdef" for ch in commit)):
+            return None, (
+                f"{label} must be an exact lowercase Git object id")
+        rc, _out, err = _isolated_git(
+            runner, repo, "--no-replace-objects", "cat-file", "-e",
+            f"{commit}^{{commit}}")
+        if rc != 0:
+            return None, (
+                f"{label} {commit[:12]} is not available in the local "
+                f"repository ({err[:160]}). A connected session must supply "
+                f"the Git object; verification never contacts a forge.")
+
+    rc, out, err = _isolated_git(
+        runner, repo, "--no-replace-objects", "rev-list", "--parents",
+        "--max-count=1", str(merged_as))
+    fields = out.split()
+    if rc != 0 or not fields or fields[0] != merged_as:
+        return None, f"cannot inspect merged commit {merged_as[:12]}: {err[:160]}"
+    parents = fields[1:]
+    if method == "merge":
+        if len(parents) != 2 or parents[1] != produced_head:
+            return None, (
+                f"merged commit {merged_as[:12]} is not a two-parent merge "
+                f"whose second parent is produced head {produced_head[:12]}")
+        return parents[0], None
+    if method == "squash":
+        if len(parents) != 1:
+            return None, (
+                f"squash result {merged_as[:12]} does not have exactly one "
+                f"parent from which to establish the pre-merge target")
+        return parents[0], None
+    if method != "rebase":
+        return None, f"merge method {method!r} has no target derivation rule"
+    return None, (
+        "integration evidence for a rebase is unavailable: the rebased "
+        "commit chain does not encode which patch-equivalent commit was the "
+        "pre-merge target")
+
+
+def _candidate_checkout(runner, repo, produced_head, target_commit):
+    """Return ``(tmp, tree, basis, error)`` for a nontrivial candidate merge."""
+    basis, error = integration_basis(
+        runner, repo, produced_head, target_commit)
+    if error:
+        return None, None, None, error
+    tmp, tree, err = _isolated_checkout(
+        runner, repo, target_commit, "verify-integration-")
+    if err:
+        return None, None, basis, err
+    rc, _out, err = _isolated_git(
+        runner, tree, "--no-replace-objects", "-c",
+        "core.hooksPath=/dev/null", "-c", "rerere.enabled=false", "-c",
+        "rerere.autoupdate=false", "-c", "user.name=hanig-verifier",
+        "-c", "user.email=hanig-verifier.invalid", "merge", "--no-commit",
+        "--no-ff", str(produced_head), timeout=300)
+    if rc != 0:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None, None, basis, (
+            f"candidate merge of produced head "
+            f"{str(produced_head)[:12]} into target "
+            f"{str(target_commit)[:12]} is unavailable: {err[:300]}")
+    rc, candidate_tree, err = _isolated_git(
+        runner, tree, "--no-replace-objects", "write-tree")
+    if rc != 0 or not candidate_tree.strip():
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None, None, basis, (
+            f"cannot identify the candidate merge tree: {err[:200]}")
+    rc, target_tree, err = _isolated_git(
+        runner, tree, "--no-replace-objects", "rev-parse", "HEAD^{tree}")
+    if rc != 0 or not target_tree.strip():
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None, None, basis, (
+            f"cannot identify the target tree: {err[:200]}")
+    basis["candidate_tree"] = candidate_tree.strip()
+    if candidate_tree.strip() == target_tree.strip():
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None, None, basis, (
+            "candidate merge has no produced tree change relative to the "
+            "target; branch-local evidence cannot satisfy integration-tests")
+    return tmp, tree, basis, None
+
+
+def candidate_merge_basis(runner, repo, produced_head, target_commit):
+    """Rederive the candidate tree identity without running a verifier."""
+    tmp, _tree, basis, error = _candidate_checkout(
+        runner, repo, produced_head, target_commit)
+    if tmp:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return basis, error
+
+
+def run_in_candidate_merge(runner, repo, produced_head, target_commit, path,
+                           expect_digest, args=None, timeout=900):
+    """Run pinned verifier bytes in a disposable candidate-merge checkout.
+
+    The checkout starts at the exact target commit and receives the produced
+    head with Git's ordinary recursive merge. A conflict or target-identical
+    result is evidence unavailability, not permission to test either branch.
+    Returns ``(outcome, basis, error)``.
+    """
+    tmp, tree, basis, error = _candidate_checkout(
+        runner, repo, produced_head, target_commit)
+    if error:
+        return None, basis, error
+    try:
+        outcome, run_error = run_pinned(
+            runner, path, expect_digest, args=args, timeout=timeout, cwd=tree)
+        return outcome, basis, run_error
+    finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 

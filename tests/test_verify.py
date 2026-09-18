@@ -218,6 +218,13 @@ class TestAdmissionIsBound(unittest.TestCase):
             self.assertIsNone(refusal)
             self.assertIsNotNone(got)
 
+    def test_ordinary_head_bound_receipts_need_no_merge_fields(self):
+        """Integration binding must not silently strengthen old claims."""
+        rec = self._rec()
+        self.assertNotIn("target_commit", rec)
+        self.assertNotIn("merge_base", rec)
+        self.assertIsNone(S._verify_shape_problem(rec))
+
     def test_a_pass_for_another_commit_is_not_a_pass_for_this_one(self):
         with tempfile.TemporaryDirectory() as d:
             self._write(d, self._rec(subject_head="b" * 40))
@@ -320,6 +327,17 @@ class TestTheRequirementIsDeclared(unittest.TestCase):
 
     def test_a_declared_claim_validates(self):
         S.validate_plan(self._plan(requires_verification=["tests-pass"]))
+
+    def test_integration_tests_is_a_declarable_claim(self):
+        S.validate_plan(
+            self._plan(requires_verification=[V.INTEGRATION_CLAIM]))
+
+    def test_integration_plan_still_requires_its_merge_target(self):
+        plan = self._plan(requires_verification=[V.INTEGRATION_CLAIM])
+        del plan["units"][0]["target_branch"]
+        with self.assertRaises(S.PlanError) as caught:
+            S.validate_plan(plan)
+        self.assertIn("no 'target_branch'", str(caught.exception))
 
     def test_declaring_none_is_unchanged(self):
         S.validate_plan(self._plan())

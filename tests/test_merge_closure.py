@@ -80,6 +80,14 @@ class TestTheBinding(unittest.TestCase):
             self.assertIsNone(refusal)
             self.assertEqual(got["head"], HEAD)
 
+    def test_a_wrong_target_does_not_mask_a_later_correct_receipt(self):
+        with tempfile.TemporaryDirectory() as d:
+            write(d, receipt(target="dev"), receipt(target="main"))
+            got, refusal = S.admit_merge(
+                d, "u1", HEAD, expect_target="main")
+            self.assertIsNone(refusal)
+            self.assertEqual(got["target"], "main")
+
 
 class TestAnUnmergedPRDoesNotClose(unittest.TestCase):
 
@@ -168,6 +176,24 @@ class TestClosureAuthorityIsUnchanged(unittest.TestCase):
 
     def test_code_still_closes_on_a_merged_pr(self):
         self.assertEqual(S.closing_evidence_for("code"), "merged_pr")
+
+    def test_integration_target_binding_does_not_replace_the_merge(self):
+        """Old merge evidence remains the fixed closure authority."""
+        with tempfile.TemporaryDirectory() as d:
+            write(d, receipt())
+            got, refusal = S.admit_merge(d, "u1", HEAD)
+            self.assertIsNone(refusal)
+            self.assertNotIn("target_commit", got)
+            self.assertNotIn("target_commit", S._MERGE_REQUIRED)
+            self.assertEqual(S.closing_evidence_for("code"), "merged_pr")
+
+    def test_optional_target_metadata_does_not_change_ordinary_closure(self):
+        """Only a unit requiring integration-tests activates that binding."""
+        with tempfile.TemporaryDirectory() as d:
+            write(d, receipt(target_commit="d" * 40))
+            got, refusal = S.admit_merge(d, "u1", HEAD)
+            self.assertIsNone(refusal)
+            self.assertEqual(got["merged_as"], "c" * 40)
 
     def test_slurm_does_not_need_one(self):
         self.assertEqual(S.closing_evidence_for("slurm"), "predicate_receipt")
