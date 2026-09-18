@@ -257,8 +257,6 @@ class TestCandidateMergeIsTheSubject(IntegrationRepo):
 
     def test_promisor_repo_does_not_lazy_fetch_a_missing_commit(self):
         target = self.commit_from_base("target", "left.txt", "1")
-        produced = self.commit_from_base(
-            "produced", "compatible.txt", "1")
         git(self.repo, "config", "uploadpack.allowFilter", "true")
         git(self.repo, "config", "uploadpack.allowAnySHA1InWant", "true")
         partial = Path(self.tmp.name) / "partial"
@@ -266,6 +264,22 @@ class TestCandidateMergeIsTheSubject(IntegrationRepo):
             ["git", "clone", "-q", "--filter=blob:none", "--single-branch",
              "--branch", "target", "file://" + str(self.repo), str(partial)],
             check=True, env=ENV)
+
+        # Two things make the premise hold on every git rather than on some.
+        # The produced commit is created AFTER the clone, so the clone never
+        # carried it; and the promisor remote is pointed at a path that does
+        # not exist, so no lazy fetch can supply it later. Creating the commit
+        # first made the premise depend on whether this git's blob:none
+        # single-branch clone happens to carry an unrelated commit: on macOS
+        # CI it did, the refusal never fired, and this assertion failed every
+        # unrelated pull request until it was corrected. Checking the premise
+        # with `cat-file -e` is not enough either, because in a promisor
+        # repository that call performs the very fetch under test on any git
+        # older than GIT_NO_LAZY_FETCH.
+        produced = self.commit_from_base(
+            "produced", "compatible.txt", "1")
+        git(partial, "remote", "set-url", "origin",
+            str(Path(self.tmp.name) / "no-such-remote"))
 
         basis, error = V.integration_basis(
             U.run, partial, produced, target)
