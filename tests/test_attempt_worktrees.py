@@ -1,4 +1,5 @@
 """C11: every code attempt executes in its own Paseo-managed worktree."""
+import contextlib
 import json
 import os
 import shutil
@@ -32,6 +33,39 @@ def repo_at(path):
     git(path, "add", "-A")
     git(path, "commit", "-qm", "base")
     return path
+
+
+
+@contextlib.contextmanager
+def paseo_resolvable():
+    """A `paseo` that satisfies shutil.which and NOTHING else.
+
+    `unit.py` checks `shutil.which("paseo")` before it runs any command, so a
+    test that stubs the RUN seam still needs the NAME to resolve. Without this
+    the test passes on a developer host with paseo installed and fails on CI
+    with "paseo is not on PATH", which is the host leaking into a test that
+    believed it had stubbed everything. Same seam and same reasoning as
+    tests/test_plan_shape.py::paseo_on_path; it exits 127 so a test that
+    actually needs paseo to answer fails loudly rather than passing against a
+    stub that lies.
+    """
+    d = tempfile.mkdtemp(prefix="attempt-worktrees-fakebin-")
+    old = os.environ.get("PATH", "")
+    try:
+        f = Path(d) / "paseo"
+        f.write_text("#!/bin/sh\necho 'stub paseo: PATH placeholder' >&2\n"
+                     "exit 127\n")
+        f.chmod(0o755)
+        # PREPEND, unlike tests/test_dispatch_claims.py::fake_bin which must
+        # REPLACE. That fixture proves a tool is ABSENT, so a real one leaking
+        # in from the host defeats it. This one proves a name RESOLVES while
+        # the run seam is stubbed, and the code under test still needs a real
+        # git, so the rest of PATH must survive.
+        os.environ["PATH"] = d + os.pathsep + old
+        yield d
+    finally:
+        os.environ["PATH"] = old
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def push_attempt(workspace, facts, remote_branch=None):
@@ -382,6 +416,12 @@ class TestPerAttemptWorktrees(unittest.TestCase):
             return real(argv, **kwargs)
 
         S.U.run = terminal
+        # `unit.py` resolves the paseo NAME before it runs anything, so the
+        # run stub above is not enough: without this the test passes only on a
+        # host that happens to have paseo installed.
+        _paseo = paseo_resolvable()
+        _paseo.__enter__()
+        self.addCleanup(_paseo.__exit__, None, None, None)
         spec = dict(code_unit(self.repo), task_id="code",
                     job_id="agent-deleted-before-judge")
         notes = []
