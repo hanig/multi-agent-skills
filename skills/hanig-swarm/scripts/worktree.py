@@ -700,12 +700,27 @@ def remote_push_transport(runner, repo):
             f"origin has {len(values)} push destinations; one code attempt "
             "can anchor and judge exactly one repository")
     raw_url = values[0]
+    # `ls-remote --get-url` applies `url.*.insteadOf` but NOT
+    # `url.*.pushInsteadOf`, so for a repository configured with the latter it
+    # returns the FETCH destination while `git push origin` writes somewhere
+    # else. Judgment then queries a repository the attempt never pushed to and
+    # reports that it produced nothing. Reproduced: with
+    # `url.<write>.pushInsteadOf=<read>`, the push lands in <write> while
+    # `ls-remote --get-url` reports <read>.
+    #
+    # `git remote get-url --push` is the only resolution that applies push
+    # rewrites, and there is no `ls-remote --push`; that flag does not exist.
     rc, resolved, err = _git(
-        runner, repo, "ls-remote", "--get-url", raw_url)
+        runner, repo, "remote", "get-url", "--push", "origin")
     if rc != 0 or not resolved:
         return None, None, (
-            err or f"cannot expand origin push URL {raw_url!r}")
-    return raw_url, resolved, None
+            err or f"cannot resolve origin push destination from {raw_url!r}")
+    resolved = resolved.strip().splitlines()
+    if len(resolved) != 1 or not resolved[0]:
+        return None, None, (
+            "origin resolves to %d push destinations; one code attempt can "
+            "anchor and judge exactly one repository" % len(resolved))
+    return raw_url, resolved[0], None
 
 
 def _anchored_remote_transport(runner, facts):

@@ -548,7 +548,7 @@ class TestANonEmptyStashStackRefusesACodeDispatch(unittest.TestCase):
         git(self.repo, "remote", "remove", "origin")
         err, anchored = S._capture_code_launch(str(self.attempt), self.unit())
         self.assertIsNone(anchored)
-        self.assertIn("has no readable origin remote", err)
+        self.assertIn("has no readable single origin push destination", err)
         self.assertIn("must push", err)
 
     def test_a_parked_entry_refuses_the_launch(self):

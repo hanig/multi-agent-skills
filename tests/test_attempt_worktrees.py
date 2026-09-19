@@ -1565,5 +1565,46 @@ class TestEveryArchiveSiteIsDryRunGuarded(unittest.TestCase):
             "archive call(s) at line(s) %s are not inside a dry_run guard; a "
             "dry run must never archive a real workspace" % unguarded)
 
+
+class TestPushInsteadOfRoute(unittest.TestCase):
+    """`ls-remote --get-url` applies insteadOf but not pushInsteadOf.
+
+    Reproduced against real git before this test existed: with
+    `url.<write>.pushInsteadOf=<read>`, `git push origin` lands in <write>
+    while `ls-remote --get-url origin` reports <read>. Anchoring the latter
+    makes the coordinator judge a repository the attempt never pushed to, and
+    report that it produced nothing.
+    """
+
+    def test_push_destination_honours_push_insteadof(self):
+        import worktree as W
+        import unit as U
+        tmp = tempfile.mkdtemp(prefix="pushinsteadof-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        read = os.path.join(tmp, "read.git")
+        write = os.path.join(tmp, "write.git")
+        work = os.path.join(tmp, "work")
+        for bare in (read, write):
+            subprocess.run(["git", "init", "-q", "--bare", bare],
+                           check=True, env=ENV)
+        subprocess.run(["git", "init", "-q", work], check=True, env=ENV)
+        run = lambda *a, **k: subprocess.run(  # noqa: E731
+            *a, **dict(k, check=True, env=ENV))
+        run(["git", "-C", work, "config", "user.email", "t@x"])
+        run(["git", "-C", work, "config", "user.name", "t"])
+        Path(work, "f").write_text("a\n")
+        run(["git", "-C", work, "add", "-A"])
+        run(["git", "-C", work, "commit", "-qm", "base"])
+        run(["git", "-C", work, "remote", "add", "origin", read])
+        run(["git", "-C", work, "config",
+             "url.%s.pushInsteadOf" % write, read])
+
+        raw, resolved, problem = W.remote_push_transport(U.run, work)
+        self.assertIsNone(problem, problem)
+        self.assertEqual(raw, read, "raw spelling should stay the fetch URL")
+        self.assertEqual(
+            resolved, write,
+            "the anchored push destination must be where git actually pushes")
+
 if __name__ == "__main__":
     unittest.main()

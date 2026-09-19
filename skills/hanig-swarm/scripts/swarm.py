@@ -3545,8 +3545,12 @@ def _capture_code_launch(unit_dir, u):
                 f"branch to origin so the coordinator can judge the exact "
                 f"ref it anchored before the agent existed"), None
     judgment_ref = f"refs/heads/{branch}"
+    # Query the PUSH destination, not the raw fetch spelling: with
+    # `url.*.pushInsteadOf` configured they are different repositories, and
+    # the attempt will push to the former. Checking the latter for collisions
+    # asks the wrong repository and later judges the wrong one too.
     remote_rc, _remote_head, remote_err = _git(
-        repo, "ls-remote", "--exit-code", remote_raw,
+        repo, "ls-remote", "--exit-code", remote,
         f"refs/heads/{branch}")
     if remote_rc == 0:
         return (f"unit {u.get('id')!r}: generated attempt branch {branch!r} "
