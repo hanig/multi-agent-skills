@@ -317,9 +317,63 @@ units leave daemons behind.
 Per-attempt Git worktrees sit in the same position, one level down. They
 isolate PATHS, which is what stops two ordinary agents and a human checkout
 from colliding by accident; they share one ref directory, so they do not
-isolate principals. `worktree.py`'s `WORKTREE_REF_ISOLATION_LIMIT` states that
-at the judgment boundary, and judgment therefore checks branch, descendant
-history, changed tree and a clean index together rather than trusting the path.
+isolate principals. New attempts are not judged from that checkout: before the
+agent exists, coordinator state anchors the exact
+`refs/heads/swarm-<attempt>` ref plus the raw and once-expanded origin push URL
+it will accept. Keeping both prevents Git from applying a chained `insteadOf`
+rewrite twice when the expanded URL is passed back to it. The checker
+revalidates that route, resolves only the exact ref through the raw spelling,
+fetches it with submodule recursion disabled, then independently
+requires its commit to descend from the anchored base and have a different
+tree. A narrow `remote.origin.fetch` therefore cannot hide a successful push,
+and the coordinator does not rewrite the user's fetch configuration. A commit
+left only in the worktree, or pushed under another ref, cannot close the
+attempt. The remote branch and its commit survive Paseo deleting the managed
+worktree, removing cleanup timing from the judgment boundary.
+
+This makes a readable `origin` and an absent exact attempt branch on that
+remote launch preconditions for a new code attempt. The coordinator checks
+both the remote branch and the local attempt branch before it creates the agent;
+an unreachable remote, a local-only repository, or either pre-existing branch is
+refused rather than launching work that cannot supply the fixed pushed-ref and
+merged-PR closure evidence. This is a point-in-time availability/collision
+check, not a promise that the remote will remain reachable when the agent
+pushes.
+
+The origin push URL and ref name are authority; the ref value is not. The agent
+controls what it pushes, while the coordinator derives the value it judges and
+validates the immutable commit against its separately anchored base and tree.
+This establishes durable production on the preselected remote ref, not
+authorship, correctness, review, merge, or protection against another writer
+who can mutate that remote ref. The receipt records the ref, derivation, denied
+claims, and this same-UID limit in its `basis` block. When the ref is absent it
+also distinguishes a live worktree still at the base, a worktree-only change,
+and a worktree already deleted by cleanup. Those residue observations are
+diagnostic and same-UID mutable; they never supply a produced head. Schema-1
+intents/schema-2 facts genuinely predate ref judgment and retain the old
+live-worktree check. The preserved first attempt's schema-2 intents/schema-3
+facts already anchored the origin URL and generated branch before launch, but
+recorded the local tracking spelling; their stored bytes remain unchanged while
+the reader derives `refs/heads/<branch>` from those primitive anchors. Receipts
+name both spellings and the derivation. Schema-3 intents/schema-4 facts use the
+exact remote ref spelling directly and revalidate their one stored URL against
+the current single origin push route. New schema-4 intents/schema-5 facts also
+anchor the raw push URL used for exactly-once rewriting. A ref-era snapshot missing its anchored
+origin or carrying the wrong generation-specific ref fails closed rather than
+downgrading to a weaker worktree predicate. Deleting coordinator state is
+not a migration path: state is authority, so a same-attempt ref found without
+its persisted intent is refused rather than adopted.
+
+For newly bound code attempts the coordinator also starts a detached local
+watcher that waits for Paseo to report the agent idle, then immediately invokes
+the ordinary locked `advance` path with dispatch disabled. This narrows the
+cleanup window without creating a second judge: `unit.py check` still makes the
+only decision, and the produced head still enters authority through coordinator
+state. The watcher is best effort, same-host, and waits at most 60 seconds for a
+busy coordinator lock after terminal observation; a crash, unavailable Paseo,
+or longer lock holder leaves the scheduled advance as the fallback. It does not
+make the managed worktree durable and is not a substitute for remote-ref
+judgment.
 
 ## Verifier admissibility includes the corpus it reads
 
@@ -606,7 +660,7 @@ rather than after a queued job has to be moved.
 |---|---|---|
 | `slurm` | exclusive run-dir + Slurm allocation | terminal-OK owned row AND declared output present |
 | `pipeline` | fresh work dir + fresh publish dir, boundary only | engine's terminal exit AND final outputs present |
-| `code` | per-attempt git worktree, inode-bound | lifecycle settled + outputs + a committed change over the base; a merged PR closes it |
+| `code` | per-attempt git worktree while running; anchored exact remote ref for durable judgment | lifecycle settled + outputs + the anchored remote ref resolves to a committed tree change over the base; a merged PR closes it |
 
 **A pipeline's interior is UNJUDGEABLE.** The engine owns its DAG, retries and
 work directory, so per-task success and which internal step produced which

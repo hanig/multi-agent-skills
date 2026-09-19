@@ -51,12 +51,11 @@ isolation boundary differ.
             is UNJUDGEABLE and this module does not pretend otherwise -- the
             receipt says "interior not judged; engine's self-report trusted at
             the boundary". Do not reimplement the engine's scheduler.
-  code      judged HERE, over a per-attempt git worktree: the lifecycle is
-            settled, declared outputs exist, and the repository shows a
-            committed change over the recorded base. A merged pull request
-            is what closes the unit. The design once meant to delegate this
-            to `bus await`; nothing ever called `bus`, so nothing judged the
-            worktree at all, and C11 replaced the idea. See `worktree.py`.
+  code      judged HERE from a ref anchored before launch: the lifecycle is
+            settled, declared outputs exist, and the pushed ref resolves to a
+            committed tree change over the recorded base. The ref survives
+            Paseo deleting its worktree. A merged pull request closes the
+            unit. See `worktree.py`.
 
 The Slurm knowledge below is lifted VERBATIM from contract.py, which earned it
 against a real scheduler: sacct row ownership under job-id reuse, `0:0` on a
@@ -1036,9 +1035,10 @@ def _code_state(unit_dir, spec, present, missing, notes, launch_facts=None):
     on its own: the declared outputs must also be present in the exclusive
     write root.
 
-    What this does NOT judge is the agent's git worktree. Shreshth's `bus
-    await --base HEAD --require-clean` covers that, and reimplementing it here
-    would be the mistake this plan exists to undo. The receipt says so."""
+    Git judgment is delegated to worktree.py. New attempts use the pushed ref
+    the coordinator anchored before the agent existed, rather than relying on
+    the lifetime of Paseo's managed checkout. The receipt says exactly which
+    route supplied the produced head."""
     agent = spec.get("job_id")
     if not agent:
         notes.append("no agent id is bound to this attempt, so nothing shows "
@@ -1112,7 +1112,7 @@ def _code_state(unit_dir, spec, present, missing, notes, launch_facts=None):
                      f"{', '.join(sorted(missing))}. An agent finishing its "
                      f"turn is not the same as the work being done.")
         return "INCOMPLETE"
-    # THE TREE TRANSITION. Declared outputs present in the write root is not
+    # THE REPOSITORY TRANSITION. Declared outputs present in the write root is not
     # production for a code unit: an agent can write a file it was told to
     # write and change nothing in the repository it was asked to change. This
     # module used to say the worktree was "not judged here" and point at
@@ -1121,17 +1121,12 @@ def _code_state(unit_dir, spec, present, missing, notes, launch_facts=None):
     # only later, during merge admission, asked the agent-owned repository a
     # second time; if it had moved on, the head actually validated was gone
     # and a correct receipt for it was refused.
-    produced, judged_head, why = W.judge_detail(
+    produced, why = W.judge_and_capture(
         run, unit_dir, spec, launch_facts)
-    spec["produced_head"] = judged_head
-    spec["worktree_judged"] = (
-        "no-repository-declared" if produced is None else
-        "produced-committed-change" if produced else
-        "no-produced-change")
     head = (f"agent {agent} is {status or 'idle'} and all {len(present)} "
             f"declared output(s) are present")
     if produced is False:
-        notes.append(f"REASON={REASON_NO_OUTPUTS}")
+        notes.append(f"REASON={W.code_failure_reason(spec.get('production_state'))}")
         notes.append(f"{head}, but the repository shows no produced "
                      f"change: {why}")
         return "INCOMPLETE"

@@ -71,6 +71,26 @@ ALLOWED = {
         "containment set; no record is involved",
     ("worktree.py", "judge_detail"):
         "reads the launch snapshot transported from coordinator state",
+    ("worktree.py", "_judge_anchored_ref"):
+        "resolves only the ref named by the coordinator-state launch snapshot "
+        "and validates its commit against the snapshot's base and tree",
+    ("worktree.py", "effective_remote_ref"):
+        "derives the exact wire ref only from generation-specific fields in "
+        "the already validated coordinator-state launch snapshot",
+    ("worktree.py", "_worktree_residue_state"):
+        "classifies coordinator-state worktree residue only after the "
+        "authoritative remote ref is absent; it supplies no produced head "
+        "and cannot change the refusal",
+    ("worktree.py", "_anchored_remote_transport"):
+        "revalidates the raw and expanded push route against the trusted "
+        "coordinator-state launch snapshot before remote judgment; it never "
+        "reads the audit record",
+    ("worktree.py", "code_basis"):
+        "formats the ref already captured during judgment into audit fields; "
+        "it performs no repository observation",
+    ("worktree.py", "capture_code_judgment"):
+        "copies the ref from the coordinator-state launch snapshot into the "
+        "receipt formatter's transient spec after the single judgment",
     ("worktree.py", "stray_untracked"):
         "takes the workspace and the clean-at-launch baseline from the "
         "coordinator-state snapshot, the same source judge_detail uses, and "
@@ -376,6 +396,12 @@ class TestTheSealActuallyTravels(unittest.TestCase):
         for args in (["add", "-A"], ["commit", "-qm", "base"]):
             subprocess.run(["git", "-C", str(self.repo)] + args, check=True,
                            env=env, capture_output=True)
+        self.remote = self.tmp / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(self.remote)],
+                       check=True, env=env, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(self.repo), "remote", "add", "origin",
+             str(self.remote)], check=True, env=env, capture_output=True)
         self.att = self.tmp / "runs" / "u1" / "att1"
         self.att.mkdir(parents=True)
 

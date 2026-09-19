@@ -38,6 +38,10 @@ class RepoCase(unittest.TestCase):
         (self.repo / "a.txt").write_text("base\n")
         git(self.repo, "add", "-A")
         git(self.repo, "commit", "-qm", "base")
+        self.remote = self.tmp / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(self.remote)],
+                       check=True)
+        git(self.repo, "remote", "add", "origin", str(self.remote))
         self.base = git(self.repo, "rev-parse", "HEAD")
         self.base_tree = git(self.repo, "rev-parse", "HEAD^{tree}")
         self.branch = git(self.repo, "rev-parse", "--abbrev-ref", "HEAD")
@@ -600,9 +604,7 @@ Path(data["result"]).write_text(json.dumps(payload))
 class TestPinnedCommitIsNotAMovingRef(RepoCase):
     def test_code_state_captures_both_results_from_one_judgment(self):
         source = inspect.getsource(U._code_state)
-        self.assertEqual(source.count("W.judge_detail("), 1)
-        self.assertIn('spec["produced_head"] = judged_head', source)
-        self.assertIn('spec["worktree_judged"] =', source)
+        self.assertEqual(source.count("W.judge_and_capture("), 1)
 
     def test_receipt_basis_does_not_reobserve_the_repository(self):
         def unexpected_observation(*_args, **_kwargs):
@@ -651,7 +653,7 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         self.assertEqual(job, "agent-1")
         for key in ("unit_id", "attempt_id", "repo", "base_commit",
                     "base_tree", "branch", "target_branch", "worktree_slug",
-                    "repository_remote"):
+                    "repository_remote", "judgment_ref"):
             self.assertIn(key, seen)
         facts = state["units"]["u1"]["attempt_launch_facts"]["att1"]
         self.assertEqual(facts["execution_workspace"],

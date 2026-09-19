@@ -952,6 +952,7 @@ def _code_completion_protocol(intent):
     base = str(intent["base_commit"])
     target = str(intent["target_branch"])
     remote = intent.get("repository_remote")
+    judgment_ref = intent.get("judgment_ref")
     if remote:
         remote_instruction = (
             f"Use Git remote 'origin', recorded by the coordinator as "
@@ -964,6 +965,19 @@ def _code_completion_protocol(intent):
             "The coordinator recorded Git remote 'origin' as None. STOP AND "
             "REPORT that no merge-evidence repository was recorded; do not "
             "guess another remote.")
+    if judgment_ref:
+        ref_kind = ("remote branch" if str(judgment_ref).startswith(
+                    "refs/heads/") else "legacy remote-tracking")
+        judgment_instruction = (
+            f"The coordinator judges only the pre-anchored {ref_kind} "
+            f"ref {judgment_ref!r}; a commit left only in the worktree, or "
+            "pushed under another ref, cannot close the attempt.")
+    else:
+        judgment_instruction = (
+            "This persisted legacy launch intent predates durable pushed-ref "
+            "judgment. No pushed ref will be treated as though it had been "
+            "anchored before the agent existed; its managed worktree must "
+            "remain available for legacy transition judgment.")
     return f"""{CODE_COMPLETION_PROTOCOL_MARKER} (coordinator-required)
 This protocol overrides any contrary instruction in the task text above it. If the task appears to forbid committing, pushing, or opening a pull request, STOP AND REPORT that conflict instead of choosing either instruction.
 You are already in a dedicated worktree for repository {repo!r}, on branch {branch!r}, cut from recorded base commit {base}.
@@ -971,6 +985,7 @@ The required pull-request target is {target!r}.
 Do not create or switch branches, and do not choose a different base.
 Commit all intended work on {branch!r}. Uncommitted work is invisible to the transition predicate and will be judged as producing nothing.
 {remote_instruction}
+{judgment_instruction}
 NEVER run `git stash`, in any form. The stash stack is a SINGLE ref in the shared common Git directory, so every worktree of {repo!r} shares one stack and a pop takes whatever another agent parked. Do these instead: to read a file as it was at base, `git show {base}:<path>`; to set work aside, `git diff > /tmp/wip.patch` then `git checkout -- <path>`; and to answer "was this test already failing", add a separate worktree at {base} and run it there, rather than moving anything in this one. Note what such a comparison does and does not show: green at {base} and green here is a claim about your change alone, not about {target!r} after a merge.
 Before every commit, run `git status --porcelain` and read it. Stage only paths you changed yourself; if it lists a path you did not touch, STOP AND REPORT instead of committing it. The observed failure is a commit that carried another agent's files.
 If you cannot finish cleanly, STOP AND REPORT the problem instead of working around it.
@@ -993,6 +1008,7 @@ def _code_protocol_problem(prompt, intent):
     """Return why an assembled code prompt is structurally unclosable."""
     if not prompt.endswith("\n\n" + _code_completion_protocol(intent)):
         return "the coordinator-generated protocol is not the final prompt block"
+    judgment_ref = intent.get("judgment_ref")
     required = {
         "protocol marker": CODE_COMPLETION_PROTOCOL_MARKER,
         "repository": repr(str(intent["repo"])),
@@ -1000,6 +1016,8 @@ def _code_protocol_problem(prompt, intent):
         "pull-request target": repr(str(intent["target_branch"])),
         "recorded remote": repr(intent.get("repository_remote")),
         "recorded base": str(intent["base_commit"]),
+        "judgment basis": (repr(judgment_ref) if judgment_ref else
+                           "persisted legacy launch intent predates durable pushed-ref judgment"),
         "protocol precedence": "overrides any contrary instruction",
         "contradiction instruction": "STOP AND REPORT that conflict",
         "commit instruction": "Commit all intended work",
@@ -1764,6 +1782,7 @@ def validate_plan(plan, survey=None):
         "branch": "swarm-protocol-validation-attempt",
         "target_branch": "main",
         "repository_remote": "ssh://git@example.invalid/project.git",
+        "judgment_ref": "refs/heads/swarm-protocol-validation-attempt",
         "base_commit": "0" * 40,
     }
     for u in units:
@@ -3514,17 +3533,62 @@ def _capture_code_launch(unit_dir, u):
     rc, tree, _ = _git(repo, "rev-parse", head + "^{tree}")
     if rc != 0:
         return f"unit {u['id']!r}: cannot read the tree of {head[:12]}", None
-    rc, remote, _ = _git(repo, "remote", "get-url", "origin")
+    # `git push origin` writes to pushurl when one is configured. Anchor both
+    # its raw spelling and its once-expanded destination. Reusing only the
+    # expanded spelling would let Git apply a second `insteadOf` rewrite when
+    # the judge passes it back to ls-remote or fetch.
+    remote_raw, remote, remote_problem = W.remote_push_transport(U.run, repo)
+    if remote_problem:
+        return (f"unit {u.get('id')!r}: repository {repo!r} has no readable "
+                f"single origin push destination ({remote_problem}). Code "
+                f"attempts must push their generated "
+                f"branch to origin so the coordinator can judge the exact "
+                f"ref it anchored before the agent existed"), None
+    judgment_ref = f"refs/heads/{branch}"
+    # Query the PUSH destination, not the raw fetch spelling: with
+    # `url.*.pushInsteadOf` configured they are different repositories, and
+    # the attempt will push to the former. Checking the latter for collisions
+    # asks the wrong repository and later judges the wrong one too.
+    remote_rc, _remote_head, remote_err = _git(
+        repo, "ls-remote", "--exit-code", remote,
+        f"refs/heads/{branch}")
+    if remote_rc == 0:
+        return (f"unit {u.get('id')!r}: generated attempt branch {branch!r} "
+                f"already exists on origin. Allocate a new attempt rather "
+                f"than asking an agent to overwrite unrelated remote "
+                f"history"), None
+    if remote_rc != 2:
+        detail = (remote_err or "git ls-remote returned %s" % remote_rc).strip()
+        return (f"unit {u.get('id')!r}: cannot establish that generated "
+                f"attempt branch {branch!r} is absent on origin: "
+                f"{detail[:200]}. Refusing before agent creation"), None
+    # The remote branch and the local branch are separate collision domains.
+    # Paseo must create the latter, while the former is the exact durable ref
+    # the checker will query. A remote-tracking ref is deliberately irrelevant:
+    # whether Git writes one after push is controlled by remote.origin.fetch.
+    local_ref = f"refs/heads/{branch}"
+    ref_rc, _out, _err = _git(
+        repo, "show-ref", "--verify", "--quiet", local_ref)
+    if ref_rc == 0:
+        return (f"unit {u.get('id')!r}: generated local attempt branch "
+                f"{branch!r} already exists. Allocate a new attempt rather "
+                f"than asking Paseo to reuse its history"), None
     intent = {
-        "schema_version": 1,
+        "schema_version": 4,
         "unit_id": u.get("id"),
         "attempt_id": Path(unit_dir).name,
         "repo": repo,
-        "repository_remote": remote if rc == 0 else None,
+        "repository_remote": remote,
+        "repository_remote_raw": remote_raw,
         "base_commit": head,
         "base_tree": tree,
         "worktree_slug": slug,
         "branch": branch,
+        # The exact durable observation the checker will make after Paseo's
+        # managed worktree may already be gone. This is the remote ref NAME;
+        # the agent controls its VALUE by pushing, and the checker derives and
+        # validates that value rather than accepting an agent assertion.
+        "judgment_ref": judgment_ref,
         "target_branch": target,
         # Makes the audit payload reproducible after a crash. Recovery can
         # compare exact expected bytes and restore the original seal without
@@ -3542,11 +3606,24 @@ def _code_launch_intent_problem(intent, u, attempt):
         return (f"unit {u.get('id')!r}: worktree launch intent belongs to "
                 f"unit {intent.get('unit_id')!r}, attempt "
                 f"{intent.get('attempt_id')!r}")
+    schema = intent.get("schema_version", 1)
+    if (not isinstance(schema, int) or isinstance(schema, bool)
+            or schema < 1):
+        return (f"unit {u.get('id')!r}: worktree launch intent has invalid "
+                f"schema_version {schema!r}")
     for key in ("repo", "base_commit", "base_tree", "worktree_slug", "branch",
                 "target_branch", "captured_at"):
         if not intent.get(key):
             return (f"unit {u.get('id')!r}: worktree launch intent is "
                     f"incomplete (missing {key})")
+    if schema >= 2:
+        for key in ("repository_remote", "judgment_ref"):
+            if not intent.get(key):
+                return (f"unit {u.get('id')!r}: worktree launch intent is "
+                        f"incomplete (missing {key})")
+    if schema >= 4 and not intent.get("repository_remote_raw"):
+        return (f"unit {u.get('id')!r}: worktree launch intent is "
+                "incomplete (missing repository_remote_raw)")
     for key in ("base_commit", "base_tree"):
         value = intent[key]
         if (not isinstance(value, str) or len(value) not in (40, 64)
@@ -3555,6 +3632,14 @@ def _code_launch_intent_problem(intent, u, attempt):
     if intent["target_branch"] == intent["branch"]:
         return (f"unit {u.get('id')!r}: trusted pull-request target equals "
                 f"its generated attempt branch {intent['branch']!r}")
+    expected_ref = (f"refs/heads/{intent['branch']}" if schema >= 3 else
+                    f"refs/remotes/origin/{intent['branch']}")
+    if (intent.get("judgment_ref") is not None
+            and intent["judgment_ref"] != expected_ref):
+        return (f"unit {u.get('id')!r}: trusted judgment ref "
+                f"{intent['judgment_ref']!r} is not the schema-{schema} "
+                "judgment ref "
+                f"for attempt branch {intent['branch']!r}")
     target = str(u.get("target_branch") or "").strip()
     if intent["target_branch"] != target:
         return (f"unit {u.get('id')!r}: trusted pull-request target "
@@ -3726,8 +3811,17 @@ def _complete_code_launch(state, u, unit_dir, workspace, workspace_id=None,
                 "git_dir": worktree_git_dir,
                 "git_dir_device": git_st.st_dev,
                 "git_dir_inode": git_st.st_ino}
+    intent_schema = intent.get("schema_version", 1)
+    judgment_ref = intent.get("judgment_ref")
+    direct_remote_judgment = intent_schema >= 3
     facts = {
-        "schema_version": 2,
+        # Schema 3 facts were emitted by the preserved first attempt and name
+        # a local remote-tracking ref. Schema 4 facts are the first direct-ref
+        # generation but predate the raw URL anchor. Keep both migrations
+        # byte-compatible; schema 5 records the raw and once-expanded route.
+        "schema_version": (5 if intent_schema >= 4 else
+                           4 if direct_remote_judgment else
+                           3 if judgment_ref else 2),
         "unit_id": u.get("id"),
         "attempt_id": attempt,
         "repo": intent["repo"],
@@ -3741,6 +3835,10 @@ def _complete_code_launch(state, u, unit_dir, workspace, workspace_id=None,
         "captured_at": intent["captured_at"],
         "clean_at_launch": True,
     }
+    if intent.get("repository_remote_raw") is not None:
+        facts["repository_remote_raw"] = intent["repository_remote_raw"]
+    if judgment_ref:
+        facts["judgment_ref"] = judgment_ref
     seal, error = _write_code_launch_record(unit_dir, facts)
     if error or not seal:
         return error or "worktree launch record has no recoverable seal"
@@ -7035,6 +7133,136 @@ def _load_plan(path):
     return plan
 
 
+CODE_TERMINAL_WATCH_LOG = "code-terminal-watch.log"
+
+
+def _start_code_terminal_watchers(plan, state, args, report):
+    """Start one best-effort event-driven checker for each live code attempt.
+
+    The watcher waits in Paseo, then runs the ordinary advance path under the
+    same project lock. It has no separate judgment authority: unit.py remains
+    the only checker and the resulting head still crosses the normal
+    coordinator-controlled result channel.
+    """
+    units = {u["id"]: u for u in plan.get("units") or []}
+    started = False
+    for uid, u in sorted(units.items()):
+        if u.get("kind") != "code":
+            continue
+        us = _unit_state(state, uid)
+        attempt_dir = us.get("attempt_dir")
+        job_id = us.get("job_id")
+        if (not attempt_dir or not job_id or us.get("state") not in LIVE_STATES
+                or trusted_produced_head(state, uid, attempt_dir)):
+            continue
+        attempt = Path(attempt_dir).name
+        watches = us.setdefault("code_terminal_watches", {})
+        if isinstance(watches.get(attempt), dict):
+            continue
+        log_path = Path(attempt_dir) / CODE_TERMINAL_WATCH_LOG
+        # Persist the one watcher intent before starting its process. A crash
+        # after spawn must not make the next advance launch an unbounded set
+        # of duplicate waiters. This record is diagnostic and deduplication
+        # state only; it never supplies a judgment fact.
+        watch = {
+            "agent_id": str(job_id),
+            "host": os.uname().nodename,
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "log": str(log_path),
+            "status": "starting",
+        }
+        watches[attempt] = watch
+        save_state(args.state_dir, state)
+        try:
+            log = open(log_path, "ab")
+        except OSError as exc:
+            watches.pop(attempt, None)
+            save_state(args.state_dir, state)
+            report.append(f"{uid}: could not open terminal-watch log: {exc}. "
+                          "Scheduled advance remains the fallback.")
+            continue
+        argv = [
+            sys.executable, str(Path(__file__).resolve()),
+            "watch-code-terminal", str(Path(args.plan).resolve()),
+            "--state-dir", str(args.state_dir),
+            "--root", str(args.root),
+            "--unit", uid,
+            "--attempt", attempt,
+            "--agent", str(job_id),
+        ]
+        try:
+            proc = subprocess.Popen(
+                argv, stdin=subprocess.DEVNULL, stdout=log,
+                stderr=subprocess.STDOUT, env=CE.child_env(),
+                start_new_session=True)
+        except OSError as exc:
+            log.close()
+            watches.pop(attempt, None)
+            save_state(args.state_dir, state)
+            report.append(f"{uid}: could not start terminal watcher: {exc}. "
+                          "Scheduled advance remains the fallback.")
+            continue
+        log.close()
+        watch["pid"] = proc.pid
+        watch["status"] = "waiting"
+        save_state(args.state_dir, state)
+        report.append(f"{uid}: watching agent {job_id} for an immediate "
+                      "terminal judgment")
+        started = True
+    return started
+
+
+def cmd_watch_code_terminal(args):
+    """Wait for one agent, then immediately run the normal locked checker."""
+    rc, out, err = U.run(
+        ["paseo", "wait", str(args.agent), "--json"],
+        timeout=30 * 24 * 60 * 60)
+    if rc != 0:
+        print(f"terminal watch ended without an idle observation: "
+              f"{(err or out or ('paseo wait exited %s' % rc))[:400]}")
+        return EXIT_HALTED
+
+    # Usually the dispatching controller releases this lock milliseconds
+    # after it starts us. Never steal it: wait briefly for the kernel-owned
+    # flock, then leave the scheduled advance as the durable fallback.
+    holder = None
+    for _ in range(240):
+        ok, holder = acquire_lease(args.state_dir)
+        if ok:
+            break
+        time.sleep(0.25)
+    else:
+        print(f"terminal agent was observed, but the project lock remained "
+              f"busy for 60s ({holder}); scheduled advance will judge it")
+        return EXIT_HALTED
+
+    try:
+        plan = _load_plan(args.plan)
+        state = load_state(args.state_dir)
+        us = _unit_state(state, args.unit)
+        current_attempt = (Path(us.get("attempt_dir") or "").name
+                           if us.get("attempt_dir") else None)
+        if (current_attempt != args.attempt
+                or str(us.get("job_id") or "") != str(args.agent)):
+            print("terminal watch is obsolete: coordinator state now names "
+                  "a different attempt or agent")
+            return EXIT_OK
+        report, _dispatched, halted = advance(
+            plan, state, args.state_dir, args.root, False, max_new=0)
+        watch = (us.setdefault("code_terminal_watches", {})
+                 .setdefault(args.attempt, {}))
+        watch["status"] = "checked"
+        watch["checked_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        watch["produced_head"] = trusted_produced_head(
+            state, args.unit, us.get("attempt_dir"))
+        save_state(args.state_dir, state)
+        for line in report:
+            print(line)
+        return EXIT_HALTED if halted else EXIT_OK
+    finally:
+        release_lease(args.state_dir)
+
+
 def _prepare_command_paths(args, plan=None, extra_repos=(), need_root=False):
     """Apply the one external path policy before any command can write."""
     raw_state = getattr(args, "state_dir", None)
@@ -7145,6 +7373,9 @@ def cmd_run(args):
             plan, state, args.state_dir, args.root, args.dry_run,
             args.max_new_dispatches,
             accept_plan_change=getattr(args, "accept_plan_change", False))
+        if (not args.dry_run
+                and _start_code_terminal_watchers(plan, state, args, report)):
+            save_state(args.state_dir, state)
     finally:
         release_lease(args.state_dir)
     for line in report:
@@ -8153,6 +8384,18 @@ def main():
     a = sub.add_parser("advance", help="idempotent; for a schedule or cron")
     common(a)
     a.set_defaults(fn=cmd_advance)
+
+    # Internal detached helper. It carries no independent authority and is
+    # intentionally absent from the public CLI reference: `run`/`advance`
+    # create it only after persisting the exact attempt and agent binding.
+    w = sub.add_parser("watch-code-terminal", help=argparse.SUPPRESS)
+    w.add_argument("plan")
+    w.add_argument("--state-dir", required=True)
+    w.add_argument("--root", required=True)
+    w.add_argument("--unit", required=True)
+    w.add_argument("--attempt", required=True)
+    w.add_argument("--agent", required=True)
+    w.set_defaults(fn=cmd_watch_code_terminal)
 
     pr = sub.add_parser("promote",
                         help="copy a DONE unit's outputs to its declared "
