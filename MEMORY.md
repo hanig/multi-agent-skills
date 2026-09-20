@@ -29,7 +29,7 @@ bind mount.
 
 ## Status as of 2026-09-02
 
-Built and green: **1085 tests**. Sixteen commits ahead of where this session
+Built and green at that snapshot. Sixteen commits ahead of where this session
 started (`413baca`), 30 files, ~4900 insertions.
 
 | Piece | File | State |

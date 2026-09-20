@@ -4,12 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Private repository: it carries cluster hostnames, partitions, account names and measured host probes. Do not publish any of it.
 
-`MEMORY.md` is a dated snapshot, not live truth. It holds model routing and the reasoning behind the design, and both its counts and its "next" list have gone stale while the code moved: it lists C11, a worktree per code attempt, as owed, and `swarm.py`, `worktree.py` and `tests/test_attempt_worktrees.py` ship it. `docs/plan-field-reports.md` is the live plan. `README.md` is the CLI reference for every skill, with the same caveat on its numbers. Routing truth is the `enabled` flags in `skills/hanig-review-gate/reviewers.json` plus `models.json`, never a roster or count quoted in prose. Verify any owed item against the tree before acting on it.
+`MEMORY.md` is a dated snapshot, not live truth. It holds model routing and the reasoning behind the design, and its "next" list has gone stale while the code moved: it lists C11, a worktree per code attempt, as owed, and `swarm.py`, `worktree.py` and `tests/test_attempt_worktrees.py` ship it. `docs/plan-field-reports.md` is the live plan. `README.md` is the CLI reference for every skill, with the same caveat on its measurements. Routing truth is the `enabled` flags in `skills/hanig-review-gate/reviewers.json` plus `models.json`, never a roster quoted in prose. Verify any owed item against the tree before acting on it.
 
 ## Commands
 
+<!-- docs-truth:suite-count -->
+Full suite: 1662 tests on 2026-09-19.
+
 ```sh
-python3 -m unittest discover -s tests            # full suite, ~8 min; 1572 tests on 2026-09-16
+python3 -m unittest discover -s tests            # full suite, ~8 min
 python3 -m unittest tests.test_swarm             # one module
 python3 skills/hanig-swarm/scripts/swarm.py schema           # every unit field, before writing a plan
 python3 skills/hanig-review-gate/scripts/review.py --kind implementation --staged --round 1
