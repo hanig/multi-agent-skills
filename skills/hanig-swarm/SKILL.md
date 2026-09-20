@@ -124,9 +124,11 @@ declared inputs. The coordinator disables implicit home, cwd, hostfs,
 administrator, and requested binds, adds the declared binds and a writable
 tmpfs overlay, and accepts only one executable plus literal arguments. Shell,
 expansion, redirection, pipelines, and backgrounding are refused. A random
-coordinator-held token written only after successful direct container execution
-plus the pinned wrapper fact is required for `os_enforced_isolation:true`;
-otherwise the unit cannot close by silently degrading.
+coordinator-held token is retained or created after removing any old marker;
+only successful direct container execution writes the marker. That matching
+token plus the pinned wrapper fact is required for
+`os_enforced_isolation:true`; otherwise the unit cannot close by silently
+degrading.
 
 ## Authority and closure
 
@@ -153,8 +155,15 @@ revalidates the route, fetches only that exact ref with submodules disabled,
 and requires a changed tree descending from the anchored base. Worktree-only
 commits and commits pushed under another ref do not count. The pushed remote
 ref survives Paseo cleanup. A detached watcher best-effort invokes the same
-locked `advance` path after terminal Paseo state; scheduled advance remains the
-fallback, and `unit.py check` remains the only judge.
+locked `advance` path after terminal Paseo state and waits at most 60 seconds
+for its lock; scheduled advance remains the fallback, and `unit.py check`
+remains the only judge.
+
+Persisted judgment facts keep generation-specific rules: pre-ref generations
+retain the live-worktree predicate, while ref-era generations must carry their
+generation's origin/ref anchors and fail closed rather than downgrade when one
+is absent. Readers derive only the documented older ref spelling without
+rewriting stored bytes. Deleting coordinator state is not migration.
 
 ## Verifier admissibility
 
@@ -191,7 +200,9 @@ state binds device/inode for the root, Git common dir, and linked Git dir;
 judgment re-resolves and re-stats them. Honest Git content must change, so inode
 identity is not content tamper-evidence. Judgment instead requires expected
 branch/ref, descendant history, changed tree, and clean index/worktree, then
-pins the produced commit.
+pins the produced commit. Launch facts from before inode fields existed retain
+their explicitly weaker path-only compatibility check; missing a then-unknown
+field is not treated as evidence of substitution.
 
 Recovery after a controller crash adopts only a named agent or one unambiguous
 worktree matching the complete launch intent after checking Paseo workspace
