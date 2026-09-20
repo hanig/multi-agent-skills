@@ -39,7 +39,7 @@ mutate a tracker.
 
 - The non-overridable finding classes below. No relevance exception reaches them.
 - A spend ceiling, declared per run, with the orchestrator stopping rather than
-  exceeding it.
+  exceeding it. Default is $50/day.
 - No force-push and no history rewriting, ever.
 - No edits to vendored skills (`paseo*`, `pi-fleet`, `agent-bus`,
   `start-a-sprint`).
