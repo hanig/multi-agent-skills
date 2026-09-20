@@ -51,20 +51,35 @@ def _authored_skill_docs():
 
 def _local_markdown_targets(body):
     for match in LOCAL_MARKDOWN_LINK.finditer(body):
-        target = match.group(1).split("#", 1)[0]
-        if target and "://" not in target and not target.startswith("#"):
+        target = match.group(1)
+        path = target.split("#", 1)[0]
+        if path and "://" not in path:
             yield target
+
+
+def _heading_fragments(path):
+    fragments = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("#"):
+            continue
+        heading = line.lstrip("#").strip().casefold()
+        heading = re.sub(r"[^\w -]", "", heading)
+        fragments.add(re.sub(r"\s+", "-", heading))
+    return fragments
 
 
 def _local_reference_problems(doc):
     skill = doc.parent.resolve()
     problems = []
     for target in _local_markdown_targets(_body(doc)):
-        resolved = (skill / target).resolve()
+        path, _, fragment = target.partition("#")
+        resolved = (skill / path).resolve()
         if not resolved.is_relative_to(skill):
             problems.append(f"link escapes skill: {target}")
         elif not resolved.is_file():
             problems.append(f"linked file is absent: {target}")
+        elif fragment and fragment not in _heading_fragments(resolved):
+            problems.append(f"linked heading is absent: {target}")
     return problems
 
 
@@ -91,16 +106,22 @@ class TestAuthoredSkillShape(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             skill = Path(raw) / "hanig-example"
             skill.mkdir()
+            references = skill / "references"
+            references.mkdir()
+            (references / "details.md").write_text("# Present heading\n",
+                                                    encoding="utf-8")
             doc = skill / "SKILL.md"
             doc.write_text(
                 "---\nname: example\n---\n"
-                "[missing](references/missing.md) [escape](../outside.md)\n",
+                "[missing](references/missing.md) [escape](../outside.md) "
+                "[heading](references/details.md#absent-heading)\n",
                 encoding="utf-8",
             )
             self.assertEqual(
                 _local_reference_problems(doc),
                 ["linked file is absent: references/missing.md",
-                 "link escapes skill: ../outside.md"],
+                 "link escapes skill: ../outside.md",
+                 "linked heading is absent: references/details.md#absent-heading"],
             )
 
     def test_every_declared_swarm_limit_remains_in_the_body_with_a_pointer(self):
