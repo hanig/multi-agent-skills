@@ -41,6 +41,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -70,6 +71,18 @@ MAX_CHARS = 180_000
 # cost kimi-k2.7-code a whole session before the error message was made to say
 # so. Sized for the answer AFTER the thinking.
 DEFAULT_MAX_OUTPUT_TOKENS = 64_000
+
+JOURNAL_DIR = "hanig-review-gate"
+JOURNAL_CHILD_ARG = "--_append-review-journal"
+JOURNAL_TIMEOUT_SECONDS = 5
+JOURNAL_DIAGNOSTIC_TIMEOUT_SECONDS = 0.25
+JOURNAL_NAME = "review-rounds"
+JOURNAL_HEADER = (
+    "Append-only logical collection of immutable per-round JSON lines; "
+    "audit-only attested review history. This is not the rejected "
+    "mandatory per-change receipt: that receipt could lock honest authors out "
+    "of the gate, while this non-gating record cannot decide or block a verdict."
+)
 
 
 SYSTEM = """You are an adversarial code reviewer. Your job is to REFUTE, not to approve.
@@ -163,6 +176,320 @@ def read_text_bounded(path):
 
 def now():
     return time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
+def journal_timestamp():
+    """Observed UTC date recorded inside each immutable journal entry."""
+    stamp = time.time_ns()
+    seconds, nanos = divmod(stamp, 1_000_000_000)
+    return (time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(seconds))
+            + f".{nanos:09d}Z")
+
+
+def _resolved(path):
+    return Path(path).expanduser().resolve()
+
+
+def _inside(path, directory):
+    try:
+        _resolved(path).relative_to(_resolved(directory))
+        return True
+    except ValueError:
+        return False
+
+
+def _attached_worktrees(place):
+    """All ordinary worktrees attached to the repository containing place."""
+    top = git_out("-C", str(place), "rev-parse", "--show-toplevel").strip()
+    if not top:
+        return set()
+    found = {_resolved(top)}
+    raw = git_out("-C", top, "worktree", "list", "--porcelain")
+    for line in raw.splitlines():
+        if line.startswith("worktree "):
+            found.add(_resolved(line[len("worktree "):]))
+    return found
+
+
+def review_worktrees(files=()):
+    """Worktrees for every repository that supplies this review's input."""
+    places = [Path.cwd()]
+    for value in files:
+        lexical = Path(os.path.abspath(os.path.expanduser(value)))
+        lexical_place = (lexical if lexical.is_dir() and not lexical.is_symlink()
+                         else lexical.parent)
+        # git -C follows a symlinked directory component. Survey every lexical
+        # ancestor as well, so /repo/link/out.py still records /repo even when
+        # link resolves outside that worktree.
+        places.extend((lexical_place, *lexical_place.parents))
+        path = _resolved(value)
+        places.append(path if path.is_dir() else path.parent)
+    found = set()
+    for place in places:
+        found.update(_attached_worktrees(place))
+    return sorted(found, key=str)
+
+
+def review_journal_path(files=()):
+    """Journal below a state home outside every operated Git worktree.
+
+    This follows coordinator_paths.py's candidate order and containment
+    doctrine. A relative XDG_STATE_HOME is not a state home, and a candidate
+    inside any reviewed repository's attached worktrees is skipped before any
+    directory is created.
+    """
+    worktrees = review_worktrees(files)
+    candidates = []
+    xdg = os.environ.get("XDG_STATE_HOME")
+    if xdg and os.path.isabs(os.path.expanduser(xdg)):
+        # Preserve configured components for the descriptor-relative no-follow
+        # walk. Resolution here would silently turn a configured symlink into
+        # its target before _open_directory_chain could refuse it.
+        candidates.append(Path(os.path.abspath(os.path.expanduser(xdg))))
+    candidates.append(_resolved(Path.home() / ".local" / "state"))
+    candidates.append(_resolved(Path(tempfile.gettempdir()) /
+                                "hanig-review-gate-state"))
+    base = next((candidate for candidate in candidates
+                 if not any(_inside(candidate, worktree)
+                            for worktree in worktrees)), None)
+    if base is None:
+        raise OSError("no review journal state location is available outside "
+                      "the operated Git worktrees")
+    path = base / JOURNAL_DIR / JOURNAL_NAME
+    resolved_path = _resolved(path)
+    for worktree in worktrees:
+        if _inside(resolved_path, worktree):
+            raise OSError(f"review journal {str(path)!r} resolves inside "
+                          f"operated Git worktree {str(worktree)!r}")
+    if not _inside(resolved_path, base):
+        raise OSError(f"review journal {str(path)!r} resolves outside its "
+                      f"state home {str(base)!r}")
+    return path
+
+
+def claim_digests(claims):
+    """Ordered digests retain claim identity without copying claim text."""
+    return [hashlib.sha256(claim.encode("utf-8")).hexdigest()
+            for claim in claims]
+
+
+def _open_directory_chain(path):
+    """Open/create an absolute directory path without retraversing names.
+
+    Every component is opened relative to its already-open parent. A
+    concurrent rename leaves the descriptor on the directory that was
+    actually checked; an intermediate symlink is never followed.
+    """
+    path = Path(path)
+    if not path.is_absolute():
+        raise OSError(f"journal directory {str(path)!r} is not absolute")
+    required = ("O_DIRECTORY", "O_NOFOLLOW")
+    if not all(hasattr(os, name) for name in required):
+        raise OSError("descriptor-anchored journal paths require O_DIRECTORY "
+                      "and O_NOFOLLOW on this host")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    current = os.open(os.path.sep, flags)
+    try:
+        for component in path.parts[1:]:
+            try:
+                child = os.open(component, flags, dir_fd=current)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(component, 0o700, dir_fd=current)
+                except FileExistsError:
+                    # A cooperating creator won the race. The anchored,
+                    # no-follow open below decides whether it made a directory.
+                    pass
+                child = os.open(component, flags, dir_fd=current)
+            os.close(current)
+            current = child
+        return current
+    except BaseException:
+        os.close(current)
+        raise
+
+
+def append_review_journal(path, kind, round_no, effective_panel, verdict,
+                          claims):
+    """Atomically publish one immutable audit record.
+
+    State-directory topology and non-cooperating same-UID relinking are trusted
+    while this transaction runs. The journal is a logical append-only
+    collection: every completed round is one newline-terminated JSON file in
+    an exclusive event directory. Partial writes remain private pending files
+    and are never canonical history.
+    """
+    path = Path(path)
+    record = {
+        "type": "review_round",
+        "schema_version": 1,
+        "journal_header": JOURNAL_HEADER,
+        "date": journal_timestamp(),
+        "kind": kind,
+        "round": round_no,
+        "effective_panel": list(effective_panel),
+        "verdict": verdict,
+        "claim_digests": claim_digests(claims),
+    }
+    line = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
+    collection_fd = event_fd = fd = None
+    event_name = (f"{time.time_ns():020d}-{os.getpid()}-"
+                  f"{os.urandom(12).hex()}")
+    pending_name = "record.pending"
+    final_name = "record.jsonl"
+    try:
+        collection_fd = _open_directory_chain(path)
+        os.mkdir(event_name, 0o700, dir_fd=collection_fd)
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        event_fd = os.open(event_name, directory_flags,
+                           dir_fd=collection_fd)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        fd = os.open(pending_name, flags, 0o600, dir_fd=event_fd)
+        status = os.fstat(fd)
+        if not stat.S_ISREG(status.st_mode):
+            raise OSError("pending review journal record is not a regular file")
+        if status.st_nlink != 1:
+            raise OSError("pending review journal record has multiple links")
+        written = 0
+        while written < len(line):
+            try:
+                count = os.write(fd, line[written:])
+            except InterruptedError:
+                continue
+            if count <= 0:
+                raise OSError(f"journal append made no progress after "
+                              f"{written} of {len(line)} bytes")
+            written += count
+        os.fsync(fd)
+        os.close(fd)
+        fd = None
+        os.rename(pending_name, final_name,
+                  src_dir_fd=event_fd, dst_dir_fd=event_fd)
+        os.fsync(event_fd)
+        os.fsync(collection_fd)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if event_fd is not None:
+            os.close(event_fd)
+        if collection_fd is not None:
+            os.close(collection_fd)
+    return record, path / event_name / final_name
+
+
+def _journal_child(payload):
+    """Perform one append in the bounded audit-only helper process."""
+    path = review_journal_path(payload["files"])
+    _record, record_path = append_review_journal(
+        path, payload["kind"], payload["round"],
+        payload["effective_panel"], payload["verdict"], payload["claims"])
+    return {"ok": True, "path": str(record_path)}
+
+
+def _run_journal_child(args, completed, verdict):
+    """Run journal I/O out of process so stalled storage cannot gate review."""
+    payload = json.dumps({
+        "files": args.file,
+        "kind": args.kind,
+        "round": args.round,
+        "effective_panel": [result["name"] for result in completed],
+        "verdict": verdict,
+        "claims": args.claim,
+    })
+    env = os.environ.copy()
+    for name in ("OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"):
+        env.pop(name, None)
+    process = subprocess.Popen(
+        [sys.executable, str(Path(__file__).resolve()), JOURNAL_CHILD_ARG],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        encoding="utf-8", env=env)
+    try:
+        stdout, child_stderr = process.communicate(
+            input=payload, timeout=JOURNAL_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except Exception:
+            pass
+        try:
+            process.communicate(timeout=1)
+        except Exception:
+            pass
+        raise TimeoutError(
+            f"review journal append exceeded {JOURNAL_TIMEOUT_SECONDS}s")
+    if process.returncode != 0:
+        try:
+            result = json.loads(stdout)
+            error = result["error"]
+        except Exception:
+            error = child_stderr.strip() or "journal helper returned no error"
+        raise OSError(f"journal helper failed: {error}")
+    try:
+        result = json.loads(stdout)
+    except (TypeError, ValueError) as exc:
+        raise OSError(f"journal helper returned invalid JSON: {exc}")
+    if not result.get("ok") or not isinstance(result.get("path"), str):
+        raise OSError("journal helper returned an invalid success record")
+    return result["path"]
+
+
+def _emit_journal_failure(message):
+    """Report a non-gating failure without letting diagnostics gate review."""
+    # Unit tests and in-process callers use a memory stream, which cannot block
+    # on an external reader and preserves their ability to inspect diagnostics.
+    try:
+        if (type(sys.stderr).__module__ == "_io" and
+                type(sys.stderr).__name__ == "StringIO"):
+            sys.stderr.write(message + "\n")
+            return
+    except Exception:
+        return
+
+    data = (message + "\n").encode("utf-8", "backslashreplace")
+    try:
+        pid = os.fork()
+    except (AttributeError, OSError):
+        return
+    if pid == 0:
+        try:
+            os.write(2, data)
+        except Exception:
+            pass
+        os._exit(0)
+
+    deadline = time.monotonic() + JOURNAL_DIAGNOSTIC_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            finished, _status = os.waitpid(pid, os.WNOHANG)
+        except (ChildProcessError, OSError):
+            return
+        if finished == pid:
+            return
+        time.sleep(0.01)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, OSError):
+        pass
+
+
+def record_review_round(args, completed, verdict):
+    """Write bounded, non-gating audit history; report failure if possible."""
+    try:
+        path = _run_journal_child(args, completed, verdict)
+        return {"path": path, "written": True, "status": "confirmed",
+                "error": None}
+    except Exception as exc:
+        try:
+            error = redact(f"{type(exc).__name__}: {exc}")
+        except Exception:
+            error = type(exc).__name__
+        message = ("JOURNAL_WRITE_FAILED — audit history persistence was not "
+                   "confirmed: "
+                   f"{error}. The review verdict is unchanged because the "
+                   "journal is non-gating.")
+        _emit_journal_failure(message)
+        return {"path": None, "written": False, "status": "unconfirmed",
+                "error": error}
 
 
 def deep_redact(obj):
@@ -1141,6 +1468,15 @@ def arm_watchdog(seconds):
         pass
 
 
+def disarm_watchdog():
+    """A non-gating audit write cannot replace an already-known verdict."""
+    if hasattr(signal, "SIGALRM"):
+        try:
+            signal.alarm(0)
+        except (OSError, ValueError, OverflowError, TypeError):
+            pass
+
+
 def decide_state(n_completed, n_failed, confirmed, refuted_claims,
                  rejecting, truncated, quorum, n_out_of_scope_critical=0):
     """The gate's verdict. Extracted from main() so it can be tested directly:
@@ -1402,8 +1738,11 @@ def main():
             {"name": rev["name"], "reason": why} if why else rev)
 
     if not runnable:
+        disarm_watchdog()
+        journal = record_review_round(args, [], "REVIEW_UNAVAILABLE")
         report = {"state": "REVIEW_UNAVAILABLE", "checked_at": now(),
-                  "reviewed": label, "unavailable": unavailable, "results": []}
+                  "reviewed": label, "unavailable": unavailable, "results": [],
+                  "journal": journal}
         if args.json:
             print(json.dumps(report, indent=2))
         else:
@@ -1423,6 +1762,8 @@ def main():
         completed, failed, unavailable, tiers_run = escalate(
             reviewers, prompt, args, truncated, label, len(body))
         if not completed and not failed:
+            disarm_watchdog()
+            record_review_round(args, [], "REVIEW_UNAVAILABLE")
             print("no reviewer could run in any tier", file=sys.stderr)
             sys.exit(STATES["REVIEW_UNAVAILABLE"])
     else:
@@ -1458,6 +1799,8 @@ def main():
                          rejecting=rejecting, truncated=truncated,
                          quorum=args.quorum,
                          n_out_of_scope_critical=len(oos_critical))
+    disarm_watchdog()
+    journal = record_review_round(args, completed, state)
 
     report = {
         "state": state, "checked_at": now(), "reviewed": label,
@@ -1469,6 +1812,7 @@ def main():
         "confirmed_findings": confirmed, "refuted_claims": refuted_claims,
         "out_of_scope_findings": out_of_scope,
         "rejecting_reviewers": rejecting,
+        "journal": journal,
         "results": completed,
     }
 
@@ -1549,4 +1893,17 @@ def main():
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == [JOURNAL_CHILD_ARG]:
+        try:
+            child_result = _journal_child(json.load(sys.stdin))
+        except Exception as child_exc:
+            child_result = {
+                "ok": False,
+                "error": redact(
+                    f"{type(child_exc).__name__}: {child_exc}"),
+            }
+            print(json.dumps(child_result, sort_keys=True))
+            sys.exit(1)
+        print(json.dumps(child_result, sort_keys=True))
+        sys.exit(0)
     main()

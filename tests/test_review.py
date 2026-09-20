@@ -12,14 +12,18 @@ Offline: no API calls.
 """
 
 import importlib.util
+import hashlib
 import io
 import json
 import os
+import signal
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -942,14 +946,13 @@ class TestFailClosed(unittest.TestCase):
 class TestPortability(unittest.TestCase):
     def test_stdlib_only(self):
         allowed = {"argparse", "concurrent", "hashlib", "json", "os", "re", "signal", "stat",
-                   "subprocess", "sys", "time", "urllib", "pathlib"}
+                   "subprocess", "sys", "tempfile", "time", "urllib", "pathlib"}
         for line in SCRIPT.read_text().splitlines():
             s = line.strip()
             if s.startswith("import ") and not s.startswith("import ("):
                 self.assertIn(s.split()[1].split(".")[0], allowed, s)
             elif s.startswith("from ") and " import " in s:
                 self.assertIn(s.split()[1].split(".")[0], allowed, s)
-
 
 class TestFailedReviewerIsNotAPass(unittest.TestCase):
     """luna: the final state checked only whether len(completed) reached quorum,
@@ -1794,6 +1797,484 @@ class TestBothProviderPathsShareTheirLimits(unittest.TestCase):
         self.assertIn(str(review.DEFAULT_MAX_OUTPUT_TOKENS), comment,
                      "reviewers.json documents a different default than the "
                      "code uses")
+
+
+class TestReviewJournal(unittest.TestCase):
+    CLAIM = "This change cannot make an honest run fail."
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.saved = {
+            "argv": sys.argv,
+            "load_reviewers": review.load_reviewers,
+            "availability": review.availability,
+            "run_one": review.run_one,
+            "gather": review.gather,
+            "arm_watchdog": review.arm_watchdog,
+            "disarm_watchdog": review.disarm_watchdog,
+            "record_review_round": review.record_review_round,
+            "time_ns": review.time.time_ns,
+            "xdg": os.environ.get("XDG_STATE_HOME"),
+        }
+        self.addCleanup(self.restore)
+        os.environ["XDG_STATE_HOME"] = str(self.tmp / "state")
+        review.load_reviewers = lambda: [
+            {"name": "answered", "provider": "stub", "model": "stub",
+             "profiles": ["standard"], "enabled": True},
+            {"name": "errored", "provider": "stub", "model": "stub-2",
+             "profiles": ["standard"], "enabled": True},
+        ]
+        review.availability = lambda _reviewer: None
+        review.gather = lambda _args: ("diff body", "test diff")
+        review.arm_watchdog = lambda _seconds: None
+        review.run_one = self.answer
+
+    def restore(self):
+        sys.argv = self.saved["argv"]
+        review.load_reviewers = self.saved["load_reviewers"]
+        review.availability = self.saved["availability"]
+        review.run_one = self.saved["run_one"]
+        review.gather = self.saved["gather"]
+        review.arm_watchdog = self.saved["arm_watchdog"]
+        review.disarm_watchdog = self.saved["disarm_watchdog"]
+        review.record_review_round = self.saved["record_review_round"]
+        review.time.time_ns = self.saved["time_ns"]
+        if self.saved["xdg"] is None:
+            os.environ.pop("XDG_STATE_HOME", None)
+        else:
+            os.environ["XDG_STATE_HOME"] = self.saved["xdg"]
+
+    def answer(self, reviewer, *_args, **_kwargs):
+        return {
+            "ok": True, "name": reviewer["name"], "verdict": "upheld",
+            "findings": [],
+            "claims": [{"claim_index": 0, "claim": self.CLAIM,
+                        "status": "supported",
+                        "why": "the stub supplies a complete claim assessment"}],
+            "notes": "", "elapsed_s": 0, "in_tokens": 1,
+            "out_tokens": 1,
+        }
+
+    def invoke(self, only="answered"):
+        sys.argv = [str(SCRIPT), "--kind", "implementation", "--round", "1",
+                    "--profile", "standard", "--quorum", "1",
+                    "--claim", self.CLAIM, "--file", str(SCRIPT), "--json"]
+        if only is not None:
+            sys.argv.extend(["--only", only])
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as stopped:
+                review.main()
+        return stopped.exception.code, stdout.getvalue(), stderr.getvalue()
+
+    def journal_path(self):
+        return (Path(os.environ["XDG_STATE_HOME"]) / review.JOURNAL_DIR /
+                review.JOURNAL_NAME)
+
+    def records(self):
+        return [json.loads(path.read_text())
+                for path in sorted(self.journal_path().glob("*/record.jsonl"))]
+
+    def seed_record(self, name, record, filename="record.jsonl"):
+        event = self.journal_path() / name
+        event.mkdir(parents=True)
+        path = event / filename
+        path.write_text(json.dumps(record) + "\n")
+        return path
+
+    def test_two_invocations_append_two_records_with_monotonic_timestamps(self):
+        self.assertEqual(self.invoke()[0], review.STATES["REVIEW_PASS"])
+        self.assertEqual(self.invoke()[0], review.STATES["REVIEW_PASS"])
+        records = self.records()
+        self.assertEqual(len(records), 2)
+        for path in self.journal_path().glob("*/record.jsonl"):
+            self.assertEqual(path.read_bytes().count(b"\n"), 1)
+            self.assertTrue(path.read_bytes().endswith(b"\n"))
+        self.assertLess(records[0]["date"], records[1]["date"])
+        for record in records:
+            notice = record["journal_header"].lower()
+            self.assertIn("audit-only", notice)
+            self.assertIn("mandatory per-change receipt", notice)
+            self.assertIn("lock honest authors out", notice)
+            self.assertIn("non-gating", notice)
+            self.assertIn("cannot decide or block a verdict", notice)
+            self.assertEqual(record["kind"], "implementation")
+            self.assertEqual(record["round"], 1)
+            self.assertEqual(record["effective_panel"], ["answered"])
+            self.assertEqual(record["verdict"], "REVIEW_PASS")
+            self.assertEqual(
+                record["claim_digests"],
+                [hashlib.sha256(self.CLAIM.encode("utf-8")).hexdigest()])
+
+    def test_effective_panel_contains_only_reviewers_that_answered(self):
+        def one_answer(reviewer, *_args, **_kwargs):
+            if reviewer["name"] == "errored":
+                return {"ok": False, "name": "errored",
+                        "error": "HTTP 402", "elapsed_s": 0}
+            return self.answer(reviewer)
+
+        review.run_one = one_answer
+        code, stdout, _stderr = self.invoke(only=None)
+        self.assertEqual(code, review.STATES["REVIEW_PARTIAL"])
+        self.assertEqual(json.loads(stdout)["state"], "REVIEW_PARTIAL")
+        self.assertEqual(self.records()[-1]["effective_panel"], ["answered"])
+
+    def test_existing_journal_cannot_decide_the_verdict(self):
+        self.seed_record("000-seed", {
+            "type": "review_round", "verdict": "REVIEW_FAIL",
+            "date": "9999-12-31T23:59:59.999999999Z",
+        })
+        code, stdout, _stderr = self.invoke()
+        self.assertEqual(code, review.STATES["REVIEW_PASS"])
+        self.assertEqual(json.loads(stdout)["state"], "REVIEW_PASS")
+        self.assertEqual([record["verdict"] for record in self.records()],
+                         ["REVIEW_FAIL", "REVIEW_PASS"])
+
+    def test_journal_code_runs_only_after_the_verdict_is_decided(self):
+        original_decide = review.decide_state
+        original_record = review.record_review_round
+        events = []
+
+        def decide(*args, **kwargs):
+            result = original_decide(*args, **kwargs)
+            events.append(("verdict", result))
+            return result
+
+        def record(_args, _completed, verdict):
+            self.assertEqual(events, [("verdict", verdict)])
+            events.append(("journal", verdict))
+            return {"path": "test", "written": True, "error": None}
+
+        review.decide_state = decide
+        review.record_review_round = record
+        try:
+            code, stdout, _stderr = self.invoke()
+        finally:
+            review.decide_state = original_decide
+            review.record_review_round = original_record
+
+        self.assertEqual(code, review.STATES["REVIEW_PASS"])
+        self.assertEqual(json.loads(stdout)["state"], "REVIEW_PASS")
+        self.assertEqual(events, [("verdict", "REVIEW_PASS"),
+                                  ("journal", "REVIEW_PASS")])
+
+    def test_partial_pending_record_cannot_decide_or_block_the_verdict(self):
+        pending = self.journal_path() / "000-interrupted" / "record.pending"
+        pending.parent.mkdir(parents=True)
+        pending.write_text('{"type":"hostile seed","verdict":"REVIEW_FAIL"')
+        code, stdout, stderr = self.invoke()
+        self.assertEqual(code, review.STATES["REVIEW_PASS"])
+        self.assertEqual(json.loads(stdout)["state"], "REVIEW_PASS")
+        self.assertNotIn("JOURNAL_WRITE_FAILED", stderr)
+        self.assertEqual(len(self.records()), 1)
+        self.assertEqual(pending.read_text(),
+                         '{"type":"hostile seed","verdict":"REVIEW_FAIL"')
+
+    def test_read_only_journal_failure_is_loud_but_non_gating(self):
+        path = self.journal_path()
+        path.mkdir(parents=True)
+        path.chmod(0o500)
+        try:
+            code, stdout, stderr = self.invoke()
+        finally:
+            path.chmod(0o700)
+        self.assertEqual(code, review.STATES["REVIEW_PASS"])
+        report = json.loads(stdout)
+        self.assertEqual(report["state"], "REVIEW_PASS")
+        self.assertFalse(report["journal"]["written"])
+        self.assertIn("journal helper failed", report["journal"]["error"])
+        self.assertNotIn("invalid success", report["journal"]["error"])
+        self.assertIn("JOURNAL_WRITE_FAILED", stderr)
+
+    def test_broken_stderr_cannot_turn_journal_failure_into_review_failure(self):
+        class BrokenStderr:
+            def write(self, _text):
+                raise OSError("stderr is unavailable")
+
+            def flush(self):
+                raise OSError("stderr is unavailable")
+
+        sys.argv = [str(SCRIPT), "--kind", "implementation", "--round", "1",
+                    "--profile", "standard", "--quorum", "1",
+                    "--claim", self.CLAIM, "--file", str(SCRIPT), "--json",
+                    "--only", "answered"]
+        stdout = io.StringIO()
+        saved_stderr = sys.stderr
+        saved_write = review.os.write
+        saved_child = review._run_journal_child
+        try:
+            sys.stderr = BrokenStderr()
+            review._run_journal_child = (
+                lambda *_args: (_ for _ in ()).throw(
+                    OSError("journal storage is unavailable")))
+            review.os.write = lambda _fd, _data: (_ for _ in ()).throw(
+                OSError("descriptor 2 is unavailable"))
+            with redirect_stdout(stdout):
+                with self.assertRaises(SystemExit) as stopped:
+                    review.main()
+        finally:
+            sys.stderr = saved_stderr
+            review.os.write = saved_write
+            review._run_journal_child = saved_child
+
+        self.assertEqual(stopped.exception.code, review.STATES["REVIEW_PASS"])
+        report = json.loads(stdout.getvalue())
+        self.assertEqual(report["state"], "REVIEW_PASS")
+        self.assertFalse(report["journal"]["written"])
+
+    def test_stalled_diagnostic_writer_is_killed_at_its_deadline(self):
+        class DescriptorStderr:
+            pass
+
+        saved = (sys.stderr, review.os.fork, review.os.waitpid,
+                 review.os.kill, review.time.monotonic, review.time.sleep)
+        killed = []
+        clock = iter((0.0, 0.1, 0.3))
+        try:
+            sys.stderr = DescriptorStderr()
+            review.os.fork = lambda: 4321
+            review.os.waitpid = lambda _pid, _flags: (0, 0)
+            review.os.kill = lambda pid, sig: killed.append((pid, sig))
+            review.time.monotonic = lambda: next(clock)
+            review.time.sleep = lambda _seconds: None
+
+            review._emit_journal_failure("diagnostic")
+        finally:
+            (sys.stderr, review.os.fork, review.os.waitpid,
+             review.os.kill, review.time.monotonic,
+             review.time.sleep) = saved
+
+        self.assertEqual(killed, [(4321, signal.SIGKILL)])
+
+    def test_journal_state_home_never_resolves_inside_reviewed_worktree(self):
+        os.environ["XDG_STATE_HOME"] = str(REPO / ".state-in-repo")
+        path = review.review_journal_path([SCRIPT])
+        with self.assertRaises(ValueError):
+            path.relative_to(REPO.resolve())
+
+    def test_file_symlink_keeps_its_lexical_worktree_in_placement_scope(self):
+        target = self.tmp / "outside-input.py"
+        target.write_text("pass\n")
+        link = REPO / (".journal-input-link-" + self.tmp.name + ".py")
+        self.addCleanup(link.unlink, missing_ok=True)
+        link.symlink_to(target)
+        os.environ["XDG_STATE_HOME"] = str(REPO / ".state-in-repo")
+        previous = Path.cwd()
+        try:
+            os.chdir(self.tmp)
+            path = review.review_journal_path([link])
+        finally:
+            os.chdir(previous)
+
+        with self.assertRaises(ValueError):
+            path.relative_to(REPO.resolve())
+
+    def test_symlinked_input_directory_keeps_lexical_worktree_in_scope(self):
+        target_dir = self.tmp / "outside-inputs"
+        target_dir.mkdir()
+        (target_dir / "input.py").write_text("pass\n")
+        link_dir = REPO / (".journal-input-dir-" + self.tmp.name)
+        self.addCleanup(link_dir.unlink, missing_ok=True)
+        link_dir.symlink_to(target_dir, target_is_directory=True)
+        os.environ["XDG_STATE_HOME"] = str(REPO / ".state-in-repo")
+        previous = Path.cwd()
+        try:
+            os.chdir(self.tmp)
+            path = review.review_journal_path([link_dir / "input.py"])
+        finally:
+            os.chdir(previous)
+
+        with self.assertRaises(ValueError):
+            path.relative_to(REPO.resolve())
+
+    def test_symlinked_journal_directory_cannot_escape_into_worktree(self):
+        base = Path(os.environ["XDG_STATE_HOME"])
+        base.mkdir(parents=True)
+        target = REPO / (".journal-target-" + self.tmp.name)
+        (base / review.JOURNAL_DIR).symlink_to(target, target_is_directory=True)
+        code, stdout, stderr = self.invoke()
+        self.assertEqual(code, review.STATES["REVIEW_PASS"])
+        self.assertEqual(json.loads(stdout)["state"], "REVIEW_PASS")
+        self.assertIn("JOURNAL_WRITE_FAILED", stderr)
+        self.assertIn("operated Git worktree", stderr)
+        self.assertFalse(target.exists())
+
+    def test_preexisting_symlink_inside_state_home_is_refused(self):
+        base = Path(os.environ["XDG_STATE_HOME"])
+        base.mkdir(parents=True)
+        target = base / "alternate"
+        target.mkdir()
+        (base / review.JOURNAL_DIR).symlink_to(target, target_is_directory=True)
+
+        code, stdout, stderr = self.invoke()
+
+        self.assertEqual(code, review.STATES["REVIEW_PASS"])
+        self.assertEqual(json.loads(stdout)["state"], "REVIEW_PASS")
+        self.assertIn("JOURNAL_WRITE_FAILED", stderr)
+        self.assertFalse((target / review.JOURNAL_NAME).exists())
+
+    def test_symlinked_configured_state_home_is_refused(self):
+        target = self.tmp / "actual-state"
+        target.mkdir()
+        configured = self.tmp / "configured-state"
+        configured.symlink_to(target, target_is_directory=True)
+        os.environ["XDG_STATE_HOME"] = str(configured)
+
+        code, stdout, stderr = self.invoke()
+
+        self.assertEqual(code, review.STATES["REVIEW_PASS"])
+        self.assertEqual(json.loads(stdout)["state"], "REVIEW_PASS")
+        self.assertIn("JOURNAL_WRITE_FAILED", stderr)
+        self.assertFalse((target / review.JOURNAL_DIR).exists())
+
+    def test_intermediate_symlink_swap_after_validation_is_refused(self):
+        path = review.review_journal_path([SCRIPT])
+        path.parent.mkdir(parents=True)
+        parked = path.parent.with_name(path.parent.name + "-parked")
+        target = REPO / (".journal-swap-target-" + self.tmp.name)
+        target.mkdir()
+        path.parent.rename(parked)
+        path.parent.symlink_to(target, target_is_directory=True)
+        try:
+            with self.assertRaises(OSError):
+                review.append_review_journal(
+                    path, "implementation", 1, ["answered"],
+                    "REVIEW_PASS", [self.CLAIM])
+            self.assertFalse((target / review.JOURNAL_NAME).exists())
+        finally:
+            path.parent.unlink(missing_ok=True)
+            shutil.rmtree(parked, ignore_errors=True)
+            shutil.rmtree(target, ignore_errors=True)
+
+    def test_interrupted_private_write_cannot_corrupt_canonical_history(self):
+        path = self.journal_path()
+        original_write = review.os.write
+        calls = 0
+
+        def interrupted_write(fd, data):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return original_write(fd, data[:17])
+            raise OSError("injected interruption")
+
+        review.os.write = interrupted_write
+        try:
+            with self.assertRaisesRegex(OSError, "injected interruption"):
+                review.append_review_journal(
+                    path, "implementation", 1, ["answered"],
+                    "REVIEW_PASS", [self.CLAIM])
+        finally:
+            review.os.write = original_write
+
+        pending = list(path.glob("*/record.pending"))
+        self.assertEqual(len(pending), 1)
+        before = pending[0].read_bytes()
+        self.assertEqual(self.records(), [])
+
+        code, stdout, stderr = self.invoke()
+
+        self.assertEqual(code, review.STATES["REVIEW_PASS"])
+        self.assertEqual(json.loads(stdout)["state"], "REVIEW_PASS")
+        self.assertNotIn("JOURNAL_WRITE_FAILED", stderr)
+        self.assertEqual(pending[0].read_bytes(), before)
+        self.assertEqual(len(self.records()), 1)
+
+    def test_stalled_journal_helper_is_killed_without_gating_verdict(self):
+        class HungProcess:
+            def __init__(self):
+                self.returncode = None
+                self.calls = []
+                self.killed = False
+
+            def communicate(self, input=None, timeout=None):
+                self.calls.append((input, timeout))
+                raise subprocess.TimeoutExpired("journal helper", timeout)
+
+            def kill(self):
+                self.killed = True
+
+        hung = HungProcess()
+        original_popen = review.subprocess.Popen
+        review.subprocess.Popen = lambda *_args, **_kwargs: hung
+        try:
+            code, stdout, stderr = self.invoke()
+        finally:
+            review.subprocess.Popen = original_popen
+
+        self.assertEqual(code, review.STATES["REVIEW_PASS"])
+        self.assertEqual(json.loads(stdout)["state"], "REVIEW_PASS")
+        self.assertTrue(hung.killed)
+        self.assertEqual(hung.calls[0][1], review.JOURNAL_TIMEOUT_SECONDS)
+        self.assertIn("JOURNAL_WRITE_FAILED", stderr)
+        self.assertIn("append exceeded", stderr)
+
+    def test_short_writes_are_completed_before_success(self):
+        path = self.journal_path()
+        original_write = review.os.write
+        calls = []
+
+        def short_write(fd, data):
+            count = max(1, len(data) // 2)
+            calls.append(count)
+            return original_write(fd, data[:count])
+
+        review.os.write = short_write
+        try:
+            review.append_review_journal(
+                path, "implementation", 1, ["answered"], "REVIEW_PASS",
+                [self.CLAIM])
+        finally:
+            review.os.write = original_write
+        self.assertGreater(len(calls), 1)
+        self.assertEqual(len(self.records()), 1)
+
+    def test_private_modes_remain_private_under_common_umask(self):
+        previous = os.umask(0o022)
+        try:
+            _record, record_path = review.append_review_journal(
+                self.journal_path(), "implementation", 1, ["answered"],
+                "REVIEW_PASS", [self.CLAIM])
+        finally:
+            os.umask(previous)
+
+        self.assertEqual(stat.S_IMODE(record_path.parent.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(record_path.stat().st_mode), 0o600)
+
+    def test_watchdog_is_disarmed_before_journal_persistence(self):
+        events = []
+        review.disarm_watchdog = lambda: events.append("disarmed")
+
+        def record(_args, _completed, _verdict):
+            self.assertEqual(events, ["disarmed"])
+            return {"path": "test", "written": True, "error": None}
+
+        review.record_review_round = record
+        code, stdout, stderr = self.invoke()
+        self.assertEqual(code, review.STATES["REVIEW_PASS"])
+        self.assertEqual(json.loads(stdout)["state"], "REVIEW_PASS")
+        self.assertEqual(stderr, "")
+
+    def test_hard_linked_journal_cannot_modify_a_worktree_file(self):
+        state = REPO.parent / (".review-journal-state-" + self.tmp.name)
+        self.addCleanup(shutil.rmtree, state, ignore_errors=True)
+        os.environ["XDG_STATE_HOME"] = str(state)
+        base = Path(os.environ["XDG_STATE_HOME"])
+        journal = base / review.JOURNAL_DIR / review.JOURNAL_NAME
+        journal.parent.mkdir(parents=True)
+        target = REPO / (".journal-hardlink-target-" + self.tmp.name)
+        self.addCleanup(target.unlink, missing_ok=True)
+        target.write_text("repository bytes\n")
+        before = target.read_bytes()
+        os.link(target, journal)
+
+        code, stdout, stderr = self.invoke()
+
+        self.assertEqual(code, review.STATES["REVIEW_PASS"])
+        self.assertEqual(json.loads(stdout)["state"], "REVIEW_PASS")
+        self.assertIn("JOURNAL_WRITE_FAILED", stderr)
+        self.assertEqual(target.read_bytes(), before)
 
 
 if __name__ == "__main__":
