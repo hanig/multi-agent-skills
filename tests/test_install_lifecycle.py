@@ -182,6 +182,21 @@ class LifecycleTest(unittest.TestCase):
         self.assertFalse(list(target.destination.parent.glob(".alpha.stage-*")))
         self.assertFalse(list(target.destination.parent.glob(".alpha.backup-*")))
 
+    def test_copy_install_and_uninstall_own_nested_reference_files(self):
+        source = self.source()
+        references = source / "references"
+        references.mkdir()
+        (references / "details.md").write_text("installed with the skill\n")
+        target = self.target(source=source)
+
+        self.assertEqual(lifecycle.install([target])[0].status, "installed")
+        installed = target.destination / "references" / "details.md"
+        self.assertEqual(installed.read_text(), "installed with the skill\n")
+
+        self.assertEqual(lifecycle.uninstall([target.destination])[0].status,
+                         "removed")
+        self.assertFalse(target.destination.exists())
+
     def test_concurrent_installs_do_not_share_staging_or_corrupt_payload(self):
         target = self.target()
         with ThreadPoolExecutor(max_workers=2) as workers:
