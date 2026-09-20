@@ -4,6 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Private repository: it carries cluster hostnames, partitions, account names and measured host probes. Do not publish any of it.
 
+If you are driving a run rather than editing this repository, read `docs/orchestrator-mandate.md` first. It is the orchestrator's authority, it is owner-granted by merge rather than by conversation, and a new session must show the owner its enumerated grant and bounds and get confirmation before operating unattended. Until that confirmation you may read, survey, plan, run the gate and report, and you may not dispatch, merge, spend or mutate a tracker.
+
 `MEMORY.md` is a dated snapshot, not live truth. It holds model routing and the reasoning behind the design, and both its counts and its "next" list have gone stale while the code moved: it lists C11, a worktree per code attempt, as owed, and `swarm.py`, `worktree.py` and `tests/test_attempt_worktrees.py` ship it. `docs/plan-field-reports.md` is the live plan. `README.md` is the CLI reference for every skill, with the same caveat on its numbers. Routing truth is the `enabled` flags in `skills/hanig-review-gate/reviewers.json` plus `models.json`, never a roster or count quoted in prose. Verify any owed item against the tree before acting on it.
 
 ## Commands
