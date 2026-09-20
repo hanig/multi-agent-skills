@@ -1,4 +1,10 @@
-"""Size, local-reference, and declared-limit shape of authored skills."""
+"""Size, local-reference, and declaration shape of authored skills.
+
+The local-reference contract is deliberately file-level: relative inline
+Markdown links only, with fragments and queries refused rather than interpreted
+as renderer-specific navigation. Limit records occupy one fence-free body
+section, so example text cannot satisfy their inventory.
+"""
 
 from pathlib import Path
 import re
@@ -35,6 +41,34 @@ SWARM_LIMIT_LABELS = (
     "LIMIT: output-claim registry.",
     "LIMIT: base-branch comparison.",
 )
+SWARM_BEHAVIOR_CLAUSES = (
+    "Report missing Python, Git, scheduler, Paseo, or bus capabilities",
+    "Never infer OpenCode as a supported worker backend",
+    "A unit may not be its own canary",
+    "The container backend and image are declarations; never infer them",
+    "Unsupported or ambiguous isolation profiles are refused",
+    "Never restate a done predicate without its basis clause",
+    "delete the redundant attribution check",
+    "Slurm ownership logic is lifted from `contract.py`; do not edit",
+    "Widening worker credential access requires a deliberately designed proxy",
+    "agent credentials required for those actions are not a defect to re-file",
+    "must rename that claim or migrate its receipt producer",
+    "Branch-local test receipts can never satisfy `integration-tests`",
+    "The coordinator never rewrites `remote.origin.fetch`",
+    "local-only repository is refused before launch",
+    "The base is a commit ID, never a ref",
+    "Paseo `--cwd` names only the trusted source repository",
+    "A misspelled criterion key is refused during validation",
+    "never the writable attempt directory",
+    "never a Paseo schedule",
+    "Do not add a heartbeat, TTL, or lock stealing",
+    "Choose lock topology per host and record it",
+    "Do not replace the Paseo registry checks with a lock",
+    "take identity from the launch intent",
+    "Do not use `sbatch --test-only` start estimates to decide whether to wait",
+    "Test on Python 3.10, not the newest host",
+    "tests/test_record_is_not_authority.py",
+)
 
 
 def _body(path):
@@ -57,30 +91,27 @@ def _local_markdown_targets(body):
             yield target
 
 
-def _heading_fragments(path):
-    fragments = set()
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.startswith("#"):
-            continue
-        heading = line.lstrip("#").strip().casefold()
-        heading = re.sub(r"[^\w -]", "", heading)
-        fragments.add(re.sub(r"\s+", "-", heading))
-    return fragments
-
-
 def _local_reference_problems(doc):
     skill = doc.parent.resolve()
     problems = []
     for target in _local_markdown_targets(_body(doc)):
-        path, _, fragment = target.partition("#")
-        resolved = (skill / path).resolve()
+        if "#" in target or "?" in target:
+            problems.append(f"local link must name a whole file: {target}")
+            continue
+        resolved = (skill / target).resolve()
         if not resolved.is_relative_to(skill):
             problems.append(f"link escapes skill: {target}")
         elif not resolved.is_file():
             problems.append(f"linked file is absent: {target}")
-        elif fragment and fragment not in _heading_fragments(resolved):
-            problems.append(f"linked heading is absent: {target}")
     return problems
+
+
+def _swarm_limit_section(body):
+    lines = body.splitlines()
+    start = lines.index("## Declared limits: meet every one before relying on the system")
+    end = next((index for index in range(start + 1, len(lines))
+                if lines[index].startswith("## ")), len(lines))
+    return lines[start + 1:end]
 
 
 class TestAuthoredSkillShape(unittest.TestCase):
@@ -102,7 +133,7 @@ class TestAuthoredSkillShape(unittest.TestCase):
             with self.subTest(skill=doc.parent.name):
                 self.assertEqual(_local_reference_problems(doc), [])
 
-    def test_a_missing_or_escaping_body_path_is_rejected(self):
+    def test_a_missing_escaping_or_fragmented_body_path_is_rejected(self):
         with tempfile.TemporaryDirectory() as raw:
             skill = Path(raw) / "hanig-example"
             skill.mkdir()
@@ -114,26 +145,38 @@ class TestAuthoredSkillShape(unittest.TestCase):
             doc.write_text(
                 "---\nname: example\n---\n"
                 "[missing](references/missing.md) [escape](../outside.md) "
-                "[heading](references/details.md#absent-heading)\n",
+                "[fragment](references/details.md#present-heading)\n",
                 encoding="utf-8",
             )
             self.assertEqual(
                 _local_reference_problems(doc),
                 ["linked file is absent: references/missing.md",
                  "link escapes skill: ../outside.md",
-                 "linked heading is absent: references/details.md#absent-heading"],
+                 "local link must name a whole file: "
+                 "references/details.md#present-heading"],
             )
 
     def test_every_declared_swarm_limit_remains_in_the_body_with_a_pointer(self):
         doc = SKILLS / "hanig-swarm" / "SKILL.md"
-        limit_lines = [line for line in _body(doc).splitlines()
+        section = _swarm_limit_section(_body(doc))
+        self.assertFalse(any(line.lstrip().startswith(("```", "~~~"))
+                             for line in section),
+                         "declared limits must remain prose, not examples")
+        limit_lines = [line for line in section
                        if line.startswith("- **LIMIT: ")]
         labels = [line.split("**", 2)[1] for line in limit_lines]
         self.assertEqual(set(labels), set(SWARM_LIMIT_LABELS))
         self.assertEqual(len(labels), len(SWARM_LIMIT_LABELS))
         for label, line in zip(labels, limit_lines):
             with self.subTest(limit=label):
-                self.assertIn("](references/limits.md#", line)
+                self.assertIn("](references/limits.md)", line)
+
+    def test_baseline_swarm_behavior_decisions_remain_in_the_body(self):
+        doc = SKILLS / "hanig-swarm" / "SKILL.md"
+        body = " ".join(_body(doc).split())
+        for clause in SWARM_BEHAVIOR_CLAUSES:
+            with self.subTest(clause=clause):
+                self.assertIn(clause, body)
 
 
 if __name__ == "__main__":
