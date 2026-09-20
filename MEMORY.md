@@ -3,6 +3,12 @@
 Portable state for this repo. Written for a fresh session with zero context,
 on any machine.
 
+**If you are taking over as orchestrator, read `docs/handoff-2026-09-20.md`
+first, and `docs/orchestrator-mandate.md` before acting.** The prose sections
+below are dated 2026-09-02 and are stale in ways that matter: the test count,
+and a next-list naming work that has since shipped. The generated facts block
+at the bottom is current; the narrative above it is not.
+
 ## What this is
 
 A set of Claude Code skills for running a swarm of agents against scientific
@@ -105,3 +111,42 @@ found three more the targeted fix would have missed.
 - `docs/tracker-outbox.md` — the outbox and how to write a drain.
 - `docs/scenario-mach1-zebrafish.md` — end-to-end walkthrough. Its multi-cluster DAG is NOT the intended topology; annotated as such.
 - `docs/plan-fusion.md`, `docs/audit-*.md` — prior analyses.
+
+## Generated facts
+
+<!-- handoff:facts:begin sha=6e303ea4333a084a592bd739132046012f1eaae4 -->
+
+**Recent commits** (regenerated in full: no previous marker):
+- `6e303ea Merge pull request #29 from hanig/hanig/orchestrator-plan`
+- `533856e policy: set the orchestrator spend ceiling and scope`
+- `99560fa policy: the orchestrator mandate, and the concurrence rule for overriding a finding`
+- `6b8939c docs: what a handoff from a mortal orchestrator must carry`
+- `2c086de docs: plan for the orchestrator role, from GPT-Astra`
+- `5cf9ab5 Merge pull request #26 from hanig/swarm-94cd6f9014a5a20a`
+- `4d20935 feat: add audit-only review journal`
+- `099fddf chore: preserve review journal attempt`
+- `d143da1 Merge pull request #25 from hanig/hanig/effort-nulls`
+- `d3eb9b3 Merge pull request #24 from hanig/hanig/arc642-pushinsteadof`
+- `10adbdb test: stop the worktree-cleanup test depending on a host paseo`
+- `0e1f67c docs: record why glm-5.3 and kimi-k2.7-code carry a null effort`
+- `07bfb09 fix: anchor the push destination git actually writes to`
+- `bb9e40f fix: pin single-pass remote judgment routes`
+- `91c08e2 fix: judge code agents on terminal events`
+- `dc276bc fix: judge code attempts from anchored remote refs`
+- `90f7c44 wip: preserve ARC-642 review-blocked implementation`
+- `f1ea79a chore: preserve ARC-642 attempt branch`
+- `2eb10f4 Merge pull request #22 from hanig/swarm-2385ffdd697921cd`
+- `b98ab0a Merge pull request #23 from hanig/hanig/promisor-test-premise`
+- `c88a409 fix: make the promisor test establish its own premise`
+- `a3c349f Add versioned tracker drain contract`
+- `a150c65 chore: preserve swarm worktree branch`
+- `eea5d90 Merge pull request #20 from hanig/swarm-e38e56f2b0268969`
+- `fdfdd7d Add candidate-merge integration verification`
+
+**Uncommitted paths** (1):
+- `?? docs/handoff-2026-09-20.md`
+
+**Open contracts** (0):
+- none found under this directory
+
+<!-- handoff:facts:end -->
