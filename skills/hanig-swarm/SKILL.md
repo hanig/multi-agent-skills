@@ -19,6 +19,10 @@ Read the current host's project instructions first. Loading this Markdown does
 not supply Paseo, Slurm, Python, Git, a worker provider, credentials, or
 approvals. Use only capabilities actually present. Never copy credentials or
 weaken coordinator/worker containment to compensate for a missing capability.
+Report missing Python, Git, scheduler, Paseo, or bus capabilities and follow
+the bounded fallback in [capability fallbacks](references/capability-fallbacks.md).
+Never infer OpenCode as a supported worker backend merely because it loaded
+this skill.
 
 Set `HANIG_SWARM_DIR` to the directory containing the `SKILL.md` instance this
 agent loaded. It locates bundled programs only; project, plan, state, input and
@@ -61,6 +65,7 @@ entrypoint: submit-host existence says nothing about a compute node. A canary
 is an ordinary cheap Slurm ancestor that runs the probe through the same
 launcher, partition, and account. Node-local paths, heterogeneous partitions,
 and run-time-built containers require allocation-local `preflight` instead.
+A unit may not be its own canary: the work would already have been dispatched.
 
 ## Unit sizing and retries
 
@@ -104,6 +109,9 @@ It is a **trusted-writer convention, not an OS boundary**: another same-UID
 process can write the root. Receipts and reports state
 `os_enforced_isolation:false` and `attribution_by_observation:false` unless the
 declared container profile was actually applied.
+Never restate a done predicate without its basis clause. If write-root
+isolation already makes a check conclusive, delete the redundant attribution
+check instead of trying to observe which process wrote an artifact.
 
 The artifact-basis premise is mandatory: an output already present at dispatch
 cannot prove production. Before dispatch, the coordinator digests every
@@ -129,6 +137,9 @@ only successful direct container execution writes the marker. That matching
 token plus the pinned wrapper fact is required for
 `os_enforced_isolation:true`; otherwise the unit cannot close by silently
 degrading.
+The container backend and image are declarations; never infer them from names,
+runtime resolution, partitions, or `PATH`. Unsupported or ambiguous isolation
+profiles are refused rather than run with a weaker basis.
 
 ## Authority and closure
 
@@ -137,7 +148,8 @@ facts, artifact bases, produced heads, and receipt provenance live in
 coordinator state outside both the attempt root and operated Git worktree.
 They are pinned per attempt, never inherited from a previous retry. The checker
 returns its decision over an anonymous descriptor; `unit.run` refuses
-`pass_fds` entries below 3.
+`pass_fds` entries below 3. `tests/test_record_is_not_authority.py` pins the
+rule that rewriting `launch.json` changes no judging input.
 
 Closure is fixed by kind. `code` closes only on a merged PR whose head equals
 the head independently judged for the attempt. `slurm` and `pipeline` close on
@@ -154,7 +166,9 @@ unreadable origin or a pre-existing local/remote attempt branch. Judgment
 revalidates the route, fetches only that exact ref with submodules disabled,
 and requires a changed tree descending from the anchored base. Worktree-only
 commits and commits pushed under another ref do not count. The pushed remote
-ref survives Paseo cleanup. A detached watcher best-effort invokes the same
+ref survives Paseo cleanup. The coordinator never rewrites
+`remote.origin.fetch`. An unreachable remote or local-only repository is
+refused before launch. A detached watcher best-effort invokes the same
 locked `advance` path after terminal Paseo state and waits at most 60 seconds
 for its lock; scheduled advance remains the fallback, and `unit.py check`
 remains the only judge.
@@ -185,6 +199,9 @@ target refuses evidence. The receipt binds head, pre-merge target, unique merge
 base, candidate tree, verifier policy, and verifier digest; admission rebuilds
 the candidate. Rebase topology is unavailable. Integration verification
 supplements, never replaces, merged-PR closure.
+An existing policy that used `integration-tests` for an ordinary head-bound
+check must rename that claim or migrate its receipt producer. Branch-local test
+receipts can never satisfy `integration-tests`.
 
 ## Code-attempt isolation
 
@@ -193,6 +210,9 @@ concurrently runnable units, but it confines no process. Each code attempt gets
 its own Paseo branch-off worktree from the immutable recorded base commit.
 `target_branch` names the PR destination; the legacy per-unit `branch` field is
 not a fallback. Concurrent code units need no artificial dependency.
+The base is a commit ID, never a ref. Paseo `--cwd` names only the trusted
+source repository; the agent works in the returned, independently verified
+worktree.
 
 The returned path is accepted only when Git proves it is a linked worktree of
 the trusted source repo at the expected base and generated branch. Coordinator
@@ -209,6 +229,9 @@ worktree matching the complete launch intent after checking Paseo workspace
 and agent registries. Unknown ownership refuses. The remaining same-UID race is
 declared below. Paseo's free-text workspace ID is cleanup bookkeeping only and
 must never decide trust.
+Do not replace the Paseo registry checks with a lock; that only moves the race.
+For any decision about workspace ownership, take identity from the launch
+intent and independently re-derived Git facts, never the parsed workspace ID.
 
 ## Usage
 
@@ -227,7 +250,9 @@ Outputs are relative to the run-dir; a path resolving outside it is refused.
 Move an already queued job in place with
 `scontrol update JobId=187196 Partition=cpu`; cancel-and-redispatch leaves the
 new job id bound to nothing and edits the plan digest, forcing
-`--accept-plan-change`. See [field evidence](references/field-evidence.md#moving-a-queued-job).
+`--accept-plan-change`. See [field evidence](references/field-evidence.md).
+Do not use `sbatch --test-only` start estimates to decide whether to wait; the
+measured estimates were pessimistic. Test on Python 3.10, not the newest host.
 
 ## The three kinds
 
@@ -246,6 +271,8 @@ its scheduler.
 If the surviving coordinator module grows past roughly 300 lines or reacquires
 any check that asks whether a particular command wrote an artifact, stop and
 revisit the design. Isolation, not observed attribution, is the center.
+Slurm ownership logic is lifted from `contract.py`; do not edit the lifted
+logic here independently of its source and closure tests.
 
 ## Convergence gates
 
@@ -265,14 +292,17 @@ convergence. Anything but `CONVERGED` becomes `NEEDS_HUMAN`, closes no ticket,
 releases no dependent, cannot be promoted, and stays out of retries. The block
 is validated before dispatch and is forbidden on `code`. No block preserves
 ordinary behavior.
+Read convergence criteria only from the frozen plan, never the writable attempt
+directory. A misspelled criterion key is refused during validation, not
+defaulted after compute has been spent.
 
 ## Running unattended
 
-Use a deterministic scheduler to call `advance`; do not start a fresh LLM
-agent periodically. These guards are mandatory:
+Use a deterministic scheduler to call `advance`, never a Paseo schedule or a
+fresh periodic LLM agent. These guards are mandatory:
 
 - One coordinator node per plan: advisory `flock` on the state directory; the
-  kernel releases it on death, so there is no heartbeat, TTL, or lock stealing.
+  kernel releases it on death. Do not add a heartbeat, TTL, or lock stealing.
 - `sbatch`/bind crash: attempts have `swarm-<attempt>` names and orphan
   reconciliation consults `squeue`/`sacct` before any resubmit.
 - `INCOMPLETE` settles to terminal `FAILED_EVIDENCE` after 600 seconds and
@@ -287,7 +317,8 @@ agent periodically. These guards are mandatory:
 
 `max_running` and named pools count all live attempts, including attempts from
 earlier invocations. A queued partition fix preserves the existing attempt and
-job binding as described above.
+job binding as described above. Choose lock topology per host and record it;
+network and node-local state have different declared tradeoffs.
 
 ## Credential boundary
 
@@ -299,28 +330,33 @@ Paseo's daemon may independently give provider credentials to a worker, and
 inspect values. `models.json` is routing metadata, not a credential grant;
 `OPENAI_API_KEY` and `OPENROUTER_API_KEY` remain coordinator-side for review
 and committee programs.
+Worker provider authentication is not permission to call further models.
+Widening worker credential access requires a deliberately designed proxy or
+named credential exception; never quietly remove a denied name. A code unit
+must push a branch and open a PR, so agent credentials required for those
+actions are not a defect to re-file.
 
 ## Declared limits: meet every one before relying on the system
 
-- **LIMIT: runtime canary scope.** One node at one time does not establish heterogeneous or node-local runtime availability; use preflight. [Details](references/limits.md#runtime-canary-scope)
-- **LIMIT: trusted-writer isolation.** Exclusive paths prevent accidental collision, not another same-UID writer. [Details](references/limits.md#trusted-writer-isolation)
-- **LIMIT: container isolation scope.** The profile restricts launched host binds, not the Unix principal, network, all descendants, or private scratch. [Details](references/limits.md#container-isolation-scope)
-- **LIMIT: pre-dispatch artifact basis.** Old attempts lack basis; artifacts over 256 MB use size/mtime; byte-identical regeneration is indistinguishable from no production. [Details](references/limits.md#pre-dispatch-artifact-basis)
-- **LIMIT: same-UID authority access.** Same-UID descendants can reach `/proc` or ptrace authority descriptors; separate identities are required to close this. [Details](references/limits.md#same-uid-authority-access)
-- **LIMIT: process-tree quiescence.** No portable barrier proves every Paseo/Slurm descendant is dead; accepted receipts record that limit. [Details](references/limits.md#process-tree-quiescence)
-- **LIMIT: remote-ref durability.** The ref proves durable production on a preselected route, not authorship, correctness, review, merge, future reachability, or protection from another remote writer. [Details](references/limits.md#remote-ref-durability)
-- **LIMIT: verifier corpus boundary.** Only exact declared corpus files are protected; undeclared helpers, generated data, toolchains, and environment remain outside it. [Details](references/limits.md#verifier-corpus-boundary)
-- **LIMIT: integration verification topology.** Conflicts, moved targets, missing objects, ambiguous ancestry, and rebases make integration evidence unavailable. [Details](references/limits.md#integration-verification-topology)
-- **LIMIT: write scopes.** `write_scopes` constrains the plan, not a process's writes. [Details](references/limits.md#write-scopes)
-- **LIMIT: worktree inode identity.** Inodes detect path substitution, not Git-content tampering. [Details](references/limits.md#worktree-inode-identity)
-- **LIMIT: child credentials.** Exact environment filtering does not remove daemon-supplied credentials, files under `HOME`, or unknown names. [Details](references/limits.md#child-credentials)
-- **LIMIT: worktree adoption.** Registry checks reduce accidental adoption but cannot close the same-UID reserve/launch race. [Details](references/limits.md#worktree-adoption)
-- **LIMIT: Paseo workspace ID.** A free-text parsed ID is cleanup bookkeeping and cannot authenticate anything. [Details](references/limits.md#paseo-workspace-id)
-- **LIMIT: pipeline interior.** Only the engine boundary is judged; internal tasks and intermediates are not. [Details](references/limits.md#pipeline-interior)
-- **LIMIT: convergence plateau.** Plateau alone can converge at a bad value; pair it with a threshold when value matters. [Details](references/limits.md#convergence-plateau)
-- **LIMIT: coordinator lock topology.** Same-node `flock` trials do not certify NFS recovery or cross-node exclusion; use one coordinator node per plan. [Details](references/limits.md#coordinator-lock-topology)
-- **LIMIT: output-claim registry.** Claims arbitrate only coordinators sharing one run root, persist beyond coordinator lifetime, and unknown liveness refuses release. [Details](references/limits.md#output-claim-registry)
-- **LIMIT: base-branch comparison.** Green at base and on the feature head says nothing about the eventual merged tree; integration testing is separate. [Details](references/limits.md#base-branch-comparison)
+- **LIMIT: runtime canary scope.** One node at one time does not establish heterogeneous or node-local runtime availability; use preflight. [Details](references/limits.md)
+- **LIMIT: trusted-writer isolation.** Exclusive paths prevent accidental collision, not another same-UID writer. [Details](references/limits.md)
+- **LIMIT: container isolation scope.** The profile restricts launched host binds, not the Unix principal, network, all descendants, or private scratch. [Details](references/limits.md)
+- **LIMIT: pre-dispatch artifact basis.** Old attempts lack basis; artifacts over 256 MB use size/mtime; byte-identical regeneration is indistinguishable from no production. [Details](references/limits.md)
+- **LIMIT: same-UID authority access.** Same-UID descendants can reach `/proc` or ptrace authority descriptors; separate identities are required to close this. [Details](references/limits.md)
+- **LIMIT: process-tree quiescence.** No portable barrier proves every Paseo/Slurm descendant is dead; accepted receipts record that limit. [Details](references/limits.md)
+- **LIMIT: remote-ref durability.** The ref proves durable production on a preselected route, not authorship, correctness, review, merge, future reachability, or protection from another remote writer. [Details](references/limits.md)
+- **LIMIT: verifier corpus boundary.** Only exact declared corpus files are protected; undeclared helpers, generated data, toolchains, and environment remain outside it. [Details](references/limits.md)
+- **LIMIT: integration verification topology.** Conflicts, moved targets, missing objects, ambiguous ancestry, and rebases make integration evidence unavailable. [Details](references/limits.md)
+- **LIMIT: write scopes.** `write_scopes` constrains the plan, not a process's writes. [Details](references/limits.md)
+- **LIMIT: worktree inode identity.** Inodes detect path substitution, not Git-content tampering. [Details](references/limits.md)
+- **LIMIT: child credentials.** Exact environment filtering does not remove daemon-supplied credentials, files under `HOME`, or unknown names. [Details](references/limits.md)
+- **LIMIT: worktree adoption.** Registry checks reduce accidental adoption but cannot close the same-UID reserve/launch race. [Details](references/limits.md)
+- **LIMIT: Paseo workspace ID.** A free-text parsed ID is cleanup bookkeeping and cannot authenticate anything. [Details](references/limits.md)
+- **LIMIT: pipeline interior.** Only the engine boundary is judged; internal tasks and intermediates are not. [Details](references/limits.md)
+- **LIMIT: convergence plateau.** Plateau alone can converge at a bad value; pair it with a threshold when value matters. [Details](references/limits.md)
+- **LIMIT: coordinator lock topology.** Same-node `flock` trials do not certify NFS recovery or cross-node exclusion; use one coordinator node per plan. [Details](references/limits.md)
+- **LIMIT: output-claim registry.** Claims arbitrate only coordinators sharing one run root, persist beyond coordinator lifetime, and unknown liveness refuses release. [Details](references/limits.md)
+- **LIMIT: base-branch comparison.** Green at base and on the feature head says nothing about the eventual merged tree; integration testing is separate. [Details](references/limits.md)
 
 Measured scheduler trials, the first real DAG, cluster memory/partition tables,
 and operational gotchas are in [field evidence](references/field-evidence.md).
