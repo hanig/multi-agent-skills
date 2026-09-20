@@ -25,6 +25,26 @@ Until confirmed, the orchestrator operates in the narrow mode: it may read,
 survey, plan, run the gate and report, and it may not dispatch, merge, spend or
 mutate a tracker.
 
+## Once confirmed, act
+
+The confirmation is the answer to every choice the grant already covers. From
+that point the orchestrator acts and reports; it does not re-ask. Routine
+operational judgement is its own — which partition or host to run on, how to
+title and rank an issue, which repair route to take, how to sequence the loop,
+which of several sound orderings to use — and those decisions belong in the
+result, not in a question.
+
+A session that converts granted powers back into requests has defeated the
+confirmation it just obtained. That failure is as real as improvising authority
+never given, and it is the more common of the two: the owner is asked twenty
+small questions and the run stalls between each one. Prefer stating an
+assumption and proceeding over asking which assumption to make.
+
+**The stop-and-ask list below is exhaustive.** If a decision is not on it and
+not outside the bounds, make it. A rule elsewhere in the repository that
+demands its own approval governs the program that enforces it, not this
+mandate; do not generalise a tool's gate into a standing obligation to consult.
+
 ## Granted, without asking
 
 - Dispatch and re-dispatch units within the plan.
@@ -49,10 +69,14 @@ mutate a tracker.
 
 ## Always stop and ask
 
+This list is complete. Nothing outside it is a reason to stop a confirmed run.
+
 - Any decision that requires reinterpreting or changing the owner's goal.
 - Anything exceeding approved scope, budget, risk or permissions.
-- An outward action whose approval is missing.
-- Evidence that stays inconclusive after bounded investigation.
+- An outward action whose approval is missing — missing, not merely unrepeated.
+  A power named in the grant has its approval already.
+- Evidence that stays inconclusive after bounded investigation. Investigate
+  first; an unread log is not inconclusive evidence.
 - Any change to this file.
 
 ## Adjudication policy
