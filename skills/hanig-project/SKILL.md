@@ -490,6 +490,26 @@ The coordinator records tracker intents as units change state:
 python3 "$S/scripts/swarm.py" outbox --json
 ```
 
+**Drain unprompted, and drain again after every outward action.** The outbox
+is not a queue someone empties when asked. Read it at the start of every
+session, before trusting either the tracker or your own memory of the run, and
+read it again immediately after any push, merge, PR close or adjudication.
+Draining is part of the action, not a follow-up to it.
+
+The failure this prevents is silent and it has happened: on 2026-09-20 a run
+had accumulated **67 unacknowledged intents** spanning every unit in the
+project, because dispatch continued while nothing drained. Four issues sat at
+a state contradicted by coordinator state, two of them reading "In Progress"
+with nothing running and three terminal failed attempts behind them. A tracker
+that lags is not merely out of date: a successor reads it as the record of
+what was adjudicated, and acts on it. In that same run the written account
+claimed two units "produced nothing" when one held a verified 2,232-line
+patch, and re-dispatching on that sentence would have destroyed the work.
+
+Reconcile against what the tracker actually says now, not against what this
+session believes it did. Verify before correcting: a field that looks wrong
+may be right, and a unit reading DONE with a merge receipt behind it is DONE.
+
 In a session with the connector, apply each pending intent to its issue, then
 mark it applied. The rules are not negotiable:
 
