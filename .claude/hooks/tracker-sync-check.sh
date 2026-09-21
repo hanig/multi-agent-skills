@@ -40,29 +40,32 @@ PYEOF
 
 INPUT=$(cat 2>/dev/null)
 
-# Match the command being RUN, not an argument that merely mentions one. A
-# bare substring test fired on things like `gh issue comment` quoting
-# "gh pr merge" inside prose.
+# Detection is deliberately SENSITIVE, not precise, because the costs are not
+# symmetric. A spurious reminder costs one line of context. A missed one costs
+# the tracker sync this hook exists to guarantee. So: substring detection, and
+# wording that never asserts the command actually ran.
+#
+# Two earlier matchers were refuted. A bare `case` substring test fired on
+# prose quoting a command. Replacing it with shlex plus flag-stripping then
+# produced a FALSE NEGATIVE — `gh -R owner/repo pr merge` shifted the
+# subcommand position and silently did not fire — while still false-firing on
+# a trigger inside a quoted argument after a separator. Parsing shell out of a
+# string is the mistake; the fix is to stop claiming precision we cannot have.
 CMD=$(printf '%s' "$INPUT" | python3 -c "
-import json, re, shlex, sys
+import json, re, sys
 try:
     cmd = (json.load(sys.stdin).get('tool_input') or {}).get('command', '')
 except Exception:
     print(''); raise SystemExit
-for part in re.split(r'(?:&&|\|\||;|\||\n)', cmd):
-    try:
-        words = shlex.split(part)
-    except ValueError:
-        words = part.split()
-    words = [w for w in words if not w.startswith('-')]
-    if not words:
-        continue
-    if words[:2] == ['git', 'push']:
-        print('git push'); raise SystemExit
-    if words[:3] in (['gh','pr','merge'], ['gh','pr','close'], ['gh','pr','create']):
-        print(' '.join(words[:3])); raise SystemExit
-    if words[:2] == ['gh', 'issue']:
-        print(' '.join(words[:3])); raise SystemExit
+for label, pat in (
+    ('gh pr merge',  r'\bgh\b.*\bpr\b.*\bmerge\b'),
+    ('gh pr close',  r'\bgh\b.*\bpr\b.*\bclose\b'),
+    ('gh pr create', r'\bgh\b.*\bpr\b.*\bcreate\b'),
+    ('gh issue',     r'\bgh\b.*\bissue\b'),
+    ('git push',     r'\bgit\b.*\bpush\b'),
+):
+    if re.search(pat, cmd):
+        print(label); raise SystemExit
 print('')
 " 2>/dev/null)
 
@@ -121,8 +124,8 @@ PYEOF
 rm -f "$TMP" 2>/dev/null
 
 if [ -z "$REPORT" ]; then
-  emit "TRACKER SYNC CHECK after \`$CMD\`: could not read the outbox at $STATE. Unknown is not zero -- check before assuming Linear is current."
+  emit "TRACKER SYNC CHECK: this tool call looks like \`$CMD\` (matched loosely; it may not have run). Could not read the outbox at $STATE. Unknown is not zero -- check before assuming Linear is current."
 else
-  emit "TRACKER SYNC CHECK after \`$CMD\`: $REPORT. Reflect this action in Linear now; the issue comment is part of the action, not a follow-up. Draining is reconciliation, never replay -- an intent contradicted by current tracker state is escalated, not applied."
+  emit "TRACKER SYNC CHECK: this tool call looks like \`$CMD\` (matched loosely; it may not have run). $REPORT. If it did run, reflect it in Linear now; the issue comment is part of the action, not a follow-up. Draining is reconciliation, never replay -- an intent contradicted by current tracker state is escalated, not applied."
 fi
 exit 0
