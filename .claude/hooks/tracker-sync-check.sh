@@ -24,7 +24,14 @@
 #      hookSpecificOutput.additionalContext, which the harness documents as
 #      "Text injected into model context".
 #
-# It must never block, never hang, and never execute configuration as code.
+# It must never block, never hang, never execute configuration as code, and
+# never go quiet on an outward action it matched.
+#
+# `tests/test_tracker_sync_hook.py` enforces that by running this script the
+# way the harness runs it and asserting on what a consumer receives, not on
+# what the script contains. Five mutations fail it: restoring the bare $HOME
+# default, restoring a silent exit, printing the reminder as plain text,
+# unquoting the hook path in settings.json, and dropping a detection row.
 
 set -u
 
@@ -73,9 +80,34 @@ print('')
 
 [ -n "$CMD" ] || exit 0
 
+# Past this point the command has matched, so this hook is COMMITTED to
+# emitting. Every remaining failure path degrades to a reported unknown and
+# never to a silent exit, because the conditions that would silence this hook
+# are exactly the ones during which the tracker is most likely adrift. Two
+# shipped defects of that class, both found by review:
+#
+#   1. `set -u` with a bare $HOME in the default. With HOME unset the script
+#      died at the assignment with "HOME: unbound variable" -- before any
+#      emit, so the matched outward action produced no reminder at all.
+#   2. Three silent `exit 0`s -- unresolvable state dir, missing repo, mktemp
+#      failure -- each of which also produced no reminder.
+#
+# An emitted unknown is the floor. Do not reintroduce a bare `exit 0` below.
+give_up() {  # $1 = the sentence saying what could not be determined
+  emit "TRACKER SYNC CHECK: this tool call looks like \`$CMD\` (matched loosely; it may not have run). $1 Unknown is not zero -- check Linear before assuming it is current."
+  exit 0
+}
+
 # Configuration is data, never code. No eval, no shell-string assembly.
-REPO="${HANIG_TRACKER_REPO-$HOME/multi-agent-skills}"
-STATE="${HANIG_TRACKER_STATE_DIR-}"
+# Every expansion below carries its own default: `set -u` is on, and an
+# unset variable must degrade to a reported unknown, never to a dead script.
+REPO="${HANIG_TRACKER_REPO:-}"
+if [ -z "$REPO" ]; then
+  HOME_DIR="${HOME:-}"
+  [ -n "$HOME_DIR" ] || give_up "Neither HANIG_TRACKER_REPO nor HOME is set, so the repository could not be located."
+  REPO="$HOME_DIR/multi-agent-skills"
+fi
+STATE="${HANIG_TRACKER_STATE_DIR:-}"
 
 if [ -z "$STATE" ]; then
   STATE=$(python3 - "$REPO" 2>/dev/null <<'PYEOF'
@@ -88,12 +120,12 @@ print(os.path.join(base, "hanig-swarm", "projects", f"{slug}-{digest}", "state")
 PYEOF
 )
 fi
-[ -n "$STATE" ] || exit 0
-[ -d "$REPO" ] || exit 0
+[ -n "$STATE" ] || give_up "Could not derive the coordinator state directory for $REPO."
+[ -d "$REPO" ] || give_up "There is no repository at $REPO."
 
 # Bounded: a hung filesystem must not stall the session. macOS has no
 # coreutils `timeout`, so reap explicitly. Paths are passed as argv.
-TMP=$(mktemp 2>/dev/null) || exit 0
+TMP=$(mktemp 2>/dev/null) || give_up "Could not create a temporary file, so the outbox went unread."
 ( cd "$REPO" && python3 skills/hanig-swarm/scripts/swarm.py outbox \
     --state-dir "$STATE" --json ) > "$TMP" 2>/dev/null &
 PROBE_PID=$!
