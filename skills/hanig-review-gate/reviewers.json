@@ -1,5 +1,5 @@
 {
- "_comment": "Routing config only — endpoint, model id, reasoning effort, profile membership. Carries NO quality scores: a stale ranking is worse than none. Availability is MEASURED by `review.py --list`, which probes each provider live; a key being set is not availability. All reviewers use DEFAULT_MAX_OUTPUT_TOKENS (64000) unless they set max_output_tokens: reasoning tokens come out of the answer's budget, and at 16000 a large review returned no content at all. Prices in _cost are per million tokens as listed 2026-08-25 and are a budgeting hint, not a routing input.",
+ "_comment": "Routing config only \u2014 endpoint, model id, reasoning effort, profile membership. Carries NO quality scores: a stale ranking is worse than none. Availability is MEASURED by `review.py --list`, which probes each provider live; a key being set is not availability. All reviewers use DEFAULT_MAX_OUTPUT_TOKENS (64000) unless they set max_output_tokens: reasoning tokens come out of the answer's budget, and at 16000 a large review returned no content at all. Prices in _cost are per million tokens as listed 2026-08-25 and are a budgeting hint, not a routing input.",
  "default_profile": "standard",
  "_profiles": {
   "plan": "TWO contrasting models, never escalated. For acceptance criteria and designs, BEFORE code exists. A third reviewer adds agreement, not insight.",
@@ -21,7 +21,9 @@
    "_cost": {
     "in": 0.87,
     "out": 1.74
-   }
+   },
+   "max_output_tokens": 128000,
+   "_max_output_tokens": "Raised pre-emptively with the sibling sweep for ARC-689. Not yet observed starving, but it shares the one global default that starved glm-5.3 and kimi-k2.7-code, and reasoning tokens come out of the answer's budget for every reviewer here."
   },
   {
    "name": "luna",
@@ -39,7 +41,9 @@
    "_cost": {
     "in": 0.2,
     "out": 1.2
-   }
+   },
+   "max_output_tokens": 128000,
+   "_max_output_tokens": "Raised pre-emptively with the sibling sweep for ARC-689. Not yet observed starving, but it shares the one global default that starved glm-5.3 and kimi-k2.7-code, and reasoning tokens come out of the answer's budget for every reviewer here."
   },
   {
    "name": "kimi-k2.7-code",
@@ -58,7 +62,9 @@
     "in": 0.67,
     "out": 3.4
    },
-   "_effort": "null is measured, not forgotten; see _effort_null_is_deliberate"
+   "_effort": "null is measured, not forgotten; see _effort_null_is_deliberate",
+   "max_output_tokens": 128000,
+   "_max_output_tokens": "MEASURED. Starved at the 64000 shared default: returned no content after 41364 reasoning tokens in one round and exhausted the full budget in the next, so two consecutive rounds of one unit reached quorum with two reviewers instead of three while appearing to run three. Same defect as glm-5.3 (ARC-689); raising glm alone and not sweeping the siblings let it keep degrading quorum silently."
   },
   {
    "name": "astra",
@@ -68,7 +74,9 @@
    "profiles": [
     "deep"
    ],
-   "enabled": true
+   "enabled": true,
+   "max_output_tokens": 128000,
+   "_max_output_tokens": "Raised pre-emptively with the sibling sweep for ARC-689. Not yet observed starving, but it shares the one global default that starved glm-5.3 and kimi-k2.7-code, and reasoning tokens come out of the answer's budget for every reviewer here."
   },
   {
    "name": "sol",
