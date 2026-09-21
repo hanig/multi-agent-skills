@@ -490,27 +490,68 @@ The coordinator records tracker intents as units change state:
 python3 "$S/scripts/swarm.py" outbox --json
 ```
 
-**Drain unprompted, and drain again after every outward action.** The outbox
-is not a queue someone empties when asked. Read it at the start of every
-session, before trusting either the tracker or your own memory of the run, and
-read it again immediately after any push, merge, PR close or adjudication.
-Draining is part of the action, not a follow-up to it.
+**Read the outbox unprompted, and read it again after every outward action.**
+Read it at the start of every session, before trusting either the tracker or
+your own memory of the run, and again after any push, merge, PR close or
+adjudication.
 
 The failure this prevents is silent and it has happened: on 2026-09-20 a run
 had accumulated **67 unacknowledged intents** spanning every unit in the
-project, because dispatch continued while nothing drained. Four issues sat at
-a state contradicted by coordinator state, two of them reading "In Progress"
-with nothing running and three terminal failed attempts behind them. A tracker
-that lags is not merely out of date: a successor reads it as the record of
-what was adjudicated, and acts on it. In that same run the written account
-claimed two units "produced nothing" when one held a verified 2,232-line
-patch, and re-dispatching on that sentence would have destroyed the work.
+project, because dispatch continued while nothing drained. A tracker that lags
+is not merely out of date — a successor reads it as the record of what was
+adjudicated, and acts on it. In that same run the written account claimed two
+units "produced nothing" when one held a verified 2,232-line patch, and
+re-dispatching on that sentence would have destroyed the work.
 
-Reconcile against what the tracker actually says now, not against what this
-session believes it did. Verify before correcting: a field that looks wrong
-may be right, and a unit reading DONE with a merge receipt behind it is DONE.
+Reading is always safe. **Applying is not**, and the two must not be confused.
 
-In a session with the connector, apply each pending intent to its issue, then
+### Do not apply a lifecycle intent
+
+A `start` or non-terminal `block` records what the coordinator believed when
+it queued the intent. By the time a drainer sees it the tracker may have
+moved, and applying it then is not an update but a regression: a stale `start`
+on a unit the tracker already shows DONE resets a finished unit and invites a
+second dispatch on merged code.
+
+A check-then-apply guard does not fix this, because the check and the write
+are not atomic. Review found that, and a step-back committee (deepseek-v4-pro,
+luna, kimi-k2.7-code, 2026-09-20) reached the same conclusion independently:
+lifecycle intents are issued as unconditional commands when they are really
+conditional observations, and the connector offers no compare-and-set, no
+if-match revision and no monotonic transition to make them safe.
+
+So lifecycle intents are read and recorded, never applied. They are audit, not
+command. Dispatch never reads tracker status as authority, so this costs
+visibility, not correctness: `swarm.py status` is where "what is running" is
+answered, and coordinator state remains the only authority.
+
+### A terminal intent that conflicts is escalated, not quietly deferred
+
+Terminal intents (`close`, and a `block` the coordinator's state machine
+defines as terminal) carry coordinator authority, and their evidence rules are
+unchanged: a `code` unit still closes only on a merged pull request whose head
+equals the head the coordinator judged the attempt to have produced.
+
+If the tracker's current state contradicts one — most sharply, a `close`
+backed by a merged PR against an issue someone has since Canceled — **do not
+resolve it either way.** Applying it overwrites a human decision; dropping it
+leaves a real merge unrecorded. Report it to a person, naming the unit, the
+merge evidence and the conflicting tracker state, and leave the intent
+unacknowledged until they decide.
+
+**This is a declared limit, not a solved problem.** Nothing here makes a
+conflicting terminal intent resolve on its own, and a drain cannot promise
+that every merge reaches the tracker. What it can promise is that no conflict
+is settled silently. The mechanism that would fix it — a conditional update,
+or a coordinator-side compare-and-apply — is ARC-678 and ARC-679.
+
+Of the 67 intents drained on 2026-09-20, 17 were left unacknowledged: five
+`block` verbs with no terminal end state, and twelve whose issue no longer
+satisfies them. An unacknowledged intent means only that this machine has no
+receipt either way. Re-draining is safe; un-reverting a wrongly applied
+mutation is not.
+
+In a session with the connector, apply each pending TERMINAL intent to its issue, then
 mark it applied. The rules are not negotiable:
 
 - **Nothing closes on a self-report.** A `close` intent carries the unit's
