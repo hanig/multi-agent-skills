@@ -510,6 +510,20 @@ Reconcile against what the tracker actually says now, not against what this
 session believes it did. Verify before correcting: a field that looks wrong
 may be right, and a unit reading DONE with a merge receipt behind it is DONE.
 
+**Draining is reconciliation, not replay.** An intent records what was true
+when the coordinator queued it, and the tracker may have moved since. Before
+applying one, check that the tracker's current state does not already
+contradict it. A `start` intent for a unit the tracker shows DONE behind a
+merge commit must NOT be applied: doing so resets a finished unit to
+in-progress and invites a second dispatch on top of merged code. Leave such an
+intent unacknowledged and say why. That is not a failure to drain — an
+unacknowledged intent means only that this machine has no receipt either way,
+and re-draining is safe while un-reverting a wrongly applied mutation is not.
+
+Of the 67 intents drained on 2026-09-20, 17 were deliberately left
+unacknowledged on exactly this ground: five `block` verbs with no tracker end
+state to read back, and twelve whose issue no longer satisfies them.
+
 In a session with the connector, apply each pending intent to its issue, then
 mark it applied. The rules are not negotiable:
 
