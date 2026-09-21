@@ -110,6 +110,13 @@ runs.
 
 `--round N`, refused past `MAX_ROUNDS = 3`.
 
+Past three rounds the choice is NOT merge-or-abandon. `SKILL.md` states the
+third path and this file did not, which cost one orchestrator a wrong framing:
+**after 3 rounds without convergence, start fresh — new reviewers, full history
+of what was tried.** A fresh cycle is legitimate only when the mechanism
+changed or the history travels with it; restarting the counter on the same
+change with the same design is a dishonest round 4.
+
 **Step back when round N+1 finds a defect in round N's fix.** Not at N+3. One
 session ran five rounds where rounds 3, 4 and 5 each found a defect in the
 previous round's fix: an annotation hatch, then a bypass of the hatch, then a
