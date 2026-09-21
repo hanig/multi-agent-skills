@@ -549,6 +549,34 @@ Of the 67 intents drained on 2026-09-20, 17 were left unacknowledged on these
 grounds: five `block` verbs with no terminal end state, and twelve whose issue
 no longer satisfies them.
 
+### The alarm is pending TERMINAL intents, and deferral is never abandonment
+
+Two consequences follow, and missing either one turns this rule back into the
+failure it replaces.
+
+**A deferred terminal intent is re-driven on the next drain, always.** Defer
+means "not yet", never "dropped". A `close` that was deferred because the
+issue moved is retried at the next drain and every drain after, until it is
+applied or a person decides otherwise. Nothing in this section permits a
+merge to go unrecorded: that is the harm the whole step exists to prevent.
+
+**Count the alarm over terminal intents only.** Lifecycle intents stay
+unacknowledged by design now, so a raw pending count grows forever and stops
+meaning anything — which would destroy the very signal that exposed the
+2026-09-20 backlog. The number that matters is **pending terminal intents**,
+and it should be zero after a drain. Lifecycle intents are excluded from it
+by policy, not by oversight.
+
+**Declared limit.** The outbox has no disposition meaning "retired by policy,
+never applied". Its outcomes are `operation_accepted`,
+`asynchronously_completed`, `confirmed_by_readback` and `unknown`, and using
+any of them for an intent that was deliberately never applied would be a
+false acknowledgment — strictly worse than a missing one. So lifecycle
+intents accumulate in the unacknowledged set with no retirement path. That is
+a known gap in the schema, not a licence to fake a receipt, and it is why the
+alarm is defined over terminal intents until the schema gains a retirement
+outcome.
+
 Dispatch never reads tracker status as authority, so a tracker that lags on
 lifecycle costs visibility, not correctness. Coordinator state remains the
 only authority, and `swarm.py status` is where "what is running" is answered.
