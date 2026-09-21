@@ -117,6 +117,18 @@ of what was tried.** A fresh cycle is legitimate only when the mechanism
 changed or the history travels with it; restarting the counter on the same
 change with the same design is a dishonest round 4.
 
+**Nothing enforces that distinction.** `review.py` counts the `--round` you
+pass and refuses past three; it cannot tell a legitimate fresh cycle from a
+relabelled fourth round, and the audit journal records the round number you
+declared rather than deriving it. So this is a rule you keep, not one the
+program keeps for you — which is exactly the weakness this repository warns
+about, stated here rather than left for a reader to discover.
+
+What would close it: the journal already records `claim_digests` per round, so
+a gate could refuse `--round 1` when a recent record carries overlapping
+digests unless the invocation explicitly declares the prior history it
+carries. That is unbuilt.
+
 **Step back when round N+1 finds a defect in round N's fix.** Not at N+3. One
 session ran five rounds where rounds 3, 4 and 5 each found a defect in the
 previous round's fix: an annotation hatch, then a bypass of the hatch, then a
