@@ -23,7 +23,8 @@
     "out": 1.74
    },
    "max_output_tokens": 128000,
-   "_max_output_tokens": "Raised pre-emptively with the sibling sweep for ARC-689. Not yet observed starving, but it shares the one global default that starved glm-5.3 and kimi-k2.7-code, and reasoning tokens come out of the answer's budget for every reviewer here."
+   "_max_output_tokens": "PRE-EMPTIVE, not measured as starving. Raised with the sibling sweep for ARC-689 rather than after its own incident, because the shared 64000 default is what starved glm-5.3 and kimi-k2.7-code and leaving a reviewer on it is what let the defect recur. That the provider ACCEPTS 128000 is measured; see _max_output_tokens_accepted.",
+   "_max_output_tokens_accepted": "2026-09-21: completed a real committee request at 128000 (openrouter, deepseek/deepseek-v4-pro), hook-substrate-32 phase 1."
   },
   {
    "name": "luna",
@@ -43,7 +44,8 @@
     "out": 1.2
    },
    "max_output_tokens": 128000,
-   "_max_output_tokens": "Raised pre-emptively with the sibling sweep for ARC-689. Not yet observed starving, but it shares the one global default that starved glm-5.3 and kimi-k2.7-code, and reasoning tokens come out of the answer's budget for every reviewer here."
+   "_max_output_tokens": "PRE-EMPTIVE, not measured as starving. Raised with the sibling sweep for ARC-689 rather than after its own incident, because the shared 64000 default is what starved glm-5.3 and kimi-k2.7-code and leaving a reviewer on it is what let the defect recur. That the provider ACCEPTS 128000 is measured; see _max_output_tokens_accepted.",
+   "_max_output_tokens_accepted": "2026-09-21: completed a real gate request at 128000 (openai /v1/responses, gpt-5.6-luna), 9713 output tokens, PR #39 round 1."
   },
   {
    "name": "kimi-k2.7-code",
@@ -64,7 +66,8 @@
    },
    "_effort": "null is measured, not forgotten; see _effort_null_is_deliberate",
    "max_output_tokens": 128000,
-   "_max_output_tokens": "MEASURED. Starved at the 64000 shared default: returned no content after 41364 reasoning tokens in one round and exhausted the full budget in the next, so two consecutive rounds of one unit reached quorum with two reviewers instead of three while appearing to run three. Same defect as glm-5.3 (ARC-689); raising glm alone and not sweeping the siblings let it keep degrading quorum silently."
+   "_max_output_tokens": "MEASURED. Starved at the 64000 shared default: returned no content after 41364 reasoning tokens in one round and exhausted the full budget in the next, so two consecutive rounds of one unit reached quorum with two reviewers instead of three while appearing to run three. Same defect as glm-5.3 (ARC-689); raising glm alone and not sweeping the siblings let it keep degrading quorum silently.",
+   "_max_output_tokens_accepted": "2026-09-21: completed a real gate request at 128000 (openrouter, moonshotai/kimi-k2.7-code), 22922 output tokens, PR #39 round 1."
   },
   {
    "name": "astra",
@@ -76,7 +79,8 @@
    ],
    "enabled": true,
    "max_output_tokens": 128000,
-   "_max_output_tokens": "Raised pre-emptively with the sibling sweep for ARC-689. Not yet observed starving, but it shares the one global default that starved glm-5.3 and kimi-k2.7-code, and reasoning tokens come out of the answer's budget for every reviewer here."
+   "_max_output_tokens": "PRE-EMPTIVE, not measured as starving. Raised with the sibling sweep for ARC-689 rather than after its own incident, because the shared 64000 default is what starved glm-5.3 and kimi-k2.7-code and leaving a reviewer on it is what let the defect recur. That the provider ACCEPTS 128000 is measured; see _max_output_tokens_accepted.",
+   "_max_output_tokens_accepted": "2026-09-21: completed a real committee request at 128000 (openai /v1/responses, gpt-6-astra), hook-substrate-32 phase 1. committee.py reads the same max_output_tokens."
   },
   {
    "name": "sol",
@@ -126,8 +130,10 @@
     "in": 1.4,
     "out": 4.4
    },
-   "_effort": "null is measured, not forgotten; see _effort_null_is_deliberate"
+   "_effort": "null is measured, not forgotten; see _effort_null_is_deliberate",
+   "_max_output_tokens_accepted": "2026-09-21: completed a real gate request at 128000 (openrouter, z-ai/glm-5.3), 34267 output tokens, PR #41 round 1."
   }
  ],
- "_effort_null_is_deliberate": "Measured 2026-09-19, three samples per cell against a real 120-line diff at a 16000 cap: glm-5.3 at effort=high burned the ENTIRE budget on reasoning and returned zero characters in 3 of 3 samples, at effort=low in 2 of 3, and at effort=null returned a 4581-character review for $0.016 in 3 of 3. kimi-k2.7-code spends ~12k completion tokens at every level, so effort changes nothing but price: high cost 83% more and returned slightly LESS answer. A null effort here is therefore deliberate and load-bearing, not an omission. Setting one on either reviewer makes the gate pay more for less, and on glm-5.3 for nothing at all."
+ "_effort_null_is_deliberate": "Measured 2026-09-19, three samples per cell against a real 120-line diff at a 16000 cap: glm-5.3 at effort=high burned the ENTIRE budget on reasoning and returned zero characters in 3 of 3 samples, at effort=low in 2 of 3, and at effort=null returned a 4581-character review for $0.016 in 3 of 3. kimi-k2.7-code spends ~12k completion tokens at every level, so effort changes nothing but price: high cost 83% more and returned slightly LESS answer. A null effort here is therefore deliberate and load-bearing, not an omission. Setting one on either reviewer makes the gate pay more for less, and on glm-5.3 for nothing at all.",
+ "_output_budget_rule": "Every ENABLED reviewer must declare max_output_tokens explicitly and must carry a dated _max_output_tokens_accepted record naming the real request that completed at that value. tests/test_reviewer_budgets.py enforces both. The rule exists because the 64000 shared default is not a safe default for a reasoning model -- it silently starved glm-5.3 and then kimi-k2.7-code, and a starved reviewer is counted as present, so a round reaches quorum with two while the log presents three (ARC-689). Inheriting the default is therefore not permitted for an enabled reviewer, which is why sol and kimi-k3 must be measured before they are re-enabled rather than switched on at a value nothing has tried."
 }
