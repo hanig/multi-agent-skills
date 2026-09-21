@@ -106,11 +106,13 @@
    "provider": "openrouter",
    "model": "z-ai/glm-5.3",
    "effort": null,
+   "max_output_tokens": 128000,
    "profiles": [
     "deep",
     "standard"
    ],
    "enabled": true,
+   "_max_output_tokens": "MEASURED. At the 64000 default this model returned finish_reason=length with no content, degrading the round to REVIEW_PARTIAL (ARC-689). review.py reported completion_tokens=64000 against reasoning_tokens=64005: the cap bound and essentially all of it went to reasoning, the 5-token excess being the provider's two counters disagreeing rather than reasoning escaping the cap. At 128000 the same 138KB range returned 42211 tokens with a substantive finding. effort is null and it still reasons, so the budget is the only lever here.",
    "_note": "1M context, so it does not need the >100KB review split. glm-5.2 is marginally cheaper (1.19/3.74) with the same context if cost matters more than recency.",
    "_cost": {
     "in": 1.4,

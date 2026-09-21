@@ -1803,7 +1803,12 @@ class TestReviewJournal(unittest.TestCase):
     CLAIM = "This change cannot make an honest run fail."
 
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
+        # macOS commonly returns a lexical /var/... temporary path even
+        # though /var is a symlink to /private/var.  These success-path tests
+        # must not accidentally exercise the deliberate symlink refusal in
+        # _open_directory_chain; the dedicated symlink tests below construct
+        # the component whose refusal they assert.
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.saved = {
             "argv": sys.argv,
