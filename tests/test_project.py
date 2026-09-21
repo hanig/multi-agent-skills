@@ -3036,7 +3036,8 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
         self.assertNotIn("while ($got == -1 && $! == EINTR)", src)
         self.assertNotIn("while ($last == -1 && $! == EINTR)", src)
         self.assertIn("elsif ($got == -1 && $poll_errno_number != EINTR", src)
-        self.assertIn("unless defined $cleanup_deadline", src)
+        self.assertEqual(src.count("unless defined $cleanup_deadline"), 4,
+                         "every later cleanup assignment must preserve first")
         self.assertIn('answer("supervisor-error", 127, $wait_error)', src)
         self.assertIn("unless ($direct_reaped || defined $cleanup_deadline)",
                       src)
@@ -3347,60 +3348,148 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
                         os.killpg(proc.pid, signal.SIGKILL)
                         proc.communicate()
 
-    def test_near_deadline_interrupt_keeps_its_first_cleanup_deadline(self):
-        """An interrupt within one reap interval of the run deadline arms
-        cleanup first. Crossing the run deadline may latch TIMED_OUT, but must
-        not replace that earlier absolute cleanup deadline with timeout grace."""
-        with tempfile.TemporaryDirectory() as d:
-            leader_file = Path(d) / "leader.pid"
-            script = Path(d) / "ignore-term"
-            script.write_text(
-                "#!/bin/sh\n"
-                "trap '' HUP INT TERM\n"
-                "printf '%s' \"$$\" >" + str(leader_file) + "\n"
-                "while :; do :; done\n")
-            script.chmod(0o755)
-            proc = subprocess.Popen(
-                [shutil.which("perl"), "-e", self._supervisor_source(),
-                 "4", "2", str(script)], stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, text=True, start_new_session=True)
-            leader = None
-            try:
-                deadline = time.monotonic() + 3
-                while time.monotonic() < deadline:
-                    if leader_file.exists():
-                        leader = int(leader_file.read_text())
-                        break
-                    time.sleep(0.02)
-                else:
-                    self.fail("signal-ignoring probe did not start")
+    def test_timeout_transition_preserves_armed_cleanup_deadline(self):
+        """Execute the shipped timeout transition with deterministic state.
 
-                # Signal 1.5 seconds before the run deadline: its two-second
-                # grace expires about 2 seconds from here. The faulty timeout
-                # overwrite instead returns about 3.5 seconds from here.
-                time.sleep(2.5)
-                started = time.monotonic()
+        The structural check above keeps the guard reviewable.  This check
+        executes that exact Perl block twice: an armed cleanup deadline must
+        survive timeout, while an unarmed deadline must take timeout grace.
+        It distinguishes the reset mutation without observing wall time.
+        """
+        source = self._supervisor_source()
+        start_anchor = (
+            'if ($state eq "RUNNING" && !$wait_error '
+            '&& $now >= $run_deadline)')
+        end_anchor = "\n\n    unless ($direct_reaped || defined $cleanup_deadline)"
+        self.assertEqual(source.count(start_anchor), 1)
+        self.assertEqual(source.count(end_anchor), 1)
+        start = source.index(start_anchor)
+        end = source.index(end_anchor, start)
+        transition = source[start:end]
+
+        def run_transition(cleanup):
+            declaration = ("my $cleanup_deadline = %d;" % cleanup
+                           if cleanup is not None
+                           else "my $cleanup_deadline;")
+            driver = (
+                "use strict; use warnings;\n"
+                "my $state = 'RUNNING'; my $wait_error = '';\n"
+                "my $now = 20; my $run_deadline = 10;\n"
+                "my $grace_deadline = 22; my $active_pid = 0;\n" +
+                declaration + "\n" + transition + "\n" +
+                "print qq{$state\\n$cleanup_deadline\\n};\n")
+            return subprocess.run(
+                [shutil.which("perl"), "-e", driver],
+                capture_output=True, text=True)
+
+        armed = run_transition(11)
+        self.assertEqual(armed.returncode, 0, armed.stderr)
+        self.assertEqual(armed.stdout.splitlines(), ["TIMED_OUT", "11"])
+
+        unarmed = run_transition(None)
+        self.assertEqual(unarmed.returncode, 0, unarmed.stderr)
+        self.assertEqual(unarmed.stdout.splitlines(), ["TIMED_OUT", "22"])
+
+    def test_delayed_interrupt_kills_group_without_wall_clock_or_pid_oracle(self):
+        """Real SIGTERM and EOF prove group effect despite scheduler delay.
+
+        A test-only barrier in the exact extracted supervisor holds its loop
+        while the TERM-ignoring group becomes ready and while the Python
+        observer pauses for five seconds.  No elapsed bound judges the product;
+        the deterministic transition test separately proves deadline choice.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            script = Path(d) / "ignore-term"
+            read_fd, write_fd = os.pipe()
+            barrier_read, barrier_write = os.pipe()
+            leader = None
+            proc = None
+            try:
+                script.write_text(
+                    "#!/bin/sh\n"
+                    "trap '' HUP INT TERM\n"
+                    # This alone exceeded the rejected readiness precondition.
+                    "/bin/sleep 3.2\n"
+                    "(trap '' HUP INT TERM; "
+                    "printf 'W\\n' >&" + str(write_fd) + "; "
+                    "exec /bin/sleep 600) &\n"
+                    "printf 'L %s\\n' \"$$\" >&" + str(write_fd) + "\n"
+                    "exec /bin/sleep 600\n")
+                script.chmod(0o755)
+
+                source = self._supervisor_source()
+                loop_anchor = "while (1) {\n    drain();"
+                self.assertEqual(source.count(loop_anchor), 1)
+                barrier = (
+                    "open(my $test_barrier, q(<&=), "
+                    "$ENV{HANIG_TEST_BARRIER_FD})\n"
+                    "    or answer(q(unknown), 127, q(test barrier open));\n"
+                    "my $test_release = q();\n"
+                    "while (!length($test_release)) {\n"
+                    "    my $n = sysread($test_barrier, $test_release, 1);\n"
+                    "    next if !defined($n) && $! == EINTR;\n"
+                    "    answer(q(unknown), 127, q(test barrier read))\n"
+                    "        unless defined($n) && $n > 0;\n"
+                    "}\n"
+                    "close $test_barrier;\n")
+                source = source.replace(loop_anchor, barrier + loop_anchor)
+                env = os.environ.copy()
+                env["HANIG_TEST_BARRIER_FD"] = str(barrier_read)
+                proc = subprocess.Popen(
+                    [shutil.which("perl"), "-e", source,
+                     "3", "2", str(script)],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                    start_new_session=True,
+                    pass_fds=(write_fd, barrier_read), env=env)
+                os.close(write_fd)
+                write_fd = None
+                os.close(barrier_read)
+                barrier_read = None
+
+                ready = b""
+                match = None
+                while b"W\n" not in ready or match is None:
+                    chunk = os.read(read_fd, 4096)
+                    self.assertNotEqual(
+                        chunk, b"", "group witness exited before readiness")
+                    ready += chunk
+                    match = re.search(rb"(?:^|\n)L ([0-9]+)\n", ready)
+                leader = int(match.group(1))
+
                 os.kill(proc.pid, signal.SIGTERM)
-                out, err = proc.communicate(timeout=3)
-                elapsed = time.monotonic() - started
-                self.assertGreaterEqual(elapsed, 1.7)
-                self.assertLess(elapsed, 2.7,
-                                "timeout moved the interruption deadline")
+                # Simulate the observer being descheduled after real delivery.
+                # A pause may delay observation, never change the assertion.
+                time.sleep(5)
+                os.write(barrier_write, b"R")
+                os.close(barrier_write)
+                barrier_write = None
+
+                out, err = proc.communicate()
                 self.assertEqual(proc.returncode, 0, err)
                 self.assertEqual(out.splitlines()[:2],
                                  ["supervisor-error", "127"])
                 self.assertIn("interrupted by SIGTERM", out)
-                with self.assertRaises(ProcessLookupError):
-                    os.kill(leader, 0)
+                self.assertEqual(
+                    os.read(read_fd, 1), b"",
+                    "negative-PGID KILL did not terminate the group witness")
             finally:
-                if leader is not None:
-                    try:
-                        os.kill(-leader, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                if proc.poll() is None:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                    proc.communicate()
+                try:
+                    if leader is not None:
+                        try:
+                            os.kill(-leader, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    if proc is not None and proc.poll() is None:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                        proc.communicate()
+                finally:
+                    os.close(read_fd)
+                    if write_fd is not None:
+                        os.close(write_fd)
+                    if barrier_read is not None:
+                        os.close(barrier_read)
+                    if barrier_write is not None:
+                        os.close(barrier_write)
 
     def test_timeout_does_not_wait_for_a_descendant_that_calls_setsid(self):
         """Arbitrary-grandchild quiescence is outside the declared boundary.
