@@ -51,6 +51,8 @@ INPUT=$(cat 2>/dev/null)
 # subcommand position and silently did not fire — while still false-firing on
 # a trigger inside a quoted argument after a separator. Parsing shell out of a
 # string is the mistake; the fix is to stop claiming precision we cannot have.
+# A third refutation: without re.S the patterns did not cross a backslash-newline
+# continuation, so a wrapped `gh --repo X \\<newline> pr merge` silently missed.
 CMD=$(printf '%s' "$INPUT" | python3 -c "
 import json, re, sys
 try:
@@ -64,7 +66,7 @@ for label, pat in (
     ('gh issue',     r'\bgh\b.*\bissue\b'),
     ('git push',     r'\bgit\b.*\bpush\b'),
 ):
-    if re.search(pat, cmd):
+    if re.search(pat, cmd, re.S):   # re.S: a backslash-newline continuation still reads as one command
         print(label); raise SystemExit
 print('')
 " 2>/dev/null)
