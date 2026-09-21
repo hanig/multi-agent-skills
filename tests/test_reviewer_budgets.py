@@ -94,6 +94,22 @@ class ReviewerOutputBudgets(unittest.TestCase):
                     "%s's acceptance record does not name the provider the "
                     "request went to" % reviewer["name"],
                 )
+                # Acceptance is per model, not per value or per provider.
+                # 128000 completing for gpt-6-astra says nothing about
+                # gpt-5.6-sol, and a record that names neither the model nor
+                # a completion is a date with a number after it.
+                self.assertIn(
+                    reviewer["model"], record,
+                    "%s's acceptance record does not name the model it was "
+                    "measured on (%s); a value accepted by one model on a "
+                    "provider is not evidence for another"
+                    % (reviewer["name"], reviewer["model"]),
+                )
+                self.assertIn(
+                    "completed", record,
+                    "%s's acceptance record must say what completed, not "
+                    "merely assert a value: %r" % (reviewer["name"], record),
+                )
 
     def test_a_declared_budget_explains_itself(self):
         """Measured or pre-emptive, the file has to say which.
