@@ -5,8 +5,9 @@ shipped a defect that made it a no-op: it printed its reminder to stdout and
 exited 0, which the harness shows only in transcript mode, so nothing it ever
 produced reached the model. The logic was right and the guard was hollow.
 
-So these tests do not read the script. They run it the way the harness runs
-it -- JSON on stdin -- and assert on what a consumer receives: a single JSON
+So these tests do not read the script. They run the command `settings.json`
+configures, through a shell, the way the harness runs it -- JSON on stdin --
+and assert on what a consumer receives: a single JSON
 object carrying `hookSpecificOutput.additionalContext`, which is the only
 shape that is injected into the model's context. A reminder printed as plain
 text passes every test that inspects the script's logic and fails these.
@@ -18,8 +19,30 @@ import subprocess
 import unittest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-HOOK = os.path.join(REPO_ROOT, ".claude", "hooks", "tracker-sync-check.sh")
 SETTINGS = os.path.join(REPO_ROOT, ".claude", "settings.json")
+HOOK = os.path.join(REPO_ROOT, ".claude", "hooks", "tracker-sync-check.sh")
+
+
+def wired_commands():
+    """The PostToolUse commands settings.json actually configures.
+
+    The tests below run THESE rather than naming an implementation file, so
+    the contract stays pinned to what the harness executes. A step-back
+    committee (astra, deepseek-v4-pro) asked for exactly this: the hook is a
+    shell script today and the same committee recommended porting it to
+    Python, and a test that hardcodes `bash <path>` would have to be edited
+    to let that port pass -- which is a test the change under review gets to
+    rewrite.
+    """
+    with open(SETTINGS) as handle:
+        settings = json.load(handle)
+    entries = (settings.get("hooks") or {}).get("PostToolUse") or []
+    return [
+        hook.get("command", "")
+        for entry in entries
+        for hook in (entry.get("hooks") or [])
+        if "tracker-sync" in hook.get("command", "")
+    ]
 
 # Commands that change a PR or an issue. Detection is deliberately loose, so
 # these are representative spellings rather than an exhaustive grammar.
@@ -48,8 +71,15 @@ def run_hook(command, env_overrides=None, timeout=60):
         "tool_name": "Bash",
         "tool_input": {"command": command},
     })
+    # Exactly how the harness invokes it: the configured command string,
+    # through a shell, with CLAUDE_PROJECT_DIR pointing at the project.
+    commands = wired_commands()
+    if len(commands) != 1:
+        raise AssertionError(
+            "expected exactly one wired tracker-sync command, got %r" % (commands,))
+    env["CLAUDE_PROJECT_DIR"] = REPO_ROOT
     proc = subprocess.run(
-        ["/bin/bash", HOOK],
+        ["/bin/sh", "-c", commands[0]],
         input=payload.encode("utf-8"),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
