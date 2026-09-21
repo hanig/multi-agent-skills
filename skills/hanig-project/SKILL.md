@@ -551,8 +551,17 @@ satisfies them. An unacknowledged intent means only that this machine has no
 receipt either way. Re-draining is safe; un-reverting a wrongly applied
 mutation is not.
 
-In a session with the connector, apply each pending TERMINAL intent to its issue, then
-mark it applied. The rules are not negotiable:
+In a session with the connector, apply each pending terminal intent whose
+tracker state does **not** conflict, then mark it applied. A conflicting one is
+escalated, never applied, per the rule above; a lifecycle one is never applied
+at all.
+
+Even for a non-conflicting terminal intent the read and the write are not
+atomic, so an issue can change between them. That residual window is the same
+declared limit as above and has the same owner, ARC-678 and ARC-679. Do not
+read the instruction below as a promise that it cannot happen.
+
+The remaining rules are not negotiable:
 
 - **Nothing closes on a self-report.** A `close` intent carries the unit's
   receipt. An intent without evidence must be REFUSED, not applied.
