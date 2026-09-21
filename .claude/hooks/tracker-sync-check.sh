@@ -6,44 +6,67 @@
 # hanig-project SKILL.md step 6 and then skipped twice within the hour by the
 # session that wrote it. The harness runs this; the model cannot forget it.
 #
-# It must never block, never hang, and never execute configuration as code.
-# This file has now cost two command injections, both found by review, both
-# written by the orchestrator:
+# THIS FILE HAS BEEN WRONG THREE TIMES, EACH CAUGHT BY REVIEW, EACH WRITTEN BY
+# THE ORCHESTRATOR. Read before editing:
 #
-#   1. `eval` on $HANIG_TRACKER_REPO in the local branch.
+#   1. `eval` on $HANIG_TRACKER_REPO was a command injection.
 #      HANIG_TRACKER_REPO='$(rm -rf "$HOME")' would have run.
 #   2. The same value interpolated into an ssh remote command string inside
-#      single quotes, so HANIG_TRACKER_REPO="'; touch /tmp/canary; #" escaped
-#      the quoting and executed on the remote host. Fixing (1) and not
-#      sweeping for (2) is precisely the sibling-sweep failure CLAUDE.md warns
-#      about.
+#      single quotes escaped the quoting and executed on the remote host.
+#      Fixing (1) without sweeping for (2) is the sibling-sweep failure
+#      CLAUDE.md warns about. The remote branch is now gone entirely rather
+#      than quoted more carefully; the coordinator runs on this machine.
+#   3. The report went to stdout with exit 0. Verified against the harness:
+#      "Exit code 0 - stdout shown in transcript mode (ctrl+o)". So the
+#      reminder reached a transcript and NEVER the model. A hook built
+#      because prose gets skipped was itself a no-op carrying an
+#      authoritative-sounding header. It now emits
+#      hookSpecificOutput.additionalContext, which the harness documents as
+#      "Text injected into model context".
 #
-# The remote branch is therefore GONE rather than quoted more carefully. The
-# coordinator runs on this machine. Removing it also removes a second defect:
-# the state directory was derived from the LOCAL home and sent to a host where
-# that path does not exist, so the probe silently reported "could not read"
-# instead of surfacing real unacknowledged intents. If a remote coordinator is
-# ever wanted, design it deliberately with argv-safe transport — never by
-# assembling paths into a shell string.
-#
-# It also reports the verb breakdown rather than one collapsed number: which
-# `block` intents are terminal is the coordinator state machine's call, not
-# this hook's, and an earlier version printed "pending TERMINAL intents: 0"
-# while five terminal candidates sat unacknowledged.
+# It must never block, never hang, and never execute configuration as code.
 
 set -u
 
+emit() {  # $1 = message injected into the model's context
+  python3 - "$1" <<'PYEOF'
+import json, sys
+print(json.dumps({"hookSpecificOutput": {
+    "hookEventName": "PostToolUse",
+    "additionalContext": sys.argv[1],
+}}))
+PYEOF
+}
+
 INPUT=$(cat 2>/dev/null)
+
+# Match the command being RUN, not an argument that merely mentions one. A
+# bare substring test fired on things like `gh issue comment` quoting
+# "gh pr merge" inside prose.
 CMD=$(printf '%s' "$INPUT" | python3 -c "
-import json,sys
-try: print((json.load(sys.stdin).get('tool_input') or {}).get('command',''))
-except Exception: print('')
+import json, re, shlex, sys
+try:
+    cmd = (json.load(sys.stdin).get('tool_input') or {}).get('command', '')
+except Exception:
+    print(''); raise SystemExit
+for part in re.split(r'(?:&&|\|\||;|\||\n)', cmd):
+    try:
+        words = shlex.split(part)
+    except ValueError:
+        words = part.split()
+    words = [w for w in words if not w.startswith('-')]
+    if not words:
+        continue
+    if words[:2] == ['git', 'push']:
+        print('git push'); raise SystemExit
+    if words[:3] in (['gh','pr','merge'], ['gh','pr','close'], ['gh','pr','create']):
+        print(' '.join(words[:3])); raise SystemExit
+    if words[:2] == ['gh', 'issue']:
+        print(' '.join(words[:3])); raise SystemExit
+print('')
 " 2>/dev/null)
 
-case "$CMD" in
-  *"gh pr merge"*|*"gh pr close"*|*"gh pr create"*|*"gh issue"*|*"git push"*) ;;
-  *) exit 0 ;;
-esac
+[ -n "$CMD" ] || exit 0
 
 # Configuration is data, never code. No eval, no shell-string assembly.
 REPO="${HANIG_TRACKER_REPO-$HOME/multi-agent-skills}"
@@ -86,19 +109,20 @@ except Exception:
 ints = d if isinstance(d, list) else d.get("intents", [])
 un = [i for i in ints if i.get("ack_status") == "unacknowledged"]
 c = collections.Counter((i.get("envelope") or {}).get("requested_operation") for i in un)
-print("  unacknowledged by verb: " + (", ".join(f"{k}={v}" for k, v in sorted(c.items())) or "none"))
-print(f"  close={c.get('close',0)}  block={c.get('block',0)}   <- terminal candidates; a terminal block counts")
-print(f"  total unacknowledged: {len(un)}")
+# close and block are both terminal CANDIDATES. Which blocks are terminal is
+# the coordinator state machine's call, not this hook's, so print the verbs
+# rather than collapsing them into one number this hook cannot derive.
+print("unacknowledged by verb: "
+      + (", ".join(f"{k}={v}" for k, v in sorted(c.items())) or "none")
+      + f" | close={c.get('close',0)} block={c.get('block',0)} are terminal candidates"
+      + f" | total {len(un)}")
 PYEOF
 )
 rm -f "$TMP" 2>/dev/null
 
-printf 'TRACKER SYNC CHECK (outward action detected)\n'
 if [ -z "$REPORT" ]; then
-  printf '  could not read the outbox at %s. Unknown is not zero.\n' "$STATE"
+  emit "TRACKER SYNC CHECK after \`$CMD\`: could not read the outbox at $STATE. Unknown is not zero -- check before assuming Linear is current."
 else
-  printf '%s\n' "$REPORT"
+  emit "TRACKER SYNC CHECK after \`$CMD\`: $REPORT. Reflect this action in Linear now; the issue comment is part of the action, not a follow-up. Draining is reconciliation, never replay -- an intent contradicted by current tracker state is escalated, not applied."
 fi
-printf '  Reflect this action in Linear now. The issue comment is part of the\n'
-printf '  action, not a follow-up. Draining is reconciliation, never replay.\n'
 exit 0
