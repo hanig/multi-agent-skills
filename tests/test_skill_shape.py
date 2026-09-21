@@ -19,7 +19,11 @@ BODY_LINE_BUDGETS = {
     # A separate planned unit owns this already-measured split.
     "hanig-project": 600,
 }
-LOCAL_MARKDOWN_LINK = re.compile(r"\[[^]]*\]\(([^)]+)\)")
+EXTERNAL_MARKDOWN_LINK = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
+MARKDOWN_ESCAPABLE = frozenset(
+    r"!\"#$%&'()*+,-./:;<=>?@[\]^_`{|}~\\"
+)
+MARKDOWN_DELIMITER_WHITESPACE = frozenset(" \t\n\r\f\v")
 SWARM_LIMIT_LABELS = (
     "LIMIT: runtime canary scope.",
     "LIMIT: trusted-writer isolation.",
@@ -83,11 +87,186 @@ def _authored_skill_docs():
     return sorted(SKILLS.glob("hanig-*/SKILL.md"))
 
 
+def _is_escaped(text, index):
+    backslashes = 0
+    index -= 1
+    while index >= 0 and text[index] == "\\":
+        backslashes += 1
+        index -= 1
+    return bool(backslashes % 2)
+
+
+def _markdown_unescape(value):
+    out = []
+    index = 0
+    while index < len(value):
+        if (value[index] == "\\" and index + 1 < len(value)
+                and value[index + 1] in MARKDOWN_ESCAPABLE):
+            index += 1
+        out.append(value[index])
+        index += 1
+    return "".join(out)
+
+
+def _label_end(body, start):
+    depth = 1
+    index = start + 1
+    while index < len(body):
+        if body[index] == "\\" and index + 1 < len(body):
+            index += 2
+            continue
+        if body[index] == "[":
+            depth += 1
+        elif body[index] == "]":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return None
+
+
+def _destination(body, start):
+    index = start
+    while (index < len(body)
+           and body[index] in MARKDOWN_DELIMITER_WHITESPACE):
+        index += 1
+    if index >= len(body):
+        return "", index, False
+    if index > start and body[index] in ("\"", "'", "("):
+        return "", index, False
+
+    if body[index] == "<":
+        begin = index + 1
+        index = begin
+        while index < len(body):
+            if body[index] == "\n":
+                return _markdown_unescape(body[begin:index]), index, False
+            if body[index] == ">" and not _is_escaped(body, index):
+                return _markdown_unescape(body[begin:index]), index + 1, False
+            index += 1
+        return _markdown_unescape(body[begin:index]), index, False
+
+    begin = index
+    depth = 0
+    while index < len(body):
+        char = body[index]
+        if (char == "\\" and index + 1 < len(body)
+                and body[index + 1] in MARKDOWN_ESCAPABLE):
+            index += 2
+            continue
+        if char in MARKDOWN_DELIMITER_WHITESPACE and depth == 0:
+            break
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            if depth == 0:
+                return _markdown_unescape(body[begin:index]), index + 1, True
+            depth -= 1
+        index += 1
+    return _markdown_unescape(body[begin:index]), index, False
+
+
+def _quoted_end(body, start, quote):
+    index = start + 1
+    recovery = None
+    while index < len(body):
+        if body[index] == "\\" and index + 1 < len(body):
+            index += 2
+            continue
+        if body[index] == quote:
+            return index + 1, True
+        if recovery is None and body[index] == "[" and not _is_escaped(body, index):
+            recovery = index
+        elif recovery is None and body[index] == "\n":
+            recovery = index + 1
+        index += 1
+    return (recovery if recovery is not None else index), False
+
+
+def _parenthesized_title_end(body, start):
+    depth = 1
+    index = start + 1
+    recovery = None
+    while index < len(body):
+        if body[index] == "\\" and index + 1 < len(body):
+            index += 2
+            continue
+        if body[index] == "(":
+            depth += 1
+        elif body[index] == ")":
+            depth -= 1
+            if depth == 0:
+                return index + 1, True
+        if recovery is None and body[index] == "[" and not _is_escaped(body, index):
+            recovery = index
+        elif recovery is None and body[index] == "\n":
+            recovery = index + 1
+        index += 1
+    return (recovery if recovery is not None else index), False
+
+
+def _outer_link_end(body, start):
+    index = start
+    crossed_line = False
+    while (index < len(body)
+           and body[index] in MARKDOWN_DELIMITER_WHITESPACE):
+        crossed_line = crossed_line or body[index] == "\n"
+        index += 1
+    if index < len(body) and body[index] in ("\"", "'"):
+        index, closed = _quoted_end(body, index, body[index])
+        if not closed:
+            return index
+    elif index < len(body) and body[index] == "(":
+        index, closed = _parenthesized_title_end(body, index)
+        if not closed:
+            return index
+    elif crossed_line and (index >= len(body) or body[index] != ")"):
+        return index
+
+    depth = 0
+    quote = None
+    while index < len(body):
+        char = body[index]
+        if char == "\\" and index + 1 < len(body):
+            index += 2
+            continue
+        if quote:
+            if char == quote:
+                quote = None
+        elif char in ("\"", "'"):
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            if depth == 0:
+                return index + 1
+            depth -= 1
+        elif char == "\n" and index + 1 < len(body) and body[index + 1] == "\n":
+            return index + 2
+        index += 1
+    return index
+
+
+def _inline_markdown_targets(body):
+    index = 0
+    while index < len(body):
+        if body[index] != "[" or _is_escaped(body, index):
+            index += 1
+            continue
+        close = _label_end(body, index)
+        if close is None or close + 1 >= len(body) or body[close + 1] != "(":
+            index += 1
+            continue
+        target, tail, already_closed = _destination(body, close + 2)
+        yield target
+        index = tail if already_closed else _outer_link_end(body, tail)
+        if index <= close + 1:
+            index = close + 2
+
+
 def _local_markdown_targets(body):
-    for match in LOCAL_MARKDOWN_LINK.finditer(body):
-        target = match.group(1)
-        path = target.split("#", 1)[0]
-        if path and "://" not in path:
+    for target in _inline_markdown_targets(body):
+        if target and not EXTERNAL_MARKDOWN_LINK.match(target):
             yield target
 
 
@@ -154,6 +333,200 @@ class TestAuthoredSkillShape(unittest.TestCase):
                  "link escapes skill: ../outside.md",
                  "local link must name a whole file: "
                  "references/details.md#present-heading"],
+            )
+
+    def test_a_same_file_fragment_is_rejected(self):
+        with tempfile.TemporaryDirectory() as raw:
+            skill = Path(raw) / "hanig-example"
+            skill.mkdir()
+            doc = skill / "SKILL.md"
+            doc.write_text(
+                "---\nname: example\n---\n[x](#some-heading)\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _local_reference_problems(doc),
+                ["local link must name a whole file: #some-heading"],
+            )
+
+    def test_a_missing_local_path_with_an_external_url_in_its_query_is_rejected(self):
+        with tempfile.TemporaryDirectory() as raw:
+            skill = Path(raw) / "hanig-example"
+            skill.mkdir()
+            doc = skill / "SKILL.md"
+            doc.write_text(
+                "---\nname: example\n---\n"
+                "[x](references/nonexistent-file.md?r=https://example.com)\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _local_reference_problems(doc),
+                ["local link must name a whole file: "
+                 "references/nonexistent-file.md?r=https://example.com"],
+            )
+
+    def test_scheme_prefixed_external_links_are_not_local_references(self):
+        with tempfile.TemporaryDirectory() as raw:
+            skill = Path(raw) / "hanig-example"
+            skill.mkdir()
+            doc = skill / "SKILL.md"
+            doc.write_text(
+                "---\nname: example\n---\n"
+                "[web](https://example.com/docs?q=one#heading)\n"
+                "[ftp](ftp://example.com/readme.md)\n"
+                "[file](file:///tmp/readme.md)\n"
+                "[git](git+ssh://example.com/repository.git)\n"
+                "[malformed](https://[::1)\n"
+                "[spaced]( https://example.com/docs )\n"
+                "[angled](<https://example.com/docs>)\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(_local_reference_problems(doc), [])
+
+    def test_empty_destinations_are_not_local_references(self):
+        with tempfile.TemporaryDirectory() as raw:
+            skill = Path(raw) / "hanig-example"
+            skill.mkdir()
+            doc = skill / "SKILL.md"
+            doc.write_text(
+                "---\nname: example\n---\n"
+                "[bare]()\n"
+                "[angle](<>)\n"
+                "[quoted]( \"title\")\n"
+                "[parenthesized]( (title) )\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(list(_local_markdown_targets(_body(doc))), [])
+            self.assertEqual(_local_reference_problems(doc), [])
+
+    def test_unicode_filename_space_is_not_a_markdown_delimiter(self):
+        with tempfile.TemporaryDirectory() as raw:
+            skill = Path(raw) / "hanig-example"
+            skill.mkdir()
+            filename = "existing\u00a0file.md"
+            (skill / filename).write_text("details\n", encoding="utf-8")
+            doc = skill / "SKILL.md"
+            doc.write_text(
+                f"---\nname: example\n---\n[present]({filename})\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                list(_local_markdown_targets(_body(doc))),
+                [filename],
+            )
+            self.assertEqual(_local_reference_problems(doc), [])
+
+    def test_a_markdown_title_is_not_part_of_the_local_path(self):
+        with tempfile.TemporaryDirectory() as raw:
+            skill = Path(raw) / "hanig-example"
+            skill.mkdir()
+            (skill / "details.md").write_text("details\n", encoding="utf-8")
+            doc = skill / "SKILL.md"
+            doc.write_text(
+                "---\nname: example\n---\n"
+                "[present](details.md \"see [ghost](ghost.md) at "
+                "https://example.com\")\n"
+                "[missing](missing.md 'documentation')\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _local_reference_problems(doc),
+                ["linked file is absent: missing.md"],
+            )
+
+    def test_a_multiline_markdown_title_is_not_scanned_as_another_link(self):
+        with tempfile.TemporaryDirectory() as raw:
+            skill = Path(raw) / "hanig-example"
+            skill.mkdir()
+            (skill / "details.md").write_text("details\n", encoding="utf-8")
+            doc = skill / "SKILL.md"
+            doc.write_text(
+                "---\nname: example\n---\n"
+                "[present](details.md\n\"[ghost](ghost.md)\")\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                list(_local_markdown_targets(_body(doc))),
+                ["details.md"],
+            )
+            self.assertEqual(_local_reference_problems(doc), [])
+
+    def test_a_malformed_query_or_escaped_title_cannot_hide_a_local_path(self):
+        with tempfile.TemporaryDirectory() as raw:
+            skill = Path(raw) / "hanig-example"
+            skill.mkdir()
+            doc = skill / "SKILL.md"
+            doc.write_text(
+                "---\nname: example\n---\n"
+                "[query](missing.md?q=hello world)\n"
+                "[title](missing.md \"see \\\"https://example.com\\\"\")\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _local_reference_problems(doc),
+                ["local link must name a whole file: missing.md?q=hello",
+                 "linked file is absent: missing.md"],
+            )
+
+    def test_scanner_preserves_destination_syntax_and_outer_boundaries(self):
+        with tempfile.TemporaryDirectory() as raw:
+            skill = Path(raw) / "hanig-example"
+            skill.mkdir()
+            (skill / "details.md").write_text("details\n", encoding="utf-8")
+            (skill / "a(b).md").write_text("balanced\n", encoding="utf-8")
+            doc = skill / "SKILL.md"
+            doc.write_text(
+                "---\nname: example\n---\n"
+                "[outer](details.md \"[ghost](ghost.md)\")\n"
+                "[angle](<details.md >)\n"
+                "[balanced](a(b).md)\n"
+                "[escaped](a\\(b\\).md)\n",
+                encoding="utf-8",
+            )
+            body = _body(doc)
+            self.assertEqual(
+                list(_inline_markdown_targets(body)),
+                ["details.md", "details.md ", "a(b).md", "a(b).md"],
+            )
+            self.assertEqual(
+                _local_reference_problems(doc),
+                ["linked file is absent: details.md "],
+            )
+
+    def test_malformed_link_recovery_does_not_hide_later_links(self):
+        with tempfile.TemporaryDirectory() as raw:
+            skill = Path(raw) / "hanig-example"
+            skill.mkdir()
+            (skill / "existing.md").write_text("existing\n", encoding="utf-8")
+            (skill / "details.md").write_text("details\n", encoding="utf-8")
+            doc = skill / "SKILL.md"
+            doc.write_text(
+                "---\nname: example\n---\n"
+                "[valid](existing.md)\n"
+                "[broken](missing.md\n"
+                "[later](absent.md)\n"
+                "[literal-backslash](details.md\\ \"note\")\n"
+                "[unclosed-quote](quote-missing.md \"title\n"
+                "[after-quote](quote-hidden.md)\n"
+                "[unclosed-paren](paren-missing.md (title\n"
+                "[after-paren](paren-hidden.md)\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                list(_inline_markdown_targets(_body(doc))),
+                ["existing.md", "missing.md", "absent.md", "details.md\\",
+                 "quote-missing.md", "quote-hidden.md", "paren-missing.md",
+                 "paren-hidden.md"],
+            )
+            self.assertEqual(
+                _local_reference_problems(doc),
+                ["linked file is absent: missing.md",
+                 "linked file is absent: absent.md",
+                 "linked file is absent: details.md\\",
+                 "linked file is absent: quote-missing.md",
+                 "linked file is absent: quote-hidden.md",
+                 "linked file is absent: paren-missing.md",
+                 "linked file is absent: paren-hidden.md"],
             )
 
     def test_every_declared_swarm_limit_remains_in_the_body_with_a_pointer(self):
