@@ -107,6 +107,13 @@
       ]
     },
     {
+      "id": "interview.reporting-cadence",
+      "normative_text": "Ask how often the owner wants a report while the run lasts -- hourly, at each unit's close, only when something needs them, or at the end -- recommending hourly while units are live. Capture cadence and escalation separately: \"only at the end\" is a legitimate cadence and never a legitimate escalation policy, and a NEEDS_HUMAN unit, an exhausted budget, a blocked merge or a conflict a machine must not settle reaches them regardless. Record both in the plan as a top-level `reporting` block, never in a session's memory, because a session dies and its successor inherits the plan rather than the conversation. It sits outside `plan_digest`, so changing cadence mid-run needs no --accept-plan-change. Nothing enforces cadence; the orchestrator honours it, and enforcing it is ARC-691's clock rather than a sentence here.",
+      "references": [
+        "references/survey-interview.md"
+      ]
+    },
+    {
       "id": "plan.inputs",
       "normative_text": "Declare every path, glob, and configuration file a command reads; empty inputs, placeholders, and globs matching nothing are refused."
     },

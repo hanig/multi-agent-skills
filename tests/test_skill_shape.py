@@ -823,5 +823,60 @@ class TestAuthoredSkillShape(unittest.TestCase):
             )
 
 
+class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
+    """A statement can leave the decision surface and nothing notices.
+
+    The registry has two enforcement checks and neither sees a deletion:
+    body-generation compares the body to the registry, and reference-drift
+    polices references. If a declaration is removed from the registry, both
+    agree perfectly with each other about a surface that no longer carries
+    the rule.
+
+    That is not hypothetical. This branch's own restructuring deleted the
+    reporting-cadence interview -- a statement that changes what the agent
+    ASKS and WRITES, which is the registry's own definition of
+    behaviour-deciding -- and it survived in no declaration, no reference
+    and no body text. Three reviewers found it independently; no test did.
+
+    This pins the ids that must not vanish without a replacement being
+    named. It is a floor, not a schema: adding declarations is free.
+    """
+
+    REQUIRED = {
+        "hanig-project": (
+            "interview.reporting-cadence",
+            "interview.retry-boundary",
+            "interview.judgment-only",
+            "interview.dispatch-complete",
+            "capability.tracker",
+            "tracker.approval",
+            "tracker.autopilot",
+        ),
+    }
+
+    def test_required_declaration_ids_are_present(self):
+        for skill, ids in self.REQUIRED.items():
+            registry = SKILLS / skill / "declarations.json"
+            with open(registry) as handle:
+                declared = {entry["id"]
+                            for entry in json.load(handle)["declarations"]}
+            for required in ids:
+                with self.subTest(skill=skill, declaration=required):
+                    self.assertIn(
+                        required, declared,
+                        "%s left %s's registry. If it was replaced, name the "
+                        "replacement here; if it was dropped, say why in the "
+                        "commit, because the two registry checks cannot see "
+                        "a deletion." % (required, skill))
+
+    def test_each_required_declaration_reaches_the_generated_body(self):
+        """Present in the registry is not present in the body."""
+        for skill, ids in self.REQUIRED.items():
+            text = (SKILLS / skill / "SKILL.md").read_text()
+            for required in ids:
+                with self.subTest(skill=skill, declaration=required):
+                    self.assertIn("`%s`:" % required, text)
+
+
 if __name__ == "__main__":
     unittest.main()
