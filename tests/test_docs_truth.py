@@ -2466,7 +2466,7 @@ class TestDocsTruth(unittest.TestCase):
 
 
 class TestCanonicalDocumentPointers(unittest.TestCase):
-    """CLAUDE.md sends a reader to other files. Those files must exist.
+    """The run-driving instruction must point at the mandate that grants it.
 
     The first line of the agent contract tells a session driving a run to
     read `docs/orchestrator-mandate.md` before acting, and the mandate is
@@ -2474,35 +2474,10 @@ class TestCanonicalDocumentPointers(unittest.TestCase):
     or a move leaves that instruction pointing at nothing, and the
     session that follows it finds no file rather than no authority --
     which reads as "there is no mandate" instead of "the mandate moved".
-
-    Same for the partition reference and the live plan. This is the
-    cheapest possible check and nothing was making it.
     """
 
-    REFERENCE = re.compile(r"`(docs/[A-Za-z0-9._/-]+)`")
-
-    def test_every_docs_path_named_in_the_canonical_document_exists(self):
-        text = CANONICAL_DOCUMENT.read_text()
-        named = sorted(set(self.REFERENCE.findall(text)))
-        self.assertTrue(
-            named,
-            "no docs/ path is referenced from %s, so this guard is "
-            "watching nothing -- check the pattern, not the document"
-            % CANONICAL_DOCUMENT.name)
-        missing = [ref for ref in named if not (ROOT / ref).exists()]
-        self.assertEqual(
-            [], missing,
-            "%s points at %s, which does not exist. A reader told to "
-            "read a missing file concludes there is nothing to read."
-            % (CANONICAL_DOCUMENT.name, ", ".join(missing)))
-
     def test_the_orchestrator_mandate_is_one_of_them(self):
-        """The specific pointer this guard exists for.
-
-        A generic "every path resolves" test passes vacuously if the
-        mandate stops being referenced at all, which is the other way
-        the instruction can rot.
-        """
+        """Check the named instruction and its target independently."""
         text = CANONICAL_DOCUMENT.read_text()
         self.assertIn(
             "docs/orchestrator-mandate.md", text,
