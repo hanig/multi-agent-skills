@@ -1318,6 +1318,38 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
             not_an_ancestor, str(attempt), unit, anchor_facts["facts"])
         self.assertFalse(produced)
         self.assertIn("does not descend from the anchored base", why)
+        # ...and says only that. luna, one round after the exit STATUS
+        # stopped being collapsed: the PROSE still named a cause. A
+        # sibling-branch commit, a branch already ahead at launch and a
+        # force-pushed replacement all give exit 1, and only one is a
+        # replacement.
+        self.assertNotIn("history was replaced rather than extended", why)
+        self.assertIn("does not distinguish", why)
+
+    def test_an_unreadable_git_identity_names_no_cause(self):
+        """kimi-k2.7-code: "(top is unreadable)" for every nonzero exit
+        sent an operator to check permissions when git had said
+        `fatal: not a git repository`."""
+        real = U.run
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        unit = {"id": "u1", "kind": "code", "repo": str(self.repo)}
+        err, anchor_facts = S._write_launch_record(str(attempt), unit)
+        self.assertIsNone(err)
+        self.commit("A")
+
+        def not_a_repository(argv, **kwargs):
+            if "--show-toplevel" in argv:
+                return 128, "", "fatal: not a git repository"
+            return real(argv, **kwargs)
+
+        produced, _head, why = W.judge_detail(
+            not_a_repository, str(attempt), unit, anchor_facts["facts"])
+        self.assertFalse(produced)
+        self.assertIn("could not be determined", why)
+        self.assertNotIn("unreadable", why)
+        self.assertIn("not a git repository", why,
+                      "git's own words did not reach the record")
 
     def test_no_refusal_interpolates_a_value_the_renderer_never_saw(self):
         """The one-renderer property, enforced instead of asserted.

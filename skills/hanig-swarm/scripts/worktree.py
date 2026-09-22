@@ -1025,10 +1025,15 @@ def workspace_identity_problem(runner, facts):
             ("git_common_dir", ("rev-parse", "--git-common-dir")),
             ("git_dir", ("rev-parse", "--git-dir")),
             ("branch", ("rev-parse", "--abbrev-ref", "HEAD"))):
-        rc, value, _ = _git(runner, workspace, *args)
+        rc, value, identity_err = _git(runner, workspace, *args)
         if rc != 0:
-            return (f"cannot verify the anchored worktree's Git identity "
-                    f"({render_for_record(key, 32)} is unreadable)")
+            # kimi-k2.7-code: "is unreadable" named a cause for every
+            # nonzero exit, so `fatal: not a git repository` sent an
+            # operator to check file permissions. Report what was asked
+            # and what git said; do not decide between them.
+            return (f"cannot verify the anchored worktree's Git identity: "
+                    f"{render_for_record(key, 32)} could not be determined. "
+                    f"{render_git_diagnostic(rc, identity_err)}")
         observed[key] = value
     top = str(Path(observed["top"]).resolve())
     common = str((Path(workspace) / observed["git_common_dir"]).resolve())
@@ -1212,11 +1217,20 @@ def judge_detail(runner, unit_dir, spec, launch_facts=None, judgment=None):
     if rc == 1:
         # Exit 1 is the DOCUMENTED "not an ancestor". Only here is a
         # verdict on lineage something git actually established.
+        # luna, one round after the exit STATUS stopped being collapsed:
+        # the prose still was. Exit 1 establishes "not an ancestor" and
+        # nothing else -- a sibling-branch commit, a branch already
+        # ahead at launch and a force-pushed replacement all produce it,
+        # and only one of them is a replacement. Naming that one is the
+        # same claims-more-than-it-knows defect this whole change exists
+        # to remove, surviving in the sentence after the fix.
         return False, None, (
             f"HEAD {render_for_record(head[:12], 12)} does not descend from "
-            f"the anchored base {render_for_record(str(base)[:12], 12)}. The "
-            f"history was replaced rather than extended, so what is there "
-            f"now was not built on what we anchored")
+            f"the anchored base {render_for_record(str(base)[:12], 12)}, so "
+            f"what is there now was not built on what we anchored. What "
+            f"put it there -- a replaced history, a branch already ahead "
+            f"at launch, an unrelated commit checked out -- this does not "
+            f"distinguish")
     if rc != 0:
         return False, None, (
             f"the lineage of HEAD {render_for_record(head[:12], 12)} against "
