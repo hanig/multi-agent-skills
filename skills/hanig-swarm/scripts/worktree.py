@@ -710,7 +710,9 @@ def read_sealed_launch_record(unit_dir, seal):
                       "state before the agent ran, so no transition can be "
                       "judged")
     except OSError as exc:
-        return None, f"cannot read the launch record at {path}: {exc}"
+        return None, (f"cannot read the launch record at "
+                      f"{render_for_record(path, _PATH_LIMIT, collapse=False)}: "
+                      f"{render_for_record(exc, _DIAGNOSTIC_LIMIT)}")
     # Checked AFTER the file, so an absent record still reports as absent.
     # That case grants nothing either way, and the missing-anchor message is
     # the one that tells an operator what to do.
@@ -722,16 +724,24 @@ def read_sealed_launch_record(unit_dir, seal):
     actual = hashlib.sha256(raw).hexdigest()
     if actual != seal:
         return None, (
-            f"the launch record at {path} no longer matches the digest the "
-            f"coordinator recorded when it wrote it (sealed {seal[:12]}, "
-            f"found {actual[:12]}). It was changed after the agent started, "
+            f"the launch record at "
+            f"{render_for_record(path, _PATH_LIMIT, collapse=False)} no longer "
+            f"matches the digest the coordinator recorded when it wrote it "
+            f"(sealed {render_for_record(seal[:12], 12)}, "
+            f"found {render_for_record(actual[:12], 12)}). It was changed "
+            f"after the agent started, "
             f"so nothing in it can be used to judge what the agent did")
     try:
         rec = json.loads(raw)
     except ValueError as exc:
-        return None, f"the launch record at {path} is not readable JSON: {exc}"
+        return None, (f"the launch record at "
+                      f"{render_for_record(path, _PATH_LIMIT, collapse=False)} "
+                      f"is not readable JSON: "
+                      f"{render_for_record(exc, _DIAGNOSTIC_LIMIT)}")
     if not isinstance(rec, dict):
-        return None, f"the launch record at {path} is not a JSON object"
+        return None, (f"the launch record at "
+                      f"{render_for_record(path, _PATH_LIMIT, collapse=False)} "
+                      f"is not a JSON object")
     return rec, None
 
 
