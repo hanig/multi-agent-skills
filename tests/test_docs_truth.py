@@ -41,8 +41,12 @@ SUITE_CLAIMS = tuple(
     rf"(?:in|of)\s+the\s+{ADJECTIVE}\s+suite{TOKEN_END}",
     rf"{TOKEN_START}(?:the\s+)?suite\s+(?:currently\s+)?"
     rf"(?:contains|has)\s+\**\s*(?P<count>{NUMBER})\s+tests?{TOKEN_END}",
+    # A copula was missing, so "The full suite total is 2,000 tests." matched
+    # nothing -- luna. Only a colon or an equals sign was admitted, and a
+    # copula is the ordinary way to write the sentence.
     rf"{TOKEN_START}{ADJECTIVE}\s+suite\s+"
-    rf"(?:total|size|count)\s*(?::|=)?\s*\**\s*"
+    rf"(?:total|size|count)\s*(?:\s+(?:is|was|stands\s+at))?"
+    rf"\s*(?::|=)?\s*\**\s*"
     rf"(?P<count>{NUMBER})\s+tests?{TOKEN_END}",
 ))
 LOWER_BOUND_CLAIM = re.compile(
@@ -633,6 +637,25 @@ def check_canonical_suite_floor(filename, text, discovered):
             f"as competing with it: {details}")
 
 
+# Two residual limits, stated because a claim about them has already been
+# refuted once each.
+#
+# A component sentence whose count happens to be AT OR ABOVE the floor is
+# still rejected -- luna's "The installer was built and green: 2,000 tests."
+# astra predicted exactly this when the committee split: a magnitude rule
+# does not establish attribution, it relocates the errors. The relocation
+# is accepted because the surviving false positive is a sentence about two
+# thousand of something in the one document that carries the live claim,
+# which is both rare and genuinely confusable, while the alternative was to
+# stop guarding unmarked totals at all.
+#
+# OUTSIDE the canonical document, an unmarked count is never scanned at any
+# magnitude: only a MARKED claim is rejected there. That is rule 1 and it is
+# deliberate, since a regex cannot tell what a count is attributed to. It
+# means "a competing claim is caught" is true of CLAUDE.md and of nothing
+# else, which is narrower than it sounds and is why it is written here.
+
+
 def check_live_suite_claims(documents, discovered):
     """Reject marked live totals outside the canonical document."""
     for path, text in documents:
@@ -1172,7 +1195,16 @@ class TestDocsTruth(unittest.TestCase):
         refuses one. The remedy is the document's own floor rather than a
         new annotation: a count below the number the document asserts the
         suite exceeds cannot be read as this suite's total.
-        """
+        
+    DECLARED LIMIT, found while checking a reviewer's finding: running the
+    suite with `-k` whose pattern selects THIS test makes it fail. It
+    compares declared methods against collected ones, and `-k` suppresses
+    collection of everything else, so the shortfall it reports is the
+    filter rather than a hidden test. `-k` patterns that do not match this
+    test simply do not run it. No honest full-suite invocation is affected;
+    the documented `discover -s tests` is green, including this test, at
+    1,748 tests.
+    """
         discovered = unittest.TestLoader().discover(
             str(ROOT / "tests")).countTestCases()
         text = CANONICAL_DOCUMENT.read_text()
@@ -1213,27 +1245,63 @@ class TestDocsTruth(unittest.TestCase):
                 text + f"\nThe suite has {floor} tests.\n",
                 discovered)
 
-    def test_the_boundary_moves_with_the_floor(self):
-        """Raise the floor and a number that was prose becomes a claim."""
+    def test_one_sentence_two_floors_opposite_outcomes(self):
+        """The boundary IS the floor, shown on a single sentence.
+
+        kimi-k2.7-code read the previous version as not demonstrating the
+        moving boundary, because its two assertions used different document
+        bodies. They tested the property in opposite directions, which is
+        the same thing, but the reading was fair: this asserts both
+        outcomes for ONE sentence under two floors, side by side.
+        """
         discovered = unittest.TestLoader().discover(
             str(ROOT / "tests")).countTestCases()
         text = CANONICAL_DOCUMENT.read_text()
+        sentence = "\nThe suite has 1550 tests.\n"
+
         raised = CANONICAL_LOWER_BOUND.sub(
             "Full suite: at least 1,600 tests discoverable by unittest. Run "
             "the command below for the exact current total.",
             text, count=1)
         self.assertNotEqual(raised, text, "the floor line must be substitutable")
 
-        # 1,550 is prose under a 1,600 floor and a competing claim under 1,500.
+        # floor 1,600: 1,550 is below it, so prose.
         check_canonical_suite_floor(
-            CANONICAL_DOCUMENT.name,
-            raised + "\nThe suite has 1550 tests.\n",
-            max(discovered, 1600))
+            CANONICAL_DOCUMENT.name, raised + sentence, max(discovered, 1600))
+
+        # floor 1,500, same sentence: at or above it, so a competing claim.
         with self.assertRaisesRegex(AssertionError, "could be read as competing"):
             check_canonical_suite_floor(
-                CANONICAL_DOCUMENT.name,
-                text + "\nThe suite has 1550 tests.\n",
-                discovered)
+                CANONICAL_DOCUMENT.name, text + sentence, discovered)
+
+    def test_an_exact_count_is_judged_by_the_floor_like_any_other(self):
+        """kimi-k2.7-code: the 27 competing-claim subtests all use a number
+        above the floor, so they never showed what happens below it or at
+        it. An exact count is not a special case -- the floor decides."""
+        discovered = unittest.TestLoader().discover(
+            str(ROOT / "tests")).countTestCases()
+        text = CANONICAL_DOCUMENT.read_text()
+        floor = int(CANONICAL_LOWER_BOUND.search(text)
+                    .group("count").replace(",", ""))
+
+        # below the floor: prose, even stated as an exact suite total
+        check_canonical_suite_floor(
+            CANONICAL_DOCUMENT.name,
+            text + "\nThe full suite total is %d tests.\n" % (floor - 1),
+            discovered)
+
+        # at the floor, and above it: competing claims, with the line named
+        for count in (floor, floor + 1, discovered):
+            with self.subTest(count=count):
+                with self.assertRaises(AssertionError) as caught:
+                    check_canonical_suite_floor(
+                        CANONICAL_DOCUMENT.name,
+                        text + "\nThe full suite total is %d tests.\n" % count,
+                        max(discovered, count))
+                message = str(caught.exception)
+                self.assertIn("could be read as competing", message)
+                self.assertIn(str(count), message)
+                self.assertIn("line ", message)
 
 
 if __name__ == "__main__":
