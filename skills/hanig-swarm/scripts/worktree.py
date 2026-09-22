@@ -510,8 +510,9 @@ def artifact_transition_problem(basis, unit_dir, spec, observed):
     now_declared = [str(rel) for rel in (spec.get("declared_outputs") or [])]
     if sorted(now_declared) != sorted(declared):
         return (f"this attempt's spec now declares "
-                f"{', '.join(sorted(now_declared)) or 'nothing'}, but the "
-                f"coordinator digested {', '.join(sorted(declared)) or 'nothing'} "
+                f"{render_for_record(', '.join(sorted(now_declared)) or 'nothing', _DIAGNOSTIC_LIMIT, collapse=False)}, but the "
+                f"coordinator digested "
+                f"{render_for_record(', '.join(sorted(declared)) or 'nothing', _DIAGNOSTIC_LIMIT, collapse=False)} "
                 f"before dispatch. The declaration changed after the baseline "
                 f"was taken, so the baseline does not cover what is being "
                 f"judged"), []
@@ -529,7 +530,9 @@ def artifact_transition_problem(basis, unit_dir, spec, observed):
     refusals, weak = [], []
     for rel in declared:
         if rel in escaped:
-            refusals.append(f"{rel} resolved outside the exclusive write root "
+            refusals.append(
+                f"{render_for_record(rel, _PATH_LIMIT, collapse=False)} "
+                f"resolved outside the exclusive write root "
                             f"before dispatch, so it was never isolated")
             continue
         if rel in absent:
@@ -538,18 +541,22 @@ def artifact_transition_problem(basis, unit_dir, spec, observed):
         if not isinstance(was, dict):
             # Declared, and the basis says neither "absent" nor what it
             # looked like. That is a hole in the baseline, not a pass.
-            refusals.append(f"{rel} is declared, and nothing was digested for "
+            refusals.append(
+                f"{render_for_record(rel, _PATH_LIMIT, collapse=False)} "
+                f"is declared, and nothing was digested for "
                             f"it before dispatch")
             continue
         changed, is_weak = _artifact_changed(was, (observed or {}).get(rel))
         if changed is None:
             refusals.append(
-                f"{rel} cannot be compared against its pre-dispatch digest "
-                f"(before: {was.get('method', was.get('error', 'nothing recorded'))!r}, "
-                f"now: {((observed or {}).get(rel) or {}).get('method', 'nothing recorded')!r})")
+                f"{render_for_record(rel, _PATH_LIMIT, collapse=False)} "
+                f"cannot be compared against its pre-dispatch digest "
+                f"(before: {render_for_record(was.get('method', was.get('error', 'nothing recorded')), _DIAGNOSTIC_LIMIT)}, "
+                f"now: {render_for_record(((observed or {}).get(rel) or {}).get('method', 'nothing recorded'), _DIAGNOSTIC_LIMIT)})")
         elif not changed:
             refusals.append(
-                f"{rel} is identical to the artifact that was already there "
+                f"{render_for_record(rel, _PATH_LIMIT, collapse=False)} "
+                f"is identical to the artifact that was already there "
                 f"when this attempt was dispatched, so nothing shows this "
                 f"attempt produced it. A declared output that existed "
                 f"beforehand and did not change is an input")
