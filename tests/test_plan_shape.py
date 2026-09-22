@@ -1160,6 +1160,14 @@ class TestValidateFindsTheSurveyItself(SurveyCase):
             sbatch=["--partition=cpu"])))
         return str(proj / "plan.json")
 
+    def _operator_cwd(self, root):
+        """A constructed stand-in for the operator's ambient checkout."""
+        cwd = Path(root) / "operator-cwd"
+        (cwd / ".swarm").mkdir(parents=True)
+        (cwd / ".swarm" / "survey.json").write_text(json.dumps(
+            survey_doc(mem_flag_required=True)))
+        return cwd
+
     def test_it_reads_the_survey_beside_the_plan(self):
         with tempfile.TemporaryDirectory() as d:
             p = self._project(d, survey_doc(mem_flag_required=True))
@@ -1189,16 +1197,22 @@ class TestValidateFindsTheSurveyItself(SurveyCase):
 
     def test_no_survey_names_the_path_it_looked_for(self):
         with tempfile.TemporaryDirectory() as d:
-            found, note = S.discover_survey(self._project(d))
+            root = Path(d)
+            project = root / "project"
+            operator = self._operator_cwd(root)
+            found, note = S.discover_survey(
+                self._project(project), cwd=project)
             self.assertIsNone(found)
             self.assertIn(os.path.join(".swarm", "survey.json"), note)
             self.assertIn("survey.py", note)
+            self.assertNotIn(str(operator), note)
 
-    def _validate(self, plan_path, *args):
+    def _validate(self, plan_path, *args, cwd=None):
         import subprocess
         return subprocess.run(
             [sys.executable, str(SWARM), "validate", plan_path, *args],
-            capture_output=True, text=True)
+            capture_output=True, text=True,
+            cwd=cwd or os.path.dirname(os.path.abspath(plan_path)))
 
     def test_the_discovered_survey_refuses_the_plan_end_to_end(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1212,10 +1226,14 @@ class TestValidateFindsTheSurveyItself(SurveyCase):
         means the memory policy and the account rules were not examined at
         all, and the reader has to be told which."""
         with tempfile.TemporaryDirectory() as d:
-            r = self._validate(self._project(d))
+            root = Path(d)
+            project = root / "project"
+            operator = self._operator_cwd(root)
+            r = self._validate(self._project(project), cwd=project)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("NOT CHECKED", r.stdout)
             self.assertIn("no survey was read", r.stdout)
+            self.assertNotIn(str(operator), r.stdout)
 
     def test_a_pass_against_a_survey_carries_the_qos_caveat(self):
         with tempfile.TemporaryDirectory() as d:

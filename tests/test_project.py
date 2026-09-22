@@ -40,6 +40,23 @@ def run(script, *argv, cwd=None):
                           capture_output=True, text=True, cwd=cwd)
 
 
+def controlled_env(root, **extra):
+    """A minimal process environment whose writable homes are fixtures."""
+    root = Path(root).resolve()
+    home = root / "home"
+    temp_dir = root / "tmp"
+    config_home = root / "config"
+    for path in (home, temp_dir, config_home):
+        path.mkdir(parents=True, exist_ok=True)
+    env = {"HOME": str(home),
+           "PATH": os.environ.get("PATH", os.defpath),
+           "TMPDIR": str(temp_dir),
+           "XDG_CONFIG_HOME": str(config_home),
+           "LANG": "C", "LC_ALL": "C"}
+    env.update(extra)
+    return env
+
+
 class TestSurveyIsBounded(unittest.TestCase):
     """The first version was pointed at a cluster home directory and never
     returned: an unbounded `**` glob plus an unbounded walk. A survey that
@@ -796,19 +813,35 @@ class TestRamificationsOfTheRoundTwoFixes(unittest.TestCase):
         """Surveying a home directory printed the same disk twice on every
         host, because home and the repo resolve to one path."""
         with tempfile.TemporaryDirectory() as d:
-            out = run(SURVEY, "--repo", str(Path.home())).stdout
+            root = Path(d)
+            repo = root / "repo"
+            repo.mkdir()
+            env = controlled_env(root)
+            home = Path(env["HOME"]).resolve()
+            repo = repo.resolve()
+            out = subprocess.run(
+                [sys.executable, str(SURVEY), "--repo", str(home)],
+                capture_output=True, text=True, env=env).stdout
             self.assertEqual(out.count("  disk "), 1, out)
-            out2 = run(SURVEY, "--repo", d).stdout
+            out2 = subprocess.run(
+                [sys.executable, str(SURVEY), "--repo", str(repo)],
+                capture_output=True, text=True, env=env).stdout
             self.assertEqual(out2.count("  disk "), 2, out2)
 
     def test_dropping_git_status_left_no_stale_reader(self):
-        """`dirty_files` became None for every consumer. Checked repo-wide:
-        nothing else reads it, and the field carries a note saying why it is
-        empty rather than looking forgotten."""
+        """`dirty_files` became None for every declared consumer.
+
+        The consumer surface is finite by design; operator-created files in
+        the checkout are not part of this source-layout assertion.
+        """
+        consumers = (
+            SURVEY,
+            ROOT / "skills" / "hanig-project" / "scripts" / "tickets.py",
+            ROOT / "skills" / "hanig-project" / "scripts" / "report.py",
+            ROOT / "skills" / "hanig-swarm" / "scripts" / "swarm.py",
+        )
         readers = []
-        for f in list(ROOT.rglob("*.py")) + list(ROOT.rglob("*.md")):
-            if ".git/" in str(f) or "test_project" in f.name:
-                continue
+        for f in consumers:
             if "dirty_files" in f.read_text():
                 readers.append(str(f.relative_to(ROOT)))
         self.assertEqual(readers,
@@ -857,8 +890,12 @@ class TestTheInstalledVersionSurvivesAWorktree(unittest.TestCase):
     def test_doctor_names_the_commit(self):
         if not self._repo_head():
             self.skipTest("not a git checkout, so there is no version to find")
-        r = subprocess.run(["sh", str(ROOT / "bin" / "doctor")],
-                           capture_output=True, text=True, cwd=ROOT)
+        with tempfile.TemporaryDirectory() as d:
+            env = controlled_env(
+                d, AGENT_BUS_HOME=str(Path(d) / "agent-bus"))
+            r = subprocess.run(["sh", str(ROOT / "bin" / "doctor")],
+                               capture_output=True, text=True, cwd=ROOT,
+                               env=env)
         self.assertIn("commit: ", r.stdout)
         self.assertNotIn("commit: unknown", r.stdout)
 
@@ -1065,11 +1102,17 @@ class TestVendoredSkillsAreNotOursToDelete(unittest.TestCase):
     everything it writes hanig-*, so a directory under skills/ outside that
     namespace arrived from somebody else."""
 
+    def _host_env(self, root):
+        root = Path(root)
+        return controlled_env(
+            root, AGENT_BUS_HOME=str(root / "agent-bus"))
+
     def _install(self, prefix, *extra):
         return subprocess.run(
             ["sh", str(ROOT / "install.sh"), "--prefix", str(prefix),
              "--allow-org-shadow", *extra],
-            capture_output=True, text=True, cwd=ROOT)
+            capture_output=True, text=True, cwd=ROOT,
+            env=self._host_env(Path(prefix).parent))
 
     def _upstream_install(self, base, prefix, name="paseo", shape="link"):
         """What upstream's own install looks like from here: a symlink into
@@ -1275,7 +1318,7 @@ class TestVendoredSkillsAreNotOursToDelete(unittest.TestCase):
             out = subprocess.run(["sh", str(ROOT / "bin" / "doctor"),
                                   "--prefix", str(prefix)],
                                  capture_output=True, text=True,
-                                 cwd=ROOT).stdout
+                                 cwd=ROOT, env=self._host_env(d)).stdout
             # Ancillary prerequisite warnings can also mention a skill name.
             # Ownership is asserted only against its installed-skills row.
             _, header, installed = out.partition("=== INSTALLED SKILLS ===")
@@ -1299,7 +1342,8 @@ class TestVendoredSkillsAreNotOursToDelete(unittest.TestCase):
                           "install into")
             flagged = subprocess.run(
                 ["sh", str(ROOT / "bin" / "doctor"), "--prefix", str(prefix)],
-                capture_output=True, text=True, cwd=ROOT)
+                capture_output=True, text=True, cwd=ROOT,
+                env=self._host_env(d))
             self.assertIn("paseo", flagged.stdout)
             self.assertIn(str(prefix), flagged.stdout)
 
@@ -1311,10 +1355,12 @@ class TestVendoredSkillsAreNotOursToDelete(unittest.TestCase):
             self._install(prefix)
             positional = subprocess.run(
                 ["sh", str(ROOT / "bin" / "doctor"), str(prefix)],
-                capture_output=True, text=True, cwd=ROOT).stdout
+                capture_output=True, text=True, cwd=ROOT,
+                env=self._host_env(d)).stdout
             flagged = subprocess.run(
                 ["sh", str(ROOT / "bin" / "doctor"), "--prefix", str(prefix)],
-                capture_output=True, text=True, cwd=ROOT).stdout
+                capture_output=True, text=True, cwd=ROOT,
+                env=self._host_env(d)).stdout
             skills = lambda o: o.split("=== INSTALLED SKILLS ===")[1] \
                 .split("=== SCRIPT HEALTH ===")[0]
             self.assertEqual(skills(positional), skills(flagged))
@@ -1374,22 +1420,26 @@ class TestVendoredAgentBusLayoutIsExplicit(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as d:
             sandbox = Path(d)
+            checkout = sandbox / "checkout"
+            (checkout / "bin").mkdir(parents=True)
+            shutil.copy2(ROOT / "bin" / "bus", checkout / "bin" / "bus")
+            shutil.copy2(ROOT / "models.json", checkout / "models.json")
+            fixture_bus = checkout / "bin" / "bus"
             fake_home = sandbox / "home"
             outside = sandbox / "outside"
             external_scratch = sandbox / "external-scratch"
             for path in (fake_home, outside, external_scratch):
                 path.mkdir()
-            env = dict(os.environ)
-            env.update({
-                "HOME": str(fake_home),
-                "AGENT_BUS_SCRATCH": str(external_scratch),
-                "MULTI_AGENT_SKILLS_CHECKOUT": str(ROOT),
-            })
-            env.pop("AGENT_BUS_HOME", None)
+            env = controlled_env(
+                sandbox / "process-env",
+                **{"HOME": str(fake_home),
+                   "AGENT_BUS_SCRATCH": str(external_scratch),
+                   "MULTI_AGENT_SKILLS_CHECKOUT": str(checkout)},
+            )
 
             home_before = snapshot(fake_home)
             outside_before = snapshot(outside)
-            checkout_before = snapshot(ROOT)
+            checkout_before = snapshot(checkout)
             check = section.split("#### Disposable model-routing check", 1)[1]
             documented = check.split("```bash", 1)[1].split("```", 1)[0]
 
@@ -1399,13 +1449,13 @@ class TestVendoredAgentBusLayoutIsExplicit(unittest.TestCase):
             runtime_home = runtime_state / "home"
             runtime_home.mkdir(parents=True)
             runtime_registry = runtime_state / "models.json"
-            shutil.copyfile(ROOT / "models.json", runtime_registry)
+            shutil.copyfile(checkout / "models.json", runtime_registry)
             runtime_registry.chmod(0o600)
             runtime_env = dict(env)
             runtime_env.update({"HOME": str(runtime_home),
                                 "AGENT_BUS_HOME": str(runtime_state)})
             probed = subprocess.run(
-                [str(local_bus), "models", "--json"], cwd=outside,
+                [str(fixture_bus), "models", "--json"], cwd=outside,
                 env=runtime_env, capture_output=True, text=True, timeout=30)
             self.assertEqual(probed.returncode, 0, probed.stderr)
             for dirname in ("sessions", "inbox", "cursors", "cache"):
@@ -1424,7 +1474,7 @@ class TestVendoredAgentBusLayoutIsExplicit(unittest.TestCase):
                 capture_output=True, text=True, timeout=30)
             self.assertEqual(ran.returncode, 0, ran.stderr)
             rows = json.loads(ran.stdout)
-            expected = json.loads((ROOT / "models.json").read_text())
+            expected = json.loads((checkout / "models.json").read_text())
             self.assertEqual({row["id"] for row in rows},
                              {row["id"] for row in expected["models"]})
 
@@ -1445,7 +1495,7 @@ class TestVendoredAgentBusLayoutIsExplicit(unittest.TestCase):
                              "the disposable check wrote into HOME")
             self.assertEqual(snapshot(outside), outside_before,
                              "models wrote runtime cache into its cwd")
-            self.assertEqual(snapshot(ROOT), checkout_before,
+            self.assertEqual(snapshot(checkout), checkout_before,
                              "the disposable check changed the checkout")
 
             bad_home = sandbox / "bad-home"

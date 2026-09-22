@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,6 +84,21 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.state_home = self.tmp / "state-home"
+        home = self.tmp / "home"
+        temp_dir = self.tmp / "tmp"
+        for path in (self.state_home, home, temp_dir):
+            path.mkdir()
+        state_env = mock.patch.dict(
+            os.environ,
+            {"XDG_STATE_HOME": str(self.state_home),
+             "HOME": str(home),
+             "TMPDIR": str(temp_dir),
+             "PATH": os.environ.get("PATH", os.defpath),
+             "LANG": "C", "LC_ALL": "C"},
+            clear=True)
+        state_env.start()
+        self.addCleanup(state_env.stop)
 
 
 def _state_with_seal(uid, attempt, seal, facts=None):
@@ -101,6 +117,8 @@ class TestExternalPathPolicy(Base):
             plan=plan, cwd=repo, need_root=True)
         state2, root2, _ = CP.resolve_paths(cwd=repo, need_root=True)
         self.assertEqual((state1, root1), (state2, root2))
+        state1.relative_to(self.state_home.resolve())
+        root1.relative_to(self.state_home.resolve())
         for path in (state1, root1):
             for worktree in worktrees:
                 with self.assertRaises(ValueError):
