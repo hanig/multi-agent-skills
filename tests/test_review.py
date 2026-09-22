@@ -709,34 +709,29 @@ class TestBoundedReads(unittest.TestCase):
     there blocked the gate forever and it never printed a verdict."""
 
     def test_fifo_file_argument_is_a_config_error_not_a_hang(self):
-        """The test was hollow, in both its versions, and nobody had said so.
+        """A FIFO handed to --file is refused, not waited on.
 
-        It ran `--list`, which prints the reviewer roster and exits
-        WITHOUT EVER OPENING `--file`. So it passed because `--list`
-        returns, not because a FIFO was rejected: the path it is named
-        for was never reached. luna and glm-5.3 both found the symptom
-        -- `assertIsNotNone(pr.returncode)` passes for any exit at all,
-        and glm added that an unrecognised flag would exit 2 with no
-        traceback and leave this green -- and measuring it showed the
-        cause was worse than either described.
+        The test used `--list`, which prints the reviewer roster and
+        exits WITHOUT OPENING --file, so it passed because `--list`
+        returns -- not because a FIFO was rejected. The path it is
+        named for had never run. `--list` also contacts every provider
+        first (measured 13.3s against a 15s deadline), so it raced a
+        network round trip it did not need.
 
-        My first repair made it worse in a second way. `--list` also
-        makes a live request to every configured provider before
-        printing (13.3s wall at 1% CPU, against this test's 15-second
-        deadline), so the test raced a network round trip it did not
-        need; I added `--no-probe` and a longer deadline and left it
-        still not reading the file.
-
-        A real reviewing invocation DOES read `--file`, refuses a
+        A real reviewing invocation reads the file, refuses a
         non-regular one in `read_text_bounded`, and exits before any
-        provider is contacted. Measured: rc=4 in 0.14s, no network. So
-        the assertions are positive -- the exit status the gate uses for
-        a configuration problem, and git's... the reader's own sentence
-        naming the path -- rather than "it returned something".
+        provider is contacted: measured rc=4 in 0.14s.
 
-        A regular file is deliberately NOT used here: that path proceeds
-        to a real review and contacts providers, which is the dependency
-        this test exists without.
+        The asserted contract lives in review.py: `config_error` exits
+        4 (REVIEW_ERROR, a configuration problem) and prints
+        "cannot read {path}: {reason}". Both are asserted here because
+        a refusal that names neither is not a usable diagnostic.
+
+        The `communicate` deadline is inherited from this test as it
+        stood and widened from 15s to 60s, against an operation that
+        went from 13.3s to 0.14s. It is the only way to notice the hang
+        the test exists for, and every honest run reaches it with four
+        hundred times the margin it had before.
         """
         import tempfile as _tf, os as _os
         tmp = Path(_tf.mkdtemp())
@@ -761,31 +756,6 @@ class TestBoundedReads(unittest.TestCase):
         self.assertIn("cannot read", both)
         self.assertIn(str(fifo), both,
                       "the refusal did not name the path it refused")
-        # The 60-second `communicate` deadline is the ONLY clock left,
-        # and it is not an assertion about speed: it is the sole way to
-        # notice the hang this test exists for, against an operation
-        # measured at 0.14s. A 400x margin, reached only when the gate
-        # genuinely blocks.
-        #
-        # kimi-k2.7-code is right that it can fail an honest run if the
-        # machine is suspended for a minute mid-rejection, and that is
-        # the price of being able to detect a hang at all. glm-5.3
-        # re-evaluated the related worry -- a shorter per-test runner
-        # timeout hiding the message -- and found no such timeout
-        # exists here and none is configurable by default.
-        #
-        # NO OTHER WALL-CLOCK ASSERTION. There was one -- 30 seconds, to
-        # catch the path contacting a provider -- and luna pointed out
-        # what it was: a new timing race, in the test written to remove
-        # a timing race. A scheduling delay or a suspended machine
-        # would have failed an honest run.
-        #
-        # It was also ineffective, which makes the call easy: a
-        # provider answering inside the threshold would have passed it.
-        # What actually establishes that nothing is contacted is the
-        # exit status and the message -- the gate refuses the file
-        # during argument handling and never reaches a provider -- and
-        # those are asserted above without a clock.
 
     def test_bounded_reader_rejects_non_regular_files(self):
         import tempfile as _tf, os as _os
