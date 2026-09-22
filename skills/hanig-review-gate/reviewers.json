@@ -1,5 +1,5 @@
 {
- "_comment": "Routing config only — endpoint, model id, reasoning effort, profile membership. Carries NO quality scores: a stale ranking is worse than none. Availability is MEASURED by `review.py --list`, which probes each provider live; a key being set is not availability. All reviewers use DEFAULT_MAX_OUTPUT_TOKENS (64000) unless they set max_output_tokens: reasoning tokens come out of the answer's budget, and at 16000 a large review returned no content at all. Prices in _cost are per million tokens as listed 2026-08-25 and are a budgeting hint, not a routing input.",
+ "_comment": "Routing config only \u2014 endpoint, model id, reasoning effort, profile membership. Carries NO quality scores: a stale ranking is worse than none. Availability is MEASURED by `review.py --list`, which probes each provider live; a key being set is not availability. All reviewers use DEFAULT_MAX_OUTPUT_TOKENS (64000) unless they set max_output_tokens: reasoning tokens come out of the answer's budget, and at 16000 a large review returned no content at all. Prices in _cost are per million tokens as listed 2026-08-25 and are a budgeting hint, not a routing input.",
  "default_profile": "standard",
  "_profiles": {
   "plan": "TWO contrasting models, never escalated. For acceptance criteria and designs, BEFORE code exists. A third reviewer adds agreement, not insight.",
@@ -21,6 +21,17 @@
    "_cost": {
     "in": 0.87,
     "out": 1.74
+   },
+   "max_output_tokens": 128000,
+   "_max_output_tokens": "PRE-EMPTIVE, not measured as starving. Raised with the sibling sweep for ARC-689 rather than after its own incident, because the shared 64000 default is what starved glm-5.3 and kimi-k2.7-code and leaving a reviewer on it is what let the defect recur. That the provider ACCEPTS 128000 is measured; see _max_output_tokens_accepted.",
+   "_max_output_tokens_accepted": {
+    "date": "2026-09-21",
+    "max_output_tokens": 128000,
+    "provider": "openrouter",
+    "model": "deepseek/deepseek-v4-pro",
+    "outcome": "completed",
+    "output_tokens": 20328,
+    "observed_in": "gate run, PR #41 measurement pass, --only astra,deepseek-v4-pro"
    }
   },
   {
@@ -39,6 +50,17 @@
    "_cost": {
     "in": 0.2,
     "out": 1.2
+   },
+   "max_output_tokens": 128000,
+   "_max_output_tokens": "PRE-EMPTIVE, not measured as starving. Raised with the sibling sweep for ARC-689 rather than after its own incident, because the shared 64000 default is what starved glm-5.3 and kimi-k2.7-code and leaving a reviewer on it is what let the defect recur. That the provider ACCEPTS 128000 is measured; see _max_output_tokens_accepted.",
+   "_max_output_tokens_accepted": {
+    "date": "2026-09-21",
+    "max_output_tokens": 128000,
+    "provider": "openai",
+    "model": "gpt-5.6-luna",
+    "outcome": "completed",
+    "output_tokens": 9713,
+    "observed_in": "gate run, PR #39 fresh-cycle round 1"
    }
   },
   {
@@ -58,7 +80,18 @@
     "in": 0.67,
     "out": 3.4
    },
-   "_effort": "null is measured, not forgotten; see _effort_null_is_deliberate"
+   "_effort": "null is measured, not forgotten; see _effort_null_is_deliberate",
+   "max_output_tokens": 128000,
+   "_max_output_tokens": "MEASURED. Starved at the 64000 shared default: returned no content after 41364 reasoning tokens in one round and exhausted the full budget in the next, so two consecutive rounds of one unit reached quorum with two reviewers instead of three while appearing to run three. Same defect as glm-5.3 (ARC-689); raising glm alone and not sweeping the siblings let it keep degrading quorum silently.",
+   "_max_output_tokens_accepted": {
+    "date": "2026-09-21",
+    "max_output_tokens": 128000,
+    "provider": "openrouter",
+    "model": "moonshotai/kimi-k2.7-code",
+    "outcome": "completed",
+    "output_tokens": 22922,
+    "observed_in": "gate run, PR #39 fresh-cycle round 1"
+   }
   },
   {
    "name": "astra",
@@ -68,7 +101,18 @@
    "profiles": [
     "deep"
    ],
-   "enabled": true
+   "enabled": true,
+   "max_output_tokens": 128000,
+   "_max_output_tokens": "PRE-EMPTIVE, not measured as starving. Raised with the sibling sweep for ARC-689 rather than after its own incident, because the shared 64000 default is what starved glm-5.3 and kimi-k2.7-code and leaving a reviewer on it is what let the defect recur. That the provider ACCEPTS 128000 is measured; see _max_output_tokens_accepted.",
+   "_max_output_tokens_accepted": {
+    "date": "2026-09-21",
+    "max_output_tokens": 128000,
+    "provider": "openai",
+    "model": "gpt-6-astra",
+    "outcome": "completed",
+    "output_tokens": 2875,
+    "observed_in": "gate run, PR #41 measurement pass, --only astra,deepseek-v4-pro"
+   }
   },
   {
    "name": "sol",
@@ -118,8 +162,18 @@
     "in": 1.4,
     "out": 4.4
    },
-   "_effort": "null is measured, not forgotten; see _effort_null_is_deliberate"
+   "_effort": "null is measured, not forgotten; see _effort_null_is_deliberate",
+   "_max_output_tokens_accepted": {
+    "date": "2026-09-21",
+    "max_output_tokens": 128000,
+    "provider": "openrouter",
+    "model": "z-ai/glm-5.3",
+    "outcome": "completed",
+    "output_tokens": 34267,
+    "observed_in": "gate run, PR #41 round 1"
+   }
   }
  ],
- "_effort_null_is_deliberate": "Measured 2026-09-19, three samples per cell against a real 120-line diff at a 16000 cap: glm-5.3 at effort=high burned the ENTIRE budget on reasoning and returned zero characters in 3 of 3 samples, at effort=low in 2 of 3, and at effort=null returned a 4581-character review for $0.016 in 3 of 3. kimi-k2.7-code spends ~12k completion tokens at every level, so effort changes nothing but price: high cost 83% more and returned slightly LESS answer. A null effort here is therefore deliberate and load-bearing, not an omission. Setting one on either reviewer makes the gate pay more for less, and on glm-5.3 for nothing at all."
+ "_effort_null_is_deliberate": "Measured 2026-09-19, three samples per cell against a real 120-line diff at a 16000 cap: glm-5.3 at effort=high burned the ENTIRE budget on reasoning and returned zero characters in 3 of 3 samples, at effort=low in 2 of 3, and at effort=null returned a 4581-character review for $0.016 in 3 of 3. kimi-k2.7-code spends ~12k completion tokens at every level, so effort changes nothing but price: high cost 83% more and returned slightly LESS answer. A null effort here is therefore deliberate and load-bearing, not an omission. Setting one on either reviewer makes the gate pay more for less, and on glm-5.3 for nothing at all.",
+ "_output_budget_rule": "Every ENABLED reviewer must declare max_output_tokens explicitly and must carry a STRUCTURED _max_output_tokens_accepted record: date, max_output_tokens, provider, model, outcome and a positive output_tokens. tests/test_reviewer_budgets.py compares those typed fields to the reviewer's own configuration by exact equality. It was free text matched by substring for one round, and the gate refused that correctly: \"completed a 1280000-token request via openrouterx for z-ai/glm-5.3-variant\" satisfied substring checks for 128000, openrouter and z-ai/glm-5.3. English commentary belongs in _max_output_tokens, not in the thing a test parses. The rule exists because the 64000 shared default is not a safe default for a reasoning model -- it silently starved glm-5.3 and then kimi-k2.7-code, and a starved reviewer is counted as present, so a round reaches quorum with two while the log presents three (ARC-689). Inheriting the default is therefore not permitted for an enabled reviewer, which is why sol and kimi-k3 must be measured before they are re-enabled. Acceptance is per MODEL: 128000 completing for gpt-6-astra says nothing about gpt-5.6-sol. output_tokens is required and must be positive because a provider ACCEPTING a budget is not the same fact as a reviewer RETURNING usable output, and it was the second fact that motivated this change. STILL OWED, and not claimed here: these records are transcribed by hand from measured runs. Nothing generates them from the probe, so the test checks that a record is well formed and self-consistent, never that the run happened. That belongs with the rest of ARC-689."
 }
