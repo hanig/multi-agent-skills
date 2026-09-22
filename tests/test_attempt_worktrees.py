@@ -980,7 +980,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
             facts["branch"])
         produced, why = W.judge(S.U.run, str(attempt), unit, facts)
         self.assertFalse(produced)
-        self.assertIn("device/inode changed", why)
+        self.assertIn("the inode differs", why)
 
     def test_swapped_git_metadata_is_refused_at_judgment(self):
         attempt = self.attempt("code", "swapped-git")
