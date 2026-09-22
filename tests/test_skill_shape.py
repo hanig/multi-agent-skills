@@ -879,6 +879,31 @@ def publish_second_copies(found, stream=None):
     return len(found)
 
 
+def _aligned_lower(text):
+    """Lowercase that never changes length, so offsets stay valid.
+
+    luna, against the excerpt this report prints: `str.lower()` is not
+    length-preserving. U+0130 LATIN CAPITAL LETTER I WITH DOT ABOVE
+    lowercases to two code points, so every offset after it is shifted
+    and a span found in the lowered text slices the wrong bytes out of
+    the original.
+
+    Measured, one such character before the run:
+
+        span from lowered : 'done criteria, ... discardable work'
+        same span from src: 'one criteria, ... discardable work.'
+
+    A character whose lowercase is not a single code point is left as
+    it stands. It then matches no topic, which is correct: every topic
+    needle here is ASCII, so nothing that could have matched is lost.
+    """
+    folded = []
+    for character in text:
+        lowered = character.lower()
+        folded.append(lowered if len(lowered) == 1 else character)
+    return "".join(folded)
+
+
 def _all_positions(haystack, needle):
     """Every start offset of NEEDLE, not merely the first."""
     found, start = [], haystack.find(needle)
@@ -1016,7 +1041,7 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
         found = []
         for name, sentences in named_sentences:
             for sentence in sentences:
-                lowered = sentence.lower()
+                lowered = _aligned_lower(sentence)
                 # EVERY occurrence, not just the first. luna and
                 # glm-5.3, independently: `.index()` recorded a topic at
                 # an earlier PROSE mention, so the slot it occupies in a
@@ -1494,6 +1519,46 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
                 self.assertTrue(
                     self.second_copies([("planted.md", [paraphrase])], topics),
                     "a second copy phrased as %r was not detected" % label)
+
+    def test_the_reported_excerpt_survives_a_case_expanding_character(self):
+        """The excerpt must be the text that is actually there.
+
+        luna, on the first version of this report: the span is found in
+        the lowered text and sliced out of the original, and
+        `str.lower()` is not length-preserving. One U+0130 ahead of the
+        run shifts every later offset by one, so the excerpt loses its
+        first character and takes a trailing one that is not part of
+        the list.
+
+        An advisory diagnostic that quotes text the document does not
+        contain is worse than no diagnostic: it sends a reader looking
+        for a string that is not there. Same defect as naming the wrong
+        surface, one level down.
+        """
+        with open(SKILLS / "hanig-project" / "declarations.json") as handle:
+            declared = {entry["id"]: entry["normative_text"]
+                        for entry in json.load(handle)["declarations"]}
+        topics = self.interview_topics(declared["interview.judgment-only"])
+        run = ", ".join(topics[:3])
+        for label, prefix in (("no expansion", "Note. "),
+                              ("case-expanding", "\u0130nterview note. ")):
+            with self.subTest(prefix=label):
+                sentence = prefix + "Ask about " + run + "."
+                found = self.second_copies([("planted.md", [sentence])],
+                                           topics)
+                self.assertTrue(found, "the planted run was not detected")
+                excerpt = found[0][2]
+                self.assertIn(
+                    excerpt, sentence,
+                    "the excerpt is not text that appears in the sentence")
+                self.assertTrue(
+                    excerpt.startswith(topics[0]),
+                    "the excerpt starts mid-topic (%r), so the span was "
+                    "applied to a string it was not measured against"
+                    % excerpt[:20])
+                self.assertTrue(
+                    excerpt.endswith(topics[2]),
+                    "the excerpt runs past the list (%r)" % excerpt[-20:])
 
     def test_a_second_copy_is_reported_and_does_not_fail_the_run(self):
         """The advisory boundary, through the harness that delivers it.
