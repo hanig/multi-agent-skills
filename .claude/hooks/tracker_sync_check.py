@@ -207,7 +207,11 @@ ISSUE_MUTATING = frozenset(
 # guarantee than this needs a different mechanism -- observing effect, or
 # capturing intent at the tool layer -- which is ARC-698, not more
 # aggressive text parsing.
-_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# `VAR+=value` is a standard Bash assignment and this matched only
+# `VAR=value`, so `PATH+=/usr/local/bin git push origin HEAD` put the
+# assignment in the program-word slot and the real push became an
+# argument -- kimi-k2.7-code.
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
 # The leading `\d*` is gone: shlex always separates the descriptor
 # number into its own token, so it could never match here.
 # `&>` and `>&` are descriptor-merging redirections shlex emits
@@ -216,9 +220,10 @@ _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # Every separator shlex emits as its own token. `|&` is Bash's
 # stderr-pipe and was missing, so a real command on its right side
 # was never examined -- luna. The newline is inserted by _lex.
-_OPERATORS = frozenset([";", "\n", "&&", "||", "|", "&", "|&"])
+_OPERATORS = frozenset(
+    [";", "\n", "&&", "||", "|", "&", "|&", "(", ")", "{", "}"])
 
-_REDIRECTION = re.compile(r"^(?:&>>|&>|>&|>>|>|<<-|<<|<)$")
+_REDIRECTION = re.compile(r"^(?:&>>|&>|>&|>\||<>|<&|>>|>|<<-|<<|<)$")
 
 
 
@@ -386,6 +391,25 @@ def _command_word_and_arguments(tokens):
     return tokens[index], tokens[index + 1:]
 
 
+# A command word carries no shell metacharacter. This is the BACKSTOP for
+# the class round 3 was supposed to have closed and had not: a parse that
+# succeeds and lands somewhere that is not a command.
+#
+# glm-5.3 found it with `(gh pr merge 41)`. shlex emits `(` as its own
+# token, `(` was in no operator or redirection set, so it occupied the
+# program-word slot, matched no program, and the hook went silent on a
+# real merge. `<&3 gh pr merge 41` and `>|out git push` are the same
+# thing. Adding those four spellings is the move I have now made three
+# times and a fourth reviewer has found the fifth spelling each time.
+#
+# So the rule is about the SHAPE of what was found rather than the list of
+# what was looked for: if the word in the program slot cannot be a command
+# name, this parser did not find a command, and "could not read this" is
+# the honest answer. `$CMD push` takes it too -- an unresolved variable is
+# a program word this hook cannot know.
+_COMMAND_WORD = re.compile(r"^[A-Za-z0-9_./+@:,~^%-]+$")
+
+
 def _subcommands(arguments, value_options, depth):
     """The first `depth` positional arguments, global options skipped."""
     out, index = [], 0
@@ -412,22 +436,50 @@ def _subcommands(arguments, value_options, depth):
 _COMMAND_LEX_LIMIT = 64 * 1024
 
 
+# The out-of-depth answer is "I could not read this", and it is only worth
+# saying about text that could be an outward action at all. `!!! ??? ***`
+# has a program word that is not a command name and takes the backstop
+# below, but there is no `gh` and no `git` anywhere in it, so there is
+# nothing it could be hiding and a reminder on it is pure habituation --
+# which is how a reminder stops being read.
+#
+# Deliberately a SUBSTRING test, not a word test: "through" contains "gh"
+# and will pass this filter. That is the direction to err in. It gates
+# only the unknown answers; a command this hook actually parses is matched
+# by the real detector regardless.
+_OUTWARD_HINTS = ("gh", "git")
+
+
+def _could_be_outward(command):
+    lowered = command.lower()
+    return any(hint in lowered for hint in _OUTWARD_HINTS)
+
+
 def matched_label(command):
     """The outward action this command looks like, or None."""
+    unreadable = _could_be_outward(command)
     if len(command) > _COMMAND_LEX_LIMIT:
-        return "an outward action (command too large to parse)"
+        return ("an outward action (command too large to parse)"
+                if unreadable else None)
     tokens = _lex(command)
     if tokens is OUT_OF_DEPTH:
-        return "an outward action (the command could not be parsed fully)"
+        return ("an outward action (the command could not be parsed fully)"
+                if unreadable else None)
     if tokens is None:
         # Unlexable text -- an unbalanced quote. Guessing is what the four
         # earlier shapes did; erring towards a reminder is what the stated
         # asymmetry asks for.
-        return "an outward action (command could not be parsed)"
+        return ("an outward action (command could not be parsed)"
+                if unreadable else None)
     for simple in _simple_commands(tokens):
         program, arguments = _command_word_and_arguments(simple)
         if not program:
             continue
+        if not _COMMAND_WORD.match(program):
+            if not unreadable:
+                continue
+            return ("an outward action (the command could not be parsed "
+                    "fully)")
         program = program.rsplit("/", 1)[-1]
         if program == "gh":
             path = _subcommands(arguments, _GH_VALUE_OPTIONS, 2)
@@ -523,6 +575,11 @@ def _reap(proc):
         pass
 
 
+INCOMPLETE = "incomplete"
+OVERFLOWED = "overflowed"
+TIMED_OUT = "timed out"
+
+
 def _read_bounded(proc):
     """Read the probe's stdout under BOTH a deadline and a size cap.
 
@@ -538,24 +595,31 @@ def _read_bounded(proc):
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            return None, False
+            return None, TIMED_OUT
         try:
             ready, _, _ = select.select([fd], [], [], min(remaining, 0.25))
         except (OSError, ValueError):
-            return b"".join(chunks), False
+            return b"".join(chunks), None
         if not ready:
             if proc.poll() is not None:
-                return b"".join(chunks), False
+                # The direct child is gone and the pipe is still OPEN: no
+                # EOF ever arrived, so a descendant inherited the write end
+                # and may write more. luna: this returned the partial bytes
+                # and `{"intents": []}` written before the fork then read as
+                # "total 0" with a live descendant behind it. What is known
+                # here is that the output is incomplete, and incomplete is
+                # unknown.
+                return None, INCOMPLETE
             continue
         try:
             chunk = os.read(fd, 65536)
         except OSError:
-            return b"".join(chunks), False
+            return b"".join(chunks), None
         if not chunk:
-            return b"".join(chunks), False
+            return b"".join(chunks), None
         total += len(chunk)
         if total > _OUTPUT_LIMIT:
-            return b"".join(chunks), True
+            return None, OVERFLOWED
         chunks.append(chunk)
 
 
@@ -603,15 +667,26 @@ def read_outbox(repo, state):
             start_new_session=True)
     except OSError as exc:
         return None, "The outbox probe could not start (%s)." % exc.strerror
-    out, overflow = _read_bounded(proc)
-    if overflow:
+    out, incomplete = _read_bounded(proc)
+    if incomplete is OVERFLOWED:
         _reap(proc)
         return None, ("The outbox probe produced more than %d bytes, which "
                       "no outbox does." % _OUTPUT_LIMIT)
-    if out is None:
+    if incomplete is TIMED_OUT:
         _reap(proc)
         return None, ("The outbox probe did not finish within %gs."
                       % probe_timeout_s())
+    if incomplete is INCOMPLETE:
+        # Named separately from the timeout because it is a different
+        # fact: the probe finished, and something it left behind still
+        # holds the pipe, so what was read is a prefix of the answer.
+        _reap(proc)
+        return None, ("The outbox probe exited while a descendant still "
+                      "held its output open, so what it wrote is "
+                      "incomplete.")
+    if out is None:
+        _reap(proc)
+        return None, "The outbox probe produced no readable output."
     try:
         proc.wait(timeout=REAP_GRACE_S)
     except subprocess.TimeoutExpired:
@@ -659,7 +734,11 @@ def read_outbox(repo, state):
                   if not isinstance(i, dict)
                   or i.get("ack_status") not in ACK_STATUSES
                   or not isinstance(i.get("envelope"), dict)
-                  or not (i.get("envelope") or {}).get("requested_operation")]
+                  or not isinstance(
+                      (i.get("envelope") or {}).get("requested_operation"),
+                      str)
+                  or not (i.get("envelope") or {}).get(
+                      "requested_operation").strip()]
     if unreadable:
         return None, ("The outbox probe returned %d intent(s), %d of which "
                       "this hook cannot read -- an ack_status it does not "
@@ -734,15 +813,28 @@ def main():
     return 0
 
 
-if __name__ == "__main__":
+def run():
+    """The entry point, with the last-resort guard around it.
+
+    Extracted from the `__main__` block so a test can reach it. kimi-k2.7-code
+    and glm-5.3 both noted that the guard was not exercised by anything and
+    that reverting it would leave the suite green -- which was true, and
+    "committed to emitting, including when this file itself is wrong" is
+    exactly the kind of claim that must not rest on an unrun line.
+    """
     try:
-        sys.exit(main())
-    except Exception:
-        # Committed to emitting, including when this file itself is wrong.
+        return main()
+    except BaseException:
+        # Not Exception. A MemoryError or a KeyboardInterrupt mid-probe is
+        # still a tool call whose tracker state nobody checked.
         try:
             emit("TRACKER SYNC CHECK: this hook failed while checking tracker "
                  "state. Unknown is not zero -- check Linear before assuming "
                  "it is current.")
-        except Exception:
+        except BaseException:
             pass
-        sys.exit(0)
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(run())

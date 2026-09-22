@@ -13,10 +13,13 @@ shape that is injected into the model's context. A reminder printed as plain
 text passes every test that inspects the script's logic and fails these.
 """
 
+import importlib.util
+import io
 import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import time
@@ -24,6 +27,16 @@ import unittest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SETTINGS = os.path.join(REPO_ROOT, ".claude", "settings.json")
+
+# Two of these cases reach INTO the hook: the clamp on the probe timeout
+# and the last-resort guard around main(). Everything else runs the wired
+# command through a shell, which is what this file is for -- but a guard
+# that only fires when the hook itself is broken cannot be provoked from
+# outside, and leaving it untested is what kimi-k2.7-code and glm-5.3
+# both refused. A fresh module per test, so a patched main() never leaks.
+HOOK_SPEC = importlib.util.spec_from_file_location(
+    "tracker_sync_check_under_test",
+    os.path.join(REPO_ROOT, ".claude", "hooks", "tracker_sync_check.py"))
 
 
 def wired_commands():
@@ -333,7 +346,36 @@ PROBE_WRONG_SHAPE = {
     "no intents key": "    print('{}')",
     "a bare number": "    print('7')",
     "intents holds non-objects": '    print(\'{"intents": [1, 2, 3]}\')',
+    # Each of these passed the check one field earlier and reported
+    # "total 0" -- a shape the reader does not understand read as an
+    # outbox with nothing in it, three times, one field further in each
+    # round. luna found all three.
+    "a known status but no envelope":
+        '    print(\'{"intents": [{"ack_status": "attested"}]}\')',
+    "an envelope with no operation":
+        '    print(\'{"intents": [{"ack_status": "attested",'
+        ' "envelope": {}}]}\')',
+    "a numeric requested_operation":
+        '    print(\'{"intents": [{"ack_status": "attested",'
+        ' "envelope": {"requested_operation": 1}}]}\')',
+    "a blank requested_operation":
+        '    print(\'{"intents": [{"ack_status": "attested",'
+        ' "envelope": {"requested_operation": "  "}}]}\')',
 }
+
+# Prints a well-formed EMPTY outbox, forks a child that inherits stdout
+# and outlives it, then exits ZERO. luna: the reader saw the direct
+# child gone with bytes already in hand and returned them, so the probe
+# reported "total 0" with a live descendant still holding the write end
+# -- the answer was a prefix and was read as the whole of it.
+PROBE_EXITS_LEAVING_A_WRITER = """
+    import os, sys, time
+    print('{"intents": []}', flush=True)
+    if os.fork() == 0:
+        time.sleep(30)
+        os._exit(0)
+    os._exit(0)
+"""
 
 # Ignores SIGTERM and spawns a child that outlives it and also ignores
 # SIGTERM. This is the shape the shell version leaked: it reaped by killing
@@ -439,6 +481,24 @@ class TrackerSyncHookOutboxReporting(unittest.TestCase):
                 self.assertIsNotNone(context, out)
                 self.assertIn("Unknown is not zero", context)
                 self.assertNotIn("total 0", context)
+
+    def test_a_descendant_holding_stdout_makes_the_answer_incomplete(self):
+        """luna: the probe exited zero with a live writer behind it.
+
+        `_read_bounded` returned as soon as the DIRECT child was gone and
+        nothing was readable, so the bytes written before the fork were
+        treated as the whole answer -- and those bytes were a well-formed
+        empty outbox, which is the one sentence this hook must never
+        reach by accident. No EOF ever arrived, and no EOF means the
+        output is a prefix.
+        """
+        rc, context, out, _ = self.run_against(
+            PROBE_EXITS_LEAVING_A_WRITER, timeout=90)
+        self.assertEqual(rc, 0)
+        self.assertIsNotNone(context, out)
+        self.assertIn("Unknown is not zero", context)
+        self.assertNotIn("total 0", context)
+        self.assertIn("incomplete", context)
 
     def test_malformed_output_is_unknown_even_when_it_parses(self):
         """A permissive reader is how malformed output became "total 0"."""
@@ -674,6 +734,22 @@ class TrackerSyncHookInputContract(unittest.TestCase):
             # heredoc whose delimiter cannot be read.
             "the stderr pipe operator": (
                 "gh pr view 41 |& gh pr merge 41", "gh pr merge"),
+            # Round 1 of the rewrite: glm-5.3 found `(` in the program-word
+            # slot, and kimi-k2.7-code found `VAR+=value` there. Both are
+            # covered by the backstop as well as by their own token, which
+            # is the point -- the backstop is what stops the next one.
+            "a subshell": ("(gh pr merge 41)", "gh pr merge"),
+            "a subshell around a push": (
+                "(git push origin HEAD)", "git push"),
+            "a brace group": ("{ gh pr merge 41; }", "gh pr merge"),
+            "a descriptor duplication": (
+                "<&3 gh pr merge 41", "gh pr merge"),
+            "a clobbering redirect": (
+                ">|out git push origin HEAD", "git push"),
+            "a read-write redirect": (
+                "<>rw git push origin HEAD", "git push"),
+            "an appending assignment": (
+                "PATH+=/usr/local/bin git push origin HEAD", "git push"),
             "a leading combined redirection": (
                 "&>/dev/null git push origin HEAD", "git push"),
             "a leading descriptor merge": (
@@ -753,6 +829,23 @@ class TrackerSyncHookInputContract(unittest.TestCase):
                     self.assertEqual(out.strip(), "",
                                      "%s should be silent: %r" % (label, out))
 
+        # The narrowing, stated rather than assumed. An unknown answer is
+        # only worth giving about text that could be an outward action at
+        # all, and "x x x ..." past the size bound could not be. glm-5.3's
+        # point about habituation is the whole reason: a reminder that
+        # fires on obvious non-commands is a reminder nobody reads.
+        for label, command in (
+                ("oversized with nothing outward in it", "x " * 40000),
+                ("unlexable with nothing outward in it", 'echo "oops'),
+        ):
+            with self.subTest(command=label):
+                payload = json.dumps(
+                    {"tool_input": {"command": command}}).encode()
+                rc, out = self.invoke(payload, timeout=30)
+                self.assertEqual(rc, 0)
+                self.assertEqual(out.strip(), "",
+                                 "%s produced a reminder" % label)
+
     def test_a_parse_out_of_its_depth_reminds_rather_than_guesses(self):
         """Five shapes of this function each hid a real command by
         treating "I could not read this" as "there is nothing here".
@@ -779,7 +872,7 @@ class TrackerSyncHookInputContract(unittest.TestCase):
                 # commands and a quiet one meant silence -- the reminder
                 # for an unreadable parse went missing.
                 ("a degenerate heredoc followed by a blank line",
-                 "cat <<\n\nls -la"),
+                 "cat <<\n\ngit status\n\ngh pr merge 41"),
         ):
             with self.subTest(command=label):
                 payload = json.dumps(
@@ -806,6 +899,93 @@ class TrackerSyncHookInputContract(unittest.TestCase):
                 self.assertEqual(out.strip(), "",
                                  "%s fired on heredoc body text" % label)
 
+    def test_a_program_word_that_is_not_a_command_is_not_a_parse(self):
+        """The backstop, and the reason this round is not a sixth patch.
+
+        glm-5.3: `(gh pr merge 41)` lexes cleanly, and `(` then sat in the
+        program-word slot, matched no program, and the hook went silent on
+        a real merge. Three rounds running I added the spelling a reviewer
+        named and the next reviewer brought the one beside it.
+
+        So this asserts the SHAPE rule rather than the spellings: a word
+        that cannot be a command name means the parser did not find a
+        command, whatever put it there. The token itself need not be
+        known.
+        """
+        fake_repo(PROBE_EMPTY, os.path.join(self.tmp, "repo"))
+        for label, command in (
+                ("an unresolved variable", "GIT_DIR=x $CMD push origin HEAD"),
+                ("a glob in the program slot", "gh* pr merge 41"),
+                ("a bracket glob", "[gh]h pr merge 41"),
+                ("a tilde-brace expansion", "~/{gh,x} pr merge 41"),
+        ):
+            with self.subTest(command=label):
+                payload = json.dumps(
+                    {"tool_input": {"command": command}}).encode()
+                rc, out = self.invoke(payload, timeout=30)
+                self.assertEqual(rc, 0)
+                context = injected_context(out)
+                self.assertIsNotNone(context, "%s emitted nothing" % label)
+                self.assertIn(
+                    "could not be parsed", context,
+                    "%s was answered with a verdict, not an unknown" % label)
+
+    def test_the_probe_timeout_override_is_clamped(self):
+        """glm-5.3: nothing supplied an out-of-range value, so reverting
+        the clamp left the suite green.
+
+        The clamp is what keeps a stray value from disabling the bound or
+        turning this hook into a long stall on a synchronous per-tool
+        path, which is a property worth a test rather than a comment.
+        """
+        hook = importlib.util.module_from_spec(HOOK_SPEC)
+        HOOK_SPEC.loader.exec_module(hook)
+        original = os.environ.get("HANIG_TRACKER_PROBE_TIMEOUT_S")
+        try:
+            for value, expected in (("99999", 120.0), ("-5", 1.0),
+                                    ("0", 1.0), ("", 20.0),
+                                    ("not a number", 20.0), ("45", 45.0)):
+                with self.subTest(value=value):
+                    os.environ["HANIG_TRACKER_PROBE_TIMEOUT_S"] = value
+                    self.assertEqual(hook.probe_timeout_s(), expected)
+        finally:
+            if original is None:
+                os.environ.pop("HANIG_TRACKER_PROBE_TIMEOUT_S", None)
+            else:
+                os.environ["HANIG_TRACKER_PROBE_TIMEOUT_S"] = original
+
+    def test_the_last_resort_guard_emits_when_the_hook_itself_is_wrong(self):
+        """kimi-k2.7-code and glm-5.3: the guard was exercised by nothing.
+
+        "Committed to emitting, including when this file itself is wrong"
+        is the module's own headline claim, and it rested on a line that
+        reverting would not have failed anything.
+        """
+        hook = importlib.util.module_from_spec(HOOK_SPEC)
+        HOOK_SPEC.loader.exec_module(hook)
+        class NotAnException(BaseException):
+            """A BaseException that is not an Exception, and not one
+            unittest treats specially. KeyboardInterrupt here aborted the
+            whole runner instead of failing one test, which is a worse
+            signal than the defect it was catching."""
+
+        for failure in (RuntimeError("main is broken"),
+                        MemoryError(),
+                        NotAnException("the interpreter is unwinding")):
+            with self.subTest(failure=type(failure).__name__):
+                hook.main = lambda _f=failure: (_ for _ in ()).throw(_f)
+                captured = io.StringIO()
+                stdout, sys.stdout = sys.stdout, captured
+                try:
+                    status = hook.run()
+                finally:
+                    sys.stdout = stdout
+                self.assertEqual(status, 0)
+                payload = json.loads(captured.getvalue())
+                self.assertIn(
+                    "Unknown is not zero",
+                    payload["hookSpecificOutput"]["additionalContext"])
+
     def test_unparseable_and_oversized_commands_fail_towards_a_reminder(self):
         """The stated asymmetry, applied where the parser gives up.
 
@@ -819,7 +999,7 @@ class TrackerSyncHookInputContract(unittest.TestCase):
         """
         fake_repo(PROBE_EMPTY, os.path.join(self.tmp, "repo"))
         for label, command in (
-                ("oversized", "x " * 40000),
+                ("oversized", "git log " * 20000),
                 ("unbalanced quote", 'git commit -m "oops'),
         ):
             with self.subTest(command=label):
