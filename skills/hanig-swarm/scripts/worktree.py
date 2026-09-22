@@ -439,21 +439,25 @@ def artifact_basis_problem(basis, unit_dir=None, spec=None):
                 "attempt's declared artifacts")
     if basis.get("schema_version") != ARTIFACT_BASIS_SCHEMA:
         return (f"the pre-dispatch artifact digest declares schema_version "
-                f"{basis.get('schema_version')!r}; this build understands "
-                f"{ARTIFACT_BASIS_SCHEMA}")
+                f"{render_for_record(basis.get('schema_version'), 32)}; "
+                f"this build understands "
+                f"{render_for_record(ARTIFACT_BASIS_SCHEMA, 12)}")
     if unit_dir is not None and basis.get("attempt_id") != Path(unit_dir).name:
         return (f"the pre-dispatch artifact digest belongs to attempt "
-                f"{basis.get('attempt_id')!r}, not {Path(unit_dir).name!r}")
+                f"{render_for_record(basis.get('attempt_id'), 160, collapse=False)}, "
+                f"not {render_for_record(Path(unit_dir).name, 255, collapse=False)}")
     expected_unit = (spec or {}).get("task_id") or (spec or {}).get("id")
     if expected_unit and basis.get("unit_id") != expected_unit:
         return (f"the pre-dispatch artifact digest belongs to unit "
-                f"{basis.get('unit_id')!r}, not {expected_unit!r}")
+                f"{render_for_record(basis.get('unit_id'), 160, collapse=False)}, "
+                f"not {render_for_record(expected_unit, 160, collapse=False)}")
     if not isinstance(basis.get("declared"), list):
         return ("the pre-dispatch artifact digest names no declared artifact "
                 "list")
     for key in ("absent", "escaped"):
         if not isinstance(basis.get(key), list):
-            return f"the pre-dispatch artifact digest has no {key!r} list"
+            return (f"the pre-dispatch artifact digest has no "
+                    f"{render_for_record(key, 32, collapse=False)} list")
     if not isinstance(basis.get("present"), dict):
         return "the pre-dispatch artifact digest has no 'present' map"
     return None
