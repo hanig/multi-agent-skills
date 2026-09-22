@@ -1991,22 +1991,32 @@ class TestDocsTruth(unittest.TestCase):
             "an exported factory class is collected; only the orphan "
             "is hidden")
 
-        # A match case is a body like any other.
-        matched = (
-            "import unittest\n"
-            "\n"
-            "match 0:\n"
-            "    case 1:\n"
-            "        class Hidden(unittest.TestCase):\n"
-            "            def test_lost(self):\n"
-            "                pass\n"
-        )
-        self.assertEqual(
-            {name: methods
-             for name, methods, _line in self.sweep_source(
-                 matched, "test_match")},
-            {"Hidden": ["test_lost"]},
-            "a class declared in a match case was invisible to the walk")
+        # A match case is a body like any other -- but `match` is
+        # 3.10+ SYNTAX, and release validation pins 3.9. The first
+        # version of this fixture was green on this 3.12 host and
+        # turned both CI runners red with a SyntaxError at import,
+        # which is the exact trap CLAUDE.md records for
+        # `sys.stdlib_module_names`: "3.9 is the binding constraint for
+        # anything a test imports ... Test against 3.10, not the
+        # newest." The walk's `cases` handling is still right, because
+        # the HOST floor is 3.10; only the fixture has to be guarded.
+        if sys.version_info >= (3, 10):
+            matched = (
+                "import unittest\n"
+                "\n"
+                "match 0:\n"
+                "    case 1:\n"
+                "        class Hidden(unittest.TestCase):\n"
+                "            def test_lost(self):\n"
+                "                pass\n"
+            )
+            self.assertEqual(
+                {name: methods
+                 for name, methods, _line in self.sweep_source(
+                     matched, "test_match")},
+                {"Hidden": ["test_lost"]},
+                "a class declared in a match case was invisible to the "
+                "walk")
 
         # A module-level class OCCUPYING the source name of a
         # factory-local one. luna: the direct resolution found a class,
@@ -2147,6 +2157,42 @@ class TestDocsTruth(unittest.TestCase):
         self.assertIn(
             "test_shared", {method for _cls, method in expected},
             "unittest collects this test, so the sweep must expect it")
+
+    def test_every_authored_test_parses_at_the_binding_version(self):
+        """3.9 is the binding constraint and this host runs 3.12.
+
+        CLAUDE.md records the trap: "Release validation pins 3.9 in
+        both jobs, so 3.9 is the binding constraint for anything a test
+        imports ... Test against 3.10, not the newest." I read that and
+        then added a `match` statement to a fixture in this very file,
+        which was green here and turned BOTH CI runners red with a
+        SyntaxError at import.
+
+        There is no 3.9 or 3.10 interpreter on this host, so the suite
+        could not have caught it by running. `ast.parse` takes a
+        `feature_version`, which rejects 3.10+ syntax without a 3.10
+        interpreter -- verified: it refuses `match` at (3, 9) and
+        accepts it at (3, 10).
+
+        This does not replace running the suite on 3.9. It catches the
+        one failure mode that reaches CI as a SyntaxError before a
+        single test runs, which is the one that cost two red runners.
+        """
+        floor = (3, 9)
+        offenders = []
+        for path in unittest_discoverable_paths(ROOT / "tests"):
+            try:
+                with tokenize.open(path) as handle:
+                    ast.parse(handle.read(), filename=str(path),
+                              feature_version=floor)
+            except SyntaxError as exc:
+                offenders.append("%s:%s: %s"
+                                 % (path.name, exc.lineno, exc.msg))
+        self.assertEqual(
+            offenders, [],
+            "these files use syntax newer than the %d.%d release "
+            "validation pins, so CI fails at import before any test "
+            "runs:\n  %s" % (floor[0], floor[1], "\n  ".join(offenders)))
 
     def test_no_test_here_throws_away_a_report_it_asked_for(self):
         """The property, enforced, because asserting it kept failing.
