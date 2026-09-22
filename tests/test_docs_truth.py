@@ -800,13 +800,23 @@ def expected_test_methods(path, module, concrete=None):
 
 
 def assert_every_test_method_collected(paths, loader=None, module_loader=None):
-    loader = loader or unittest.defaultTestLoader
+    # A FRESH loader for the repository sweep, never the caller's.
+    # kimi-k2.7-code: reusing the ambient loader meant `unittest discover
+    # -s tests -k docs_truth` -- an ordinary invocation -- compared every
+    # declared method against a collection that `-k` had filtered, and
+    # reported the filtered-out methods as hidden. A guard that fails
+    # because someone ran a subset is a false alarm, and it was documented
+    # as a limit here before it was fixed, which is worse: the limit was
+    # real and avoidable.
     module_loader = module_loader or importlib.import_module
     paths = list(paths)
     repository_discovery = paths and all(
         isinstance(path, Path) for path in paths)
+    sweep_loader = unittest.TestLoader() if repository_discovery else (
+        loader or unittest.defaultTestLoader)
+    loader = loader or unittest.defaultTestLoader
     discovered_suite = (
-        loader.discover(str(ROOT / "tests"))
+        sweep_loader.discover(str(ROOT / "tests"))
         if repository_discovery else None)
     discovered_tests = (
         list(walk_suite(discovered_suite))

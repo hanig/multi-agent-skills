@@ -408,12 +408,26 @@ class TestNoTestGoesUncollectedAnywhere(unittest.TestCase):
         """
         import types
         import tempfile
-        from tests.test_docs_truth import (
-            assert_every_test_method_collected,
-            source_test_methods,
-            unittest_discoverable_paths,
-            walk_suite,
-        )
+        # Loaded BY PATH, not by package name. glm-5.3 argued that on
+        # Python 3.10 `unittest discover` replaces sys.path[0] with the
+        # tests directory rather than inserting it, which evicts the
+        # repository root that a PEP 420 `tests` namespace package needs,
+        # and 3.10 is this repository's binding host floor. I could not
+        # reproduce it -- 3.9 and 3.12 on this machine both INSERT -- and I
+        # have no 3.10 interpreter here, so the claim is neither confirmed
+        # nor refuted. A path-based load makes the question moot on every
+        # interpreter, which is worth more than winning the argument.
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "_docs_truth_for_project",
+            str(Path(__file__).resolve().parent / "test_docs_truth.py"))
+        _docs_truth = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_docs_truth)
+        assert_every_test_method_collected = (
+            _docs_truth.assert_every_test_method_collected)
+        source_test_methods = _docs_truth.source_test_methods
+        unittest_discoverable_paths = _docs_truth.unittest_discoverable_paths
+        walk_suite = _docs_truth.walk_suite
 
         assert_every_test_method_collected(
             unittest_discoverable_paths(ROOT / "tests"))
