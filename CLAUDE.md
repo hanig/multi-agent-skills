@@ -89,6 +89,22 @@ An invariant written in prose is not an invariant. If a docstring claims a test 
 
 **Preserve a blocked attempt's work before any cleanup path runs.** Of two attempts blocked the same way on one day, one wrote a digested patch and one deleted its implementation "to leave the worktree clean"; nothing in the protocol decided which. Preservation must not be agent discretion: cleanup depends on a completed, restore-checked snapshot carrying base identity, content digest and validation result, and a failed preservation leaves the work in place. Preserving work neither resumes it nor makes it verified. **Unenforced today**: cleanup does not depend on a completed snapshot, which is ARC-682.
 
+**Never normalize a value you are about to decide with.** Truncating,
+resolving, flattening or case-folding is for what a human reads, and it happens
+after the decision, not before it. Three separate defects in one day: a ref
+rendered with a fixed 4096 bound and then compared for equality, so two
+different refs could compare equal (ARC-704); a line number computed from an
+offset into text that `sentences` had already whitespace-flattened, so every
+duplicate reported as line 1; and a worktree's `.git` pointer excluded from a
+recovery snapshot when its target `resolve()`d to the expected path, so a
+replaced pointer with different bytes was classified as Git's own and its bytes
+lost (ARC-682). Each function's docstring claimed the exact check it was not
+making. **Partly enforced**: `tests/test_attempt_authority.py` pins the
+rendering boundary in `worktree.py` through an AST guard over
+`RENDERED_REFUSAL_FUNCTIONS`, so a raw interpolation in an enrolled function
+fails. Nothing checks the general shape, and nothing checks a docstring that
+describes a stricter test than the code performs.
+
 Check every fix by mutation: revert the fix and the test must fail. A green suite after a change proves nothing on its own. When fixing an instance, sweep mechanically for its siblings instead of fixing the one in front of you. Correct the persisted state, not only the forward path: three review rounds in a row fixed how a value would be computed next time and left the wrong value on disk.
 
 Keep `if __name__ == "__main__"` at the bottom of a test file. A `__main__` block above later class definitions once hid 13 tests in one file and 9 classes in another while the suite stayed green. A test must not be satisfiable by its own source text: a grep that matches the comment explaining an absence is a false pass.
