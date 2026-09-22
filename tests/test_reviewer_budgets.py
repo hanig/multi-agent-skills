@@ -34,7 +34,10 @@ import unittest
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG = os.path.join(REPO_ROOT, "skills", "hanig-review-gate", "reviewers.json")
 
-ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}: \S")
+ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+REQUIRED_RECORD_FIELDS = (
+    "date", "max_output_tokens", "provider", "model", "outcome", "output_tokens")
 
 
 def load():
@@ -69,47 +72,63 @@ class ReviewerOutputBudgets(unittest.TestCase):
                 )
 
     def test_every_declared_budget_names_a_request_that_completed_at_it(self):
+        """The record is structured data, compared field by field.
+
+        It was free text matched by substring for one round, and the gate
+        refused that correctly: luna's counterexample, "completed a
+        1280000-token request via openrouterx for z-ai/glm-5.3-variant",
+        satisfied `"128000" in record`, `"openrouter" in record` and
+        `"z-ai/glm-5.3" in record` while documenting a different value, a
+        different provider and a different model. Exact-token matching would
+        have closed that hole and kept the shape, which is a human sentence
+        a test parses. So the record carries typed fields and English
+        commentary stays in _max_output_tokens.
+        """
         for reviewer in self.reviewers:
             if reviewer.get("max_output_tokens") is None:
                 continue
             with self.subTest(reviewer=reviewer["name"]):
                 record = reviewer.get("_max_output_tokens_accepted")
                 self.assertIsInstance(
-                    record, str,
-                    "%s declares max_output_tokens with no "
+                    record, dict,
+                    "%s declares max_output_tokens with no structured "
                     "_max_output_tokens_accepted record" % reviewer["name"],
                 )
+                for field in REQUIRED_RECORD_FIELDS:
+                    self.assertIn(field, record,
+                                  "%s's acceptance record is missing %s"
+                                  % (reviewer["name"], field))
                 self.assertRegex(
-                    record, ISO_DATE,
-                    "%s's acceptance record must start with an ISO date and "
-                    "then say what completed: %r" % (reviewer["name"], record),
-                )
-                self.assertIn(
-                    str(reviewer["max_output_tokens"]), record,
-                    "%s's acceptance record does not name the value it "
-                    "accepts (%s)" % (reviewer["name"], reviewer["max_output_tokens"]),
-                )
-                self.assertIn(
-                    reviewer["provider"], record,
-                    "%s's acceptance record does not name the provider the "
-                    "request went to" % reviewer["name"],
-                )
-                # Acceptance is per model, not per value or per provider.
-                # 128000 completing for gpt-6-astra says nothing about
-                # gpt-5.6-sol, and a record that names neither the model nor
-                # a completion is a date with a number after it.
-                self.assertIn(
-                    reviewer["model"], record,
-                    "%s's acceptance record does not name the model it was "
-                    "measured on (%s); a value accepted by one model on a "
-                    "provider is not evidence for another"
-                    % (reviewer["name"], reviewer["model"]),
-                )
-                self.assertIn(
-                    "completed", record,
-                    "%s's acceptance record must say what completed, not "
-                    "merely assert a value: %r" % (reviewer["name"], record),
-                )
+                    str(record["date"]), ISO_DATE,
+                    "%s's acceptance record needs an ISO date"
+                    % reviewer["name"])
+                # Exact equality against the reviewer's own configuration.
+                # A record for a neighbouring value, provider or model is
+                # evidence about a request that was never made here.
+                self.assertEqual(
+                    record["max_output_tokens"], reviewer["max_output_tokens"],
+                    "%s's acceptance record documents %r, but the reviewer is "
+                    "configured for %r"
+                    % (reviewer["name"], record["max_output_tokens"],
+                       reviewer["max_output_tokens"]))
+                self.assertEqual(record["provider"], reviewer["provider"],
+                                 reviewer["name"])
+                self.assertEqual(record["model"], reviewer["model"],
+                                 reviewer["name"])
+                self.assertEqual(
+                    record["outcome"], "completed",
+                    "%s's acceptance record must record a completed request"
+                    % reviewer["name"])
+                # A provider ACCEPTING a budget is not the same fact as a
+                # reviewer RETURNING usable output, and it was the second
+                # fact that motivated raising these budgets at all.
+                self.assertIsInstance(record["output_tokens"], int,
+                                      reviewer["name"])
+                self.assertGreater(
+                    record["output_tokens"], 0,
+                    "%s's acceptance record shows no output; an accepted "
+                    "request that returns nothing is the defect being fixed, "
+                    "not evidence against it" % reviewer["name"])
 
     def test_a_declared_budget_explains_itself(self):
         """Measured or pre-emptive, the file has to say which.
