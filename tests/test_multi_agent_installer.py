@@ -178,10 +178,17 @@ class TestPublicCli(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         base = Path(temp.name)
         home = base / "home with spaces"
+        temp_dir = base / "tmp"
+        config_home = base / "config"
+        temp_dir.mkdir()
+        config_home.mkdir()
         binaries = self._fake_agents(base, *agents)
-        env = dict(os.environ, HOME=str(home),
-                   PATH=str(binaries) + os.pathsep + "/usr/bin:/bin",
-                   PYTHONDONTWRITEBYTECODE="1")
+        env = {"HOME": str(home),
+               "PATH": str(binaries) + os.pathsep + "/usr/bin:/bin",
+               "TMPDIR": str(temp_dir),
+               "XDG_CONFIG_HOME": str(config_home),
+               "LANG": "C", "LC_ALL": "C",
+               "PYTHONDONTWRITEBYTECODE": "1"}
         if extra_env:
             env.update(extra_env)
         result = subprocess.run(["sh", str(ROOT / "install.sh"), *args], cwd=ROOT,
@@ -279,7 +286,9 @@ class TestPublicCli(unittest.TestCase):
                             for action in data["actions"]))
 
     def test_copy_is_a_stable_snapshot_and_dry_run_leaves_no_bytecode(self):
-        before = set(ROOT.rglob("__pycache__"))
+        source_roots = (ROOT / "skills" / "hanig-swarm", ROOT / "lib")
+        before = {path for root in source_roots
+                  for path in root.rglob("__pycache__")}
         result, home = self._run("--agent", "claude", "--only", "hanig-swarm", "--json",
                                  agents=("claude",))
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -287,7 +296,8 @@ class TestPublicCli(unittest.TestCase):
         self.assertTrue(installed.is_dir())
         self.assertFalse(installed.is_symlink())
         self.assertTrue((installed / ".installed-by-multi-agent-skills").is_file())
-        self.assertEqual(before, set(ROOT.rglob("__pycache__")))
+        self.assertEqual(before, {path for root in source_roots
+                                  for path in root.rglob("__pycache__")})
 
     def test_all_collisions_are_reported_before_any_destination_is_written(self):
         with tempfile.TemporaryDirectory() as raw:
