@@ -112,11 +112,13 @@ def _as_text(value):
     # which produces a real str with real methods.
     if type(value) is str:
         return value
-    if isinstance(value, bytes):
-        return value.decode("utf-8", "replace")
     if value is None:
         return ""
     try:
+        # `.decode` is inside the guard: kimi-k2.7-code pointed out that a
+        # bytes SUBCLASS can override it, and it was being called outside.
+        if isinstance(value, bytes):
+            return value.decode("utf-8", "replace")
         return str(value)
     except BaseException:
         # BaseException, not Exception: kimi-k2.7-code pointed out that a
@@ -138,10 +140,13 @@ def _as_status(value):
     """
     if type(value) is int:
         return value
-    try:
-        return int(value)
-    except BaseException:
-        return 1
+    # Do NOT parse. `int(value)` reads the string "0" as success, which
+    # ADMITS a run the previous `rc != 0` comparison refused -- luna and
+    # glm-5.3 both caught that, and admitting a previously refused case is
+    # the worst direction a change to this function can fail in. Anything
+    # that is not already an int is a failure, which is what the docstring
+    # said before the code disagreed with it.
+    return 1
 
 
 def _git(runner, repo, *args, timeout=60):

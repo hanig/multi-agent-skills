@@ -905,6 +905,49 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
                 out = W.render_git_diagnostic(shape, "boom")
                 self.assertIsInstance(out, str)
 
+    def test_a_textual_zero_status_is_not_success(self):
+        """luna and glm-5.3: coercing "0" ADMITTED a refused run.
+
+        `int("0")` is 0, so a runner reporting a failed call with a
+        textual status turned a refusal into a pass. The old `rc != 0`
+        comparison refused it. Anything that is not already an int is a
+        failure now.
+        """
+        real = U.run
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        facts = self.facts(attempt)
+        pinned = self.commit("A")
+        for status in ("0", 0.5, "00", b"0"):
+            with self.subTest(status=repr(status)):
+                def runner(argv, _s=status, **kwargs):
+                    if "cat-file" in argv:
+                        return _s, "", "fatal: it failed"
+                    return real(argv, **kwargs)
+                why = W.validate_pinned_head(runner, facts, pinned)
+                self.assertIsNotNone(
+                    why, "status %r was read as success" % (status,))
+
+    def test_a_bytes_subclass_with_a_raising_decode_still_refuses(self):
+        class BadBytes(bytes):
+            def decode(self, *args, **kwargs):
+                raise RuntimeError("poisoned decode")
+
+        real = U.run
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        facts = self.facts(attempt)
+        pinned = self.commit("A")
+
+        def runner(argv, **kwargs):
+            if "cat-file" in argv:
+                return 1, "", BadBytes(b"fatal: nope")
+            return real(argv, **kwargs)
+
+        why = W.validate_pinned_head(runner, facts, pinned)
+        self.assertIsNotNone(why, "a poisoned decode produced no refusal")
+        self.assertIsInstance(why, str)
+
     def test_a_bytes_diagnostic_still_produces_a_refusal(self):
         real = U.run
 
@@ -1022,13 +1065,16 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
                 return "7\nsmuggled", "", "fatal: nope"
             return real(argv, **kwargs)
 
-        try:
-            hostile = W.validate_pinned_head(hostile_rc, facts, pinned)
-        except Exception:                      # a non-int rc may not reach us
-            hostile = None
-        if hostile is not None:
-            self.assertNotIn("\n", hostile)
-            self.assertNotIn("smuggled\n", hostile)
+        # NO try/except. glm-5.3: wrapping this in `except Exception` and
+        # then asserting only `if hostile is not None` made the contract
+        # unassertable -- deleting the guard in _as_status would raise,
+        # the test would swallow it, and the suite would stay green while
+        # a validation failure became an exception again. A test that
+        # cannot fail is not a test.
+        hostile = W.validate_pinned_head(hostile_rc, facts, pinned)
+        self.assertIsNotNone(hostile, "a non-int status produced no refusal")
+        self.assertNotIn("\n", hostile)
+        self.assertNotIn("smuggled\n", hostile)
 
     def test_an_empty_recorded_repository_refuses_before_running_git(self):
         attempt = self.tmp / "runs" / "u1" / "att1"
