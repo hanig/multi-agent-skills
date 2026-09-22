@@ -1227,79 +1227,38 @@ def receipt_basis(runner, unit_dir, spec, launch_facts=None):
                 stray_untracked=stray_untracked(runner, spec, launch_facts))
 
 
-# Conditions git names in its own error text, matched on the SPECIFIC
-# condition rather than on the generic "cannot change to" prefix. A first
-# version matched the prefix and kimi-k2.7-code refuted it in one line: a
-# path that is a regular file yields "Not a directory" and an unreadable one
-# yields "Permission denied", both of which begin "cannot change to" and were
-# therefore reported as a missing repository.
-_GIT_PATH_CONDITIONS = (
-    ("no such file or directory", "{repo} is not present on this host"),
-    ("not a directory", "{repo} exists but is not a directory"),
-    ("permission denied", "{repo} cannot be read by this process"),
-    ("not a git repository", "{repo} is present but is not a git repository"),
-)
+# A stable prefix so a refusal stays greppable across git versions, wording
+# and locale, WITHOUT claiming a category. astra, on the committee: "A stable
+# generic label solves discovery; diagnostic localization, if required, is a
+# separate presentation decision."
+PIN_VALIDATION_REFUSAL = "pinned commit validation failed"
+
+_DIAGNOSTIC_LIMIT = 400
 
 
-def repository_unusable_reason(runner, repo):
-    """Why a repository path cannot answer a question, or None if it can.
+def render_git_diagnostic(rc, err):
+    """Git's own words, attributed to git and safe to put in a record.
 
-    Asked BEFORE a missing object is reported as a missing object. Git's own
-    `rev-parse --git-dir` is the probe rather than a filesystem stat, so this
-    stays inside the runner abstraction the judge is tested through, and so a
-    path that exists but is not a repository is caught too.
+    Five review rounds went into classifying this text -- is the object
+    absent, is the pack unreadable, is the path missing -- and each round
+    found another way for English to be ambiguous. A step-back committee
+    (astra, deepseek-v4-pro) agreed unanimously that the classification was
+    never load-bearing: no caller reads a category, every consumer treats
+    the return value as a human-facing refusal, and git's own sentence is
+    what actually diagnoses the case. So the text is reported, not decoded.
 
-    An unrecognised failure is reported verbatim rather than sorted into the
-    nearest bucket. Guessing is what this function exists to stop.
+    It is still rendered rather than dumped. A diagnostic goes into a record
+    an operator reads: control characters and embedded newlines damage the
+    display, and an unbounded message damages the record.
     """
-    if not repo:
-        return "this attempt recorded no repository"
-    rc, _out, err = _git(runner, repo, "rev-parse", "--git-dir")
-    if rc == 0:
-        return None
-    lowered = (err or "").lower()
-    for condition, template in _GIT_PATH_CONDITIONS:
-        if condition in lowered:
-            return "its recorded repository " + template.format(repo=repo)
-    return f"git could not read {repo}: {err or 'no error text'}"
-
-
-# Git's own words for "this object name does not name anything here". These
-# are the ONLY evidence that justifies the word absent. Everything else --
-# including an unrecognised message and including silence -- is unknown.
-#
-# The default is inverted deliberately. Three reviewers, converging from
-# three directions, kept finding another way for a present-but-unreadable
-# object to be called absent: an unreadable pack, a corrupt loose object, a
-# permissions change after a partial restore, a HEAD probe that reads a
-# different pack than the one holding the produced commit. Each was patched
-# and the next one appeared, which is the signal that the default was wrong
-# rather than that the list was short. glm-5.3 named the missed evidence
-# exactly: `cat-file -e`'s own stderr is the one probe that touches the
-# produced object, and it was being captured into `_err` and discarded.
-_OBJECT_ABSENT_PHRASES = (
-    "not a valid object name",
-    "could not get object info",
-    "unknown revision or path not in the working tree",
-)
-
-
-def object_absence_is_established(err):
-    """Does git's own error text establish the object is ABSENT, not unread?
-
-    Only git saying the name does not resolve. An unreadable pack, a corrupt
-    object, a permissions failure and an unrecognised message all mean the
-    question was not answered, which is a different refusal with a different
-    remedy: absent means the work is gone, unknown means look somewhere else.
-    """
-    lowered = (err or "").strip().lower()
-    if not lowered:
-        # `cat-file -e` is quiet by design, so silence is the common case for
-        # a genuinely missing object -- but it is also what a suppressed or
-        # swallowed error looks like, and the caller pays for the difference
-        # only by looking in another checkout. Silence is not evidence.
-        return False
-    return any(phrase in lowered for phrase in _OBJECT_ABSENT_PHRASES)
+    text = (err or "")
+    if not text.strip():
+        return f"git exited {rc} with no diagnostic output"
+    flattened = " ".join(text.split())
+    safe = "".join(c if c.isprintable() else "?" for c in flattened)
+    if len(safe) > _DIAGNOSTIC_LIMIT:
+        safe = safe[:_DIAGNOSTIC_LIMIT] + " [truncated]"
+    return f"git exited {rc} and said: {safe}"
 
 
 def validate_pinned_head(runner, launch_facts, produced):
@@ -1319,37 +1278,28 @@ def validate_pinned_head(runner, launch_facts, produced):
     # the finished worktree. Judgment itself uses execution_workspace above;
     # this later pin validation deliberately needs no live checkout.
     repo, base = launch_facts["repo"], launch_facts["base_commit"]
+    if not repo:
+        return f"{PIN_VALIDATION_REFUSAL}: this attempt recorded no repository"
     rc, _out, cat_err = _git(runner, repo, "cat-file", "-e",
                              produced + "^{commit}")
     if rc != 0:
-        # Discriminate before naming a cause. A nonzero rc here has at least
-        # four, and only one of them means the work is gone: the object is
-        # absent from a present repository; the recorded repository path does
-        # not exist on this host; the path exists but is not a repository; or
-        # git could not run. Reporting all four as "no longer available"
-        # cost nine units: after the coordinator moved from chimera to a Mac,
-        # every launch record still pointed at /home/hani/multi-agent-skills,
-        # so `git -C` failed with "cannot change to ...: No such file or
-        # directory" and the refusal announced that nine judged heads were
-        # gone. All nine commits were present in the new checkout. Unknown is
-        # not absent -- the same distinction the outbox draws when an intent
-        # with no receipt reads `unacknowledged`.
-        unusable = repository_unusable_reason(runner, repo)
-        if unusable:
-            return (f"the pinned produced commit {produced[:12]} could not "
-                    f"be read because {unusable}. That is unknown, not "
-                    f"absent: another ref is still never substituted, and "
-                    f"the object may exist in a checkout of the same remote")
-        if not object_absence_is_established(cat_err):
-            detail = cat_err.strip() or "git reported no reason"
-            return (f"the pinned produced commit {produced[:12]} could not "
-                    f"be read from {repo} ({detail}). That is unknown, not "
-                    f"absent: the object may be present and unreadable, or "
-                    f"present in another checkout of the same remote, and "
-                    f"another ref is still never substituted")
-        return (f"pinned produced commit {produced[:12]} is absent from "
-                f"{repo}: {cat_err.strip()}. Refusing rather than "
-                f"substituting the current ref")
+        # Do NOT name a cause. A nonzero rc here has many: the object is
+        # absent; the recorded repository path does not exist on this host;
+        # the path is not a repository; a pack is unreadable; a loose object
+        # is corrupt; permissions changed. Deciding between them from git's
+        # English is what five rounds of review kept finding holes in, and
+        # the cost of guessing wrong is not cosmetic -- nine units read
+        # "no longer available" while all nine commits were present, and
+        # that sentence sent a session looking for work that was never lost.
+        #
+        # `cat-file -e` is an existence-and-type check, so "could not be
+        # validated" is what this establishes; "could not be read" claims
+        # more than it knows.
+        return (f"{PIN_VALIDATION_REFUSAL}: the pinned produced commit "
+                f"{produced[:12]} could not be validated at {repo}. "
+                f"{render_git_diagnostic(rc, cat_err)}. Refusing rather than "
+                f"substituting the current ref; the object may still exist "
+                f"in another checkout of the same remote")
     rc, _out, _err = _git(runner, repo, "merge-base", "--is-ancestor",
                            base, produced)
     if rc != 0:

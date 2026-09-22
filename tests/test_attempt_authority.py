@@ -601,6 +601,11 @@ Path(data["result"]).write_text(json.dumps(payload))
         self.assertIn("no judged produced commit", err.getvalue())
 
 
+def _stderr_tail(text):
+    """The distinctive tail of a stderr line, as the refusal renders it."""
+    return " ".join(text.split())[-30:]
+
+
 class TestPinnedCommitIsNotAMovingRef(RepoCase):
     def test_code_state_captures_both_results_from_one_judgment(self):
         source = inspect.getsource(U._code_state)
@@ -685,146 +690,114 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         """Unknown is not absent, and nine units paid for the difference.
 
         After the coordinator moved from chimera to a Mac, every launch
-        record still named /home/hani/multi-agent-skills. `git -C` on a path
-        that does not exist fails exactly as `cat-file -e` on a deleted
-        object does, so nine judged heads were reported "no longer
+        record still named /home/hani/multi-agent-skills, so `git -C` on a
+        path that does not exist failed exactly as `cat-file -e` on a
+        deleted object does. Nine judged heads were reported "no longer
         available" while all nine commits sat in the new checkout.
         """
         attempt = self.tmp / "runs" / "u1" / "att1"
         attempt.mkdir(parents=True)
         facts = self.facts(attempt)
         pinned = self.commit("A")
-        # The object is present and the repository is readable: admitted.
         self.assertIsNone(W.validate_pinned_head(U.run, facts, pinned))
 
-        # Same present object, recorded repository gone.
         moved = dict(facts)
         moved["repo"] = str(self.tmp / "no-such-checkout")
         why = W.validate_pinned_head(U.run, moved, pinned)
         self.assertIsNotNone(why, "a missing repository must still refuse")
-        self.assertIn("not present on this host", why)
-        self.assertNotIn("absent from", why)
-        self.assertIn("unknown, not", why)
+        # git's own words diagnose it; the code names no cause.
+        self.assertIn("No such file or directory", why)
+        self.assertNotIn("absent", why)
+        self.assertNotIn("no longer available", why)
 
-    def test_a_genuinely_absent_object_still_says_absent(self):
-        """The discrimination must not soften the real case."""
+    def test_the_refusal_never_claims_which_cause_it_was(self):
+        """Five rounds of classifying git's English, five leaks.
+
+        A step-back committee agreed unanimously that no caller reads a
+        category. These are the cases that were each, at some round, sorted
+        into the wrong bucket: a genuinely absent object, an unreadable
+        object, a path that is a regular file, and an unrecognised message.
+        None of them may now be given a cause by this code.
+        """
+        real = U.run
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        facts = self.facts(attempt)
+        pinned = self.commit("A")
+        cases = {
+            "unreadable object": "fatal: unable to read object file",
+            "corrupt pack": "error: could not get object info",
+            "permission": "fatal: cannot change to '/x': Permission denied",
+            "unrecognised": "fatal: something nobody has seen before",
+        }
+        for label, stderr in cases.items():
+            with self.subTest(case=label):
+                def runner(argv, _stderr=stderr, **kwargs):
+                    if "cat-file" in argv:
+                        return 1, "", _stderr
+                    return real(argv, **kwargs)
+                why = W.validate_pinned_head(runner, facts, pinned)
+                self.assertIsNotNone(why)
+                self.assertIn(W.PIN_VALIDATION_REFUSAL, why)
+                self.assertIn(_stderr_tail(stderr), why)
+                for word in ("absent", "is not present on this host",
+                             "is not a git repository"):
+                    self.assertNotIn(word, why,
+                                     "%s was given a cause: %r" % (label, why))
+
+    def test_a_refusal_carries_a_stable_greppable_prefix(self):
+        """Discovery without classification, which is what the committee
+        asked for: a stable label survives git versions, wording and
+        locale; a semantic bucket derived from English does not."""
         attempt = self.tmp / "runs" / "u1" / "att1"
         attempt.mkdir(parents=True)
         facts = self.facts(attempt)
         self.commit("A")
-        never = "0" * 40
-        why = W.validate_pinned_head(U.run, facts, never)
+        why = W.validate_pinned_head(U.run, facts, "0" * 40)
         self.assertIsNotNone(why)
-        self.assertIn("absent from", why)
-        self.assertNotIn("not present on this host", why)
+        # The literal, not the module constant: asserting startswith() on
+        # W.PIN_VALIDATION_REFUSAL passes for any string when the constant
+        # is emptied, which is a test satisfiable by its own source.
+        self.assertTrue(
+            why.startswith("pinned commit validation failed"),
+            "the refusal lost its greppable prefix: %r" % why)
+        self.assertTrue(W.PIN_VALIDATION_REFUSAL.strip(),
+                        "the prefix constant must not be empty")
 
-    def test_a_path_that_is_not_a_repository_is_named_as_such(self):
+    def test_a_diagnostic_is_rendered_before_it_enters_a_record(self):
+        """It goes into a record an operator reads."""
+        rendered = W.render_git_diagnostic(
+            128, "fatal: line one\nline two\ttabbed\x07bell")
+        self.assertIn("git exited 128", rendered)
+        self.assertNotIn("\n", rendered)
+        self.assertNotIn("\x07", rendered)
+        # Whitespace is COLLAPSED, not merely made printable. Replacing the
+        # split/join with the raw text still passes an isprintable() filter,
+        # because that filter turns a newline into "?" -- which is why this
+        # asserts the words are rejoined by single spaces instead.
+        self.assertIn("fatal: line one line two tabbed", rendered)
+        self.assertNotIn("  ", rendered)
+        self.assertIn("?", rendered)  # the bell survives only as a marker
+
+        self.assertIn("no diagnostic output",
+                      W.render_git_diagnostic(1, "   \n  "))
+        long_one = W.render_git_diagnostic(1, "x" * 5000)
+        self.assertLess(len(long_one), 600)
+        self.assertIn("[truncated]", long_one)
+
+    def test_an_empty_recorded_repository_refuses_before_running_git(self):
         attempt = self.tmp / "runs" / "u1" / "att1"
         attempt.mkdir(parents=True)
-        facts = self.facts(attempt)
+        facts = dict(self.facts(attempt))
         pinned = self.commit("A")
-        plain = self.tmp / "not-a-repo"
-        plain.mkdir()
-        elsewhere = dict(facts)
-        elsewhere["repo"] = str(plain)
-        why = W.validate_pinned_head(U.run, elsewhere, pinned)
+        facts["repo"] = ""
+
+        def never(argv, **kwargs):
+            raise AssertionError("git must not run without a repository")
+
+        why = W.validate_pinned_head(never, facts, pinned)
         self.assertIsNotNone(why)
-        self.assertIn("not a git repository", why)
-
-    def test_a_file_where_a_repository_was_is_not_called_missing(self):
-        """kimi-k2.7-code's counterexample: ENOTDIR also says "cannot change to".
-
-        A first version matched that generic prefix, so a path that is a
-        regular file was reported as a repository that is not present.
-        """
-        attempt = self.tmp / "runs" / "u1" / "att1"
-        attempt.mkdir(parents=True)
-        facts = self.facts(attempt)
-        pinned = self.commit("A")
-        afile = self.tmp / "repo-is-a-file.txt"
-        afile.write_text("not a repository\n")
-        moved = dict(facts)
-        moved["repo"] = str(afile)
-        why = W.validate_pinned_head(U.run, moved, pinned)
-        self.assertIsNotNone(why)
-        self.assertIn("is not a directory", why)
-        self.assertNotIn("not present on this host", why)
-
-    def test_an_unrecognised_git_failure_is_quoted_not_bucketed(self):
-        """Guessing is the thing this discrimination exists to stop."""
-        def runner(argv, **kwargs):
-            if "rev-parse" in argv and "--git-dir" in argv:
-                return 1, "", "fatal: something nobody has seen before"
-            return 1, "", ""
-        why = W.repository_unusable_reason(runner, "/somewhere")
-        self.assertIn("something nobody has seen before", why)
-        self.assertNotIn("not present on this host", why)
-        self.assertNotIn("not a git repository", why)
-
-    def test_an_unreadable_object_is_not_an_absent_one(self):
-        """luna, kimi-k2.7-code and glm-5.3 converged on this from three
-        directions, and the third time is when the default was wrong rather
-        than the list short.
-
-        A repository whose pack holding the produced commit cannot be read
-        answers `rev-parse --git-dir` with rc 0 and may resolve HEAD from a
-        different, readable pack, so every probe that does not touch the
-        produced object passes and the commit is called absent.
-        """
-        real = U.run
-
-        def runner(argv, **kwargs):
-            if "cat-file" in argv:
-                return 1, "", "fatal: unable to read object file"
-            return real(argv, **kwargs)
-
-        attempt = self.tmp / "runs" / "u1" / "att1"
-        attempt.mkdir(parents=True)
-        facts = self.facts(attempt)
-        pinned = self.commit("A")
-        why = W.validate_pinned_head(runner, facts, pinned)
-        self.assertIsNotNone(why)
-        self.assertIn("unknown, not", why)
-        self.assertIn("unable to read object file", why)
-        self.assertNotIn("is absent from", why)
-
-    def test_silence_from_cat_file_is_not_evidence_of_absence(self):
-        """`cat-file -e` is quiet by design, so silence is also what a
-        suppressed or swallowed error looks like."""
-        real = U.run
-
-        def runner(argv, **kwargs):
-            if "cat-file" in argv:
-                return 1, "", ""
-            return real(argv, **kwargs)
-
-        attempt = self.tmp / "runs" / "u1" / "att1"
-        attempt.mkdir(parents=True)
-        facts = self.facts(attempt)
-        pinned = self.commit("A")
-        why = W.validate_pinned_head(runner, facts, pinned)
-        self.assertIsNotNone(why)
-        self.assertIn("unknown, not", why)
-        self.assertNotIn("is absent from", why)
-
-    def test_git_saying_the_name_does_not_resolve_does_establish_absence(self):
-        """The discrimination must not soften the real case into mush."""
-        real = U.run
-
-        def runner(argv, **kwargs):
-            if "cat-file" in argv:
-                return 1, "", ("fatal: Not a valid object name "
-                               "0000000000000000000000000000000000000000^{commit}")
-            return real(argv, **kwargs)
-
-        attempt = self.tmp / "runs" / "u1" / "att1"
-        attempt.mkdir(parents=True)
-        facts = self.facts(attempt)
-        pinned = self.commit("A")
-        why = W.validate_pinned_head(runner, facts, pinned)
-        self.assertIsNotNone(why)
-        self.assertIn("is absent from", why)
-        self.assertNotIn("unknown, not", why)
+        self.assertIn("recorded no repository", why)
 
     def test_deleting_the_launch_record_does_not_change_judgment(self):
         attempt = self.tmp / "runs" / "u1" / "att1"
