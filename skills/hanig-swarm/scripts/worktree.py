@@ -91,10 +91,39 @@ def decode_launch_facts(payload):
     return facts, None
 
 
+def _as_text(value):
+    """Any runner return value, as text, without ever raising.
+
+    THE boundary. Every value the injected runner produces enters this
+    module through `_git`, and `_git` used to call `(value or "").strip()`
+    on it -- so a runner returning a list of stderr lines, "a natural
+    runner shape", raised AttributeError here and a validation failure
+    became an exception rather than a refusal.
+
+    Three review rounds fixed consumers of this function instead of this
+    function: first `render_for_record`, then `render_git_diagnostic`, then
+    the exit status. Each fix was correct and none of them was the
+    boundary. This is the boundary, and there is exactly one coercion in
+    the module now.
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    if value is None:
+        return ""
+    try:
+        return str(value)
+    except Exception:
+        # `str()` can raise: an object whose __str__ fails propagates
+        # straight through anything advertised as total -- kimi-k2.7-code.
+        return "<a value that cannot be rendered>"
+
+
 def _git(runner, repo, *args, timeout=60):
     rc, out, err = runner(["git", "-C", str(repo)] + list(args),
                           timeout=timeout)
-    return rc, (out or "").strip(), (err or "").strip()
+    return rc, _as_text(out).strip(), _as_text(err).strip()
 
 
 def repo_status(runner, repo):
@@ -1260,14 +1289,7 @@ def render_for_record(text, limit, collapse=True):
     # exception instead of a refusal -- the one thing a function whose job
     # is to produce a refusal must never do. `_git` stringifies in the real
     # path, but the runner is injected and nothing enforces its types.
-    if isinstance(text, bytes):
-        raw = text.decode("utf-8", "replace")
-    elif isinstance(text, str):
-        raw = text
-    elif text is None:
-        raw = ""
-    else:
-        raw = str(text)
+    raw = _as_text(text)
     source = " ".join(raw.split()) if collapse else raw
     safe = "".join(c if c.isprintable() else "?" for c in source)
     if len(safe) <= limit:
@@ -1302,11 +1324,27 @@ def render_git_diagnostic(rc, err):
     # unrendered" is either true or it is a claim a reviewer refutes, which
     # luna did, for this field, after the same claim had already been
     # refuted for the path and for the commit id.
-    code = render_for_record(str(rc), 12)
-    if not (err or "").strip():
-        return f"git exited {code} with no diagnostic output"
+    # render_for_record does the coercion; calling str() here would put the
+    # same unguarded conversion back outside the total function, one
+    # argument over from where it was just removed.
+    code = render_for_record(rc, 12)
+    # Render BEFORE touching the value. luna, kimi-k2.7-code and glm-5.3 all
+    # found the same thing here, and glm named it exactly: this line
+    # dereferenced the runner's stderr outside the total renderer, so a
+    # truthy value that is neither str nor bytes raised AttributeError and
+    # "a validation failure became an exception instead of a refusal -- the
+    # exact defect class this change claims to have eliminated".
+    #
+    # Three rounds running I fixed the call site a reviewer named instead of
+    # the boundary. The boundary is this: NOTHING from the runner is touched
+    # until it has been through render_for_record, including to ask whether
+    # it is empty.
     prefix = f"git exited {code} and said: "
-    return prefix + render_for_record(err, max(0, _DIAGNOSTIC_LIMIT - len(prefix)))
+    rendered = render_for_record(
+        err, max(0, _DIAGNOSTIC_LIMIT - len(prefix)))
+    if not rendered.strip():
+        return f"git exited {code} with no diagnostic output"
+    return prefix + rendered
 
 
 def validate_pinned_head(runner, launch_facts, produced):
@@ -1350,7 +1388,7 @@ def validate_pinned_head(runner, launch_facts, produced):
         return (f"{PIN_VALIDATION_REFUSAL}: the pinned produced commit "
                 f"{render_for_record(produced[:12], 12)} could not be "
                 f"validated at "
-                f"{render_for_record(str(repo), _PATH_LIMIT, collapse=False)}. "
+                f"{render_for_record(repo, _PATH_LIMIT, collapse=False)}. "
                 f"{render_git_diagnostic(rc, cat_err)}. Refusing rather than "
                 f"substituting the current ref; the object may still exist "
                 f"in another checkout of the same remote")
@@ -1364,7 +1402,7 @@ def validate_pinned_head(runner, launch_facts, produced):
     if rc != 0:
         return (f"{PIN_VALIDATION_REFUSAL}: pinned produced commit "
                 f"{render_for_record(produced[:12], 12)} does not descend "
-                f"from trusted base {render_for_record(str(base)[:12], 12)}")
+                f"from trusted base {render_for_record(base, 12)}")
     rc, tree, tree_err = _git(runner, repo, "rev-parse", produced + "^{tree}")
     if rc != 0:
         return (f"{PIN_VALIDATION_REFUSAL}: cannot read the tree of pinned "

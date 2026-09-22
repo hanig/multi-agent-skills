@@ -838,6 +838,49 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
                 out = W.render_for_record("x" * 100, limit)
                 self.assertLessEqual(len(out), limit)
 
+    def test_no_runner_value_is_touched_before_the_renderer(self):
+        """The boundary, asserted as a property rather than per field.
+
+        Three rounds running I fixed the call site a reviewer named instead
+        of the boundary. luna, kimi-k2.7-code and glm-5.3 then found the
+        same defect one argument over: `(err or "").strip()` dereferenced
+        the runner's stderr OUTSIDE the total renderer, so a list -- "a
+        natural runner shape" -- raised AttributeError and a validation
+        failure became an exception. glm's phrase for it: "the exact defect
+        class this change claims to have eliminated".
+
+        So this enumerates value shapes an injected runner could plausibly
+        return, for BOTH fields, and requires a refusal every time.
+        """
+        class Hostile(object):
+            def __str__(self):
+                raise ValueError("this value refuses to be a string")
+
+        shapes = [["fatal: unreadable"], 123, {"b": 1}, object(), Hostile(),
+                  b"fatal: bytes", None, "", "   "]
+        real = U.run
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        facts = self.facts(attempt)
+        pinned = self.commit("A")
+
+        for shape in shapes:
+            with self.subTest(stderr=type(shape).__name__):
+                def runner(argv, _s=shape, **kwargs):
+                    if "cat-file" in argv:
+                        return 1, "", _s
+                    return real(argv, **kwargs)
+                why = W.validate_pinned_head(runner, facts, pinned)
+                self.assertIsNotNone(why, "no refusal for stderr %r" % (shape,))
+                self.assertIsInstance(why, str)
+
+        for shape in [Hostile(), ["7"], {"rc": 1}, None]:
+            with self.subTest(rc=type(shape).__name__):
+                # render_git_diagnostic is reached with the runner's rc, so
+                # the exit status is the other field with the same exposure.
+                out = W.render_git_diagnostic(shape, "boom")
+                self.assertIsInstance(out, str)
+
     def test_a_bytes_diagnostic_still_produces_a_refusal(self):
         real = U.run
 
