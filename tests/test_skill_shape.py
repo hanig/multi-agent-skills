@@ -851,11 +851,12 @@ def _all_positions(haystack, needle):
     return found
 
 
+_SEP = r"[\s,;:.\-\u2013\u2014*+\u2022|/]"
 LIST_SEPARATOR = re.compile(
-    r"^[\s,;:.\-\u2013\u2014*+\u2022]*"
-    r"(?:\d{1,2}[.)])?[\s,;:.\-\u2013\u2014*+\u2022]*"
+    r"^" + _SEP + r"*"
+    r"(?:\d{1,2}[.)])?" + _SEP + r"*"
     r"(?:and|or|plus|then)?"
-    r"[\s,;:.\-\u2013\u2014*+\u2022]*(?:the\s+)?$")
+    + _SEP + r"*(?:the\s+)?$")
 
 
 class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
@@ -1033,6 +1034,11 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
         skill = SKILLS / "hanig-project"
         return [skill / "SKILL.md"] + sorted(
             (skill / "references").glob("*.md"))
+
+    @classmethod
+    def whole_text(cls, surface):
+        """The authored text as ONE string, generated block removed."""
+        return " ".join(cls.sentences(surface))
 
     @staticmethod
     def sentences(surface):
@@ -1235,6 +1241,53 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
         self.assertNotIn("budget", perturbed)
         self.assertEqual(len(perturbed), len(topics))
 
+        # THE WHOLE PIPELINE, against a perturbed REGISTRY ON DISK.
+        # Twice now I have claimed the detector is tied to the parsed
+        # needles and twice a reviewer has shown that replacing
+        # `topics = self.interview_topics(enumeration)` with an equal
+        # literal passes everything -- assertEqual cannot tell equal
+        # values apart, and the perturbation assertions called the
+        # parser into a separate variable. glm-5.3 named the comment
+        # that claimed otherwise.
+        #
+        # So the registry is rewritten in a copy of the skill, and the
+        # scan is run against that copy. A hardcoded list cannot
+        # follow a file it never reads.
+        with tempfile.TemporaryDirectory() as tmp:
+            copy = Path(tmp) / "hanig-project"
+            shutil.copytree(SKILLS / "hanig-project", copy)
+            registry = copy / "declarations.json"
+            data = json.loads(registry.read_text())
+            for entry in data["declarations"]:
+                if entry["id"] == "interview.judgment-only":
+                    entry["normative_text"] = entry["normative_text"].replace(
+                        "budget", "spending ceiling")
+            registry.write_text(json.dumps(data, indent=2) + "\n")
+
+            moved_enumeration = [
+                entry["normative_text"]
+                for entry in json.loads(registry.read_text())["declarations"]
+                if entry["id"] == "interview.judgment-only"][0]
+            moved_topics = self.interview_topics(moved_enumeration)
+            self.assertIn("spending ceiling", moved_topics)
+
+            planted = ("Ask about done criteria, the scientific claim, "
+                       "discardable work, spending ceiling, and protected "
+                       "destinations.")
+            self.assertTrue(
+                self.second_copies([("copy.md", [planted])], moved_topics),
+                "the scan does not follow the registry on disk")
+            # The SAME sentence, against the real registry, is not a
+            # copy of the real list: 'spending ceiling' is not one of
+            # its topics, so only four of the five words match and the
+            # run breaks where the unknown word sits.
+            self.assertFalse(
+                self.second_copies(
+                    [("copy.md", ["Ask about spending ceiling alone."])],
+                    topics),
+                "a word absent from the real declaration was treated as "
+                "a topic")
+
         # And the DETECTOR follows them. A list written with the
         # perturbed topic must be caught by the perturbed needles and
         # missed by the real ones; a hardcoded list cannot do both.
@@ -1254,7 +1307,18 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
                 topics),
             "a word absent from the real declaration was treated as a topic")
 
-        named = [(surface.name, self.sentences(surface))
+        # The WHOLE surface, not sentence fragments. luna and glm-5.3:
+        # `sentences()` splits on a period followed by whitespace, so
+        # `1. done criteria 2. ...` became one-topic fragments that can
+        # never reach the threshold -- and my own numbered-list case
+        # passed only because it handed `second_copies` a pre-split
+        # string and never went through the splitter at all. Measured
+        # both ways: True direct, False through the real path.
+        #
+        # Adjacency already does the discrimination, so sentence
+        # boundaries add nothing and break lists. Checked against three
+        # separate sentences each mentioning one topic: still clean.
+        named = [(surface.name, [self.whole_text(surface)])
                  for surface in self.authored_surfaces()]
         self.assertEqual(
             self.second_copies(named, topics), [],
@@ -1304,6 +1368,57 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
                     self.second_copies([("planted.md", [honest])], topics),
                     [],
                     "honest prose was read as a second copy of the list")
+
+        # Every LIST FORM, planted. Each of these was verified at a
+        # console while fixing the reviewer finding that named it, and
+        # not one was planted as a case -- so reverting the separator
+        # class or the whole-surface scan left the suite green. That
+        # is the same gap five times over in this session: probing the
+        # fix and never pinning it.
+        for label, listed in (
+                ("a numbered list",
+                 "Ask about: 1. done criteria 2. the scientific claim "
+                 "3. discardable work 4. budget"),
+                ("bullets whose items end in periods",
+                 "- done criteria. - the scientific claim. "
+                 "- discardable work. - budget."),
+                ("a pipe table",
+                 "| done criteria | scientific claim | discardable work |"),
+                ("a slash list",
+                 "done criteria / scientific claim / discardable work"),
+        ):
+            with self.subTest(form=label):
+                self.assertTrue(
+                    self.second_copies([("planted.md", [listed])], topics),
+                    "%s is a second copy and was not detected" % label)
+
+        # THROUGH THE REAL PATH. The cases above hand `second_copies`
+        # one string, which is exactly the bypass that hid the defect:
+        # my numbered-list case passed while the shipped scan, which
+        # goes through the sentence helper first, did not catch it.
+        # This writes a surface and reads it the way the check does.
+        with tempfile.TemporaryDirectory() as tmp:
+            surface = Path(tmp) / "planted.md"
+            surface.write_text(
+                "# A reference\n"
+                "\n"
+                "Ask about: 1. done criteria 2. the scientific claim "
+                "3. discardable work 4. budget\n")
+            self.assertTrue(
+                self.second_copies(
+                    [(surface.name, [self.whole_text(surface)])], topics),
+                "a numbered list in a real file was not detected, so the "
+                "surface is being split before the scan sees it")
+
+        # Three separate sentences each mentioning one topic are NOT a
+        # list, which is the false positive whole-surface scanning
+        # could have introduced and does not.
+        self.assertEqual(
+            self.second_copies([("planted.md", [
+                "A budget is required. Work here is discardable. Some "
+                "destinations are protected by policy."])], topics),
+            [],
+            "three ordinary sentences were read as a list")
 
         for label, paraphrase in (
                 ("no ask verb",
