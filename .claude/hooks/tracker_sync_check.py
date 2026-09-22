@@ -419,8 +419,8 @@ def _lex_line(line):
         return None
 
 
-def _heredoc_delimiters(tokens):
-    """The words that would close a heredoc this line opens, or None.
+def _heredoc_specs(tokens):
+    """The ordered heredocs this line opens and whether each is a script.
 
     Decided from TOKENS, never from raw text. The first version ran a
     regex over the raw command before shlex saw it, and luna and glm-5.3
@@ -435,7 +435,8 @@ def _heredoc_delimiters(tokens):
     quoted `'<<EOF'` as ONE token rather than the `<<` operator, and
     strips a `#` comment to nothing.
 
-    A SET, because this lexer cannot recover which shape was written.
+    Each delimiter is a SET, because this lexer cannot recover which shape
+    was written.
     `cat <<-EOF` arrives as ['cat', '<<', '-EOF'] and `cat << -EOF`
     arrives identically, but the first closes on `EOF` and the second on
     `-EOF`; the whitespace that distinguishes them is gone. Accepting
@@ -443,7 +444,12 @@ def _heredoc_delimiters(tokens):
     commands rather than less -- the direction this module's asymmetry
     points, since a spurious reminder costs a line of context and a
     missed one costs the sync.
+    Multiple heredocs are read in lexical order, but only the last stdin
+    redirection on one simple command supplies that command's stdin.  A
+    heredoc belongs to the simple command containing its operator, not to an
+    earlier command in a pipeline or compound list.
     """
+    found = []
     for index, token in enumerate(tokens):
         if token not in ("<<", "<<-"):
             continue
@@ -459,11 +465,33 @@ def _heredoc_delimiters(tokens):
             # `cat <<- EOF` lexes as ['cat', '<<', '-', 'EOF'].
             if len(rest) < 2 or not rest[1]:
                 return DEGENERATE_HEREDOC
-            return frozenset([word, rest[1]])
-        if word.startswith("-") and word[1:]:
-            return frozenset([word, word[1:]])
-        return frozenset([word])
-    return None
+            delimiters = frozenset([word, rest[1]])
+        elif word.startswith("-") and word[1:]:
+            delimiters = frozenset([word, word[1:]])
+        else:
+            delimiters = frozenset([word])
+
+        start = index
+        while start and tokens[start - 1] not in _OPERATORS:
+            start -= 1
+        end = index + 1
+        while end < len(tokens) and tokens[end] not in _OPERATORS:
+            end += 1
+        found.append((delimiters, start, end))
+
+    if not found:
+        return []
+
+    last_for_command = {}
+    for position, (_, start, end) in enumerate(found):
+        last_for_command[(start, end)] = position
+    specs = []
+    for position, (delimiters, start, end) in enumerate(found):
+        is_last_stdin = last_for_command[(start, end)] == position
+        is_script = (is_last_stdin
+                     and _feeds_a_shell(tokens[start:end]))
+        specs.append((delimiters, is_script))
+    return specs
 
 
 _NEWLINE = "\n"
@@ -474,8 +502,70 @@ _NEWLINE = "\n"
 _SCRIPT_BODIES = object()
 
 
-def _feeds_a_shell(line_tokens):
-    """True when this line hands its heredoc to something that runs it.
+def _without_redirections(tokens):
+    """Return command words with redirections and their operands removed."""
+    words, index = [], 0
+    while index < len(tokens):
+        token = tokens[index]
+        if (token.isdigit() and index + 1 < len(tokens)
+                and _REDIRECTION.match(tokens[index + 1])):
+            index += 2
+            if index < len(tokens):
+                index += 1
+            continue
+        if _REDIRECTION.match(token):
+            index += 1
+            if index < len(tokens):
+                index += 1
+            continue
+        words.append(token)
+        index += 1
+    return words
+
+
+_WRAPPER_VALUE_OPTIONS = {
+    "sudo": frozenset(["-u", "--user", "-g", "--group", "-h", "--host",
+                       "-p", "--prompt", "-C", "--close-from", "-D",
+                       "--chdir", "-R", "--chroot", "-T", "--command-timeout",
+                       "-U", "--other-user"]),
+    "doas": frozenset(["-C", "-u"]),
+    "env": frozenset(["-u", "--unset", "-C", "--chdir", "-S",
+                      "--split-string"]),
+    "timeout": frozenset(["-k", "--kill-after", "-s", "--signal"]),
+    "nice": frozenset(["-n", "--adjustment"]),
+}
+
+
+def _skip_wrapper_options(program, arguments):
+    """Return the first command word after one supported wrapper."""
+    index = 0
+    value_options = _WRAPPER_VALUE_OPTIONS.get(program, frozenset())
+    while index < len(arguments):
+        word = arguments[index]
+        if word == "--":
+            index += 1
+            break
+        if not word.startswith("-") or word == "-":
+            break
+        option = word.split("=", 1)[0]
+        index += 1
+        if option in value_options and "=" not in word:
+            index += 1
+
+    if program == "env":
+        while index < len(arguments) and _ASSIGNMENT.match(arguments[index]):
+            index += 1
+    elif program == "timeout":
+        # The duration is the one required operand before timeout's command.
+        index += 1
+
+    if index >= len(arguments):
+        return None, []
+    return arguments[index], arguments[index + 1:]
+
+
+def _feeds_a_shell(command_tokens):
+    """True when this simple command gives its heredoc to a shell's stdin.
 
     The program word decides it: `bash <<EOF` executes the body,
     `cat <<EOF` prints it and `cat > x.sh <<EOF` stores it. A wrapper
@@ -497,40 +587,28 @@ def _feeds_a_shell(line_tokens):
     close, arriving through the tokens either side of the program
     rather than through the heredoc.
 
-    So a redirection takes its operand with it, and a wrapper switches
-    to scanning the rest of the line, because where its arguments end
-    cannot be known without a table of every wrapper's options. A
-    command word reached before any wrapper still decides immediately,
-    which is what keeps `cat <<EOF` data.
+    Redirections and their operands are removed before command options are
+    considered: a delimiter named `-c` is data, not a bash option.  The
+    supported wrappers are unwrapped to their actual command word rather
+    than scanned for any later shell-looking argument, which keeps
+    `env echo bash <<EOF` as data.
 
     A shell handed its script another way does NOT run the heredoc:
     `bash -c ':' <<EOF` reads the body as stdin and ignores it, so
     calling that an outward action is a false positive (luna).
     """
-    tokens = list(line_tokens)
-    if any(token in _SHELL_COMMAND_OPTIONS for token in tokens):
-        return False
-    scanning = False
-    skip_operand = False
-    for token in tokens:
-        if skip_operand:
-            skip_operand = False
-            continue
-        if token in _OPERATORS:
-            continue
-        if _REDIRECTION.match(token):
-            skip_operand = True
-            continue
-        if _ASSIGNMENT.match(token):
-            continue
-        basename = token.rsplit("/", 1)[-1]
-        if basename in _SHELLS or basename in _EVAL:
-            return True
-        if basename in _WRAPPERS:
-            scanning = True
-            continue
-        if not scanning:
+    words = _without_redirections(command_tokens)
+    program, arguments = _command_word_and_arguments(words)
+    for _ in range(_SHELL_RECURSION_LIMIT):
+        if program is None:
             return False
+        basename = program.rsplit("/", 1)[-1]
+        if basename in _SHELLS:
+            return not any(_is_shell_command_option(word)
+                           for word in arguments)
+        if basename not in _WRAPPERS:
+            return False
+        program, arguments = _skip_wrapper_options(basename, arguments)
     return False
 
 
@@ -552,16 +630,17 @@ def _lex(command):
     guess about.
     """
     tokens = []
-    pending = None
-    pending_is_script = False
+    pending = []
     script_bodies = []
     body = []
     for line in command.replace("\\\n", " ").splitlines():
-        if pending is not None:
-            if line.strip() in pending:
+        if pending:
+            delimiters, pending_is_script = pending[0]
+            if line.strip() in delimiters:
                 if pending_is_script:
                     script_bodies.append("\n".join(body))
-                pending, pending_is_script, body = None, False, []
+                pending.pop(0)
+                body = []
                 continue
             if pending_is_script:
                 body.append(line)
@@ -573,10 +652,10 @@ def _lex(command):
             return None
         tokens.extend(line_tokens)
         tokens.append(_NEWLINE)
-        delimiters = _heredoc_delimiters(line_tokens)
-        if delimiters is DEGENERATE_HEREDOC:
+        specs = _heredoc_specs(line_tokens)
+        if specs is DEGENERATE_HEREDOC:
             return OUT_OF_DEPTH
-        pending = delimiters
+        pending = list(specs)
         # WHOSE heredoc is it. astra: `bash <<'EOF' ... EOF` feeds the
         # body to a shell, which EXECUTES it -- the body is the script,
         # and discarding it as inert was the third detection regression
@@ -586,8 +665,7 @@ def _lex(command):
         # astra also bounded the fix: "I reject building a complete
         # shell interpreter." The consumer is the discriminator, and
         # nothing more is needed.
-        pending_is_script = bool(pending) and _feeds_a_shell(line_tokens)
-    if pending is not None and pending_is_script:
+    if pending and any(is_script for _, is_script in pending):
         # An unterminated heredoc that a shell would have run: the text
         # this parser never saw is executable, which is the strongest
         # case for the unknown answer rather than the weakest.
@@ -595,7 +673,7 @@ def _lex(command):
     if script_bodies:
         tokens.append(_SCRIPT_BODIES)
         tokens.extend(script_bodies)
-    if pending is not None:
+    if pending:
         # A heredoc whose delimiter never arrives: either the text is
         # truncated or the `<<` was not an operator at all -- a quoted
         # `'<<'` is indistinguishable from the real thing once shlex has

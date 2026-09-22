@@ -884,6 +884,22 @@ class TrackerSyncHookInputContract(unittest.TestCase):
             # false positive -- the direction that reddens honest work.
             "a shell whose script came from -c": (
                 "bash -c ':' <<'EOF'\ngit push origin HEAD\nEOF", ""),
+            # Round 2. These execute through ordinary shell grammar; the
+            # consumer is the simple command carrying the heredoc, and only
+            # its last stdin heredoc can become the shell's script.
+            "a delimiter named like a shell option": (
+                "bash <<'-c'\ngit push origin HEAD\n-c", "git push"),
+            "a shell later in a pipeline": (
+                "cat | bash <<'EOF'\ngit push origin HEAD\nEOF", "git push"),
+            "a shell after an earlier compound command": (
+                "true; bash <<'EOF'\ngit push origin HEAD\nEOF", "git push"),
+            "a shell-looking argument to a non-shell wrapper command": (
+                "env echo bash <<'EOF'\ngit push origin HEAD\nEOF", ""),
+            "only the last of two heredocs is shell stdin": (
+                "bash <<'FIRST' <<'LAST'\ngit push origin HEAD\nFIRST\n"
+                "echo ok\nLAST", ""),
+            "a heredoc on cat after a shell pipeline command": (
+                "bash | cat <<'EOF'\ngit push origin HEAD\nEOF", ""),
             "a shell running something harmless too": (
                 "bash -c 'echo hi'", ""),
             # Round 1 of the restart. All three reviewers found the same
