@@ -1279,9 +1279,16 @@ def render_git_diagnostic(rc, err):
     RENDERED string rather than the payload inside it: bounding the payload
     and then prefixing it put a "400 character" limit at 435.
     """
+    # `rc` goes through the renderer too. It is an int from subprocess in
+    # every real path, but the runner is an injected callable and nothing
+    # enforces its return type -- and "no value reaches the refusal
+    # unrendered" is either true or it is a claim a reviewer refutes, which
+    # luna did, for this field, after the same claim had already been
+    # refuted for the path and for the commit id.
+    code = render_for_record(str(rc), 12)
     if not (err or "").strip():
-        return f"git exited {rc} with no diagnostic output"
-    prefix = f"git exited {rc} and said: "
+        return f"git exited {code} with no diagnostic output"
+    prefix = f"git exited {code} and said: "
     return prefix + render_for_record(err, max(0, _DIAGNOSTIC_LIMIT - len(prefix)))
 
 

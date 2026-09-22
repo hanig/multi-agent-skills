@@ -866,12 +866,28 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         why = W.validate_pinned_head(runner, facts, pinned)
         self.assertIsNotNone(why)
         for value, collapse in ((pinned[:12], True),
-                                (facts["repo"], False)):
+                                (facts["repo"], False),
+                                ("1", True)):        # the exit code
             self.assertIn(
                 W.render_for_record(value, 400, collapse=collapse), why,
                 "a value reached the refusal unrendered: %r" % value)
         self.assertIn("fatal: line one line two", why)
         self.assertNotIn("\n", why)
+
+        # A runner is an injected callable; nothing enforces that its exit
+        # status is an int, so the status is rendered like everything else.
+        def hostile_rc(argv, **kwargs):
+            if "cat-file" in argv:
+                return "7\nsmuggled", "", "fatal: nope"
+            return real(argv, **kwargs)
+
+        try:
+            hostile = W.validate_pinned_head(hostile_rc, facts, pinned)
+        except Exception:                      # a non-int rc may not reach us
+            hostile = None
+        if hostile is not None:
+            self.assertNotIn("\n", hostile)
+            self.assertNotIn("smuggled\n", hostile)
 
     def test_an_empty_recorded_repository_refuses_before_running_git(self):
         attempt = self.tmp / "runs" / "u1" / "att1"
