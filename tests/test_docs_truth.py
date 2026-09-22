@@ -5,6 +5,7 @@ import importlib
 import inspect
 import re
 import sys
+import tempfile
 import tokenize
 import unittest
 from pathlib import Path
@@ -561,42 +562,94 @@ def prose_paragraphs(lexed_lines):
     return paragraphs
 
 
-def check_canonical_suite_floor(filename, text, discovered):
+def scan_counts(paragraphs, skip=None):
+    """Every count-shaped claim in PARAGRAPHS, as (line number, count).
+
+    No floor filter. The previous version skipped any count below the
+    document's own documented floor, reasoning that a reader cannot
+    mistake it for the suite total because the marked claim contradicts
+    it -- which luna refused, correctly: `The full suite total is 1499
+    tests.` next to a floor of 1500 is exactly the sentence a reader
+    consults and is misled by, and suppressing it from a REPORT buys
+    nothing. The filter existed to avoid false failures, and this has not
+    failed on a competing count since it became a report.
+    """
+    found = []
+    for paragraph in paragraphs:
+        if skip is not None and paragraph is skip:
+            continue
+        visible = "\n".join(line for _, line in paragraph)
+        for position, count in (claim_matches(visible)
+                                + lower_bound_matches(visible)):
+            line_offset = visible.count("\n", 0, position)
+            found.append((paragraph[line_offset][0], count))
+    return sorted(found)
+
+
+def check_canonical_suite_floor(filename, text, discovered, problems=None):
+    """Structural problems and competing counts for the canonical document.
+
+    Returns the competing counts. Structural problems go into PROBLEMS
+    when the caller supplies a list, and otherwise raise ONCE at the end,
+    all of them together with the counts.
+
+    luna and kimi-k2.7-code both refuted "every check reports rather than
+    raises". They were right about the code and the important half is not
+    the raise -- a structural break in the guard's own document should
+    fail the suite -- it is that the raise happened EARLY, before the rest
+    of the document had been read. One malformed marker hid every
+    competing count behind it, which is the same "one problem conceals
+    the others" shape the report was introduced to end. So nothing aborts
+    the scan; the verdict comes after it.
+    """
+    raise_at_end = problems is None
+    problems = [] if raise_at_end else problems
     markers, lexed_lines = lex_document(text)
+    paragraphs = prose_paragraphs(lexed_lines)
+    owner = None
+    documented_floor = None
+
     if len(markers) != 1:
-        raise AssertionError(
+        problems.append(
             f"{filename}: expected one canonical suite-floor marker, "
             f"found {len(markers)}")
-
-    marker_line = markers[0]
-    paragraphs = prose_paragraphs(lexed_lines)
-    following = [
-        (line_number, line)
-        for paragraph in paragraphs
-        for line_number, line in paragraph
-        if line_number > marker_line
-    ]
-    if not following:
-        raise AssertionError(f"{filename}: suite-floor marker has no claim")
-    claim_line = following[0][0]
-    owners = [
-        paragraph for paragraph in paragraphs
-        if any(line_number == claim_line for line_number, _ in paragraph)
-    ]
-    if len(owners) != 1 or len(owners[0]) != 1:
-        raise AssertionError(
-            f"{filename}: canonical suite floor must be a standalone paragraph")
-
-    canonical_visible_line = owners[0][0][1]
-    canonical = CANONICAL_LOWER_BOUND.fullmatch(canonical_visible_line)
-    if canonical is None:
-        raise AssertionError(
-            f"{filename}: canonical marker must own the suite lower bound")
-    documented_floor = int(canonical.group("count").replace(",", ""))
-    if discovered < documented_floor:
-        raise AssertionError(
-            f"{filename}: documented suite floor {documented_floor} exceeds "
-            f"{discovered} tests discovered by unittest")
+    else:
+        marker_line = markers[0]
+        following = [
+            (line_number, line)
+            for paragraph in paragraphs
+            for line_number, line in paragraph
+            if line_number > marker_line
+        ]
+        if not following:
+            problems.append(f"{filename}: suite-floor marker has no claim")
+        else:
+            claim_line = following[0][0]
+            owners = [
+                paragraph for paragraph in paragraphs
+                if any(line_number == claim_line
+                       for line_number, _ in paragraph)
+            ]
+            if len(owners) != 1 or len(owners[0]) != 1:
+                problems.append(
+                    f"{filename}: canonical suite floor must be a standalone "
+                    f"paragraph")
+            else:
+                owner = owners[0]
+                canonical = CANONICAL_LOWER_BOUND.fullmatch(owner[0][1])
+                if canonical is None:
+                    problems.append(
+                        f"{filename}: canonical marker must own the suite "
+                        f"lower bound")
+                    owner = None
+                else:
+                    documented_floor = int(
+                        canonical.group("count").replace(",", ""))
+                    if discovered < documented_floor:
+                        problems.append(
+                            f"{filename}: documented suite floor "
+                            f"{documented_floor} exceeds {discovered} tests "
+                            f"discovered by unittest")
 
     # A competing claim is one that could be MISTAKEN for the marked one.
     # The document's own floor is what decides that, and reusing it needs no
@@ -617,16 +670,7 @@ def check_canonical_suite_floor(filename, text, discovered):
     # competing claims. What it gives up is an unmarked count BELOW the
     # floor going unremarked -- which by construction cannot be read as this
     # suite's total, because the marked claim directly contradicts it.
-    unowned = []
-    for paragraph in paragraphs:
-        if paragraph is owners[0]:
-            continue
-        visible = "\n".join(line for _, line in paragraph)
-        for position, count in claim_matches(visible) + lower_bound_matches(visible):
-            if count < documented_floor:
-                continue
-            line_offset = visible.count("\n", 0, position)
-            unowned.append((paragraph[line_offset][0], count))
+    unowned = scan_counts(paragraphs, skip=owner)
     # REPORTED, NOT RAISED. This is astra's plan from the committee split,
     # adopted after luna demonstrated both failure modes of the magnitude
     # rule I had preferred instead -- in one round:
@@ -655,7 +699,13 @@ def check_canonical_suite_floor(filename, text, discovered):
     # on -- removing the scan outright would have deleted the only
     # observable those 27 cases have, which is the shape of deletion this
     # repository has been burned by.
-    return [(line_number, count) for line_number, count in unowned]
+    unowned = [(line_number, count) for line_number, count in unowned]
+    if raise_at_end and problems:
+        raise AssertionError(
+            "; ".join(problems)
+            + (f" | competing counts also present: {unowned}"
+               if unowned else ""))
+    return unowned
 
 
 # Two residual limits, stated because a claim about them has already been
@@ -678,26 +728,47 @@ def check_canonical_suite_floor(filename, text, discovered):
 
 
 def check_live_suite_claims(documents, discovered):
-    """Reject marked live totals outside the canonical document.
+    """Check every live document and return one report for all of them.
 
-    Returns the canonical document's soft report. luna: this called
+    Returns `(filename, line number, count)` for every count-shaped claim
+    a reader could take for the suite total, in every document. Raises
+    once, at the end, if any document is structurally broken.
+
+    Two things were wrong before. luna: this called
     `check_canonical_suite_floor` and threw the return value away, so the
-    report the scan exists to produce reached nobody -- computed and
-    dropped, which is worse than not computing it.
+    report reached nobody -- computed and dropped, which is worse than
+    not computing it. And then, once the return value was kept, luna
+    again: only the canonical document was ever SCANNED. An unmarked
+    `The suite has 1600 tests.` in README.md or MEMORY.md produced no
+    report at all, although those two documents are named in
+    LIVE_DOCUMENTS and the module's whole subject is a count going stale
+    in them. The canonical document is the only one with a floor to
+    check; it is not the only one a reader believes.
     """
+    problems = []
     reported = []
     for path, text in documents:
         if path.name == CANONICAL_DOCUMENT.name:
             reported.extend(
-                check_canonical_suite_floor(path.name, text, discovered) or [])
+                (path.name, line_number, count)
+                for line_number, count in check_canonical_suite_floor(
+                    path.name, text, discovered, problems))
             continue
-        markers, _ = lex_document(text)
+        markers, lexed_lines = lex_document(text)
         if markers:
             details = ", ".join(f"line {line_number}"
                                 for line_number in markers)
-            raise AssertionError(
+            problems.append(
                 f"{path.name}: marked live suite claim(s) must reference "
                 f"{CANONICAL_DOCUMENT.name}: {details}")
+        reported.extend(
+            (path.name, line_number, count)
+            for line_number, count in scan_counts(
+                prose_paragraphs(lexed_lines)))
+    if problems:
+        raise AssertionError(
+            "; ".join(problems)
+            + (f" | counts also reported: {reported}" if reported else ""))
     return reported
 
 
@@ -745,8 +816,54 @@ def source_test_classes(path):
                 class_declarations(node.body, prefix + (node.name,)))
         return declarations
 
-    declarations = class_declarations(ast.parse(source).body)
+    tree = ast.parse(source)
+    declarations = class_declarations(tree.body)
     return declarations
+
+
+def unreachable_test_classes(path):
+    """Classes declaring test methods that the module scope cannot reach.
+
+    luna: `source_test_classes` walks module bodies and nested class
+    bodies only, so `if False:` around a TestCase -- or one declared
+    inside a function -- produced NO expected declaration, and the sweep
+    passed on a file whose test methods it had never heard of. That is
+    this module's own failure mode: a declaration that leaves the
+    collected set with nothing going red, the same shape as the `__main__`
+    block that once hid 13 tests.
+
+    Only classes that DECLARE a test method count. The repository has 23
+    function-local helper classes (fake loaders, crash doubles) and every
+    one of them declares none; reporting those would be noise that trains
+    a reader to skip the report.
+    """
+    if isinstance(path, Path):
+        with tokenize.open(path) as source_file:
+            source = source_file.read()
+    else:
+        source = path.read_text()
+    tree = ast.parse(source)
+
+    reachable = set()
+
+    def mark(body):
+        for node in body:
+            if isinstance(node, ast.ClassDef):
+                reachable.add(id(node))
+                mark(node.body)
+
+    mark(tree.body)
+    hidden = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef) or id(node) in reachable:
+            continue
+        methods = sorted(
+            member.name for member in node.body
+            if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and member.name.startswith("test"))
+        if methods:
+            hidden.append((node.name, methods, node.lineno))
+    return sorted(hidden)
 
 
 def source_test_methods(path):
@@ -893,6 +1010,12 @@ def assert_every_test_method_collected(paths, loader=None, module_loader=None):
             failures[path.name] = {"could not inspect": str(exc)}
             continue
         problems = {}
+        unreachable = unreachable_test_classes(path)
+        if unreachable:
+            problems["test methods declared outside module scope"] = [
+                "%s.%s (line %d)" % (name, method, line)
+                for name, methods, line in unreachable
+                for method in methods]
         if duplicates:
             problems["duplicate declarations"] = duplicates
         if unavailable:
@@ -1460,6 +1583,108 @@ class TestDocsTruth(unittest.TestCase):
             check_canonical_suite_floor(
                 CANONICAL_DOCUMENT.name, two_markers, discovered)
 
+    def test_a_count_below_the_documented_floor_is_still_reported(self):
+        """luna: the scan suppressed exactly the sentence that misleads.
+
+        The old rule skipped any count below the document's own floor,
+        reasoning that the marked claim contradicts it so no reader can
+        be fooled. But a reader consulting `The full suite total is 1499
+        tests.` does not also read the floor two hundred lines away, and
+        the scan is a REPORT -- there was never a false-failure cost to
+        avoid.
+        """
+        discovered = unittest.TestLoader().discover(
+            str(ROOT / "tests")).countTestCases()
+        text = CANONICAL_DOCUMENT.read_text()
+        floor = int(CANONICAL_LOWER_BOUND.search(text)
+                    .group("count").replace(",", ""))
+        self.assertLess(floor, discovered,
+                        "this case needs a floor below the real count")
+        low = floor - 1
+        reported = competing_counts(
+            CANONICAL_DOCUMENT.name,
+            text + f"\nThe full suite total is {low} tests.\n",
+            discovered)
+        self.assertIn(low, [count for _line, count in reported],
+                      "a stale total below the floor went unreported")
+
+    def test_a_structural_problem_does_not_hide_the_counts(self):
+        """luna and kimi-k2.7-code: the check raised on the first
+        problem it met, so everything after it was never read.
+
+        The raise itself is right -- a broken marker in the guard's own
+        document should fail the suite. Raising EARLY is what made one
+        problem conceal the others, which is the failure this scan was
+        rewritten to end.
+        """
+        discovered = unittest.TestLoader().discover(
+            str(ROOT / "tests")).countTestCases()
+        text = CANONICAL_DOCUMENT.read_text()
+        # Two markers (a structural problem) AND a competing count that
+        # sits after them, so an early raise cannot have seen it.
+        broken = (text + f"\n{SUITE_MARKER}\n"
+                  + f"\nHistorical suite size: {discovered + 3} tests.\n")
+        with self.assertRaises(AssertionError) as caught:
+            check_canonical_suite_floor(
+                CANONICAL_DOCUMENT.name, broken, discovered)
+        message = str(caught.exception)
+        self.assertIn("marker", message)
+        self.assertIn(str(discovered + 3), message,
+                      "the structural problem hid the competing count")
+
+        # And with a caller-supplied accumulator, nothing raises at all.
+        problems = []
+        counts = check_canonical_suite_floor(
+            CANONICAL_DOCUMENT.name, broken, discovered, problems)
+        self.assertTrue(problems)
+        self.assertIn(discovered + 3, [count for _line, count in counts])
+
+    def test_a_test_method_declared_outside_module_scope_is_reported(self):
+        """luna: `if False: class Hidden(TestCase): def test_lost` was
+        invisible, so the sweep passed on a file whose test methods it
+        had never heard of.
+
+        This is the module's own subject -- a declaration leaving the
+        collected set with nothing going red -- and it is the same shape
+        as the `__main__` block that once hid 13 tests.
+        """
+        source = (
+            "import unittest\n"
+            "\n"
+            "if False:\n"
+            "    class Hidden(unittest.TestCase):\n"
+            "        def test_lost(self):\n"
+            "            pass\n"
+            "\n"
+            "def factory():\n"
+            "    class AlsoHidden(unittest.TestCase):\n"
+            "        def test_also_lost(self):\n"
+            "            pass\n"
+            "    return AlsoHidden\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "test_hidden.py"
+            path.write_text(source)
+            hidden = unreachable_test_classes(path)
+        names = {name: methods for name, methods, _line in hidden}
+        self.assertEqual(
+            names,
+            {"Hidden": ["test_lost"], "AlsoHidden": ["test_also_lost"]})
+
+        # A helper class with no test method is not noise in the report.
+        # The repository has 23 of those and every one declares none.
+        helper = (
+            "def make():\n"
+            "    class Crash(Exception):\n"
+            "        def raise_it(self):\n"
+            "            pass\n"
+            "    return Crash\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "test_helper.py"
+            path.write_text(helper)
+            self.assertEqual(unreachable_test_classes(path), [])
+
     def test_the_entry_point_hands_the_report_to_its_caller(self):
         """luna: the report was computed and thrown away.
 
@@ -1486,7 +1711,29 @@ class TestDocsTruth(unittest.TestCase):
         self.assertGreater(
             len(noisy), len(clean),
             "the caller received no report for a competing count")
-        self.assertIn(discovered + 1, [count for _line, count in noisy])
+        self.assertIn(discovered + 1,
+                      [count for _name, _line, count in noisy])
+
+        # Every live document is scanned, not only the canonical one.
+        # luna: an unmarked stale total in README.md or MEMORY.md was
+        # never looked at, although both are in LIVE_DOCUMENTS and both
+        # are documents a reader believes.
+        for target in (path for path in LIVE_DOCUMENTS
+                       if path.name != CANONICAL_DOCUMENT.name):
+            with self.subTest(document=target.name):
+                planted = [
+                    (path, source + (
+                        f"\nThe suite has {discovered + 7} tests.\n"
+                        if path == target else ""))
+                    for path, source in
+                    [(CANONICAL_DOCUMENT, text)] + others
+                ]
+                report = check_live_suite_claims(planted, discovered)
+                self.assertIn(
+                    (target.name, discovered + 7),
+                    [(name, count) for name, _line, count in report],
+                    "%s was not scanned for an unmarked stale total"
+                    % target.name)
 
 
 if __name__ == "__main__":
