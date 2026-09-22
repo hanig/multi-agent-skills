@@ -1154,10 +1154,18 @@ def judge_detail(runner, unit_dir, spec, launch_facts=None, judgment=None):
     # failure CLAUDE.md warns about, and this is the same wound: nine
     # units read a false cause off a collapsed exit status, and this
     # function collapses the same status in the same way one screen up.
+    # Every value in the messages BELOW goes through the renderer too.
+    # All three reviewers pointed at the same thing in the same round:
+    # I rewrote these refusals and left them interpolating raw, while
+    # claiming one renderer at one boundary. The renderer's own docstring
+    # already records that this claim ran ahead of the code three times,
+    # once per field; this is the fourth, and it is the last place in
+    # either function that bypasses it.
+    shown_repo = render_for_record(repo, _PATH_LIMIT, collapse=False)
     rc, head, head_err = _git(runner, repo, "rev-parse", "HEAD")
     if rc != 0:
         return False, None, (
-            f"HEAD could not be read in {repo!r}. "
+            f"HEAD could not be read in {shown_repo}. "
             f"{render_git_diagnostic(rc, head_err)}. That is unknown, not a "
             f"verdict on what the attempt produced")
     if head == base:
@@ -1170,15 +1178,16 @@ def judge_detail(runner, unit_dir, spec, launch_facts=None, judgment=None):
         # Exit 1 is the DOCUMENTED "not an ancestor". Only here is a
         # verdict on lineage something git actually established.
         return False, None, (
-            f"HEAD {head[:12]} does not descend from the anchored base "
-            f"{str(base)[:12]}. The history was replaced rather than extended, "
-            f"so what is there now was not built on what we anchored")
+            f"HEAD {render_for_record(head[:12], 12)} does not descend from "
+            f"the anchored base {render_for_record(str(base)[:12], 12)}. The "
+            f"history was replaced rather than extended, so what is there "
+            f"now was not built on what we anchored")
     if rc != 0:
         return False, None, (
-            f"the lineage of HEAD {head[:12]} against the anchored base "
-            f"{str(base)[:12]} could not be determined. "
-            f"{render_git_diagnostic(rc, ancestor_err)}. That is unknown, "
-            f"not a verdict on lineage")
+            f"the lineage of HEAD {render_for_record(head[:12], 12)} against "
+            f"the anchored base {render_for_record(str(base)[:12], 12)} could "
+            f"not be determined. {render_git_diagnostic(rc, ancestor_err)}. "
+            f"That is unknown, not a verdict on lineage")
 
     # The tree of the CAPTURED head, not of HEAD. Reading `HEAD^{tree}` was a
     # second look at a moving target: the agent could leave an empty
@@ -1188,9 +1197,10 @@ def judge_detail(runner, unit_dir, spec, launch_facts=None, judgment=None):
     rc, tree, tree_err = _git(runner, repo, "rev-parse", head + "^{tree}")
     if rc != 0:
         return False, None, (
-            f"the tree of HEAD {head[:12]} could not be validated in "
-            f"{repo!r}. {render_git_diagnostic(rc, tree_err)}. That is "
-            f"unknown, not a verdict on the tree")
+            f"the tree of HEAD {render_for_record(head[:12], 12)} could not "
+            f"be validated in {shown_repo}. "
+            f"{render_git_diagnostic(rc, tree_err)}. That is unknown, not a "
+            f"verdict on the tree")
     if tree == rec.get("base_tree"):
         return False, None, (
             "HEAD advanced but its tree is identical to the anchored base "

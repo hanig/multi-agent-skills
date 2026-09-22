@@ -1311,6 +1311,106 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         self.assertFalse(produced)
         self.assertIn("does not descend from the anchored base", why)
 
+    def test_judge_detail_renders_every_value_it_records(self):
+        """luna, kimi-k2.7-code and glm-5.3, all three in one round.
+
+        I rewrote these refusals and left them interpolating `repo!r`,
+        `head[:12]` and `str(base)[:12]` raw while claiming one renderer
+        at one boundary. render_for_record's own docstring already
+        records that claim running ahead of the code three times, once
+        per field. This is the fourth, so the property is asserted here
+        rather than argued: a runner that returns a head full of control
+        characters, against a recorded path far past the bound, must
+        still produce a bounded printable refusal.
+        """
+        real = U.run
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        long_repo = str(self.repo)
+        unit = {"id": "u1", "kind": "code", "repo": long_repo}
+        err, anchor_facts = S._write_launch_record(str(attempt), unit)
+        self.assertIsNone(err)
+        self.commit("A")
+        # base_commit stays VALID. Making it hostile got the attempt
+        # refused by launch_facts_problem before any of these branches
+        # ran, which is why four renderer mutations survived the first
+        # version of this test: it was asserting on a message from a
+        # different function.
+        facts = anchor_facts["facts"]
+
+        def hostile_head(argv, **kwargs):
+            if "merge-base" in argv:
+                return 1, "", ""
+            if argv[-1] == "HEAD" and "rev-parse" in argv:
+                return 0, "d\x01\te" + "f" * 400, ""
+            return real(argv, **kwargs)
+
+        # Each branch separately: a mutation that un-renders the
+        # could-not-be-determined message is invisible if only the
+        # exit-1 message is exercised, which is how my first version of
+        # this test let two of its own mutations through.
+        for label, status in (("not an ancestor", 1),
+                              ("a fatal merge-base", 128)):
+            with self.subTest(branch=label):
+                def hostile(argv, _status=status, **kwargs):
+                    if "merge-base" in argv:
+                        return _status, "", "fatal: bad object"
+                    if ("rev-parse" in argv and argv[-1] == "HEAD"
+                            and "--abbrev-ref" not in argv):
+                        return 0, "d\x01\te" + "f" * 400, ""
+                    return real(argv, **kwargs)
+
+                produced, _head, why = W.judge_detail(
+                    hostile, str(attempt), unit, facts)
+                self.assertFalse(produced)
+                self.assertIsInstance(why, str)
+                self.assertTrue(
+                    why.isprintable(),
+                    "a refusal reached the record unprintable: %r" % why)
+                for forbidden in ("\x00", "\x01", "\n", "\t"):
+                    self.assertNotIn(forbidden, why)
+                self.assertIn("?", why,
+                              "the hostile head reached the record intact, "
+                              "so this branch never rendered it")
+
+        # And the repository path goes through the renderer rather than
+        # repr(), which is the difference all three reviewers named. A
+        # rendered path appears bare; `{repo!r}` wraps it in quotes.
+        def head_unreadable(argv, **kwargs):
+            if ("rev-parse" in argv and argv[-1] == "HEAD"
+                    and "--abbrev-ref" not in argv):
+                return 128, "", "fatal: not a git repository"
+            return real(argv, **kwargs)
+
+        produced, _head, why = W.judge_detail(
+            head_unreadable, str(attempt), unit, anchor_facts["facts"])
+        self.assertFalse(produced)
+        # Against the path judge_detail actually saw, not the one this
+        # test wrote: on macOS /var is a symlink to /private/var, and
+        # comparing against the unresolved spelling made both the
+        # rendered and the repr() form fail to match, so the assertion
+        # pair could not tell them apart and four mutations walked past
+        # it.
+        recorded = anchor_facts["facts"]["repo"]
+        self.assertIn(recorded, why)
+        self.assertNotIn("'%s'" % recorded, why,
+                         "the path went through repr(), not the renderer")
+
+        # The tree branch is the fourth message and was reached by
+        # nothing, so its mutation survived while the other three fell.
+        def tree_unreadable(argv, **kwargs):
+            if any(a.endswith("^{tree}") for a in argv):
+                return 128, "", "fatal: not a git repository"
+            return real(argv, **kwargs)
+
+        produced, _head, why = W.judge_detail(
+            tree_unreadable, str(attempt), unit, anchor_facts["facts"])
+        self.assertFalse(produced)
+        self.assertIn("could not be validated", why)
+        self.assertIn(recorded, why)
+        self.assertNotIn("'%s'" % recorded, why,
+                         "the tree branch bypassed the renderer")
+
 
 class TestEvidenceRecordAuthorityKeys(unittest.TestCase):
     def test_repository_location_is_an_authority_input(self):
