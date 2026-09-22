@@ -4,6 +4,22 @@ The decision surface is `../SKILL.md`. This reference records why the survey
 and interview declarations exist and gives examples without becoming a second
 source of behavior. <!-- declaration: placement.reference-elaboration -->
 
+<!--
+  A NOTE ON THIS FILE'S MARKERS, because they have cost two review rounds.
+
+  A declaration tie is a same-line `<!-- declaration: id -->` comment, and
+  on a wrapped sentence it sits at the end of whichever line holds the
+  modal -- often past column 80, visually detached from the words it
+  licenses. Two consecutive review rounds produced a MAJOR finding from
+  reading such a line without its marker: one on `cannot interrupt
+  os.scandir` here, one on the paragraph-initial imperatives in
+  tracker-sync.md. Both were tied; both read as untied.
+
+  The convention is hanig-swarm's and is not changed here. If you are
+  checking whether a modal is tied, read to end of line, and run
+  `declaration_registry.py check-references` rather than scanning.
+-->
+
 ## Repository walk states
 
 The survey tree walk runs in a child process with a real deadline. A check in
