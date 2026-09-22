@@ -78,9 +78,10 @@ partition, account, promotion destination and approver, code provider and mode,
 target branch, runtime verification, and retry exposure. <!-- declaration: interview.dispatch-complete -->
 
 Every question must concern judgment that inspection cannot settle and carry a <!-- declaration: interview.judgment-only -->
-recommended answer. The categories are at least done criteria, scientific
-claim, discardable work, budget, protected destinations, retry exposure, and
-reporting cadence; the list is a floor rather than an exhaustive set. <!-- declaration: interview.judgment-only -->
+recommended answer. The topics are the ones the declaration itself lists, and
+that list is a floor rather than an exhaustive set; it is deliberately not <!-- declaration: interview.judgment-only -->
+copied here. A second copy is what let the reporting cadence leave one surface <!-- declaration: interview.judgment-only -->
+while surviving in another. <!-- declaration: interview.judgment-only -->
 
 ## Reporting cadence and escalation
 

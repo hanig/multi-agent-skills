@@ -159,11 +159,10 @@ request contains the literal phrase `swarm autopilot`.
 
 ### Finish only when the plan can dispatch
 
-Ask only about judgment. At least: done criteria, scientific claim,
-discardable work, budget, protected destinations, the most work the owner will
-repeat after one interruption, and how often they want to be told what is
-happening. That list is a floor, not an exhaustive set. Every question
-includes a recommended answer.
+Ask only about judgment, and give every question a recommended answer. The
+topics are the ones `interview.judgment-only` lists above; they are not
+restated here, because two copies of a list of what to ask is how the
+reporting cadence fell out of one of them.
 
 Before ending the interview, enumerate the plan's required values:
 

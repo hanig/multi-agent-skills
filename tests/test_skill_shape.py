@@ -823,6 +823,12 @@ class TestAuthoredSkillShape(unittest.TestCase):
             )
 
 
+GENERATED_BEGIN = "<!-- BEGIN GENERATED DECLARATIONS"
+GENERATED_END = "<!-- END GENERATED DECLARATIONS -->"
+ASK_CUE = re.compile(r"\bask(?:s|ed|ing)?\b", re.IGNORECASE)
+FRONTMATTER = re.compile(r"\A---\n.*?\n---\n", re.DOTALL)
+
+
 class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
     """A statement can leave the decision surface and nothing notices.
 
@@ -838,24 +844,136 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
     behaviour-deciding -- and it survived in no declaration, no reference
     and no body text. Three reviewers found it independently; no test did.
 
-    This pins the ids that must not vanish without a replacement being
-    named. It is a floor, not a schema: adding declarations is free.
+    The first version of this pinned seven ids and called itself "a floor,
+    not a schema". luna and glm-5.3 both refused that: sixty of the
+    sixty-seven declarations could still be deleted with every check green,
+    including `closure.evidence`, the rule that refuses a close without
+    evidence. A floor that omits most of the building is not a floor. So
+    the whole set is pinned.
+
+    This is a SNAPSHOT, not a schema. Adding a declaration fails this list
+    too, which is the point: the list is the place a reader looks to see
+    what the skill decides, and changing that set should be a deliberate
+    edit with a reason in the commit, not a side effect of regenerating a
+    body.
     """
 
-    REQUIRED = {
+    DECLARED = {
         "hanig-project": (
-            "interview.reporting-cadence",
-            "interview.retry-boundary",
-            "interview.judgment-only",
-            "interview.dispatch-complete",
+            "placement.behavior-deciding",
+            "placement.reference-elaboration",
+            "placement.reference-dialect",
+            "capability.host-policy",
             "capability.tracker",
+            "capability.install-boundary",
+            "paths.skill-directory",
+            "workflow.order",
+            "survey.read-before-ask",
+            "survey.incomplete-walk",
+            "survey.partition-state",
+            "adoption.context",
+            "repository.destination",
+            "repository.source-data",
+            "repository.creation-approval",
+            "interview.judgment-only",
+            "interview.retry-boundary",
+            "interview.dispatch-complete",
+            "interview.reporting-cadence",
+            "plan.inputs",
+            "plan.scheduler-route",
+            "plan.promotion",
+            "code.configuration",
+            "code.target-branch",
+            "runtime.contract",
+            "retry.contract",
+            "cluster.memory-flag",
+            "cluster.account-allowance",
+            "cluster.memory-charging",
+            "cluster.qos-scope",
+            "findings.interview",
+            "unit.retry-size",
+            "judgment.by-kind",
+            "slurm.command-boundary",
+            "pipeline.command-boundary",
+            "code.prompt-boundary",
+            "outputs.attempt-relative",
+            "code.default-agent",
+            "slurm.array-outputs",
+            "plan.required-fields",
+            "code.write-scopes",
+            "code.worktree-isolation",
+            "plan.docs-protection",
+            "plan.human-document",
+            "plan.validate",
+            "tracker.team",
+            "tracker.credential-boundary",
             "tracker.approval",
             "tracker.autopilot",
+            "tracker.apply",
+            "tracker.edges",
+            "tracker.readback-shape",
+            "tracker.attestation",
+            "tracker.check",
+            "dispatch.sequence",
+            "drain.authority",
+            "closure.evidence",
+            "closure.by-kind",
+            "drain.block-intent",
+            "outbox.receipt",
+            "outbox.idempotency",
+            "report.required",
+            "report.evidence-source",
+            "report.contents",
+            "findings.contract",
+            "findings.bound",
+            "adoption.remaining-work",
         ),
     }
 
+    def authored_surfaces(self):
+        """Every hanig-project surface a human wrote, generated block cut."""
+        skill = SKILLS / "hanig-project"
+        return [skill / "SKILL.md"] + sorted(
+            (skill / "references").glob("*.md"))
+
+    @staticmethod
+    def sentences(surface):
+        """Sentences of the AUTHORED text: no frontmatter, no generated
+        block.
+
+        The frontmatter is metadata rather than guidance -- its
+        `description` is a when-to-use list and legitimately reads as one
+        -- and the generated block is derived from the registry, so
+        holding it to a rule about second copies would fail the first one.
+        """
+        text = surface.read_text()
+        if GENERATED_BEGIN in text and GENERATED_END in text:
+            head = text[:text.index(GENERATED_BEGIN)]
+            tail = text[text.index(GENERATED_END) + len(GENERATED_END):]
+            text = head + "\n" + tail
+        text = FRONTMATTER.sub("", text)
+        return re.split(r"(?<=[.!?])\s+", " ".join(text.split()))
+
+    def test_the_declared_set_is_exactly_what_is_pinned(self):
+        for skill, ids in self.DECLARED.items():
+            registry = SKILLS / skill / "declarations.json"
+            with open(registry) as handle:
+                declared = [entry["id"]
+                            for entry in json.load(handle)["declarations"]]
+            with self.subTest(skill=skill):
+                self.assertEqual(
+                    sorted(declared), sorted(ids),
+                    "%s's declaration set changed. Neither registry check "
+                    "can see a declaration leave, so this snapshot is the "
+                    "only thing that can: update it in the same commit and "
+                    "say in the message what was added or dropped and why."
+                    % skill)
+                self.assertEqual(
+                    len(declared), len(set(declared)),
+                    "%s declares the same id twice" % skill)
+
     def test_required_declaration_ids_are_present(self):
-        for skill, ids in self.REQUIRED.items():
+        for skill, ids in self.DECLARED.items():
             registry = SKILLS / skill / "declarations.json"
             with open(registry) as handle:
                 declared = {entry["id"]
@@ -871,7 +989,7 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
 
     def test_each_required_declaration_reaches_the_generated_body(self):
         """Present in the registry is not present in the body."""
-        for skill, ids in self.REQUIRED.items():
+        for skill, ids in self.DECLARED.items():
             text = (SKILLS / skill / "SKILL.md").read_text()
             for required in ids:
                 with self.subTest(skill=skill, declaration=required):
@@ -933,32 +1051,37 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
             "an enumeration that reads as exhaustive must say it is not, "
             "or the next mandatory topic silently falls outside it")
 
-        # EVERY SURFACE, not just the registry. glm-5.3: my first version
-        # read only declarations.json, so the same contradiction survived
-        # in the authored body's step-2 walkthrough and in the reference --
-        # "recreating in the authored body the exact exhaustive-enumeration
-        # contradiction this change claims to have fixed in the registry".
-        skill = SKILLS / "hanig-project"
-        surfaces = [skill / "SKILL.md"] + sorted(
-            (skill / "references").glob("*.md"))
-        for surface in surfaces:
-            text = surface.read_text()
-            for paragraph in text.split("\n\n"):
-                lowered = " ".join(paragraph.split()).lower()
-                if "done criteria" not in lowered:
+        # ONE COPY, not a sweep for the words I happened to write.
+        #
+        # My first version read only declarations.json, so the same
+        # contradiction survived in the body's step-2 walkthrough and in
+        # the reference (glm-5.3). My second swept every surface for
+        # paragraphs containing the literal "done criteria" and "protected
+        # destinations" -- which luna refuted in one line: an honest
+        # paraphrase ("completion criteria ... protected locations ...")
+        # omits the cadence and never trips a sentinel. Widening the
+        # sentinel list is the same losing move a third time.
+        #
+        # So there is now exactly ONE enumeration, in the registry, and the
+        # walkthrough and the reference point at it instead of restating
+        # it. This asserts the absence: outside the generated declaration
+        # block, no sentence both asks and lists. It is a heuristic, and it
+        # is one that cannot be paraphrased around, because it keys on the
+        # SHAPE of an enumeration rather than on its words. An honest new
+        # ask-list fails it too -- and the answer to that failure is to put
+        # the list in the registry, which is the rule.
+        for surface in self.authored_surfaces():
+            for sentence in self.sentences(surface):
+                if not ASK_CUE.search(sentence):
                     continue
-                if "protected destinations" not in lowered:
+                if sentence.count(",") < 4:
                     continue
-                with self.subTest(surface=surface.name):
-                    self.assertTrue(
-                        "cadence" in lowered
-                        or "told what is happening" in lowered,
-                        "%s enumerates the interview topics without the "
-                        "reporting cadence:\n%s" % (surface.name, paragraph))
-                    self.assertTrue(
-                        "at least" in lowered or "floor" in lowered,
-                        "%s enumerates the interview topics as if the list "
-                        "were exhaustive:\n%s" % (surface.name, paragraph))
+                self.fail(
+                    "%s lists what to ask outside the generated "
+                    "declaration block:\n  %s\nThe interview topics have "
+                    "one home, interview.judgment-only. A second copy is "
+                    "how the reporting cadence left one surface while "
+                    "surviving in another." % (surface.name, sentence))
 
     def test_every_declaration_elaboration_mentions_its_subject(self):
         """glm-5.3: the cadence declaration pointed at a reference that
