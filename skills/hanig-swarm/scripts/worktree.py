@@ -129,33 +129,79 @@ def _as_text(value):
         return "<a value that cannot be rendered>"
 
 
+class _UnestablishedStatus(object):
+    """Nonzero, with a magnitude this runner did not establish.
+
+    NOT an int, deliberately. Every branch in this module that reads an
+    exact status -- `rc == 1` for merge-base's documented "not an
+    ancestor", `rc == 2` for ls-remote's "ref absent", `rc in (0, 1)` for
+    config's "key not found" -- is asking a question that a value like
+    "128" or 128.0 or True cannot answer. Collapsing those to 1, which is
+    what the previous version did, made every one of them answer YES to a
+    question about a status nobody reported.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self):
+        return "<a status the runner did not report as a number>"
+
+    __str__ = __repr__
+
+
+UNESTABLISHED_STATUS = _UnestablishedStatus()
+
+
 def _as_status(value):
-    """A runner's exit status as an int, without trusting its operators.
+    """A runner's exit status, as an int when one can be established.
 
     luna and kimi-k2.7-code, independently: `rc` was never coerced, so a
     status object with a custom comparison raised at `rc != 0` before any
     refusal could be built. A status whose comparison to zero cannot be
     evaluated is treated as FAILURE, because a runner that cannot say it
     succeeded did not.
+
+    Four rounds of this function were four wrong answers to one question,
+    "is this value zero, and if not, which nonzero is it":
+
+      * `rc != 0` accepted 0, 0.0 and False, refused "0", and raised on a
+        hostile comparison.
+      * `int(value)` ADMITTED "0" -- a previously-refused run (luna,
+        glm-5.3).
+      * Rejecting everything non-int REFUSED 0.0 and False, which a runner
+        legitimately returns (kimi-k2.7-code).
+      * Collapsing every nonzero to 1 made 128.0 and "128" read as
+        merge-base's documented "not an ancestor", so a fatal error became
+        a false lineage verdict (luna, glm-5.3, both again).
+
+    The fourth is the one worth stating as a rule: the callers need two
+    different facts, and only one of them survives a collapse. So a value
+    that is not an int yields zero if it compares equal to zero, and
+    otherwise UNESTABLISHED_STATUS -- nonzero, and no more than that. The
+    magnitude is never PARSED out of a string; "0" is still refused, and
+    the refusal now says the status was not reported as a number rather
+    than naming a cause.
     """
-    # The ORIGINAL comparison had the right semantics all along and I
-    # replaced it with a coercion, twice, wrongly in both directions.
-    # `rc != 0` accepted 0, 0.0 and False and refused "0"; `int(value)`
-    # ADMITTED "0" (luna, glm-5.3), and rejecting everything non-int then
-    # REFUSED 0.0 and False, which a runner legitimately returns
-    # (kimi-k2.7-code). So the comparison is back, and the only thing
-    # added is that it cannot raise.
-    # An int passes through UNCHANGED. Collapsing every nonzero to 1 was
-    # my own two fixes colliding: the lineage branch distinguishes
-    # merge-base's documented exit 1 ("not an ancestor") from a fatal 128,
-    # and normalising 128 to 1 destroyed exactly the evidence that
-    # distinction rests on.
     if type(value) is int:
+        # An int passes through UNCHANGED, magnitude and all: 1 and 128
+        # mean different things and both callers depend on the difference.
+        #
+        # `type(value) is int` rather than isinstance, and bool is the
+        # reason as much as an int subclass is: True == 1, so an
+        # isinstance check would let a bool answer YES to "is this
+        # merge-base's documented not-an-ancestor". It falls through to
+        # the comparison below instead, where False is zero and True is
+        # nonzero-and-nothing-more. I wrote that as an explicit bool
+        # branch first; reverting the branch changed no behaviour and no
+        # test, so it was doing nothing but claiming to.
         return value
     try:
-        return 0 if value == 0 else 1
+        if value == 0:
+            return 0
     except BaseException:
-        return 1
+        # Not Exception: a comparison operator can raise SystemExit.
+        return UNESTABLISHED_STATUS
+    return UNESTABLISHED_STATUS
 
 
 def _git(runner, repo, *args, timeout=60):
@@ -871,7 +917,7 @@ def _judge_anchored_ref(runner, facts, judgment=None):
         _set_judgment_state(judgment, "remote-ref-unreadable")
         return False, None, (
             f"cannot resolve anchored remote ref {ref!r} from the anchored "
-            f"origin: {(err or out or ('git ls-remote exited %s' % rc))[:200]}")
+            f"origin: {render_git_diagnostic(rc, err or out)}")
     lines = [line.split() for line in out.splitlines() if line.strip()]
     if (len(lines) != 1 or len(lines[0]) != 2 or lines[0][1] != ref
             or len(lines[0][0]) not in (40, 64)
@@ -1365,6 +1411,16 @@ def render_git_diagnostic(rc, err):
     # render_for_record does the coercion; calling str() here would put the
     # same unguarded conversion back outside the total function, one
     # argument over from where it was just removed.
+    if rc is UNESTABLISHED_STATUS:
+        # Not "git exited <a status the runner did not report as a
+        # number>", which reads as though that phrase were the status.
+        code = "with a status this runner did not report as a number"
+        prefix = f"git exited {code} and said: "
+        rendered = render_for_record(
+            err, max(0, _DIAGNOSTIC_LIMIT - len(prefix)))
+        return (prefix + rendered).strip() if rendered.strip() else (
+            "git exited with a status this runner did not report as a "
+            "number and said nothing")
     code = render_for_record(rc, 12)
     # Render BEFORE touching the value. luna, kimi-k2.7-code and glm-5.3 all
     # found the same thing here, and glm named it exactly: this line

@@ -918,7 +918,34 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
                 self.assertEqual(W._as_status(status), 0)
         for status in ("0", "00", b"0", 0.5, None, object()):
             with self.subTest(status=repr(status)[:20]):
-                self.assertEqual(W._as_status(status), 1)
+                self.assertIs(W._as_status(status), W.UNESTABLISHED_STATUS)
+                self.assertNotEqual(W._as_status(status), 0)
+
+    def test_an_unestablished_status_answers_no_exact_question(self):
+        """luna and glm-5.3: collapsing every nonzero to 1 made a fatal
+        status answer YES to "is this merge-base's documented exit 1".
+
+        Three branches in this module read an EXACT status -- `rc == 1`
+        for not-an-ancestor, `rc == 2` for ls-remote's absent ref,
+        `rc in (0, 1)` for config's key-not-found. A runner reporting
+        statuses as strings, floats or bools reached all three through a
+        value that was never 128, 2 or 1 to begin with. The sentinel is
+        not an int on purpose: it equals no exact status, and it is not
+        zero.
+        """
+        for status in ("128", 128.0, True, "2", 2.0, "1", 1.0):
+            with self.subTest(status=repr(status)):
+                rc = W._as_status(status)
+                self.assertIs(rc, W.UNESTABLISHED_STATUS)
+                self.assertTrue(rc != 0, "an unreadable status is not zero")
+                self.assertFalse(rc == 1, "it is not merge-base's exit 1")
+                self.assertFalse(rc == 2, "it is not ls-remote's exit 2")
+                self.assertNotIn(rc, (0, 1), "it is not config's key-absent")
+        # It is renderable, because every refusal carrying it is durable.
+        rendered = W.render_git_diagnostic(W.UNESTABLISHED_STATUS, "fatal: x")
+        self.assertIsInstance(rendered, str)
+        self.assertIn("not report", rendered)
+        self.assertIn("fatal: x", rendered)
 
     def test_a_fatal_merge_base_is_not_a_lineage_verdict(self):
         """glm-5.3: exit 1 means "not an ancestor"; 128 means git failed.
@@ -956,6 +983,27 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         verdict = W.validate_pinned_head(not_an_ancestor, facts, pinned)
         self.assertIsNotNone(verdict)
         self.assertIn("does not descend", verdict)
+
+        # The finding above fed int 128 only, so a runner that reports
+        # statuses as strings, floats or bools walked straight past it --
+        # luna and glm-5.3 both, in the round after the int case was
+        # fixed. Every one of these is a FATAL merge-base, and none of
+        # them may produce a lineage verdict.
+        for status in ("128", 128.0, True, "1", 1.0):
+            with self.subTest(status=repr(status)):
+                def not_a_number(argv, _status=status, **kwargs):
+                    if "merge-base" in argv:
+                        return _status, "", "fatal: bad object deadbeef"
+                    return real(argv, **kwargs)
+
+                why = W.validate_pinned_head(not_a_number, facts, pinned)
+                self.assertIsNotNone(why)
+                self.assertIsInstance(why, str)
+                self.assertIn("could not be determined", why)
+                self.assertNotIn(
+                    "does not descend", why,
+                    "a status of %r produced a lineage verdict" % (status,))
+                self.assertIn("bad object", why)
 
     def test_a_textual_zero_status_is_not_success(self):
         """luna and glm-5.3: coercing "0" ADMITTED a refused run.
