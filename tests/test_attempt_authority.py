@@ -905,6 +905,58 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
                 out = W.render_git_diagnostic(shape, "boom")
                 self.assertIsInstance(out, str)
 
+    def test_a_zero_valued_status_is_success(self):
+        """kimi-k2.7-code: I over-corrected and refused 0.0 and False.
+
+        The ORIGINAL `rc != 0` accepted those and refused "0". Replacing a
+        working comparison with a coercion broke it in one direction, then
+        in the other. The comparison is back; the only addition is that it
+        cannot raise.
+        """
+        for status in (0, 0.0, False):
+            with self.subTest(status=repr(status)):
+                self.assertEqual(W._as_status(status), 0)
+        for status in ("0", "00", b"0", 0.5, None, object()):
+            with self.subTest(status=repr(status)[:20]):
+                self.assertEqual(W._as_status(status), 1)
+
+    def test_a_fatal_merge_base_is_not_a_lineage_verdict(self):
+        """glm-5.3: exit 1 means "not an ancestor"; 128 means git failed.
+
+        A checkout holding the produced commit but not the base object --
+        a shallow re-clone, a corrupt pack -- made `--is-ancestor` die
+        128, and the durable record then said the commit "does not descend
+        from trusted base": a false lineage verdict, sending an operator
+        after an off-base commit that descends fine. This is the nine-unit
+        wound recurring in a sibling branch I had swept for rendering and
+        not for the no-cause property.
+        """
+        real = U.run
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        facts = self.facts(attempt)
+        pinned = self.commit("A")
+
+        def fatal(argv, **kwargs):
+            if "merge-base" in argv:
+                return 128, "", "fatal: bad object deadbeef"
+            return real(argv, **kwargs)
+
+        why = W.validate_pinned_head(fatal, facts, pinned)
+        self.assertIsNotNone(why)
+        self.assertIn("could not be determined", why)
+        self.assertIn("bad object", why)
+        self.assertNotIn("does not descend", why)
+
+        def not_an_ancestor(argv, **kwargs):
+            if "merge-base" in argv:
+                return 1, "", ""
+            return real(argv, **kwargs)
+
+        verdict = W.validate_pinned_head(not_an_ancestor, facts, pinned)
+        self.assertIsNotNone(verdict)
+        self.assertIn("does not descend", verdict)
+
     def test_a_textual_zero_status_is_not_success(self):
         """luna and glm-5.3: coercing "0" ADMITTED a refused run.
 

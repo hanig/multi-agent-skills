@@ -133,20 +133,29 @@ def _as_status(value):
     """A runner's exit status as an int, without trusting its operators.
 
     luna and kimi-k2.7-code, independently: `rc` was never coerced, so a
-    status object with a custom `__ne__` raised at `rc != 0` before any
-    refusal could be built. A status that cannot be read as an integer is
-    treated as FAILURE, because a runner that cannot produce one did not
-    report success.
+    status object with a custom comparison raised at `rc != 0` before any
+    refusal could be built. A status whose comparison to zero cannot be
+    evaluated is treated as FAILURE, because a runner that cannot say it
+    succeeded did not.
     """
+    # The ORIGINAL comparison had the right semantics all along and I
+    # replaced it with a coercion, twice, wrongly in both directions.
+    # `rc != 0` accepted 0, 0.0 and False and refused "0"; `int(value)`
+    # ADMITTED "0" (luna, glm-5.3), and rejecting everything non-int then
+    # REFUSED 0.0 and False, which a runner legitimately returns
+    # (kimi-k2.7-code). So the comparison is back, and the only thing
+    # added is that it cannot raise.
+    # An int passes through UNCHANGED. Collapsing every nonzero to 1 was
+    # my own two fixes colliding: the lineage branch distinguishes
+    # merge-base's documented exit 1 ("not an ancestor") from a fatal 128,
+    # and normalising 128 to 1 destroyed exactly the evidence that
+    # distinction rests on.
     if type(value) is int:
         return value
-    # Do NOT parse. `int(value)` reads the string "0" as success, which
-    # ADMITS a run the previous `rc != 0` comparison refused -- luna and
-    # glm-5.3 both caught that, and admitting a previously refused case is
-    # the worst direction a change to this function can fail in. Anything
-    # that is not already an int is a failure, which is what the docstring
-    # said before the code disagreed with it.
-    return 1
+    try:
+        return 0 if value == 0 else 1
+    except BaseException:
+        return 1
 
 
 def _git(runner, repo, *args, timeout=60):
@@ -1421,21 +1430,36 @@ def validate_pinned_head(runner, launch_facts, produced):
                 f"{render_git_diagnostic(rc, cat_err)}. Refusing rather than "
                 f"substituting the current ref; the object may still exist "
                 f"in another checkout of the same remote")
-    rc, _out, _err = _git(runner, repo, "merge-base", "--is-ancestor",
-                           base, produced)
+    rc, _out, ancestor_err = _git(runner, repo, "merge-base",
+                                  "--is-ancestor", base, produced)
     # Every refusal this function emits goes through the renderer, not only
     # the one a reviewer named. glm-5.3 pointed out that these three
     # branches still interpolated raw; it was filed out of scope and is
     # swept anyway, because "some refusals are rendered" is not a property
     # anyone can rely on.
     if rc != 0:
-        return (f"{PIN_VALIDATION_REFUSAL}: pinned produced commit "
-                f"{render_for_record(produced[:12], 12)} does not descend "
-                f"from trusted base {render_for_record(base, 12)}")
+        # `merge-base --is-ancestor` DOCUMENTS exit 1 as "not an ancestor".
+        # Any other nonzero is a fatal error -- a bad or missing base
+        # object, a shallow clone cut below the base, a corrupt pack --
+        # and saying "does not descend" there is a false lineage verdict.
+        # glm-5.3 found this surviving here after I swept these branches
+        # for the renderer and not for the property the branch exists to
+        # enforce: the whole point is that a refusal does not claim a
+        # cause the evidence does not establish.
+        if rc == 1:
+            return (f"{PIN_VALIDATION_REFUSAL}: pinned produced commit "
+                    f"{render_for_record(produced[:12], 12)} does not "
+                    f"descend from trusted base "
+                    f"{render_for_record(base, 12)}")
+        return (f"{PIN_VALIDATION_REFUSAL}: the lineage of pinned produced "
+                f"commit {render_for_record(produced[:12], 12)} against "
+                f"base {render_for_record(base, 12)} could not be "
+                f"determined. {render_git_diagnostic(rc, ancestor_err)}. "
+                f"That is unknown, not a verdict on lineage")
     rc, tree, tree_err = _git(runner, repo, "rev-parse", produced + "^{tree}")
     if rc != 0:
-        return (f"{PIN_VALIDATION_REFUSAL}: cannot read the tree of pinned "
-                f"commit {render_for_record(produced[:12], 12)}. "
+        return (f"{PIN_VALIDATION_REFUSAL}: the tree of pinned commit "
+                f"{render_for_record(produced[:12], 12)} could not be read. "
                 f"{render_git_diagnostic(rc, tree_err)}")
     if tree == launch_facts["base_tree"]:
         return (f"{PIN_VALIDATION_REFUSAL}: the pinned produced commit has "
