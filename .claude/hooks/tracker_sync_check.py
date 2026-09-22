@@ -480,14 +480,57 @@ def _feeds_a_shell(line_tokens):
     The program word decides it: `bash <<EOF` executes the body,
     `cat <<EOF` prints it and `cat > x.sh <<EOF` stores it. A wrapper
     counts too, since `sudo bash <<EOF` runs it just the same.
+
+    Finding that word is the whole difficulty, and the first version
+    took the first non-wrapper token, which is not it. luna and
+    kimi-k2.7-code, independently, with six shapes that missed:
+
+        env -i bash <<EOF        the wrapper's OPTION decided
+        sudo -u bob bash <<EOF   the option's VALUE decided
+        timeout 600 bash <<EOF   the wrapper's OPERAND decided
+        nice -n 5 bash <<EOF     both
+        <<EOF bash               the heredoc DELIMITER decided
+        > /tmp/o bash <<EOF      the redirection TARGET decided
+
+    Every one is a silent miss: a shell runs `git push` and the hook
+    says nothing, which is the regression this function exists to
+    close, arriving through the tokens either side of the program
+    rather than through the heredoc.
+
+    So a redirection takes its operand with it, and a wrapper switches
+    to scanning the rest of the line, because where its arguments end
+    cannot be known without a table of every wrapper's options. A
+    command word reached before any wrapper still decides immediately,
+    which is what keeps `cat <<EOF` data.
+
+    A shell handed its script another way does NOT run the heredoc:
+    `bash -c ':' <<EOF` reads the body as stdin and ignores it, so
+    calling that an outward action is a false positive (luna).
     """
-    for token in line_tokens:
+    tokens = list(line_tokens)
+    if any(token in _SHELL_COMMAND_OPTIONS for token in tokens):
+        return False
+    scanning = False
+    skip_operand = False
+    for token in tokens:
+        if skip_operand:
+            skip_operand = False
+            continue
         if token in _OPERATORS:
             continue
-        basename = token.rsplit("/", 1)[-1]
-        if basename in _WRAPPERS or _ASSIGNMENT.match(token):
+        if _REDIRECTION.match(token):
+            skip_operand = True
             continue
-        return basename in _SHELLS or basename in _EVAL
+        if _ASSIGNMENT.match(token):
+            continue
+        basename = token.rsplit("/", 1)[-1]
+        if basename in _SHELLS or basename in _EVAL:
+            return True
+        if basename in _WRAPPERS:
+            scanning = True
+            continue
+        if not scanning:
+            return False
     return False
 
 

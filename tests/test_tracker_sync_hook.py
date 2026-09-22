@@ -846,6 +846,44 @@ class TrackerSyncHookInputContract(unittest.TestCase):
                 "cat > x.sh <<'EOF'\ngit push\nEOF", ""),
             "a shell heredoc doing something harmless": (
                 "bash <<'EOF'\necho hello\nEOF", ""),
+            # Round 2 on the heredoc consumer. luna and kimi-k2.7-code
+            # found six shapes where the token that decided was not the
+            # program: a wrapper's option, its value, its operand, and
+            # the heredoc delimiter or redirection target when the
+            # redirection came first. Every one was a silent miss.
+            "a wrapper option before the shell": (
+                "env -i bash <<'EOF'\ngit push origin HEAD\nEOF",
+                "git push"),
+            "a wrapper option with a value before the shell": (
+                "sudo -u bob bash <<'EOF'\ngit push origin HEAD\nEOF",
+                "git push"),
+            "a wrapper operand before the shell": (
+                "timeout 600 bash <<'EOF'\ngit push origin HEAD\nEOF",
+                "git push"),
+            "the redirection before the command": (
+                "<<'EOF' bash\ngit push origin HEAD\nEOF", "git push"),
+            "an output redirection before the command": (
+                "> /tmp/o bash <<'EOF'\ngit push origin HEAD\nEOF",
+                "git push"),
+            # ...and the same shapes must not start flagging data.
+            "a wrapper option before a non-shell": (
+                "sudo -u bob cat <<'EOF'\ngit push origin HEAD\nEOF", ""),
+            "the redirection before a non-shell": (
+                "<<'EOF' cat\ngit push origin HEAD\nEOF", ""),
+            # A shell NAME as an argument to something that is not a
+            # shell. Nothing distinguished "reached a command word
+            # before any wrapper" from "still scanning past one" until
+            # this case: every other shape has no shell token after
+            # the program, so deleting that stop changed no answer and
+            # the mutation survived. Here it flips data into a false
+            # outward action.
+            "a shell name as an argument to a non-shell": (
+                "echo bash <<'EOF'\ngit push origin HEAD\nEOF", ""),
+            # luna: a shell given its script with -c reads the heredoc
+            # as stdin and ignores it, so calling that outward is a
+            # false positive -- the direction that reddens honest work.
+            "a shell whose script came from -c": (
+                "bash -c ':' <<'EOF'\ngit push origin HEAD\nEOF", ""),
             "a shell running something harmless too": (
                 "bash -c 'echo hi'", ""),
             # Round 1 of the restart. All three reviewers found the same
