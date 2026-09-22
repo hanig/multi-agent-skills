@@ -942,7 +942,21 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         for status in (0, 0.0, False):
             with self.subTest(status=repr(status)):
                 self.assertEqual(W._as_status(status), 0)
-        for status in ("0", "00", b"0", 0.5, None, object()):
+        # A LYING object. luna: one whose __eq__(0) returns True was
+        # admitted as success, so a runner could wrap a real exit 128
+        # in it and validate_pinned_head would return None instead of
+        # refusing. Every earlier version of this function erred
+        # towards refusing; that one erred towards admitting.
+        class Liar(object):
+            def __eq__(self, other):
+                return True
+
+        class Raises(object):
+            def __eq__(self, other):
+                raise SystemExit(1)
+
+        for status in ("0", "00", b"0", 0.5, None, object(),
+                       Liar(), Raises(), True, 128.0):
             with self.subTest(status=repr(status)[:20]):
                 self.assertIs(W._as_status(status), W.UNESTABLISHED_STATUS)
                 self.assertNotEqual(W._as_status(status), 0)
@@ -1368,6 +1382,26 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         self.assertNotIn("unreadable", why)
         self.assertIn("not a git repository", why,
                       "git's own words did not reach the record")
+
+    def test_head_equal_to_base_names_no_history(self):
+        """luna: "nothing was committed" from HEAD == base alone.
+
+        A run that commits and then resets leaves exactly this state,
+        so the message named a history the check never observed.
+        """
+        real = U.run
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        unit = {"id": "u1", "kind": "code", "repo": str(self.repo)}
+        err, anchor_facts = S._write_launch_record(str(attempt), unit)
+        self.assertIsNone(err)
+
+        produced, _head, why = W.judge_detail(
+            real, str(attempt), unit, anchor_facts["facts"])
+        self.assertFalse(produced)
+        self.assertIn("produced nothing to judge", why)
+        self.assertNotIn("nothing was committed", why)
+        self.assertIn("does not distinguish", why)
 
     def test_a_repository_that_is_not_a_directory_names_no_cause(self):
         """kimi-k2.7-code: `not os.path.isdir(repo)` reported the

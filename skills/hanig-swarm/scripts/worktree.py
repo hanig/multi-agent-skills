@@ -212,6 +212,23 @@ def _as_status(value):
     the refusal now says the status was not reported as a number rather
     than naming a cause.
     """
+    # Only a genuine number may claim zero. luna: an object whose
+    # __eq__(0) returns True was ADMITTED as success -- a runner could
+    # wrap a real exit 128 in one and validate_pinned_head would
+    # return None instead of refusing. Every earlier version of this
+    # function erred towards refusing; this one erred towards
+    # admitting, which is the direction that matters.
+    #
+    # The comparison is kept for float and False because a runner
+    # legitimately returns those (kimi-k2.7-code, two rounds ago), and
+    # denied to everything else because nothing else can be trusted to
+    # mean zero by saying so.
+    if value is False:
+        return 0
+    if value is True:
+        return UNESTABLISHED_STATUS
+    if type(value) is float:
+        return 0 if value == 0 else UNESTABLISHED_STATUS
     if type(value) is int:
         # An int passes through UNCHANGED, magnitude and all: 1 and 128
         # mean different things and both callers depend on the difference.
@@ -225,12 +242,6 @@ def _as_status(value):
         # branch first; reverting the branch changed no behaviour and no
         # test, so it was doing nothing but claiming to.
         return value
-    try:
-        if value == 0:
-            return 0
-    except BaseException:
-        # Not Exception: a comparison operator can raise SystemExit.
-        return UNESTABLISHED_STATUS
     return UNESTABLISHED_STATUS
 
 
@@ -1277,8 +1288,14 @@ def judge_detail(runner, unit_dir, spec, launch_facts=None, judgment=None):
             f"{render_git_diagnostic(rc, head_err)}. That is unknown, not a "
             f"verdict on what the attempt produced")
     if head == base:
-        return False, None, ("HEAD has not moved since launch, so nothing was "
-                       "committed")
+        # luna: this established only that HEAD equals the launch base
+        # NOW. A run that commits and then resets leaves exactly this
+        # state, so "nothing was committed" names a history the check
+        # never observed.
+        return False, None, (
+            "HEAD is the launch base, so this attempt produced nothing "
+            "to judge. Whether it never committed or committed and "
+            "moved back, this does not distinguish")
 
     rc, _, ancestor_err = _git(
         runner, repo, "merge-base", "--is-ancestor", base, head)
