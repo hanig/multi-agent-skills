@@ -669,6 +669,20 @@ class TrackerSyncHookInputContract(unittest.TestCase):
                 "GIT_SSH_COMMAND=ssh git push origin HEAD", "git push"),
             "an absolute program path": ("/usr/bin/git push origin HEAD",
                                          "git push"),
+            # Round 2's findings: the heredoc stripper ran a regex over
+            # raw text before shlex, so a quoted `<<EOF` and a `<<` in a
+            # comment each swallowed the real command after them; and
+            # shlex splits `2>` so a bare descriptor became the program.
+            "a quoted heredoc marker is not a heredoc": (
+                "printf '%s' '<<EOF'\ngit push origin HEAD", "git push"),
+            "a heredoc mentioned in a comment": (
+                "# usage: cat << EOF\ngit push origin HEAD", "git push"),
+            "a numbered descriptor redirection": (
+                "2>/dev/null git push origin HEAD", "git push"),
+            "a trailing descriptor redirection": (
+                "git push origin HEAD 2> /dev/null", "git push"),
+            "a dash heredoc still hides its body": (
+                "cat <<-EOF\ngit push\nEOF", ""),
             # A step-back committee's acceptance criteria, verbatim.
             # deepseek-v4-pro supplied thirteen after four hand-rolled
             # shapes; these are the ones not already above.

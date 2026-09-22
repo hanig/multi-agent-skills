@@ -185,7 +185,9 @@ ISSUE_MUTATING = frozenset(
 # capturing intent at the tool layer -- which is ARC-698, not more
 # aggressive text parsing.
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-_REDIRECTION = re.compile(r"^\d*(?:>>|>|<<-|<<|<)")
+# The leading `\d*` is gone: shlex always separates the descriptor
+# number into its own token, so it could never match here.
+_REDIRECTION = re.compile(r"^(?:>>|>|<<-|<<|<)")
 
 _OPERATORS = frozenset([";", "&&", "||", "|", "&", "\n"])
 
@@ -196,29 +198,36 @@ _GIT_VALUE_OPTIONS = frozenset(
      "--config-env"])
 
 
-def strip_heredocs(command):
-    """Remove heredoc BODIES before lexing.
+def _lex_line(line):
+    """Tokens for one line, or None if it cannot be lexed."""
+    lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        return list(lexer)
+    except ValueError:
+        return None
 
-    shlex does not know heredocs, so `cat > x.sh <<'EOF' / git push / EOF`
-    would offer `git push` as a command. It is a file being written, not a
-    push being run -- glm-5.3 found the hook reminding about a push that
-    never happened.
+
+def _heredoc_delimiter(tokens):
+    """The delimiter a line opens a heredoc with, or None.
+
+    Decided from TOKENS, never from raw text. The first version ran a
+    regex over the raw command before shlex saw it, and luna and glm-5.3
+    broke it the same way: in `printf '%s' '<<EOF'` and in
+    `# usage: cat << EOF` the regex found a heredoc, so every following
+    line -- including a real `git push` -- was deleted before lexing and
+    the hook emitted nothing. A missed reminder is the expensive
+    direction, and glm noted the deleted shell script would have fired on
+    that input.
+
+    Tokens make both correct without a special case: shlex yields the
+    quoted `'<<EOF'` as ONE token rather than the `<<` operator, and
+    strips a `#` comment to nothing.
     """
-    lines = command.splitlines()
-    out, index = [], 0
-    while index < len(lines):
-        line = lines[index]
-        out.append(line)
-        match = re.search(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1", line)
-        index += 1
-        if not match:
-            continue
-        delimiter = match.group(2)
-        while index < len(lines) and lines[index].strip() != delimiter:
-            index += 1
-        if index < len(lines):
-            index += 1        # drop the delimiter line too
-    return "\n".join(out)
+    for index, token in enumerate(tokens):
+        if token == "<<" and index + 1 < len(tokens):
+            return tokens[index + 1].lstrip("-")
+    return None
 
 
 _NEWLINE = "\n"
@@ -228,31 +237,34 @@ def _lex(command):
     """Shell words and operators, quoting respected, newlines preserved.
 
     Lexed LINE BY LINE with an explicit separator between lines, because
-    shlex treats a newline as ordinary whitespace: lexing the whole text at
-    once made `cat > x.sh <<EOF ... EOF` followed by a real `git push` into
-    one command beginning with `cat`, so the push was missed. Backslash
-    continuations are joined first, so a command split across lines stays
-    one command.
+    shlex treats a newline as ordinary whitespace: lexing the whole text
+    at once made `cat > x.sh <<EOF ... EOF` followed by a real `git push`
+    into one command beginning with `cat`. Heredoc bodies are skipped as
+    they are met, using the delimiter the opening line's TOKENS named.
+    Backslash continuations are joined first.
 
-    A quoted string containing a literal newline is therefore lexed as two
-    lines. That is a declared limit, and the direction it fails in is
-    towards a spurious reminder rather than a missed one.
+    A quoted string containing a literal newline is lexed as two lines.
+    That is a declared limit, and it fails towards a spurious reminder
+    rather than a missed one.
 
-    Returns None for text shlex cannot lex, which is not something to guess
-    about.
+    Returns None for text shlex cannot lex, which is not something to
+    guess about.
     """
-    joined = strip_heredocs(command).replace("\\\n", " ")
     tokens = []
-    for line in joined.splitlines():
+    pending = None
+    for line in command.replace("\\\n", " ").splitlines():
+        if pending is not None:
+            if line.strip() == pending:
+                pending = None
+            continue
         if not line.strip():
             continue
-        lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
-        lexer.whitespace_split = True
-        try:
-            tokens.extend(list(lexer))
-        except ValueError:
+        line_tokens = _lex_line(line)
+        if line_tokens is None:
             return None
+        tokens.extend(line_tokens)
         tokens.append(_NEWLINE)
+        pending = _heredoc_delimiter(line_tokens)
     return tokens
 
 
@@ -279,6 +291,17 @@ def _command_word_and_arguments(tokens):
             continue
         if _REDIRECTION.match(token):
             index += 1
+            if index < len(tokens):
+                index += 1      # the redirection target
+            continue
+        # shlex splits `2>/dev/null` into `2`, `>`, `/dev/null`, so a bare
+        # descriptor number sits where the program word should be and the
+        # real command after it was missed -- luna and glm-5.3. glm also
+        # noted the `^\d*` in _REDIRECTION can never match under this
+        # lexer, which is right: the digits are always a separate token.
+        if (token.isdigit() and index + 1 < len(tokens)
+                and _REDIRECTION.match(tokens[index + 1])):
+            index += 2
             if index < len(tokens):
                 index += 1      # the redirection target
             continue
