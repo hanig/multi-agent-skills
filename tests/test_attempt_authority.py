@@ -1369,6 +1369,51 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         self.assertIn("not a git repository", why,
                       "git's own words did not reach the record")
 
+    def test_a_repository_that_is_not_a_directory_names_no_cause(self):
+        """kimi-k2.7-code: `not os.path.isdir(repo)` reported the
+        repository as GONE, which is also true of a regular file or a
+        path this process cannot stat.
+
+        The branch is reachable only by a race: `workspace_identity_problem`
+        stats the workspace and runs git in it first, so by the time
+        this check runs the path was a directory a moment ago. The
+        window is narrow and that is exactly why the message matters --
+        something changed underneath the attempt between two lines, and
+        "is gone" picks one explanation out of several the process
+        never saw.
+
+        Patched rather than raced, because the message is what the
+        finding was about and a timing window is not something to
+        reproduce by luck.
+        """
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        unit = {"id": "u1", "kind": "code", "repo": str(self.repo)}
+        err, anchor_facts = S._write_launch_record(str(attempt), unit)
+        self.assertIsNone(err)
+        self.commit("A")
+
+        real_isdir = W.os.path.isdir
+        workspace = anchor_facts["facts"]["execution_workspace"]
+
+        def vanished(path):
+            if str(path) == str(workspace):
+                return False
+            return real_isdir(path)
+
+        W.os.path.isdir = vanished
+        try:
+            produced, _head, why = W.judge_detail(
+                U.run, str(attempt), unit, anchor_facts["facts"])
+        finally:
+            W.os.path.isdir = real_isdir
+
+        self.assertFalse(produced)
+        self.assertIn("not a directory", why)
+        self.assertNotIn("is gone", why)
+        self.assertIn("does not distinguish", why)
+        self.assertIn(str(workspace), why)
+
     def test_a_poisoned_str_subclass_cannot_escape_the_boundary(self):
         """luna, one round after the isinstance fix, and the fourth time
         this boundary has been claimed one value short.
@@ -1386,12 +1431,32 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
             def __str__(self):
                 return self
 
+            def __radd__(self, other):
+                # The hole glm-5.3 named: when the right operand is a
+                # str SUBCLASS, Python gives it first crack at __radd__,
+                # so `"" + poison` returns the poison. My first repair
+                # cited that rule as the reason it was safe.
+                return self
+
+            def encode(self, *args, **kwargs):
+                return b"lies"
+
         class PoisonBytes(bytes):
             def decode(self, *args, **kwargs):
                 return Poison("from bytes")
 
+        class NotEvenAStr(object):
+            def __radd__(self, other):
+                return 42
+
+        class DecodesToNonStr(bytes):
+            def decode(self, *args, **kwargs):
+                return NotEvenAStr()
+
         for label, value in (("a str subclass", Poison("hello")),
-                             ("a bytes subclass", PoisonBytes(b"x"))):
+                             ("a bytes subclass", PoisonBytes(b"x")),
+                             ("decode returning a non-str",
+                              DecodesToNonStr(b"z"))):
             with self.subTest(value=label):
                 out = W._as_text(value)
                 self.assertIs(type(out), str,

@@ -123,15 +123,32 @@ def _as_text(value):
             rendered = str(value)
         # str() and .decode() both RETURN A SUBCLASS when handed one, so
         # the subclass this branch exists to defuse walked straight
-        # through it and `_git` called its poisoned `.strip()` anyway --
-        # luna, one round after the isinstance fix, which is the fourth
-        # time this boundary has been claimed one value short.
+        # through it and `_git` called its poisoned `.strip()` anyway.
         #
-        # `"" + x` goes through `str.__add__`, which builds an exact
-        # str. It is the cheapest coercion that cannot be overridden,
-        # because the subclass is the right-hand operand of a real str.
+        # My first repair was `"" + rendered`, justified in a comment
+        # saying the subclass could not intervene "because it is the
+        # right-hand operand of a real str". glm-5.3: "The in-code
+        # justification is backwards: being the right-hand operand of a
+        # str is what gives the subclass first crack at __radd__, not
+        # what prevents it." Reproduced -- a Poison(str) with __radd__
+        # returning self comes straight back out of `"" + p`, and out
+        # of `str(p)` and `"%s" % p` too. I had cited the mechanism
+        # that defeats the coercion as the reason it works.
+        #
+        # `"".join([x])` copies the characters in C. There is no
+        # protocol for an element to intercept a join, so a subclass
+        # cannot return itself from one, and a value that is not a str
+        # at all raises TypeError into the handler below rather than
+        # escaping as something else. Those are the only two outcomes:
+        # exact str, or the fallback.
+        #
+        # A `type(...) is not str` check sat here afterwards and
+        # reverting it changed nothing, because join has no third
+        # outcome to catch. A guard that cannot fire is the "invariant
+        # written in prose" this repository warns about, so it is gone
+        # and the reasoning is here instead.
         if type(rendered) is not str:
-            rendered = "" + rendered
+            rendered = "".join([rendered])
         return rendered
     except BaseException:
         # BaseException, not Exception: kimi-k2.7-code pointed out that a
@@ -1150,8 +1167,15 @@ def judge_detail(runner, unit_dir, spec, launch_facts=None, judgment=None):
             f"than reading this as a configuration mistake")
     if not os.path.isdir(repo):
         return False, None, (
+            # `not isdir` is also true for a regular file and for a
+            # path this process cannot stat, so "is gone" sends an
+            # operator looking for a deletion that may not have
+            # happened -- kimi-k2.7-code, and the same
+            # claims-more-than-it-knows shape as the lineage branches.
             f"the anchored repository "
-            f"{render_for_record(repo, _PATH_LIMIT, collapse=False)} is gone")
+            f"{render_for_record(repo, _PATH_LIMIT, collapse=False)} is "
+            f"not a directory. It may be absent, replaced by a file, or "
+            f"unreadable from here; this does not distinguish them")
 
     if not rec.get("clean_at_launch", False):
         return False, None, (
