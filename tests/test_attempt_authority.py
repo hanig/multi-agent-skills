@@ -857,6 +857,16 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         self.assertNotIn("\n", problem)
         self.assertIn("[truncated]", problem)
 
+    def test_launch_record_paths_do_not_alias_overlong_attempt_names(self):
+        with tempfile.TemporaryDirectory() as root:
+            first = Path(root) / ("a" * 243 + "1")
+            second = Path(root) / ("a" * 243 + "2")
+            first_path = W.launch_record_path(first)
+            second_path = W.launch_record_path(second)
+        self.assertNotEqual(first_path, second_path)
+        self.assertTrue(first_path.name.endswith("1.json"))
+        self.assertTrue(second_path.name.endswith("2.json"))
+
     def test_the_whole_refusal_is_bounded_not_just_the_diagnostic(self):
         """kimi-k2.7-code: the recorded path went in verbatim.
 
