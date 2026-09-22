@@ -40,6 +40,46 @@ behaviour held fixed by tests/test_tracker_sync_hook.py -- which executes
 whatever command settings.json wires, so it did not have to be repointed to
 let this change pass.
 
+## What kept recurring, and the contract that replaces it
+
+Four review rounds found four defects and the gate then refused a fifth,
+correctly: "more rounds have not converged -- they have been finding
+defects in the previous round's fixes."
+
+They were one defect. A relative repository locator resolved twice; a JSON
+shape never checked; bytes decoded permissively enough that a corrupt one
+survived; a command scanned by a pattern whose cost was never bounded.
+Every round, this hook took an UNTRUSTED INPUT and produced a confident
+answer from it without validating it at the boundary. The fixes were
+correct and the pattern was the problem.
+
+So the inputs are enumerated, and each has a stated contract. There are
+five, and `TrackerSyncHookInputContract` in the test file has a hostile
+case for each:
+
+  1. **The harness event on stdin.** May be absent, truncated, not JSON, or
+     JSON without a command. Contract: if the event cannot be read, nothing
+     is emitted -- an unreadable event is not evidence that an outward
+     action occurred.
+  2. **The command text.** Untrusted and unbounded. Contract: classified in
+     time linear in its length, per logical line, and never across lines.
+  3. **The repository locator.** May be empty, relative, absent, a file, or
+     a directory that is not a repository. Contract: resolved exactly once,
+     and anything unusable is a reported unknown.
+  4. **The probe's exit status.** Contract: nonzero is a reported unknown,
+     even when the probe also printed a well-formed empty outbox.
+  5. **The probe's bytes.** Contract: decoded strictly, parsed without
+     JSON's non-standard constants, and shape-checked before any count is
+     believed.
+
+Two invariants cut across all five. Once a command matches, this hook is
+COMMITTED to emitting -- every failure degrades to a reported unknown and
+never to silence, because the conditions that silence it are the ones
+during which the tracker is most likely adrift. And "total 0" is the most
+reassuring sentence available here, so it must be the hardest to reach by
+accident: it requires a probe that started, exited zero, produced strict
+UTF-8, parsed as standard JSON, and matched the outbox shape.
+
 Two rules this file must keep:
 
   * Configuration is data, never code. No shell strings are assembled here;

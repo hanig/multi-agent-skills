@@ -494,5 +494,135 @@ class TrackerSyncHookOutboxReporting(unittest.TestCase):
             "the direct child leaves it alive holding the output pipe" % pid)
 
 
+class TrackerSyncHookInputContract(unittest.TestCase):
+    """One hostile case per untrusted input, enumerated rather than found.
+
+    Four review rounds found four defects here and the gate refused a fifth,
+    saying the rounds had stopped converging. They were one defect wearing
+    four hats: the hook produced a confident answer from an input it had not
+    validated at the boundary. A relative repository locator resolved twice,
+    a JSON shape never checked, bytes decoded permissively, a command
+    scanned by a pattern whose cost was never bounded.
+
+    So this class is organised by INPUT rather than by defect. If a sixth
+    defect is found here, the first question is which input it came in
+    through and whether that input is listed.
+    """
+
+    INPUTS = ("the harness event", "the command text",
+              "the repository locator", "the probe's exit status",
+              "the probe's bytes")
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="tracker-sync-contract-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def invoke(self, payload_bytes, env_overrides=None, timeout=60):
+        env = dict(os.environ)
+        env["HANIG_TRACKER_REPO"] = os.path.join(self.tmp, "repo")
+        env["HANIG_TRACKER_STATE_DIR"] = os.path.join(self.tmp, "state")
+        env["CLAUDE_PROJECT_DIR"] = REPO_ROOT
+        for key, value in (env_overrides or {}).items():
+            if value is None:
+                env.pop(key, None)
+            else:
+                env[key] = value
+        commands = wired_commands()
+        proc = subprocess.run(
+            ["/bin/sh", "-c", commands[0]], input=payload_bytes,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env, timeout=timeout)
+        return proc.returncode, proc.stdout.decode("utf-8")
+
+    # 1. the harness event -------------------------------------------------
+
+    def test_an_unreadable_event_emits_nothing(self):
+        """An event that cannot be read is not evidence of an outward
+        action, so the answer is silence rather than a reported unknown."""
+        for label, payload in (
+                ("empty stdin", b""),
+                ("not json", b"{ this is not json"),
+                ("truncated json", b'{"tool_input": {"command"'),
+                ("no tool_input", b'{"hook_event_name": "PostToolUse"}'),
+                ("command is not a string", b'{"tool_input": {"command": 7}}'),
+                ("invalid utf-8", b'{"tool_input": {"command": "\xff"}}'),
+        ):
+            with self.subTest(event=label):
+                rc, out = self.invoke(payload)
+                self.assertEqual(rc, 0, "the hook must never block")
+                self.assertEqual(out.strip(), "",
+                                 "emitted on an unreadable event: %r" % out)
+
+    # 3. the repository locator -------------------------------------------
+
+    def test_a_repository_without_the_probe_is_a_reported_unknown(self):
+        """The locator can point somewhere real that cannot answer."""
+        empty = os.path.join(self.tmp, "repo")
+        os.makedirs(empty, exist_ok=True)
+        payload = json.dumps(
+            {"tool_input": {"command": "git push origin HEAD"}}).encode()
+        rc, out = self.invoke(payload)
+        self.assertEqual(rc, 0)
+        context = injected_context(out)
+        self.assertIsNotNone(context, out)
+        self.assertIn("Unknown is not zero", context)
+        self.assertNotIn("total 0", context)
+
+    def test_a_file_where_a_repository_was_is_a_reported_unknown(self):
+        afile = os.path.join(self.tmp, "repo-is-a-file")
+        with open(afile, "w") as handle:
+            handle.write("not a repository\n")
+        payload = json.dumps(
+            {"tool_input": {"command": "gh pr merge 1"}}).encode()
+        rc, out = self.invoke(payload, {"HANIG_TRACKER_REPO": afile})
+        self.assertEqual(rc, 0)
+        context = injected_context(out)
+        self.assertIsNotNone(context, out)
+        self.assertIn("Unknown is not zero", context)
+
+    # the invariant that cuts across all five ------------------------------
+
+    def test_total_zero_requires_every_input_to_have_been_validated(self):
+        """The most reassuring sentence must be the hardest to reach.
+
+        Each of these breaks exactly one link in the chain that ends in
+        "total 0", and each must report unknown instead.
+        """
+        breakages = {
+            "probe will not start": None,          # no repo at all
+            "probe exits nonzero": PROBE_EXITS_NONZERO,
+            "probe prints non-json": PROBE_NOT_JSON,
+            "probe prints the wrong shape": PROBE_WRONG_SHAPE["no intents key"],
+            "probe prints invalid utf-8": PROBE_MALFORMED["invalid utf-8"],
+            "probe prints NaN": PROBE_MALFORMED["NaN in the payload"],
+        }
+        payload = json.dumps(
+            {"tool_input": {"command": "git push origin HEAD"}}).encode()
+        for label, body in breakages.items():
+            with self.subTest(broken=label):
+                repo = os.path.join(self.tmp, "repo")
+                shutil.rmtree(repo, ignore_errors=True)
+                if body is not None:
+                    fake_repo(body, repo)
+                rc, out = self.invoke(payload)
+                self.assertEqual(rc, 0)
+                context = injected_context(out)
+                self.assertIsNotNone(context, out)
+                self.assertNotIn(
+                    "total 0", context,
+                    "%s still produced an empty-outbox report" % label)
+                self.assertIn("Unknown is not zero", context)
+
+        # ...and the intact chain does produce a count, so the assertions
+        # above are not passing because nothing ever reports one.
+        repo = os.path.join(self.tmp, "repo")
+        shutil.rmtree(repo, ignore_errors=True)
+        fake_repo(PROBE_EMPTY, repo)
+        rc, out = self.invoke(payload)
+        context = injected_context(out)
+        self.assertIsNotNone(context, out)
+        self.assertIn("total 0", context)
+
+
 if __name__ == "__main__":
     unittest.main()
