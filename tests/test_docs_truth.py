@@ -894,6 +894,40 @@ def unreachable_test_classes(path, module):
 
     walk(ast.parse(source).body, ())
 
+    # Every class the module EXPOSES, by the qualified name it was
+    # declared under. `TestCommon = make_common_tests()` binds a class
+    # whose __qualname__ is `make_common_tests.<locals>.Common`, so the
+    # source declaration `Common` is found through the alias without
+    # knowing the alias exists.
+    #
+    # luna and glm-5.3 both found this, and glm quoted the comment I had
+    # written one commit earlier claiming resolution would discover such
+    # bindings "on its own". It did not: it resolved the SOURCE name,
+    # `module.Common` does not exist, and an honest generated-test idiom
+    # -- collected and green -- was reported hidden. Third false
+    # positive from this function, and the third time it answered a
+    # question about the runtime by reading the source.
+    exposed_by_declaration = {}
+
+    def collect(obj, seen):
+        for attribute in dir(obj):
+            try:
+                candidate = getattr(obj, attribute)
+            except Exception:
+                continue
+            if not inspect.isclass(candidate) or id(candidate) in seen:
+                continue
+            seen.add(id(candidate))
+            qualname = getattr(candidate, "__qualname__", candidate.__name__)
+            key = qualname.split(".<locals>.")[-1]
+            exposed_by_declaration.setdefault(key, []).append(candidate)
+
+    # Module attributes only. Recursing into each class was here and
+    # reverting it changed no behaviour and no test: a NESTED class is
+    # already reached by the qualified walk below, through its outer
+    # one, so the recursion only re-found what resolution finds anyway.
+    collect(module, set())
+
     hidden = []
     for qualified, methods, lineno in declarations:
         name = ".".join(qualified)
@@ -902,6 +936,11 @@ def unreachable_test_classes(path, module):
             exposed = getattr(exposed, part, None)
             if exposed is None:
                 break
+        if not inspect.isclass(exposed):
+            for candidate in exposed_by_declaration.get(name, []):
+                if all(callable(getattr(candidate, m, None)) for m in methods):
+                    exposed = candidate
+                    break
         # ONE question, asked once: which declared methods does the
         # name the module exposes actually carry? If it exposes nothing,
         # `getattr(None, m, None)` carries none of them and every method
@@ -1229,11 +1268,22 @@ class TestDocsTruth(unittest.TestCase):
             with self.subTest(pattern=pattern_index + 1, sentence=sentence):
                 self.assertIsNotNone(
                     SUITE_CLAIMS[pattern_index].search(sentence))
-                check_live_suite_claims(
+                report = check_live_suite_claims(
                     ((CANONICAL_DOCUMENT, canonical),
                      (ROOT / "README.md", sentence)),
                     discovered,
                 )
+                # The REPORT, not just the absence of a raise. All three
+                # reviewers named this test: it asked for a report and
+                # threw it away, which is the "computed and dropped"
+                # shape this module's own docstrings condemn, in a test
+                # written after that lesson.
+                number = int(re.search(r"([\d,]+)\s+tests", sentence)
+                             .group(1).replace(",", ""))
+                self.assertIn(
+                    ("README.md", number),
+                    [(name, count) for name, _line, count in report],
+                    "the component count was not reported as a candidate")
 
     def test_marked_stale_live_total_outside_canonical_is_rejected(self):
         discovered = unittest.TestLoader().discover(
@@ -1617,11 +1667,24 @@ class TestDocsTruth(unittest.TestCase):
                 "The full suite total is 9,999 tests.",
         ):
             with self.subTest(sentence=sentence):
-                # Must not raise. It may be REPORTED, which is the point.
-                check_canonical_suite_floor(
+                # Must not raise, and the report is READ rather than
+                # discarded: "it may be reported, which is the point"
+                # was a comment asserting nothing, in the test that
+                # exists to say a candidate is reported and not
+                # rejected. All three reviewers named it.
+                reported = check_canonical_suite_floor(
                     CANONICAL_DOCUMENT.name,
                     text + "\n" + sentence + "\n",
                     discovered)
+                self.assertIsInstance(reported, list)
+                # The sentence is a CANDIDATE, so it appears; what must
+                # not happen is a raise. Asserting its presence is what
+                # makes "reported rather than rejected" a fact here
+                # rather than a comment.
+                number = int(re.search(r"([\d,]+)\s+tests", sentence)
+                             .group(1).replace(",", ""))
+                self.assertIn(number, [count for _line, count in reported],
+                              "the candidate was neither raised nor reported")
 
     def test_the_hard_failures_are_still_hard(self):
         """What the retreat did NOT give up."""
@@ -1784,6 +1847,37 @@ class TestDocsTruth(unittest.TestCase):
                  buried, "test_buried")},
             {"Outer.Inner": ["test_buried"]},
             "a class buried in a function is reachable by no name")
+
+        # A factory class EXPORTED UNDER AN ALIAS. luna and glm-5.3
+        # both found this, and glm quoted back the comment I had
+        # written claiming resolution would discover such bindings "on
+        # its own" -- it resolved the source name `Common`, found no
+        # `module.Common`, and reported an honest collected test as
+        # hidden. The third false positive from this function.
+        aliased = (
+            "import unittest\n"
+            "\n"
+            "def make_common_tests():\n"
+            "    class Common(unittest.TestCase):\n"
+            "        def test_common(self):\n"
+            "            pass\n"
+            "    return Common\n"
+            "\n"
+            "TestCommon = make_common_tests()\n"
+            "\n"
+            "def orphan():\n"
+            "    class Lost(unittest.TestCase):\n"
+            "        def test_lost(self):\n"
+            "            pass\n"
+            "    return Lost\n"
+        )
+        self.assertEqual(
+            {name: methods
+             for name, methods, _line in self.sweep_source(
+                 aliased, "test_alias")},
+            {"Lost": ["test_lost"]},
+            "an exported factory class is collected; only the orphan "
+            "is hidden")
 
         # A name the module exposes, carrying a DIFFERENT class: the
         # factory-local `Same` declares test_hidden, the module-level
