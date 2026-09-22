@@ -669,6 +669,26 @@ class TrackerSyncHookInputContract(unittest.TestCase):
                 "GIT_SSH_COMMAND=ssh git push origin HEAD", "git push"),
             "an absolute program path": ("/usr/bin/git push origin HEAD",
                                          "git push"),
+            # A step-back committee's acceptance criteria, verbatim.
+            # deepseek-v4-pro supplied thirteen after four hand-rolled
+            # shapes; these are the ones not already above.
+            "AC4 heredoc body is not a command": (
+                "cat > x.sh <<'EOF'\ngit push\nEOF", ""),
+            "AC5 a real push after a heredoc": (
+                "cat > x.sh <<'EOF'\ngit push\nEOF\ngit push origin HEAD",
+                "git push"),
+            "AC3 a merge inside a quoted argument": (
+                'echo "one; gh pr merge"', ""),
+            "AC2 a leading redirection": (
+                "> /tmp/merge.log gh pr merge 41", "gh pr merge"),
+            "AC1 a quoted multi-word assignment value": (
+                'GIT_SSH_COMMAND="ssh -i /some path/key" git push origin HEAD',
+                "git push"),
+            "AC7 pr lock": ("gh pr lock 41", "gh pr lock"),
+            "AC7 pr unlock": ("gh pr unlock 41", "gh pr unlock"),
+            "AC8 a subcommand in a variable": ("gh pr $merge 41", ""),
+            "commands on separate lines": (
+                "git add -A\ngit push origin HEAD", "git push"),
             # position, not presence
             "git behind a -C flag": ("git -C /tmp/x push origin HEAD",
                                      "git push"),
@@ -707,6 +727,36 @@ class TrackerSyncHookInputContract(unittest.TestCase):
                 else:
                     self.assertEqual(out.strip(), "",
                                      "%s should be silent: %r" % (label, out))
+
+    def test_unparseable_and_oversized_commands_fail_towards_a_reminder(self):
+        """The stated asymmetry, applied where the parser gives up.
+
+        Proper lexing costs more than bad splitting -- 0.0296s against
+        0.0022s on 600 lines -- and a hook on a synchronous per-tool path
+        should not spend half a second on a pathological command. Past the
+        size bound, and for text shlex cannot lex at all, the text is not
+        parsed and the reminder is emitted: "a spurious reminder costs one
+        line of context, a missed one costs the tracker sync this hook
+        exists to guarantee."
+        """
+        fake_repo(PROBE_EMPTY, os.path.join(self.tmp, "repo"))
+        for label, command in (
+                ("oversized", "x " * 40000),
+                ("unbalanced quote", 'git commit -m "oops'),
+        ):
+            with self.subTest(command=label):
+                payload = json.dumps(
+                    {"tool_input": {"command": command}}).encode()
+                started = time.time()
+                rc, out = self.invoke(payload, timeout=30)
+                elapsed = time.time() - started
+                self.assertEqual(rc, 0)
+                context = injected_context(out)
+                self.assertIsNotNone(
+                    context, "%s emitted nothing: %r" % (label, out))
+                self.assertIn("outward action", context)
+                self.assertLess(elapsed, 10.0,
+                                "%s took %.1fs" % (label, elapsed))
 
     # 3. the repository locator -------------------------------------------
 

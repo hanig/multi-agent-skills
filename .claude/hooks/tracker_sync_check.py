@@ -96,6 +96,7 @@ import json
 import os
 import re
 import select
+import shlex
 import signal
 import subprocess
 import sys
@@ -125,52 +126,68 @@ ACK_STATUSES = frozenset(
     ["unacknowledged", "attested", "attested_confirmed", "conflict"])
 
 PR_MUTATING = frozenset(
-    "merge close create edit ready reopen comment review update-branch"
+    "merge close create edit ready reopen comment review "
+    "update-branch lock unlock"
     .split())
 ISSUE_MUTATING = frozenset(
     "create close reopen edit comment delete transfer pin unpin lock "
     "unlock develop".split())
 
-# Detection PARSES the command line. That is the fifth shape this has had,
-# and the four before it failed for one reason: each approximated a parse
-# instead of writing one, so something that merely LOOKED like a subcommand
-# kept being read as one, or a real subcommand kept being missed.
+# Detection LEXES with shlex and then parses a documented subset. That is
+# the fifth shape, chosen by a step-back committee (astra, deepseek-v4-pro)
+# after four hand-rolled shapes each failed the same way: every one of them
+# approximated shell word splitting instead of using it.
 #
-#   1. `\bgh\b.*\bpr\b.*\bmerge\b` with re.S. Quadratic -- 8.05s for ONE
-#      of four patterns on 600 honest `gh pr view` lines, measured -- and it
-#      matched a `gh` on line 1 against a `merge` on line 400.
-#   2. A per-line word-set intersection. Linear, and it lost position:
-#      `gh pr view 41 | grep merge` read as a merge (kimi-k2.7-code), and
-#      the word `issue` in `--subject "fixes issue #3"` routed a real
-#      `gh pr merge` into the issue branch so it emitted NOTHING (glm-5.3).
-#   3. First-token-ish: search for `gh` anywhere, then read the next two
-#      non-flag tokens. Still not a parse, so `gh --repo acme/x pr merge 41`
-#      was missed (the value of a global option became the noun), `# gh pr
-#      merge 41` in a comment fired, `git log --grep push` fired, and `&`
-#      was not a separator so a second command was never examined -- luna
-#      and kimi-k2.7-code, four findings between them.
-#   4. This: strip comments, split on every separator the shell has, take
-#      the COMMAND WORD as the first token, skip global options and their
-#      values, and read the subcommand from the first positional after
-#      them. `git log --grep push` has subcommand `log`, not `push`.
+#   1. `\bgh\b.*\bpr\b.*\bmerge\b` with re.S -- quadratic (8.05s for one
+#      of four patterns on 600 honest lines, measured) and matched across
+#      lines.
+#   2. A per-line word-set intersection -- position-blind. A pipe made an
+#      argument look like a subcommand, and the word `issue` inside
+#      `--subject "fixes issue #3"` made a real `gh pr merge` emit nothing.
+#   3. Search for `gh` anywhere, take the next two non-flag tokens -- missed
+#      `gh --repo acme/x pr merge`, fired from a comment, fired on
+#      `git log --grep push`, and `&` was not a separator.
+#   4. A positional read over `segment.split()` -- five MAJOR findings,
+#      every one a consequence of `split()` not being shell word splitting:
+#      a leading redirection became the command word, a quoted assignment
+#      value was split apart, and quoted text and heredoc bodies became
+#      their own commands and produced reminders for actions never run.
 #
-# Linear, and deliberately SENSITIVE rather than precise: a spurious
-# reminder costs one line of context, a missed one costs the sync.
+# deepseek-v4-pro's diagnosis of why there were five: "Five iterations are
+# evidence that the GUARANTEE is ill-posed, not the heuristic. Detecting
+# 'obvious literal outward action' is well-posed. Detecting 'any outward
+# action in arbitrary shell from text alone' is not."
 #
-# There is deliberately NO comment stripping. It was written, and its
-# mutation passed: anchoring on the command word plus splitting on newlines
-# already covers every comment case tried -- `# gh pr merge 41` on its own
-# line has `#` as its command word, and `gh pr view 41 # gh pr merge 41`
-# reads its subcommand as `view`. Code whose removal breaks no test is not
-# protection, it is the appearance of protection, so it is gone. If the
-# anchoring ever weakens, this is the thing to reinstate.
+# So the claim is narrowed to match what is achievable, and it is stated
+# here rather than implied:
 #
-# DECLARED LIMITS. This reads text, not intent. A subcommand supplied
-# through a variable, an alias, `xargs`, `eval` or a heredoc is not seen. A
-# `#` inside a quoted string is treated as a comment. Neither is closed, and
-# both are the reason this hook is defence in depth rather than a guarantee.
-_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9._/-]*")
-_SEPARATOR = re.compile(r"[;\n]|\|\|?|&&?")
+#   THIS HOOK DETECTS A DOCUMENTED SYNTACTIC SUBSET. Inside that subset it
+#   is highly sensitive. Outside it, it fails closed and says nothing.
+#
+# IN the subset: a literal command word, optionally behind `VAR=value`
+# assignments, redirections, an absolute path, and value-taking global
+# options; separated by `;`, newline, `&&`, `||`, `|`, `&`; with quoting
+# and heredoc bodies respected.
+#
+# OUT of the subset, and not claimed: a subcommand or command word supplied
+# through a variable, an alias, `eval`, command substitution or backticks.
+# Those are excluded by shlex rather than by a check of ours: it does not
+# expand, so `gh pr $merge 41` lexes `$merge` and no unexpanded token ever
+# equals an allowlisted verb. A `_literal()` guard was written for this and
+# DELETED after its mutation passed -- measured across `$merge`, `${VERB}`,
+# backticks, `$(...)`, `$GH` as the program and `$NOUN` as the noun, all six
+# already silent without it. Code that survives its own mutation is the
+# appearance of protection. If the lexer is ever replaced with one that
+# expands, this is the thing to reinstate;
+# anything whose execution depends on control flow; and a `#` inside a
+# quoted string that shlex does not treat as a comment. A stronger
+# guarantee than this needs a different mechanism -- observing effect, or
+# capturing intent at the tool layer -- which is ARC-698, not more
+# aggressive text parsing.
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_REDIRECTION = re.compile(r"^\d*(?:>>|>|<<-|<<|<)")
+
+_OPERATORS = frozenset([";", "&&", "||", "|", "&", "\n"])
 
 # Global options that take a SEPARATE value, so the value is not a noun.
 _GH_VALUE_OPTIONS = frozenset(["--repo", "-R", "--hostname"])
@@ -179,52 +196,141 @@ _GIT_VALUE_OPTIONS = frozenset(
      "--config-env"])
 
 
-def _segments(command):
-    """Separately-executed commands, with continuations joined."""
-    joined = command.replace("\\\n", " ")
-    return _SEPARATOR.split(joined)
+def strip_heredocs(command):
+    """Remove heredoc BODIES before lexing.
 
-
-def _words(segment):
-    """Shell words in order, unquoted enough to compare."""
-    return [w.strip("\"'`()$") for w in segment.split() if w.strip("\"'`()$")]
-
-
-def _subcommand_path(words, value_options, depth):
-    """The command word's first `depth` positional arguments.
-
-    Global options are skipped, and an option that takes a separate value
-    consumes it, so `gh --repo acme/x pr merge` yields ('pr', 'merge') and
-    not ('acme/x', 'pr').
+    shlex does not know heredocs, so `cat > x.sh <<'EOF' / git push / EOF`
+    would offer `git push` as a command. It is a file being written, not a
+    push being run -- glm-5.3 found the hook reminding about a push that
+    never happened.
     """
-    out = []
-    index = 1
-    while index < len(words) and len(out) < depth:
-        word = words[index]
+    lines = command.splitlines()
+    out, index = [], 0
+    while index < len(lines):
+        line = lines[index]
+        out.append(line)
+        match = re.search(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1", line)
+        index += 1
+        if not match:
+            continue
+        delimiter = match.group(2)
+        while index < len(lines) and lines[index].strip() != delimiter:
+            index += 1
+        if index < len(lines):
+            index += 1        # drop the delimiter line too
+    return "\n".join(out)
+
+
+_NEWLINE = "\n"
+
+
+def _lex(command):
+    """Shell words and operators, quoting respected, newlines preserved.
+
+    Lexed LINE BY LINE with an explicit separator between lines, because
+    shlex treats a newline as ordinary whitespace: lexing the whole text at
+    once made `cat > x.sh <<EOF ... EOF` followed by a real `git push` into
+    one command beginning with `cat`, so the push was missed. Backslash
+    continuations are joined first, so a command split across lines stays
+    one command.
+
+    A quoted string containing a literal newline is therefore lexed as two
+    lines. That is a declared limit, and the direction it fails in is
+    towards a spurious reminder rather than a missed one.
+
+    Returns None for text shlex cannot lex, which is not something to guess
+    about.
+    """
+    joined = strip_heredocs(command).replace("\\\n", " ")
+    tokens = []
+    for line in joined.splitlines():
+        if not line.strip():
+            continue
+        lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        try:
+            tokens.extend(list(lexer))
+        except ValueError:
+            return None
+        tokens.append(_NEWLINE)
+    return tokens
+
+
+def _simple_commands(tokens):
+    """Split a token stream into separately-executed simple commands."""
+    current, out = [], []
+    for token in tokens:
+        if token in _OPERATORS:
+            out.append(current)
+            current = []
+        else:
+            current.append(token)
+    out.append(current)
+    return [command for command in out if command]
+
+
+def _command_word_and_arguments(tokens):
+    """Strip assignments and redirections; return (program, arguments)."""
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if _ASSIGNMENT.match(token):
+            index += 1
+            continue
+        if _REDIRECTION.match(token):
+            index += 1
+            if index < len(tokens):
+                index += 1      # the redirection target
+            continue
+        break
+    if index >= len(tokens):
+        return None, []
+    return tokens[index], tokens[index + 1:]
+
+
+def _subcommands(arguments, value_options, depth):
+    """The first `depth` positional arguments, global options skipped."""
+    out, index = [], 0
+    while index < len(arguments) and len(out) < depth:
+        word = arguments[index]
         if word.startswith("-"):
             if word in value_options and "=" not in word:
                 index += 1
             index += 1
             continue
-        out.append(word.lower())
+        out.append(word)
         index += 1
     return out
 
 
+# Lexing properly costs more than splitting badly: 0.0296s against 0.0022s
+# on 600 lines, 0.4911s on 158,889 bytes. Linear, and fine for a real
+# command, but a hook on a synchronous per-tool path should not spend half a
+# second on a pathological one. Past this size the text is not parsed at
+# all and the reminder is emitted unconditionally, which is the direction
+# the module's stated asymmetry points: "a spurious reminder costs one line
+# of context, a missed one costs the tracker sync this hook exists to
+# guarantee."
+_COMMAND_LEX_LIMIT = 64 * 1024
+
+
 def matched_label(command):
     """The outward action this command looks like, or None."""
-    for segment in _segments(command):
-        words = _words(segment)
-        if not words:
+    if len(command) > _COMMAND_LEX_LIMIT:
+        return "an outward action (command too large to parse)"
+    tokens = _lex(command)
+    if tokens is None:
+        # Unlexable text -- an unbalanced quote. Guessing is what the four
+        # earlier shapes did; erring towards a reminder is what the stated
+        # asymmetry asks for.
+        return "an outward action (command could not be parsed)"
+    for simple in _simple_commands(tokens):
+        program, arguments = _command_word_and_arguments(simple)
+        if not program:
             continue
-        # Leading VAR=value assignments precede the command word.
-        while words and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]):
-            words = words[1:]
-        if not words:
-            continue
-        program = words[0].rsplit("/", 1)[-1].lower()
+        program = program.rsplit("/", 1)[-1]
         if program == "gh":
-            path = _subcommand_path(words, _GH_VALUE_OPTIONS, 2)
+            path = _subcommands(arguments, _GH_VALUE_OPTIONS, 2)
             if len(path) == 2:
                 noun, verb = path
                 if noun == "pr" and verb in PR_MUTATING:
@@ -232,7 +338,7 @@ def matched_label(command):
                 if noun == "issue" and verb in ISSUE_MUTATING:
                     return "gh issue " + verb
         elif program == "git":
-            path = _subcommand_path(words, _GIT_VALUE_OPTIONS, 1)
+            path = _subcommands(arguments, _GIT_VALUE_OPTIONS, 1)
             if path and path[0] == "push":
                 return "git push"
     return None
