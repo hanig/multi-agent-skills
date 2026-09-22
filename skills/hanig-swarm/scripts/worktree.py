@@ -1072,13 +1072,29 @@ def workspace_identity_problem(runner, facts):
     if current.st_ino != identity["inode"]:
         differences.append("the inode differs")
     if differences:
+        # The SENTENCE has to stop claiming more than the list does.
+        # luna, in the round after the list was added: "no longer names
+        # the launched directory" is disproved by the stat in this very
+        # conditional when only resolve() moved -- same device, same
+        # inode, same directory, different spelling. I reported WHICH
+        # check differed and left the clause around it asserting the
+        # thing that check had just refuted.
+        #
+        # Same file identity is now said so explicitly, because that is
+        # the case an operator most needs told apart from a
+        # substitution.
+        same_file = (current.st_dev == identity["device"]
+                     and current.st_ino == identity["inode"])
+        headline = ("still names the same file, but not by the launched "
+                    "identity" if same_file
+                    else "no longer names the launched directory")
         # The join goes through the renderer too. My own AST guard
         # flagged it, correctly: it cannot know the pieces were
         # rendered individually, and rendering the assembled string
         # bounds the COMBINED length, which nothing else did.
         return (f"the anchored worktree path "
                 f"{render_for_record(workspace, _PATH_LIMIT, collapse=False)}"
-                f" no longer names the launched directory: "
+                f" {render_for_record(headline, _DIAGNOSTIC_LIMIT)}: "
                 f"{render_for_record('; '.join(differences), _DIAGNOSTIC_LIMIT, collapse=False)}")
     observed = {}
     for key, args in (

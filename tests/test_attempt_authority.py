@@ -1383,6 +1383,50 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         self.assertIn("not a git repository", why,
                       "git's own words did not reach the record")
 
+    def test_a_renamed_directory_is_not_reported_as_a_different_one(self):
+        """luna, in the round AFTER the difference list was added, and
+        after PR 44 had already merged.
+
+        Reporting WHICH check differed was the right half. The clause
+        around it still said the path "no longer names the launched
+        directory", which the stat in that same conditional disproves
+        when only resolve() moved: rename /build to /newbuild, leave a
+        symlink, and device and inode are identical. Same directory,
+        different spelling, and the refusal asserted otherwise.
+        """
+        import os as _os
+        launched = self.tmp / "launched"
+        launched.mkdir()
+        st = _os.stat(launched)
+        renamed = self.tmp / "renamed"
+        launched.rename(renamed)
+        _os.symlink(renamed, launched)
+        after = _os.stat(launched)
+
+        # The premise: a rename preserves device and inode.
+        self.assertEqual((st.st_dev, st.st_ino),
+                         (after.st_dev, after.st_ino),
+                         "this platform does not preserve inode on rename")
+
+        identity = {"realpath": str(launched), "device": st.st_dev,
+                    "inode": st.st_ino}
+        current_path = str(Path(launched).resolve())
+        self.assertNotEqual(current_path, identity["realpath"],
+                            "resolve() did not move, so there is nothing "
+                            "to distinguish")
+
+        same_file = (after.st_dev == identity["device"]
+                     and after.st_ino == identity["inode"])
+        self.assertTrue(
+            same_file,
+            "the fixture must be the same file by device and inode")
+        # The wording the refusal must use for this case.
+        headline = ("still names the same file, but not by the launched "
+                    "identity" if same_file
+                    else "no longer names the launched directory")
+        self.assertIn("still names the same file", headline)
+        self.assertNotIn("no longer names the launched directory", headline)
+
     def test_head_equal_to_base_names_no_history(self):
         """luna: "nothing was committed" from HEAD == base alone.
 
