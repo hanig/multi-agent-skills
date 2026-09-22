@@ -5,9 +5,12 @@ on any machine.
 
 **If you are taking over as orchestrator, read `docs/handoff-2026-09-20.md`
 first, and `docs/orchestrator-mandate.md` before acting.** The prose sections
-below are dated 2026-09-02 and are stale in ways that matter: the test count,
-and a next-list naming work that has since shipped. The generated facts block
+below are dated 2026-09-02 and are stale in ways that matter, including a
+next-list naming work that has since shipped. The generated facts block
 at the bottom is current; the narrative above it is not.
+
+For suite size, `CLAUDE.md` owns the guarded lower bound; run unittest
+discovery for the exact current total.
 
 ## What this is
 
@@ -35,7 +38,7 @@ bind mount.
 
 ## Status as of 2026-09-02
 
-Built and green: **1085 tests**. Sixteen commits ahead of where this session
+Built and green at that snapshot. Sixteen commits ahead of where this session
 started (`413baca`), 30 files, ~4900 insertions.
 
 | Piece | File | State |
