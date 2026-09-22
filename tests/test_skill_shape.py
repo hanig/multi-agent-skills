@@ -1029,33 +1029,59 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
                     self.assertIn("`%s`:" % required, text)
 
     def test_the_dialect_declaration_matches_what_the_checker_does(self):
-        """The declaration says what is refused; this checks it is true.
+        """The declaration says what is refused; this checks each one.
 
         kimi-k2.7-code read "raw HTML ... are refused" as covering the
-        `<!-- declaration: id -->` markers the reference files are full of,
-        and posed a dilemma: either the checker flags every reference file,
-        or it silently exempts HTML and the declaration is a false promise.
-        Neither holds -- the sentence's first clause permits valid same-line
-        comments and its second refuses OTHER raw HTML -- but the wording
-        invited the reading, so both halves are now asserted rather than
-        argued.
+        `<!-- declaration: id -->` markers the reference files are full
+        of, and posed a dilemma: either the checker flags every
+        reference file, or it silently exempts HTML and the declaration
+        is a false promise. Neither holds -- the sentence's first clause
+        permits valid same-line comments and its second refuses OTHER
+        raw HTML.
+
+        Then, the round after: only the HTML half was exercised, while
+        the declaration names five more forms. "An invariant written in
+        prose is not an invariant" and a declaration is prose, so every
+        form it promises to refuse is planted here and every one must be
+        caught. Planted in a COPY, because the first version edited the
+        tracked source file and restored it, which glm-5.3 noted races
+        with a concurrent run and leaves the file mutated if one is
+        killed.
         """
         skill = SKILLS / "hanig-project"
         self.assertEqual(DECLARATION_REGISTRY.reference_problems(skill), [],
                          "the markers the files already use must be accepted")
 
-        reference = skill / "references" / "unit-contract.md"
-        original = reference.read_text()
-        try:
-            reference.write_text(original + "\n<div>raw html</div>\n")
-            problems = DECLARATION_REGISTRY.reference_problems(skill)
-            self.assertTrue(
-                any("raw HTML" in problem for problem in problems),
-                "the declaration promises raw HTML is refused; the checker "
-                "accepted it: %r" % (problems,))
-        finally:
-            reference.write_text(original)
-        self.assertEqual(DECLARATION_REGISTRY.reference_problems(skill), [])
+        refused = (
+            ("raw HTML", "<div>raw html</div>"),
+            ("tab", "\tA tab-indented behaviour-deciding line."),
+            ("indentation of four or more spaces",
+             "    A four-space indented line."),
+            ("blockquote", "> A quoted behaviour-deciding line."),
+            ("prose indentation must be two spaces",
+             " A one-space indented line."),
+            ("nested list", "  - a nested list item"),
+        )
+        for expected, planted in refused:
+            with self.subTest(form=expected):
+                with tempfile.TemporaryDirectory() as tmp:
+                    copy = Path(tmp) / "hanig-project"
+                    shutil.copytree(skill, copy)
+                    reference = copy / "references" / "unit-contract.md"
+                    reference.write_text(
+                        reference.read_text() + "\n" + planted + "\n")
+                    problems = DECLARATION_REGISTRY.reference_problems(copy)
+                self.assertTrue(
+                    any(expected in problem for problem in problems),
+                    "placement.reference-dialect promises %r is refused; "
+                    "the checker said %r" % (expected, problems))
+
+        # And the copy itself is clean before anything is planted, so a
+        # subTest failure above means the planted line, not the copy.
+        with tempfile.TemporaryDirectory() as tmp:
+            copy = Path(tmp) / "hanig-project"
+            shutil.copytree(skill, copy)
+            self.assertEqual(DECLARATION_REGISTRY.reference_problems(copy), [])
 
     def test_declarations_do_not_contradict_each_other(self):
         """Two declarations I wrote disagreed, and nothing noticed.
@@ -1110,6 +1136,22 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
         topics = self.interview_topics(enumeration)
         self.assertGreaterEqual(len(topics), 5,
                                 "the topic list did not parse: %r" % (topics,))
+
+        # The needles must FOLLOW the declaration, not merely equal it
+        # today. luna, kimi-k2.7-code and glm-5.3 all made the same
+        # point in one round: my mutation replaced the parser with a
+        # one-item list, which trips the length check, but replacing it
+        # with a hardcoded copy of the same seven topics passes
+        # everything -- and a hardcoded copy is the second copy this
+        # whole test exists to forbid. So the declaration is perturbed
+        # and the output has to move with it.
+        moved = enumeration.replace("budget", "spending ceiling")
+        self.assertNotEqual(moved, enumeration, "the perturbation missed")
+        perturbed = self.interview_topics(moved)
+        self.assertIn("spending ceiling", perturbed,
+                      "the needles are not read from the declaration")
+        self.assertNotIn("budget", perturbed)
+        self.assertEqual(len(perturbed), len(topics))
 
         named = [(surface.name, self.sentences(surface))
                  for surface in self.authored_surfaces()]
