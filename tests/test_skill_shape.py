@@ -8,6 +8,7 @@ reference prose only needs mechanical modal-to-id ties, not English inference.
 
 from pathlib import Path
 import importlib.util
+import io
 import json
 import re
 import shutil
@@ -844,7 +845,36 @@ SECOND_COPY_TOPICS = 3
 # entirely: `sentences()` collapses the newlines and leaves " - "
 # between items, and "-" was outside the class. luna and glm-5.3 both
 # found it. Numerals and their separators are here for the same reason.
-def publish_second_copies(found, stream=None):
+def excerpt_line(path, excerpt):
+    """The line in PATH where EXCERPT starts, or None.
+
+    Not computable inside the scan. `sentences` flattens a surface with
+    `" ".join(text.split())`, so the string the scan measures spans
+    against has no newlines at all and every offset in it reports line
+    1. The first version of this did exactly that and printed
+    `SKILL.md:1` for a duplicate planted at the end of the file -- a
+    line number that is worse than none, because it is followable and
+    wrong.
+
+    So the line is resolved where the newlines still exist. The
+    excerpt's words are matched with `\\s+` between them, because the
+    run may be split across lines in the source and is collapsed in
+    the report (luna).
+    """
+    if path is None:
+        return None
+    try:
+        text = path.read_text()
+    except OSError:
+        return None
+    pattern = r"\s+".join(re.escape(word) for word in excerpt.split())
+    match = re.search(pattern, text)
+    if match is None:
+        return None
+    return text.count("\n", 0, match.start()) + 1
+
+
+def publish_second_copies(found, sources=None, stream=None):
     """Write second-copy candidates where a person will see them.
 
     ADVISORY, not authority. astra:
@@ -871,11 +901,16 @@ def publish_second_copies(found, stream=None):
         return 0
     stream.write("\ninterview-topic candidates (advisory):\n")
     for name, listed, excerpt in found:
-        stream.write("  %s: %s\n    ...%s...\n"
-                     % (name, listed, " ".join(excerpt.split())[:200]))
+        line_number = excerpt_line((sources or {}).get(name), excerpt)
+        stream.write("  %s%s: %s\n    ...%s...\n"
+                     % (name,
+                        "" if line_number is None else ":%d" % line_number,
+                        listed, " ".join(excerpt.split())[:200]))
     stream.write("  Each excerpt carries several topics in a row. That may be\n"
                  "  a second copy of the list, or a comparison that mentions\n"
-                 "  them. Nothing here failed; read them and judge.\n")
+                 "  them. Whitespace in the quote is collapsed onto one line,\n"
+                 "  so go by the line number, not by searching for the text.\n"
+                 "  Nothing here failed; read them and judge.\n")
     return len(found)
 
 
@@ -1406,7 +1441,9 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
         # snapshot, the body/registry diff, the reference ties and the
         # dialect. Those enforce explicit ownership. This one guesses,
         # so it reports.
-        publish_second_copies(self.second_copies(named, topics))
+        publish_second_copies(
+            self.second_copies(named, topics),
+            {surface.name: surface for surface in self.authored_surfaces()})
 
         # The rule must also FIRE. Disabling the threshold left the suite
         # green until this case existed, which is the shape this whole
@@ -1560,6 +1597,62 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
                     excerpt.endswith(topics[2]),
                     "the excerpt runs past the list (%r)" % excerpt[-20:])
 
+    def test_a_reported_line_number_points_at_the_planted_line(self):
+        """THROUGH THE REAL SCAN, because that is where this broke.
+
+        The first version computed the line inside `second_copies`,
+        from an offset into the string it was scanning. That string
+        comes from `sentences`, which flattens a surface with
+        `" ".join(text.split())` and so contains no newlines at all.
+        Every line came out as 1. A duplicate planted at the end of
+        SKILL.md was reported as `SKILL.md:1`.
+
+        A unit test on the helper passed, because it handed the helper
+        raw text with real newlines in it. Only running the scan the
+        way the suite runs it showed the flattening. That is the third
+        time on this branch that testing a function instead of the
+        path through it hid the defect, so this one plants a line in a
+        real tree, runs the real test in a subprocess, and reads the
+        line number back out of what the operator sees.
+        """
+        # SPLIT ACROSS LINES, which is the case the report's whitespace
+        # collapsing exists for and the one a literal search cannot
+        # find. A single-line plant let `re.escape(excerpt)` pass, so
+        # the flexibility the resolver claims was untested -- the
+        # mutation survived and said so.
+        marker = ("Ask about the done criteria, the scientific claim,\n"
+                  "discardable work, budget, retry exposure and\n"
+                  "reporting cadence.")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "tree"
+            (root / "tests").mkdir(parents=True)
+            shutil.copytree(SKILLS, root / "skills", symlinks=True)
+            shutil.copy(Path(__file__), root / "tests" / Path(__file__).name)
+            surface = root / "skills" / "hanig-project" / "SKILL.md"
+            body = surface.read_text() + "\nA closing note.\n" + marker + "\n"
+            surface.write_text(body)
+            planted_line = body[:body.index(marker)].count("\n") + 1
+
+            done = subprocess.run(
+                [sys.executable, "-m", "unittest",
+                 "tests.%s.%s.%s" % (Path(__file__).stem,
+                                     type(self).__name__,
+                                     "test_declarations_do_not_contradict_"
+                                     "each_other")],
+                cwd=str(root), stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, universal_newlines=True)
+
+        reported = re.findall(r"SKILL\.md:(\d+)", done.stdout)
+        self.assertTrue(
+            reported,
+            "the report carries no line number for the planted copy.\n%s"
+            % done.stdout)
+        self.assertIn(
+            str(planted_line), reported,
+            "the report points at line(s) %s, but the duplicate was "
+            "planted at line %d. A followable wrong line is worse than "
+            "none.\n%s" % (reported, planted_line, done.stdout))
+
     def test_a_second_copy_is_reported_and_does_not_fail_the_run(self):
         """The advisory boundary, through the harness that delivers it.
 
@@ -1593,6 +1686,17 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
             (root / "tests").mkdir(parents=True)
             shutil.copytree(SKILLS, root / "skills", symlinks=True)
             shutil.copy(Path(__file__), root / "tests" / Path(__file__).name)
+            # kimi-k2.7-code raised this as a confirmed MAJOR and it does
+            # NOT reproduce: there is no tests/__init__.py today, this
+            # module imports nothing but the standard library, and
+            # planting an __init__.py in the real tree leaves the inner
+            # run passing, because the copied tree is a namespace
+            # package either way. Copied anyway, because the cost is one
+            # line and the day someone adds one is not the day to find
+            # out this test assumed otherwise.
+            package_marker = Path(__file__).parent / "__init__.py"
+            if package_marker.exists():
+                shutil.copy(package_marker, root / "tests" / "__init__.py")
             surface = root / "skills" / "hanig-project" / "SKILL.md"
             surface.write_text(surface.read_text() + planted)
 
