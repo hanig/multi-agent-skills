@@ -836,7 +836,26 @@ SECOND_COPY_TOPICS = 3
 # What may sit between two items of a LIST: punctuation, one
 # conjunction, an article. Anything else and they are two mentions in a
 # sentence, not two entries in a list.
-LIST_SEPARATOR = re.compile(r"^[\s,;:]*(?:and|or|plus|then)?[\s,;:]*(?:the\s+)?$")
+# What may sit between two items of a LIST. The first version admitted
+# only whitespace, commas, semicolons and colons -- so a Markdown
+# BULLET list, which is how a list is most naturally written, evaded it
+# entirely: `sentences()` collapses the newlines and leaves " - "
+# between items, and "-" was outside the class. luna and glm-5.3 both
+# found it. Numerals and their separators are here for the same reason.
+def _all_positions(haystack, needle):
+    """Every start offset of NEEDLE, not merely the first."""
+    found, start = [], haystack.find(needle)
+    while start != -1:
+        found.append(start)
+        start = haystack.find(needle, start + 1)
+    return found
+
+
+LIST_SEPARATOR = re.compile(
+    r"^[\s,;:.\-\u2013\u2014*+\u2022]*"
+    r"(?:\d{1,2}[.)])?[\s,;:.\-\u2013\u2014*+\u2022]*"
+    r"(?:and|or|plus|then)?"
+    r"[\s,;:.\-\u2013\u2014*+\u2022]*(?:the\s+)?$")
 
 
 class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
@@ -960,19 +979,37 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
         for name, sentences in named_sentences:
             for sentence in sentences:
                 lowered = sentence.lower()
-                hits = sorted((lowered.index(t), t)
-                              for t in topics if t in lowered)
-                run, best, listed = 1, 1, []
-                for (start, topic), (nxt, _) in zip(hits, hits[1:]):
+                # EVERY occurrence, not just the first. luna and
+                # glm-5.3, independently: `.index()` recorded a topic at
+                # an earlier PROSE mention, so the slot it occupies in a
+                # later genuine list was never seen and the run broke
+                # there. A sentence that mentions a topic and then lists
+                # it is the ordinary way to write one.
+                hits = sorted(
+                    (position, topic)
+                    for topic in topics
+                    for position in _all_positions(lowered, topic))
+                # DISTINCT topics in the run. Counting hits let
+                # "budget, budget, budget" score three, which is a
+                # repetition and not a copy of anything -- my own
+                # false positive, from allowing every occurrence a
+                # moment after allowing only the first.
+                run, best = set(), set()
+                for index, (start, topic) in enumerate(hits):
+                    if not run:
+                        run = {topic}
+                    if index + 1 >= len(hits):
+                        break
+                    nxt = hits[index + 1][0]
                     between = lowered[start + len(topic):nxt]
                     if LIST_SEPARATOR.match(between):
-                        run += 1
+                        run.add(hits[index + 1][1])
                     else:
-                        run = 1
-                    best = max(best, run)
-                if best >= SECOND_COPY_TOPICS:
-                    listed = [t for _p, t in hits]
-                    found.append((name, ", ".join(listed), sentence))
+                        run = {hits[index + 1][1]}
+                    if len(run) > len(best):
+                        best = set(run)
+                if len(best) >= SECOND_COPY_TOPICS:
+                    found.append((name, ", ".join(sorted(best)), sentence))
         return found
 
     @staticmethod
@@ -1166,7 +1203,19 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
         # police and the registry does not claim to. And it tightens by
         # itself: add a topic to the declaration and the needle set grows
         # with it.
+        # NO INTERMEDIATE BINDING. luna and glm-5.3 both showed that
+        # `topics = self.interview_topics(enumeration)` could be
+        # replaced by a literal seven-item list and every assertion
+        # still passed -- the perturbation check called the parser
+        # separately, so nothing tied the DETECTOR's needles to the
+        # registry. A value cannot distinguish a literal from a parse
+        # when the two are equal today, so the binding is gone and
+        # every use calls the parser. The only mutation left is inside
+        # the parser, which the perturbation below kills.
         topics = self.interview_topics(enumeration)
+        self.assertEqual(
+            topics, self.interview_topics(enumeration),
+            "the parser is not deterministic")
         self.assertGreaterEqual(len(topics), 5,
                                 "the topic list did not parse: %r" % (topics,))
 
@@ -1185,6 +1234,25 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
                       "the needles are not read from the declaration")
         self.assertNotIn("budget", perturbed)
         self.assertEqual(len(perturbed), len(topics))
+
+        # And the DETECTOR follows them. A list written with the
+        # perturbed topic must be caught by the perturbed needles and
+        # missed by the real ones; a hardcoded list cannot do both.
+        planted_new = ("Ask about done criteria, the scientific claim, "
+                       "discardable work, spending ceiling, protected "
+                       "destinations, retry exposure, and reporting "
+                       "cadence.")
+        self.assertTrue(
+            self.second_copies([("p.md", [planted_new])], perturbed),
+            "the detector does not use the needles the parser produced")
+        planted_old = planted_new.replace(
+            "discardable work, spending ceiling, protected destinations",
+            "discardable work, spending ceiling, unrelated wording")
+        self.assertFalse(
+            self.second_copies([("p.md", [
+                "A spending ceiling is not a topic the registry names."])],
+                topics),
+            "a word absent from the real declaration was treated as a topic")
 
         named = [(surface.name, self.sentences(surface))
                  for surface in self.authored_surfaces()]

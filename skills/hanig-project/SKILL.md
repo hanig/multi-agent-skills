@@ -224,7 +224,7 @@ cluster's own surveyed `sbatch` flags.
 `write_scopes` are planning metadata, not process isolation. Concurrent units
 need disjoint scopes or a dependency; code-path isolation comes from verified
 per-attempt Git worktrees. Every code unit names `repo` and `target_branch`.
-The sibling declarations `code.write-scopes`, `code.worktree-identity`, and
+The sibling declarations `code.write-scopes`, `code.worktree-isolation`, and
 the worktree limits state what that isolation does and does not establish.
 
 `PLAN.md` for humans: what is being built, what was decided in step 2 and by
