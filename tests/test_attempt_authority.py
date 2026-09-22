@@ -817,6 +817,80 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
             % len(why))
         self.assertIn("[truncated]", why)
 
+    def test_the_renderer_is_total(self):
+        """A function whose job is to produce a refusal must never raise.
+
+        luna: a runner returning bytes made the string join raise
+        TypeError, so a validation failure became an exception. `_git`
+        stringifies in the real path, but the runner is injected.
+        """
+        for value in (b"fatal: bytes", None, 7, 7.5, ["a"], {"b": 1}, object()):
+            with self.subTest(value=type(value).__name__):
+                out = W.render_for_record(value, 200)
+                self.assertIsInstance(out, str)
+        self.assertEqual(W.render_for_record(b"fatal: unable to read", 200),
+                         "fatal: unable to read")
+        self.assertEqual(W.render_for_record(None, 200), "")
+        # kimi-k2.7-code: a limit below the marker's own length produced a
+        # result LONGER than the limit.
+        for limit in range(0, 16):
+            with self.subTest(limit=limit):
+                out = W.render_for_record("x" * 100, limit)
+                self.assertLessEqual(len(out), limit)
+
+    def test_a_bytes_diagnostic_still_produces_a_refusal(self):
+        real = U.run
+
+        def runner(argv, **kwargs):
+            if "cat-file" in argv:
+                return 1, "", b"fatal: unable to read object"
+            return real(argv, **kwargs)
+
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        facts = self.facts(attempt)
+        pinned = self.commit("A")
+        why = W.validate_pinned_head(runner, facts, pinned)
+        self.assertIsNotNone(why, "a bytes diagnostic produced no refusal")
+        self.assertIn("unable to read object", why)
+
+    def test_every_refusal_branch_carries_the_stable_prefix(self):
+        """glm-5.3, filed out of scope and swept anyway: three sibling
+        branches still interpolated raw. "Some refusals are rendered" is
+        not a property anyone can rely on."""
+        real = U.run
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        facts = dict(self.facts(attempt))
+        pinned = self.commit("A")
+
+        # not a descendant of the trusted base
+        unrelated = dict(facts)
+        unrelated["base_commit"] = "0" * 40
+
+        def ancestor_fails(argv, **kwargs):
+            if "merge-base" in argv:
+                return 1, "", "fatal: not an ancestor"
+            return real(argv, **kwargs)
+
+        # the tree cannot be read
+        def tree_fails(argv, **kwargs):
+            if "rev-parse" in argv and "^{tree}" in " ".join(map(str, argv)):
+                return 1, "", b"fatal: unreadable tree"
+            return real(argv, **kwargs)
+
+        for label, runner, facts_used in (
+                ("not a descendant", ancestor_fails, facts),
+                ("unreadable tree", tree_fails, facts),
+        ):
+            with self.subTest(branch=label):
+                why = W.validate_pinned_head(runner, facts_used, pinned)
+                self.assertIsNotNone(why, label)
+                self.assertTrue(
+                    why.startswith("pinned commit validation failed"),
+                    "%s refusal lost the stable prefix: %r" % (label, why))
+                self.assertNotIn("\n", why)
+
     def test_a_control_character_in_a_path_does_not_reach_the_record(self):
         # Collapsing mode, for git's prose.
         self.assertEqual(W.render_for_record("/tmp/a\nb\x07c", 200),

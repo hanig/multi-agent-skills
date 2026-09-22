@@ -1255,13 +1255,30 @@ def render_for_record(text, limit, collapse=True):
     left exactly as recorded. luna and kimi-k2.7-code both caught the first
     version trimming a path it had promised not to trim.
     """
-    raw = text or ""
+    # TOTAL by construction. luna: a runner that returns bytes made the
+    # string join raise TypeError, so a validation failure became an
+    # exception instead of a refusal -- the one thing a function whose job
+    # is to produce a refusal must never do. `_git` stringifies in the real
+    # path, but the runner is injected and nothing enforces its types.
+    if isinstance(text, bytes):
+        raw = text.decode("utf-8", "replace")
+    elif isinstance(text, str):
+        raw = text
+    elif text is None:
+        raw = ""
+    else:
+        raw = str(text)
     source = " ".join(raw.split()) if collapse else raw
     safe = "".join(c if c.isprintable() else "?" for c in source)
     if len(safe) <= limit:
         return safe
+    # kimi-k2.7-code: with a limit below the marker's own length the result
+    # was LONGER than the limit, which is the defect this function exists
+    # to prevent, in miniature.
     marker = " [truncated]"
-    return safe[:max(0, limit - len(marker))] + marker
+    if limit <= len(marker):
+        return safe[:max(0, limit)]
+    return safe[:limit - len(marker)] + marker
 
 
 def render_git_diagnostic(rc, err):
@@ -1339,12 +1356,21 @@ def validate_pinned_head(runner, launch_facts, produced):
                 f"in another checkout of the same remote")
     rc, _out, _err = _git(runner, repo, "merge-base", "--is-ancestor",
                            base, produced)
+    # Every refusal this function emits goes through the renderer, not only
+    # the one a reviewer named. glm-5.3 pointed out that these three
+    # branches still interpolated raw; it was filed out of scope and is
+    # swept anyway, because "some refusals are rendered" is not a property
+    # anyone can rely on.
     if rc != 0:
-        return (f"pinned produced commit {produced[:12]} does not descend "
-                f"from trusted base {base[:12]}")
-    rc, tree, _err = _git(runner, repo, "rev-parse", produced + "^{tree}")
+        return (f"{PIN_VALIDATION_REFUSAL}: pinned produced commit "
+                f"{render_for_record(produced[:12], 12)} does not descend "
+                f"from trusted base {render_for_record(str(base)[:12], 12)}")
+    rc, tree, tree_err = _git(runner, repo, "rev-parse", produced + "^{tree}")
     if rc != 0:
-        return f"cannot read the tree of pinned commit {produced[:12]}"
+        return (f"{PIN_VALIDATION_REFUSAL}: cannot read the tree of pinned "
+                f"commit {render_for_record(produced[:12], 12)}. "
+                f"{render_git_diagnostic(rc, tree_err)}")
     if tree == launch_facts["base_tree"]:
-        return "the pinned produced commit has the launch base's unchanged tree"
+        return (f"{PIN_VALIDATION_REFUSAL}: the pinned produced commit has "
+                f"the launch base's unchanged tree")
     return None
