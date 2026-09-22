@@ -12,6 +12,8 @@ import json
 import re
 import shutil
 import string
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -842,6 +844,41 @@ SECOND_COPY_TOPICS = 3
 # entirely: `sentences()` collapses the newlines and leaves " - "
 # between items, and "-" was outside the class. luna and glm-5.3 both
 # found it. Numerals and their separators are here for the same reason.
+def publish_second_copies(found, stream=None):
+    """Write second-copy candidates where a person will see them.
+
+    ADVISORY, not authority. astra:
+
+      "Enumeration describes syntax, not purpose: comparisons,
+       examples, and interview instructions can enumerate identical
+       words ... The guard is inferring semantic ownership from
+       unrestricted prose instead of enforcing explicit ownership.
+       The false alarm is the symptom; assigning enforcement authority
+       to that inference is the problem."
+
+    The concrete false failure: "Do not treat budget, retry exposure,
+    and reporting cadence as interchangeable." Three topics, adjacent,
+    ordinary separators -- and it is a warning against conflating them,
+    not a second checklist. No separator rule tells those apart, which
+    is why the answer is to stop failing on the guess rather than to
+    refine it.
+
+    Returns how many candidates were written, so a test can prove the
+    step happened.
+    """
+    stream = sys.stderr if stream is None else stream
+    if not found:
+        return 0
+    stream.write("\ninterview-topic candidates (advisory):\n")
+    for name, listed, excerpt in found:
+        stream.write("  %s: %s\n    ...%s...\n"
+                     % (name, listed, " ".join(excerpt.split())[:200]))
+    stream.write("  Each excerpt carries several topics in a row. That may be\n"
+                 "  a second copy of the list, or a comparison that mentions\n"
+                 "  them. Nothing here failed; read them and judge.\n")
+    return len(found)
+
+
 def _all_positions(haystack, needle):
     """Every start offset of NEEDLE, not merely the first."""
     found, start = [], haystack.find(needle)
@@ -995,22 +1032,34 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
                 # repetition and not a copy of anything -- my own
                 # false positive, from allowing every occurrence a
                 # moment after allowing only the first.
+                # The run carries its SPAN as well as its topics. The
+                # report is advisory, so it has to be worth reading:
+                # `whole_text` hands this the entire surface as one
+                # string, and quoting the head of that means pointing a
+                # reader at the frontmatter while the duplicate sits
+                # 400 lines below. A diagnostic that names the wrong
+                # place is worse than none.
                 run, best = set(), set()
+                run_span = best_span = (0, 0)
                 for index, (start, topic) in enumerate(hits):
                     if not run:
                         run = {topic}
+                        run_span = (start, start + len(topic))
                     if index + 1 >= len(hits):
                         break
-                    nxt = hits[index + 1][0]
+                    nxt, nxt_topic = hits[index + 1]
                     between = lowered[start + len(topic):nxt]
                     if LIST_SEPARATOR.match(between):
-                        run.add(hits[index + 1][1])
+                        run.add(nxt_topic)
+                        run_span = (run_span[0], nxt + len(nxt_topic))
                     else:
-                        run = {hits[index + 1][1]}
+                        run = {nxt_topic}
+                        run_span = (nxt, nxt + len(nxt_topic))
                     if len(run) > len(best):
-                        best = set(run)
+                        best, best_span = set(run), run_span
                 if len(best) >= SECOND_COPY_TOPICS:
-                    found.append((name, ", ".join(sorted(best)), sentence))
+                    found.append((name, ", ".join(sorted(best)),
+                                  sentence[best_span[0]:best_span[1]]))
         return found
 
     @staticmethod
@@ -1320,12 +1369,19 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
         # separate sentences each mentioning one topic: still clean.
         named = [(surface.name, [self.whole_text(surface)])
                  for surface in self.authored_surfaces()]
-        self.assertEqual(
-            self.second_copies(named, topics), [],
-            "the interview topic list has a second copy outside the "
-            "generated declaration block. The topics have one home, "
-            "interview.judgment-only; a second copy is how the reporting "
-            "cadence left one surface while surviving in another.")
+        # ADVISORY. This used to fail the suite, and astra showed a
+        # correct document edit that it rejects: "Do not treat budget,
+        # retry exposure, and reporting cadence as interchangeable."
+        # A test-only guard is not cost-free -- a false failure blocks
+        # every subsequent change -- and no refinement separates a
+        # checklist from a comparison, because enumeration is syntax
+        # and ownership is purpose.
+        #
+        # The STRUCTURAL checks below stay hard: the declaration
+        # snapshot, the body/registry diff, the reference ties and the
+        # dialect. Those enforce explicit ownership. This one guesses,
+        # so it reports.
+        publish_second_copies(self.second_copies(named, topics))
 
         # The rule must also FIRE. Disabling the threshold left the suite
         # green until this case existed, which is the shape this whole
@@ -1438,6 +1494,67 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
                 self.assertTrue(
                     self.second_copies([("planted.md", [paraphrase])], topics),
                     "a second copy phrased as %r was not detected" % label)
+
+    def test_a_second_copy_is_reported_and_does_not_fail_the_run(self):
+        """The advisory boundary, through the harness that delivers it.
+
+        A guard is not what its function returns, it is what the
+        consumer does with it. This repo has already shipped a
+        reminder that printed to stdout and exited 0, where the
+        harness showed it only in transcript mode: every message it
+        produced reached a transcript and no reader. So this runs the
+        REAL test, in a subprocess, over a REAL tree with a duplicate
+        planted in it, and reads what actually came out.
+
+        Two things must both hold, and they pull in opposite
+        directions: the run must PASS, because astra showed a correct
+        document edit this heuristic rejects --
+
+          "Do not treat budget, retry exposure, and reporting cadence
+           as interchangeable."
+
+        -- and the candidate must still be VISIBLE, because silence
+        would delete the check rather than demote it.
+
+        Mutating the call site back to a hard assertion fails this on
+        the exit status; deleting the publish call fails it on the
+        missing diagnostic.
+        """
+        planted = ("\nAsk about the done criteria, the scientific claim, "
+                   "discardable work, budget, retry exposure and "
+                   "reporting cadence.\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "tree"
+            (root / "tests").mkdir(parents=True)
+            shutil.copytree(SKILLS, root / "skills", symlinks=True)
+            shutil.copy(Path(__file__), root / "tests" / Path(__file__).name)
+            surface = root / "skills" / "hanig-project" / "SKILL.md"
+            surface.write_text(surface.read_text() + planted)
+
+            done = subprocess.run(
+                [sys.executable, "-m", "unittest", "-v",
+                 "tests.%s.%s.%s" % (Path(__file__).stem,
+                                     type(self).__name__,
+                                     "test_declarations_do_not_contradict_"
+                                     "each_other")],
+                cwd=str(root), stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, universal_newlines=True)
+
+        self.assertEqual(
+            done.returncode, 0,
+            "a planted second copy failed the suite. It is a candidate for "
+            "a reader to judge, not a verdict: no separator rule "
+            "distinguishes a checklist from a sentence warning against "
+            "conflating the same topics.\n%s" % done.stdout)
+        self.assertIn(
+            "interview-topic candidates", done.stdout,
+            "the planted copy was neither reported nor failed on, so the "
+            "check is delivering nothing.\n%s" % done.stdout)
+        self.assertIn(
+            "SKILL.md", done.stdout.split("interview-topic candidates")[1],
+            "the report does not name the surface the candidate is on, "
+            "which is the one thing a reader needs to go look.\n%s"
+            % done.stdout)
 
     def test_every_declaration_elaboration_mentions_its_subject(self):
         """glm-5.3: the cadence declaration pointed at a reference that
