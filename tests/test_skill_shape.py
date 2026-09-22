@@ -2,7 +2,7 @@
 
 The local-reference contract is deliberately file-level: relative inline
 Markdown links only, with fragments and queries refused rather than interpreted
-as renderer-specific navigation. Swarm declarations come from structured data;
+as renderer-specific navigation. Behavior declarations come from structured data;
 reference prose only needs mechanical modal-to-id ties, not English inference.
 """
 
@@ -19,10 +19,6 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 SKILLS = ROOT / "skills"
 DEFAULT_BODY_LINE_BUDGET = 500
-BODY_LINE_BUDGETS = {
-    # A separate planned unit owns this already-measured split.
-    "hanig-project": 600,
-}
 EXTERNAL_MARKDOWN_LINK = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
 MARKDOWN_ESCAPABLE = frozenset(
     r"!\"#$%&'()*+,-./:;<=>?@[\]^_`{|}~\\"
@@ -257,12 +253,11 @@ class TestAuthoredSkillShape(unittest.TestCase):
         self.assertTrue(docs, "the authored-skill sweep matched no files")
         for doc in docs:
             body_lines = len(_body(doc).splitlines())
-            budget = BODY_LINE_BUDGETS.get(doc.parent.name,
-                                           DEFAULT_BODY_LINE_BUDGET)
             with self.subTest(skill=doc.parent.name):
                 self.assertLessEqual(
-                    body_lines, budget,
-                    f"{doc}: authored body has {body_lines} lines; budget is {budget}",
+                    body_lines, DEFAULT_BODY_LINE_BUDGET,
+                    f"{doc}: authored body has {body_lines} lines; "
+                    f"budget is {DEFAULT_BODY_LINE_BUDGET}",
                 )
 
     def test_body_markdown_paths_exist_inside_the_skill(self):
@@ -502,6 +497,70 @@ class TestAuthoredSkillShape(unittest.TestCase):
     def test_swarm_reference_modals_are_tied_to_registered_declarations(self):
         skill = SKILLS / "hanig-swarm"
         self.assertEqual(DECLARATION_REGISTRY.reference_problems(skill), [])
+
+    def test_project_declaration_block_matches_the_canonical_registry(self):
+        skill = SKILLS / "hanig-project"
+        self.assertEqual(DECLARATION_REGISTRY.body_diff(skill), "")
+
+    def test_project_reference_modals_are_tied_to_registered_declarations(self):
+        skill = SKILLS / "hanig-project"
+        self.assertEqual(DECLARATION_REGISTRY.reference_problems(skill), [])
+
+    def test_project_keeps_partition_routing_as_owner_judgment(self):
+        declarations = {
+            item["id"]: item["normative_text"]
+            for item in DECLARATION_REGISTRY.load_registry(
+                SKILLS / "hanig-project"
+            )
+        }
+        self.assertIn(
+            "ask the owner whether CPU-only work may run",
+            declarations["cluster.account-allowance"],
+        )
+
+    def test_project_keeps_active_host_policy_in_the_registry(self):
+        declarations = {
+            item["id"]: item["normative_text"]
+            for item in DECLARATION_REGISTRY.load_registry(
+                SKILLS / "hanig-project"
+            )
+        }
+        self.assertIn(
+            "Follow the active host's discovered project instructions",
+            declarations["capability.host-policy"],
+        )
+
+    def test_project_registry_keeps_interview_speech_acts(self):
+        declarations = {
+            item["id"]: item["normative_text"]
+            for item in DECLARATION_REGISTRY.load_registry(
+                SKILLS / "hanig-project"
+            )
+        }
+        required = {
+            "repository.destination": "State the adopted remote and branch",
+            "survey.partition-state": "report an unknown state",
+            "cluster.account-allowance": "named denial is not a question",
+            "cluster.memory-charging": "recommend shrinking per-job memory",
+            "plan.docs-protection": "tell the owner",
+            "closure.by-kind": "merge observations are attested",
+            "code.configuration": "confirm the selected provider's exact mode spelling",
+            "capability.tracker": "report the pending synchronization",
+            "findings.bound": "reason for each",
+            "closure.evidence": "report an issue closed without it as an integrity violation",
+            "judgment.by-kind": "coordinator-pinned pre-dispatch artifact basis",
+        }
+        for declaration_id, speech_act in required.items():
+            with self.subTest(declaration=declaration_id):
+                self.assertIn(speech_act, declarations[declaration_id])
+        self.assertIn(
+            "coordinator does not validate the mode",
+            declarations["code.configuration"],
+        )
+        self.assertNotIn(
+            "dispatch must refuse unsupported provider-mode pairs",
+            declarations["code.configuration"],
+        )
 
     def test_an_unregistered_reference_imperative_is_rejected(self):
         with tempfile.TemporaryDirectory() as raw:
