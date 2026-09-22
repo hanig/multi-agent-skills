@@ -133,6 +133,14 @@ def state_dir_for(repo):
                         "%s-%s" % (slug or "project", digest), "state")
 
 
+def _shape_of(data):
+    """A short, safe description of JSON this hook cannot read."""
+    if isinstance(data, dict):
+        keys = ", ".join(sorted(str(k) for k in list(data)[:5])) or "no keys"
+        return "an object with %s" % keys
+    return "a %s" % type(data).__name__
+
+
 def read_outbox(repo, state):
     """Run the coordinator's own outbox reader, bounded, and reap its tree.
 
@@ -185,9 +193,23 @@ def read_outbox(repo, state):
         data = json.loads(out.decode("utf-8", "replace"))
     except ValueError:
         return None, "The outbox probe returned output that is not JSON."
-    intents = data if isinstance(data, list) else (data.get("intents") or [])
+    # Validate the SHAPE before believing the count. luna: a probe that
+    # exits 0 and prints {"intents": "not-a-list"} or {} produced "total 0"
+    # with no warning -- a schema the reader does not recognise reading as
+    # an empty outbox is the same defect as a failed probe reading as one,
+    # and "nothing pending" is the most reassuring thing this hook can say.
+    if isinstance(data, list):
+        intents = data
+    elif isinstance(data, dict) and isinstance(data.get("intents"), list):
+        intents = data["intents"]
+    else:
+        return None, ("The outbox probe returned JSON this hook does not "
+                      "recognise (%s)." % _shape_of(data))
+    if not all(isinstance(i, dict) for i in intents):
+        return None, ("The outbox probe returned %d intent(s), not all of "
+                      "which are objects." % len(intents))
     pending = [i for i in intents
-               if isinstance(i, dict) and i.get("ack_status") == "unacknowledged"]
+               if i.get("ack_status") == "unacknowledged"]
     verbs = collections.Counter(
         (i.get("envelope") or {}).get("requested_operation") for i in pending)
     # close and block are both terminal CANDIDATES. Which blocks are terminal

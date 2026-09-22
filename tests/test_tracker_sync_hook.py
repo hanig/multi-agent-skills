@@ -278,6 +278,16 @@ PROBE_NOT_JSON = """
     print("Traceback (most recent call last):")
 """
 
+# Valid JSON the reader does not recognise. luna found that each of these
+# produced "total 0" -- a schema mismatch reading as an empty outbox, which
+# is the same defect as a failed probe reading as one.
+PROBE_WRONG_SHAPE = {
+    "intents is a string": '    print(\'{"intents": "not-a-list"}\')',
+    "no intents key": "    print('{}')",
+    "a bare number": "    print('7')",
+    "intents holds non-objects": '    print(\'{"intents": [1, 2, 3]}\')',
+}
+
 # Ignores SIGTERM and spawns a child that outlives it and also ignores
 # SIGTERM. This is the shape the shell version leaked: it reaped by killing
 # the subshell, leaving the python grandchild alive holding the output pipe.
@@ -371,6 +381,17 @@ class TrackerSyncHookOutboxReporting(unittest.TestCase):
         self.assertIsNotNone(context, proc.stdout)
         self.assertIn("total 3", context)
         self.assertNotIn("Unknown is not zero", context)
+
+    def test_json_this_hook_cannot_read_is_unknown_not_an_empty_outbox(self):
+        """The most reassuring sentence this hook can say is "total 0", so
+        it must be the hardest one to reach by accident."""
+        for label, body in PROBE_WRONG_SHAPE.items():
+            with self.subTest(shape=label):
+                rc, context, out, _ = self.run_against(body)
+                self.assertEqual(rc, 0)
+                self.assertIsNotNone(context, out)
+                self.assertIn("Unknown is not zero", context)
+                self.assertNotIn("total 0", context)
 
     def test_a_hanging_probe_is_bounded_and_leaves_no_descendants(self):
         """The defect class a step-back committee predicted would come next.
