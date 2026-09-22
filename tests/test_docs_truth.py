@@ -2,6 +2,7 @@
 import ast
 import collections
 import importlib
+import importlib.util
 import inspect
 import re
 import sys
@@ -708,23 +709,24 @@ def check_canonical_suite_floor(filename, text, discovered, problems=None):
     return unowned
 
 
-# Two residual limits, stated because a claim about them has already been
-# refuted once each.
+# One residual limit, and two sentences here that described a design this
+# module no longer has. glm-5.3 caught the stale ones, which is a
+# documentation-truth defect in the file that exists to catch those, so
+# they are corrected rather than annotated.
 #
-# A component sentence whose count happens to be AT OR ABOVE the floor is
-# still rejected -- luna's "The installer was built and green: 2,000 tests."
-# astra predicted exactly this when the committee split: a magnitude rule
-# does not establish attribution, it relocates the errors. The relocation
-# is accepted because the surviving false positive is a sentence about two
-# thousand of something in the one document that carries the live claim,
-# which is both rare and genuinely confusable, while the alternative was to
-# stop guarding unmarked totals at all.
+# WAS: "a component sentence at or above the floor is still REJECTED" and
+# "outside the canonical document an unmarked count is never scanned".
+# Neither is true now. Nothing is rejected for being count-shaped -- the
+# scan is a report, which is astra's plan from the committee split -- and
+# every document in LIVE_DOCUMENTS is scanned, because a stale count in
+# README.md misleads a reader exactly as much as one in CLAUDE.md.
 #
-# OUTSIDE the canonical document, an unmarked count is never scanned at any
-# magnitude: only a MARKED claim is rejected there. That is rule 1 and it is
-# deliberate, since a regex cannot tell what a count is attributed to. It
-# means "a competing claim is caught" is true of CLAUDE.md and of nothing
-# else, which is narrower than it sounds and is why it is written here.
+# The limit that remains: a count-shaped sentence about a DIFFERENT
+# component is reported alongside a genuinely stale total, and nothing
+# here separates them. astra said why when the committee split -- a
+# magnitude rule does not establish attribution, it relocates the errors
+# -- and a phrasing rule does no better. So the report lists candidates
+# and says so; it does not claim each one is a defect.
 
 
 def check_live_suite_claims(documents, discovered):
@@ -821,16 +823,30 @@ def source_test_classes(path):
     return declarations
 
 
-def unreachable_test_classes(path):
-    """Classes declaring test methods that the module scope cannot reach.
+def unreachable_test_classes(path, module):
+    """Classes declaring test methods that the MODULE does not expose.
 
     luna: `source_test_classes` walks module bodies and nested class
     bodies only, so `if False:` around a TestCase -- or one declared
     inside a function -- produced NO expected declaration, and the sweep
     passed on a file whose test methods it had never heard of. That is
     this module's own failure mode: a declaration that leaves the
-    collected set with nothing going red, the same shape as the `__main__`
-    block that once hid 13 tests.
+    collected set with nothing going red, the same shape as the
+    `__main__` block that once hid 13 tests.
+
+    The first version answered that question from the SYNTAX -- is this
+    class lexically at module scope -- and all three reviewers broke it
+    the same way: `if True:` and `if sys.version_info >= (3, 11):` are
+    module-level guards whose bodies execute, so a class inside one is
+    collected and run, and reporting it reddens an honest suite. Which
+    is the mirror of the defect being fixed, and a worse one, because it
+    fails work that is correct.
+
+    Lexical position was never the question. Whether the module EXPOSES
+    the class is, and the module is right there: import it and look.
+    `if True:` exposes the class, `if False:` does not, a factory
+    function does not, and none of that needs a reachability analysis
+    this file has no business attempting.
 
     Only classes that DECLARE a test method count. The repository has 23
     function-local helper classes (fake loaders, crash doubles) and every
@@ -842,27 +858,29 @@ def unreachable_test_classes(path):
             source = source_file.read()
     else:
         source = path.read_text()
-    tree = ast.parse(source)
 
-    reachable = set()
-
-    def mark(body):
-        for node in body:
-            if isinstance(node, ast.ClassDef):
-                reachable.add(id(node))
-                mark(node.body)
-
-    mark(tree.body)
     hidden = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.ClassDef) or id(node) in reachable:
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.ClassDef):
             continue
         methods = sorted(
             member.name for member in node.body
             if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
             and member.name.startswith("test"))
-        if methods:
+        if not methods:
+            continue
+        exposed = getattr(module, node.name, None)
+        if not inspect.isclass(exposed):
             hidden.append((node.name, methods, node.lineno))
+            continue
+        # A name can be exposed by a DIFFERENT class of the same name --
+        # a module-level TestCase and a factory-local one, say. Then the
+        # declared methods are the evidence: the ones the exposed class
+        # does not carry were declared somewhere nothing reaches.
+        missing = sorted(m for m in methods
+                         if not callable(getattr(exposed, m, None)))
+        if missing:
+            hidden.append((node.name, missing, node.lineno))
     return sorted(hidden)
 
 
@@ -1010,7 +1028,7 @@ def assert_every_test_method_collected(paths, loader=None, module_loader=None):
             failures[path.name] = {"could not inspect": str(exc)}
             continue
         problems = {}
-        unreachable = unreachable_test_classes(path)
+        unreachable = unreachable_test_classes(path, module)
         if unreachable:
             problems["test methods declared outside module scope"] = [
                 "%s.%s (line %d)" % (name, method, line)
@@ -1427,14 +1445,12 @@ class TestDocsTruth(unittest.TestCase):
         new annotation: a count below the number the document asserts the
         suite exceeds cannot be read as this suite's total.
         
-    DECLARED LIMIT, found while checking a reviewer's finding: running the
-    suite with `-k` whose pattern selects THIS test makes it fail. It
-    compares declared methods against collected ones, and `-k` suppresses
-    collection of everything else, so the shortfall it reports is the
-    filter rather than a hidden test. `-k` patterns that do not match this
-    test simply do not run it. No honest full-suite invocation is affected;
-    the documented `discover -s tests` is green, including this test, at
-    1,748 tests.
+    This paragraph used to declare a `-k` limit that no longer exists:
+    the repository sweep takes a FRESH loader, so a `-k` filter on the
+    caller's loader no longer makes it report the filtered-out methods
+    as hidden. kimi-k2.7-code fixed that and the prose describing the
+    limit stayed, which glm-5.3 then found -- stale documentation inside
+    the module whose subject is stale documentation.
     """
         discovered = unittest.TestLoader().discover(
             str(ROOT / "tests")).countTestCases()
@@ -1642,13 +1658,17 @@ class TestDocsTruth(unittest.TestCase):
     def test_a_test_method_declared_outside_module_scope_is_reported(self):
         """luna: `if False: class Hidden(TestCase): def test_lost` was
         invisible, so the sweep passed on a file whose test methods it
-        had never heard of.
+        had never heard of. And then, in the round after: keying on
+        LEXICAL position reported `if True:` and
+        `if sys.version_info >= (3, 11):` -- guards whose bodies execute
+        -- as hidden, reddening an honest suite, which is the mirror of
+        the defect and a worse one.
 
-        This is the module's own subject -- a declaration leaving the
-        collected set with nothing going red -- and it is the same shape
-        as the `__main__` block that once hid 13 tests.
+        Whether the MODULE exposes the class is the question, so these
+        cases import the module and check.
         """
         source = (
+            "import sys\n"
             "import unittest\n"
             "\n"
             "if False:\n"
@@ -1656,20 +1676,31 @@ class TestDocsTruth(unittest.TestCase):
             "        def test_lost(self):\n"
             "            pass\n"
             "\n"
+            "if True:\n"
+            "    class Guarded(unittest.TestCase):\n"
+            "        def test_collected(self):\n"
+            "            pass\n"
+            "\n"
+            "if sys.version_info >= (3, 0):\n"
+            "    class VersionGuarded(unittest.TestCase):\n"
+            "        def test_also_collected(self):\n"
+            "            pass\n"
+            "\n"
             "def factory():\n"
             "    class AlsoHidden(unittest.TestCase):\n"
             "        def test_also_lost(self):\n"
             "            pass\n"
             "    return AlsoHidden\n"
+            "\n"
+            "class Reachable(unittest.TestCase):\n"
+            "    def test_plain(self):\n"
+            "        pass\n"
         )
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "test_hidden.py"
-            path.write_text(source)
-            hidden = unreachable_test_classes(path)
-        names = {name: methods for name, methods, _line in hidden}
+        hidden = self.sweep_source(source, "test_conditional")
         self.assertEqual(
-            names,
-            {"Hidden": ["test_lost"], "AlsoHidden": ["test_also_lost"]})
+            {name: methods for name, methods, _line in hidden},
+            {"Hidden": ["test_lost"], "AlsoHidden": ["test_also_lost"]},
+            "a guard whose body runs is not a hidden declaration")
 
         # A helper class with no test method is not noise in the report.
         # The repository has 23 of those and every one declares none.
@@ -1680,10 +1711,17 @@ class TestDocsTruth(unittest.TestCase):
             "            pass\n"
             "    return Crash\n"
         )
+        self.assertEqual(self.sweep_source(helper, "test_helper"), [])
+
+    def sweep_source(self, source, stem):
+        """Write SOURCE to a module, import it, and sweep it."""
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "test_helper.py"
-            path.write_text(helper)
-            self.assertEqual(unreachable_test_classes(path), [])
+            path = Path(tmp) / (stem + ".py")
+            path.write_text(source)
+            spec = importlib.util.spec_from_file_location(stem, path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return unreachable_test_classes(path, module)
 
     def test_the_entry_point_hands_the_report_to_its_caller(self):
         """luna: the report was computed and thrown away.
@@ -1701,8 +1739,18 @@ class TestDocsTruth(unittest.TestCase):
 
         clean = check_live_suite_claims(
             [(CANONICAL_DOCUMENT, text)] + others, discovered)
-        self.assertEqual(clean, baseline_counts(discovered),
-                         "the caller saw something the scan did not report")
+        # LIKE WITH LIKE. glm-5.3: this compared the entry point's
+        # (document, line, count) triples against baseline_counts'
+        # (line, count) pairs, so it could only pass while both were
+        # empty -- and appending the honest sentence another test in
+        # this file REQUIRES be accepted then reddened the suite. I
+        # changed the return type in the previous commit and left the
+        # comparison reading the old one.
+        self.assertEqual(
+            [(line, count) for name, line, count in clean
+             if name == CANONICAL_DOCUMENT.name],
+            baseline_counts(discovered),
+            "the caller saw something the scan did not report")
 
         noisy = check_live_suite_claims(
             [(CANONICAL_DOCUMENT,
@@ -1713,6 +1761,26 @@ class TestDocsTruth(unittest.TestCase):
             "the caller received no report for a competing count")
         self.assertIn(discovered + 1,
                       [count for _name, _line, count in noisy])
+
+        # With the canonical document CARRYING a count, so the
+        # comparison has something to get wrong. glm-5.3's finding was
+        # that triples were compared against pairs and could agree only
+        # while both were empty -- which the live CLAUDE.md happens to
+        # make true, so the mutation restoring it left the suite green
+        # until this case existed.
+        planted_text = (text
+                        + f"\nThe installer was built and green: "
+                        f"{discovered + 11} tests.\n")
+        planted = check_live_suite_claims(
+            [(CANONICAL_DOCUMENT, planted_text)] + others, discovered)
+        canonical_rows = [(line, count) for name, line, count in planted
+                          if name == CANONICAL_DOCUMENT.name]
+        self.assertIn(discovered + 11, [count for _line, count in canonical_rows])
+        self.assertEqual(
+            canonical_rows,
+            competing_counts(CANONICAL_DOCUMENT.name, planted_text, discovered),
+            "the entry point and the canonical scan disagree about the "
+            "same document")
 
         # Every live document is scanned, not only the canonical one.
         # luna: an unmarked stale total in README.md or MEMORY.md was
