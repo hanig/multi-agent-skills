@@ -857,6 +857,10 @@ class TestModeAdviceMatchesTheProvider(CodeUnitCase):
                 if '"mode": "bypass"' in line or '"mode":"bypass"' in line:
                     self.fail("%s:%d recommends mode=bypass, which codex "
                               "rejects: %s" % (doc.name, i, line.strip()))
+                if (name == "hanig-project" and "auto-review" in line
+                        and "full-access" in line):
+                    self.fail("%s:%d publishes a closed codex mode list: %s"
+                              % (doc.name, i, line.strip()))
 
 
 class TestTheCheapFixForAWrongPartitionIsWrittenDown(unittest.TestCase):
