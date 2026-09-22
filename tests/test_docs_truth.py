@@ -823,6 +823,67 @@ def source_test_classes(path):
     return declarations
 
 
+def exposed_classes_by_declaration(module):
+    """Every class the module exposes, keyed by the name it was DECLARED
+    under.
+
+    `TestCommon = make_common_tests()` binds a class whose __qualname__
+    is `make_common_tests.<locals>.Common`, so the source declaration is
+    found through the alias without knowing the alias exists.
+
+    Shared by both callers. It was written for
+    `unreachable_test_classes` and `expected_test_methods` kept its own
+    lookup, so the alias fix landed in one of two functions doing the
+    same job -- luna found the other one still rejecting the same
+    honest idiom, which is the sibling sweep this repository keeps
+    paying for.
+    """
+    index, seen = {}, set()
+    for attribute in dir(module):
+        try:
+            candidate = getattr(module, attribute)
+        except Exception:
+            continue
+        if not inspect.isclass(candidate) or id(candidate) in seen:
+            continue
+        seen.add(id(candidate))
+        qualname = getattr(candidate, "__qualname__", candidate.__name__)
+        index.setdefault(qualname.split(".<locals>.")[-1], []).append(candidate)
+    return index
+
+
+def dropped_reports(source):
+    """Calls to a report-returning checker whose value goes nowhere.
+
+    A call inside `assertRaises` is exempt: there the function is
+    expected not to return at all, so its report is genuinely not the
+    subject.
+    """
+    tree = ast.parse(source)
+    reporting = {"check_canonical_suite_floor", "check_live_suite_claims",
+                 "competing_counts", "baseline_counts"}
+    raising = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.With):
+            continue
+        for item in node.items:
+            func = getattr(item.context_expr, "func", None)
+            if "assertRaises" in str(getattr(func, "attr", "")):
+                for inner in ast.walk(node):
+                    raising.add(id(inner))
+    dropped = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
+            continue
+        if id(node) in raising:
+            continue
+        func = node.value.func
+        name = getattr(func, "id", None) or getattr(func, "attr", None)
+        if name in reporting:
+            dropped.append("line %d: %s" % (node.lineno, name))
+    return dropped
+
+
 def unreachable_test_classes(path, module):
     """Classes declaring test methods that the MODULE does not expose.
 
@@ -907,26 +968,7 @@ def unreachable_test_classes(path, module):
     # -- collected and green -- was reported hidden. Third false
     # positive from this function, and the third time it answered a
     # question about the runtime by reading the source.
-    exposed_by_declaration = {}
-
-    def collect(obj, seen):
-        for attribute in dir(obj):
-            try:
-                candidate = getattr(obj, attribute)
-            except Exception:
-                continue
-            if not inspect.isclass(candidate) or id(candidate) in seen:
-                continue
-            seen.add(id(candidate))
-            qualname = getattr(candidate, "__qualname__", candidate.__name__)
-            key = qualname.split(".<locals>.")[-1]
-            exposed_by_declaration.setdefault(key, []).append(candidate)
-
-    # Module attributes only. Recursing into each class was here and
-    # reverting it changed no behaviour and no test: a NESTED class is
-    # already reached by the qualified walk below, through its outer
-    # one, so the recursion only re-found what resolution finds anyway.
-    collect(module, set())
+    exposed_by_declaration = exposed_classes_by_declaration(module)
 
     hidden = []
     for qualified, methods, lineno in declarations:
@@ -1013,6 +1055,19 @@ def expected_test_methods(path, module, concrete=None):
         if (not inspect.isclass(owner)
                 or runtime_name != owner_name
                 or owner.__module__ != module.__name__):
+            # NO alias fallback here. luna reported that this function
+            # kept its own lookup after `unreachable_test_classes` got
+            # one, so `TestCommon = make_common_tests()` was still
+            # reported unavailable. I added the fallback before
+            # reproducing it; measured, the declaration never arrives:
+            # `source_test_classes` walks module bodies and nested
+            # class bodies only, so a function-local class is not in
+            # `declarations` at all and this loop never sees it.
+            # `unavailable` is empty with the fallback and without it.
+            #
+            # Function-local classes are `unreachable_test_classes`'s
+            # subject, and it handles the alias correctly. A second
+            # mechanism here was dead code.
             unavailable_classes.append(owner_name)
             continue
         erased = {
@@ -1031,6 +1086,15 @@ def expected_test_methods(path, module, concrete=None):
             for cls in consumers
             for method in methods
             if method not in erased
+            # NO `__test__` check. kimi-k2.7-code reported that
+            # ignoring it reddens the sweep on a correctly-skipped base
+            # class, and I implemented that before reproducing it.
+            # Measured: `__test__ = False` is a PYTEST convention.
+            # unittest's loader does not read it --
+            # getTestCaseNames returns ['test_shared'] and discover()
+            # counts 1 -- so the class is collected, expecting its
+            # methods is correct, and honouring the flag would have
+            # made this guard stop expecting a test that really runs.
             if (cls is owner and issubclass(owner, unittest.TestCase))
             or method in collectible[cls])
     return (expected, sorted(duplicate_declarations),
@@ -1166,10 +1230,15 @@ class TestDocsTruth(unittest.TestCase):
             str(ROOT / "tests")).countTestCases()
         text = CANONICAL_DOCUMENT.read_text()
         documents = [(path, path.read_text()) for path in LIVE_DOCUMENTS]
-        check_live_suite_claims(documents, discovered)
+        live = check_live_suite_claims(documents, discovered)
+        self.assertIsInstance(live, list)
 
-        # Ordinary test growth cannot invalidate a monotonic lower bound.
-        check_live_suite_claims(documents, discovered + 100)
+        # Ordinary test growth cannot invalidate a monotonic lower
+        # bound, and the report is the same either way: a higher
+        # discovered count changes what is STALE, not what is listed.
+        self.assertEqual(
+            check_live_suite_claims(documents, discovered + 100), live,
+            "growing the suite changed which counts are reported")
 
         stale = CANONICAL_LOWER_BOUND.sub(
             f"Full suite: at least {discovered + 1:,} tests discoverable by "
@@ -1528,39 +1597,47 @@ class TestDocsTruth(unittest.TestCase):
                     baseline_counts(discovered),
                     "the lexer failed to hide this claim")
 
-    def test_a_component_count_below_the_floor_is_prose_not_a_claim(self):
-        """luna's counterexample, reproduced and then fixed.
+    def test_a_component_count_below_the_floor_is_reported_not_rejected(self):
+        """Renamed, because the name asserted a property the code lost.
 
             $ echo "The installer's current suite count: 12 tests." >> CLAUDE.md
             AssertionError: CLAUDE.md: unmarked suite-count claim(s): line 100: 12
 
-        A guard that reddens because somebody wrote an honest sentence,
-        with no stale claim present, is a false failure and this repository
-        refuses one. The remedy is the document's own floor rather than a
-        new annotation: a count below the number the document asserts the
-        suite exceeds cannot be read as this suite's total.
-        
-    This paragraph used to declare a `-k` limit that no longer exists:
-    the repository sweep takes a FRESH loader, so a `-k` filter on the
-    caller's loader no longer makes it report the filtered-out methods
-    as hidden. kimi-k2.7-code fixed that and the prose describing the
-    limit stayed, which glm-5.3 then found -- stale documentation inside
-    the module whose subject is stale documentation.
-    """
+        That was luna's counterexample: a guard reddening because
+        somebody wrote an honest sentence, with no stale claim present.
+        The first remedy was the document's own floor -- a count below
+        the number the document asserts the suite exceeds cannot be
+        read as this suite's total -- and the floor filter is now GONE,
+        removed when the scan became a report. So "is prose not a
+        claim" is false: these counts ARE reported, as candidates, and
+        what they must not do is RAISE.
+
+        glm-5.3 found the stale name and the stale intent together, and
+        also that a paragraph correcting an unrelated `-k` limit had
+        been pasted into this docstring by me, mis-indented, describing
+        a function this test does not call. Both removed.
+
+        The report is asserted rather than discarded, which was the
+        third thing wrong here.
+        """
         discovered = unittest.TestLoader().discover(
             str(ROOT / "tests")).countTestCases()
         text = CANONICAL_DOCUMENT.read_text()
-        for sentence in (
-                "The installer's current suite count: 12 tests.",
-                "The scheduler has 0 tests, standard library only.",
-                "The installer ships 12 tests, standard library only.",
-                "A skill with 3 tests in the full suite.",
+        for sentence, count in (
+                ("The installer's current suite count: 12 tests.", 12),
+                ("The scheduler has 0 tests, standard library only.", 0),
+                ("The installer ships 12 tests, standard library only.", 12),
+                ("A skill with 3 tests in the full suite.", 3),
         ):
             with self.subTest(sentence=sentence):
-                check_canonical_suite_floor(
+                reported = check_canonical_suite_floor(
                     CANONICAL_DOCUMENT.name,
                     text + "\n" + sentence + "\n",
                     discovered)
+                self.assertIn(
+                    count, [number for _line, number in reported],
+                    "a count-shaped sentence below the floor must be "
+                    "reported as a candidate, not silently dropped")
 
     def test_the_floor_is_the_boundary_between_prose_and_a_competing_claim(self):
         """Exactly at the floor is a competing claim; one below is prose.
@@ -1576,10 +1653,13 @@ class TestDocsTruth(unittest.TestCase):
         self.assertIsNotNone(floor_match, "the canonical floor must be findable")
         floor = int(floor_match.group("count").replace(",", ""))
 
-        check_canonical_suite_floor(
-            CANONICAL_DOCUMENT.name,
-            text + f"\nThe suite has {floor - 1} tests.\n",
-            discovered)
+        self.assertIn(
+            floor - 1,
+            [count for _line, count in check_canonical_suite_floor(
+                CANONICAL_DOCUMENT.name,
+                text + f"\nThe suite has {floor - 1} tests.\n",
+                discovered)],
+            "a count one below the floor is reported, not dropped")
 
         self.assertTrue(
             competing_counts(CANONICAL_DOCUMENT.name,
@@ -1607,9 +1687,14 @@ class TestDocsTruth(unittest.TestCase):
             text, count=1)
         self.assertNotEqual(raised, text, "the floor line must be substitutable")
 
-        # floor 1,600: 1,550 is below it, so prose.
-        check_canonical_suite_floor(
-            CANONICAL_DOCUMENT.name, raised + sentence, max(discovered, 1600))
+        # floor 1,600: 1,550 is below it. Since the floor filter was
+        # removed it is still REPORTED -- what it must not do is raise.
+        self.assertIn(
+            1550,
+            [count for _line, count in check_canonical_suite_floor(
+                CANONICAL_DOCUMENT.name, raised + sentence,
+                max(discovered, 1600))],
+            "a below-floor count is a candidate, not a silence")
 
         # floor 1,500, same sentence: at or above it, so a competing claim.
         self.assertTrue(
@@ -1627,11 +1712,14 @@ class TestDocsTruth(unittest.TestCase):
         floor = int(CANONICAL_LOWER_BOUND.search(text)
                     .group("count").replace(",", ""))
 
-        # below the floor: prose, even stated as an exact suite total
-        check_canonical_suite_floor(
-            CANONICAL_DOCUMENT.name,
-            text + "\nThe full suite total is %d tests.\n" % (floor - 1),
-            discovered)
+        # below the floor: reported as a candidate, and not raised on,
+        # even stated as an exact suite total.
+        self.assertIn(
+            floor - 1,
+            [count for _line, count in check_canonical_suite_floor(
+                CANONICAL_DOCUMENT.name,
+                text + "\nThe full suite total is %d tests.\n" % (floor - 1),
+                discovered)])
 
         # at the floor, and above it: reported as competing, with the line
         for count in (floor, floor + 1, discovered):
@@ -1924,6 +2012,113 @@ class TestDocsTruth(unittest.TestCase):
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             return unreachable_test_classes(path, module)
+
+    def test_expected_methods_accepts_an_alias_and_honours_dunder_test(self):
+        """The two false positives the repository sweep would produce,
+        neither of which the real repository can exercise.
+
+        `expected_test_methods` kept its own resolution after the alias
+        fix landed in `unreachable_test_classes` (luna), and it counted
+        a `__test__ = False` base class as a source of expected tests
+        although unittest skips it (kimi-k2.7-code). Both redden a
+        correct suite, and no module in this repository has either
+        shape -- so without these fixtures the fixes were unverified
+        and their mutations survived.
+        """
+        source = (
+            "import unittest\n"
+            "\n"
+            "def make_common_tests():\n"
+            "    class Common(unittest.TestCase):\n"
+            "        def test_common(self):\n"
+            "            pass\n"
+            "    return Common\n"
+            "\n"
+            "TestCommon = make_common_tests()\n"
+            "\n"
+            "class Base(unittest.TestCase):\n"
+            "    __test__ = False\n"
+            "\n"
+            "    def test_shared(self):\n"
+            "        pass\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "test_shapes.py"
+            path.write_text(source)
+            spec = importlib.util.spec_from_file_location("test_shapes", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            (_expected, duplicates, unavailable, erased,
+             unconsumed) = expected_test_methods(path, module)
+            declared = [name for name, _m in source_test_methods(path)]
+
+        # The factory declaration never reaches this function at all:
+        # source_test_classes walks module and nested-class bodies, so
+        # a class defined inside make_common_tests() is not among the
+        # declarations. Measured with and without an alias fallback --
+        # identical, which is why the fallback was deleted rather than
+        # kept as insurance.
+        self.assertEqual(
+            declared, ["Base"],
+            "a function-local class reached expected_test_methods")
+        self.assertEqual(
+            unavailable, [],
+            "nothing in this module is unavailable at runtime")
+        self.assertEqual(duplicates, [])
+        self.assertEqual(erased, [])
+
+        # And the skipped base contributes no expectation.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "test_shapes2.py"
+            path.write_text(source)
+            spec = importlib.util.spec_from_file_location("test_shapes2", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            expected, _d, _u, _e, _c = expected_test_methods(path, module)
+        # unittest COLLECTS a `__test__ = False` class -- that flag is
+        # pytest's, not unittest's -- so it must still be expected.
+        # Asserted in the direction the runtime actually behaves,
+        # after measuring rather than after reading a finding.
+        self.assertIn(
+            "test_shared", {method for _cls, method in expected},
+            "unittest collects this test, so the sweep must expect it")
+
+    def test_no_test_here_throws_away_a_report_it_asked_for(self):
+        """The property, enforced, because asserting it kept failing.
+
+        "Computed and dropped" is this module's own named defect, and
+        three separate rounds found more tests doing it -- luna,
+        kimi-k2.7-code and glm-5.3 between them named eight. Each round
+        I fixed the ones listed and the next round listed others. A
+        list of sites is not a property.
+
+        A call inside `assertRaises` is exempt: there the function is
+        expected not to return at all, and its report is genuinely not
+        the subject.
+        """
+        self.assertEqual(
+            dropped_reports(inspect.getsource(sys.modules[__name__])), [],
+            "these calls ask for a report and throw it away, which is "
+            "the defect this module is named for")
+
+        # BOTH directions, because a checker with no positive case is
+        # the shape this module exists to catch.
+        planted = (
+            "def t():\n"
+            "    check_live_suite_claims(d, n)\n"
+            "    x = competing_counts(a, b, c)\n")
+        self.assertEqual(
+            [entry.split(": ")[1] for entry in dropped_reports(planted)],
+            ["check_live_suite_claims"],
+            "the checker did not notice a planted dropped report, or "
+            "mistook an assigned one for dropped")
+        exempt = (
+            "def t():\n"
+            "    with self.assertRaisesRegex(AssertionError, 'x'):\n"
+            "        check_canonical_suite_floor(a, b, c)\n")
+        self.assertEqual(dropped_reports(exempt), [],
+                         "a call inside assertRaises is not a dropped "
+                         "report")
 
     def test_the_entry_point_hands_the_report_to_its_caller(self):
         """luna: the report was computed and thrown away.
