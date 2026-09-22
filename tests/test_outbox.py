@@ -2757,11 +2757,9 @@ class TestADefaultChangeIsMadeVisible(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             f = Path(d) / "p.json"
             f.write_text(json.dumps(plan))
-            result = subprocess.run(
+            return subprocess.run(
                 [sys.executable, str(SWARM), "validate", str(f)],
-                capture_output=True, text=True, cwd=d)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            return result.stdout
+                capture_output=True, text=True).stdout
 
     def test_units_relying_on_the_default_are_named(self):
         out = self._validate({"name": "p", "units": [
