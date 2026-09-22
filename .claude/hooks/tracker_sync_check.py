@@ -115,6 +115,15 @@ import time
 # list, diff, checks, status -- are deliberately absent: they change nothing,
 # so a reminder on them is noise, and habituation is how a reminder stops
 # being read.
+# The coordinator's own wire vocabulary, from swarm.py. luna: requiring
+# merely a STRING let {"ack_status": "pending"} through, the pending filter
+# matched nothing, and the hook reported "total 0" -- a status the reader
+# does not know counted as an outbox with nothing in it. If the coordinator
+# ever adds a value, this hook must report unknown until it is added here,
+# which is the safe direction.
+ACK_STATUSES = frozenset(
+    ["unacknowledged", "attested", "attested_confirmed", "conflict"])
+
 PR_MUTATING = frozenset(
     "merge close create edit ready reopen comment review update-branch"
     .split())
@@ -122,76 +131,110 @@ ISSUE_MUTATING = frozenset(
     "create close reopen edit comment delete transfer pin unpin lock "
     "unlock develop".split())
 
-# Detection reads POSITION, not a bag of words, and that is the fourth shape
-# this has had. The history is worth keeping because each shape failed in a
-# way the next one had to answer:
+# Detection PARSES the command line. That is the fifth shape this has had,
+# and the four before it failed for one reason: each approximated a parse
+# instead of writing one, so something that merely LOOKED like a subcommand
+# kept being read as one, or a real subcommand kept being missed.
 #
-#   1. `\bgh\b.*\bpr\b.*\bmerge\b` with re.S. Quadratic: 8.05s for ONE
-#      of four patterns on 600 honest `gh pr view` lines (measured), and it
+#   1. `\bgh\b.*\bpr\b.*\bmerge\b` with re.S. Quadratic -- 8.05s for ONE
+#      of four patterns on 600 honest `gh pr view` lines, measured -- and it
 #      matched a `gh` on line 1 against a `merge` on line 400.
-#   2. A per-line set intersection. Linear, and it lost position, so
-#      `gh pr view 41 | grep merge` read as a merge (kimi-k2.7-code) and
-#      `gh pr merge 41 --subject "fixes issue #3"` emitted NOTHING, because
-#      the word `issue` routed the line into the issue branch (glm-5.3).
-#      That last one is a missed merge, which is the failure this hook
-#      exists to prevent.
-#   3. This: the CLI's own grammar. `gh <noun> <verb>` and `git ... push`,
-#      taken positionally from the first non-flag tokens of each segment.
-#      An argument can no longer impersonate a subcommand.
+#   2. A per-line word-set intersection. Linear, and it lost position:
+#      `gh pr view 41 | grep merge` read as a merge (kimi-k2.7-code), and
+#      the word `issue` in `--subject "fixes issue #3"` routed a real
+#      `gh pr merge` into the issue branch so it emitted NOTHING (glm-5.3).
+#   3. First-token-ish: search for `gh` anywhere, then read the next two
+#      non-flag tokens. Still not a parse, so `gh --repo acme/x pr merge 41`
+#      was missed (the value of a global option became the noun), `# gh pr
+#      merge 41` in a comment fired, `git log --grep push` fired, and `&`
+#      was not a separator so a second command was never examined -- luna
+#      and kimi-k2.7-code, four findings between them.
+#   4. This: strip comments, split on every separator the shell has, take
+#      the COMMAND WORD as the first token, skip global options and their
+#      values, and read the subcommand from the first positional after
+#      them. `git log --grep push` has subcommand `log`, not `push`.
 #
-# Still linear, and still deliberately SENSITIVE rather than precise: a
-# spurious reminder costs one line of context, a missed one costs the sync.
+# Linear, and deliberately SENSITIVE rather than precise: a spurious
+# reminder costs one line of context, a missed one costs the sync.
 #
-# Declared limits: a subcommand supplied through a variable, an alias, or
-# `xargs` is not seen, and neither is one assembled at runtime. This reads
-# text, not intent.
-_WORD = re.compile(r"[A-Za-z][A-Za-z0-9._-]*")
-_SEGMENT = re.compile(r"[;\n]|\|\|?|&&")
+# There is deliberately NO comment stripping. It was written, and its
+# mutation passed: anchoring on the command word plus splitting on newlines
+# already covers every comment case tried -- `# gh pr merge 41` on its own
+# line has `#` as its command word, and `gh pr view 41 # gh pr merge 41`
+# reads its subcommand as `view`. Code whose removal breaks no test is not
+# protection, it is the appearance of protection, so it is gone. If the
+# anchoring ever weakens, this is the thing to reinstate.
+#
+# DECLARED LIMITS. This reads text, not intent. A subcommand supplied
+# through a variable, an alias, `xargs`, `eval` or a heredoc is not seen. A
+# `#` inside a quoted string is treated as a comment. Neither is closed, and
+# both are the reason this hook is defence in depth rather than a guarantee.
+_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9._/-]*")
+_SEPARATOR = re.compile(r"[;\n]|\|\|?|&&?")
+
+# Global options that take a SEPARATE value, so the value is not a noun.
+_GH_VALUE_OPTIONS = frozenset(["--repo", "-R", "--hostname"])
+_GIT_VALUE_OPTIONS = frozenset(
+    ["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path",
+     "--config-env"])
 
 
 def _segments(command):
-    """Split into separately-executed commands, joining continuations.
+    """Separately-executed commands, with continuations joined."""
+    joined = command.replace("\\\n", " ")
+    return _SEPARATOR.split(joined)
 
-    `|` splits too: `gh pr view 41 | grep merge` is two commands and only
-    the first is a gh invocation.
+
+def _words(segment):
+    """Shell words in order, unquoted enough to compare."""
+    return [w.strip("\"'`()$") for w in segment.split() if w.strip("\"'`()$")]
+
+
+def _subcommand_path(words, value_options, depth):
+    """The command word's first `depth` positional arguments.
+
+    Global options are skipped, and an option that takes a separate value
+    consumes it, so `gh --repo acme/x pr merge` yields ('pr', 'merge') and
+    not ('acme/x', 'pr').
     """
-    return _SEGMENT.split(command.replace("\\\n", " "))
-
-
-def _tokens(segment):
-    """Non-flag words, in order, as the shell would pass them."""
     out = []
-    for raw in segment.split():
-        stripped = raw.strip("\"'`()$")
-        if not stripped or stripped.startswith("-"):
+    index = 1
+    while index < len(words) and len(out) < depth:
+        word = words[index]
+        if word.startswith("-"):
+            if word in value_options and "=" not in word:
+                index += 1
+            index += 1
             continue
-        match = _WORD.match(stripped)
-        if match:
-            out.append(match.group(0).lower())
+        out.append(word.lower())
+        index += 1
     return out
 
 
 def matched_label(command):
     """The outward action this command looks like, or None."""
     for segment in _segments(command):
-        tokens = _tokens(segment)
-        if not tokens:
+        words = _words(segment)
+        if not words:
             continue
-        try:
-            head = tokens.index("gh")
-        except ValueError:
-            head = None
-        if head is not None:
-            rest = tokens[head + 1:]
-            if len(rest) >= 2:
-                noun, verb = rest[0], rest[1]
+        # Leading VAR=value assignments precede the command word.
+        while words and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]):
+            words = words[1:]
+        if not words:
+            continue
+        program = words[0].rsplit("/", 1)[-1].lower()
+        if program == "gh":
+            path = _subcommand_path(words, _GH_VALUE_OPTIONS, 2)
+            if len(path) == 2:
+                noun, verb = path
                 if noun == "pr" and verb in PR_MUTATING:
                     return "gh pr " + verb
                 if noun == "issue" and verb in ISSUE_MUTATING:
                     return "gh issue " + verb
-            continue
-        if "git" in tokens and "push" in tokens[tokens.index("git") + 1:]:
-            return "git push"
+        elif program == "git":
+            path = _subcommand_path(words, _GIT_VALUE_OPTIONS, 1)
+            if path and path[0] == "push":
+                return "git push"
     return None
 
 
@@ -403,10 +446,10 @@ def read_outbox(repo, state):
     # does not understand counted as an outbox with nothing in it.
     unreadable = [i for i in intents
                   if not isinstance(i, dict)
-                  or not isinstance(i.get("ack_status"), str)]
+                  or i.get("ack_status") not in ACK_STATUSES]
     if unreadable:
         return None, ("The outbox probe returned %d intent(s), %d of which "
-                      "carry no readable ack_status."
+                      "carry an ack_status this hook does not know."
                       % (len(intents), len(unreadable)))
     pending = [i for i in intents
                if i.get("ack_status") == "unacknowledged"]

@@ -283,7 +283,12 @@ PROBE_OK = """
          "envelope": {"requested_operation": "block"}},
         {"ack_status": "unacknowledged",
          "envelope": {"requested_operation": "block"}},
-        {"ack_status": "acknowledged",
+        # The coordinator's wire value is "attested_confirmed";
+        # "acknowledged" is a Python compatibility alias in swarm.py and
+        # is never emitted. The strict vocabulary caught this fixture
+        # inventing a value, which is the second time today strictness
+        # found fabricated data in my own test material.
+        {"ack_status": "attested_confirmed",
          "envelope": {"requested_operation": "close"}},
     ]}))
 """
@@ -646,6 +651,24 @@ class TrackerSyncHookInputContract(unittest.TestCase):
                 "gh pr merge 41 | tee /tmp/log", "gh pr merge"),
             # luna: a mutating subcommand that was simply absent.
             "update-branch": ("gh pr update-branch 41", "gh pr update-branch"),
+            # luna and kimi-k2.7-code, round 3: the parse was still an
+            # approximation, so a global option's value became the noun, a
+            # comment fired, `&` was not a separator, and a read-only git
+            # subcommand with `push` in an argument fired.
+            "a global --repo before the subcommand": (
+                "gh --repo acme/project pr merge 41", "gh pr merge"),
+            "the -R spelling": ("gh -R acme/project pr merge 41",
+                                "gh pr merge"),
+            "a single ampersand separator": (
+                "gh pr view 1 & gh pr merge 2", "gh pr merge"),
+            "a merge in a comment": ("# gh pr merge 41\ngh pr view 41", ""),
+            "push as a grep argument": ("git log --grep push", ""),
+            "push in a config key": ("git config push.default simple", ""),
+            "a merge inside echo": ('echo "gh pr merge"', ""),
+            "a leading environment assignment": (
+                "GIT_SSH_COMMAND=ssh git push origin HEAD", "git push"),
+            "an absolute program path": ("/usr/bin/git push origin HEAD",
+                                         "git push"),
             # position, not presence
             "git behind a -C flag": ("git -C /tmp/x push origin HEAD",
                                      "git push"),
@@ -755,6 +778,8 @@ class TrackerSyncHookInputContract(unittest.TestCase):
             "probe prints NaN": PROBE_MALFORMED["NaN in the payload"],
             "intent has no ack_status": '    print(\'{"intents": [{}]}\')',
             "intent is not an object": '    print(\'{"intents": ["x"]}\')',
+            "ack_status the reader does not know":
+                '    print(\'{"intents": [{"ack_status": "pending"}]}\')',
         }
         payload = json.dumps(
             {"tool_input": {"command": "git push origin HEAD"}}).encode()
