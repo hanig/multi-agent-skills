@@ -947,6 +947,68 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         self.assertIn("not report", rendered)
         self.assertIn("fatal: x", rendered)
 
+    def test_the_rev_parse_branch_names_no_cause_either(self):
+        """luna, in the round after the lineage branch was fixed.
+
+        cat-file and merge-base can both exit 0 and rev-parse still fail
+        -- the checkout going away between two commands is enough -- and
+        "the tree could not be READ" then sends an operator after a tree
+        that is fine. Third branch, same claims-more-than-it-knows shape,
+        which is why the sibling in the judgment path is swept in the
+        same commit rather than waiting for a fourth round.
+        """
+        real = U.run
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        facts = self.facts(attempt)
+        pinned = self.commit("A")
+
+        for status in (1, 128, "128", 128.0):
+            with self.subTest(status=repr(status)):
+                def gone(argv, _status=status, **kwargs):
+                    if "rev-parse" in argv:
+                        return _status, "", "fatal: not a git repository"
+                    return real(argv, **kwargs)
+
+                why = W.validate_pinned_head(gone, facts, pinned)
+                self.assertIsNotNone(why)
+                self.assertIn("could not be validated", why)
+                self.assertNotIn("could not be read", why)
+                self.assertIn("not a verdict on the tree", why)
+                self.assertIn("not a git repository", why)
+
+    def test_the_base_commit_is_not_truncated_into_one_character(self):
+        """kimi-k2.7-code read `render_for_record(base, 12)` on a full
+        40-character SHA as producing 'a [truncated]'.
+
+        It does not: the marker is exactly 12 characters, so a limit of
+        12 takes the `limit <= len(marker)` path and returns the first
+        twelve. The finding does not reproduce -- and the code was right
+        only by landing exactly on that boundary, which is why it now
+        slices first, the way the produced-commit sites already did.
+        """
+        base = "a" * 40
+        self.assertEqual(W.render_for_record(base[:12], 12), "a" * 12)
+        # One character over and the coincidence would have been a defect.
+        self.assertEqual(W.render_for_record(base, 13), "a [truncated]")
+
+        real = U.run
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        facts = self.facts(attempt)
+        pinned = self.commit("A")
+
+        def not_an_ancestor(argv, **kwargs):
+            if "merge-base" in argv:
+                return 1, "", ""
+            return real(argv, **kwargs)
+
+        why = W.validate_pinned_head(not_an_ancestor, facts, pinned)
+        self.assertIsNotNone(why)
+        self.assertIn(facts["base_commit"][:12], why,
+                      "the durable record lost the base identifier")
+        self.assertNotIn("[truncated]", why)
+
     def test_a_fatal_merge_base_is_not_a_lineage_verdict(self):
         """glm-5.3: exit 1 means "not an ancestor"; 128 means git failed.
 
@@ -1201,6 +1263,53 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         produced, _head, why = W.judge_detail(
             U.run, str(attempt), unit, anchor["facts"])
         self.assertTrue(produced, why)
+
+
+    def test_the_judgment_path_does_not_collapse_lineage_either(self):
+        """The SIBLING, swept in the same commit rather than in a fourth
+        round.
+
+        `validate_pinned_head` was fixed to distinguish merge-base's
+        documented exit 1 from a fatal one. `judge_detail` collapsed the
+        same status in the same way one screen up, and it is the same
+        wound: nine units read a false cause off a collapsed status. The
+        mutation that put `rc != 0` back here left the suite green until
+        this test existed.
+        """
+        real = U.run
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        unit = {"id": "u1", "kind": "code", "repo": str(self.repo)}
+        err, anchor_facts = S._write_launch_record(str(attempt), unit)
+        self.assertIsNone(err)
+        self.commit("A")
+
+        for status in (128, "128", 128.0):
+            with self.subTest(status=repr(status)):
+                def fatal(argv, _status=status, **kwargs):
+                    if "merge-base" in argv:
+                        return _status, "", "fatal: bad object deadbeef"
+                    return real(argv, **kwargs)
+
+                produced, _head, why = W.judge_detail(
+                    fatal, str(attempt), unit, anchor_facts["facts"])
+                self.assertFalse(produced)
+                self.assertIsNotNone(why)
+                self.assertIn("could not be determined", why)
+                self.assertIn("not a verdict on lineage", why)
+                self.assertNotIn("does not descend", why)
+                self.assertIn("bad object", why)
+
+        # Exit 1 is still the documented verdict, and still says so.
+        def not_an_ancestor(argv, **kwargs):
+            if "merge-base" in argv:
+                return 1, "", ""
+            return real(argv, **kwargs)
+
+        produced, _head, why = W.judge_detail(
+            not_an_ancestor, str(attempt), unit, anchor_facts["facts"])
+        self.assertFalse(produced)
+        self.assertIn("does not descend from the anchored base", why)
 
 
 class TestEvidenceRecordAuthorityKeys(unittest.TestCase):

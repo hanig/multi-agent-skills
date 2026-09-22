@@ -1149,28 +1149,48 @@ def judge_detail(runner, unit_dir, spec, launch_facts=None, judgment=None):
                        f"attempt was anchored on {rec['branch']!r}")
 
     base = rec.get("base_commit")
-    rc, head, _ = _git(runner, repo, "rev-parse", "HEAD")
+    # The SIBLING of validate_pinned_head's lineage branch, swept with it.
+    # Fixing the one a reviewer named and leaving this one is the exact
+    # failure CLAUDE.md warns about, and this is the same wound: nine
+    # units read a false cause off a collapsed exit status, and this
+    # function collapses the same status in the same way one screen up.
+    rc, head, head_err = _git(runner, repo, "rev-parse", "HEAD")
     if rc != 0:
-        return False, None, f"cannot read HEAD in {repo!r}"
+        return False, None, (
+            f"HEAD could not be read in {repo!r}. "
+            f"{render_git_diagnostic(rc, head_err)}. That is unknown, not a "
+            f"verdict on what the attempt produced")
     if head == base:
         return False, None, ("HEAD has not moved since launch, so nothing was "
                        "committed")
 
-    rc, _, _ = _git(runner, repo, "merge-base", "--is-ancestor", base, head)
-    if rc != 0:
+    rc, _, ancestor_err = _git(
+        runner, repo, "merge-base", "--is-ancestor", base, head)
+    if rc == 1:
+        # Exit 1 is the DOCUMENTED "not an ancestor". Only here is a
+        # verdict on lineage something git actually established.
         return False, None, (
             f"HEAD {head[:12]} does not descend from the anchored base "
             f"{str(base)[:12]}. The history was replaced rather than extended, "
             f"so what is there now was not built on what we anchored")
+    if rc != 0:
+        return False, None, (
+            f"the lineage of HEAD {head[:12]} against the anchored base "
+            f"{str(base)[:12]} could not be determined. "
+            f"{render_git_diagnostic(rc, ancestor_err)}. That is unknown, "
+            f"not a verdict on lineage")
 
     # The tree of the CAPTURED head, not of HEAD. Reading `HEAD^{tree}` was a
     # second look at a moving target: the agent could leave an empty
     # descendant at HEAD for the first read and a content-changing one for
     # this, so the tree that satisfied the check belonged to a commit other
     # than the one returned and pinned.
-    rc, tree, _ = _git(runner, repo, "rev-parse", head + "^{tree}")
+    rc, tree, tree_err = _git(runner, repo, "rev-parse", head + "^{tree}")
     if rc != 0:
-        return False, None, f"cannot read HEAD's tree in {repo!r}"
+        return False, None, (
+            f"the tree of HEAD {head[:12]} could not be validated in "
+            f"{repo!r}. {render_git_diagnostic(rc, tree_err)}. That is "
+            f"unknown, not a verdict on the tree")
     if tree == rec.get("base_tree"):
         return False, None, (
             "HEAD advanced but its tree is identical to the anchored base "
@@ -1506,17 +1526,27 @@ def validate_pinned_head(runner, launch_facts, produced):
             return (f"{PIN_VALIDATION_REFUSAL}: pinned produced commit "
                     f"{render_for_record(produced[:12], 12)} does not "
                     f"descend from trusted base "
-                    f"{render_for_record(base, 12)}")
+                    f"{render_for_record(base[:12], 12)}")
         return (f"{PIN_VALIDATION_REFUSAL}: the lineage of pinned produced "
                 f"commit {render_for_record(produced[:12], 12)} against "
-                f"base {render_for_record(base, 12)} could not be "
+                f"base {render_for_record(base[:12], 12)} could not be "
                 f"determined. {render_git_diagnostic(rc, ancestor_err)}. "
                 f"That is unknown, not a verdict on lineage")
     rc, tree, tree_err = _git(runner, repo, "rev-parse", produced + "^{tree}")
     if rc != 0:
+        # "could not be READ" names the tree as the thing that failed.
+        # luna: cat-file and merge-base can both succeed and this still
+        # exit nonzero because the checkout went away between commands,
+        # and the record then sends an operator after a tree that is
+        # fine. The same claims-more-than-it-knows shape as the lineage
+        # branch, in the branch after it -- which is the third time this
+        # sweep has had to reach one message further down the function.
         return (f"{PIN_VALIDATION_REFUSAL}: the tree of pinned commit "
-                f"{render_for_record(produced[:12], 12)} could not be read. "
-                f"{render_git_diagnostic(rc, tree_err)}")
+                f"{render_for_record(produced[:12], 12)} could not be "
+                f"validated at "
+                f"{render_for_record(repo, _PATH_LIMIT, collapse=False)}. "
+                f"{render_git_diagnostic(rc, tree_err)}. That is unknown, "
+                f"not a verdict on the tree")
     if tree == launch_facts["base_tree"]:
         return (f"{PIN_VALIDATION_REFUSAL}: the pinned produced commit has "
                 f"the launch base's unchanged tree")
