@@ -778,8 +778,8 @@ are in [docs/clusters.md](docs/clusters.md).
 python3 -m unittest discover -s tests
 ```
 
-621 tests, standard library only, no network and no cluster required. Green on
-macOS 3.10.16 and on all three clusters (3.10.12, 3.12.3, 3.10.12).
+Standard library only; no network or cluster required. Green on macOS 3.10.16
+and on all three clusters (3.10.12, 3.12.3, 3.10.12).
 
 | file | lines | classes |
 |---|---|---|

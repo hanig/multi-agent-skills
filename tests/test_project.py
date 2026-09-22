@@ -397,51 +397,530 @@ class TestNoTestGoesUncollectedAnywhere(unittest.TestCase):
                          f"these classes never run when their file is executed "
                          f"directly: {offenders}")
 
-    def test_every_declared_class_is_actually_collected(self):
-        """Compare what the loader COLLECTS against what each file DECLARES,
-        across the whole suite.
+    def test_every_declared_test_method_is_actually_collected(self):
+        """Compare available source names with concrete collection.
 
-        The obvious version re-executes each file, which makes this file run
-        itself, which re-executes it: I wrote that and hung the suite. Asking
-        the loader is the same question without the recursion."""
-        import re
-        missing = {}
-        for f in sorted((ROOT / "tests").glob("test_*.py")):
-            src = f.read_text()
-            # Only classes that actually CONTAIN tests. A shared `Base`
-            # subclassing TestCase with no test_ methods is legitimately not
-            # collected, and flagging it would be the cries-wolf failure that
-            # gets a guard deleted.
-            declared = set()
-            for node in ast.parse(src).body:
-                if not isinstance(node, ast.ClassDef):
-                    continue
-                has_tests = any(isinstance(b, (ast.FunctionDef,
-                                               ast.AsyncFunctionDef))
-                                and b.name.startswith("test_")
-                                for b in node.body)
-                if has_tests:
-                    declared.add(node.name)
-            loaded = set()
-            try:
-                suite = unittest.defaultTestLoader.loadTestsFromName(
-                    f"tests.{f.stem}")
-            except Exception as e:      # noqa: BLE001 - report, do not hide
-                missing[f.name] = f"could not load: {e}"
-                continue
+        Expectations come from a fresh loader and runtime MRO, while the suite
+        under inspection comes from the loader being checked. This catches one
+        hidden method even when another method from its class still collects.
+        It does not prove which callable body a collected name executes:
+        decorators and later callable substitution are deliberately accepted.
+        """
+        import types
+        import tempfile
+        from tests.test_docs_truth import (
+            assert_every_test_method_collected,
+            source_test_methods,
+            unittest_discoverable_paths,
+            walk_suite,
+        )
 
-            def walk(s):
-                for t in s:
-                    if isinstance(t, unittest.TestSuite):
-                        walk(t)
-                    else:
-                        loaded.add(type(t).__name__)
-            walk(suite)
-            gap = declared - loaded
-            if gap:
-                missing[f.name] = sorted(gap)
-        self.assertEqual(missing, {},
-                         f"declared but never collected: {missing}")
+        assert_every_test_method_collected(
+            unittest_discoverable_paths(ROOT / "tests"))
+
+        source = """
+import unittest
+class Shared:
+    def test_shared(self):
+        pass
+class Concrete(Shared, unittest.TestCase):
+    def test_own(self):
+        pass
+class Legacy(unittest.TestCase):
+    def testLegacy(self):
+        pass
+"""
+        module = types.ModuleType("tests.synthetic_collection")
+        exec(compile(source, "synthetic_collection.py", "exec"),
+             module.__dict__)
+
+        class SourcePath:
+            name = "synthetic_collection.py"
+            stem = "synthetic_collection"
+
+            def read_text(self):
+                return source
+
+        class ModuleLoader(unittest.TestLoader):
+            def loadTestsFromName(self, name, module_arg=None):
+                return self.loadTestsFromModule(module)
+
+        module_loader = lambda name: module
+        assert_every_test_method_collected(
+            [SourcePath()], ModuleLoader(), module_loader)
+
+        decorated_source = """
+import unittest
+class CallableTest:
+    def __call__(self):
+        pass
+def decorate(function):
+    return CallableTest()
+def wrap(function):
+    def wrapper(self):
+        return function(self)
+    return wrapper
+class Decorated(unittest.TestCase):
+    @decorate
+    def test_decorated(self):
+        pass
+    @wrap
+    def test_wrapped(self):
+        pass
+"""
+        decorated_module = types.ModuleType("tests.synthetic_collection")
+        exec(compile(decorated_source, "synthetic_collection.py", "exec"),
+             decorated_module.__dict__)
+        assert_every_test_method_collected(
+            [type("DecoratedPath", (), {
+                "name": "synthetic_collection.py",
+                "stem": "synthetic_collection",
+                "read_text": lambda self: decorated_source,
+            })()],
+            type("DecoratedLoader", (unittest.TestLoader,), {
+                "loadTestsFromName": lambda self, name:
+                self.loadTestsFromModule(decorated_module),
+            })(),
+            lambda name: decorated_module)
+
+        nested_source = """
+import unittest
+class Holder:
+    class Hidden(unittest.TestCase):
+        def test_hidden(self):
+            pass
+"""
+        nested_module = types.ModuleType("tests.synthetic_collection")
+        exec(compile(nested_source, "synthetic_collection.py", "exec"),
+             nested_module.__dict__)
+        with self.assertRaisesRegex(AssertionError,
+                                    r"Holder\.Hidden\.test_hidden"):
+            assert_every_test_method_collected(
+                [type("NestedPath", (), {
+                    "name": "synthetic_collection.py",
+                    "stem": "synthetic_collection",
+                    "read_text": lambda self: nested_source,
+                })()],
+                type("NestedLoader", (unittest.TestLoader,), {
+                    "loadTestsFromName": lambda self, name:
+                    self.loadTestsFromModule(nested_module),
+                })(),
+                lambda name: nested_module)
+
+        class CustomLeaf:
+            def __call__(self, result):
+                return result
+
+            def countTestCases(self):
+                return 1
+
+        class CustomLeafLoader(ModuleLoader):
+            def loadTestsFromName(self, name, module_arg=None):
+                suite = super().loadTestsFromName(name, module_arg)
+                suite.addTest(CustomLeaf())
+                return suite
+
+        assert_every_test_method_collected(
+            [SourcePath()], CustomLeafLoader(), module_loader)
+
+        orphan_source = source + """
+class Orphan:
+    def test_lost(self):
+        pass
+"""
+        orphan_module = types.ModuleType("tests.synthetic_collection")
+        exec(compile(orphan_source, "synthetic_collection.py", "exec"),
+             orphan_module.__dict__)
+        with self.assertRaisesRegex(AssertionError, "Orphan.test_lost"):
+            assert_every_test_method_collected(
+                [type("OrphanPath", (), {
+                    "name": "synthetic_collection.py",
+                    "stem": "synthetic_collection",
+                    "read_text": lambda self: orphan_source,
+                })()],
+                type("OrphanLoader", (unittest.TestLoader,), {
+                    "loadTestsFromName": lambda self, name:
+                    self.loadTestsFromModule(orphan_module),
+                })(),
+                lambda name: orphan_module)
+
+        duplicate_source = source + """
+class Duplicate:
+    def test_same(self):
+        pass
+    def test_same(self):
+        pass
+"""
+        duplicate_module = types.ModuleType("tests.synthetic_collection")
+        exec(compile(duplicate_source, "synthetic_collection.py", "exec"),
+             duplicate_module.__dict__)
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"duplicate declarations.*Duplicate\.test_same"):
+            assert_every_test_method_collected(
+                [type("DuplicatePath", (), {
+                    "name": "synthetic_collection.py",
+                    "stem": "synthetic_collection",
+                    "read_text": lambda self: duplicate_source,
+                })()],
+                type("DuplicateLoader", (unittest.TestLoader,), {
+                    "loadTestsFromName": lambda self, name:
+                    self.loadTestsFromModule(duplicate_module),
+                })(),
+                lambda name: duplicate_module)
+
+        redefined_source = source + """
+class Redefined(unittest.TestCase):
+    def test_lost(self):
+        pass
+class Redefined(unittest.TestCase):
+    pass
+"""
+        redefined_module = types.ModuleType("tests.synthetic_collection")
+        exec(compile(redefined_source, "synthetic_collection.py", "exec"),
+             redefined_module.__dict__)
+        with self.assertRaisesRegex(
+                AssertionError, r"duplicate declarations.*Redefined"):
+            assert_every_test_method_collected(
+                [type("RedefinedPath", (), {
+                    "name": "synthetic_collection.py",
+                    "stem": "synthetic_collection",
+                    "read_text": lambda self: redefined_source,
+                })()],
+                type("RedefinedLoader", (unittest.TestLoader,), {
+                    "loadTestsFromName": lambda self, name:
+                    self.loadTestsFromModule(redefined_module),
+                })(),
+                lambda name: redefined_module)
+
+        target = "Concrete.test_shared"
+
+        class HidingLoader(ModuleLoader):
+            def loadTestsFromName(self, name, module_arg=None):
+                suite = super().loadTestsFromName(name, module_arg)
+                visible = [
+                    test for test in walk_suite(suite)
+                    if f"{type(test).__name__}.{test._testMethodName}" != target
+                ]
+                return unittest.TestSuite(visible)
+
+        with self.assertRaisesRegex(AssertionError, re.escape(target)):
+            assert_every_test_method_collected(
+                [SourcePath()], HidingLoader(), module_loader)
+
+        class HidingLegacyLoader(ModuleLoader):
+            def loadTestsFromName(self, name, module_arg=None):
+                suite = super().loadTestsFromName(name, module_arg)
+                visible = [
+                    test for test in walk_suite(suite)
+                    if not (type(test).__name__ == "Legacy"
+                            and test._testMethodName == "testLegacy")
+                ]
+                return unittest.TestSuite(visible)
+
+        with self.assertRaisesRegex(AssertionError, "Legacy.testLegacy"):
+            assert_every_test_method_collected(
+                [SourcePath()], HidingLegacyLoader(), module_loader)
+
+        override_source = """
+import unittest
+class Shared:
+    def test_same(self):
+        pass
+class Concrete(Shared, unittest.TestCase):
+    def test_same(self):
+        pass
+"""
+        override_module = types.ModuleType("tests.synthetic_collection")
+        exec(compile(override_source, "synthetic_collection.py", "exec"),
+             override_module.__dict__)
+        assert_every_test_method_collected(
+            [type("OverridePath", (), {
+                "name": "synthetic_collection.py",
+                "stem": "synthetic_collection",
+                "read_text": lambda self: override_source,
+            })()],
+            type("OverrideLoader", (unittest.TestLoader,), {
+                "loadTestsFromName": lambda self, name:
+                self.loadTestsFromModule(override_module),
+            })(),
+            lambda name: override_module)
+
+        disabled_source = """
+import unittest
+class Base(unittest.TestCase):
+    def test_disabled(self):
+        pass
+class Derived(Base):
+    test_disabled = None
+"""
+        disabled_module = types.ModuleType("tests.synthetic_collection")
+        exec(compile(disabled_source, "synthetic_collection.py", "exec"),
+             disabled_module.__dict__)
+        assert_every_test_method_collected(
+            [type("DisabledPath", (), {
+                "name": "synthetic_collection.py",
+                "stem": "synthetic_collection",
+                "read_text": lambda self: disabled_source,
+            })()],
+            type("DisabledLoader", (unittest.TestLoader,), {
+                "loadTestsFromName": lambda self, name:
+                self.loadTestsFromModule(disabled_module),
+            })(),
+            lambda name: disabled_module)
+
+        erased_source = """
+import unittest
+class Erased(unittest.TestCase):
+    def test_erased(self):
+        pass
+Erased.test_erased = None
+"""
+        erased_module = types.ModuleType("tests.synthetic_collection")
+        exec(compile(erased_source, "synthetic_collection.py", "exec"),
+             erased_module.__dict__)
+        with self.assertRaisesRegex(AssertionError, "Erased.test_erased"):
+            assert_every_test_method_collected(
+                [type("ErasedPath", (), {
+                    "name": "synthetic_collection.py",
+                    "stem": "synthetic_collection",
+                    "read_text": lambda self: erased_source,
+                })()],
+                type("ErasedLoader", (unittest.TestLoader,), {
+                    "loadTestsFromName": lambda self, name:
+                    self.loadTestsFromModule(erased_module),
+                })(),
+                lambda name: erased_module)
+
+        erased_mixin_source = """
+import unittest
+class Shared:
+    def test_erased(self):
+        pass
+class Concrete(Shared, unittest.TestCase):
+    pass
+Shared.test_erased = None
+"""
+        erased_mixin = types.ModuleType("tests.synthetic_collection")
+        exec(compile(
+            erased_mixin_source, "synthetic_collection.py", "exec"),
+            erased_mixin.__dict__)
+        with self.assertRaisesRegex(AssertionError, "Shared.test_erased"):
+            assert_every_test_method_collected(
+                [type("ErasedMixinPath", (), {
+                    "name": "synthetic_collection.py",
+                    "stem": "synthetic_collection",
+                    "read_text": lambda self: erased_mixin_source,
+                })()],
+                type("ErasedMixinLoader", (unittest.TestLoader,), {
+                    "loadTestsFromName": lambda self, name:
+                    self.loadTestsFromModule(erased_mixin),
+                })(),
+                lambda name: erased_mixin)
+
+        rebound_source = """
+import unittest
+class Replacement(unittest.TestCase):
+    def test_erased(self):
+        pass
+class Erased(unittest.TestCase):
+    def test_erased(self):
+        pass
+Erased = Replacement
+"""
+        rebound_module = types.ModuleType("tests.synthetic_collection")
+        exec(compile(rebound_source, "synthetic_collection.py", "exec"),
+             rebound_module.__dict__)
+        with self.assertRaisesRegex(
+                AssertionError, "source classes unavailable.*Erased"):
+            assert_every_test_method_collected(
+                [type("ReboundPath", (), {
+                    "name": "synthetic_collection.py",
+                    "stem": "synthetic_collection",
+                    "read_text": lambda self: rebound_source,
+                })()],
+                type("ReboundLoader", (unittest.TestLoader,), {
+                    "loadTestsFromName": lambda self, name:
+                    self.loadTestsFromModule(rebound_module),
+                })(),
+                lambda name: rebound_module)
+
+        forged_source = """
+import unittest
+class Original(unittest.TestCase):
+    def test_original(self):
+        pass
+class Replacement(unittest.TestCase):
+    def test_original(self):
+        pass
+Replacement.__name__ = "Original"
+Replacement.__module__ = __name__
+Original = Replacement
+"""
+        forged_module = types.ModuleType("tests.synthetic_collection")
+        exec(compile(forged_source, "synthetic_collection.py", "exec"),
+             forged_module.__dict__)
+        with self.assertRaisesRegex(
+                AssertionError, "source classes unavailable.*Replacement"):
+            assert_every_test_method_collected(
+                [type("ForgedPath", (), {
+                    "name": "synthetic_collection.py",
+                    "stem": "synthetic_collection",
+                    "read_text": lambda self: forged_source,
+                })()],
+                type("ForgedLoader", (unittest.TestLoader,), {
+                    "loadTestsFromName": lambda self, name:
+                    self.loadTestsFromModule(forged_module),
+                })(),
+                lambda name: forged_module)
+
+        external_source = """
+import unittest
+class External(unittest.TestCase):
+    def test_external(self):
+        pass
+"""
+        external_module = types.ModuleType("tests.synthetic_collection")
+        exec(compile(external_source, "synthetic_collection.py", "exec"),
+             external_module.__dict__)
+        helper_namespace = {}
+        exec(compile("""
+
+
+def test_external(self):
+    pass
+""", "helper.py", "exec"), helper_namespace)
+        external_module.External.test_external = (
+            helper_namespace["test_external"])
+        assert_every_test_method_collected(
+            [type("ExternalPath", (), {
+                "name": "synthetic_collection.py",
+                "stem": "synthetic_collection",
+                "read_text": lambda self: external_source,
+            })()],
+            type("ExternalLoader", (unittest.TestLoader,), {
+                "loadTestsFromName": lambda self, name:
+                self.loadTestsFromModule(external_module),
+            })(),
+            lambda name: external_module)
+
+        same_class_rebind_source = """
+import unittest
+class Rebound(unittest.TestCase):
+    def test_original(self):
+        raise AssertionError("the original body need not be preserved")
+    def replacement(self):
+        pass
+Rebound.test_original = Rebound.replacement
+"""
+        same_class_rebind = types.ModuleType("tests.synthetic_collection")
+        exec(compile(
+            same_class_rebind_source, "synthetic_collection.py", "exec"),
+            same_class_rebind.__dict__)
+        assert_every_test_method_collected(
+            [type("SameClassRebindPath", (), {
+                "name": "synthetic_collection.py",
+                "stem": "synthetic_collection",
+                "read_text": lambda self: same_class_rebind_source,
+            })()],
+            type("SameClassRebindLoader", (unittest.TestLoader,), {
+                "loadTestsFromName": lambda self, name:
+                self.loadTestsFromModule(same_class_rebind),
+            })(),
+            lambda name: same_class_rebind)
+
+        mixin_module = types.ModuleType("tests.synthetic_mixin")
+        exec(compile("""
+class SharedAcrossModules:
+    def test_shared_across_modules(self):
+        pass
+""", "synthetic_mixin.py", "exec"), mixin_module.__dict__)
+        consumer_module = types.ModuleType("tests.synthetic_consumer")
+        consumer_module.SharedAcrossModules = (
+            mixin_module.SharedAcrossModules)
+        exec(compile("""
+import unittest
+class ConcreteAcrossModules(SharedAcrossModules, unittest.TestCase):
+    pass
+""", "synthetic_consumer.py", "exec"), consumer_module.__dict__)
+        modules = {
+            mixin_module.__name__: mixin_module,
+            consumer_module.__name__: consumer_module,
+        }
+
+        class CrossModuleLoader(unittest.TestLoader):
+            def loadTestsFromName(self, name, module_arg=None):
+                return self.loadTestsFromModule(modules[name])
+
+        assert_every_test_method_collected(
+            [type("MixinPath", (), {
+                "name": "synthetic_mixin.py",
+                "stem": "synthetic_mixin",
+                "read_text": lambda self: """
+class SharedAcrossModules:
+    def test_shared_across_modules(self):
+        pass
+""",
+            })(), type("ConsumerPath", (), {
+                "name": "synthetic_consumer.py",
+                "stem": "synthetic_consumer",
+                "read_text": lambda self: """
+import unittest
+class ConcreteAcrossModules(SharedAcrossModules, unittest.TestCase):
+    pass
+""",
+            })()], CrossModuleLoader(), lambda name: modules[name])
+
+        owner_a = types.ModuleType("tests.owner_a")
+        owner_b = types.ModuleType("tests.owner_b")
+        owner_source = """
+import unittest
+class Owner(unittest.TestCase):
+    def test_same(self):
+        pass
+"""
+        exec(compile(owner_source, "owner_a.py", "exec"), owner_a.__dict__)
+        exec(compile(owner_source, "owner_b.py", "exec"), owner_b.__dict__)
+        owner_b.Owner = owner_a.Owner
+        owner_modules = {owner_a.__name__: owner_a, owner_b.__name__: owner_b}
+        with self.assertRaisesRegex(
+                AssertionError, "source classes unavailable.*Owner"):
+            assert_every_test_method_collected(
+                [type("OwnerAPath", (), {
+                    "name": "owner_a.py",
+                    "stem": "owner_a",
+                    "read_text": lambda self: owner_source,
+                })(), type("OwnerBPath", (), {
+                    "name": "owner_b.py",
+                    "stem": "owner_b",
+                    "read_text": lambda self: owner_source,
+                })()],
+                type("OwnerLoader", (unittest.TestLoader,), {
+                    "loadTestsFromName": lambda self, name:
+                    self.loadTestsFromModule(owner_modules[name]),
+                })(),
+                lambda name: owner_modules[name])
+
+        with tempfile.TemporaryDirectory() as directory:
+            encoded = Path(directory) / "test_encoded.py"
+            encoded.write_bytes(
+                b"# coding: latin-1\nclass Encoded:\n"
+                b"    def test_encoded(self):\n        \"\"\"caf\xe9\"\"\"\n")
+            self.assertEqual(
+                source_test_methods(encoded),
+                [("Encoded", ["test_encoded"])])
+            root = Path(directory) / "tests"
+            package = root / "package"
+            fixture = root / "fixture"
+            package.mkdir(parents=True)
+            fixture.mkdir()
+            (package / "__init__.py").write_text("")
+            included = package / "test_included.py"
+            excluded = fixture / "test_excluded.py"
+            included.write_text("")
+            excluded.write_text("")
+            self.assertEqual(
+                unittest_discoverable_paths(root), [included])
 
 
 
