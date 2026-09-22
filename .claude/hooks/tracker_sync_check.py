@@ -288,12 +288,47 @@ _RESERVED_WORDS = frozenset([
     "while", "[[", "]]",
 ])
 
+# Wrappers that RUN a command given as their arguments. glm-5.3 found
+# these the round after reserved words, and they are the same shape:
+# `timeout 600 git push`, `sudo git push`, `env FOO=1 git push`,
+# `nohup git push`, `command git push` (luna) all put a word that is
+# not the real program in the program slot, all went silent, and the
+# shell script this file replaces caught every one of them with its
+# `*"git push"*` substring match. Two regression classes from one port
+# is enough to stop guessing which words can appear there.
+#
+# A wrapper's own options and operands vary too much to parse -- 600 is
+# an operand to `timeout`, `-u x` is an option to `sudo`, `FOO=1` is an
+# assignment to `env` -- so the remaining words are SCANNED for an
+# outward program rather than walked. That can over-fire on
+# `sudo echo git push`, which is the priced-in direction.
+_WRAPPERS = frozenset([
+    "command", "sudo", "doas", "env", "nohup", "timeout", "nice",
+    "ionice", "stdbuf", "exec", "setsid", "chrt", "eatmydata",
+])
+
 # Shells that take a command as a STRING argument. luna: `bash -c 'git push
 # origin HEAD'` lexes as a `bash` command whose quoted argument holds the
 # whole push, so no simple command has `git` as its program and the hook
 # went silent on a push the shell really runs.
 _SHELLS = frozenset(["sh", "bash", "zsh", "dash", "ksh", "ash", "busybox"])
 _SHELL_COMMAND_OPTIONS = frozenset(["-c", "--command"])
+
+
+def _is_shell_command_option(word):
+    """True for `-c`, `--command`, and a cluster like `-ce`.
+
+    kimi-k2.7-code: `bash -ce 'git push origin HEAD'` passes one token
+    `-ce`, which matched neither exact spelling, so the quoted command
+    was never read. Short options cluster; this is not an exotic
+    spelling.
+    """
+    if word in _SHELL_COMMAND_OPTIONS:
+        return True
+    if word.startswith("--"):
+        return word.split("=", 1)[0] == "--command"
+    return (len(word) > 1 and word[0] == "-" and "c" in word[1:]
+            and all(character.isalpha() for character in word[1:]))
 
 # Global options that take a SEPARATE value, so the value is not a noun.
 _GH_VALUE_OPTIONS = frozenset(["--repo", "-R", "--hostname"])
@@ -478,7 +513,13 @@ def _command_word_and_arguments(tokens):
 # name, this parser did not find a command, and "could not read this" is
 # the honest answer. `$CMD push` takes it too -- an unresolved variable is
 # a program word this hook cannot know.
-_COMMAND_WORD = re.compile(r"^[A-Za-z0-9_./+@:,~^%-]+$")
+# `[` is the test builtin and a legitimate program name, so rejecting
+# it turned `if [ -n "$GH_TOKEN" ]; then` -- a benign read-only check --
+# into a spurious unknown whenever the script mentioned gh or git
+# anywhere. glm-5.3 filed it out of scope as a false positive in the
+# priced-in direction; it is still noise, and noise is how a reminder
+# stops being read.
+_COMMAND_WORD = re.compile(r"^(?:\[\[?|\]\]?|[A-Za-z0-9_./+@:,~^%-]+)$")
 
 
 def _subcommands(arguments, value_options, depth):
@@ -575,6 +616,19 @@ def matched_label(command, _depth=0):
             return ("an outward action (the command could not be parsed "
                     "fully)")
         program = program.rsplit("/", 1)[-1]
+        if program in _WRAPPERS and _depth < _SHELL_RECURSION_LIMIT:
+            # Scan the wrapper's remaining words for an outward program
+            # and read the command from there. Not a walk: a wrapper's
+            # own options and operands have no common shape.
+            for index, argument in enumerate(arguments):
+                if argument.rsplit("/", 1)[-1] not in ("gh", "git"):
+                    continue
+                inner = matched_label(
+                    " ".join(shlex.quote(word)
+                             for word in arguments[index:]), _depth + 1)
+                if inner is not None:
+                    return inner
+                break
         if program in _SHELLS and _depth < _SHELL_RECURSION_LIMIT:
             # luna: `bash -c 'git push origin HEAD'` lexes as a `bash`
             # command whose quoted argument holds the whole push, so no
@@ -584,11 +638,15 @@ def matched_label(command, _depth=0):
             # -c ...'` is a command a person can write and a recursion a
             # hook must not follow forever.
             for index, argument in enumerate(arguments):
-                if argument not in _SHELL_COMMAND_OPTIONS:
+                if not _is_shell_command_option(argument):
                     continue
-                if index + 1 >= len(arguments):
+                if argument.startswith("--command="):
+                    inner = matched_label(argument.split("=", 1)[1],
+                                          _depth + 1)
+                elif index + 1 < len(arguments):
+                    inner = matched_label(arguments[index + 1], _depth + 1)
+                else:
                     break
-                inner = matched_label(arguments[index + 1], _depth + 1)
                 if inner is not None:
                     return inner
                 break
@@ -619,9 +677,17 @@ def probe_timeout_s():
     """
     raw = os.environ.get("HANIG_TRACKER_PROBE_TIMEOUT_S") or ""
     try:
-        return max(1.0, min(120.0, float(raw)))
+        seconds = float(raw)
     except ValueError:
         return 20.0
+    # kimi-k2.7-code: `float("NaN")` raises nothing, and min/max with a
+    # NaN propagate it, so `HANIG_TRACKER_PROBE_TIMEOUT_S=NaN` made
+    # `remaining <= 0` permanently false and disabled the deadline this
+    # clamp exists to guarantee. Infinity does the same. A bound that a
+    # value can switch off is not a bound.
+    if seconds != seconds or seconds in (float("inf"), float("-inf")):
+        return 20.0
+    return max(1.0, min(120.0, seconds))
 
 
 def emit(message):

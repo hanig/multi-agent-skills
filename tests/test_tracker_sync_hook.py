@@ -782,6 +782,37 @@ class TrackerSyncHookInputContract(unittest.TestCase):
                 "git >/tmp/log push origin HEAD", "git push"),
             "a bare append before the subcommand": (
                 "gh >>/tmp/log pr merge 41", "gh pr merge"),
+            # Round 3. The SECOND regression class against the shell
+            # hook this file replaces: a wrapper word in the program
+            # slot. luna found `command`, glm-5.3 found the rest, and
+            # the old `*"git push"*` substring match caught every one.
+            "the command builtin": (
+                "command git push origin HEAD", "git push"),
+            "timeout with an operand": (
+                "timeout 600 git push origin HEAD", "git push"),
+            "sudo": ("sudo git push origin HEAD", "git push"),
+            "sudo with an option and a value": (
+                "sudo -u bob git push origin HEAD", "git push"),
+            "env with an assignment": (
+                "env FOO=1 git push origin HEAD", "git push"),
+            "nohup": ("nohup gh pr merge 41", "gh pr merge"),
+            "nice with an option": (
+                "nice -n 5 git push origin HEAD", "git push"),
+            # kimi-k2.7-code: short options cluster.
+            "a clustered shell option": (
+                "bash -ce 'git push origin HEAD'", "git push"),
+            "another clustered shell option": (
+                "sh -xc 'gh pr merge 41'", "gh pr merge"),
+            "an equals-attached shell option": (
+                'bash --command="git push origin HEAD" x', "git push"),
+            # glm-5.3, out of scope but noise: `[` is the test builtin
+            # and a legitimate program name, so a benign conditional
+            # must not read as an unparseable command.
+            "the test builtin in a conditional": (
+                'if [ -n "$GH_TOKEN" ]; then gh pr merge 41; fi',
+                "gh pr merge"),
+            # A wrapper word that is not wrapping an outward command.
+            "sudo running something harmless": ("sudo ls -la", ""),
             # luna: the command delegated to another shell as a string.
             "bash -c with a push": (
                 "bash -c 'git push origin HEAD'", "git push"),
@@ -986,7 +1017,14 @@ class TrackerSyncHookInputContract(unittest.TestCase):
         try:
             for value, expected in (("99999", 120.0), ("-5", 1.0),
                                     ("0", 1.0), ("", 20.0),
-                                    ("not a number", 20.0), ("45", 45.0)):
+                                    ("not a number", 20.0), ("45", 45.0),
+                                    # kimi-k2.7-code: float() accepts
+                                    # these and min/max propagate them,
+                                    # so the deadline was switched off
+                                    # by a value the clamp let through.
+                                    ("NaN", 20.0), ("nan", 20.0),
+                                    ("inf", 20.0), ("-inf", 20.0),
+                                    ("Infinity", 20.0)):
                 with self.subTest(value=value):
                     os.environ["HANIG_TRACKER_PROBE_TIMEOUT_S"] = value
                     self.assertEqual(hook.probe_timeout_s(), expected)
