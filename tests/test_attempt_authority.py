@@ -633,6 +633,7 @@ RENDERED_REFUSAL_FUNCTIONS = (
     "artifact_transition_problem",
     "judge_artifacts",
     "launch_record_path",
+    "launch_facts_problem",
     "read_sealed_launch_record",
     "read_launch_record",
     "refused_launch",

@@ -811,17 +811,20 @@ def launch_facts_problem(facts, unit_dir=None, spec=None):
         attempt = Path(unit_dir).name
         if facts.get("attempt_id") != attempt:
             return (f"the trusted launch snapshot belongs to attempt "
-                    f"{facts.get('attempt_id')!r}, not {attempt!r}")
+                    f"{render_for_record(facts.get('attempt_id'), 160, collapse=False)}, "
+                    f"not {render_for_record(attempt, 160, collapse=False)}")
     expected_unit = (spec or {}).get("task_id") or (spec or {}).get("id")
     if expected_unit and facts.get("unit_id") != expected_unit:
         return (f"the trusted launch snapshot belongs to unit "
-                f"{facts.get('unit_id')!r}, not {expected_unit!r}")
+                f"{render_for_record(facts.get('unit_id'), 160, collapse=False)}, "
+                f"not {render_for_record(expected_unit, 160, collapse=False)}")
     required = ("repo", "execution_workspace", "workspace_identity",
                 "base_commit", "base_tree", "branch", "clean_at_launch")
     missing = [key for key in required if key not in facts]
     if missing:
         return ("the trusted launch snapshot is incomplete (missing "
-                f"{', '.join(missing)}). Re-dispatch this attempt")
+                f"{render_for_record(', '.join(missing), 200, collapse=False)}). "
+                f"Re-dispatch this attempt")
     identity = facts.get("workspace_identity")
     if (not isinstance(identity, dict)
             or identity.get("realpath") != facts.get("execution_workspace")):
@@ -830,7 +833,8 @@ def launch_facts_problem(facts, unit_dir=None, spec=None):
         value = facts.get(key)
         if not isinstance(value, str) or len(value) not in (40, 64) or any(
                 c not in "0123456789abcdef" for c in value.lower()):
-            return f"the trusted launch snapshot has an invalid {key}"
+            return (f"the trusted launch snapshot has an invalid "
+                    f"{render_for_record(key, 32, collapse=False)}")
     if facts.get("clean_at_launch") is not True:
         return ("the repository was already dirty at launch according to "
                 "the trusted launch snapshot, so production is "
@@ -838,12 +842,15 @@ def launch_facts_problem(facts, unit_dir=None, spec=None):
     judgment_ref = facts.get("judgment_ref")
     schema = facts.get("schema_version", 0)
     if schema >= 3:
-        expected = (f"refs/heads/{facts.get('branch')}" if schema >= 4 else
-                    f"refs/remotes/origin/{facts.get('branch')}")
+        expected = (
+            f"refs/heads/{render_for_record(facts.get('branch'), 4096, collapse=False)}"
+            if schema >= 4 else
+            f"refs/remotes/origin/{render_for_record(facts.get('branch'), 4096, collapse=False)}")
         if judgment_ref != expected:
             return (f"the trusted launch snapshot has judgment_ref "
-                    f"{judgment_ref!r}, not the schema-{schema} ref "
-                    f"{expected!r}")
+                    f"{render_for_record(judgment_ref, 4096, collapse=False)}, "
+                    f"not the schema-{render_for_record(schema, 12)} ref "
+                    f"{render_for_record(expected, 4096, collapse=False)}")
         if not facts.get("repository_remote"):
             return ("the trusted launch snapshot has no anchored origin URL "
                     "for direct remote-ref judgment")
