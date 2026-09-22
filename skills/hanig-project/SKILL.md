@@ -120,11 +120,34 @@ request runs it end to end.
 
 Ask ONLY about judgment: what counts as done, what the scientific claim is,
 what may be thrown away, what the budget is, what must never be overwritten,
-and **the most work they are willing to repeat after one interruption**. That
-last one sets the retry boundary and cannot be inferred from anything; a
-planner that invents it produces a readable DAG whose units are larger than
-the failures they will meet.
+**the most work they are willing to repeat after one interruption**, and **how
+often they want to be told what is happening**. The retry boundary sets unit
+size and cannot be inferred from anything; a planner that invents it produces
+a readable DAG whose units are larger than the failures they will meet.
 Every question carries your recommended answer so the default costs one word.
+
+**Reporting cadence is a question, not a default.** A run lasts days and the
+human is not watching it. Ask:
+
+> How often do you want a report while this runs — hourly, at each unit's
+> close, only when something needs you, or at the end? *Recommended: hourly
+> while units are live, plus immediately on anything that needs a person.*
+
+Record the answer in the plan as a top-level `reporting` block, not in your
+own memory: a session dies and its successor inherits the plan, not the
+conversation. It sits outside `plan_digest`, which covers units, budget and
+root, so changing cadence mid-run does not invalidate recorded attempts and
+needs no `--accept-plan-change`.
+
+Two things the answer must capture, because they are different questions.
+**Cadence** is how often a healthy run reports. **Escalation** is what reaches
+them immediately regardless of cadence — a `NEEDS_HUMAN` unit, an exhausted
+budget, a blocked merge, a conflict a machine must not settle. "Only at the
+end" is a legitimate cadence and is never a legitimate escalation policy.
+
+Nothing enforces cadence today; the orchestrator honours it. Say so plainly
+rather than implying a timer exists, and if you want it enforced, that is
+ARC-691's clock, not a sentence here.
 
 **Stop when the plan can RUN, not when you run out of questions.** These are
 different, and getting it wrong is expensive: a plan was once built, validated
