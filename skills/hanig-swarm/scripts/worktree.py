@@ -634,7 +634,8 @@ class EvidenceRecord(dict):
 
     def _refuse(self, key):
         raise AuthorityFromEvidence(
-            f"{key!r} decides something, and this launch record was read "
+            f"{render_for_record(key, 80, collapse=False)} decides something, "
+            f"and this launch record was read "
             f"without its seal, so it is evidence rather than authority. Take "
             f"the value from the plan or from coordinator state; if you are "
             f"cross-checking the record's claim against one of those and will "
