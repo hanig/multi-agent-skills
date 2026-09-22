@@ -873,6 +873,16 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
             W.effective_remote_ref({"schema_version": 3, "branch": branch}),
             "refs/heads/" + branch)
 
+    def test_launch_facts_problem_preserves_an_overlong_comparison_ref(self):
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        branch = "b" * 5000
+        facts = dict(self.facts(attempt), schema_version=4,
+                     branch=branch,
+                     judgment_ref="refs/heads/" + branch,
+                     repository_remote="https://example.invalid/repo.git")
+        self.assertIsNone(W.launch_facts_problem(facts))
+
     def test_the_whole_refusal_is_bounded_not_just_the_diagnostic(self):
         """kimi-k2.7-code: the recorded path went in verbatim.
 

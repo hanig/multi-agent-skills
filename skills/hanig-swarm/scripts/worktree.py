@@ -844,10 +844,11 @@ def launch_facts_problem(facts, unit_dir=None, spec=None):
     judgment_ref = facts.get("judgment_ref")
     schema = facts.get("schema_version", 0)
     if schema >= 3:
+        branch = _as_text(facts.get("branch"))
         expected = (
-            f"refs/heads/{render_for_record(facts.get('branch'), 4096, collapse=False)}"
+            f"refs/heads/{render_for_record(branch, len(branch), collapse=False)}"
             if schema >= 4 else
-            f"refs/remotes/origin/{render_for_record(facts.get('branch'), 4096, collapse=False)}")
+            f"refs/remotes/origin/{render_for_record(branch, len(branch), collapse=False)}")
         if judgment_ref != expected:
             return (f"the trusted launch snapshot has judgment_ref "
                     f"{render_for_record(judgment_ref, 4096, collapse=False)}, "
