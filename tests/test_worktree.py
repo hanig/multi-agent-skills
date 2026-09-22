@@ -92,7 +92,7 @@ class TestWorkThatDidNotHappen(Base):
         self.anchor()
         produced, why = self.judge()
         self.assertFalse(produced)
-        self.assertIn("HEAD has not moved", why)
+        self.assertIn("HEAD is the launch base", why)
 
     def test_an_empty_commit_is_not_production(self):
         """Moves HEAD, changes nothing. This is why the comparison is tree to
@@ -109,7 +109,7 @@ class TestWorkThatDidNotHappen(Base):
         self.write("a.txt", "one\n")
         produced, why = self.judge()
         self.assertFalse(produced)
-        self.assertIn("HEAD has not moved", why)
+        self.assertIn("HEAD is the launch base", why)
 
     def test_change_committed_then_reverted_and_committed(self):
         """Two commits, net zero. HEAD descends from base and is clean, so
@@ -308,7 +308,7 @@ class TestARetryDoesNotInheritTheLastAttemptsBaseline(Base):
         self.assertFalse(produced,
                          "att2 produced nothing, but inherited att1's anchor "
                          "so att1's commit counted as att2's production")
-        self.assertIn("HEAD has not moved", why)
+        self.assertIn("HEAD is the launch base", why)
 
     def test_the_first_attempts_verdict_is_unaffected(self):
         sys.path.insert(0, str(SCRIPTS))

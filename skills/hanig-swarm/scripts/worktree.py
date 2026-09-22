@@ -91,10 +91,164 @@ def decode_launch_facts(payload):
     return facts, None
 
 
+def _as_text(value):
+    """Any runner return value, as text, without ever raising.
+
+    THE boundary. Every value the injected runner produces enters this
+    module through `_git`, and `_git` used to call `(value or "").strip()`
+    on it -- so a runner returning a list of stderr lines, "a natural
+    runner shape", raised AttributeError here and a validation failure
+    became an exception rather than a refusal.
+
+    Three review rounds fixed consumers of this function instead of this
+    function: first `render_for_record`, then `render_git_diagnostic`, then
+    the exit status. Each fix was correct and none of them was the
+    boundary. This is the boundary, and there is exactly one coercion in
+    the module now.
+    """
+    # `type(value) is str`, not isinstance: luna found that a str SUBCLASS
+    # passes isinstance and then `_git` calls its overridden `.strip()`,
+    # which can raise. A subclass falls through to the str() branch below,
+    # which produces a real str with real methods.
+    if type(value) is str:
+        return value
+    if value is None:
+        return ""
+    try:
+        # `.decode` is inside the guard: kimi-k2.7-code pointed out that a
+        # bytes SUBCLASS can override it, and it was being called outside.
+        if isinstance(value, bytes):
+            rendered = value.decode("utf-8", "replace")
+        else:
+            rendered = str(value)
+        # str() and .decode() both RETURN A SUBCLASS when handed one, so
+        # the subclass this branch exists to defuse walked straight
+        # through it and `_git` called its poisoned `.strip()` anyway.
+        #
+        # My first repair was `"" + rendered`, justified in a comment
+        # saying the subclass could not intervene "because it is the
+        # right-hand operand of a real str". glm-5.3: "The in-code
+        # justification is backwards: being the right-hand operand of a
+        # str is what gives the subclass first crack at __radd__, not
+        # what prevents it." Reproduced -- a Poison(str) with __radd__
+        # returning self comes straight back out of `"" + p`, and out
+        # of `str(p)` and `"%s" % p` too. I had cited the mechanism
+        # that defeats the coercion as the reason it works.
+        #
+        # `"".join([x])` copies the characters in C. There is no
+        # protocol for an element to intercept a join, so a subclass
+        # cannot return itself from one, and a value that is not a str
+        # at all raises TypeError into the handler below rather than
+        # escaping as something else. Those are the only two outcomes:
+        # exact str, or the fallback.
+        #
+        # A `type(...) is not str` check sat here afterwards and
+        # reverting it changed nothing, because join has no third
+        # outcome to catch. A guard that cannot fire is the "invariant
+        # written in prose" this repository warns about, so it is gone
+        # and the reasoning is here instead.
+        if type(rendered) is not str:
+            rendered = "".join([rendered])
+        return rendered
+    except BaseException:
+        # BaseException, not Exception: kimi-k2.7-code pointed out that a
+        # __str__ raising SystemExit escapes an `except Exception`. The
+        # only call inside this try is str(value), so any BaseException
+        # from it is the value's doing, and this function's contract is
+        # that it does not raise.
+        return "<a value that cannot be rendered>"
+
+
+class _UnestablishedStatus(object):
+    """Nonzero, with a magnitude this runner did not establish.
+
+    NOT an int, deliberately. Every branch in this module that reads an
+    exact status -- `rc == 1` for merge-base's documented "not an
+    ancestor", `rc == 2` for ls-remote's "ref absent", `rc in (0, 1)` for
+    config's "key not found" -- is asking a question that a value like
+    "128" or 128.0 or True cannot answer. Collapsing those to 1, which is
+    what the previous version did, made every one of them answer YES to a
+    question about a status nobody reported.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self):
+        return "<a status the runner did not report as a number>"
+
+    __str__ = __repr__
+
+
+UNESTABLISHED_STATUS = _UnestablishedStatus()
+
+
+def _as_status(value):
+    """A runner's exit status, as an int when one can be established.
+
+    luna and kimi-k2.7-code, independently: `rc` was never coerced, so a
+    status object with a custom comparison raised at `rc != 0` before any
+    refusal could be built. A status whose comparison to zero cannot be
+    evaluated is treated as FAILURE, because a runner that cannot say it
+    succeeded did not.
+
+    Four rounds of this function were four wrong answers to one question,
+    "is this value zero, and if not, which nonzero is it":
+
+      * `rc != 0` accepted 0, 0.0 and False, refused "0", and raised on a
+        hostile comparison.
+      * `int(value)` ADMITTED "0" -- a previously-refused run (luna,
+        glm-5.3).
+      * Rejecting everything non-int REFUSED 0.0 and False, which a runner
+        legitimately returns (kimi-k2.7-code).
+      * Collapsing every nonzero to 1 made 128.0 and "128" read as
+        merge-base's documented "not an ancestor", so a fatal error became
+        a false lineage verdict (luna, glm-5.3, both again).
+
+    The fourth is the one worth stating as a rule: the callers need two
+    different facts, and only one of them survives a collapse. So a value
+    that is not an int yields zero if it compares equal to zero, and
+    otherwise UNESTABLISHED_STATUS -- nonzero, and no more than that. The
+    magnitude is never PARSED out of a string; "0" is still refused, and
+    the refusal now says the status was not reported as a number rather
+    than naming a cause.
+    """
+    # Only a genuine number may claim zero. luna: an object whose
+    # __eq__(0) returns True was ADMITTED as success -- a runner could
+    # wrap a real exit 128 in one and validate_pinned_head would
+    # return None instead of refusing. Every earlier version of this
+    # function erred towards refusing; this one erred towards
+    # admitting, which is the direction that matters.
+    #
+    # The comparison is kept for float and False because a runner
+    # legitimately returns those (kimi-k2.7-code, two rounds ago), and
+    # denied to everything else because nothing else can be trusted to
+    # mean zero by saying so.
+    if value is False:
+        return 0
+    if value is True:
+        return UNESTABLISHED_STATUS
+    if type(value) is float:
+        return 0 if value == 0 else UNESTABLISHED_STATUS
+    if type(value) is int:
+        # An int passes through UNCHANGED, magnitude and all: 1 and 128
+        # mean different things and both callers depend on the difference.
+        #
+        # `type(value) is int` rather than isinstance, and bool is the
+        # reason as much as an int subclass is: True == 1, so an
+        # isinstance check would let a bool answer YES to "is this
+        # merge-base's documented not-an-ancestor". It falls through to
+        # the comparison below instead, where False is zero and True is
+        # nonzero-and-nothing-more. I wrote that as an explicit bool
+        # branch first; reverting the branch changed no behaviour and no
+        # test, so it was doing nothing but claiming to.
+        return value
+    return UNESTABLISHED_STATUS
+
+
 def _git(runner, repo, *args, timeout=60):
     rc, out, err = runner(["git", "-C", str(repo)] + list(args),
                           timeout=timeout)
-    return rc, (out or "").strip(), (err or "").strip()
+    return _as_status(rc), _as_text(out).strip(), _as_text(err).strip()
 
 
 def repo_status(runner, repo):
@@ -109,10 +263,13 @@ def repo_status(runner, repo):
     worktree, so an in-repository path is user-authored dirt and must be named
     rather than silently ignored.
     """
-    rc, out, _ = _git(runner, repo, "status", "--porcelain=v1", "-z",
-                       "--untracked-files=all")
+    rc, out, err = _git(runner, repo, "status", "--porcelain=v1", "-z",
+                        "--untracked-files=all")
     if rc != 0:
-        return rc, []
+        # git's own sentence travels with the status. Discarding it here
+        # is why the caller had to invent one, and "cannot read git
+        # status" was the invention -- luna.
+        return rc, [render_git_diagnostic(rc, err)]
     fields = out.split("\x00")
     entries, i = [], 0
     while i < len(fields):
@@ -804,7 +961,7 @@ def _judge_anchored_ref(runner, facts, judgment=None):
         _set_judgment_state(judgment, "remote-ref-unreadable")
         return False, None, (
             f"cannot resolve anchored remote ref {ref!r} from the anchored "
-            f"origin: {(err or out or ('git ls-remote exited %s' % rc))[:200]}")
+            f"origin: {render_git_diagnostic(rc, err or out)}")
     lines = [line.split() for line in out.splitlines() if line.strip()]
     if (len(lines) != 1 or len(lines[0]) != 2 or lines[0][1] != ref
             or len(lines[0][0]) not in (40, 64)
@@ -896,22 +1053,48 @@ def workspace_identity_problem(runner, facts):
         current_path = str(Path(workspace).resolve())
         current = os.stat(workspace)
     except OSError as exc:
-        return f"cannot identify the anchored worktree {workspace!r}: {exc}"
-    if (current_path != identity["realpath"]
-            or current.st_dev != identity["device"]
-            or current.st_ino != identity["inode"]):
-        return (f"the anchored worktree path {workspace!r} no longer names "
-                f"the launched directory (device/inode changed)")
+        return (f"cannot identify the anchored worktree "
+                f"{render_for_record(workspace, _PATH_LIMIT, collapse=False)}"
+                f": {render_for_record(exc, _DIAGNOSTIC_LIMIT)}")
+    # WHICH of the three differed. kimi-k2.7-code and glm-5.3 gave the
+    # same example: rename /build to /newbuild and leave a symlink, and
+    # stat returns the identical device and inode while only resolve()
+    # moves. The old message said "(device/inode changed)" -- a cause
+    # the stat in this very conditional disproves, sending an operator
+    # to hunt a replaced directory that is the same directory.
+    differences = []
+    if current_path != identity["realpath"]:
+        differences.append(
+            "the resolved path is now "
+            + render_for_record(current_path, _PATH_LIMIT, collapse=False))
+    if current.st_dev != identity["device"]:
+        differences.append("the device differs")
+    if current.st_ino != identity["inode"]:
+        differences.append("the inode differs")
+    if differences:
+        # The join goes through the renderer too. My own AST guard
+        # flagged it, correctly: it cannot know the pieces were
+        # rendered individually, and rendering the assembled string
+        # bounds the COMBINED length, which nothing else did.
+        return (f"the anchored worktree path "
+                f"{render_for_record(workspace, _PATH_LIMIT, collapse=False)}"
+                f" no longer names the launched directory: "
+                f"{render_for_record('; '.join(differences), _DIAGNOSTIC_LIMIT, collapse=False)}")
     observed = {}
     for key, args in (
             ("top", ("rev-parse", "--show-toplevel")),
             ("git_common_dir", ("rev-parse", "--git-common-dir")),
             ("git_dir", ("rev-parse", "--git-dir")),
             ("branch", ("rev-parse", "--abbrev-ref", "HEAD"))):
-        rc, value, _ = _git(runner, workspace, *args)
+        rc, value, identity_err = _git(runner, workspace, *args)
         if rc != 0:
-            return (f"cannot verify the anchored worktree's Git identity "
-                    f"({key} is unreadable)")
+            # kimi-k2.7-code: "is unreadable" named a cause for every
+            # nonzero exit, so `fatal: not a git repository` sent an
+            # operator to check file permissions. Report what was asked
+            # and what git said; do not decide between them.
+            return (f"cannot verify the anchored worktree's Git identity: "
+                    f"{render_for_record(key, 32)} could not be determined. "
+                    f"{render_git_diagnostic(rc, identity_err)}")
         observed[key] = value
     top = str(Path(observed["top"]).resolve())
     common = str((Path(workspace) / observed["git_common_dir"]).resolve())
@@ -920,7 +1103,8 @@ def workspace_identity_problem(runner, facts):
         common_st = os.stat(common)
         git_st = os.stat(git_dir)
     except OSError as exc:
-        return f"cannot stat the anchored Git metadata: {exc}"
+        return ("cannot stat the anchored Git metadata: "
+                + render_for_record(exc, _DIAGNOSTIC_LIMIT))
     # Migration: launch snapshots written before the Git-metadata identity
     # fields were added recorded paths but not device/inode. Those attempts
     # keep the older, weaker path + worktree-root check until they finish;
@@ -935,11 +1119,18 @@ def workspace_identity_problem(runner, facts):
             or (has_git_inode
                 and (git_st.st_dev != identity["git_dir_device"]
                      or git_st.st_ino != identity["git_dir_inode"]))):
-        return (f"the anchored directory {workspace!r} no longer has the "
-                f"launched Git worktree metadata identity")
+        return (f"the anchored directory "
+                f"{render_for_record(workspace, _PATH_LIMIT, collapse=False)}"
+                f" no longer has the launched Git worktree metadata "
+                f"identity")
     if observed["branch"] != facts.get("branch"):
-        return (f"the repository is on branch {observed['branch']!r}, but "
-                f"this attempt was anchored on {facts.get('branch')!r}")
+        # The message luna's 10,000-character branch actually reached.
+        # `judge_detail` carries the same sentence and was fixed first;
+        # this one fired before it and is the sibling that matters.
+        return (f"the repository is on branch "
+                f"{render_for_record(observed['branch'], _DIAGNOSTIC_LIMIT)}"
+                f", but this attempt was anchored on "
+                f"{render_for_record(facts.get('branch'), _DIAGNOSTIC_LIMIT)}")
     return None
 
 
@@ -998,18 +1189,30 @@ def judge_detail(runner, unit_dir, spec, launch_facts=None, judgment=None):
     repo = rec.get("execution_workspace")
     if not repo:
         return False, None, (
-            f"this unit declares repo {spec['repo']!r}, but its launch record "
+            f"this unit declares repo "
+            f"{render_for_record(spec['repo'], _PATH_LIMIT, collapse=False)}"
+            f", but its launch record "
             f"anchored no execution worktree. The anchor was written before the unit "
             f"declared one, or _write_launch_record failed: either way "
             f"nothing captured a baseline, so re-dispatch this unit rather "
             f"than reading this as a configuration mistake")
     if not os.path.isdir(repo):
-        return False, None, f"the anchored repository {repo!r} is gone"
+        return False, None, (
+            # `not isdir` is also true for a regular file and for a
+            # path this process cannot stat, so "is gone" sends an
+            # operator looking for a deletion that may not have
+            # happened -- kimi-k2.7-code, and the same
+            # claims-more-than-it-knows shape as the lineage branches.
+            f"the anchored repository "
+            f"{render_for_record(repo, _PATH_LIMIT, collapse=False)} is "
+            f"not a directory. It may be absent, replaced by a file, or "
+            f"unreadable from here; this does not distinguish them")
 
     if not rec.get("clean_at_launch", False):
         return False, None, (
             f"the repository was already dirty at launch "
-            f"({rec.get('dirty_paths_at_launch', '?')} path(s)), so there was "
+            f"({render_for_record(rec.get('dirty_paths_at_launch', '?'), 12)}"
+            f" path(s)), so there was "
             f"no clean state to transition FROM and any change now is "
             f"unattributable to this attempt")
 
@@ -1023,7 +1226,20 @@ def judge_detail(runner, unit_dir, spec, launch_facts=None, judgment=None):
     # tree. The claim was too broad; the code is right.
     rc, dirty = repo_status(runner, repo)
     if rc != 0:
-        return False, None, f"cannot read git status in {repo!r}"
+        # Name the command and carry git's words; do not decide WHY it
+        # failed. A nonzero status here is equally an absent
+        # repository, an invalid one, or a git that could not run.
+        # The diagnostic is rendered by repo_status, but it arrives
+        # here as a list element and the AST guard cannot see that --
+        # it flagged the conditional, which is the guard working. One
+        # renderer at one boundary means the value is rendered where
+        # it is INTERPOLATED, not merely somewhere upstream.
+        said = render_for_record(
+            dirty[0] if dirty else "git said nothing", _DIAGNOSTIC_LIMIT)
+        return False, None, (
+            f"git status could not be determined in "
+            f"{render_for_record(repo, _PATH_LIMIT, collapse=False)}. "
+            f"{said}. That is unknown, not a verdict on the working tree")
     if dirty:
         return False, None, (
             f"{len(dirty)} path(s) are uncommitted. Work left in the working "
@@ -1032,32 +1248,93 @@ def judge_detail(runner, unit_dir, spec, launch_facts=None, judgment=None):
 
     rc, branch, _ = _git(runner, repo, "rev-parse", "--abbrev-ref", "HEAD")
     if rc == 0 and rec.get("branch") and branch != rec["branch"]:
-        return False, None, (f"the repository is on branch {branch!r}, but this "
-                       f"attempt was anchored on {rec['branch']!r}")
+        return False, None, (
+            f"the repository is on branch "
+            f"{render_for_record(branch, _DIAGNOSTIC_LIMIT)}, but this attempt "
+            f"was anchored on "
+            f"{render_for_record(rec['branch'], _DIAGNOSTIC_LIMIT)}")
 
     base = rec.get("base_commit")
-    rc, head, _ = _git(runner, repo, "rev-parse", "HEAD")
-    if rc != 0:
-        return False, None, f"cannot read HEAD in {repo!r}"
-    if head == base:
-        return False, None, ("HEAD has not moved since launch, so nothing was "
-                       "committed")
-
-    rc, _, _ = _git(runner, repo, "merge-base", "--is-ancestor", base, head)
+    # The SIBLING of validate_pinned_head's lineage branch, swept with it.
+    # Fixing the one a reviewer named and leaving this one is the exact
+    # failure CLAUDE.md warns about, and this is the same wound: nine
+    # units read a false cause off a collapsed exit status, and this
+    # function collapses the same status in the same way one screen up.
+    # Every value this function records goes through the renderer. The
+    # first pass covered only the four messages I had just rewritten,
+    # which luna and kimi-k2.7-code and glm-5.3 all then refuted from a
+    # different direction: `rec['branch']` was recorded raw, and an
+    # attempt record with a 10,000-character branch put all of it in a
+    # durable refusal. An AST sweep of both functions found nine raw
+    # interpolations, not one. All nine are rendered now; `len(dirty)`
+    # is an int and the PIN_VALIDATION_REFUSAL prefix is ours.
+    #
+    # The renderer's own docstring records this claim running ahead of
+    # the code, once per field, three times. This was the fourth, and
+    # fixing the field a reviewer names instead of sweeping is exactly
+    # the failure CLAUDE.md warns about -- so the sweep here was
+    # mechanical rather than by eye.
+    # All three reviewers pointed at the same thing in the same round:
+    # I rewrote these refusals and left them interpolating raw, while
+    # claiming one renderer at one boundary. The renderer's own docstring
+    # already records that this claim ran ahead of the code three times,
+    # once per field; this is the fourth, and it is the last place in
+    # either function that bypasses it.
+    shown_repo = render_for_record(repo, _PATH_LIMIT, collapse=False)
+    rc, head, head_err = _git(runner, repo, "rev-parse", "HEAD")
     if rc != 0:
         return False, None, (
-            f"HEAD {head[:12]} does not descend from the anchored base "
-            f"{str(base)[:12]}. The history was replaced rather than extended, "
-            f"so what is there now was not built on what we anchored")
+            f"HEAD could not be read in {shown_repo}. "
+            f"{render_git_diagnostic(rc, head_err)}. That is unknown, not a "
+            f"verdict on what the attempt produced")
+    if head == base:
+        # luna: this established only that HEAD equals the launch base
+        # NOW. A run that commits and then resets leaves exactly this
+        # state, so "nothing was committed" names a history the check
+        # never observed.
+        return False, None, (
+            "HEAD is the launch base, so this attempt produced nothing "
+            "to judge. Whether it never committed or committed and "
+            "moved back, this does not distinguish")
+
+    rc, _, ancestor_err = _git(
+        runner, repo, "merge-base", "--is-ancestor", base, head)
+    if rc == 1:
+        # Exit 1 is the DOCUMENTED "not an ancestor". Only here is a
+        # verdict on lineage something git actually established.
+        # luna, one round after the exit STATUS stopped being collapsed:
+        # the prose still was. Exit 1 establishes "not an ancestor" and
+        # nothing else -- a sibling-branch commit, a branch already
+        # ahead at launch and a force-pushed replacement all produce it,
+        # and only one of them is a replacement. Naming that one is the
+        # same claims-more-than-it-knows defect this whole change exists
+        # to remove, surviving in the sentence after the fix.
+        return False, None, (
+            f"HEAD {render_for_record(head[:12], 12)} does not descend from "
+            f"the anchored base {render_for_record(str(base)[:12], 12)}, so "
+            f"what is there now was not built on what we anchored. What "
+            f"put it there -- a replaced history, a branch already ahead "
+            f"at launch, an unrelated commit checked out -- this does not "
+            f"distinguish")
+    if rc != 0:
+        return False, None, (
+            f"the lineage of HEAD {render_for_record(head[:12], 12)} against "
+            f"the anchored base {render_for_record(str(base)[:12], 12)} could "
+            f"not be determined. {render_git_diagnostic(rc, ancestor_err)}. "
+            f"That is unknown, not a verdict on lineage")
 
     # The tree of the CAPTURED head, not of HEAD. Reading `HEAD^{tree}` was a
     # second look at a moving target: the agent could leave an empty
     # descendant at HEAD for the first read and a content-changing one for
     # this, so the tree that satisfied the check belonged to a commit other
     # than the one returned and pinned.
-    rc, tree, _ = _git(runner, repo, "rev-parse", head + "^{tree}")
+    rc, tree, tree_err = _git(runner, repo, "rev-parse", head + "^{tree}")
     if rc != 0:
-        return False, None, f"cannot read HEAD's tree in {repo!r}"
+        return False, None, (
+            f"the tree of HEAD {render_for_record(head[:12], 12)} could not "
+            f"be validated in {shown_repo}. "
+            f"{render_git_diagnostic(rc, tree_err)}. That is unknown, not a "
+            f"verdict on the tree")
     if tree == rec.get("base_tree"):
         return False, None, (
             "HEAD advanced but its tree is identical to the anchored base "
@@ -1065,9 +1342,12 @@ def judge_detail(runner, unit_dir, spec, launch_facts=None, judgment=None):
             "reverted before committing, moves HEAD without producing "
             "anything")
 
-    return True, head, (f"tree {tree[:12]} differs from the anchored base tree "
-                  f"{str(rec.get('base_tree'))[:12]}, on a commit descending "
-                  f"from {str(base)[:12]}, with a clean tree at both ends")
+    return True, head, (
+        f"tree {render_for_record(tree[:12], 12)} differs from the anchored "
+        f"base tree {render_for_record(str(rec.get('base_tree'))[:12], 12)}, "
+        f"on a commit descending from "
+        f"{render_for_record(str(base)[:12], 12)}, with a clean tree at both "
+        f"ends")
 
 
 def judge(runner, unit_dir, spec, launch_facts=None):
@@ -1227,6 +1507,107 @@ def receipt_basis(runner, unit_dir, spec, launch_facts=None):
                 stray_untracked=stray_untracked(runner, spec, launch_facts))
 
 
+# A stable prefix so a refusal stays greppable across git versions, wording
+# and locale, WITHOUT claiming a category. astra, on the committee: "A stable
+# generic label solves discovery; diagnostic localization, if required, is a
+# separate presentation decision."
+PIN_VALIDATION_REFUSAL = "pinned commit validation failed"
+
+_DIAGNOSTIC_LIMIT = 400
+_PATH_LIMIT = 200
+
+
+def render_for_record(text, limit, collapse=True):
+    """One untrusted string, made safe to put in a durable record.
+
+    Applied to EVERY value this refusal interpolates. Bounding git's
+    diagnostic and then inserting a recorded repository path verbatim left
+    the refusal unbounded through the other field -- kimi-k2.7-code
+    demonstrated it with a 10,000 character path -- and the round after
+    that found the commit id going in unrendered. Each time the claim was
+    ahead of the code by one field, so there is now one renderer and every
+    interpolation goes through it.
+
+    ``collapse`` is False for a PATH. A path may legitimately contain a
+    space, and collapsing runs of whitespace silently rewrites it, so for
+    paths every non-printable -- including a newline or a tab, which a path
+    must not contain in a record -- becomes a visible marker and spaces are
+    left exactly as recorded. luna and kimi-k2.7-code both caught the first
+    version trimming a path it had promised not to trim.
+    """
+    # TOTAL by construction. luna: a runner that returns bytes made the
+    # string join raise TypeError, so a validation failure became an
+    # exception instead of a refusal -- the one thing a function whose job
+    # is to produce a refusal must never do. `_git` stringifies in the real
+    # path, but the runner is injected and nothing enforces its types.
+    raw = _as_text(text)
+    source = " ".join(raw.split()) if collapse else raw
+    safe = "".join(c if c.isprintable() else "?" for c in source)
+    if len(safe) <= limit:
+        return safe
+    # kimi-k2.7-code: with a limit below the marker's own length the result
+    # was LONGER than the limit, which is the defect this function exists
+    # to prevent, in miniature.
+    marker = " [truncated]"
+    if limit <= len(marker):
+        return safe[:max(0, limit)]
+    return safe[:limit - len(marker)] + marker
+
+
+def render_git_diagnostic(rc, err):
+    """Git's own words, attributed to git and safe to put in a record.
+
+    Five review rounds went into classifying this text -- is the object
+    absent, is the pack unreadable, is the path missing -- and each round
+    found another way for English to be ambiguous. A step-back committee
+    (astra, deepseek-v4-pro) agreed unanimously that the classification was
+    never load-bearing: no caller reads a category, every consumer treats
+    the return value as a human-facing refusal, and git's own sentence is
+    what actually diagnoses the case. So the text is reported, not decoded.
+
+    It is still rendered rather than dumped, and the bound covers the
+    RENDERED string rather than the payload inside it: bounding the payload
+    and then prefixing it put a "400 character" limit at 435.
+    """
+    # `rc` goes through the renderer too. It is an int from subprocess in
+    # every real path, but the runner is an injected callable and nothing
+    # enforces its return type -- and "no value reaches the refusal
+    # unrendered" is either true or it is a claim a reviewer refutes, which
+    # luna did, for this field, after the same claim had already been
+    # refuted for the path and for the commit id.
+    # render_for_record does the coercion; calling str() here would put the
+    # same unguarded conversion back outside the total function, one
+    # argument over from where it was just removed.
+    if rc is UNESTABLISHED_STATUS:
+        # Not "git exited <a status the runner did not report as a
+        # number>", which reads as though that phrase were the status.
+        code = "with a status this runner did not report as a number"
+        prefix = f"git exited {code} and said: "
+        rendered = render_for_record(
+            err, max(0, _DIAGNOSTIC_LIMIT - len(prefix)))
+        return (prefix + rendered).strip() if rendered.strip() else (
+            "git exited with a status this runner did not report as a "
+            "number and said nothing")
+    code = render_for_record(rc, 12)
+    # Render BEFORE touching the value. luna, kimi-k2.7-code and glm-5.3 all
+    # found the same thing here, and glm named it exactly: this line
+    # dereferenced the runner's stderr outside the total renderer, so a
+    # truthy value that is neither str nor bytes raised AttributeError and
+    # "a validation failure became an exception instead of a refusal -- the
+    # exact defect class this change claims to have eliminated".
+    #
+    # Three rounds running I fixed the call site a reviewer named instead of
+    # the boundary. The boundary is this: NOTHING from the runner is touched
+    # until it has been through render_for_record, including to ask whether
+    # it is empty.
+    prefix = f"git exited {code} and said: "
+    rendered = render_for_record(
+        err, max(0, _DIAGNOSTIC_LIMIT - len(prefix)))
+    if not rendered.strip():
+        return f"git exited {code} with no diagnostic output"
+    return prefix + rendered
+
+
 def validate_pinned_head(runner, launch_facts, produced):
     """Validate immutable commit ``produced`` against its pinned launch base.
 
@@ -1244,18 +1625,76 @@ def validate_pinned_head(runner, launch_facts, produced):
     # the finished worktree. Judgment itself uses execution_workspace above;
     # this later pin validation deliberately needs no live checkout.
     repo, base = launch_facts["repo"], launch_facts["base_commit"]
-    rc, _out, _err = _git(runner, repo, "cat-file", "-e", produced + "^{commit}")
+    if not repo:
+        return f"{PIN_VALIDATION_REFUSAL}: this attempt recorded no repository"
+    rc, _out, cat_err = _git(runner, repo, "cat-file", "-e",
+                             produced + "^{commit}")
     if rc != 0:
-        return (f"pinned produced commit {produced[:12]} is no longer "
-                "available; refusing rather than substituting the current ref")
-    rc, _out, _err = _git(runner, repo, "merge-base", "--is-ancestor",
-                           base, produced)
+        # Do NOT name a cause. A nonzero rc here has many: the object is
+        # absent; the recorded repository path does not exist on this host;
+        # the path is not a repository; a pack is unreadable; a loose object
+        # is corrupt; permissions changed. Deciding between them from git's
+        # English is what five rounds of review kept finding holes in, and
+        # the cost of guessing wrong is not cosmetic -- nine units read
+        # "no longer available" while all nine commits were present, and
+        # that sentence sent a session looking for work that was never lost.
+        #
+        # `cat-file -e` is an existence-and-type check, so "could not be
+        # validated" is what this establishes; "could not be read" claims
+        # more than it knows.
+        # `produced` is already validated as 40 or 64 hex characters above,
+        # so this cannot smuggle anything -- but "every value goes through
+        # the renderer" is either true or it is a claim a reviewer gets to
+        # refute, and it has been refuted once for exactly this field.
+        return (f"{PIN_VALIDATION_REFUSAL}: the pinned produced commit "
+                f"{render_for_record(produced[:12], 12)} could not be "
+                f"validated at "
+                f"{render_for_record(repo, _PATH_LIMIT, collapse=False)}. "
+                f"{render_git_diagnostic(rc, cat_err)}. Refusing rather than "
+                f"substituting the current ref; the object may still exist "
+                f"in another checkout of the same remote")
+    rc, _out, ancestor_err = _git(runner, repo, "merge-base",
+                                  "--is-ancestor", base, produced)
+    # Every refusal this function emits goes through the renderer, not only
+    # the one a reviewer named. glm-5.3 pointed out that these three
+    # branches still interpolated raw; it was filed out of scope and is
+    # swept anyway, because "some refusals are rendered" is not a property
+    # anyone can rely on.
     if rc != 0:
-        return (f"pinned produced commit {produced[:12]} does not descend "
-                f"from trusted base {base[:12]}")
-    rc, tree, _err = _git(runner, repo, "rev-parse", produced + "^{tree}")
+        # `merge-base --is-ancestor` DOCUMENTS exit 1 as "not an ancestor".
+        # Any other nonzero is a fatal error -- a bad or missing base
+        # object, a shallow clone cut below the base, a corrupt pack --
+        # and saying "does not descend" there is a false lineage verdict.
+        # glm-5.3 found this surviving here after I swept these branches
+        # for the renderer and not for the property the branch exists to
+        # enforce: the whole point is that a refusal does not claim a
+        # cause the evidence does not establish.
+        if rc == 1:
+            return (f"{PIN_VALIDATION_REFUSAL}: pinned produced commit "
+                    f"{render_for_record(produced[:12], 12)} does not "
+                    f"descend from trusted base "
+                    f"{render_for_record(base[:12], 12)}")
+        return (f"{PIN_VALIDATION_REFUSAL}: the lineage of pinned produced "
+                f"commit {render_for_record(produced[:12], 12)} against "
+                f"base {render_for_record(base[:12], 12)} could not be "
+                f"determined. {render_git_diagnostic(rc, ancestor_err)}. "
+                f"That is unknown, not a verdict on lineage")
+    rc, tree, tree_err = _git(runner, repo, "rev-parse", produced + "^{tree}")
     if rc != 0:
-        return f"cannot read the tree of pinned commit {produced[:12]}"
+        # "could not be READ" names the tree as the thing that failed.
+        # luna: cat-file and merge-base can both succeed and this still
+        # exit nonzero because the checkout went away between commands,
+        # and the record then sends an operator after a tree that is
+        # fine. The same claims-more-than-it-knows shape as the lineage
+        # branch, in the branch after it -- which is the third time this
+        # sweep has had to reach one message further down the function.
+        return (f"{PIN_VALIDATION_REFUSAL}: the tree of pinned commit "
+                f"{render_for_record(produced[:12], 12)} could not be "
+                f"validated at "
+                f"{render_for_record(repo, _PATH_LIMIT, collapse=False)}. "
+                f"{render_git_diagnostic(rc, tree_err)}. That is unknown, "
+                f"not a verdict on the tree")
     if tree == launch_facts["base_tree"]:
-        return "the pinned produced commit has the launch base's unchanged tree"
+        return (f"{PIN_VALIDATION_REFUSAL}: the pinned produced commit has "
+                f"the launch base's unchanged tree")
     return None
