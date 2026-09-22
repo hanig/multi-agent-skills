@@ -594,12 +594,33 @@ def check_canonical_suite_floor(filename, text, discovered):
             f"{filename}: documented suite floor {documented_floor} exceeds "
             f"{discovered} tests discovered by unittest")
 
+    # A competing claim is one that could be MISTAKEN for the marked one.
+    # The document's own floor is what decides that, and reusing it needs no
+    # new annotation and no new judgement about English.
+    #
+    # Rejecting every count-shaped paragraph was the last place this guard
+    # inferred scope from wording, and luna refuted it with honest content:
+    # "The installer's current suite count: 12 tests." matches the pattern
+    # and is not about this suite at all. A step-back committee split on the
+    # remedy -- astra would have demoted the whole scan to a nonblocking
+    # warning, accepting that "nothing guarantees rejection of an unmarked
+    # stale total"; deepseek-v4-pro pointed out that the floor already
+    # discriminates, since a genuine suite total cannot be below the number
+    # this document asserts the suite exceeds. The second keeps the
+    # capability, so it is what runs here.
+    #
+    # It tightens by itself: raise the floor and more numbers become
+    # competing claims. What it gives up is an unmarked count BELOW the
+    # floor going unremarked -- which by construction cannot be read as this
+    # suite's total, because the marked claim directly contradicts it.
     unowned = []
     for paragraph in paragraphs:
         if paragraph is owners[0]:
             continue
         visible = "\n".join(line for _, line in paragraph)
         for position, count in claim_matches(visible) + lower_bound_matches(visible):
+            if count < documented_floor:
+                continue
             line_offset = visible.count("\n", 0, position)
             unowned.append((paragraph[line_offset][0], count))
     if unowned:
@@ -607,7 +628,9 @@ def check_canonical_suite_floor(filename, text, discovered):
             f"line {line_number}: {count}"
             for line_number, count in unowned)
         raise AssertionError(
-            f"{filename}: unmarked suite-count claim(s): {details}")
+            f"{filename}: unmarked suite-count claim(s) at or above the "
+            f"documented floor of {documented_floor}, which could be read "
+            f"as competing with it: {details}")
 
 
 def check_live_suite_claims(documents, discovered):
@@ -1137,6 +1160,80 @@ class TestDocsTruth(unittest.TestCase):
                     text + "\n\n" + prefix + "\n" + hidden_claim + "`\n",
                     discovered,
                 )
+
+    def test_a_component_count_below_the_floor_is_prose_not_a_claim(self):
+        """luna's counterexample, reproduced and then fixed.
+
+            $ echo "The installer's current suite count: 12 tests." >> CLAUDE.md
+            AssertionError: CLAUDE.md: unmarked suite-count claim(s): line 100: 12
+
+        A guard that reddens because somebody wrote an honest sentence,
+        with no stale claim present, is a false failure and this repository
+        refuses one. The remedy is the document's own floor rather than a
+        new annotation: a count below the number the document asserts the
+        suite exceeds cannot be read as this suite's total.
+        """
+        discovered = unittest.TestLoader().discover(
+            str(ROOT / "tests")).countTestCases()
+        text = CANONICAL_DOCUMENT.read_text()
+        for sentence in (
+                "The installer's current suite count: 12 tests.",
+                "The scheduler has 0 tests, standard library only.",
+                "The installer ships 12 tests, standard library only.",
+                "A skill with 3 tests in the full suite.",
+        ):
+            with self.subTest(sentence=sentence):
+                check_canonical_suite_floor(
+                    CANONICAL_DOCUMENT.name,
+                    text + "\n" + sentence + "\n",
+                    discovered)
+
+    def test_the_floor_is_the_boundary_between_prose_and_a_competing_claim(self):
+        """Exactly at the floor is a competing claim; one below is prose.
+
+        The discrimination has to be the floor itself rather than a
+        constant, so that raising the floor tightens the guard with no
+        second number to maintain.
+        """
+        discovered = unittest.TestLoader().discover(
+            str(ROOT / "tests")).countTestCases()
+        text = CANONICAL_DOCUMENT.read_text()
+        floor_match = CANONICAL_LOWER_BOUND.search(text)
+        self.assertIsNotNone(floor_match, "the canonical floor must be findable")
+        floor = int(floor_match.group("count").replace(",", ""))
+
+        check_canonical_suite_floor(
+            CANONICAL_DOCUMENT.name,
+            text + f"\nThe suite has {floor - 1} tests.\n",
+            discovered)
+
+        with self.assertRaisesRegex(AssertionError, "could be read as competing"):
+            check_canonical_suite_floor(
+                CANONICAL_DOCUMENT.name,
+                text + f"\nThe suite has {floor} tests.\n",
+                discovered)
+
+    def test_the_boundary_moves_with_the_floor(self):
+        """Raise the floor and a number that was prose becomes a claim."""
+        discovered = unittest.TestLoader().discover(
+            str(ROOT / "tests")).countTestCases()
+        text = CANONICAL_DOCUMENT.read_text()
+        raised = CANONICAL_LOWER_BOUND.sub(
+            "Full suite: at least 1,600 tests discoverable by unittest. Run "
+            "the command below for the exact current total.",
+            text, count=1)
+        self.assertNotEqual(raised, text, "the floor line must be substitutable")
+
+        # 1,550 is prose under a 1,600 floor and a competing claim under 1,500.
+        check_canonical_suite_floor(
+            CANONICAL_DOCUMENT.name,
+            raised + "\nThe suite has 1550 tests.\n",
+            max(discovered, 1600))
+        with self.assertRaisesRegex(AssertionError, "could be read as competing"):
+            check_canonical_suite_floor(
+                CANONICAL_DOCUMENT.name,
+                text + "\nThe suite has 1550 tests.\n",
+                discovered)
 
 
 if __name__ == "__main__":
