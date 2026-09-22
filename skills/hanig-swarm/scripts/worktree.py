@@ -761,10 +761,14 @@ def refused_launch(unit_dir):
     if pre.get("status") != "refused":
         return None
     ws = pre.get("workspace") or "the workspace"
-    return (f"attempt {Path(unit_dir).name} was REFUSED at launch preflight "
-            f"({ws} was not clean), so nothing was dispatched and there is no "
+    return (f"attempt "
+            f"{render_for_record(Path(unit_dir).name, 160, collapse=False)} "
+            f"was REFUSED at launch preflight "
+            f"({render_for_record(ws, _PATH_LIMIT, collapse=False)} was not "
+            f"clean), so nothing was dispatched and there is no "
             f"job to bind. Its receipt is at "
-            f"{launch_record_path(unit_dir)}. Clean the workspace and "
+            f"{render_for_record(launch_record_path(unit_dir), _PATH_LIMIT, collapse=False)}. "
+            f"Clean the workspace and "
             f"allocate a new attempt.")
 
 

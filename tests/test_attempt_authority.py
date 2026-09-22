@@ -634,6 +634,7 @@ RENDERED_REFUSAL_FUNCTIONS = (
     "judge_artifacts",
     "launch_record_path",
     "read_sealed_launch_record",
+    "refused_launch",
     "decode_artifact_basis",
     "decode_launch_facts",
     "judge_detail",
