@@ -923,6 +923,27 @@ def competing_counts(filename, text, discovered):
     return check_canonical_suite_floor(filename, text, discovered) or []
 
 
+def baseline_counts(discovered):
+    """What the live canonical document already reports, before a test
+    adds anything.
+
+    Every corpus case builds its document by appending a block to the real
+    CLAUDE.md, so asserting an ABSOLUTE empty report makes the test depend
+    on that file containing no count-shaped prose. glm-5.3 showed the
+    consequence: appending the honest sentence "The installer was built
+    and green: 2,000 tests." -- the very sentence another test in this
+    file requires be accepted -- reddens the suite, which is the false
+    failure this round retired. Measured: it fails the entry-point test
+    and two corpus tests.
+
+    So the cases assert a DELTA. The hiding property is "adding this block
+    does not make a new claim visible", which is true whatever the
+    document already says.
+    """
+    return competing_counts(CANONICAL_DOCUMENT.name,
+                            CANONICAL_DOCUMENT.read_text(), discovered)
+
+
 class TestDocsTruth(unittest.TestCase):
 
     def test_canonical_suite_floor_rejects_stale_and_competing_claims(self):
@@ -1153,7 +1174,8 @@ class TestDocsTruth(unittest.TestCase):
                             CANONICAL_DOCUMENT.name,
                     text + "\n\n" + block + "\n",
                     discovered,),
-                    [], "the lexer failed to hide this claim")
+                    baseline_counts(discovered),
+                    "the lexer failed to hide this claim")
 
         visible_claim = f"Current suite total: {discovered + 1} tests."
         visible_blocks = {
@@ -1187,10 +1209,11 @@ class TestDocsTruth(unittest.TestCase):
             with self.subTest(name=name):
                 # The property is the lexer's: this prose is VISIBLE, not
                 # code. The scan's report is how that is observed now.
-                self.assertTrue(
-                    competing_counts(CANONICAL_DOCUMENT.name,
-                                     text + "\n\n" + block + "\n",
-                                     discovered),
+                self.assertGreater(
+                    len(competing_counts(CANONICAL_DOCUMENT.name,
+                                         text + "\n\n" + block + "\n",
+                                         discovered)),
+                    len(baseline_counts(discovered)),
                     "visible prose was treated as code")
 
     def test_gfm_delimiter_minimums_preserve_inline_ownership(self):
@@ -1211,7 +1234,8 @@ class TestDocsTruth(unittest.TestCase):
                     text + "\n\n`opening | cell |\n" + delimiter + "\n"
                     + hidden_claim + "`\n",
                     discovered,),
-                    [], "the lexer failed to hide this claim")
+                    baseline_counts(discovered),
+                    "the lexer failed to hide this claim")
 
         for delimiter in ("| --- |", "| :- |", "| -: |", "| :-: |"):
             with self.subTest(valid=delimiter):
@@ -1241,7 +1265,8 @@ class TestDocsTruth(unittest.TestCase):
                             CANONICAL_DOCUMENT.name,
                     text + "\n\n" + block + "\n",
                     discovered,),
-                    [], "the lexer failed to hide this claim")
+                    baseline_counts(discovered),
+                    "the lexer failed to hide this claim")
 
     def test_comment_tails_keep_residual_for_paragraph_continuations(self):
         discovered = unittest.TestLoader().discover(
@@ -1264,7 +1289,8 @@ class TestDocsTruth(unittest.TestCase):
                             CANONICAL_DOCUMENT.name,
                     text + "\n\n" + prefix + "\n" + hidden_claim + "`\n",
                     discovered,),
-                    [], "the lexer failed to hide this claim")
+                    baseline_counts(discovered),
+                    "the lexer failed to hide this claim")
 
     def test_a_component_count_below_the_floor_is_prose_not_a_claim(self):
         """luna's counterexample, reproduced and then fixed.
@@ -1450,14 +1476,16 @@ class TestDocsTruth(unittest.TestCase):
 
         clean = check_live_suite_claims(
             [(CANONICAL_DOCUMENT, text)] + others, discovered)
-        self.assertEqual(clean, [])
+        self.assertEqual(clean, baseline_counts(discovered),
+                         "the caller saw something the scan did not report")
 
         noisy = check_live_suite_claims(
             [(CANONICAL_DOCUMENT,
               text + f"\nHistorical suite size: {discovered + 1} tests.\n")]
             + others, discovered)
-        self.assertTrue(
-            noisy, "the caller received no report for a competing count")
+        self.assertGreater(
+            len(noisy), len(clean),
+            "the caller received no report for a competing count")
         self.assertIn(discovered + 1, [count for _line, count in noisy])
 
 
