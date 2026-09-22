@@ -106,7 +106,11 @@ def _as_text(value):
     boundary. This is the boundary, and there is exactly one coercion in
     the module now.
     """
-    if isinstance(value, str):
+    # `type(value) is str`, not isinstance: luna found that a str SUBCLASS
+    # passes isinstance and then `_git` calls its overridden `.strip()`,
+    # which can raise. A subclass falls through to the str() branch below,
+    # which produces a real str with real methods.
+    if type(value) is str:
         return value
     if isinstance(value, bytes):
         return value.decode("utf-8", "replace")
@@ -114,16 +118,36 @@ def _as_text(value):
         return ""
     try:
         return str(value)
-    except Exception:
-        # `str()` can raise: an object whose __str__ fails propagates
-        # straight through anything advertised as total -- kimi-k2.7-code.
+    except BaseException:
+        # BaseException, not Exception: kimi-k2.7-code pointed out that a
+        # __str__ raising SystemExit escapes an `except Exception`. The
+        # only call inside this try is str(value), so any BaseException
+        # from it is the value's doing, and this function's contract is
+        # that it does not raise.
         return "<a value that cannot be rendered>"
+
+
+def _as_status(value):
+    """A runner's exit status as an int, without trusting its operators.
+
+    luna and kimi-k2.7-code, independently: `rc` was never coerced, so a
+    status object with a custom `__ne__` raised at `rc != 0` before any
+    refusal could be built. A status that cannot be read as an integer is
+    treated as FAILURE, because a runner that cannot produce one did not
+    report success.
+    """
+    if type(value) is int:
+        return value
+    try:
+        return int(value)
+    except BaseException:
+        return 1
 
 
 def _git(runner, repo, *args, timeout=60):
     rc, out, err = runner(["git", "-C", str(repo)] + list(args),
                           timeout=timeout)
-    return rc, _as_text(out).strip(), _as_text(err).strip()
+    return _as_status(rc), _as_text(out).strip(), _as_text(err).strip()
 
 
 def repo_status(runner, repo):

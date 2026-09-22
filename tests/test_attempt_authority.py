@@ -856,7 +856,20 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
             def __str__(self):
                 raise ValueError("this value refuses to be a string")
 
+        class ExitOnStr(object):
+            def __str__(self):
+                raise SystemExit(3)      # a BaseException, not an Exception
+
+        class PoisonedStr(str):
+            def strip(self, *args):      # a str SUBCLASS with a bad method
+                raise RuntimeError("poisoned strip")
+
+        class PoisonedStatus(int):
+            def __ne__(self, other):     # raises at `rc != 0`
+                raise RuntimeError("poisoned comparison")
+
         shapes = [["fatal: unreadable"], 123, {"b": 1}, object(), Hostile(),
+                  ExitOnStr(), PoisonedStr("fatal: poisoned"),
                   b"fatal: bytes", None, "", "   "]
         real = U.run
         attempt = self.tmp / "runs" / "u1" / "att1"
@@ -874,7 +887,18 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
                 self.assertIsNotNone(why, "no refusal for stderr %r" % (shape,))
                 self.assertIsInstance(why, str)
 
-        for shape in [Hostile(), ["7"], {"rc": 1}, None]:
+        # A runner whose exit status raises on comparison: luna and
+        # kimi-k2.7-code both found `rc != 0` evaluated before any refusal
+        # could be built.
+        def poisoned_status(argv, **kwargs):
+            if "cat-file" in argv:
+                return PoisonedStatus(1), "", "fatal: nope"
+            return real(argv, **kwargs)
+        why = W.validate_pinned_head(poisoned_status, facts, pinned)
+        self.assertIsNotNone(why, "a poisoned exit status produced no refusal")
+        self.assertIsInstance(why, str)
+
+        for shape in [Hostile(), ExitOnStr(), ["7"], {"rc": 1}, None]:
             with self.subTest(rc=type(shape).__name__):
                 # render_git_diagnostic is reached with the runner's rc, so
                 # the exit status is the other field with the same exposure.
