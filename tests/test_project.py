@@ -3402,14 +3402,18 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
             script = Path(d) / "ignore-term"
             read_fd, write_fd = os.pipe()
             barrier_read, barrier_write = os.pipe()
+            limit, reap = 3, 2
+            fixture_readiness_delay = 3.2
+            self.assertGreater(
+                fixture_readiness_delay, limit,
+                "fixture readiness no longer crosses the run deadline")
             leader = None
             proc = None
             try:
                 script.write_text(
                     "#!/bin/sh\n"
                     "trap '' HUP INT TERM\n"
-                    # This alone exceeded the rejected readiness precondition.
-                    "/bin/sleep 3.2\n"
+                    "/bin/sleep %.1f\n" % fixture_readiness_delay +
                     "(trap '' HUP INT TERM; "
                     "printf 'W\\n' >&" + str(write_fd) + "; "
                     "exec /bin/sleep 600) &\n"
@@ -3437,7 +3441,7 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
                 env["HANIG_TEST_BARRIER_FD"] = str(barrier_read)
                 proc = subprocess.Popen(
                     [shutil.which("perl"), "-e", source,
-                     "3", "2", str(script)],
+                     str(limit), str(reap), str(script)],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                     start_new_session=True,
                     pass_fds=(write_fd, barrier_read), env=env)
@@ -3469,6 +3473,9 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
                 self.assertEqual(out.splitlines()[:2],
                                  ["supervisor-error", "127"])
                 self.assertIn("interrupted by SIGTERM", out)
+                # EOF covers the descriptor-holding same-group fixture.
+                # Descendants that escape the group or survive SIGKILL remain
+                # a declared limit, not a claim of arbitrary quiescence.
                 self.assertEqual(
                     os.read(read_fd, 1), b"",
                     "negative-PGID KILL did not terminate the group witness")
