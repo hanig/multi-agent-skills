@@ -750,6 +750,48 @@ class TrackerSyncHookInputContract(unittest.TestCase):
                 "<>rw git push origin HEAD", "git push"),
             "an appending assignment": (
                 "PATH+=/usr/local/bin git push origin HEAD", "git push"),
+            # Round 2. glm-5.3 found the first of these as a DETECTION
+            # REGRESSION against the shell hook this file replaces: the
+            # old `*"git push"*` substring match caught it and the port
+            # did not, because a reserved word is plain letters and so
+            # passes the program-word backstop.
+            "a for loop": (
+                "for r in origin upstream; do git push $r main; done",
+                "git push"),
+            "an if guard": (
+                "if gh pr merge 41 --auto; then echo ok; fi",
+                "gh pr merge"),
+            "an until loop": (
+                "until gh pr merge 41; do sleep 5; done", "gh pr merge"),
+            "a negated while": (
+                "while ! git push origin HEAD; do sleep 1; done",
+                "git push"),
+            "the time keyword": ("time git push origin HEAD", "git push"),
+            # A reserved word as an ARGUMENT is still an argument.
+            "do as an argument": ("echo do git push", ""),
+            # kimi-k2.7-code: a redirection between the program word and
+            # its subcommand was collected as the subcommand.
+            "a redirection before the subcommand": (
+                "git 2>/dev/null push origin HEAD", "git push"),
+            "a global option and a redirection": (
+                "gh -R o/r 2>/dev/null pr merge 41", "gh pr merge"),
+            # The descriptor form and the BARE form take different
+            # branches, and only the descriptor one had a case, so the
+            # bare branch's mutation survived.
+            "a bare redirection before the subcommand": (
+                "git >/tmp/log push origin HEAD", "git push"),
+            "a bare append before the subcommand": (
+                "gh >>/tmp/log pr merge 41", "gh pr merge"),
+            # luna: the command delegated to another shell as a string.
+            "bash -c with a push": (
+                "bash -c 'git push origin HEAD'", "git push"),
+            "sh -c with a merge": ("sh -c 'gh pr merge 41'", "gh pr merge"),
+            "an absolute shell path": (
+                '/bin/bash -c "gh issue close 5"', "gh issue close"),
+            "a nested shell": (
+                'bash -c \'sh -c "git push"\'', "git push"),
+            "a shell running something harmless": (
+                "bash -c 'echo hello'", ""),
             "a leading combined redirection": (
                 "&>/dev/null git push origin HEAD", "git push"),
             "a leading descriptor merge": (
@@ -953,6 +995,37 @@ class TrackerSyncHookInputContract(unittest.TestCase):
                 os.environ.pop("HANIG_TRACKER_PROBE_TIMEOUT_S", None)
             else:
                 os.environ["HANIG_TRACKER_PROBE_TIMEOUT_S"] = original
+
+    def test_a_reminder_that_cannot_reach_stdout_goes_to_stderr(self):
+        """kimi-k2.7-code: the guard swallowed its own emit failure.
+
+        `main()` calls `emit()`, stdout is closed, `emit()` raises, the
+        guard tries to emit the failure message, `emit()` raises again,
+        and the inner handler returned 0 with no output -- a hook whose
+        headline claim is that it is COMMITTED to emitting, delivering
+        nothing in exactly the case that claim names.
+
+        stderr with a nonzero status is the other path the harness
+        reads, and it is taken only here.
+        """
+        hook = importlib.util.module_from_spec(HOOK_SPEC)
+        HOOK_SPEC.loader.exec_module(hook)
+
+        class Closed(io.StringIO):
+            def write(self, _text):
+                raise ValueError("I/O operation on closed file")
+
+        hook.main = lambda: (_ for _ in ()).throw(RuntimeError("broken"))
+        errors = io.StringIO()
+        stdout, stderr = sys.stdout, sys.stderr
+        sys.stdout, sys.stderr = Closed(), errors
+        try:
+            status = hook.run()
+        finally:
+            sys.stdout, sys.stderr = stdout, stderr
+        self.assertEqual(status, 2,
+                         "a hook that cannot write stdout exited quietly")
+        self.assertIn("Unknown is not zero", errors.getvalue())
 
     def test_the_last_resort_guard_emits_when_the_hook_itself_is_wrong(self):
         """kimi-k2.7-code and glm-5.3: the guard was exercised by nothing.

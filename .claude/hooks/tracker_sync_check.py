@@ -227,6 +227,30 @@ _REDIRECTION = re.compile(r"^(?:&>>|&>|>&|>\||<>|<&|>>|>|<<-|<<|<)$")
 
 
 
+# Shell RESERVED WORDS. A reserved word can never be a command name --
+# bare `do cmd` is a syntax error -- so when one lands in the program slot
+# the command is the thing after it.
+#
+# glm-5.3 found this as a DETECTION REGRESSION against the shell hook this
+# file replaces: `for r in origin upstream; do git push $r main; done` was
+# caught by the old `*"git push"*` substring match and missed here, because
+# `do` is plain letters and so passes `_COMMAND_WORD`. The backstop was
+# written to end exactly this class and reserved words walked through it,
+# which is the fifth spelling the header predicted and the first one that
+# made the port worse than what it replaced.
+_RESERVED_WORDS = frozenset([
+    "!", "case", "coproc", "do", "done", "elif", "else", "esac", "fi",
+    "for", "function", "if", "in", "select", "then", "time", "until",
+    "while", "[[", "]]",
+])
+
+# Shells that take a command as a STRING argument. luna: `bash -c 'git push
+# origin HEAD'` lexes as a `bash` command whose quoted argument holds the
+# whole push, so no simple command has `git` as its program and the hook
+# went silent on a push the shell really runs.
+_SHELLS = frozenset(["sh", "bash", "zsh", "dash", "ksh", "ash", "busybox"])
+_SHELL_COMMAND_OPTIONS = frozenset(["-c", "--command"])
+
 # Global options that take a SEPARATE value, so the value is not a noun.
 _GH_VALUE_OPTIONS = frozenset(["--repo", "-R", "--hostname"])
 _GIT_VALUE_OPTIONS = frozenset(
@@ -385,6 +409,9 @@ def _command_word_and_arguments(tokens):
             if index < len(tokens):
                 index += 1      # the redirection target
             continue
+        if token in _RESERVED_WORDS:
+            index += 1
+            continue
         break
     if index >= len(tokens):
         return None, []
@@ -411,10 +438,30 @@ _COMMAND_WORD = re.compile(r"^[A-Za-z0-9_./+@:,~^%-]+$")
 
 
 def _subcommands(arguments, value_options, depth):
-    """The first `depth` positional arguments, global options skipped."""
+    """The first `depth` positional arguments, options and redirections
+    skipped.
+
+    kimi-k2.7-code: `git 2>/dev/null push origin HEAD` strips its leading
+    redirections in `_command_word_and_arguments`, but a redirection
+    BETWEEN the program word and the subcommand reached here, where `2`
+    was collected as the first positional and `push` was never seen. The
+    two functions were skipping the same tokens in one place and not the
+    other.
+    """
     out, index = [], 0
     while index < len(arguments) and len(out) < depth:
         word = arguments[index]
+        if (word.isdigit() and index + 1 < len(arguments)
+                and _REDIRECTION.match(arguments[index + 1])):
+            index += 2
+            if index < len(arguments):
+                index += 1      # the redirection target
+            continue
+        if _REDIRECTION.match(word):
+            index += 1
+            if index < len(arguments):
+                index += 1      # the redirection target
+            continue
         if word.startswith("-"):
             if word in value_options and "=" not in word:
                 index += 1
@@ -455,7 +502,10 @@ def _could_be_outward(command):
     return any(hint in lowered for hint in _OUTWARD_HINTS)
 
 
-def matched_label(command):
+_SHELL_RECURSION_LIMIT = 3
+
+
+def matched_label(command, _depth=0):
     """The outward action this command looks like, or None."""
     unreadable = _could_be_outward(command)
     if len(command) > _COMMAND_LEX_LIMIT:
@@ -481,6 +531,23 @@ def matched_label(command):
             return ("an outward action (the command could not be parsed "
                     "fully)")
         program = program.rsplit("/", 1)[-1]
+        if program in _SHELLS and _depth < _SHELL_RECURSION_LIMIT:
+            # luna: `bash -c 'git push origin HEAD'` lexes as a `bash`
+            # command whose quoted argument holds the whole push, so no
+            # simple command here has `git` as its program and the hook
+            # went silent on a push the shell really runs. The argument
+            # IS a command; read it as one. Bounded, because `sh -c 'sh
+            # -c ...'` is a command a person can write and a recursion a
+            # hook must not follow forever.
+            for index, argument in enumerate(arguments):
+                if argument not in _SHELL_COMMAND_OPTIONS:
+                    continue
+                if index + 1 >= len(arguments):
+                    break
+                inner = matched_label(arguments[index + 1], _depth + 1)
+                if inner is not None:
+                    return inner
+                break
         if program == "gh":
             path = _subcommands(arguments, _GH_VALUE_OPTIONS, 2)
             if len(path) == 2:
@@ -822,17 +889,31 @@ def run():
     "committed to emitting, including when this file itself is wrong" is
     exactly the kind of claim that must not rest on an unrun line.
     """
+    message = ("TRACKER SYNC CHECK: this hook failed while checking tracker "
+               "state. Unknown is not zero -- check Linear before assuming "
+               "it is current.")
     try:
         return main()
     except BaseException:
         # Not Exception. A MemoryError or a KeyboardInterrupt mid-probe is
         # still a tool call whose tracker state nobody checked.
         try:
-            emit("TRACKER SYNC CHECK: this hook failed while checking tracker "
-                 "state. Unknown is not zero -- check Linear before assuming "
-                 "it is current.")
+            emit(message)
+            return 0
         except BaseException:
             pass
+    # stdout could not be written. kimi-k2.7-code: the previous shape
+    # caught that second failure and returned 0, so a hook COMMITTED to
+    # emitting delivered nothing whenever its own output stream was
+    # closed -- the module's headline claim failing in the one case it
+    # names. stderr with a nonzero status is the other delivery path the
+    # harness has, and it is used only here, where the primary one is
+    # already gone.
+    try:
+        sys.stderr.write(message + "\n")
+        sys.stderr.flush()
+        return 2
+    except BaseException:
         return 0
 
 
