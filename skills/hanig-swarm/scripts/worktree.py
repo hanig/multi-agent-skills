@@ -1227,6 +1227,27 @@ def receipt_basis(runner, unit_dir, spec, launch_facts=None):
                 stray_untracked=stray_untracked(runner, spec, launch_facts))
 
 
+def repository_unusable_reason(runner, repo):
+    """Why a repository path cannot answer a question, or None if it can.
+
+    Asked BEFORE a missing object is reported as a missing object. Git's own
+    `rev-parse --git-dir` is the probe rather than a filesystem stat, so this
+    stays inside the runner abstraction the judge is tested through, and so a
+    path that exists but is not a repository is caught too.
+    """
+    if not repo:
+        return "this attempt recorded no repository"
+    rc, _out, err = _git(runner, repo, "rev-parse", "--git-dir")
+    if rc == 0:
+        return None
+    lowered = (err or "").lower()
+    if "no such file or directory" in lowered or "cannot change to" in lowered:
+        return (f"its recorded repository {repo} is not present on this host")
+    if "not a git repository" in lowered:
+        return f"{repo} is present but is not a git repository"
+    return f"git could not read {repo}: {err or 'no error text'}"
+
+
 def validate_pinned_head(runner, launch_facts, produced):
     """Validate immutable commit ``produced`` against its pinned launch base.
 
@@ -1246,8 +1267,26 @@ def validate_pinned_head(runner, launch_facts, produced):
     repo, base = launch_facts["repo"], launch_facts["base_commit"]
     rc, _out, _err = _git(runner, repo, "cat-file", "-e", produced + "^{commit}")
     if rc != 0:
-        return (f"pinned produced commit {produced[:12]} is no longer "
-                "available; refusing rather than substituting the current ref")
+        # Discriminate before naming a cause. A nonzero rc here has at least
+        # four, and only one of them means the work is gone: the object is
+        # absent from a present repository; the recorded repository path does
+        # not exist on this host; the path exists but is not a repository; or
+        # git could not run. Reporting all four as "no longer available"
+        # cost nine units: after the coordinator moved from chimera to a Mac,
+        # every launch record still pointed at /home/hani/multi-agent-skills,
+        # so `git -C` failed with "cannot change to ...: No such file or
+        # directory" and the refusal announced that nine judged heads were
+        # gone. All nine commits were present in the new checkout. Unknown is
+        # not absent -- the same distinction the outbox draws when an intent
+        # with no receipt reads `unacknowledged`.
+        unusable = repository_unusable_reason(runner, repo)
+        if unusable:
+            return (f"the pinned produced commit {produced[:12]} could not "
+                    f"be read because {unusable}. That is unknown, not "
+                    f"absent: another ref is still never substituted, and "
+                    f"the object may exist in a checkout of the same remote")
+        return (f"pinned produced commit {produced[:12]} is absent from "
+                f"{repo}; refusing rather than substituting the current ref")
     rc, _out, _err = _git(runner, repo, "merge-base", "--is-ancestor",
                            base, produced)
     if rc != 0:

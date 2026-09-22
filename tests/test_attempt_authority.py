@@ -681,6 +681,56 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         self.assertEqual(git(self.repo, "rev-parse", "HEAD"), self.base)
         self.assertIsNone(W.validate_pinned_head(U.run, facts, pinned))
 
+    def test_a_missing_repository_is_not_reported_as_a_missing_commit(self):
+        """Unknown is not absent, and nine units paid for the difference.
+
+        After the coordinator moved from chimera to a Mac, every launch
+        record still named /home/hani/multi-agent-skills. `git -C` on a path
+        that does not exist fails exactly as `cat-file -e` on a deleted
+        object does, so nine judged heads were reported "no longer
+        available" while all nine commits sat in the new checkout.
+        """
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        facts = self.facts(attempt)
+        pinned = self.commit("A")
+        # The object is present and the repository is readable: admitted.
+        self.assertIsNone(W.validate_pinned_head(U.run, facts, pinned))
+
+        # Same present object, recorded repository gone.
+        moved = dict(facts)
+        moved["repo"] = str(self.tmp / "no-such-checkout")
+        why = W.validate_pinned_head(U.run, moved, pinned)
+        self.assertIsNotNone(why, "a missing repository must still refuse")
+        self.assertIn("not present on this host", why)
+        self.assertNotIn("absent from", why)
+        self.assertIn("unknown, not", why)
+
+    def test_a_genuinely_absent_object_still_says_absent(self):
+        """The discrimination must not soften the real case."""
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        facts = self.facts(attempt)
+        self.commit("A")
+        never = "0" * 40
+        why = W.validate_pinned_head(U.run, facts, never)
+        self.assertIsNotNone(why)
+        self.assertIn("absent from", why)
+        self.assertNotIn("not present on this host", why)
+
+    def test_a_path_that_is_not_a_repository_is_named_as_such(self):
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        facts = self.facts(attempt)
+        pinned = self.commit("A")
+        plain = self.tmp / "not-a-repo"
+        plain.mkdir()
+        elsewhere = dict(facts)
+        elsewhere["repo"] = str(plain)
+        why = W.validate_pinned_head(U.run, elsewhere, pinned)
+        self.assertIsNotNone(why)
+        self.assertIn("not a git repository", why)
+
     def test_deleting_the_launch_record_does_not_change_judgment(self):
         attempt = self.tmp / "runs" / "u1" / "att1"
         attempt.mkdir(parents=True)
