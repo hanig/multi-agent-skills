@@ -1260,6 +1260,51 @@ def competing_counts(filename, text, discovered):
     return check_canonical_suite_floor(filename, text, discovered) or []
 
 
+def claimed_counts(report):
+    """A report's CLAIMS, without the line numbers its caller moved.
+
+    The inert-comment cases insert a comment above the suite marker, and
+    an insertion shifts the line number of every count below it. So a
+    report compared as (name, line, count) triples differs from the
+    baseline for a reason that has nothing to do with the property under
+    test -- and the failure message says "an inert comment produced a
+    competing count", which is not what happened.
+
+    Measured: append the honest sentence "The suite has 9999 tests." to
+    CLAUDE.md and two inert variants fail, both of them the ones that
+    insert rather than append. The claim is identical in each; only its
+    line moved.
+
+    The property is that an inert comment adds no CLAIM. Line numbers
+    are checked separately, against the variant that actually carries
+    them, by `lines_carry_their_counts`.
+    """
+    # Two report shapes exist and both reach here: the canonical floor
+    # scan reports (line, count) pairs and the live-document scan
+    # reports (filename, line, count) triples. Unpacking one shape was
+    # a ValueError on the other, which is how this helper first read
+    # "not enough values to unpack" instead of a verdict. The line is
+    # always second from the end, so drop it by position.
+    return sorted(entry[:-2] + entry[-1:] for entry in report)
+
+
+def lines_carry_their_counts(report, text):
+    """Every reported line number points at the count it reports.
+
+    Dropping the line from the comparison above would leave nothing
+    checking that the report can be followed back to a place in the
+    document, which is the whole reason a reader gets a line number.
+    """
+    lines = text.splitlines()
+    for entry in report:
+        line_number, count = entry[-2], entry[-1]
+        if not 1 <= line_number <= len(lines):
+            return False
+        if str(count) not in lines[line_number - 1].replace(",", ""):
+            return False
+    return True
+
+
 def baseline_counts(discovered):
     """What the live canonical document already reports, before a test
     adds anything.
@@ -1473,11 +1518,15 @@ class TestDocsTruth(unittest.TestCase):
         baseline = baseline_counts(discovered)
         for variant in inert_variants:
             with self.subTest(variant=variant[-90:]):
+                report = competing_counts(CANONICAL_DOCUMENT.name, variant,
+                                          discovered)
                 self.assertEqual(
-                    competing_counts(CANONICAL_DOCUMENT.name, variant,
-                                     discovered),
-                    baseline,
+                    claimed_counts(report), claimed_counts(baseline),
                     "an inert comment produced a competing count")
+                self.assertTrue(
+                    lines_carry_their_counts(report, variant),
+                    "a reported line number does not point at its count, "
+                    "so the report cannot be followed back to the document")
 
     def test_indented_code_contexts_preserve_visible_prose(self):
         discovered = unittest.TestLoader().discover(
