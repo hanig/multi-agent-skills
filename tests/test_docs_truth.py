@@ -627,14 +627,35 @@ def check_canonical_suite_floor(filename, text, discovered):
                 continue
             line_offset = visible.count("\n", 0, position)
             unowned.append((paragraph[line_offset][0], count))
-    if unowned:
-        details = ", ".join(
-            f"line {line_number}: {count}"
-            for line_number, count in unowned)
-        raise AssertionError(
-            f"{filename}: unmarked suite-count claim(s) at or above the "
-            f"documented floor of {documented_floor}, which could be read "
-            f"as competing with it: {details}")
+    # REPORTED, NOT RAISED. This is astra's plan from the committee split,
+    # adopted after luna demonstrated both failure modes of the magnitude
+    # rule I had preferred instead -- in one round:
+    #
+    #   "The installer was built and green: 2,000 tests."
+    #       -> would fail the suite. Honest component prose, no stale claim.
+    #   "The installer has 1,500 tests."
+    #       -> would pass. An at-floor count whose wording no pattern matches.
+    #
+    # Over-fires on matched wording, under-fires on unmatched wording.
+    # Neither magnitude nor phrasing separates a component count from a
+    # suite count, which is what astra said when the committee split:
+    # "Preserve the existing competing-claim scanner as a NONBLOCKING
+    # warning, with line references. Keep exactly-one-marker and
+    # marked-claim truth validation as hard requirements."
+    #
+    # And the cost, in astra's words, conceded rather than hidden: "This
+    # deliberately relinquishes automatic rejection of UNMARKED competing
+    # suite totals. It is not capability-preserving, and should not be
+    # presented as such."
+    #
+    # What is still HARD here: exactly one marker, that marker owning a
+    # standalone claim, and the claim's floor not exceeding the real count.
+    # What is now SOFT: everything else in the document. The scan keeps its
+    # line references, which is also what the lexer corpus below asserts
+    # on -- removing the scan outright would have deleted the only
+    # observable those 27 cases have, which is the shape of deletion this
+    # repository has been burned by.
+    return [(line_number, count) for line_number, count in unowned]
 
 
 # Two residual limits, stated because a claim about them has already been
@@ -882,6 +903,17 @@ def assert_every_test_method_collected(paths, loader=None, module_loader=None):
         raise AssertionError(f"declared test methods were hidden: {failures}")
 
 
+def competing_counts(filename, text, discovered):
+    """The soft scan's report, for tests that used to expect a raise.
+
+    The scan became non-blocking (astra's plan, after luna demonstrated
+    both failure modes of the magnitude rule). The lexer corpus below still
+    needs an observable, and this is it: the list of (line, count) the scan
+    reports, which is exactly what it used to raise about.
+    """
+    return check_canonical_suite_floor(filename, text, discovered) or []
+
+
 class TestDocsTruth(unittest.TestCase):
 
     def test_canonical_suite_floor_rejects_stale_and_competing_claims(self):
@@ -935,9 +967,14 @@ class TestDocsTruth(unittest.TestCase):
         )
         for variant in contradictions:
             with self.subTest(variant=variant[-90:]):
-                with self.assertRaisesRegex(AssertionError, "CLAUDE.md"):
-                    check_canonical_suite_floor(
-                        CANONICAL_DOCUMENT.name, variant, discovered)
+                # The scan reports rather than raises now; the lexer
+                # property under test is unchanged -- the claim must be
+                # SEEN -- so the assertion moves from the exception to the
+                # report.
+                self.assertTrue(
+                    competing_counts(CANONICAL_DOCUMENT.name, variant,
+                                     discovered),
+                    "the lexer did not see the smuggled claim")
 
         visible_claim = f"Historical suite size: {discovered + 1} tests."
         after_multiline_comment = (
@@ -945,10 +982,11 @@ class TestDocsTruth(unittest.TestCase):
             + visible_claim + "\n")
         claim_line = after_multiline_comment.splitlines().index(
             visible_claim) + 1
-        with self.assertRaisesRegex(
-                AssertionError, rf"line {claim_line}: {discovered + 1}"):
-            check_canonical_suite_floor(
-                CANONICAL_DOCUMENT.name, after_multiline_comment, discovered)
+        self.assertIn(
+            (claim_line, discovered + 1),
+            competing_counts(CANONICAL_DOCUMENT.name,
+                             after_multiline_comment, discovered),
+            "the report must name the line and the count")
 
         exact_claims = (
             f"Current suite: {discovered} tests.",
@@ -1132,12 +1170,13 @@ class TestDocsTruth(unittest.TestCase):
         }
         for name, block in visible_blocks.items():
             with self.subTest(name=name):
-                with self.assertRaisesRegex(AssertionError, "CLAUDE.md"):
-                    check_canonical_suite_floor(
-                        CANONICAL_DOCUMENT.name,
-                        text + "\n\n" + block + "\n",
-                        discovered,
-                    )
+                # The property is the lexer's: this prose is VISIBLE, not
+                # code. The scan's report is how that is observed now.
+                self.assertTrue(
+                    competing_counts(CANONICAL_DOCUMENT.name,
+                                     text + "\n\n" + block + "\n",
+                                     discovered),
+                    "visible prose was treated as code")
 
     def test_gfm_delimiter_minimums_preserve_inline_ownership(self):
         discovered = unittest.TestLoader().discover(
@@ -1249,11 +1288,11 @@ class TestDocsTruth(unittest.TestCase):
             text + f"\nThe suite has {floor - 1} tests.\n",
             discovered)
 
-        with self.assertRaisesRegex(AssertionError, "could be read as competing"):
-            check_canonical_suite_floor(
-                CANONICAL_DOCUMENT.name,
-                text + f"\nThe suite has {floor} tests.\n",
-                discovered)
+        self.assertTrue(
+            competing_counts(CANONICAL_DOCUMENT.name,
+                             text + f"\nThe suite has {floor} tests.\n",
+                             discovered),
+            "a count exactly at the floor must still be reported")
 
     def test_one_sentence_two_floors_opposite_outcomes(self):
         """The boundary IS the floor, shown on a single sentence.
@@ -1280,9 +1319,10 @@ class TestDocsTruth(unittest.TestCase):
             CANONICAL_DOCUMENT.name, raised + sentence, max(discovered, 1600))
 
         # floor 1,500, same sentence: at or above it, so a competing claim.
-        with self.assertRaisesRegex(AssertionError, "could be read as competing"):
-            check_canonical_suite_floor(
-                CANONICAL_DOCUMENT.name, text + sentence, discovered)
+        self.assertTrue(
+            competing_counts(CANONICAL_DOCUMENT.name, text + sentence,
+                             discovered),
+            "an at-or-above-floor count must still be reported")
 
     def test_an_exact_count_is_judged_by_the_floor_like_any_other(self):
         """kimi-k2.7-code: the 27 competing-claim subtests all use a number
@@ -1300,18 +1340,66 @@ class TestDocsTruth(unittest.TestCase):
             text + "\nThe full suite total is %d tests.\n" % (floor - 1),
             discovered)
 
-        # at the floor, and above it: competing claims, with the line named
+        # at the floor, and above it: reported as competing, with the line
         for count in (floor, floor + 1, discovered):
             with self.subTest(count=count):
-                with self.assertRaises(AssertionError) as caught:
-                    check_canonical_suite_floor(
-                        CANONICAL_DOCUMENT.name,
-                        text + "\nThe full suite total is %d tests.\n" % count,
-                        max(discovered, count))
-                message = str(caught.exception)
-                self.assertIn("could be read as competing", message)
-                self.assertIn(str(count), message)
-                self.assertIn("line ", message)
+                reported = competing_counts(
+                    CANONICAL_DOCUMENT.name,
+                    text + "\nThe full suite total is %d tests.\n" % count,
+                    max(discovered, count))
+                self.assertTrue(reported)
+                self.assertIn(count, [found for _line, found in reported])
+                self.assertTrue(all(isinstance(line, int)
+                                    for line, _found in reported),
+                                "the report must name the line")
+
+    def test_honest_component_prose_never_fails_the_suite(self):
+        """luna's finding, as a regression rather than a disposition.
+
+        The magnitude rule rejected "The installer was built and green:
+        2,000 tests." -- honest prose, no stale claim present, suite red.
+        A guard that reddens on an honest sentence is a false failure and
+        this repository refuses one, so the scan reports instead of
+        raising. These sentences must be accepted at every magnitude,
+        including above the floor.
+        """
+        discovered = unittest.TestLoader().discover(
+            str(ROOT / "tests")).countTestCases()
+        text = CANONICAL_DOCUMENT.read_text()
+        for sentence in (
+                "The installer was built and green: 2,000 tests.",
+                "The installer's current suite count: 12 tests.",
+                "The scheduler has 0 tests, standard library only.",
+                "A skill with 3 tests in the full suite.",
+                "The full suite total is 9,999 tests.",
+        ):
+            with self.subTest(sentence=sentence):
+                # Must not raise. It may be REPORTED, which is the point.
+                check_canonical_suite_floor(
+                    CANONICAL_DOCUMENT.name,
+                    text + "\n" + sentence + "\n",
+                    discovered)
+
+    def test_the_hard_failures_are_still_hard(self):
+        """What the retreat did NOT give up."""
+        discovered = unittest.TestLoader().discover(
+            str(ROOT / "tests")).countTestCases()
+        text = CANONICAL_DOCUMENT.read_text()
+
+        stale = CANONICAL_LOWER_BOUND.sub(
+            f"Full suite: at least {discovered + 1:,} tests discoverable by "
+            "unittest. Run the command below for the exact current total.",
+            text, count=1)
+        with self.assertRaisesRegex(AssertionError, "suite floor"):
+            check_canonical_suite_floor(
+                CANONICAL_DOCUMENT.name, stale, discovered)
+
+        two_markers = text + "\n" + SUITE_MARKER + "\nFull suite: at least " \
+            "1,500 tests discoverable by unittest. Run the command below " \
+            "for the exact current total.\n"
+        with self.assertRaisesRegex(AssertionError, "marker"):
+            check_canonical_suite_floor(
+                CANONICAL_DOCUMENT.name, two_markers, discovered)
 
 
 if __name__ == "__main__":
