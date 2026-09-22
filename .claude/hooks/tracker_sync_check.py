@@ -62,7 +62,8 @@ case for each:
      is emitted -- an unreadable event is not evidence that an outward
      action occurred.
   2. **The command text.** Untrusted and unbounded. Contract: classified in
-     time linear in its length, per logical line, and never across lines.
+     time linear in its length, framed by literal LF records; continuations
+     are folded only in command syntax, never opaque heredoc data.
   3. **The repository locator.** May be empty, relative, absent, a file, or
      a directory that is not a repository. Contract: resolved exactly once,
      and anything unusable is a reported unknown.
@@ -433,23 +434,29 @@ def _lex_line(line):
     """Tokens for one line, or None if it cannot be lexed."""
     lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
+    # Bash's blank characters are space and tab.  LF framing belongs to
+    # _lex, and CR is data: treating it as whitespace can change a heredoc
+    # delimiter before the exact comparison ever sees it.
+    lexer.whitespace = " \t"
     tokens = []
     try:
         while True:
-            start = lexer.instream.tell()
+            # punctuation_chars keeps one lookahead character outside the
+            # stream.  Account for it at both ends or a token after `;`, `&&`
+            # and the other punctuation operators gets the wrong raw span.
+            start = lexer.instream.tell() - len(lexer._pushback_chars)
             value = lexer.get_token()
             if value == lexer.eof:
                 break
-            end = lexer.instream.tell()
+            end = lexer.instream.tell() - len(lexer._pushback_chars)
             consumed = line[start:end]
-            # shlex reads one punctuation character ahead before returning a
-            # word. For `1<` that consumed fragment is exactly `1<`; for
-            # `1 <` it ends in whitespace. Quoted or escaped digits do not
-            # equal the raw prefix and therefore cannot become IO_NUMBERs.
+            # For `1<` the raw token span is exactly `1` and the next source
+            # character is `<`; for `1 <` the span ends after whitespace.
+            # Quoted or escaped digits do not equal their raw span and
+            # therefore cannot become IO_NUMBERs.
             is_io_number = (value.isdigit()
-                            and len(consumed) == len(value) + 1
-                            and consumed.startswith(value)
-                            and consumed[-1:] in ("<", ">"))
+                            and consumed == value
+                            and line[end:end + 1] in ("<", ">"))
             tokens.append(_ShellToken(value, is_io_number))
     except ValueError:
         return None
@@ -503,13 +510,15 @@ def _parse_redirections(tokens):
 
 
 def _heredoc_delimiters(redirection):
-    """The possible delimiters for one normalized heredoc redirection."""
+    """The possible (delimiter, strip-leading-tabs) interpretations."""
     word = redirection.operand
+    if redirection.operator == "<<-":
+        return frozenset([(word, True)])
     if isinstance(word, tuple):
-        return frozenset(word)
+        return frozenset([(word[0], False), (word[1], True)])
     if word.startswith("-") and word[1:]:
-        return frozenset([word, word[1:]])
-    return frozenset([word])
+        return frozenset([(word, False), (word[1:], True)])
+    return frozenset([(word, False)])
 
 
 def _final_stdin_source(redirections):
@@ -560,8 +569,8 @@ def _heredoc_specs(tokens):
     quoted `'<<EOF'` as ONE token rather than the `<<` operator, and
     strips a `#` comment to nothing.
 
-    Each delimiter is a SET, because this lexer cannot recover which shape
-    was written.
+    Each delimiter is a SET of interpretations, because this lexer cannot
+    recover which shape was written.
     `cat <<-EOF` arrives as ['cat', '<<', '-EOF'] and `cat << -EOF`
     arrives identically, but the first closes on `EOF` and the second on
     `-EOF`; the whitespace that distinguishes them is gone. Accepting
@@ -700,15 +709,33 @@ def _feeds_a_shell(command_tokens):
     return False
 
 
+def _continues_command(line):
+    """Whether Bash removes a trailing backslash and the following LF.
+
+    Feed shlex the physical LF with its normal newline whitespace, while CR
+    remains data.  An effective continuation escapes that LF into a token.
+    Even backslashes and backslashes in comments do not.  None means the
+    command record is outside the subset this lexer can read.
+    """
+    lexer = shlex.shlex(line + "\n", posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    lexer.whitespace = " \t\n"
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return None
+    return bool(tokens and tokens[-1].endswith("\n"))
+
+
 def _lex(command):
     """Shell words and operators, quoting respected, newlines preserved.
 
-    Lexed LINE BY LINE with an explicit separator between lines, because
-    shlex treats a newline as ordinary whitespace: lexing the whole text
-    at once made `cat > x.sh <<EOF ... EOF` followed by a real `git push`
-    into one command beginning with `cat`. Heredoc bodies are skipped as
-    they are met, using the delimiter the opening line's TOKENS named.
-    Backslash continuations are joined first.
+    Lexed LF-DELIMITED RECORD BY LF-DELIMITED RECORD with an explicit command
+    separator, because Bash does not treat CR or Python's other universal
+    line boundaries as record separators.  Heredoc bodies are kept raw and
+    skipped as they are met, using the delimiter the opening command's TOKENS
+    named.  Backslash continuations are folded only in command state, with no
+    inserted space; preprocessing the whole string corrupts opaque bodies.
 
     A quoted string containing a literal newline is lexed as two lines.
     That is a declared limit, and it fails towards a spurious reminder
@@ -721,19 +748,45 @@ def _lex(command):
     pending = collections.deque()
     script_bodies = []
     body = []
-    for line in command.replace("\\\n", " ").splitlines():
+    records = command.split("\n")
+    index = 0
+    while index < len(records):
+        line = records[index]
         if pending:
             delimiters, pending_is_script = pending[0]
-            if line.strip() in delimiters:
+            closes = any(
+                (line.lstrip("\t") if strip_tabs else line) == delimiter
+                for delimiter, strip_tabs in delimiters)
+            if closes:
                 if pending_is_script:
                     script_bodies.append("\n".join(body))
                 pending.popleft()
                 body = []
+                index += 1
                 continue
             if pending_is_script:
                 body.append(line)
+            index += 1
             continue
-        if not line.strip():
+
+        # A heredoc opened on a continued command starts after the complete
+        # logical command, not after its first physical record.
+        logical_parts = []
+        while index + 1 < len(records):
+            continues = _continues_command(line)
+            if continues is None:
+                return None
+            if not continues:
+                break
+            logical_parts.append(line[:-1])
+            index += 1
+            line = records[index]
+        if logical_parts:
+            logical_parts.append(line)
+            line = "".join(logical_parts)
+
+        if not line.strip(" \t"):
+            index += 1
             continue
         line_tokens = _lex_line(line)
         if line_tokens is None:
@@ -753,6 +806,7 @@ def _lex(command):
         # astra also bounded the fix: "I reject building a complete
         # shell interpreter." The consumer is the discriminator, and
         # nothing more is needed.
+        index += 1
     if pending and any(is_script for _, is_script in pending):
         # An unterminated heredoc that a shell would have run: the text
         # this parser never saw is executable, which is the strongest

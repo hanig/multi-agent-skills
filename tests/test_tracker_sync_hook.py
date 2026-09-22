@@ -842,6 +842,24 @@ class TrackerSyncHookInputContract(unittest.TestCase):
             # stays data, which is the half that must not regress.
             "a cat heredoc is still data": (
                 "cat <<'EOF'\ngit push origin HEAD\nEOF", ""),
+            "a CRLF-looking cat delimiter stays data": (
+                "cat <<'EOF'\nEOF\r\ngit push origin HEAD\nEOF", ""),
+            "a fully CRLF quoted cat heredoc stays data": (
+                "cat <<'EOF'\r\ngit push origin HEAD\r\nEOF\r\n", ""),
+            "a fully CRLF shell heredoc is still a script": (
+                "bash <<'EOF'\r\ngit push origin HEAD\r\nEOF\r\n", "git push"),
+            "spaces before a quoted cat delimiter stay data": (
+                "cat <<'EOF'\n  EOF\ngit push origin HEAD\nEOF", ""),
+            "a tab before a plain cat delimiter stays data": (
+                "cat <<EOF\n\tEOF\ngit push origin HEAD\nEOF", ""),
+            "trailing delimiter whitespace stays cat data": (
+                "cat <<'EOF'\nEOF \ngit push origin HEAD\nEOF", ""),
+            "a dash heredoc strips delimiter tabs": (
+                "cat <<-EOF\n\tEOF\ngit push origin HEAD", "git push"),
+            "a dash heredoc does not strip delimiter spaces": (
+                "cat <<-EOF\n EOF\ngit push origin HEAD\nEOF", ""),
+            "a quoted cat body does not fold continuations": (
+                "cat <<'EOF'\nx\\\nEOF\ngit push origin HEAD", "git push"),
             "a heredoc written to a file is still data": (
                 "cat > x.sh <<'EOF'\ngit push\nEOF", ""),
             "a shell heredoc doing something harmless": (
@@ -893,6 +911,40 @@ class TrackerSyncHookInputContract(unittest.TestCase):
                 "cat | bash <<'EOF'\ngit push origin HEAD\nEOF", "git push"),
             "a shell after an earlier compound command": (
                 "true; bash <<'EOF'\ngit push origin HEAD\nEOF", "git push"),
+            # Round 3. shlex keeps punctuation lookahead outside the stream.
+            # The IO_NUMBER detector used stream offsets without subtracting
+            # that lookahead, so a descriptor immediately after any earlier
+            # punctuation lost its adjacency to `<<`. fd 0 therefore hid a
+            # script the shell ran. The paired fd 2 cases are the boundary:
+            # that heredoc is stderr, not the shell's script, and stays data.
+            "fd zero after a semicolon is shell stdin": (
+                "true;0<<'EOF' bash\ngit push origin HEAD\nEOF", "git push"),
+            "fd two after a semicolon is not shell stdin": (
+                "true;2<<'EOF' bash\ngit push origin HEAD\nEOF", ""),
+            "fd zero after and-if is shell stdin": (
+                "true&&0<<'EOF' bash\ngit push origin HEAD\nEOF", "git push"),
+            "fd two after and-if is not shell stdin": (
+                "true&&2<<'EOF' bash\ngit push origin HEAD\nEOF", ""),
+            "fd zero after or-if is shell stdin": (
+                "false||0<<'EOF' bash\ngit push origin HEAD\nEOF", "git push"),
+            "fd two after or-if is not shell stdin": (
+                "false||2<<'EOF' bash\ngit push origin HEAD\nEOF", ""),
+            "fd zero after a pipe is shell stdin": (
+                "printf x|0<<'EOF' bash\ngit push origin HEAD\nEOF", "git push"),
+            "fd two after a pipe is not shell stdin": (
+                "printf x|2<<'EOF' bash\ngit push origin HEAD\nEOF", ""),
+            "fd zero after a stderr pipe is shell stdin": (
+                "printf x|&0<<'EOF' bash\ngit push origin HEAD\nEOF", "git push"),
+            "fd two after a stderr pipe is not shell stdin": (
+                "printf x|&2<<'EOF' bash\ngit push origin HEAD\nEOF", ""),
+            "fd zero after backgrounding is shell stdin": (
+                "true&0<<'EOF' bash\ngit push origin HEAD\nEOF", "git push"),
+            "fd two after backgrounding is not shell stdin": (
+                "true&2<<'EOF' bash\ngit push origin HEAD\nEOF", ""),
+            "fd zero after an open paren is shell stdin": (
+                "(0<<'EOF' bash\ngit push origin HEAD\nEOF\n)", "git push"),
+            "fd two after an open paren is not shell stdin": (
+                "(2<<'EOF' bash\ngit push origin HEAD\nEOF\n)", ""),
             "a shell-looking argument to a non-shell wrapper command": (
                 "env echo bash <<'EOF'\ngit push origin HEAD\nEOF", ""),
             "only the last of two heredocs is shell stdin": (
@@ -1028,6 +1080,18 @@ class TrackerSyncHookInputContract(unittest.TestCase):
             "compound with a push": ("make build && git push origin HEAD",
                                      "git push"),
             "backslash continuation": ("gh pr \\\n  merge 41", "gh pr merge"),
+            "a mid-word backslash continuation": (
+                "git pu\\\nsh origin HEAD", "git push"),
+            "an escaped backslash does not continue": (
+                "echo \\\\\ngit push origin HEAD", "git push"),
+            "a comment backslash does not continue": (
+                "# note \\\ngit push origin HEAD", "git push"),
+            "a shell-fed body uses command continuation rules": (
+                "bash <<'EOF'\ngit pu\\\nsh origin HEAD\nEOF", "git push"),
+            "a continued cat opener remains a non-shell command": (
+                "cat <<'EOF' \\\n>/dev/null\ngit push origin HEAD\nEOF", ""),
+            "a continued shell opener still feeds the shell": (
+                "bash <<'EOF' \\\n2>/dev/null\ngit push origin HEAD\nEOF", "git push"),
             # degenerate shapes
             "empty command": ("", ""),
             "only whitespace": ("   \n\t ", ""),
@@ -1067,6 +1131,36 @@ class TrackerSyncHookInputContract(unittest.TestCase):
                 self.assertEqual(rc, 0)
                 self.assertEqual(out.strip(), "",
                                  "%s produced a reminder" % label)
+
+    def test_only_lf_frames_shell_records(self):
+        """Python's universal line boundaries are Bash record data.
+
+        Replacing the LF-only split with splitlines() must fail through the
+        configured hook: it both closes cat data early and creates a heredoc
+        opener out of text Bash still considers part of a comment.
+        """
+        fake_repo(PROBE_EMPTY, os.path.join(self.tmp, "repo"))
+        separators = ("\r", "\v", "\f", "\x1c", "\x1d", "\x1e",
+                      "\x85", "\u2028", "\u2029")
+        for separator in separators:
+            with self.subTest(separator=repr(separator), placement="body"):
+                command = ("cat <<'EOF'\nEOF" + separator +
+                           "\ngit push origin HEAD\nEOF")
+                payload = json.dumps(
+                    {"tool_input": {"command": command}}).encode()
+                rc, out = self.invoke(payload, timeout=30)
+                self.assertEqual(rc, 0)
+                self.assertEqual(out.strip(), "")
+            with self.subTest(separator=repr(separator), placement="comment"):
+                command = ("# ignored" + separator + "cat <<'EOF'\n"
+                           "git push origin HEAD\nEOF")
+                payload = json.dumps(
+                    {"tool_input": {"command": command}}).encode()
+                rc, out = self.invoke(payload, timeout=30)
+                self.assertEqual(rc, 0)
+                context = injected_context(out)
+                self.assertIsNotNone(context, out)
+                self.assertIn("git push", context)
 
     def test_a_parse_out_of_its_depth_reminds_rather_than_guesses(self):
         """Five shapes of this function each hid a real command by
