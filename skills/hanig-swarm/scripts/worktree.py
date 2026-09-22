@@ -418,7 +418,8 @@ def decode_artifact_basis(payload):
     try:
         basis = json.loads(payload)
     except (TypeError, ValueError) as exc:
-        return None, f"the pre-dispatch artifact digest is malformed JSON: {exc}"
+        return None, ("the pre-dispatch artifact digest is malformed JSON: "
+                      + render_for_record(exc, _DIAGNOSTIC_LIMIT))
     if not isinstance(basis, dict):
         return None, "the pre-dispatch artifact digest is not a JSON object"
     return basis, None
