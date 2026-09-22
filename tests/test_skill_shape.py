@@ -860,6 +860,13 @@ def excerpt_line(path, excerpt):
     excerpt's words are matched with `\\s+` between them, because the
     run may be split across lines in the source and is collapsed in
     the report (luna).
+
+    The resolver must search the same authored surface as the scanner.
+    A generated declaration can contain the same normalized run as an
+    authored duplicate, but `sentences` removes that block before the
+    scan. Exclude it here too, and return no line when more than one
+    authored occurrence remains rather than attributing the candidate
+    to the wrong one.
     """
     if path is None:
         return None
@@ -868,9 +875,16 @@ def excerpt_line(path, excerpt):
     except OSError:
         return None
     pattern = r"\s+".join(re.escape(word) for word in excerpt.split())
-    match = re.search(pattern, text)
-    if match is None:
+    matches = list(re.finditer(pattern, text))
+    if GENERATED_BEGIN in text and GENERATED_END in text:
+        generated_start = text.index(GENERATED_BEGIN)
+        generated_end = text.index(GENERATED_END) + len(GENERATED_END)
+        matches = [match for match in matches
+                   if match.end() <= generated_start
+                   or match.start() >= generated_end]
+    if len(matches) != 1:
         return None
+    match = matches[0]
     return text.count("\n", 0, match.start()) + 1
 
 
@@ -1645,6 +1659,27 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
             (root / "tests").mkdir(parents=True)
             shutil.copytree(SKILLS, root / "skills", symlinks=True)
             shutil.copy(Path(__file__), root / "tests" / Path(__file__).name)
+            registry = (root / "skills" / "hanig-project" /
+                        "declarations.json")
+            declared = json.loads(registry.read_text())
+            for entry in declared["declarations"]:
+                if entry["id"] == "interview.judgment-only":
+                    entry["normative_text"] = entry["normative_text"].replace(
+                        "the scientific claim", "scientific claim")
+                    self.assertIn("scientific claim",
+                                  entry["normative_text"])
+                    self.assertNotIn("the scientific claim",
+                                     entry["normative_text"])
+            registry.write_text(json.dumps(declared, indent=2) + "\n")
+            regenerated = subprocess.run(
+                [sys.executable,
+                 str(root / "skills" / "hanig-swarm" / "scripts" /
+                     "declaration_registry.py"),
+                 "write-body", "--skill-dir",
+                 str(root / "skills" / "hanig-project")],
+                cwd=str(root), stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, universal_newlines=True)
+            self.assertEqual(regenerated.returncode, 0, regenerated.stdout)
             surface = root / "skills" / "hanig-project" / "SKILL.md"
             body = surface.read_text() + "\nA closing note.\n" + marker + "\n"
             surface.write_text(body)
