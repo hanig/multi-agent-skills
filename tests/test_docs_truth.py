@@ -834,19 +834,21 @@ def unreachable_test_classes(path, module):
     collected set with nothing going red, the same shape as the
     `__main__` block that once hid 13 tests.
 
-    The first version answered that question from the SYNTAX -- is this
-    class lexically at module scope -- and all three reviewers broke it
-    the same way: `if True:` and `if sys.version_info >= (3, 11):` are
-    module-level guards whose bodies execute, so a class inside one is
-    collected and run, and reporting it reddens an honest suite. Which
-    is the mirror of the defect being fixed, and a worse one, because it
-    fails work that is correct.
+    Two rounds of answering that question from the SYNTAX both produced
+    false positives on correct suites, which is the mirror of the defect
+    and the worse direction:
 
-    Lexical position was never the question. Whether the module EXPOSES
-    the class is, and the module is right there: import it and look.
-    `if True:` exposes the class, `if False:` does not, a factory
-    function does not, and none of that needs a reachability analysis
-    this file has no business attempting.
+      * keying on lexical position reported `if True:` and
+        `if sys.version_info >= (3, 11):` -- guards whose bodies execute
+        -- as hidden (all three reviewers);
+      * then `getattr(module, name)` reported a nested `Outer.Inner` as
+        hidden, although the module exposes it through `Outer` and
+        unittest collects it (kimi-k2.7-code).
+
+    So the name is QUALIFIED as the walk descends, and resolved through
+    the module the same way a reader would: `Outer.Inner` is looked up
+    as an attribute of `Outer`. A class declared inside a function body
+    is unreachable by any name, so the walk marks that and does not try.
 
     Only classes that DECLARE a test method count. The repository has 23
     function-local helper classes (fake loaders, crash doubles) and every
@@ -859,28 +861,61 @@ def unreachable_test_classes(path, module):
     else:
         source = path.read_text()
 
+    declarations = []
+
+    def walk(body, prefix):
+        for node in body:
+            if isinstance(node, ast.ClassDef):
+                qualified = prefix + (node.name,)
+                methods = sorted(
+                    member.name for member in node.body
+                    if isinstance(member,
+                                  (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and member.name.startswith("test"))
+                if methods:
+                    declarations.append((qualified, methods, node.lineno))
+                walk(node.body, qualified)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                # A class declared in here carries the function's prefix
+                # nowhere: it is reachable only if something assigned it
+                # to a name the module exposes, which the resolution
+                # below discovers on its own. An explicit "inside a
+                # function means hidden" flag was here and reverting it
+                # changed no behaviour and no test, because resolution
+                # already answers the question -- and the flag would
+                # have been WRONG for the real pattern
+                # `TestCommon = make_common_tests()`.
+                walk(node.body, prefix)
+            else:
+                for field in ("body", "orelse", "finalbody"):
+                    walk(getattr(node, field, []) or [], prefix)
+                for handler in getattr(node, "handlers", []) or []:
+                    walk(handler.body, prefix)
+
+    walk(ast.parse(source).body, ())
+
     hidden = []
-    for node in ast.walk(ast.parse(source)):
-        if not isinstance(node, ast.ClassDef):
-            continue
-        methods = sorted(
-            member.name for member in node.body
-            if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and member.name.startswith("test"))
-        if not methods:
-            continue
-        exposed = getattr(module, node.name, None)
-        if not inspect.isclass(exposed):
-            hidden.append((node.name, methods, node.lineno))
-            continue
-        # A name can be exposed by a DIFFERENT class of the same name --
-        # a module-level TestCase and a factory-local one, say. Then the
-        # declared methods are the evidence: the ones the exposed class
-        # does not carry were declared somewhere nothing reaches.
+    for qualified, methods, lineno in declarations:
+        name = ".".join(qualified)
+        exposed = module
+        for part in qualified:
+            exposed = getattr(exposed, part, None)
+            if exposed is None:
+                break
+        # ONE question, asked once: which declared methods does the
+        # name the module exposes actually carry? If it exposes nothing,
+        # `getattr(None, m, None)` carries none of them and every method
+        # is reported, so a separate "not a class" branch above this was
+        # redundant -- reverting it changed no behaviour and no test.
+        #
+        # It also covers a name exposed by a DIFFERENT class of the same
+        # name: a module-level TestCase and a factory-local one. The
+        # declared methods are the evidence, and the ones the exposed
+        # class does not carry were declared somewhere nothing reaches.
         missing = sorted(m for m in methods
                          if not callable(getattr(exposed, m, None)))
         if missing:
-            hidden.append((node.name, missing, node.lineno))
+            hidden.append((name, missing, lineno))
     return sorted(hidden)
 
 
@@ -1248,10 +1283,20 @@ class TestDocsTruth(unittest.TestCase):
             text + f"\n`<!--`\n\n~~~text\nFull suite: "
             f"{discovered + 1} tests.\n~~~\n",
         )
+        # The REPORT, not just the absence of a raise. luna: this called
+        # the scan and discarded what it returned, so a regression in
+        # mask_inline_text that exposed a comment's text as a count
+        # produced a competing-count report and this test still passed.
+        # "Computed and dropped" is the same defect the entry point had,
+        # in the test written to catch it.
+        baseline = baseline_counts(discovered)
         for variant in inert_variants:
             with self.subTest(variant=variant[-90:]):
-                check_canonical_suite_floor(
-                    CANONICAL_DOCUMENT.name, variant, discovered)
+                self.assertEqual(
+                    competing_counts(CANONICAL_DOCUMENT.name, variant,
+                                     discovered),
+                    baseline,
+                    "an inert comment produced a competing count")
 
     def test_indented_code_contexts_preserve_visible_prose(self):
         discovered = unittest.TestLoader().discover(
@@ -1701,6 +1746,69 @@ class TestDocsTruth(unittest.TestCase):
             {name: methods for name, methods, _line in hidden},
             {"Hidden": ["test_lost"], "AlsoHidden": ["test_also_lost"]},
             "a guard whose body runs is not a hidden declaration")
+
+        # A NESTED class is exposed through its outer one and collected.
+        # kimi-k2.7-code: `getattr(module, "Inner")` finds nothing, so
+        # the version keyed on a bare name reported a correct suite as
+        # hidden -- the same false positive as the version keyed on
+        # lexical position, one level in.
+        nested = (
+            "import unittest\n"
+            "\n"
+            "class Outer(unittest.TestCase):\n"
+            "    def test_outer(self):\n"
+            "        pass\n"
+            "\n"
+            "    class Inner(unittest.TestCase):\n"
+            "        def test_inner(self):\n"
+            "            pass\n"
+        )
+        self.assertEqual(
+            self.sweep_source(nested, "test_nested"), [],
+            "a nested TestCase the module exposes is not hidden")
+
+        # And a nested class inside a FUNCTION still is.
+        buried = (
+            "import unittest\n"
+            "\n"
+            "def make():\n"
+            "    class Outer(unittest.TestCase):\n"
+            "        class Inner(unittest.TestCase):\n"
+            "            def test_buried(self):\n"
+            "                pass\n"
+            "    return Outer\n"
+        )
+        self.assertEqual(
+            {name: methods
+             for name, methods, _line in self.sweep_source(
+                 buried, "test_buried")},
+            {"Outer.Inner": ["test_buried"]},
+            "a class buried in a function is reachable by no name")
+
+        # A name the module exposes, carrying a DIFFERENT class: the
+        # factory-local `Same` declares test_hidden, the module-level
+        # one does not, and only the method that nothing reaches is
+        # reported.
+        shadowed = (
+            "import unittest\n"
+            "\n"
+            "class Same(unittest.TestCase):\n"
+            "    def test_visible(self):\n"
+            "        pass\n"
+            "\n"
+            "def make():\n"
+            "    class Same(unittest.TestCase):\n"
+            "        def test_hidden(self):\n"
+            "            pass\n"
+            "    return Same\n"
+        )
+        self.assertEqual(
+            {name: methods
+             for name, methods, _line in self.sweep_source(
+                 shadowed, "test_shadowed")},
+            {"Same": ["test_hidden"]},
+            "a declared method the exposed class does not carry is "
+            "reachable by nothing")
 
         # A helper class with no test method is not noise in the report.
         # The repository has 23 of those and every one declares none.
