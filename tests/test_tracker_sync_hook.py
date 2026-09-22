@@ -813,6 +813,21 @@ class TrackerSyncHookInputContract(unittest.TestCase):
                 "gh pr merge"),
             # A wrapper word that is not wrapping an outward command.
             "sudo running something harmless": ("sudo ls -la", ""),
+            # Round 2. eval JOINS its arguments and runs the result, so
+            # these are one command and not four -- glm-5.3 noted the
+            # wrapper branch already joins and that join-then-run is
+            # eval's own semantics.
+            "eval with unquoted arguments": (
+                "eval git push origin HEAD", "git push"),
+            # A regex cannot match balanced parentheses, so a nested
+            # substitution was skipped entirely, and backticks were
+            # never looked for.
+            "a nested command substitution": (
+                'echo "$(git push origin $(printf x))"', "git push"),
+            "a backtick substitution": (
+                'echo "`git push origin HEAD`"', "git push"),
+            "a substitution running something harmless": (
+                'echo "$(printf x)"', ""),
             "a shell running something harmless too": (
                 "bash -c 'echo hi'", ""),
             # Round 1 of the restart. All three reviewers found the same

@@ -320,7 +320,43 @@ _EVAL = frozenset(["eval"])
 _SHELL_COMMAND_OPTIONS = frozenset(["-c", "--command"])
 
 
-_COMMAND_SUBSTITUTION = re.compile(r"\$\(([^()]*)\)")
+def _command_substitutions(text):
+    """Every `$(...)` and backtick substitution, nesting included.
+
+    A regex cannot match balanced parentheses, and `[^()]*` silently
+    skipped any substitution containing another -- kimi-k2.7-code and
+    luna both found it, with `echo "$(git push origin $(printf x))"`.
+    Backticks were missed outright.
+    """
+    found, index = [], 0
+    while index < len(text):
+        if text.startswith("$(", index):
+            depth, start = 1, index + 2
+            cursor = start
+            while cursor < len(text) and depth:
+                if text.startswith("$(", cursor):
+                    depth += 1
+                    cursor += 2
+                    continue
+                if text[cursor] == "(":
+                    depth += 1
+                elif text[cursor] == ")":
+                    depth -= 1
+                    if not depth:
+                        break
+                cursor += 1
+            if depth == 0:
+                found.append(text[start:cursor])
+                index = cursor + 1
+                continue
+        if text[index] == "`":
+            end = text.find("`", index + 1)
+            if end != -1:
+                found.append(text[index + 1:end])
+                index = end + 1
+                continue
+        index += 1
+    return found
 
 
 def _attached_command(word):
@@ -647,7 +683,7 @@ def matched_label(command, _depth=0):
     # read as one before the simple commands are walked -- luna.
     if _depth < _SHELL_RECURSION_LIMIT:
         for token in tokens:
-            for inside in _COMMAND_SUBSTITUTION.findall(token):
+            for inside in _command_substitutions(token):
                 inner = matched_label(inside, _depth + 1)
                 if inner is not None:
                     return inner
@@ -685,8 +721,14 @@ def matched_label(command, _depth=0):
                     return inner
                 break
         if program in _EVAL and _depth < _SHELL_RECURSION_LIMIT:
-            for argument in arguments:
-                inner = matched_label(argument, _depth + 1)
+            # eval JOINS its arguments and runs the result, so
+            # `eval git push origin HEAD` is one command and not four.
+            # I checked them separately -- while the wrapper branch
+            # three lines down already joins, which glm-5.3 pointed
+            # out is exactly eval's own semantics. The mechanism was
+            # there and I used the other one.
+            if arguments:
+                inner = matched_label(" ".join(arguments), _depth + 1)
                 if inner is not None:
                     return inner
         if program in _SHELLS and _depth < _SHELL_RECURSION_LIMIT:
