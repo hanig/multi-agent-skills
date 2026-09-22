@@ -11,6 +11,7 @@ import tempfile
 import tokenize
 import unittest
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -64,6 +65,15 @@ CANONICAL_LOWER_BOUND = re.compile(
     rf"unittest\. Run the command below for the exact current total\.",
     re.IGNORECASE,
 )
+DOCS_INLINE_LINK = re.compile(
+    r"!?\[(?:\\.|[^\]\\\n])*\]\(\s*"
+    r"(?P<destination><(?:\\.|[^>\\\n])+>|(?:\\.|[^\s()\\\n])+)(?=\s|\))"
+    r"(?:\s+(?:\"(?:\\.|[^\"\\\n])*\"|"
+    r"'(?:\\.|[^'\\\n])*'|\((?:\\.|[^)\\\n])*\)))?\s*\)")
+DOCS_BARE_START = re.compile(r"(?<![A-Za-z0-9._/-])docs/")
+HTML_COMMENT = re.compile(r"<!--.*?(?:-->|\Z)", re.DOTALL)
+TRAILING_PROSE_PUNCTUATION = ".,;:!?)]}\"'"
+GLOB_MARKERS = "*?[]{}"
 
 
 def normalized_lines(text):
@@ -1326,6 +1336,147 @@ def baseline_counts(discovered):
                             CANONICAL_DOCUMENT.read_text(), discovered)
 
 
+def masked_ranges(text, ranges):
+    """Replace owned source ranges with spaces while preserving newlines."""
+    visible = list(text)
+    for start, end in ranges:
+        visible[start:end] = [
+            "\n" if character == "\n" else " "
+            for character in text[start:end]
+        ]
+    return "".join(visible)
+
+
+def inline_code_spans(text):
+    """Return `(start, end, payload)` for complete inline code spans."""
+    spans = []
+    cursor = 0
+    while cursor < len(text):
+        start = text.find("`", cursor)
+        if start < 0:
+            break
+        if opening_token_is_escaped(text, start):
+            cursor = start + 1
+            continue
+        delimiter_end = start
+        while delimiter_end < len(text) and text[delimiter_end] == "`":
+            delimiter_end += 1
+        width = delimiter_end - start
+        closing = matching_code_delimiter(
+            text, delimiter_end, width)
+        if closing is None:
+            cursor = delimiter_end
+            continue
+        end = closing + width
+        spans.append((start, end, text[delimiter_end:closing]))
+        cursor = end
+    return spans
+
+
+def block_visible_text(text):
+    """Keep prose-owned lines and mask fenced or indented block content."""
+    lines = normalized_lines(text)
+    _markers, lexed = lex_document(text)
+    return "\n".join(
+        line if not boundary else " " * len(line)
+        for line, (_number, _output, boundary) in zip(lines, lexed)
+    )
+
+
+def docs_reference_scan(text):
+    """Return concrete targets and hard refusals from CLAUDE.md Markdown.
+
+    Ownership is decided before path classification. Links own their labels,
+    destinations and titles; code spans own their payloads; only the residue
+    is bare prose. This prevents one spelling from being interpreted twice.
+    """
+    visible = block_visible_text(text)
+    comment_ranges = [match.span() for match in HTML_COMMENT.finditer(visible)]
+    visible = masked_ranges(visible, comment_ranges)
+    code_spans = inline_code_spans(visible)
+    code_masked = masked_ranges(
+        visible, [(start, end) for start, end, _payload in code_spans])
+    links = list(DOCS_INLINE_LINK.finditer(code_masked))
+    link_ranges = [match.span() for match in links]
+
+    candidates = []
+    for match in links:
+        destination = match.group("destination")
+        if destination.startswith("<") and destination.endswith(">"):
+            destination = destination[1:-1]
+        parsed = urlsplit(destination)
+        if parsed.scheme or parsed.netloc:
+            continue
+        path = unquote(parsed.path)
+        if path.startswith("docs/"):
+            candidates.append((path, "link"))
+
+    for start, end, payload in code_spans:
+        if any(link_start <= start and end <= link_end
+               for link_start, link_end in link_ranges):
+            continue
+        candidate = payload.strip()
+        if candidate.startswith("docs/"):
+            candidates.append((candidate, "code"))
+
+    prose = masked_ranges(
+        visible,
+        link_ranges + [(start, end) for start, end, _payload in code_spans],
+    )
+    for match in DOCS_BARE_START.finditer(prose):
+        end = match.end()
+        while (end < len(prose)
+               and not prose[end].isspace()
+               and prose[end] not in "`<>"):
+            end += 1
+        raw = prose[match.start():end]
+        candidate = raw.rstrip(TRAILING_PROSE_PUNCTUATION)
+        candidates.append((candidate, "bare"))
+
+    concrete = set()
+    refused = []
+    for raw, origin in candidates:
+        if not raw.startswith("docs/"):
+            continue
+        if origin == "code" and any(character.isspace() for character in raw):
+            refused.append(
+                "ambiguous code span %r; use an angle-bracket Markdown "
+                "destination for a docs path containing spaces" % raw)
+            continue
+        if any(marker in raw for marker in GLOB_MARKERS):
+            continue
+        reference = raw.split("#", 1)[0]
+        literal_parts = reference.split("/")
+        if (len(literal_parts) < 2 or literal_parts[0] != "docs"
+                or any(part in (".", "..") for part in literal_parts[1:])):
+            refused.append("unsupported docs path %r" % raw)
+            continue
+        if origin == "bare":
+            name = reference.rstrip("/").rsplit("/", 1)[-1]
+            if not reference.endswith("/") and "." not in name:
+                refused.append(
+                    "ambiguous bare docs path %r; delimit extensionless or "
+                    "space-containing targets" % raw)
+                continue
+        concrete.add(reference)
+    return sorted(concrete), sorted(set(refused))
+
+
+def docs_references(text):
+    return docs_reference_scan(text)[0]
+
+
+def docs_reference_problems(text, root=ROOT):
+    references, refused = docs_reference_scan(text)
+    missing = [reference for reference in references
+               if not (root / reference).exists()]
+    return missing, refused
+
+
+def missing_docs_references(text, root=ROOT):
+    return docs_reference_problems(text, root)[0]
+
+
 class TestDocsTruth(unittest.TestCase):
 
     def test_canonical_suite_floor_rejects_stale_and_competing_claims(self):
@@ -2479,17 +2630,13 @@ class TestCanonicalDocumentPointers(unittest.TestCase):
     cheapest possible check and nothing was making it.
     """
 
-    REFERENCE = re.compile(r"`(docs/[A-Za-z0-9._/-]+)`")
-
     def test_every_docs_path_named_in_the_canonical_document_exists(self):
         text = CANONICAL_DOCUMENT.read_text()
-        named = sorted(set(self.REFERENCE.findall(text)))
-        self.assertTrue(
-            named,
-            "no docs/ path is referenced from %s, so this guard is "
-            "watching nothing -- check the pattern, not the document"
-            % CANONICAL_DOCUMENT.name)
-        missing = [ref for ref in named if not (ROOT / ref).exists()]
+        missing, refused = docs_reference_problems(text)
+        self.assertEqual(
+            [], refused,
+            "%s contains ambiguous docs/ pointer notation: %s"
+            % (CANONICAL_DOCUMENT.name, "; ".join(refused)))
         self.assertEqual(
             [], missing,
             "%s points at %s, which does not exist. A reader told to "
@@ -2505,13 +2652,93 @@ class TestCanonicalDocumentPointers(unittest.TestCase):
         """
         text = CANONICAL_DOCUMENT.read_text()
         self.assertIn(
-            "docs/orchestrator-mandate.md", text,
+            "docs/orchestrator-mandate.md", docs_references(text),
             "%s no longer directs a session driving a run to the "
             "orchestrator mandate, so nothing loads it"
             % CANONICAL_DOCUMENT.name)
         self.assertTrue(
             (ROOT / "docs/orchestrator-mandate.md").exists(),
             "the orchestrator mandate is referenced but absent")
+
+    def test_every_ordinary_markdown_form_checks_the_same_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "docs" / "pointer.md"
+            target.parent.mkdir()
+            target.write_text("pointer\n")
+            forms = (
+                "Read `docs/pointer.md` first.",
+                "Read [the pointer](docs/pointer.md) first.",
+                "Read docs/pointer.md first.",
+                "Read (docs/pointer.md) first.",
+            )
+            for text in forms:
+                with self.subTest(text=text, state="present"):
+                    self.assertEqual(
+                        docs_references(text), ["docs/pointer.md"])
+                    self.assertEqual(missing_docs_references(text, root), [])
+
+            target.unlink()
+            for text in forms:
+                with self.subTest(text=text, state="missing"):
+                    self.assertEqual(
+                        missing_docs_references(text, root),
+                        ["docs/pointer.md"],
+                        "a broken pointer escaped because its Markdown "
+                        "form changed")
+
+    def test_space_paths_are_exact_or_hard_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "docs" / "design notes.md"
+            target.parent.mkdir()
+            target.write_text("notes\n")
+            explicit = "Read [the notes](<docs/design notes.md>)."
+            self.assertEqual(
+                docs_reference_scan(explicit),
+                (["docs/design notes.md"], []))
+            self.assertEqual(docs_reference_problems(explicit, root), ([], []))
+
+            for ambiguous in (
+                    "Read `docs/design notes.md`.",
+                    "Read docs/design notes.md."):
+                with self.subTest(ambiguous=ambiguous):
+                    references, refused = docs_reference_scan(ambiguous)
+                    self.assertEqual(references, [])
+                    self.assertTrue(refused, "ambiguous notation was silent")
+                    self.assertNotIn(
+                        "docs/design", references,
+                        "an ambiguous path was silently truncated")
+
+    def test_origin_rules_cover_round_two_interactions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            docs = root / "docs"
+            docs.mkdir()
+            (docs / "guide").write_text("guide\n")
+
+            for text in (
+                    "Read `docs/guide`.",
+                    "Read [the guide](docs/guide)."):
+                with self.subTest(kind="extensionless", text=text):
+                    self.assertEqual(docs_references(text), ["docs/guide"])
+                    self.assertEqual(docs_reference_problems(text, root),
+                                     ([], []))
+
+            period = "Read docs/missing.md."
+            self.assertEqual(docs_references(period), ["docs/missing.md"])
+            self.assertEqual(
+                docs_reference_problems(period, root),
+                (["docs/missing.md"], []),
+                "sentence punctuation hid a broken bare pointer")
+
+            external = "[docs/missing.md](https://example.test/guide)"
+            self.assertEqual(docs_reference_scan(external), ([], []),
+                             "an external link label became a local target")
+
+            glob = "See `docs/manual.md?x` as a glob."
+            self.assertEqual(docs_reference_scan(glob), ([], []),
+                             "a pattern was shortened into a concrete path")
 
 
 if __name__ == "__main__":
