@@ -1512,7 +1512,15 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         """
         source = inspect.getsource(W)
         tree = ast.parse(source)
-        allowed_bare = {"shown_repo", "PIN_VALIDATION_REFUSAL"}
+        # Each name here is a local this module rendered itself, one
+        # line earlier, and the reason is stated rather than inferred
+        # from a pattern. Adding one is a deliberate edit a reviewer
+        # can weigh; matching a shape would let any local through.
+        allowed_bare = {
+            "shown_repo",            # render_for_record of the repo path
+            "said",                  # render_for_record of git's stderr
+            "PIN_VALIDATION_REFUSAL",  # this module's own constant
+        }
         offenders = []
         for node in ast.walk(tree):
             if (not isinstance(node, ast.FunctionDef)

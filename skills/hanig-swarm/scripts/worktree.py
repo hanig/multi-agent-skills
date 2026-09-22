@@ -252,10 +252,13 @@ def repo_status(runner, repo):
     worktree, so an in-repository path is user-authored dirt and must be named
     rather than silently ignored.
     """
-    rc, out, _ = _git(runner, repo, "status", "--porcelain=v1", "-z",
-                       "--untracked-files=all")
+    rc, out, err = _git(runner, repo, "status", "--porcelain=v1", "-z",
+                        "--untracked-files=all")
     if rc != 0:
-        return rc, []
+        # git's own sentence travels with the status. Discarding it here
+        # is why the caller had to invent one, and "cannot read git
+        # status" was the invention -- luna.
+        return rc, [render_git_diagnostic(rc, err)]
     fields = out.split("\x00")
     entries, i = [], 0
     while i < len(fields):
@@ -1042,13 +1045,30 @@ def workspace_identity_problem(runner, facts):
         return (f"cannot identify the anchored worktree "
                 f"{render_for_record(workspace, _PATH_LIMIT, collapse=False)}"
                 f": {render_for_record(exc, _DIAGNOSTIC_LIMIT)}")
-    if (current_path != identity["realpath"]
-            or current.st_dev != identity["device"]
-            or current.st_ino != identity["inode"]):
+    # WHICH of the three differed. kimi-k2.7-code and glm-5.3 gave the
+    # same example: rename /build to /newbuild and leave a symlink, and
+    # stat returns the identical device and inode while only resolve()
+    # moves. The old message said "(device/inode changed)" -- a cause
+    # the stat in this very conditional disproves, sending an operator
+    # to hunt a replaced directory that is the same directory.
+    differences = []
+    if current_path != identity["realpath"]:
+        differences.append(
+            "the resolved path is now "
+            + render_for_record(current_path, _PATH_LIMIT, collapse=False))
+    if current.st_dev != identity["device"]:
+        differences.append("the device differs")
+    if current.st_ino != identity["inode"]:
+        differences.append("the inode differs")
+    if differences:
+        # The join goes through the renderer too. My own AST guard
+        # flagged it, correctly: it cannot know the pieces were
+        # rendered individually, and rendering the assembled string
+        # bounds the COMBINED length, which nothing else did.
         return (f"the anchored worktree path "
                 f"{render_for_record(workspace, _PATH_LIMIT, collapse=False)}"
-                f" no longer names the launched directory (device/inode "
-                f"changed)")
+                f" no longer names the launched directory: "
+                f"{render_for_record('; '.join(differences), _DIAGNOSTIC_LIMIT, collapse=False)}")
     observed = {}
     for key, args in (
             ("top", ("rev-parse", "--show-toplevel")),
@@ -1195,9 +1215,20 @@ def judge_detail(runner, unit_dir, spec, launch_facts=None, judgment=None):
     # tree. The claim was too broad; the code is right.
     rc, dirty = repo_status(runner, repo)
     if rc != 0:
+        # Name the command and carry git's words; do not decide WHY it
+        # failed. A nonzero status here is equally an absent
+        # repository, an invalid one, or a git that could not run.
+        # The diagnostic is rendered by repo_status, but it arrives
+        # here as a list element and the AST guard cannot see that --
+        # it flagged the conditional, which is the guard working. One
+        # renderer at one boundary means the value is rendered where
+        # it is INTERPOLATED, not merely somewhere upstream.
+        said = render_for_record(
+            dirty[0] if dirty else "git said nothing", _DIAGNOSTIC_LIMIT)
         return False, None, (
-            f"cannot read git status in "
-            f"{render_for_record(repo, _PATH_LIMIT, collapse=False)}")
+            f"git status could not be determined in "
+            f"{render_for_record(repo, _PATH_LIMIT, collapse=False)}. "
+            f"{said}. That is unknown, not a verdict on the working tree")
     if dirty:
         return False, None, (
             f"{len(dirty)} path(s) are uncommitted. Work left in the working "
