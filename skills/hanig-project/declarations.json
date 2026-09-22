@@ -17,7 +17,7 @@
     },
     {
       "id": "placement.reference-dialect",
-      "normative_text": "References use strict dialect version 1: only closed column-zero fences and valid same-line comments can exempt text; tabs, blockquotes, indented code, raw HTML, nested lists, and ambiguous structure are refused."
+      "normative_text": "References use strict dialect version 1: only closed column-zero fences and valid same-line comments -- which is what a `<!-- declaration: id -->` marker is -- can exempt text; tabs, blockquotes, indented code, OTHER raw HTML, nested lists, and ambiguous structure are refused."
     },
     {
       "id": "capability.host-policy",

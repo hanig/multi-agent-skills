@@ -877,6 +877,35 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
                 with self.subTest(skill=skill, declaration=required):
                     self.assertIn("`%s`:" % required, text)
 
+    def test_the_dialect_declaration_matches_what_the_checker_does(self):
+        """The declaration says what is refused; this checks it is true.
+
+        kimi-k2.7-code read "raw HTML ... are refused" as covering the
+        `<!-- declaration: id -->` markers the reference files are full of,
+        and posed a dilemma: either the checker flags every reference file,
+        or it silently exempts HTML and the declaration is a false promise.
+        Neither holds -- the sentence's first clause permits valid same-line
+        comments and its second refuses OTHER raw HTML -- but the wording
+        invited the reading, so both halves are now asserted rather than
+        argued.
+        """
+        skill = SKILLS / "hanig-project"
+        self.assertEqual(DECLARATION_REGISTRY.reference_problems(skill), [],
+                         "the markers the files already use must be accepted")
+
+        reference = skill / "references" / "unit-contract.md"
+        original = reference.read_text()
+        try:
+            reference.write_text(original + "\n<div>raw html</div>\n")
+            problems = DECLARATION_REGISTRY.reference_problems(skill)
+            self.assertTrue(
+                any("raw HTML" in problem for problem in problems),
+                "the declaration promises raw HTML is refused; the checker "
+                "accepted it: %r" % (problems,))
+        finally:
+            reference.write_text(original)
+        self.assertEqual(DECLARATION_REGISTRY.reference_problems(skill), [])
+
 
 if __name__ == "__main__":
     unittest.main()
