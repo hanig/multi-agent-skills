@@ -906,6 +906,52 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
             reference.write_text(original)
         self.assertEqual(DECLARATION_REGISTRY.reference_problems(skill), [])
 
+    def test_declarations_do_not_contradict_each_other(self):
+        """Two declarations I wrote disagreed, and nothing noticed.
+
+        luna: `interview.judgment-only` enumerated the interview's
+        categories as if exhaustive, and the enumeration omitted the
+        reporting cadence that `interview.reporting-cadence` separately
+        requires. An agent following the first skips the second.
+
+        There is no general contradiction checker and this does not build
+        one. It pins the specific pairing: an enumeration of what to ask
+        must name every topic another declaration makes mandatory, or say
+        it is not exhaustive.
+        """
+        with open(SKILLS / "hanig-project" / "declarations.json") as handle:
+            declared = {entry["id"]: entry["normative_text"]
+                        for entry in json.load(handle)["declarations"]}
+
+        enumeration = declared["interview.judgment-only"]
+        self.assertIn(
+            "cadence", enumeration.lower(),
+            "the interview enumeration omits the reporting cadence that "
+            "interview.reporting-cadence separately requires")
+        self.assertIn(
+            "not an exhaustive", enumeration.lower(),
+            "an enumeration that reads as exhaustive must say it is not, "
+            "or the next mandatory topic silently falls outside it")
+
+    def test_normative_text_is_grammatical_where_it_was_not(self):
+        """kimi-k2.7-code found two noun-adjunct ambiguities.
+
+        "judgment inspection cannot settle" parses as a compound noun
+        rather than "judgment THAT inspection cannot settle", and "grants
+        a worker coordinator authority" as "a worker-coordinator role"
+        rather than "a worker the coordinator's authority". A normative
+        sentence that can be parsed two ways states two rules.
+        """
+        with open(SKILLS / "hanig-project" / "declarations.json") as handle:
+            declared = {entry["id"]: entry["normative_text"]
+                        for entry in json.load(handle)["declarations"]}
+        self.assertNotIn("judgment inspection cannot",
+                         declared["interview.judgment-only"])
+        self.assertNotIn("a worker coordinator authority",
+                         declared["capability.install-boundary"])
+        self.assertIn("coordinator's authority",
+                      declared["capability.install-boundary"])
+
 
 if __name__ == "__main__":
     unittest.main()

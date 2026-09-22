@@ -32,7 +32,7 @@
     },
     {
       "id": "capability.install-boundary",
-      "normative_text": "Installing this skill never provisions accounts, copies credentials, changes permission or model defaults, or grants a worker coordinator authority."
+      "normative_text": "Installing this skill never provisions accounts, copies credentials, changes permission or model defaults, or grants a worker the coordinator's authority."
     },
     {
       "id": "paths.skill-directory",
@@ -90,7 +90,7 @@
     },
     {
       "id": "interview.judgment-only",
-      "normative_text": "Use `grill-with-docs` when installed, otherwise ask one recommended-answer question at a time only about judgment inspection cannot settle: done criteria, scientific claim, discardable work, budget, protected destinations, and retry exposure.",
+      "normative_text": "Use `grill-with-docs` when installed, otherwise ask one recommended-answer question at a time, only about judgment THAT inspection cannot settle. At least: done criteria, the scientific claim, discardable work, budget, protected destinations, retry exposure, and reporting cadence. The list is a floor, not an exhaustive set -- a value `swarm.py schema` requires and inspection cannot supply is a question too.",
       "references": [
         "references/survey-interview.md"
       ]
