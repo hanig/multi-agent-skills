@@ -709,40 +709,65 @@ class TestBoundedReads(unittest.TestCase):
     there blocked the gate forever and it never printed a verdict."""
 
     def test_fifo_file_argument_is_a_config_error_not_a_hang(self):
-        """`--no-probe`, because the probe is not what is under test.
+        """The test was hollow, in both its versions, and nobody had said so.
 
-        Without it, `--list` makes a live request to every configured
-        provider before it prints anything: 13.3s wall at 1% CPU on an
-        ordinary run here, against this test's 15-second deadline. That
-        is a 1.1x margin on a network round trip, so the test reddened
-        the suite whenever a provider was slow -- twice in one session,
-        on two branches that touch neither this file nor the gate.
+        It ran `--list`, which prints the reviewer roster and exits
+        WITHOUT EVER OPENING `--file`. So it passed because `--list`
+        returns, not because a FIFO was rejected: the path it is named
+        for was never reached. luna and glm-5.3 both found the symptom
+        -- `assertIsNotNone(pr.returncode)` passes for any exit at all,
+        and glm added that an unrecognised flag would exit 2 with no
+        traceback and leave this green -- and measuring it showed the
+        cause was worse than either described.
 
-        The failure was also self-defeating: a timeout expiring is
-        indistinguishable from the hang the test exists to refuse, so
-        the message accused the code of exactly the defect the network
-        had caused.
+        My first repair made it worse in a second way. `--list` also
+        makes a live request to every configured provider before
+        printing (13.3s wall at 1% CPU, against this test's 15-second
+        deadline), so the test raced a network round trip it did not
+        need; I added `--no-probe` and a longer deadline and left it
+        still not reading the file.
 
-        `--no-probe` reaches the same `--file` handling with no network
-        in the path -- 0.134s measured, a 100x margin -- and the
-        deadline goes back to being a backstop against a real hang
-        rather than a race against a provider.
+        A real reviewing invocation DOES read `--file`, refuses a
+        non-regular one in `read_text_bounded`, and exits before any
+        provider is contacted. Measured: rc=4 in 0.14s, no network. So
+        the assertions are positive -- the exit status the gate uses for
+        a configuration problem, and git's... the reader's own sentence
+        naming the path -- rather than "it returned something".
+
+        A regular file is deliberately NOT used here: that path proceeds
+        to a real review and contacts providers, which is the dependency
+        this test exists without.
         """
-        import tempfile as _tf, os as _os
+        import tempfile as _tf, os as _os, time as _time
         tmp = Path(_tf.mkdtemp())
         fifo = tmp / "src.fifo"
         _os.mkfifo(fifo)
+        started = _time.time()
         pr = subprocess.Popen(
-            [sys.executable, str(SCRIPT), "--file", str(fifo),
-             "--list", "--no-probe"],
+            [sys.executable, str(SCRIPT), "--kind", "implementation",
+             "--file", str(fifo), "--round", "1",
+             "--claim", "This change cannot make an honest run fail."],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             out, err = pr.communicate(timeout=60)
         except subprocess.TimeoutExpired:
             pr.kill()
+            pr.communicate()
             self.fail("review.py hung on a FIFO --file argument")
-        self.assertIsNotNone(pr.returncode)
-        self.assertNotIn("Traceback", err)
+        elapsed = _time.time() - started
+        both = out + err
+        self.assertEqual(
+            pr.returncode, 4,
+            "a FIFO must be the gate's configuration-error exit, not %r: %r"
+            % (pr.returncode, both[:400]))
+        self.assertIn("cannot read", both)
+        self.assertIn(str(fifo), both,
+                      "the refusal did not name the path it refused")
+        # No provider is contacted on this path, so the only thing a slow
+        # network can do here is nothing.
+        self.assertLess(elapsed, 30.0,
+                        "the config-error path contacted something: %.1fs"
+                        % elapsed)
 
     def test_bounded_reader_rejects_non_regular_files(self):
         import tempfile as _tf, os as _os
