@@ -825,8 +825,13 @@ class TestAuthoredSkillShape(unittest.TestCase):
 
 GENERATED_BEGIN = "<!-- BEGIN GENERATED DECLARATIONS"
 GENERATED_END = "<!-- END GENERATED DECLARATIONS -->"
-ASK_CUE = re.compile(r"\bask(?:s|ed|ing)?\b", re.IGNORECASE)
 FRONTMATTER = re.compile(r"\A---\n.*?\n---\n", re.DOTALL)
+
+# How many of the registry's own interview topics may appear in one
+# authored sentence before it is a second copy of the list. The honest
+# tree's maximum is ONE; the three paraphrases three reviewers wrote to
+# defeat the previous rule score six and seven. Three is far from both.
+SECOND_COPY_TOPICS = 3
 
 
 class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
@@ -929,6 +934,34 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
             "adoption.remaining-work",
         ),
     }
+
+    @staticmethod
+    def second_copies(named_sentences, topics):
+        """Sentences carrying enough of TOPICS to be a copy of the list."""
+        found = []
+        for name, sentences in named_sentences:
+            for sentence in sentences:
+                lowered = sentence.lower()
+                present = sorted(t for t in topics if t in lowered)
+                if len(present) >= SECOND_COPY_TOPICS:
+                    found.append((name, ", ".join(present), sentence))
+        return found
+
+    @staticmethod
+    def interview_topics(enumeration):
+        """The topics `interview.judgment-only` itself names.
+
+        Read out of the declaration rather than written down here, so
+        this test has no second copy of the list either -- which would
+        be the same defect it exists to catch.
+        """
+        listing = enumeration.split("At least:", 1)[1].split(". ", 1)[0]
+        topics = []
+        for piece in re.split(r",|\band\b", listing):
+            topic = re.sub(r"^the ", "", piece.strip().strip(".").lower())
+            if len(topic) > 3:
+                topics.append(topic)
+        return topics
 
     def authored_surfaces(self):
         """Every hanig-project surface a human wrote, generated block cut."""
@@ -1051,37 +1084,65 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
             "an enumeration that reads as exhaustive must say it is not, "
             "or the next mandatory topic silently falls outside it")
 
-        # ONE COPY, not a sweep for the words I happened to write.
+        # ONE COPY -- detected by the registry's own topics, not by any
+        # pattern I write.
         #
-        # My first version read only declarations.json, so the same
-        # contradiction survived in the body's step-2 walkthrough and in
-        # the reference (glm-5.3). My second swept every surface for
-        # paragraphs containing the literal "done criteria" and "protected
-        # destinations" -- which luna refuted in one line: an honest
-        # paraphrase ("completion criteria ... protected locations ...")
-        # omits the cadence and never trips a sentinel. Widening the
-        # sentinel list is the same losing move a third time.
+        # Three rounds of this test looked for English and three rounds
+        # of reviewers wrote English that missed it. First the literal
+        # phrases "done criteria" and "protected destinations" (luna
+        # paraphrased them). Then any sentence that both asks and lists
+        # five items -- luna, kimi-k2.7-code and glm-5.3 independently
+        # produced "Question the owner, one at a time, about ...", which
+        # has no "ask", and a semicolon list, which has no commas. Each
+        # round I widened the pattern and the next round walked past it,
+        # which is the same losing move recorded in the tracker hook's
+        # header for the same reason.
         #
-        # So there is now exactly ONE enumeration, in the registry, and the
-        # walkthrough and the reference point at it instead of restating
-        # it. This asserts the absence: outside the generated declaration
-        # block, no sentence both asks and lists. It is a heuristic, and it
-        # is one that cannot be paraphrased around, because it keys on the
-        # SHAPE of an enumeration rather than on its words. An honest new
-        # ask-list fails it too -- and the answer to that failure is to put
-        # the list in the registry, which is the rule.
-        for surface in self.authored_surfaces():
-            for sentence in self.sentences(surface):
-                if not ASK_CUE.search(sentence):
-                    continue
-                if sentence.count(",") < 4:
-                    continue
-                self.fail(
-                    "%s lists what to ask outside the generated "
-                    "declaration block:\n  %s\nThe interview topics have "
-                    "one home, interview.judgment-only. A second copy is "
-                    "how the reporting cadence left one surface while "
-                    "surviving in another." % (surface.name, sentence))
+        # So the needles come from `interview.judgment-only` itself. A
+        # second copy of the list is a sentence carrying several of the
+        # topics the list names, whatever verb introduces it and whatever
+        # punctuation separates them. It cannot be paraphrased around
+        # without changing the topic words -- at which point it is a
+        # different list saying different things, which no test can
+        # police and the registry does not claim to. And it tightens by
+        # itself: add a topic to the declaration and the needle set grows
+        # with it.
+        topics = self.interview_topics(enumeration)
+        self.assertGreaterEqual(len(topics), 5,
+                                "the topic list did not parse: %r" % (topics,))
+
+        named = [(surface.name, self.sentences(surface))
+                 for surface in self.authored_surfaces()]
+        self.assertEqual(
+            self.second_copies(named, topics), [],
+            "the interview topic list has a second copy outside the "
+            "generated declaration block. The topics have one home, "
+            "interview.judgment-only; a second copy is how the reporting "
+            "cadence left one surface while surviving in another.")
+
+        # The rule must also FIRE. Disabling the threshold left the suite
+        # green until this case existed, which is the shape this whole
+        # branch is about: a check whose only evidence is that it has not
+        # complained. Every string here is a paraphrase a reviewer wrote
+        # to walk past an earlier version of this test.
+        for label, paraphrase in (
+                ("no ask verb",
+                 "Question the owner, one at a time, about done criteria, "
+                 "the scientific claim, discardable work, budget, protected "
+                 "destinations, retry exposure, and reporting cadence."),
+                ("semicolons instead of commas",
+                 "Interview coverage: completion criteria; scientific claim; "
+                 "discardable work; budget; protected destinations; retry "
+                 "exposure; reporting cadence."),
+                ("a different verb",
+                 "The interview must cover: done criteria, the scientific "
+                 "claim, discardable work, budget, protected destinations, "
+                 "retry exposure, and reporting cadence."),
+        ):
+            with self.subTest(paraphrase=label):
+                self.assertTrue(
+                    self.second_copies([("planted.md", [paraphrase])], topics),
+                    "a second copy phrased as %r was not detected" % label)
 
     def test_every_declaration_elaboration_mentions_its_subject(self):
         """glm-5.3: the cadence declaration pointed at a reference that
