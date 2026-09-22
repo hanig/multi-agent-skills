@@ -813,6 +813,28 @@ class TrackerSyncHookInputContract(unittest.TestCase):
                 "gh pr merge"),
             # A wrapper word that is not wrapping an outward command.
             "sudo running something harmless": ("sudo ls -la", ""),
+            "a shell running something harmless too": (
+                "bash -c 'echo hi'", ""),
+            # Round 1 of the restart. All three reviewers found the same
+            # COMPOSITION: a wrapper handing the command to a shell. Two
+            # mechanisms that each worked alone and not together.
+            "a wrapper around a shell": (
+                "sudo bash -c 'git push origin HEAD'", "git push"),
+            "timeout around a shell": (
+                'timeout 600 bash -c "gh pr merge 41"', "gh pr merge"),
+            "nohup around a shell": (
+                "nohup sh -c 'git push origin HEAD'", "git push"),
+            "a wrapper with options around a shell": (
+                "sudo -u deploy bash -c 'git push origin HEAD'", "git push"),
+            # luna, three more, each a regression against the old hook.
+            "a reserved word with its own option": (
+                "time -p git push origin HEAD", "git push"),
+            "an attached -c payload": (
+                "bash -c'git push origin HEAD'", "git push"),
+            "eval of a command string": (
+                'eval "git push origin HEAD"', "git push"),
+            "a command substitution": (
+                'echo "$(git push origin HEAD)"', "git push"),
             # luna: the command delegated to another shell as a string.
             "bash -c with a push": (
                 "bash -c 'git push origin HEAD'", "git push"),

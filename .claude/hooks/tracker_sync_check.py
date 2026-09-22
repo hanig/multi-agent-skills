@@ -312,7 +312,35 @@ _WRAPPERS = frozenset([
 # whole push, so no simple command has `git` as its program and the hook
 # went silent on a push the shell really runs.
 _SHELLS = frozenset(["sh", "bash", "zsh", "dash", "ksh", "ash", "busybox"])
+
+# `eval "git push origin HEAD"` runs its argument as a command with no
+# option to introduce it. luna: the old substring match fired on this
+# and the parser did not.
+_EVAL = frozenset(["eval"])
 _SHELL_COMMAND_OPTIONS = frozenset(["-c", "--command"])
+
+
+_COMMAND_SUBSTITUTION = re.compile(r"\$\(([^()]*)\)")
+
+
+def _attached_command(word):
+    """The payload of an attached `-c'...'`, or None.
+
+    shlex yields `bash -c'git push'` as the single token `-cgit push`,
+    which matched no option spelling, so the command was never read --
+    luna.
+    """
+    if not word.startswith("-c") or len(word) <= 2 or word.startswith("--"):
+        return None
+    rest = word[2:]
+    # `-ce` is a CLUSTER of short flags; `-cgit push origin HEAD` is an
+    # attached payload. A payload carries whitespace or punctuation a
+    # flag letter cannot; a cluster is bare letters. Reading `-ce` as a
+    # payload made its command `"e"` and lost the push -- my own fix for
+    # one form breaking the other, found by the case that covered it.
+    if rest.isalpha():
+        return None
+    return rest
 
 
 def _is_shell_command_option(word):
@@ -490,6 +518,13 @@ def _command_word_and_arguments(tokens):
             continue
         if token in _RESERVED_WORDS:
             index += 1
+            # `time -p git push`: a reserved word takes options of its
+            # own, and leaving `-p` in the program slot lost a real push
+            # (luna). Only options are skipped here -- an operand is a
+            # word this parser cannot tell from a command name.
+            while (index < len(tokens) and tokens[index].startswith("-")
+                   and len(tokens[index]) > 1):
+                index += 1
             continue
         break
     if index >= len(tokens):
@@ -606,6 +641,17 @@ def matched_label(command, _depth=0):
         # asymmetry asks for.
         return ("an outward action (command could not be parsed)"
                 if unreadable else None)
+    # `echo "$(git push origin HEAD)"` runs the push to build the
+    # argument. The old substring match fired on it; the parser saw
+    # `echo`. A substitution is a command wherever it sits, so it is
+    # read as one before the simple commands are walked -- luna.
+    if _depth < _SHELL_RECURSION_LIMIT:
+        for token in tokens:
+            for inside in _COMMAND_SUBSTITUTION.findall(token):
+                inner = matched_label(inside, _depth + 1)
+                if inner is not None:
+                    return inner
+
     for simple in _simple_commands(tokens):
         program, arguments = _command_word_and_arguments(simple)
         if not program:
@@ -620,8 +666,17 @@ def matched_label(command, _depth=0):
             # Scan the wrapper's remaining words for an outward program
             # and read the command from there. Not a walk: a wrapper's
             # own options and operands have no common shape.
+            # ...to an outward program OR to a shell. luna,
+            # kimi-k2.7-code and glm-5.3 all found the same composition
+            # in one round: `sudo bash -c 'git push'` resolved `sudo`,
+            # scanned for a `gh`/`git` basename, found none because the
+            # payload is one quoted token, and never reached the shell
+            # branch because the program word was not a shell. Two
+            # mechanisms that each work alone and not together is not a
+            # spelling gap; it is the composition I failed to write.
             for index, argument in enumerate(arguments):
-                if argument.rsplit("/", 1)[-1] not in ("gh", "git"):
+                basename = argument.rsplit("/", 1)[-1]
+                if basename not in ("gh", "git") and basename not in _SHELLS:
                     continue
                 inner = matched_label(
                     " ".join(shlex.quote(word)
@@ -629,6 +684,11 @@ def matched_label(command, _depth=0):
                 if inner is not None:
                     return inner
                 break
+        if program in _EVAL and _depth < _SHELL_RECURSION_LIMIT:
+            for argument in arguments:
+                inner = matched_label(argument, _depth + 1)
+                if inner is not None:
+                    return inner
         if program in _SHELLS and _depth < _SHELL_RECURSION_LIMIT:
             # luna: `bash -c 'git push origin HEAD'` lexes as a `bash`
             # command whose quoted argument holds the whole push, so no
@@ -638,6 +698,12 @@ def matched_label(command, _depth=0):
             # -c ...'` is a command a person can write and a recursion a
             # hook must not follow forever.
             for index, argument in enumerate(arguments):
+                attached = _attached_command(argument)
+                if attached is not None:
+                    inner = matched_label(attached, _depth + 1)
+                    if inner is not None:
+                        return inner
+                    break
                 if not _is_shell_command_option(argument):
                     continue
                 if argument.startswith("--command="):
