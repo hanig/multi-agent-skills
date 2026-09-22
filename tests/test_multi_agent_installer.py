@@ -212,6 +212,31 @@ class TestPublicCli(unittest.TestCase):
         self.assertTrue(any("known competing loader visibility" in item
                             for item in data["diagnostics"]))
 
+    def test_default_dry_run_selects_present_unverified_agents_without_certifying_them(self):
+        # Versions outside the exact adapter pins are still present targets,
+        # but every one remains visibly uncertified and produces a diagnostic.
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            bin_dir = self._fake_agents(base, "claude", "codex", "pi")
+            for agent in ("claude", "codex", "pi"):
+                (bin_dir / agent).write_text("#!/bin/sh\necho 99.0.0\n")
+            env = {"HOME": str(base / "home"),
+                   "PATH": str(bin_dir) + os.pathsep + "/usr/bin:/bin",
+                   "TMPDIR": str(base), "XDG_CONFIG_HOME": str(base / "config"),
+                   "PYTHONDONTWRITEBYTECODE": "1"}
+            result = subprocess.run(
+                ["sh", str(ROOT / "install.sh"), "--dry-run", "--json"],
+                cwd=ROOT, env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual({target["agent"] for target in data["targets"]},
+                         {"claude", "codex", "pi"})
+        self.assertTrue(all(target["verification"] == "unverified"
+                            for target in data["targets"]))
+        self.assertNotEqual(data["version"], "99.0.0")
+        self.assertEqual(sum("not adapter-certified" in item
+                             for item in data["diagnostics"]), 3)
+
     def test_expected_duplicate_visibility_is_prominent_and_installs_same_snapshot(self):
         result, home = self._run(
             "--agent", "claude", "--agent", "codex",
@@ -260,6 +285,10 @@ class TestPublicCli(unittest.TestCase):
         data = json.loads(result.stdout)
         self.assertEqual([target["agent"] for target in data["targets"]], ["codex"])
         self.assertEqual(data["targets"][0]["verification"], "unverified")
+        self.assertTrue(any("selected explicitly with discovery state absent" in item
+                            for item in data["diagnostics"]))
+        self.assertFalse(any(" is present but not adapter-certified" in item
+                             for item in data["diagnostics"]))
         self.assertFalse(home.exists())
 
     def test_no_automatic_agent_is_actionable_and_writes_nothing(self):
