@@ -281,6 +281,18 @@ PROBE_NOT_JSON = """
 # Valid JSON the reader does not recognise. luna found that each of these
 # produced "total 0" -- a schema mismatch reading as an empty outbox, which
 # is the same defect as a failed probe reading as one.
+# Output that DECODES or PARSES only because the reader was permissive.
+# luna: decode(..., "replace") turns a corrupt byte into U+FFFD and lets the
+# rest parse, and json.loads accepts NaN by default, so a malformed payload
+# still reported an empty outbox.
+PROBE_MALFORMED = {
+    "invalid utf-8": (
+        "    import sys\n"
+        "    sys.stdout.buffer.write(b'{\"intents\":[],\"d\":\"\\xff\"}')"),
+    "NaN in the payload": '    print(\'{"intents": [], "d": NaN}\')',
+    "Infinity in the payload": '    print(\'{"intents": [], "d": Infinity}\')',
+}
+
 PROBE_WRONG_SHAPE = {
     "intents is a string": '    print(\'{"intents": "not-a-list"}\')',
     "no intents key": "    print('{}')",
@@ -392,6 +404,43 @@ class TrackerSyncHookOutboxReporting(unittest.TestCase):
                 self.assertIsNotNone(context, out)
                 self.assertIn("Unknown is not zero", context)
                 self.assertNotIn("total 0", context)
+
+    def test_malformed_output_is_unknown_even_when_it_parses(self):
+        """A permissive reader is how malformed output became "total 0"."""
+        for label, body in PROBE_MALFORMED.items():
+            with self.subTest(payload=label):
+                rc, context, out, _ = self.run_against(body)
+                self.assertEqual(rc, 0)
+                self.assertIsNotNone(context, out)
+                self.assertIn("Unknown is not zero", context)
+                self.assertNotIn("total 0", context)
+
+    def test_detection_is_linear_in_the_command(self):
+        """glm-5.3: four nested-greedy patterns with re.S turned an honest
+        bulk script into a multi-minute stall on the synchronous per-tool
+        path, or a hook killed with nothing emitted.
+
+        The input is deliberately honest: several hundred read-only
+        `gh pr view` lines, no mutating verb anywhere. It must stay silent
+        AND stay fast.
+        """
+        haystack = "\n".join("gh pr view %d" % n for n in range(600))
+        started = time.time()
+        rc, out, _ = run_hook(haystack, timeout=30)
+        elapsed = time.time() - started
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(), "",
+                         "a read-only bulk script must not fire the hook")
+        self.assertLess(elapsed, 5.0,
+                        "detection took %.1fs on a 600-line honest command; "
+                        "this runs on every Bash call" % elapsed)
+
+    def test_a_mutating_verb_on_another_line_is_not_one_command(self):
+        """With re.S a `gh` on line 1 and a `merge` on line 400 matched as
+        though they were the same command. They are not."""
+        rc, out, _ = run_hook("gh pr view 1\necho merge\n")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(), "", "matched across separate commands")
 
     def test_a_hanging_probe_is_bounded_and_leaves_no_descendants(self):
         """The defect class a step-back committee predicted would come next.

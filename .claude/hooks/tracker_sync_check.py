@@ -69,16 +69,54 @@ import tempfile
 # mind. Read-only subcommands (view, list, diff, checks, status) are
 # deliberately absent: they change nothing, so a reminder on them is noise,
 # and habituation is the way a reminder stops being read.
-PR_MUTATING = "merge|close|create|edit|ready|reopen|comment|review"
+PR_MUTATING = frozenset(
+    "merge close create edit ready reopen comment review".split())
 
-OUTWARD_PATTERNS = (
-    ("gh pr merge", r"\bgh\b.*\bpr\b.*\bmerge\b"),
-    ("gh pr close", r"\bgh\b.*\bpr\b.*\bclose\b"),
-    ("gh pr create", r"\bgh\b.*\bpr\b.*\bcreate\b"),
-    ("gh pr", r"\bgh\b.*\bpr\b.*\b(?:%s)\b" % PR_MUTATING),
-    ("gh issue", r"\bgh\b.*\bissue\b"),
-    ("git push", r"\bgit\b.*\bpush\b"),
-)
+# Detection is a LINEAR token scan, not a regex.
+#
+# It was `\bgh\b.*\bpr\b.*\bmerge\b` with re.S, four of them, run on
+# every Bash command. glm-5.3 showed what that costs: `.` spans newlines,
+# so on an honest multi-kilobyte command containing a few hundred read-only
+# `gh pr view` lines each pattern pairs every gh with every later pr and
+# rescans the tail, and the synchronous PostToolUse path stalls for tens of
+# seconds to minutes -- or the harness kills the hook and it emits nothing,
+# which is the one outcome this module promises never to produce. The
+# deleted shell version matched the same input instantly with `case` globs,
+# so the port had regressed it.
+#
+# Scanning per line also fixes a correctness bug the regex had: with re.S a
+# `gh` on line 1 and a `merge` on line 400 matched as though they were one
+# command.
+_WORD = re.compile(r"[A-Za-z][A-Za-z0-9-]*")
+
+
+def _logical_lines(command):
+    """Split into commands, joining backslash continuations."""
+    joined = command.replace("\\\n", " ")
+    return joined.replace(";", "\n").replace("&&", "\n").splitlines()
+
+
+def matched_label(command):
+    """The outward action this command looks like, or None.
+
+    Deliberately SENSITIVE rather than precise: a spurious reminder costs
+    one line of context, a missed one costs the tracker sync this exists
+    to guarantee.
+    """
+    for line in _logical_lines(command):
+        words = set(w.lower() for w in _WORD.findall(line))
+        if "git" in words and "push" in words:
+            return "git push"
+        if "gh" not in words:
+            continue
+        if "issue" in words:
+            return "gh issue"
+        if "pr" in words:
+            verbs = words & PR_MUTATING
+            if verbs:
+                return "gh pr " + sorted(verbs)[0]
+    return None
+
 
 REAP_GRACE_S = 2
 
@@ -115,13 +153,6 @@ def emit(message):
     sys.stdout.flush()
 
 
-def matched_label(command):
-    for label, pattern in OUTWARD_PATTERNS:
-        if re.search(pattern, command, re.S):
-            return label
-    return None
-
-
 def state_dir_for(repo):
     """The coordinator's state directory for a project, by its own rule."""
     resolved = os.path.realpath(repo)
@@ -131,6 +162,11 @@ def state_dir_for(repo):
         os.path.expanduser("~"), ".local", "state")
     return os.path.join(base, "hanig-swarm", "projects",
                         "%s-%s" % (slug or "project", digest), "state")
+
+
+def _reject_constant(name):
+    """Refuse the JSON extensions the outbox never writes."""
+    raise ValueError("unexpected JSON constant %s" % name)
 
 
 def _shape_of(data):
@@ -190,9 +226,19 @@ def read_outbox(repo, state):
     if proc.returncode != 0:
         return None, ("The outbox probe exited %s." % proc.returncode)
     try:
-        data = json.loads(out.decode("utf-8", "replace"))
-    except ValueError:
-        return None, "The outbox probe returned output that is not JSON."
+        text = out.decode("utf-8")
+    except UnicodeDecodeError:
+        # "replace" would turn a corrupt byte into U+FFFD and let the rest
+        # parse, so malformed output could still report an empty outbox.
+        return None, "The outbox probe returned output that is not UTF-8."
+    try:
+        # json.loads accepts NaN, Infinity and -Infinity by default, which
+        # the outbox never emits; accepting them means accepting a payload
+        # no json.dumps on the other side produced.
+        data = json.loads(text, parse_constant=_reject_constant)
+    except ValueError as exc:
+        return None, ("The outbox probe returned output that is not JSON "
+                      "(%s)." % str(exc).split("\n")[0][:120])
     # Validate the SHAPE before believing the count. luna: a probe that
     # exits 0 and prints {"intents": "not-a-list"} or {} produced "total 0"
     # with no warning -- a schema the reader does not recognise reading as
