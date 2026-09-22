@@ -468,6 +468,28 @@ def _heredoc_delimiters(tokens):
 
 _NEWLINE = "\n"
 
+# A sentinel that separates the command's own tokens from the bodies of
+# any heredoc a shell was going to execute. Not a string a lexer can
+# produce, so it cannot collide with real input.
+_SCRIPT_BODIES = object()
+
+
+def _feeds_a_shell(line_tokens):
+    """True when this line hands its heredoc to something that runs it.
+
+    The program word decides it: `bash <<EOF` executes the body,
+    `cat <<EOF` prints it and `cat > x.sh <<EOF` stores it. A wrapper
+    counts too, since `sudo bash <<EOF` runs it just the same.
+    """
+    for token in line_tokens:
+        if token in _OPERATORS:
+            continue
+        basename = token.rsplit("/", 1)[-1]
+        if basename in _WRAPPERS or _ASSIGNMENT.match(token):
+            continue
+        return basename in _SHELLS or basename in _EVAL
+    return False
+
 
 def _lex(command):
     """Shell words and operators, quoting respected, newlines preserved.
@@ -488,10 +510,18 @@ def _lex(command):
     """
     tokens = []
     pending = None
+    pending_is_script = False
+    script_bodies = []
+    body = []
     for line in command.replace("\\\n", " ").splitlines():
         if pending is not None:
             if line.strip() in pending:
-                pending = None
+                if pending_is_script:
+                    script_bodies.append("\n".join(body))
+                pending, pending_is_script, body = None, False, []
+                continue
+            if pending_is_script:
+                body.append(line)
             continue
         if not line.strip():
             continue
@@ -504,6 +534,24 @@ def _lex(command):
         if delimiters is DEGENERATE_HEREDOC:
             return OUT_OF_DEPTH
         pending = delimiters
+        # WHOSE heredoc is it. astra: `bash <<'EOF' ... EOF` feeds the
+        # body to a shell, which EXECUTES it -- the body is the script,
+        # and discarding it as inert was the third detection regression
+        # against the hook this replaces. A body sent to `cat`, or
+        # redirected into a file, genuinely is data.
+        #
+        # astra also bounded the fix: "I reject building a complete
+        # shell interpreter." The consumer is the discriminator, and
+        # nothing more is needed.
+        pending_is_script = bool(pending) and _feeds_a_shell(line_tokens)
+    if pending is not None and pending_is_script:
+        # An unterminated heredoc that a shell would have run: the text
+        # this parser never saw is executable, which is the strongest
+        # case for the unknown answer rather than the weakest.
+        return OUT_OF_DEPTH
+    if script_bodies:
+        tokens.append(_SCRIPT_BODIES)
+        tokens.extend(script_bodies)
     if pending is not None:
         # A heredoc whose delimiter never arrives: either the text is
         # truncated or the `<<` was not an operator at all -- a quoted
@@ -677,6 +725,14 @@ def matched_label(command, _depth=0):
         # asymmetry asks for.
         return ("an outward action (command could not be parsed)"
                 if unreadable else None)
+    # A heredoc a shell was going to execute is a command, not data.
+    if _SCRIPT_BODIES in tokens and _depth < _SHELL_RECURSION_LIMIT:
+        for body in tokens[tokens.index(_SCRIPT_BODIES) + 1:]:
+            inner = matched_label(body, _depth + 1)
+            if inner is not None:
+                return inner
+        tokens = tokens[:tokens.index(_SCRIPT_BODIES)]
+
     # `echo "$(git push origin HEAD)"` runs the push to build the
     # argument. The old substring match fired on it; the parser saw
     # `echo`. A substitution is a command wherever it sits, so it is

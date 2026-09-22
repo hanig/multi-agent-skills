@@ -828,6 +828,24 @@ class TrackerSyncHookInputContract(unittest.TestCase):
                 'echo "`git push origin HEAD`"', "git push"),
             "a substitution running something harmless": (
                 'echo "$(printf x)"', ""),
+            # astra, step-back, after PR 44 merged: a heredoc fed to a
+            # SHELL is the script that shell runs, and discarding it as
+            # inert was the third detection regression against the hook
+            # this replaces. The consumer is the discriminator.
+            "a shell-fed heredoc is a script": (
+                "bash <<'EOF'\ngit push origin HEAD\nEOF", "git push"),
+            "an unquoted shell heredoc": (
+                "bash <<EOF\ngh pr merge 41\nEOF", "gh pr merge"),
+            "a wrapper around a shell heredoc": (
+                "sudo bash <<'EOF'\ngit push origin HEAD\nEOF", "git push"),
+            # ...and a heredoc fed to something that does NOT run it
+            # stays data, which is the half that must not regress.
+            "a cat heredoc is still data": (
+                "cat <<'EOF'\ngit push origin HEAD\nEOF", ""),
+            "a heredoc written to a file is still data": (
+                "cat > x.sh <<'EOF'\ngit push\nEOF", ""),
+            "a shell heredoc doing something harmless": (
+                "bash <<'EOF'\necho hello\nEOF", ""),
             "a shell running something harmless too": (
                 "bash -c 'echo hi'", ""),
             # Round 1 of the restart. All three reviewers found the same
