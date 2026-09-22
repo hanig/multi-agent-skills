@@ -354,7 +354,9 @@ def stray_untracked(runner, spec, launch_facts=None):
     rc, entries = repo_status(runner, repo)
     if rc != 0:
         return {"workspace": repo, "paths": [], "count": 0,
-                "error": f"cannot read git status in {repo!r}"}
+                "error": ("cannot read git status in "
+                          + render_for_record(
+                              repo, _PATH_LIMIT, collapse=False))}
     declared = _declared_names(spec)
     stray = sorted(e["path"] for e in entries
                    if e.get("status") == UNTRACKED_STATUS

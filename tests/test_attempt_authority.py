@@ -631,6 +631,7 @@ def _is_rendered(node, allowed_bare):
 RENDERED_REFUSAL_FUNCTIONS = (
     "decode_launch_facts",
     "judge_detail",
+    "stray_untracked",
     "validate_pinned_head",
     "workspace_identity_problem",
 )
