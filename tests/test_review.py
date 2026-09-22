@@ -738,11 +738,10 @@ class TestBoundedReads(unittest.TestCase):
         to a real review and contacts providers, which is the dependency
         this test exists without.
         """
-        import tempfile as _tf, os as _os, time as _time
+        import tempfile as _tf, os as _os
         tmp = Path(_tf.mkdtemp())
         fifo = tmp / "src.fifo"
         _os.mkfifo(fifo)
-        started = _time.time()
         pr = subprocess.Popen(
             [sys.executable, str(SCRIPT), "--kind", "implementation",
              "--file", str(fifo), "--round", "1",
@@ -754,7 +753,6 @@ class TestBoundedReads(unittest.TestCase):
             pr.kill()
             pr.communicate()
             self.fail("review.py hung on a FIFO --file argument")
-        elapsed = _time.time() - started
         both = out + err
         self.assertEqual(
             pr.returncode, 4,
@@ -763,11 +761,18 @@ class TestBoundedReads(unittest.TestCase):
         self.assertIn("cannot read", both)
         self.assertIn(str(fifo), both,
                       "the refusal did not name the path it refused")
-        # No provider is contacted on this path, so the only thing a slow
-        # network can do here is nothing.
-        self.assertLess(elapsed, 30.0,
-                        "the config-error path contacted something: %.1fs"
-                        % elapsed)
+        # NO WALL-CLOCK ASSERTION. There was one here -- 30 seconds, to
+        # catch the path contacting a provider -- and luna pointed out
+        # what it was: a new timing race, in the test written to remove
+        # a timing race. A scheduling delay or a suspended machine
+        # would have failed an honest run.
+        #
+        # It was also ineffective, which makes the call easy: a
+        # provider answering inside the threshold would have passed it.
+        # What actually establishes that nothing is contacted is the
+        # exit status and the message -- the gate refuses the file
+        # during argument handling and never reaches a provider -- and
+        # those are asserted above without a clock.
 
     def test_bounded_reader_rejects_non_regular_files(self):
         import tempfile as _tf, os as _os
