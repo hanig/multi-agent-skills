@@ -761,7 +761,20 @@ class TestBoundedReads(unittest.TestCase):
         self.assertIn("cannot read", both)
         self.assertIn(str(fifo), both,
                       "the refusal did not name the path it refused")
-        # NO WALL-CLOCK ASSERTION. There was one here -- 30 seconds, to
+        # The 60-second `communicate` deadline is the ONLY clock left,
+        # and it is not an assertion about speed: it is the sole way to
+        # notice the hang this test exists for, against an operation
+        # measured at 0.14s. A 400x margin, reached only when the gate
+        # genuinely blocks.
+        #
+        # kimi-k2.7-code is right that it can fail an honest run if the
+        # machine is suspended for a minute mid-rejection, and that is
+        # the price of being able to detect a hang at all. glm-5.3
+        # re-evaluated the related worry -- a shorter per-test runner
+        # timeout hiding the message -- and found no such timeout
+        # exists here and none is configurable by default.
+        #
+        # NO OTHER WALL-CLOCK ASSERTION. There was one -- 30 seconds, to
         # catch the path contacting a provider -- and luna pointed out
         # what it was: a new timing race, in the test written to remove
         # a timing race. A scheduling delay or a suspended machine
