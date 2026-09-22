@@ -133,9 +133,9 @@ and nobody is watching it. Ask:
 > close, only when something needs you, or at the end? *Recommended: hourly
 > while units are live, plus immediately on anything that needs a person.*
 
-**Cadence** and **escalation** are two answers, not one. Cadence is how often
-a healthy run reports. Escalation is what reaches them immediately regardless
-of cadence: a `NEEDS_HUMAN` unit, an exhausted budget, a blocked merge, a
+These are two answers, not one. **Cadence** is how often a healthy run
+reports. **Escalation** is what reaches them immediately regardless of
+cadence: a `NEEDS_HUMAN` unit, an exhausted budget, a blocked merge, a
 conflict a machine must not settle. "Only at the end" is a legitimate cadence
 and is never a legitimate escalation policy.
 

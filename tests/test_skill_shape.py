@@ -33,7 +33,8 @@ BODY_LINE_BUDGETS = {
     # sacrificed to the budget. If the full registry does not fit, the budget
     # or the criterion is wrong, not the inclusion of behaviour rules."
     #
-    # 618 is the body's EXACT measured length, so any addition trips this.
+    # 618 is the body's EXACT measured length, so any addition trips this:
+    # one added line measures 619 and fails, removing it passes.
     # A first attempt set 615 against a 612-line body and described three
     # lines of slack as "so the next addition trips it again"; luna refuted
     # that in one line -- a one-line addition yields 613 and passes. A margin
