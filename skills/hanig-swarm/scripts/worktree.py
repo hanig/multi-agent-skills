@@ -783,9 +783,14 @@ def read_launch_record(unit_dir):
                       "state before the agent ran, so no transition can be "
                       "judged. Re-dispatch through the coordinator.")
     except (OSError, ValueError) as exc:
-        return None, f"launch record at {path} is unreadable: {exc}"
+        return None, (f"launch record at "
+                      f"{render_for_record(path, _PATH_LIMIT, collapse=False)} "
+                      f"is unreadable: "
+                      f"{render_for_record(exc, _DIAGNOSTIC_LIMIT)}")
     if not isinstance(rec, dict):
-        return None, f"launch record at {path} is not an object"
+        return None, (f"launch record at "
+                      f"{render_for_record(path, _PATH_LIMIT, collapse=False)} "
+                      f"is not an object")
     # Refusing type, so a computed key or an aliased reader cannot quietly
     # take an authority field from an unsealed record.
     return EvidenceRecord(rec), None
