@@ -101,11 +101,55 @@ past the size limit all take it. Two readings of `<<-EOF` are both
 accepted for the same reason: when the lexer cannot recover which was
 written, it takes the one that reads MORE text as commands.
 
-So the remaining gaps are still gaps, but the ones that come from the
-lexer losing its footing now announce themselves. The ones that do not --
-a spelling this lexer parses cleanly into a program name it has never
-heard of -- remain a declared limit. `matched_label` is sensitive, not
-exhaustive, and the header says so.
+That was not enough, and the round after it said why. `(gh pr merge 41)`
+lexes CLEANLY: three outcomes, and this one is "found none", because `(`
+sat in the program-word slot and matched no program. The lexer had not
+lost its footing at all -- it had landed somewhere that is not a command
+and reported nothing, which is the same silence by a different route.
+glm-5.3 found it, with `<&3`, `>|` and `{` beside it, and kimi-k2.7-code
+found `PATH+=/usr/local/bin` doing it too.
+
+So the third outcome is decided by the SHAPE of what was found rather
+than by a list of what was looked for: a word in the program slot that
+cannot be a command name means this parser did not find a command,
+whatever put it there. `_COMMAND_WORD` is that rule.
+
+One narrowing came with it. An unknown answer is only worth giving about
+text that could be an outward action at all: `!!! ??? ***` has a program
+word that is not a command name and contains no `gh` and no `git`, so
+there is nothing it could be hiding, and a reminder on it is habituation
+-- which is how a reminder stops being read. `_OUTWARD_HINTS` gates the
+three unknown answers and nothing else.
+
+## The one regression this port produced
+
+And the round after THAT found the shape rule's own blind spot, which is
+the one worth recording plainest. `for r in origin upstream; do git push
+$r main; done` puts `do` in the program slot. `do` is plain letters, so
+it passes `_COMMAND_WORD` -- the backstop written to end exactly this
+class -- and the hook went silent on two real pushes. glm-5.3 named it a
+DETECTION REGRESSION against the shell script this file replaces, whose
+crude `*"git push"*` substring match caught it, and that is the right
+word: for one shape the port was worse than what it replaced.
+
+The answer is not a sixth pattern. A shell RESERVED WORD can never be a
+command name -- bare `do cmd` is a syntax error -- so when one occupies
+the program slot the command is what follows it. `_RESERVED_WORDS` covers
+`do`, `if`, `then`, `until`, `while`, `time`, `!` and the rest in one
+rule, and a reserved word used as an ARGUMENT is untouched, because the
+skip runs only while the program word is still being resolved.
+
+Two more from that round, both real and both narrow. `bash -c 'git push
+origin HEAD'` hides a command inside a quoted argument, so the argument
+is read as a command, bounded to three levels. And `git 2>/dev/null push
+origin HEAD` put a redirection between the program word and the
+subcommand, where `_command_word_and_arguments` skipped redirections and
+`_subcommands` did not -- two functions skipping the same tokens in one
+place and not the other.
+
+The remaining gaps are still gaps. A spelling this lexer parses cleanly
+into a plausible program name it has never heard of is a declared limit;
+`matched_label` is sensitive, not exhaustive, and the header says so.
 
 Two rules this file must keep:
 
