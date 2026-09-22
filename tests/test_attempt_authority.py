@@ -731,6 +731,62 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         self.assertIsNotNone(why)
         self.assertIn("not a git repository", why)
 
+    def test_a_file_where_a_repository_was_is_not_called_missing(self):
+        """kimi-k2.7-code's counterexample: ENOTDIR also says "cannot change to".
+
+        A first version matched that generic prefix, so a path that is a
+        regular file was reported as a repository that is not present.
+        """
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        facts = self.facts(attempt)
+        pinned = self.commit("A")
+        afile = self.tmp / "repo-is-a-file.txt"
+        afile.write_text("not a repository\n")
+        moved = dict(facts)
+        moved["repo"] = str(afile)
+        why = W.validate_pinned_head(U.run, moved, pinned)
+        self.assertIsNotNone(why)
+        self.assertIn("is not a directory", why)
+        self.assertNotIn("not present on this host", why)
+
+    def test_an_unrecognised_git_failure_is_quoted_not_bucketed(self):
+        """Guessing is the thing this discrimination exists to stop."""
+        def runner(argv, **kwargs):
+            if "rev-parse" in argv and "--git-dir" in argv:
+                return 1, "", "fatal: something nobody has seen before"
+            return 1, "", ""
+        why = W.repository_unusable_reason(runner, "/somewhere")
+        self.assertIn("something nobody has seen before", why)
+        self.assertNotIn("not present on this host", why)
+        self.assertNotIn("not a git repository", why)
+
+    def test_an_unreadable_object_database_is_not_an_absent_commit(self):
+        """luna's finding: --git-dir says nothing about the object store.
+
+        A repository whose objects cannot be read answers `rev-parse
+        --git-dir` with rc 0 while `cat-file -e` fails, so a present commit
+        was reported absent.
+        """
+        real = U.run
+
+        def runner(argv, **kwargs):
+            if "cat-file" in argv:
+                return 1, "", "fatal: unable to read object"
+            if "rev-parse" in argv and "HEAD^{commit}" in argv:
+                return 128, "", "fatal: unable to read object database"
+            return real(argv, **kwargs)
+
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        facts = self.facts(attempt)
+        pinned = self.commit("A")
+        why = W.validate_pinned_head(runner, facts, pinned)
+        self.assertIsNotNone(why)
+        self.assertIn("unknown, not", why)
+        self.assertIn("object database", why)
+        self.assertNotIn("is absent from", why)
+
     def test_deleting_the_launch_record_does_not_change_judgment(self):
         attempt = self.tmp / "runs" / "u1" / "att1"
         attempt.mkdir(parents=True)

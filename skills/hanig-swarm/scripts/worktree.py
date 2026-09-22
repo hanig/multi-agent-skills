@@ -1227,6 +1227,20 @@ def receipt_basis(runner, unit_dir, spec, launch_facts=None):
                 stray_untracked=stray_untracked(runner, spec, launch_facts))
 
 
+# Conditions git names in its own error text, matched on the SPECIFIC
+# condition rather than on the generic "cannot change to" prefix. A first
+# version matched the prefix and kimi-k2.7-code refuted it in one line: a
+# path that is a regular file yields "Not a directory" and an unreadable one
+# yields "Permission denied", both of which begin "cannot change to" and were
+# therefore reported as a missing repository.
+_GIT_PATH_CONDITIONS = (
+    ("no such file or directory", "{repo} is not present on this host"),
+    ("not a directory", "{repo} exists but is not a directory"),
+    ("permission denied", "{repo} cannot be read by this process"),
+    ("not a git repository", "{repo} is present but is not a git repository"),
+)
+
+
 def repository_unusable_reason(runner, repo):
     """Why a repository path cannot answer a question, or None if it can.
 
@@ -1234,6 +1248,9 @@ def repository_unusable_reason(runner, repo):
     `rev-parse --git-dir` is the probe rather than a filesystem stat, so this
     stays inside the runner abstraction the judge is tested through, and so a
     path that exists but is not a repository is caught too.
+
+    An unrecognised failure is reported verbatim rather than sorted into the
+    nearest bucket. Guessing is what this function exists to stop.
     """
     if not repo:
         return "this attempt recorded no repository"
@@ -1241,11 +1258,38 @@ def repository_unusable_reason(runner, repo):
     if rc == 0:
         return None
     lowered = (err or "").lower()
-    if "no such file or directory" in lowered or "cannot change to" in lowered:
-        return (f"its recorded repository {repo} is not present on this host")
-    if "not a git repository" in lowered:
-        return f"{repo} is present but is not a git repository"
+    for condition, template in _GIT_PATH_CONDITIONS:
+        if condition in lowered:
+            return "its recorded repository " + template.format(repo=repo)
     return f"git could not read {repo}: {err or 'no error text'}"
+
+
+def object_database_unreadable_reason(runner, repo):
+    """Whether a present repository's objects can be read at all.
+
+    `rev-parse --git-dir` reads the repository's metadata and says nothing
+    about its object database. luna refuted the first version of this on
+    exactly that gap: a repository whose object pack is inaccessible answers
+    `--git-dir` with rc 0 while `cat-file -e` fails, so a readable-looking
+    repository reported a present commit as absent.
+
+    So before calling an object absent, confirm the database can produce ANY
+    commit. The repository's own HEAD is the cheapest such object, and a
+    repository that cannot resolve its own HEAD cannot be used to conclude
+    anything about another commit's absence.
+    """
+    rc, _out, err = _git(runner, repo, "rev-parse", "--verify", "--quiet",
+                         "HEAD^{commit}")
+    if rc == 0:
+        return None
+    # An unborn HEAD is a legitimate, readable repository with no commits;
+    # it just cannot serve as the probe. `cat-file -e` on a real object id
+    # remains the answer there, so do not claim the database is unreadable.
+    if not (err or "").strip():
+        return None
+    return (f"the object database at {repo} could not be read "
+            f"({err.strip()}), so this cannot distinguish an absent commit "
+            f"from an unreadable one")
 
 
 def validate_pinned_head(runner, launch_facts, produced):
@@ -1285,6 +1329,11 @@ def validate_pinned_head(runner, launch_facts, produced):
                     f"be read because {unusable}. That is unknown, not "
                     f"absent: another ref is still never substituted, and "
                     f"the object may exist in a checkout of the same remote")
+        unreadable = object_database_unreadable_reason(runner, repo)
+        if unreadable:
+            return (f"the pinned produced commit {produced[:12]} could not "
+                    f"be read because {unreadable}. That is unknown, not "
+                    f"absent, and another ref is still never substituted")
         return (f"pinned produced commit {produced[:12]} is absent from "
                 f"{repo}; refusing rather than substituting the current ref")
     rc, _out, _err = _git(runner, repo, "merge-base", "--is-ancestor",
