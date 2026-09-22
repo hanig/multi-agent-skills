@@ -933,6 +933,55 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
             "an enumeration that reads as exhaustive must say it is not, "
             "or the next mandatory topic silently falls outside it")
 
+        # EVERY SURFACE, not just the registry. glm-5.3: my first version
+        # read only declarations.json, so the same contradiction survived
+        # in the authored body's step-2 walkthrough and in the reference --
+        # "recreating in the authored body the exact exhaustive-enumeration
+        # contradiction this change claims to have fixed in the registry".
+        skill = SKILLS / "hanig-project"
+        surfaces = [skill / "SKILL.md"] + sorted(
+            (skill / "references").glob("*.md"))
+        for surface in surfaces:
+            text = surface.read_text()
+            for paragraph in text.split("\n\n"):
+                lowered = " ".join(paragraph.split()).lower()
+                if "done criteria" not in lowered:
+                    continue
+                if "protected destinations" not in lowered:
+                    continue
+                with self.subTest(surface=surface.name):
+                    self.assertTrue(
+                        "cadence" in lowered
+                        or "told what is happening" in lowered,
+                        "%s enumerates the interview topics without the "
+                        "reporting cadence:\n%s" % (surface.name, paragraph))
+                    self.assertTrue(
+                        "at least" in lowered or "floor" in lowered,
+                        "%s enumerates the interview topics as if the list "
+                        "were exhaustive:\n%s" % (surface.name, paragraph))
+
+    def test_every_declaration_elaboration_mentions_its_subject(self):
+        """glm-5.3: the cadence declaration pointed at a reference that
+        contained no cadence content at all, so following the link for
+        guidance found a category list that omitted it.
+
+        A narrow check, not a general one: a reference named as a
+        declaration's elaboration must carry at least one line tied to
+        that declaration's id.
+        """
+        skill = SKILLS / "hanig-project"
+        with open(skill / "declarations.json") as handle:
+            entries = json.load(handle)["declarations"]
+        for entry in entries:
+            for relative in entry.get("references", ()):
+                path = skill / relative
+                with self.subTest(declaration=entry["id"], ref=relative):
+                    self.assertIn(
+                        "<!-- declaration: %s -->" % entry["id"],
+                        path.read_text(),
+                        "%s names %s as its elaboration, but that file ties "
+                        "no line to it" % (entry["id"], relative))
+
     def test_normative_text_is_grammatical_where_it_was_not(self):
         """kimi-k2.7-code found two noun-adjunct ambiguities.
 

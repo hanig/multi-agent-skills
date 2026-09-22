@@ -4,6 +4,13 @@ The decision surface is `../SKILL.md`. This reference records why the survey
 and interview declarations exist and gives examples without becoming a second
 source of behavior. <!-- declaration: placement.reference-elaboration -->
 
+## Why the survey runs first
+
+Reading the survey before speaking is what keeps the interview to judgment.
+The walk, the partition facts and the repository state below are all things
+the host can answer, so asking about them spends the owner's attention on <!-- declaration: survey.read-before-ask -->
+something inspection already settled. <!-- declaration: survey.read-before-ask -->
+
 ## Repository walk states
 
 The survey tree walk runs in a child process with a real deadline. A check in
@@ -71,8 +78,26 @@ partition, account, promotion destination and approver, code provider and mode,
 target branch, runtime verification, and retry exposure. <!-- declaration: interview.dispatch-complete -->
 
 Every question must concern judgment that inspection cannot settle and carry a <!-- declaration: interview.judgment-only -->
-recommended answer. The categories are done criteria, scientific claim,
-discardable work, budget, protected destinations, and retry exposure. <!-- declaration: interview.judgment-only -->
+recommended answer. The categories are at least done criteria, scientific
+claim, discardable work, budget, protected destinations, retry exposure, and
+reporting cadence; the list is a floor rather than an exhaustive set. <!-- declaration: interview.judgment-only -->
+
+## Reporting cadence and escalation
+
+Cadence and escalation are two answers, not one. Cadence is how often a
+healthy run reports. Escalation is what reaches the owner immediately
+regardless of cadence: a NEEDS_HUMAN unit, an exhausted budget, a blocked
+merge, a conflict a machine must not settle. <!-- declaration: interview.reporting-cadence -->
+"Only at the end" is a legitimate cadence and is never a legitimate <!-- declaration: interview.reporting-cadence -->
+escalation policy. <!-- declaration: interview.reporting-cadence -->
+
+Both answers belong in the plan as a top-level `reporting` block rather than
+in a session's memory, because a session dies and its successor inherits the
+plan and not the conversation. The block sits outside `plan_digest`, so
+changing cadence mid-run does not invalidate recorded attempts. <!-- declaration: interview.reporting-cadence -->
+
+Nothing enforces cadence; the orchestrator honours it. Enforcing it is
+ARC-691's clock rather than a sentence in a skill. <!-- declaration: interview.reporting-cadence -->
 
 For a half-finished repository, the initial draft must be based on its project <!-- declaration: adoption.context -->
 documents, architecture decisions, recent commits, and outputs already on

@@ -159,9 +159,11 @@ request contains the literal phrase `swarm autopilot`.
 
 ### Finish only when the plan can dispatch
 
-Ask only about judgment: done criteria, scientific claim, discardable work,
-budget, protected destinations, and the most work the owner will repeat after
-one interruption. Every question includes a recommended answer.
+Ask only about judgment. At least: done criteria, scientific claim,
+discardable work, budget, protected destinations, the most work the owner will
+repeat after one interruption, and how often they want to be told what is
+happening. That list is a floor, not an exhaustive set. Every question
+includes a recommended answer.
 
 Before ending the interview, enumerate the plan's required values:
 
