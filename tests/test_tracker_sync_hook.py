@@ -621,6 +621,35 @@ class TrackerSyncHookInputContract(unittest.TestCase):
         """luna, kimi-k2.7-code and glm-5.3 all noted this class named the
         command text and then tested ordinary commands in it."""
         cases = {
+            # glm-5.3: the word "issue" in an argument routed the whole
+            # line into the issue branch and the merge emitted NOTHING.
+            "merge whose subject mentions an issue": (
+                'gh pr merge 41 --squash --subject "fixes issue #3"',
+                "gh pr merge"),
+            "merge with an issue in a comment": (
+                "gh pr merge 41 # fixes issue 3", "gh pr merge"),
+            "review whose body mentions an issue": (
+                'gh pr review 41 --approve --body "closes issue #3"',
+                "gh pr review"),
+            # kimi-k2.7-code: a pipe made an argument look like a subcommand.
+            "read-only piped into grep merge": (
+                "gh pr view 41 | grep merge", ""),
+            "read-only piped into grep close": (
+                "gh pr view 41 | grep close", ""),
+            # The other direction, which is what makes the pipe split
+            # load-bearing rather than decorative: only the FIRST gh in a
+            # segment is examined, so without splitting on `|` the second
+            # command here is never looked at and a real merge is missed.
+            "read-only piped into a real merge": (
+                "gh pr view 41 | gh pr merge 41", "gh pr merge"),
+            "mutating first, read-only second": (
+                "gh pr merge 41 | tee /tmp/log", "gh pr merge"),
+            # luna: a mutating subcommand that was simply absent.
+            "update-branch": ("gh pr update-branch 41", "gh pr update-branch"),
+            # position, not presence
+            "git behind a -C flag": ("git -C /tmp/x push origin HEAD",
+                                     "git push"),
+            "the word push as an argument": ("echo push origin", ""),
             # honest bulk script: must stay silent AND stay fast
             "600 read-only lines": ("\n".join("gh pr view %d" % n
                                               for n in range(600)), ""),

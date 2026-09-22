@@ -111,63 +111,87 @@ import time
 # mind. Read-only subcommands (view, list, diff, checks, status) are
 # deliberately absent: they change nothing, so a reminder on them is noise,
 # and habituation is the way a reminder stops being read.
+# The mutating subcommands of `gh pr` and `gh issue`. Read-only ones -- view,
+# list, diff, checks, status -- are deliberately absent: they change nothing,
+# so a reminder on them is noise, and habituation is how a reminder stops
+# being read.
 PR_MUTATING = frozenset(
-    "merge close create edit ready reopen comment review".split())
-
-# The same rule for `gh issue`, which was matched on the bare subcommand.
-# kimi-k2.7-code: `gh issue list` and `gh issue view ARC-689` change
-# nothing and fired the reminder anyway, contradicting this module's own
-# stated rule and producing exactly the habituation it warns about.
+    "merge close create edit ready reopen comment review update-branch"
+    .split())
 ISSUE_MUTATING = frozenset(
     "create close reopen edit comment delete transfer pin unpin lock "
     "unlock develop".split())
 
-# Detection is a LINEAR token scan, not a regex.
+# Detection reads POSITION, not a bag of words, and that is the fourth shape
+# this has had. The history is worth keeping because each shape failed in a
+# way the next one had to answer:
 #
-# It was `\bgh\b.*\bpr\b.*\bmerge\b` with re.S, four of them, run on
-# every Bash command. glm-5.3 showed what that costs: `.` spans newlines,
-# so on an honest multi-kilobyte command containing a few hundred read-only
-# `gh pr view` lines each pattern pairs every gh with every later pr and
-# rescans the tail, and the synchronous PostToolUse path stalls for tens of
-# seconds to minutes -- or the harness kills the hook and it emits nothing,
-# which is the one outcome this module promises never to produce. The
-# deleted shell version matched the same input instantly with `case` globs,
-# so the port had regressed it.
+#   1. `\bgh\b.*\bpr\b.*\bmerge\b` with re.S. Quadratic: 8.05s for ONE
+#      of four patterns on 600 honest `gh pr view` lines (measured), and it
+#      matched a `gh` on line 1 against a `merge` on line 400.
+#   2. A per-line set intersection. Linear, and it lost position, so
+#      `gh pr view 41 | grep merge` read as a merge (kimi-k2.7-code) and
+#      `gh pr merge 41 --subject "fixes issue #3"` emitted NOTHING, because
+#      the word `issue` routed the line into the issue branch (glm-5.3).
+#      That last one is a missed merge, which is the failure this hook
+#      exists to prevent.
+#   3. This: the CLI's own grammar. `gh <noun> <verb>` and `git ... push`,
+#      taken positionally from the first non-flag tokens of each segment.
+#      An argument can no longer impersonate a subcommand.
 #
-# Scanning per line also fixes a correctness bug the regex had: with re.S a
-# `gh` on line 1 and a `merge` on line 400 matched as though they were one
-# command.
-_WORD = re.compile(r"[A-Za-z][A-Za-z0-9-]*")
+# Still linear, and still deliberately SENSITIVE rather than precise: a
+# spurious reminder costs one line of context, a missed one costs the sync.
+#
+# Declared limits: a subcommand supplied through a variable, an alias, or
+# `xargs` is not seen, and neither is one assembled at runtime. This reads
+# text, not intent.
+_WORD = re.compile(r"[A-Za-z][A-Za-z0-9._-]*")
+_SEGMENT = re.compile(r"[;\n]|\|\|?|&&")
 
 
-def _logical_lines(command):
-    """Split into commands, joining backslash continuations."""
-    joined = command.replace("\\\n", " ")
-    return joined.replace(";", "\n").replace("&&", "\n").splitlines()
+def _segments(command):
+    """Split into separately-executed commands, joining continuations.
+
+    `|` splits too: `gh pr view 41 | grep merge` is two commands and only
+    the first is a gh invocation.
+    """
+    return _SEGMENT.split(command.replace("\\\n", " "))
+
+
+def _tokens(segment):
+    """Non-flag words, in order, as the shell would pass them."""
+    out = []
+    for raw in segment.split():
+        stripped = raw.strip("\"'`()$")
+        if not stripped or stripped.startswith("-"):
+            continue
+        match = _WORD.match(stripped)
+        if match:
+            out.append(match.group(0).lower())
+    return out
 
 
 def matched_label(command):
-    """The outward action this command looks like, or None.
-
-    Deliberately SENSITIVE rather than precise: a spurious reminder costs
-    one line of context, a missed one costs the tracker sync this exists
-    to guarantee.
-    """
-    for line in _logical_lines(command):
-        words = set(w.lower() for w in _WORD.findall(line))
-        if "git" in words and "push" in words:
+    """The outward action this command looks like, or None."""
+    for segment in _segments(command):
+        tokens = _tokens(segment)
+        if not tokens:
+            continue
+        try:
+            head = tokens.index("gh")
+        except ValueError:
+            head = None
+        if head is not None:
+            rest = tokens[head + 1:]
+            if len(rest) >= 2:
+                noun, verb = rest[0], rest[1]
+                if noun == "pr" and verb in PR_MUTATING:
+                    return "gh pr " + verb
+                if noun == "issue" and verb in ISSUE_MUTATING:
+                    return "gh issue " + verb
+            continue
+        if "git" in tokens and "push" in tokens[tokens.index("git") + 1:]:
             return "git push"
-        if "gh" not in words:
-            continue
-        if "issue" in words:
-            verbs = words & ISSUE_MUTATING
-            if verbs:
-                return "gh issue " + sorted(verbs)[0]
-            continue
-        if "pr" in words:
-            verbs = words & PR_MUTATING
-            if verbs:
-                return "gh pr " + sorted(verbs)[0]
     return None
 
 
@@ -226,13 +250,26 @@ _OUTPUT_LIMIT = 8 * 1024 * 1024
 
 
 def _reap(proc):
-    """Kill the probe's process group and wait, bounded."""
+    """Kill the probe's process group, close the pipe, and wait, bounded.
+
+    The pipe is closed BEFORE waiting. luna: communicate() buffers whatever
+    is still arriving, so a detached descendant writing to the inherited
+    stdout could push the process past the size cap during cleanup -- the
+    cap applied to the read and not to the reap. Closing the read end means
+    a surviving writer gets EPIPE instead of this process getting the
+    bytes.
+    """
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     except OSError:
         pass
     try:
-        proc.communicate(timeout=REAP_GRACE_S)
+        if proc.stdout is not None:
+            proc.stdout.close()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=REAP_GRACE_S)
     except subprocess.TimeoutExpired:
         pass
 
