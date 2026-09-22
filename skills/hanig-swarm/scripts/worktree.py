@@ -683,7 +683,8 @@ def record_claim(rec, key):
 
 def launch_record_path(unit_dir):
     """One place for the convention, which three call sites had inlined."""
-    return Path(unit_dir).parent / f"launch-{Path(unit_dir).name}.json"
+    return Path(unit_dir).parent / (
+        f"launch-{render_for_record(Path(unit_dir).name, 243, collapse=False)}.json")
 
 
 def read_sealed_launch_record(unit_dir, seal):
