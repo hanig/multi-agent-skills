@@ -80,6 +80,33 @@ reassuring sentence available here, so it must be the hardest to reach by
 accident: it requires a probe that started, exited zero, produced strict
 UTF-8, parsed as standard JSON, and matched the outbox shape.
 
+## The second recurrence: coverage instead of depth
+
+Rounds 1 through 3 of the review that followed found, between them, ten
+more detection gaps: a `2>/dev/null` prefix, a `|&` pipe, a `&>` redirect,
+a quoted `'<<EOF'` read as a heredoc, a `<<` with nothing after it, a
+delimiter that never arrives. Every round I widened the pattern by exactly
+the shape the reviewer named, and every round the next reviewer found the
+shape next to it. That is the sibling-sweep failure CLAUDE.md warns about,
+but the sweep is not the fix here either -- the set of shell spellings is
+not enumerable by a hook, and a detector that is only as good as its last
+review will always be one spelling behind.
+
+The fix is to stop pretending the parse always succeeds. This lexer now
+has three outcomes, not two: it found an outward action, it found none, or
+it could not read the text. The third is new, it is the one the earlier
+shapes collapsed into "found none", and it emits the reminder. A quoted
+`<<`, a truncated heredoc, a delimiter this lexer cannot resolve and text
+past the size limit all take it. Two readings of `<<-EOF` are both
+accepted for the same reason: when the lexer cannot recover which was
+written, it takes the one that reads MORE text as commands.
+
+So the remaining gaps are still gaps, but the ones that come from the
+lexer losing its footing now announce themselves. The ones that do not --
+a spelling this lexer parses cleanly into a program name it has never
+heard of -- remain a declared limit. `matched_label` is sensitive, not
+exhaustive, and the header says so.
+
 Two rules this file must keep:
 
   * Configuration is data, never code. No shell strings are assembled here;
@@ -106,16 +133,12 @@ import time
 # Detection is deliberately SENSITIVE, not precise, because the costs are not
 # symmetric. A spurious reminder costs one line of context. A missed one costs
 # the tracker sync this hook exists to guarantee.
-# `gh pr` subcommands that CHANGE a pull request. kimi-k2.7-code found the
-# first gap here -- `gh pr edit` retitles a PR and was not matched -- so the
-# list is the mutating verbs rather than the three that happened to come to
-# mind. Read-only subcommands (view, list, diff, checks, status) are
+# The mutating subcommands of `gh pr` and `gh issue`. kimi-k2.7-code found
+# the first gap here -- `gh pr edit` retitles a PR and was not matched -- so
+# the list is the mutating verbs rather than the three that happened to come
+# to mind. Read-only ones -- view, list, diff, checks, status -- are
 # deliberately absent: they change nothing, so a reminder on them is noise,
-# and habituation is the way a reminder stops being read.
-# The mutating subcommands of `gh pr` and `gh issue`. Read-only ones -- view,
-# list, diff, checks, status -- are deliberately absent: they change nothing,
-# so a reminder on them is noise, and habituation is how a reminder stops
-# being read.
+# and habituation is how a reminder stops being read.
 # The coordinator's own wire vocabulary, from swarm.py. luna: requiring
 # merely a STRING let {"ack_status": "pending"} through, the pending filter
 # matched nothing, and the hook reported "total 0" -- a status the reader
@@ -187,15 +210,31 @@ ISSUE_MUTATING = frozenset(
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # The leading `\d*` is gone: shlex always separates the descriptor
 # number into its own token, so it could never match here.
-_REDIRECTION = re.compile(r"^(?:>>|>|<<-|<<|<)")
+# `&>` and `>&` are descriptor-merging redirections shlex emits
+# whole; without them a leading `&>/dev/null` became the program
+# word and `2>&1 git push` hid the push -- luna, kimi-k2.7-code.
+# Every separator shlex emits as its own token. `|&` is Bash's
+# stderr-pipe and was missing, so a real command on its right side
+# was never examined -- luna. The newline is inserted by _lex.
+_OPERATORS = frozenset([";", "\n", "&&", "||", "|", "&", "|&"])
 
-_OPERATORS = frozenset([";", "&&", "||", "|", "&", "\n"])
+_REDIRECTION = re.compile(r"^(?:&>>|&>|>&|>>|>|<<-|<<|<)$")
+
+
 
 # Global options that take a SEPARATE value, so the value is not a noun.
 _GH_VALUE_OPTIONS = frozenset(["--repo", "-R", "--hostname"])
 _GIT_VALUE_OPTIONS = frozenset(
     ["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path",
      "--config-env"])
+
+
+# Two sentinels. A parse that cannot proceed is DIFFERENT from a parse
+# that proceeded and found nothing, and conflating them is how five
+# shapes of this function each hid a real command: the answer to "I could
+# not read this" is a reminder, not silence.
+DEGENERATE_HEREDOC = object()
+OUT_OF_DEPTH = object()
 
 
 def _lex_line(line):
@@ -208,8 +247,8 @@ def _lex_line(line):
         return None
 
 
-def _heredoc_delimiter(tokens):
-    """The delimiter a line opens a heredoc with, or None.
+def _heredoc_delimiters(tokens):
+    """The words that would close a heredoc this line opens, or None.
 
     Decided from TOKENS, never from raw text. The first version ran a
     regex over the raw command before shlex saw it, and luna and glm-5.3
@@ -223,10 +262,35 @@ def _heredoc_delimiter(tokens):
     Tokens make both correct without a special case: shlex yields the
     quoted `'<<EOF'` as ONE token rather than the `<<` operator, and
     strips a `#` comment to nothing.
+
+    A SET, because this lexer cannot recover which shape was written.
+    `cat <<-EOF` arrives as ['cat', '<<', '-EOF'] and `cat << -EOF`
+    arrives identically, but the first closes on `EOF` and the second on
+    `-EOF`; the whitespace that distinguishes them is gone. Accepting
+    both closes the body at the earlier line, which reads MORE text as
+    commands rather than less -- the direction this module's asymmetry
+    points, since a spurious reminder costs a line of context and a
+    missed one costs the sync.
     """
     for index, token in enumerate(tokens):
-        if token == "<<" and index + 1 < len(tokens):
-            return tokens[index + 1].lstrip("-")
+        if token not in ("<<", "<<-"):
+            continue
+        rest = tokens[index + 1:]
+        if not rest or not rest[0]:
+            # A bare `<<` with nothing after it is not something to guess
+            # about. glm-5.3: returning "" made _lex skip every following
+            # line until a blank one, hiding a real push -- and a blank
+            # line inside the body then released it so body text fired.
+            return DEGENERATE_HEREDOC
+        word = rest[0]
+        if word == "-":
+            # `cat <<- EOF` lexes as ['cat', '<<', '-', 'EOF'].
+            if len(rest) < 2 or not rest[1]:
+                return DEGENERATE_HEREDOC
+            return frozenset([word, rest[1]])
+        if word.startswith("-") and word[1:]:
+            return frozenset([word, word[1:]])
+        return frozenset([word])
     return None
 
 
@@ -254,7 +318,7 @@ def _lex(command):
     pending = None
     for line in command.replace("\\\n", " ").splitlines():
         if pending is not None:
-            if line.strip() == pending:
+            if line.strip() in pending:
                 pending = None
             continue
         if not line.strip():
@@ -264,7 +328,18 @@ def _lex(command):
             return None
         tokens.extend(line_tokens)
         tokens.append(_NEWLINE)
-        pending = _heredoc_delimiter(line_tokens)
+        delimiters = _heredoc_delimiters(line_tokens)
+        if delimiters is DEGENERATE_HEREDOC:
+            return OUT_OF_DEPTH
+        pending = delimiters
+    if pending is not None:
+        # A heredoc whose delimiter never arrives: either the text is
+        # truncated or the `<<` was not an operator at all -- a quoted
+        # `'<<'` is indistinguishable from the real thing once shlex has
+        # removed the quotes, which luna demonstrated. Either way the
+        # parse is out of its depth and the remaining lines were never
+        # examined.
+        return OUT_OF_DEPTH
     return tokens
 
 
@@ -342,6 +417,8 @@ def matched_label(command):
     if len(command) > _COMMAND_LEX_LIMIT:
         return "an outward action (command too large to parse)"
     tokens = _lex(command)
+    if tokens is OUT_OF_DEPTH:
+        return "an outward action (the command could not be parsed fully)"
     if tokens is None:
         # Unlexable text -- an unbalanced quote. Guessing is what the four
         # earlier shapes did; erring towards a reminder is what the stated
@@ -573,12 +650,20 @@ def read_outbox(repo, state):
     # {"intents":[{}]} passed a list-of-dicts check, contributed nothing to
     # the pending filter, and reported "total 0" -- a payload the reader
     # does not understand counted as an outbox with nothing in it.
+    # An intent needs a known status AND a recognisable envelope. luna:
+    # {"intents":[{"ack_status":"attested"}]} passed the status check,
+    # contributed nothing to the pending filter, and reported "total 0" --
+    # the same "a shape I do not understand counted as an empty outbox"
+    # defect, one field further in.
     unreadable = [i for i in intents
                   if not isinstance(i, dict)
-                  or i.get("ack_status") not in ACK_STATUSES]
+                  or i.get("ack_status") not in ACK_STATUSES
+                  or not isinstance(i.get("envelope"), dict)
+                  or not (i.get("envelope") or {}).get("requested_operation")]
     if unreadable:
         return None, ("The outbox probe returned %d intent(s), %d of which "
-                      "carry an ack_status this hook does not know."
+                      "this hook cannot read -- an ack_status it does not "
+                      "know, or no envelope naming an operation."
                       % (len(intents), len(unreadable)))
     pending = [i for i in intents
                if i.get("ack_status") == "unacknowledged"]

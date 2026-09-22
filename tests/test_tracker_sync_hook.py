@@ -669,6 +669,17 @@ class TrackerSyncHookInputContract(unittest.TestCase):
                 "GIT_SSH_COMMAND=ssh git push origin HEAD", "git push"),
             "an absolute program path": ("/usr/bin/git push origin HEAD",
                                          "git push"),
+            # Round 3: operators and redirections shlex emits that the
+            # splitter and the redirection pattern did not know, and a
+            # heredoc whose delimiter cannot be read.
+            "the stderr pipe operator": (
+                "gh pr view 41 |& gh pr merge 41", "gh pr merge"),
+            "a leading combined redirection": (
+                "&>/dev/null git push origin HEAD", "git push"),
+            "a leading descriptor merge": (
+                "2>&1 git push origin HEAD", "git push"),
+            "a spaced dash-heredoc is still a heredoc": (
+                "cat <<- EOF\nbody\nEOF\ngit push origin HEAD", "git push"),
             # Round 2's findings: the heredoc stripper ran a regex over
             # raw text before shlex, so a quoted `<<EOF` and a `<<` in a
             # comment each swallowed the real command after them; and
@@ -741,6 +752,59 @@ class TrackerSyncHookInputContract(unittest.TestCase):
                 else:
                     self.assertEqual(out.strip(), "",
                                      "%s should be silent: %r" % (label, out))
+
+    def test_a_parse_out_of_its_depth_reminds_rather_than_guesses(self):
+        """Five shapes of this function each hid a real command by
+        treating "I could not read this" as "there is nothing here".
+
+        A heredoc whose delimiter never arrives is the sharp case: a
+        quoted `'<<'` is indistinguishable from the operator once shlex
+        has removed the quotes (luna), and a `<<` with nothing usable
+        after it made the old code skip every following line (glm-5.3).
+        Both now say so instead of going quiet.
+        """
+        fake_repo(PROBE_EMPTY, os.path.join(self.tmp, "repo"))
+        for label, command in (
+                ("a quoted << argument", "printf '%s' '<<' DONE\n"
+                                         "git push origin HEAD"),
+                ("a bare << with nothing after", "cat <<\n"
+                                                 "git push origin HEAD"),
+                ("<< followed only by a dash", "cat << -\n"
+                                               "git push origin HEAD"),
+                ("a heredoc whose delimiter never arrives",
+                 "cat <<'EOF'\ngit push origin HEAD"),
+                # The blank line is the whole point. An earlier fix
+                # returned "" as the delimiter, and a blank line in the
+                # body then CLOSED the heredoc, so the rest was read as
+                # commands and a quiet one meant silence -- the reminder
+                # for an unreadable parse went missing.
+                ("a degenerate heredoc followed by a blank line",
+                 "cat <<\n\nls -la"),
+        ):
+            with self.subTest(command=label):
+                payload = json.dumps(
+                    {"tool_input": {"command": command}}).encode()
+                rc, out = self.invoke(payload, timeout=30)
+                self.assertEqual(rc, 0)
+                context = injected_context(out)
+                self.assertIsNotNone(context, "%s emitted nothing" % label)
+                self.assertIn("could not be parsed", context)
+
+    def test_a_well_formed_heredoc_still_hides_its_body(self):
+        """The out-of-depth rule must not swallow the working case."""
+        fake_repo(PROBE_EMPTY, os.path.join(self.tmp, "repo"))
+        for label, command in (
+                ("a merge in the body", "cat <<'EOF'\ngh pr merge 41\nEOF"),
+                ("a blank line in the body",
+                 "cat <<'EOF'\n\ngh pr merge 41\nEOF"),
+        ):
+            with self.subTest(command=label):
+                payload = json.dumps(
+                    {"tool_input": {"command": command}}).encode()
+                rc, out = self.invoke(payload, timeout=30)
+                self.assertEqual(rc, 0)
+                self.assertEqual(out.strip(), "",
+                                 "%s fired on heredoc body text" % label)
 
     def test_unparseable_and_oversized_commands_fail_towards_a_reminder(self):
         """The stated asymmetry, applied where the parser gives up.
@@ -844,6 +908,11 @@ class TrackerSyncHookInputContract(unittest.TestCase):
             "intent is not an object": '    print(\'{"intents": ["x"]}\')',
             "ack_status the reader does not know":
                 '    print(\'{"intents": [{"ack_status": "pending"}]}\')',
+            "a known status but no envelope":
+                '    print(\'{"intents": [{"ack_status": "attested"}]}\')',
+            "an envelope with no operation":
+                '    print(\'{"intents": [{"ack_status": "attested",'
+                ' "envelope": {}}]}\')',
         }
         payload = json.dumps(
             {"tool_input": {"command": "git push origin HEAD"}}).encode()
