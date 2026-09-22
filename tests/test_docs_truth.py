@@ -4,6 +4,7 @@ import collections
 import importlib
 import importlib.util
 import inspect
+import io
 import re
 import sys
 import tempfile
@@ -852,6 +853,39 @@ def exposed_classes_by_declaration(module):
     return index
 
 
+def publish_report(report, discovered, stream=None):
+    """Write the soft report where an operator will see it.
+
+    THE DELIVERY BOUNDARY, which is what the scan was missing. astra:
+
+      "'Report' became synonymous with 'a returned list'; the
+       acceptance contract stopped before delivery ... Nothing
+       publishes the returned candidates. A normal successful run
+       leaves the operator uninformed."
+
+    Three rounds fixed tests that computed the report and dropped it,
+    and the entry point that discarded it, and it still ended at an
+    assertion. A guard whose whole purpose is to tell a human that a
+    count has gone stale, telling no human anything.
+
+    Nonblocking by construction: it writes and returns, and nothing
+    here can fail a suite. Returns the number of lines written so a
+    test can prove the step happened.
+    """
+    stream = sys.stderr if stream is None else stream
+    if not report:
+        return 0
+    stream.write(
+        "\nsuite-count candidates (advisory; %d tests discovered):\n"
+        % discovered)
+    for name, line_number, count in sorted(report):
+        stream.write("  %s:%d claims %d\n" % (name, line_number, count))
+    stream.write(
+        "  Each line is a count a reader could take for the suite total.\n"
+        "  Nothing here failed; check whether any of them is stale.\n")
+    return len(report)
+
+
 def dropped_reports(source):
     """Calls to a report-returning checker whose value goes nowhere.
 
@@ -1256,6 +1290,10 @@ class TestDocsTruth(unittest.TestCase):
         documents = [(path, path.read_text()) for path in LIVE_DOCUMENTS]
         live = check_live_suite_claims(documents, discovered)
         self.assertIsInstance(live, list)
+        # DELIVERED, not merely returned. This is the only place the
+        # live documents are scanned in a normal run, so it is the
+        # place the operator has to hear about it.
+        publish_report(live, discovered)
 
         # Ordinary test growth cannot invalidate a monotonic lower
         # bound, and the report is the same either way: a higher
@@ -2194,6 +2232,48 @@ class TestDocsTruth(unittest.TestCase):
             "validation pins, so CI fails at import before any test "
             "runs:\n  %s" % (floor[0], floor[1], "\n  ".join(offenders)))
 
+    def test_a_planted_count_reaches_the_operator(self):
+        """astra's acceptance: a recognised count planted in each named
+        document appears in normal output with filename, line and
+        count, and does not itself fail the suite.
+
+        End to end, because the previous three fixes each stopped one
+        step short: tests that computed the report and dropped it, then
+        an entry point that discarded it, and it still ended at an
+        assertion. This asserts the step that hands it to a person, and
+        fails if that step is removed.
+        """
+        discovered = unittest.TestLoader().discover(
+            str(ROOT / "tests")).countTestCases()
+        for target in LIVE_DOCUMENTS:
+            with self.subTest(document=target.name):
+                planted = [
+                    (path, path.read_text() + (
+                        "\nThe suite has 9999 tests.\n"
+                        if path == target else ""))
+                    for path in LIVE_DOCUMENTS
+                ]
+                report = check_live_suite_claims(planted, discovered)
+                written = io.StringIO()
+                lines = publish_report(report, discovered, written)
+                out = written.getvalue()
+
+                self.assertGreater(lines, 0, "nothing was published")
+                self.assertIn(target.name, out,
+                              "the document was not named")
+                self.assertIn("9999", out, "the count was not shown")
+                self.assertRegex(
+                    out, r"%s:\d+ claims 9999" % re.escape(target.name),
+                    "the line number was not shown")
+                self.assertIn("Nothing here failed", out,
+                              "the report did not say it is advisory")
+
+        # And it is genuinely nonblocking: an empty report writes
+        # nothing at all, so a clean document set stays quiet.
+        quiet = io.StringIO()
+        self.assertEqual(publish_report([], discovered, quiet), 0)
+        self.assertEqual(quiet.getvalue(), "")
+
     def test_no_test_here_throws_away_a_report_it_asked_for(self):
         """The property, enforced, because asserting it kept failing.
 
@@ -2207,6 +2287,21 @@ class TestDocsTruth(unittest.TestCase):
         expected not to return at all, and its report is genuinely not
         the subject.
         """
+        # The live scan must HAND its report to the publisher. luna's
+        # class of defect one level up: my end-to-end test calls
+        # publish_report directly, so deleting the call at the scan
+        # site failed nothing -- testing the publisher is not testing
+        # that anything uses it. astra's acceptance was explicitly
+        # that removal of the publishing step be caught.
+        source = inspect.getsource(sys.modules[__name__])
+        scan_body = source[source.index(
+            "def test_canonical_suite_floor_rejects_stale_and_competing"):]
+        scan_body = scan_body[:scan_body.index("\n    def ")]
+        self.assertIn(
+            "publish_report(", scan_body,
+            "the only place the live documents are scanned no longer "
+            "hands its report to the operator")
+
         self.assertEqual(
             dropped_reports(inspect.getsource(sys.modules[__name__])), [],
             "these calls ask for a report and throw it away, which is "
