@@ -839,6 +839,24 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         self.assertEqual(W.render_git_diagnostic(2, "fatal: nope"),
                          "git exited 2 and said: fatal: nope")
 
+    def test_remote_push_transport_renders_git_failure(self):
+        def runner(argv, **kwargs):
+            joined = " ".join(argv)
+            if "remote.origin.pushurl" in joined:
+                return 1, "", ""
+            if "remote.origin.url" in joined:
+                return 0, "https://example.invalid/repo.git\0", ""
+            if "remote get-url --push origin" in joined:
+                return 128, "", "fatal: line one\n" + "x" * 5000
+            self.fail("unexpected git invocation: %r" % (argv,))
+
+        raw, resolved, problem = W.remote_push_transport(runner, "/repo")
+        self.assertIsNone(raw)
+        self.assertIsNone(resolved)
+        self.assertLessEqual(len(problem), W._DIAGNOSTIC_LIMIT)
+        self.assertNotIn("\n", problem)
+        self.assertIn("[truncated]", problem)
+
     def test_the_whole_refusal_is_bounded_not_just_the_diagnostic(self):
         """kimi-k2.7-code: the recorded path went in verbatim.
 

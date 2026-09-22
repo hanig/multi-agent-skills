@@ -918,8 +918,10 @@ def remote_push_transport(runner, repo):
     rc, resolved, err = _git(
         runner, repo, "remote", "get-url", "--push", "origin")
     if rc != 0 or not resolved:
+        if err:
+            return None, None, render_git_diagnostic(rc, err)
         return None, None, (
-            err or f"cannot resolve origin push destination from "
+            f"cannot resolve origin push destination from "
             f"{render_for_record(raw_url, _DIAGNOSTIC_LIMIT, collapse=False)}")
     resolved = resolved.strip().splitlines()
     if len(resolved) != 1 or not resolved[0]:
