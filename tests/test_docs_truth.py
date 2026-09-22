@@ -873,11 +873,22 @@ def dropped_reports(source):
                     raising.add(id(inner))
     dropped = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
+        # A bare call, or one assigned to the throwaway name. luna:
+        # `_ = check_live_suite_claims(...)` discards the result just
+        # as thoroughly as an expression statement, and the guard
+        # looked only at ast.Expr.
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            call = node.value
+        elif (isinstance(node, ast.Assign)
+              and isinstance(node.value, ast.Call)
+              and all(isinstance(t, ast.Name) and t.id == "_"
+                      for t in node.targets)):
+            call = node.value
+        else:
             continue
         if id(node) in raising:
             continue
-        func = node.value.func
+        func = call.func
         name = getattr(func, "id", None) or getattr(func, "attr", None)
         if name in reporting:
             dropped.append("line %d: %s" % (node.lineno, name))
@@ -952,6 +963,11 @@ def unreachable_test_classes(path, module):
                     walk(getattr(node, field, []) or [], prefix)
                 for handler in getattr(node, "handlers", []) or []:
                     walk(handler.body, prefix)
+                # A match case is a body like any other -- luna. The
+                # named fields do not cover it, so a class declared in
+                # one was invisible to the walk.
+                for case in getattr(node, "cases", []) or []:
+                    walk(case.body, prefix)
 
     walk(ast.parse(source).body, ())
 
@@ -978,7 +994,15 @@ def unreachable_test_classes(path, module):
             exposed = getattr(exposed, part, None)
             if exposed is None:
                 break
-        if not inspect.isclass(exposed):
+        # The alias search runs whenever the DIRECT resolution does not
+        # carry the declared methods -- not only when it finds nothing.
+        # luna: a module-level `C` occupying the source name of a
+        # factory-local `C` stopped the search, because the name
+        # resolved to a class and that was treated as an answer. It
+        # resolved to the WRONG class.
+        if not (inspect.isclass(exposed)
+                and all(callable(getattr(exposed, m, None))
+                        for m in methods)):
             for candidate in exposed_by_declaration.get(name, []):
                 if all(callable(getattr(candidate, m, None)) for m in methods):
                     exposed = candidate
@@ -1967,6 +1991,47 @@ class TestDocsTruth(unittest.TestCase):
             "an exported factory class is collected; only the orphan "
             "is hidden")
 
+        # A match case is a body like any other.
+        matched = (
+            "import unittest\n"
+            "\n"
+            "match 0:\n"
+            "    case 1:\n"
+            "        class Hidden(unittest.TestCase):\n"
+            "            def test_lost(self):\n"
+            "                pass\n"
+        )
+        self.assertEqual(
+            {name: methods
+             for name, methods, _line in self.sweep_source(
+                 matched, "test_match")},
+            {"Hidden": ["test_lost"]},
+            "a class declared in a match case was invisible to the walk")
+
+        # A module-level class OCCUPYING the source name of a
+        # factory-local one. luna: the direct resolution found a class,
+        # that was treated as the answer, and the alias carrying the
+        # real methods was never consulted.
+        collided = (
+            "import unittest\n"
+            "\n"
+            "class C(unittest.TestCase):\n"
+            "    def test_a(self):\n"
+            "        pass\n"
+            "\n"
+            "def make():\n"
+            "    class C(unittest.TestCase):\n"
+            "        def test_b(self):\n"
+            "            pass\n"
+            "    return C\n"
+            "\n"
+            "Alias = make()\n"
+        )
+        self.assertEqual(
+            self.sweep_source(collided, "test_collide"), [],
+            "an exported factory class was reported because a "
+            "module-level class occupied its source name")
+
         # A name the module exposes, carrying a DIFFERENT class: the
         # factory-local `Same` declares test_hidden, the module-level
         # one does not, and only the method that nothing reaches is
@@ -2119,6 +2184,15 @@ class TestDocsTruth(unittest.TestCase):
         self.assertEqual(dropped_reports(exempt), [],
                          "a call inside assertRaises is not a dropped "
                          "report")
+
+        # luna: a throwaway assignment discards the result just as
+        # thoroughly, and the guard looked only at expression
+        # statements.
+        throwaway = "def t():\n    _ = check_live_suite_claims(d, n)\n"
+        self.assertEqual(
+            [entry.split(": ")[1] for entry in dropped_reports(throwaway)],
+            ["check_live_suite_claims"],
+            "a result assigned to _ is still discarded")
 
     def test_the_entry_point_hands_the_report_to_its_caller(self):
         """luna: the report was computed and thrown away.
