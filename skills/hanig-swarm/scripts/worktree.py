@@ -579,12 +579,15 @@ def judge_artifacts(state, basis, unit_dir, spec, observed, notes):
         return state
     problem, weak = artifact_transition_problem(basis, unit_dir, spec, observed)
     if problem:
-        notes.append(f"REASON={REASON_ARTIFACT_UNCHANGED}")
+        notes.append(
+            f"REASON={render_for_record(REASON_ARTIFACT_UNCHANGED, 64, collapse=False)}")
         notes.append(problem)
         return "INCOMPLETE"
     if weak:
         notes.append(
-            f"production of {', '.join(sorted(weak))} was established by "
+            f"production of "
+            f"{render_for_record(', '.join(sorted(weak)), _DIAGNOSTIC_LIMIT, collapse=False)} "
+            f"was established by "
             f"size and mtime rather than content, because the artifact is "
             f"over the digest limit. A rewrite to the same length inside the "
             f"same second would be invisible to that comparison.")

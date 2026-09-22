@@ -631,6 +631,7 @@ def _is_rendered(node, allowed_bare):
 RENDERED_REFUSAL_FUNCTIONS = (
     "artifact_basis_problem",
     "artifact_transition_problem",
+    "judge_artifacts",
     "decode_artifact_basis",
     "decode_launch_facts",
     "judge_detail",
