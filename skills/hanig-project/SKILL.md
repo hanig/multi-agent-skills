@@ -126,28 +126,18 @@ size and cannot be inferred from anything; a planner that invents it produces
 a readable DAG whose units are larger than the failures they will meet.
 Every question carries your recommended answer so the default costs one word.
 
-**Reporting cadence is a question, not a default.** A run lasts days and the
-human is not watching it. Ask:
-
-> How often do you want a report while this runs — hourly, at each unit's
-> close, only when something needs you, or at the end? *Recommended: hourly
-> while units are live, plus immediately on anything that needs a person.*
-
-Record the answer in the plan as a top-level `reporting` block, not in your
-own memory: a session dies and its successor inherits the plan, not the
-conversation. It sits outside `plan_digest`, which covers units, budget and
-root, so changing cadence mid-run does not invalidate recorded attempts and
-needs no `--accept-plan-change`.
-
-Two things the answer must capture, because they are different questions.
-**Cadence** is how often a healthy run reports. **Escalation** is what reaches
-them immediately regardless of cadence — a `NEEDS_HUMAN` unit, an exhausted
-budget, a blocked merge, a conflict a machine must not settle. "Only at the
-end" is a legitimate cadence and is never a legitimate escalation policy.
-
-Nothing enforces cadence today; the orchestrator honours it. Say so plainly
-rather than implying a timer exists, and if you want it enforced, that is
-ARC-691's clock, not a sentence here.
+**Reporting cadence is a question, not a default**, because a run lasts days
+and nobody is watching it. Ask "how often do you want a report — hourly, at
+each unit's close, only when something needs you, or at the end?", recommending
+hourly while units are live. Capture **cadence** and **escalation**
+separately: "only at the end" is a legitimate cadence and never a legitimate
+escalation policy, and a `NEEDS_HUMAN` unit, an exhausted budget, a blocked
+merge or a conflict a machine must not settle reaches them regardless. Record
+it as a top-level `reporting` block in the plan, never in your own memory — a
+session dies and its successor inherits the plan, not the conversation. It
+sits outside `plan_digest`, so changing cadence mid-run needs no
+`--accept-plan-change`. Nothing enforces cadence; the orchestrator honours it,
+and enforcing it is ARC-691's clock rather than a sentence here.
 
 **Stop when the plan can RUN, not when you run out of questions.** These are
 different, and getting it wrong is expensive: a plan was once built, validated

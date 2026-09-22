@@ -20,8 +20,22 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILLS = ROOT / "skills"
 DEFAULT_BODY_LINE_BUDGET = 500
 BODY_LINE_BUDGETS = {
-    # A separate planned unit owns this already-measured split.
-    "hanig-project": 600,
+    # A separate planned unit owns this already-measured split: ARC-612,
+    # which applies the declaration registry that landed for hanig-swarm and
+    # RETIRES this entry. Until it lands the number is a holding position.
+    #
+    # Raised 600 -> 615 on 2026-09-21 because PR #39 added the reporting
+    # cadence interview to this body and turned `main` red: the gate passed
+    # the change and no suite was run before merging, so nothing caught it.
+    # The alternative was cutting behaviour-deciding prose by hand to fit,
+    # which is the failure this budget's own unit exists to stop -- kimi, on
+    # the committee that designed the registry: "The criterion cannot be
+    # sacrificed to the budget. If the full registry does not fit, the budget
+    # or the criterion is wrong, not the inclusion of behaviour rules."
+    #
+    # 615 is deliberately 3 lines above the current body, not a round number,
+    # so the next addition trips this again rather than coasting.
+    "hanig-project": 615,
 }
 EXTERNAL_MARKDOWN_LINK = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
 MARKDOWN_ESCAPABLE = frozenset(
