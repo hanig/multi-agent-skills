@@ -936,12 +936,16 @@ def _anchored_remote_transport(runner, facts):
     anchored_raw = facts.get("repository_remote_raw")
     if anchored_raw is not None and raw != anchored_raw:
         return None, (
-            f"origin raw push URL changed after launch ({anchored_raw!r} -> "
-            f"{raw!r}); refusing to select a new repository")
+            f"origin raw push URL changed after launch "
+            f"({render_for_record(anchored_raw, _DIAGNOSTIC_LIMIT, collapse=False)} -> "
+            f"{render_for_record(raw, _DIAGNOSTIC_LIMIT, collapse=False)}); "
+            f"refusing to select a new repository")
     if resolved != facts.get("repository_remote"):
         return None, (
             f"origin push destination changed after launch "
-            f"({facts.get('repository_remote')!r} -> {resolved!r}); refusing "
+            f"({render_for_record(facts.get('repository_remote'), _DIAGNOSTIC_LIMIT, collapse=False)} -> "
+            f"{render_for_record(resolved, _DIAGNOSTIC_LIMIT, collapse=False)}); "
+            f"refusing "
             "to select a new repository")
     return raw, None
 

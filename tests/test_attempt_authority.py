@@ -629,6 +629,7 @@ def _is_rendered(node, allowed_bare):
 
 
 RENDERED_REFUSAL_FUNCTIONS = (
+    "_anchored_remote_transport",
     "artifact_basis_problem",
     "artifact_transition_problem",
     "judge_artifacts",
