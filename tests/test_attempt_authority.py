@@ -629,7 +629,11 @@ def _is_rendered(node, allowed_bare):
 
 
 RENDERED_REFUSAL_FUNCTIONS = (
-    "judge_detail", "validate_pinned_head", "workspace_identity_problem")
+    "decode_launch_facts",
+    "judge_detail",
+    "validate_pinned_head",
+    "workspace_identity_problem",
+)
 
 
 class TestPinnedCommitIsNotAMovingRef(RepoCase):

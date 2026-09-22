@@ -85,7 +85,8 @@ def decode_launch_facts(payload):
     try:
         facts = json.loads(payload)
     except (TypeError, ValueError) as exc:
-        return None, f"trusted launch snapshot is malformed JSON: {exc}"
+        return None, ("trusted launch snapshot is malformed JSON: "
+                      + render_for_record(exc, _DIAGNOSTIC_LIMIT))
     if not isinstance(facts, dict):
         return None, "trusted launch snapshot is not a JSON object"
     return facts, None
