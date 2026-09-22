@@ -883,6 +883,43 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
                      repository_remote="https://example.invalid/repo.git")
         self.assertIsNone(W.launch_facts_problem(facts))
 
+    def test_anchored_ref_fetch_preserves_an_overlong_source_ref(self):
+        branch = "b" * 5000
+        selected_ref = "refs/heads/" + branch
+        facts = {
+            "schema_version": 4,
+            "attempt_id": "att1",
+            "repo": "/repo",
+            "execution_workspace": "/workspace",
+            "base_commit": "a" * 40,
+            "base_tree": "b" * 40,
+            "judgment_ref": selected_ref,
+            "repository_remote": "https://example.invalid/repo.git",
+        }
+        seen = {}
+
+        def runner(argv, **kwargs):
+            joined = " ".join(argv)
+            if "remote.origin.pushurl" in joined:
+                return 1, "", ""
+            if "remote.origin.url" in joined:
+                return 0, facts["repository_remote"] + "\0", ""
+            if "remote get-url --push origin" in joined:
+                return 0, facts["repository_remote"], ""
+            if "ls-remote --exit-code" in joined:
+                return 0, "c" * 40 + "\t" + selected_ref, ""
+            if "fetch" in argv:
+                seen["refspec"] = argv[-1]
+                return 1, "", "fetch stopped after refspec capture"
+            self.fail("unexpected git invocation: %r" % (argv,))
+
+        produced, head, _detail = W._judge_anchored_ref(runner, facts)
+        self.assertFalse(produced)
+        self.assertIsNone(head)
+        self.assertEqual(
+            seen["refspec"],
+            "+%s:refs/hanig-swarm/judgments/att1" % selected_ref)
+
     def test_the_whole_refusal_is_bounded_not_just_the_diagnostic(self):
         """kimi-k2.7-code: the recorded path went in verbatim.
 

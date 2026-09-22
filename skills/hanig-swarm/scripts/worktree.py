@@ -1045,7 +1045,7 @@ def _judge_anchored_ref(runner, facts, judgment=None):
     rc, _fetch_out, fetch_err = _git(
         runner, repo, "fetch", "--no-tags", "--force",
         "--recurse-submodules=no", remote,
-        f"+{render_for_record(ref, 4096, collapse=False)}:"
+        f"+{render_for_record(ref, len(ref), collapse=False)}:"
         f"{render_for_record(cache_ref, 4096, collapse=False)}", timeout=120)
     if rc != 0:
         _set_judgment_state(judgment, "remote-head-unavailable-locally")
