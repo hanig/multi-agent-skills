@@ -818,8 +818,60 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         self.assertIn("[truncated]", why)
 
     def test_a_control_character_in_a_path_does_not_reach_the_record(self):
-        rendered = W.render_for_record("/tmp/a\nb\x07c", 200)
-        self.assertEqual(rendered, "/tmp/a b?c")
+        # Collapsing mode, for git's prose.
+        self.assertEqual(W.render_for_record("/tmp/a\nb\x07c", 200),
+                         "/tmp/a b?c")
+        # Path mode: a newline still cannot reach the record, and a space
+        # is left exactly as recorded because a path may contain one.
+        self.assertEqual(
+            W.render_for_record("/tmp/two  spaces/x", 200, collapse=False),
+            "/tmp/two  spaces/x")
+        self.assertEqual(
+            W.render_for_record(" /tmp/lead and trail ", 200, collapse=False),
+            " /tmp/lead and trail ")
+        self.assertEqual(
+            W.render_for_record("/tmp/a\nb", 200, collapse=False), "/tmp/a?b")
+
+    def test_a_recorded_path_reaches_the_refusal_unaltered(self):
+        """luna and kimi-k2.7-code: the renderer trimmed a path the claim
+        promised not to trim."""
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        facts = dict(self.facts(attempt))
+        pinned = self.commit("A")
+        spaced = str(self.tmp / "two  spaces")
+        facts["repo"] = spaced
+        why = W.validate_pinned_head(U.run, facts, pinned)
+        self.assertIsNotNone(why)
+        self.assertIn(spaced, why,
+                      "the recorded path was altered on its way into the "
+                      "refusal: %r" % why)
+
+    def test_every_interpolated_value_goes_through_the_renderer(self):
+        """The claim has been refuted once per field. This asserts the
+        property rather than the fields: no value reaches the refusal
+        without the renderer, checked by rendering each and finding it."""
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        facts = dict(self.facts(attempt))
+        pinned = self.commit("A")
+        facts["repo"] = str(self.tmp / "repo with spaces")
+        real = U.run
+
+        def runner(argv, **kwargs):
+            if "cat-file" in argv:
+                return 1, "", "fatal: line one\nline two"
+            return real(argv, **kwargs)
+
+        why = W.validate_pinned_head(runner, facts, pinned)
+        self.assertIsNotNone(why)
+        for value, collapse in ((pinned[:12], True),
+                                (facts["repo"], False)):
+            self.assertIn(
+                W.render_for_record(value, 400, collapse=collapse), why,
+                "a value reached the refusal unrendered: %r" % value)
+        self.assertIn("fatal: line one line two", why)
+        self.assertNotIn("\n", why)
 
     def test_an_empty_recorded_repository_refuses_before_running_git(self):
         attempt = self.tmp / "runs" / "u1" / "att1"

@@ -1237,17 +1237,27 @@ _DIAGNOSTIC_LIMIT = 400
 _PATH_LIMIT = 200
 
 
-def render_for_record(text, limit):
+def render_for_record(text, limit, collapse=True):
     """One untrusted string, made safe to put in a durable record.
 
-    Applied to EVERY value this refusal interpolates, not just the one a
-    reviewer happened to name. Bounding git's diagnostic and then inserting
-    a recorded repository path verbatim left the refusal unbounded through
-    the other field -- kimi-k2.7-code demonstrated it with a 10,000
-    character path -- which is the sibling this sweep exists to catch.
+    Applied to EVERY value this refusal interpolates. Bounding git's
+    diagnostic and then inserting a recorded repository path verbatim left
+    the refusal unbounded through the other field -- kimi-k2.7-code
+    demonstrated it with a 10,000 character path -- and the round after
+    that found the commit id going in unrendered. Each time the claim was
+    ahead of the code by one field, so there is now one renderer and every
+    interpolation goes through it.
+
+    ``collapse`` is False for a PATH. A path may legitimately contain a
+    space, and collapsing runs of whitespace silently rewrites it, so for
+    paths every non-printable -- including a newline or a tab, which a path
+    must not contain in a record -- becomes a visible marker and spaces are
+    left exactly as recorded. luna and kimi-k2.7-code both caught the first
+    version trimming a path it had promised not to trim.
     """
-    flattened = " ".join((text or "").split())
-    safe = "".join(c if c.isprintable() else "?" for c in flattened)
+    raw = text or ""
+    source = " ".join(raw.split()) if collapse else raw
+    safe = "".join(c if c.isprintable() else "?" for c in source)
     if len(safe) <= limit:
         return safe
     marker = " [truncated]"
@@ -1309,9 +1319,14 @@ def validate_pinned_head(runner, launch_facts, produced):
         # `cat-file -e` is an existence-and-type check, so "could not be
         # validated" is what this establishes; "could not be read" claims
         # more than it knows.
+        # `produced` is already validated as 40 or 64 hex characters above,
+        # so this cannot smuggle anything -- but "every value goes through
+        # the renderer" is either true or it is a claim a reviewer gets to
+        # refute, and it has been refuted once for exactly this field.
         return (f"{PIN_VALIDATION_REFUSAL}: the pinned produced commit "
-                f"{produced[:12]} could not be validated at "
-                f"{render_for_record(str(repo), _PATH_LIMIT)}. "
+                f"{render_for_record(produced[:12], 12)} could not be "
+                f"validated at "
+                f"{render_for_record(str(repo), _PATH_LIMIT, collapse=False)}. "
                 f"{render_git_diagnostic(rc, cat_err)}. Refusing rather than "
                 f"substituting the current ref; the object may still exist "
                 f"in another checkout of the same remote")
