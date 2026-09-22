@@ -1138,6 +1138,25 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
                 topics.append(topic)
         return topics
 
+    def registry_topics(self):
+        """The interview topics, read from the registry every time."""
+        with open(SKILLS / "hanig-project" / "declarations.json") as handle:
+            declared = {entry["id"]: entry["normative_text"]
+                        for entry in json.load(handle)["declarations"]}
+        return self.interview_topics(declared["interview.judgment-only"])
+
+    @staticmethod
+    def surface_name(surface):
+        """A surface's name in the report: unique, and still readable.
+
+        `surface.name` alone is a basename, and two SKILL.md files
+        under different skills share it.
+        """
+        try:
+            return str(surface.relative_to(SKILLS))
+        except ValueError:
+            return surface.name
+
     def authored_surfaces(self):
         """Every hanig-project surface a human wrote, generated block cut."""
         skill = SKILLS / "hanig-project"
@@ -1380,9 +1399,8 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
             moved_topics = self.interview_topics(moved_enumeration)
             self.assertIn("spending ceiling", moved_topics)
 
-            planted = ("Ask about done criteria, the scientific claim, "
-                       "discardable work, spending ceiling, and protected "
-                       "destinations.")
+            planted = ("Ask about %s, and spending ceiling."
+                       % ", ".join(moved_topics[:4]))
             self.assertTrue(
                 self.second_copies([("copy.md", [planted])], moved_topics),
                 "the scan does not follow the registry on disk")
@@ -1400,10 +1418,7 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
         # And the DETECTOR follows them. A list written with the
         # perturbed topic must be caught by the perturbed needles and
         # missed by the real ones; a hardcoded list cannot do both.
-        planted_new = ("Ask about done criteria, the scientific claim, "
-                       "discardable work, spending ceiling, protected "
-                       "destinations, retry exposure, and reporting "
-                       "cadence.")
+        planted_new = "Ask about %s." % ", ".join(perturbed)
         self.assertTrue(
             self.second_copies([("p.md", [planted_new])], perturbed),
             "the detector does not use the needles the parser produced")
@@ -1427,7 +1442,14 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
         # Adjacency already does the discrimination, so sentence
         # boundaries add nothing and break lists. Checked against three
         # separate sentences each mentioning one topic: still clean.
-        named = [(surface.name, [self.whole_text(surface)])
+        # Named by the path under skills/, not the basename. luna: the
+        # sources map was keyed by `surface.name`, so two SKILL.md files
+        # collide and a candidate found in one is looked up in the
+        # other -- reporting a line from the wrong file, which is the
+        # followable-and-wrong failure this report already learned
+        # once. The five surfaces today do not collide; the key is not
+        # allowed to depend on that.
+        named = [(self.surface_name(surface), [self.whole_text(surface)])
                  for surface in self.authored_surfaces()]
         # ADVISORY. This used to fail the suite, and astra showed a
         # correct document edit that it rejects: "Do not treat budget,
@@ -1443,7 +1465,8 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
         # so it reports.
         publish_second_copies(
             self.second_copies(named, topics),
-            {surface.name: surface for surface in self.authored_surfaces()})
+            {self.surface_name(surface): surface
+             for surface in self.authored_surfaces()})
 
         # The rule must also FIRE. Disabling the threshold left the suite
         # green until this case existed, which is the shape this whole
@@ -1462,9 +1485,7 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
             "the frontmatter is not being scanned, so a second copy "
             "could hide there")
         planted = list(self.sentences(skill_md)) + [
-            "Ask about done criteria, the scientific claim, discardable "
-            "work, budget, protected destinations, retry exposure, and "
-            "reporting cadence."]
+            "Ask about %s." % ", ".join(topics)]
         self.assertTrue(
             self.second_copies([("SKILL.md", planted)], topics),
             "a second copy in the scanned text was not detected")
@@ -1493,17 +1514,20 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
         # class or the whole-surface scan left the suite green. That
         # is the same gap five times over in this session: probing the
         # fix and never pinning it.
+        # The SEPARATOR is what each of these varies; the topics come
+        # from the registry, because a literal list holds whatever
+        # topics it was written with and an honest rename of four of
+        # them would redden every case here (glm-5.3).
+        four = topics[:4]
+        three = topics[:3]
         for label, listed in (
                 ("a numbered list",
-                 "Ask about: 1. done criteria 2. the scientific claim "
-                 "3. discardable work 4. budget"),
+                 "Ask about: " + " ".join("%d. %s" % (n + 1, topic)
+                                          for n, topic in enumerate(four))),
                 ("bullets whose items end in periods",
-                 "- done criteria. - the scientific claim. "
-                 "- discardable work. - budget."),
-                ("a pipe table",
-                 "| done criteria | scientific claim | discardable work |"),
-                ("a slash list",
-                 "done criteria / scientific claim / discardable work"),
+                 " ".join("- %s." % topic for topic in four)),
+                ("a pipe table", "| " + " | ".join(three) + " |"),
+                ("a slash list", " / ".join(three)),
         ):
             with self.subTest(form=label):
                 self.assertTrue(
@@ -1520,8 +1544,9 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
             surface.write_text(
                 "# A reference\n"
                 "\n"
-                "Ask about: 1. done criteria 2. the scientific claim "
-                "3. discardable work 4. budget\n")
+                "Ask about: " + " ".join(
+                    "%d. %s" % (n + 1, topic)
+                    for n, topic in enumerate(topics[:4])) + "\n")
             self.assertTrue(
                 self.second_copies(
                     [(surface.name, [self.whole_text(surface)])], topics),
@@ -1540,17 +1565,12 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
 
         for label, paraphrase in (
                 ("no ask verb",
-                 "Question the owner, one at a time, about done criteria, "
-                 "the scientific claim, discardable work, budget, protected "
-                 "destinations, retry exposure, and reporting cadence."),
+                 "Question the owner, one at a time, about %s."
+                 % ", ".join(topics)),
                 ("semicolons instead of commas",
-                 "Interview coverage: completion criteria; scientific claim; "
-                 "discardable work; budget; protected destinations; retry "
-                 "exposure; reporting cadence."),
+                 "Interview coverage: %s." % "; ".join(topics)),
                 ("a different verb",
-                 "The interview must cover: done criteria, the scientific "
-                 "claim, discardable work, budget, protected destinations, "
-                 "retry exposure, and reporting cadence."),
+                 "The interview must cover: %s." % ", ".join(topics)),
         ):
             with self.subTest(paraphrase=label):
                 self.assertTrue(
@@ -1572,10 +1592,7 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
         for a string that is not there. Same defect as naming the wrong
         surface, one level down.
         """
-        with open(SKILLS / "hanig-project" / "declarations.json") as handle:
-            declared = {entry["id"]: entry["normative_text"]
-                        for entry in json.load(handle)["declarations"]}
-        topics = self.interview_topics(declared["interview.judgment-only"])
+        topics = self.registry_topics()
         run = ", ".join(topics[:3])
         for label, prefix in (("no expansion", "Note. "),
                               ("case-expanding", "\u0130nterview note. ")):
@@ -1620,9 +1637,9 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
         # find. A single-line plant let `re.escape(excerpt)` pass, so
         # the flexibility the resolver claims was untested -- the
         # mutation survived and said so.
-        marker = ("Ask about the done criteria, the scientific claim,\n"
-                  "discardable work, budget, retry exposure and\n"
-                  "reporting cadence.")
+        topics = self.registry_topics()
+        marker = "Ask about %s,\n%s, and\n%s." % (
+            ", ".join(topics[:-2]), topics[-2], topics[-1])
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "tree"
             (root / "tests").mkdir(parents=True)
@@ -1678,9 +1695,19 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
         the exit status; deleting the publish call fails it on the
         missing diagnostic.
         """
-        planted = ("\nAsk about the done criteria, the scientific claim, "
-                   "discardable work, budget, retry exposure and "
-                   "reporting cadence.\n")
+        # Built FROM the registry, never written out. glm-5.3: a
+        # hardcoded marker holds whatever topics it was written with,
+        # so an honest, snapshot-acknowledged rename of four of them
+        # leaves two in the string, the scan finds nothing to report,
+        # and this test fails on a correct change. Measured: renaming
+        # done criteria, budget, retry exposure and reporting cadence
+        # drops the marker from six topics to two, under the threshold
+        # of three.
+        #
+        # It is the same rule the scan test states two hundred lines
+        # up -- no intermediate binding, every use calls the parser --
+        # and these two tests were the place it was not followed.
+        planted = "\nAsk about %s.\n" % ", ".join(self.registry_topics())
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "tree"
             (root / "tests").mkdir(parents=True)
