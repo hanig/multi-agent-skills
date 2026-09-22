@@ -1234,6 +1234,24 @@ def receipt_basis(runner, unit_dir, spec, launch_facts=None):
 PIN_VALIDATION_REFUSAL = "pinned commit validation failed"
 
 _DIAGNOSTIC_LIMIT = 400
+_PATH_LIMIT = 200
+
+
+def render_for_record(text, limit):
+    """One untrusted string, made safe to put in a durable record.
+
+    Applied to EVERY value this refusal interpolates, not just the one a
+    reviewer happened to name. Bounding git's diagnostic and then inserting
+    a recorded repository path verbatim left the refusal unbounded through
+    the other field -- kimi-k2.7-code demonstrated it with a 10,000
+    character path -- which is the sibling this sweep exists to catch.
+    """
+    flattened = " ".join((text or "").split())
+    safe = "".join(c if c.isprintable() else "?" for c in flattened)
+    if len(safe) <= limit:
+        return safe
+    marker = " [truncated]"
+    return safe[:max(0, limit - len(marker))] + marker
 
 
 def render_git_diagnostic(rc, err):
@@ -1247,25 +1265,14 @@ def render_git_diagnostic(rc, err):
     the return value as a human-facing refusal, and git's own sentence is
     what actually diagnoses the case. So the text is reported, not decoded.
 
-    It is still rendered rather than dumped. A diagnostic goes into a record
-    an operator reads: control characters and embedded newlines damage the
-    display, and an unbounded message damages the record.
+    It is still rendered rather than dumped, and the bound covers the
+    RENDERED string rather than the payload inside it: bounding the payload
+    and then prefixing it put a "400 character" limit at 435.
     """
-    text = (err or "")
-    if not text.strip():
+    if not (err or "").strip():
         return f"git exited {rc} with no diagnostic output"
-    flattened = " ".join(text.split())
-    safe = "".join(c if c.isprintable() else "?" for c in flattened)
-    rendered = f"git exited {rc} and said: {safe}"
-    if len(rendered) <= _DIAGNOSTIC_LIMIT:
-        return rendered
-    # Bound the WHOLE rendered string, not the payload inside it. Bounding
-    # the payload and then appending a prefix and a marker put a "400
-    # character" limit at 435, which luna and kimi-k2.7-code both caught:
-    # a limit that the thing being limited exceeds is not a limit.
-    marker = " [truncated]"
-    keep = max(0, _DIAGNOSTIC_LIMIT - len(rendered) + len(safe) - len(marker))
-    return f"git exited {rc} and said: {safe[:keep]}{marker}"
+    prefix = f"git exited {rc} and said: "
+    return prefix + render_for_record(err, max(0, _DIAGNOSTIC_LIMIT - len(prefix)))
 
 
 def validate_pinned_head(runner, launch_facts, produced):
@@ -1303,7 +1310,8 @@ def validate_pinned_head(runner, launch_facts, produced):
         # validated" is what this establishes; "could not be read" claims
         # more than it knows.
         return (f"{PIN_VALIDATION_REFUSAL}: the pinned produced commit "
-                f"{produced[:12]} could not be validated at {repo}. "
+                f"{produced[:12]} could not be validated at "
+                f"{render_for_record(str(repo), _PATH_LIMIT)}. "
                 f"{render_git_diagnostic(rc, cat_err)}. Refusing rather than "
                 f"substituting the current ref; the object may still exist "
                 f"in another checkout of the same remote")

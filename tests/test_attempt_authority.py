@@ -794,6 +794,33 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         self.assertEqual(W.render_git_diagnostic(2, "fatal: nope"),
                          "git exited 2 and said: fatal: nope")
 
+    def test_the_whole_refusal_is_bounded_not_just_the_diagnostic(self):
+        """kimi-k2.7-code: the recorded path went in verbatim.
+
+        Bounding git's diagnostic and then interpolating a 10,000-character
+        repository path left the refusal unbounded through the other field.
+        Every value this message interpolates goes through the renderer,
+        which is the sibling the first bound missed.
+        """
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        facts = dict(self.facts(attempt))
+        pinned = self.commit("A")
+        facts["repo"] = "/" + "x" * 10000
+
+        why = W.validate_pinned_head(U.run, facts, pinned)
+        self.assertIsNotNone(why)
+        self.assertLess(
+            len(why), 1200,
+            "the refusal is %d characters; a recorded path is interpolated "
+            "into a durable record and must be bounded like the diagnostic"
+            % len(why))
+        self.assertIn("[truncated]", why)
+
+    def test_a_control_character_in_a_path_does_not_reach_the_record(self):
+        rendered = W.render_for_record("/tmp/a\nb\x07c", 200)
+        self.assertEqual(rendered, "/tmp/a b?c")
+
     def test_an_empty_recorded_repository_refuses_before_running_git(self):
         attempt = self.tmp / "runs" / "u1" / "att1"
         attempt.mkdir(parents=True)
