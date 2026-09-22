@@ -1006,13 +1006,18 @@ def _judge_anchored_ref(runner, facts, judgment=None):
         else:
             detail = "the remaining managed worktree is unreadable"
         return False, None, (
-            f"the anchored remote ref {ref!r} is absent on the anchored "
-            f"origin; {detail}. A commit pushed under another ref is never "
+            f"the anchored remote ref "
+            f"{render_for_record(ref, _DIAGNOSTIC_LIMIT, collapse=False)} "
+            f"is absent on the anchored origin; "
+            f"{render_for_record(detail, _DIAGNOSTIC_LIMIT)}. A commit pushed "
+            f"under another ref is never "
             "substituted")
     if rc != 0:
         _set_judgment_state(judgment, "remote-ref-unreadable")
         return False, None, (
-            f"cannot resolve anchored remote ref {ref!r} from the anchored "
+            f"cannot resolve anchored remote ref "
+            f"{render_for_record(ref, _DIAGNOSTIC_LIMIT, collapse=False)} "
+            f"from the anchored "
             f"origin: {render_git_diagnostic(rc, err or out)}")
     lines = [line.split() for line in out.splitlines() if line.strip()]
     if (len(lines) != 1 or len(lines[0]) != 2 or lines[0][1] != ref
@@ -1022,7 +1027,8 @@ def _judge_anchored_ref(runner, facts, judgment=None):
         _set_judgment_state(judgment, "remote-ref-unreadable")
         return False, None, (
             f"anchored origin returned an invalid exact-ref answer for "
-            f"{ref!r}; refusing to guess a produced head")
+            f"{render_for_record(ref, _DIAGNOSTIC_LIMIT, collapse=False)}; "
+            f"refusing to guess a produced head")
     head = lines[0][0]
     # Fetch the exact anchored ref into a coordinator namespace. ls-remote
     # establishes which value was observed; this fetch makes its commit/tree
@@ -1033,47 +1039,63 @@ def _judge_anchored_ref(runner, facts, judgment=None):
     rc, _fetch_out, fetch_err = _git(
         runner, repo, "fetch", "--no-tags", "--force",
         "--recurse-submodules=no", remote,
-        f"+{ref}:{cache_ref}", timeout=120)
+        f"+{render_for_record(ref, 4096, collapse=False)}:"
+        f"{render_for_record(cache_ref, 4096, collapse=False)}", timeout=120)
     if rc != 0:
         _set_judgment_state(judgment, "remote-head-unavailable-locally")
         return False, None, (
-            f"anchored remote ref {ref!r} resolves to {head[:12]}, but its "
-            f"exact commit could not be fetched: {fetch_err[:160]}")
+            f"anchored remote ref "
+            f"{render_for_record(ref, _DIAGNOSTIC_LIMIT, collapse=False)} "
+            f"resolves to {render_for_record(head[:12], 12)}, but its exact "
+            f"commit could not be fetched: "
+            f"{render_for_record(fetch_err, 160)}")
     rc, fetched_head, _ = _git(
         runner, repo, "rev-parse", "--verify", cache_ref + "^{commit}")
     if rc != 0 or fetched_head != head:
         _set_judgment_state(judgment, "remote-ref-moved-during-judgment")
         return False, None, (
-            f"anchored remote ref {ref!r} changed while it was being "
+            f"anchored remote ref "
+            f"{render_for_record(ref, _DIAGNOSTIC_LIMIT, collapse=False)} "
+            f"changed while it was being "
             "resolved; refusing to choose between two values")
     base = facts["base_commit"]
     if head == base:
         _set_judgment_state(judgment, "pushed-ref-no-tree-change")
         return False, None, (
-            f"the anchored remote ref {ref!r} was pushed but still names the launch base, "
+            f"the anchored remote ref "
+            f"{render_for_record(ref, _DIAGNOSTIC_LIMIT, collapse=False)} was "
+            f"pushed but still names the launch base, "
             "so it contains no produced commit")
     rc, _, _ = _git(runner, repo, "merge-base", "--is-ancestor", base, head)
     if rc != 0:
         _set_judgment_state(judgment, "pushed-ref-invalid-history")
         return False, None, (
-            f"the anchored remote ref {ref!r} names {head[:12]}, which does "
-            f"not descend from anchored base {base[:12]}")
+            f"the anchored remote ref "
+            f"{render_for_record(ref, _DIAGNOSTIC_LIMIT, collapse=False)} "
+            f"names {render_for_record(head[:12], 12)}, which does not "
+            f"descend from anchored base {render_for_record(base[:12], 12)}")
     rc, tree, _ = _git(runner, repo, "rev-parse", head + "^{tree}")
     if rc != 0:
         _set_judgment_state(judgment, "remote-head-tree-unreadable")
         return False, None, (
-            f"cannot read the tree of {head[:12]} from anchored remote ref "
-            f"{ref!r}")
+            f"cannot read the tree of {render_for_record(head[:12], 12)} from "
+            f"anchored remote ref "
+            f"{render_for_record(ref, _DIAGNOSTIC_LIMIT, collapse=False)}")
     if tree == facts["base_tree"]:
         _set_judgment_state(judgment, "pushed-ref-no-tree-change")
         return False, None, (
-            f"the anchored remote ref {ref!r} was pushed and advanced, but its tree is "
+            f"the anchored remote ref "
+            f"{render_for_record(ref, _DIAGNOSTIC_LIMIT, collapse=False)} was "
+            f"pushed and advanced, but its tree is "
             "identical to the launch base tree")
     _set_judgment_state(judgment, "pushed-ref-produced-change")
     return True, head, (
-        f"coordinator resolved anchored remote ref {ref!r} to {head[:12]}; "
-        f"its tree {tree[:12]} differs from anchored base tree "
-        f"{facts['base_tree'][:12]}, and it descends from {base[:12]}")
+        f"coordinator resolved anchored remote ref "
+        f"{render_for_record(ref, _DIAGNOSTIC_LIMIT, collapse=False)} to "
+        f"{render_for_record(head[:12], 12)}; its tree "
+        f"{render_for_record(tree[:12], 12)} differs from anchored base tree "
+        f"{render_for_record(facts['base_tree'][:12], 12)}, and it descends "
+        f"from {render_for_record(base[:12], 12)}")
 
 
 def workspace_identity_problem(runner, facts):
