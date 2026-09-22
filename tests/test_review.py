@@ -709,19 +709,53 @@ class TestBoundedReads(unittest.TestCase):
     there blocked the gate forever and it never printed a verdict."""
 
     def test_fifo_file_argument_is_a_config_error_not_a_hang(self):
-        import tempfile as _tf, os as _os, signal
+        """A FIFO handed to --file is refused, not waited on.
+
+        The test used `--list`, which prints the reviewer roster and
+        exits WITHOUT OPENING --file, so it passed because `--list`
+        returns -- not because a FIFO was rejected. The path it is
+        named for had never run. `--list` also contacts every provider
+        first (measured 13.3s against a 15s deadline), so it raced a
+        network round trip it did not need.
+
+        A real reviewing invocation reads the file, refuses a
+        non-regular one in `read_text_bounded`, and exits before any
+        provider is contacted: measured rc=4 in 0.14s.
+
+        The asserted contract lives in review.py: `config_error` exits
+        4 (REVIEW_ERROR, a configuration problem) and prints
+        "cannot read {path}: {reason}". Both are asserted here because
+        a refusal that names neither is not a usable diagnostic.
+
+        The `communicate` deadline is inherited from this test as it
+        stood and widened from 15s to 60s, against an operation that
+        went from 13.3s to 0.14s. It is the only way to notice the hang
+        the test exists for, and every honest run reaches it with four
+        hundred times the margin it had before.
+        """
+        import tempfile as _tf, os as _os
         tmp = Path(_tf.mkdtemp())
         fifo = tmp / "src.fifo"
         _os.mkfifo(fifo)
         pr = subprocess.Popen(
-            [sys.executable, str(SCRIPT), "--file", str(fifo), "--list"],
+            [sys.executable, str(SCRIPT), "--kind", "implementation",
+             "--file", str(fifo), "--round", "1",
+             "--claim", "This change cannot make an honest run fail."],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
-            out, err = pr.communicate(timeout=15)
+            out, err = pr.communicate(timeout=60)
         except subprocess.TimeoutExpired:
             pr.kill()
+            pr.communicate()
             self.fail("review.py hung on a FIFO --file argument")
-        self.assertIsNotNone(pr.returncode)
+        both = out + err
+        self.assertEqual(
+            pr.returncode, 4,
+            "a FIFO must be the gate's configuration-error exit, not %r: %r"
+            % (pr.returncode, both[:400]))
+        self.assertIn("cannot read", both)
+        self.assertIn(str(fifo), both,
+                      "the refusal did not name the path it refused")
 
     def test_bounded_reader_rejects_non_regular_files(self):
         import tempfile as _tf, os as _os
