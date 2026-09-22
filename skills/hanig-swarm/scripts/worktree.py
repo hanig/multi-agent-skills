@@ -1264,32 +1264,42 @@ def repository_unusable_reason(runner, repo):
     return f"git could not read {repo}: {err or 'no error text'}"
 
 
-def object_database_unreadable_reason(runner, repo):
-    """Whether a present repository's objects can be read at all.
+# Git's own words for "this object name does not name anything here". These
+# are the ONLY evidence that justifies the word absent. Everything else --
+# including an unrecognised message and including silence -- is unknown.
+#
+# The default is inverted deliberately. Three reviewers, converging from
+# three directions, kept finding another way for a present-but-unreadable
+# object to be called absent: an unreadable pack, a corrupt loose object, a
+# permissions change after a partial restore, a HEAD probe that reads a
+# different pack than the one holding the produced commit. Each was patched
+# and the next one appeared, which is the signal that the default was wrong
+# rather than that the list was short. glm-5.3 named the missed evidence
+# exactly: `cat-file -e`'s own stderr is the one probe that touches the
+# produced object, and it was being captured into `_err` and discarded.
+_OBJECT_ABSENT_PHRASES = (
+    "not a valid object name",
+    "could not get object info",
+    "unknown revision or path not in the working tree",
+)
 
-    `rev-parse --git-dir` reads the repository's metadata and says nothing
-    about its object database. luna refuted the first version of this on
-    exactly that gap: a repository whose object pack is inaccessible answers
-    `--git-dir` with rc 0 while `cat-file -e` fails, so a readable-looking
-    repository reported a present commit as absent.
 
-    So before calling an object absent, confirm the database can produce ANY
-    commit. The repository's own HEAD is the cheapest such object, and a
-    repository that cannot resolve its own HEAD cannot be used to conclude
-    anything about another commit's absence.
+def object_absence_is_established(err):
+    """Does git's own error text establish the object is ABSENT, not unread?
+
+    Only git saying the name does not resolve. An unreadable pack, a corrupt
+    object, a permissions failure and an unrecognised message all mean the
+    question was not answered, which is a different refusal with a different
+    remedy: absent means the work is gone, unknown means look somewhere else.
     """
-    rc, _out, err = _git(runner, repo, "rev-parse", "--verify", "--quiet",
-                         "HEAD^{commit}")
-    if rc == 0:
-        return None
-    # An unborn HEAD is a legitimate, readable repository with no commits;
-    # it just cannot serve as the probe. `cat-file -e` on a real object id
-    # remains the answer there, so do not claim the database is unreadable.
-    if not (err or "").strip():
-        return None
-    return (f"the object database at {repo} could not be read "
-            f"({err.strip()}), so this cannot distinguish an absent commit "
-            f"from an unreadable one")
+    lowered = (err or "").strip().lower()
+    if not lowered:
+        # `cat-file -e` is quiet by design, so silence is the common case for
+        # a genuinely missing object -- but it is also what a suppressed or
+        # swallowed error looks like, and the caller pays for the difference
+        # only by looking in another checkout. Silence is not evidence.
+        return False
+    return any(phrase in lowered for phrase in _OBJECT_ABSENT_PHRASES)
 
 
 def validate_pinned_head(runner, launch_facts, produced):
@@ -1309,7 +1319,8 @@ def validate_pinned_head(runner, launch_facts, produced):
     # the finished worktree. Judgment itself uses execution_workspace above;
     # this later pin validation deliberately needs no live checkout.
     repo, base = launch_facts["repo"], launch_facts["base_commit"]
-    rc, _out, _err = _git(runner, repo, "cat-file", "-e", produced + "^{commit}")
+    rc, _out, cat_err = _git(runner, repo, "cat-file", "-e",
+                             produced + "^{commit}")
     if rc != 0:
         # Discriminate before naming a cause. A nonzero rc here has at least
         # four, and only one of them means the work is gone: the object is
@@ -1329,13 +1340,16 @@ def validate_pinned_head(runner, launch_facts, produced):
                     f"be read because {unusable}. That is unknown, not "
                     f"absent: another ref is still never substituted, and "
                     f"the object may exist in a checkout of the same remote")
-        unreadable = object_database_unreadable_reason(runner, repo)
-        if unreadable:
+        if not object_absence_is_established(cat_err):
+            detail = cat_err.strip() or "git reported no reason"
             return (f"the pinned produced commit {produced[:12]} could not "
-                    f"be read because {unreadable}. That is unknown, not "
-                    f"absent, and another ref is still never substituted")
+                    f"be read from {repo} ({detail}). That is unknown, not "
+                    f"absent: the object may be present and unreadable, or "
+                    f"present in another checkout of the same remote, and "
+                    f"another ref is still never substituted")
         return (f"pinned produced commit {produced[:12]} is absent from "
-                f"{repo}; refusing rather than substituting the current ref")
+                f"{repo}: {cat_err.strip()}. Refusing rather than "
+                f"substituting the current ref")
     rc, _out, _err = _git(runner, repo, "merge-base", "--is-ancestor",
                            base, produced)
     if rc != 0:

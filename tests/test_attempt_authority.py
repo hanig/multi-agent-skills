@@ -761,20 +761,21 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         self.assertNotIn("not present on this host", why)
         self.assertNotIn("not a git repository", why)
 
-    def test_an_unreadable_object_database_is_not_an_absent_commit(self):
-        """luna's finding: --git-dir says nothing about the object store.
+    def test_an_unreadable_object_is_not_an_absent_one(self):
+        """luna, kimi-k2.7-code and glm-5.3 converged on this from three
+        directions, and the third time is when the default was wrong rather
+        than the list short.
 
-        A repository whose objects cannot be read answers `rev-parse
-        --git-dir` with rc 0 while `cat-file -e` fails, so a present commit
-        was reported absent.
+        A repository whose pack holding the produced commit cannot be read
+        answers `rev-parse --git-dir` with rc 0 and may resolve HEAD from a
+        different, readable pack, so every probe that does not touch the
+        produced object passes and the commit is called absent.
         """
         real = U.run
 
         def runner(argv, **kwargs):
             if "cat-file" in argv:
-                return 1, "", "fatal: unable to read object"
-            if "rev-parse" in argv and "HEAD^{commit}" in argv:
-                return 128, "", "fatal: unable to read object database"
+                return 1, "", "fatal: unable to read object file"
             return real(argv, **kwargs)
 
         attempt = self.tmp / "runs" / "u1" / "att1"
@@ -784,8 +785,46 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         why = W.validate_pinned_head(runner, facts, pinned)
         self.assertIsNotNone(why)
         self.assertIn("unknown, not", why)
-        self.assertIn("object database", why)
+        self.assertIn("unable to read object file", why)
         self.assertNotIn("is absent from", why)
+
+    def test_silence_from_cat_file_is_not_evidence_of_absence(self):
+        """`cat-file -e` is quiet by design, so silence is also what a
+        suppressed or swallowed error looks like."""
+        real = U.run
+
+        def runner(argv, **kwargs):
+            if "cat-file" in argv:
+                return 1, "", ""
+            return real(argv, **kwargs)
+
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        facts = self.facts(attempt)
+        pinned = self.commit("A")
+        why = W.validate_pinned_head(runner, facts, pinned)
+        self.assertIsNotNone(why)
+        self.assertIn("unknown, not", why)
+        self.assertNotIn("is absent from", why)
+
+    def test_git_saying_the_name_does_not_resolve_does_establish_absence(self):
+        """The discrimination must not soften the real case into mush."""
+        real = U.run
+
+        def runner(argv, **kwargs):
+            if "cat-file" in argv:
+                return 1, "", ("fatal: Not a valid object name "
+                               "0000000000000000000000000000000000000000^{commit}")
+            return real(argv, **kwargs)
+
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        facts = self.facts(attempt)
+        pinned = self.commit("A")
+        why = W.validate_pinned_head(runner, facts, pinned)
+        self.assertIsNotNone(why)
+        self.assertIn("is absent from", why)
+        self.assertNotIn("unknown, not", why)
 
     def test_deleting_the_launch_record_does_not_change_judgment(self):
         attempt = self.tmp / "runs" / "u1" / "att1"
