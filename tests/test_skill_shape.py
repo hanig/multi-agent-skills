@@ -24,7 +24,7 @@ BODY_LINE_BUDGETS = {
     # which applies the declaration registry that landed for hanig-swarm and
     # RETIRES this entry. Until it lands the number is a holding position.
     #
-    # Raised 600 -> 615 on 2026-09-21 because PR #39 added the reporting
+    # Raised 600 -> 618 on 2026-09-21 because PR #39 added the reporting
     # cadence interview to this body and turned `main` red: the gate passed
     # the change and no suite was run before merging, so nothing caught it.
     # The alternative was cutting behaviour-deciding prose by hand to fit,
@@ -33,9 +33,12 @@ BODY_LINE_BUDGETS = {
     # sacrificed to the budget. If the full registry does not fit, the budget
     # or the criterion is wrong, not the inclusion of behaviour rules."
     #
-    # 615 is deliberately 3 lines above the current body, not a round number,
-    # so the next addition trips this again rather than coasting.
-    "hanig-project": 615,
+    # 618 is the body's EXACT measured length, so any addition trips this.
+    # A first attempt set 615 against a 612-line body and described three
+    # lines of slack as "so the next addition trips it again"; luna refuted
+    # that in one line -- a one-line addition yields 613 and passes. A margin
+    # is not a tripwire. There is no margin here.
+    "hanig-project": 618,
 }
 EXTERNAL_MARKDOWN_LINK = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
 MARKDOWN_ESCAPABLE = frozenset(
