@@ -51,7 +51,11 @@ slow; those facts remain explicit and do not become a support claim.
 `select_targets(report, agents=(), exclude_agents=())` considers every detected
 agent by default. Automatic mode selects present executables, while reporting
 version certification independently; an unverified target is planned but never
-described as supported. Absent and configured-only agents remain in `skipped`;
+described as supported. Selection calls the dated certification check and
+returns `certification_warnings`; stale evidence downgrades an otherwise exact
+version to unverified. The installer persists those warnings in JSON and also
+prints them to stderr in both human and JSON modes, so automatic selection is
+never the only operator-visible fact. Absent and configured-only agents remain in `skipped`;
 an explicit `agents` sequence supports offline/bootstrap installation.
 It plans destinations in the fixed adapter declaration order, so reversing
 equivalent `--agent` flags does not change filesystem topology. The `selected`

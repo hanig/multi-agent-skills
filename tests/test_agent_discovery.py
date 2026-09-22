@@ -127,6 +127,20 @@ class TestAgentDiscovery(unittest.TestCase):
     def test_adapter_certifications_have_not_passed_their_review_deadline(self):
         self.assertEqual(discovery.stale_adapter_certifications(date.today()), [])
 
+    def test_stale_certification_changes_the_automatic_selection_result(self):
+        with tempfile.TemporaryDirectory() as raw:
+            report = discovery.discover(
+                fixture_env(raw), finder({"claude": "/fixtures/claude"}),
+                probe_for({"claude": VERSIONS["claude"]}))
+        plan = discovery.select_targets(report, as_of=date(2026, 10, 6))
+        selected = plan["selected"][0]
+        self.assertEqual(selected["agent"], "claude")
+        self.assertEqual(selected["certification"], "unverified")
+        self.assertTrue(any("expired after 2026-10-05" in warning
+                            for warning in selected["certification_warnings"]))
+        self.assertEqual(selected["certification_warnings"],
+                         plan["certification_warnings"])
+
     def test_supplied_path_not_the_process_path_controls_default_finder(self):
         with tempfile.TemporaryDirectory() as raw:
             home, bin_dir = Path(raw) / "home", Path(raw) / "bin"
@@ -176,10 +190,10 @@ class TestAgentDiscovery(unittest.TestCase):
         plan = discovery.select_targets(report)
         self.assertEqual(plan["selected"], [])
         self.assertEqual(plan["skipped"], [
-            {"agent": "claude", "reason": "absent"},
-            {"agent": "codex", "reason": "absent"},
-            {"agent": "opencode", "reason": "absent"},
-            {"agent": "pi", "reason": "probe_failed"},
+            {"agent": "claude", "reason": "absent", "certification": "unverified"},
+            {"agent": "codex", "reason": "absent", "certification": "unverified"},
+            {"agent": "opencode", "reason": "absent", "certification": "unverified"},
+            {"agent": "pi", "reason": "probe_failed", "certification": "unverified"},
         ])
 
     def test_default_deadlines_are_derived_from_each_adapter_measurement(self):
@@ -214,7 +228,10 @@ class TestAgentDiscovery(unittest.TestCase):
         plan = discovery.select_targets(report, agents=("claude", "opencode"), exclude_agents=("opencode",))
         self.assertEqual(plan["selected"][0]["agent"], "claude")
         self.assertEqual(plan["selected"][0]["mode"], "explicit")
-        self.assertEqual(plan["skipped"], [{"agent": "opencode", "reason": "excluded"}])
+        self.assertEqual(plan["skipped"], [{
+            "agent": "opencode", "reason": "excluded",
+            "certification": "unverified",
+        }])
 
     def test_flag_order_preserves_display_order_but_not_destination_topology(self):
         with tempfile.TemporaryDirectory() as raw:

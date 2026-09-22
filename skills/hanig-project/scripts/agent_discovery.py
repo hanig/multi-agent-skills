@@ -530,6 +530,7 @@ def discover(
 
 def select_targets(
     report: Mapping[str, Any], agents: Sequence[str] = (), exclude_agents: Sequence[str] = (),
+    as_of: Optional[date] = None,
 ) -> dict[str, Any]:
     """Plan targets for all detected agents or an explicit offline/bootstrap set.
 
@@ -544,6 +545,7 @@ def select_targets(
     instead of receiving an unnecessary second copy.
     """
     records = report["agents"]
+    stale_certifications = set(stale_adapter_certifications(as_of))
     requested, excluded = list(agents) or list(ADAPTERS), set(exclude_agents)
     if len(set(requested)) != len(requested):
         raise ValueError("agents contains a duplicate agent id")
@@ -555,10 +557,14 @@ def select_targets(
     eligible: set[str] = set()
     for agent in requested:
         record = records[agent]
+        certification = ("verified" if record["verification"] == "verified"
+                         and agent not in stale_certifications else "unverified")
         if agent in excluded:
-            skipped.append({"agent": agent, "reason": "excluded"})
+            skipped.append({"agent": agent, "reason": "excluded",
+                            "certification": certification})
         elif not agents and not record["eligible_for_automatic_target"]:
-            skipped.append({"agent": agent, "reason": record["state"]})
+            skipped.append({"agent": agent, "reason": record["state"],
+                            "certification": certification})
         else:
             eligible.add(agent)
 
@@ -588,13 +594,43 @@ def select_targets(
         assignments[agent] = (item, False)
 
     selected = []
+    warnings = []
     for agent in requested:
         if agent not in eligible:
             continue
         item, covered = assignments[agent]
-        selected.append({"agent": agent, "status": "selected", "mode": mode,
-                         "covered_by": list(item["target_agents"]) if covered else None,
-                         "destination": item["destination"], "consumers": item["consumers"]})
+        record = records[agent]
+        agent_warnings = []
+        if record["verification"] != "verified":
+            if mode == "automatic":
+                version = record.get("version") or "unknown version"
+                agent_warnings.append(
+                    f"{agent} {version} was selected from executable presence, but "
+                    "this version is not adapter-certified; selection is not a "
+                    "native-compatibility or invocation pass")
+            else:
+                agent_warnings.append(
+                    f"{agent} was selected explicitly with discovery state "
+                    f"{record['state']}; bootstrap destination planning proceeded, "
+                    "but presence, native compatibility, and invocation remain "
+                    "unverified (skip is not pass)")
+        if agent in stale_certifications:
+            selection_basis = ("selection continued from executable presence"
+                               if mode == "automatic"
+                               else "explicit bootstrap selection proceeded")
+            agent_warnings.append(
+                f"{agent} adapter certification expired after "
+                f"{record['verification_review_due']}; {selection_basis}, but "
+                "the adapter evidence is stale")
+        warnings.extend(agent_warnings)
+        selected.append({
+            "agent": agent, "status": "selected", "mode": mode,
+            "covered_by": list(item["target_agents"]) if covered else None,
+            "destination": item["destination"], "consumers": item["consumers"],
+            "certification": ("verified" if record["verification"] == "verified"
+                              and agent not in stale_certifications else "unverified"),
+            "certification_warnings": agent_warnings,
+        })
     conflicts = []
     for consumer in ADAPTERS:
         visible = [item for item in direct.values() if consumer in item["consumers"]]
@@ -602,8 +638,9 @@ def select_targets(
             conflicts.append({"consumer": consumer, "physical_paths": [item["physical_path"] for item in visible],
                               "selected_agents": [agent for item in visible for agent in item["selected_agents"]],
                               "reason": "the loader can see multiple requested copies; consult adapter precedence"})
-    return {"schema_version": SCHEMA_VERSION, "mode": mode, "selected": selected, "skipped": skipped,
-            "destinations": list(direct.values()), "competing_visibility": conflicts}
+    return {"schema_version": SCHEMA_VERSION, "mode": mode, "selected": selected,
+            "skipped": skipped, "destinations": list(direct.values()),
+            "competing_visibility": conflicts, "certification_warnings": warnings}
 
 
 def select_target(report: Mapping[str, Any], agent_id: Optional[str] = None) -> dict[str, Any]:

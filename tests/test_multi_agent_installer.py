@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 
 
@@ -44,6 +45,12 @@ class TestSelectionBeforeWrites(unittest.TestCase):
         self.assertFalse(plan.selected[0].discovery_verified)
         self.assertIn("unverified (explicit selection)",
                       installer.render_plan(plan, options, "test"))
+        document = installer._document(
+            operation="install", dry_run=True, plan=plan, actions=[],
+            diagnostics=[], conflicts=[], mode=options.mode, version="test")
+        self.assertTrue(any(
+            "codex was selected explicitly with discovery state absent" in warning
+            for warning in document["diagnostics"]))
 
     def test_automatic_exclude_leaves_other_detected_agents(self):
         options = installer.parse_options(["--exclude-agent", "opencode"])
@@ -155,6 +162,24 @@ class TestSelectionBeforeWrites(unittest.TestCase):
         with self.assertRaisesRegex(installer.InstallRequestError, "--agent claude"):
             installer.build_plan(targets, installer.parse_options([]))
 
+    def test_stale_excluded_agent_is_not_rendered_as_certified(self):
+        discovery = installer._load_discovery(ROOT)
+        versions = {name: spec["verified_versions"][0]
+                    for name, spec in discovery.adapters().items()}
+        with tempfile.TemporaryDirectory() as raw:
+            paths = {name: "/fixtures/" + name for name in ("claude", "codex")}
+            report = discovery.discover(
+                {"HOME": raw, "PATH": ""},
+                which=lambda executable: paths.get(executable),
+                probe=lambda path, timeout: (True, versions[Path(path).name]))
+        selection = discovery.select_targets(
+            report, exclude_agents=("claude",), as_of=date(2026, 10, 6))
+        plan = installer.build_discovery_plan(report, selection)
+        rendered = installer.render_plan(
+            plan, installer.parse_options(["--exclude-agent", "claude"]), "test")
+        self.assertIn("claude: executable_found 2.1.261 (uncertified)", rendered)
+        self.assertNotIn("claude: executable_found 2.1.261 (certified)", rendered)
+
 
 class TestPublicCli(unittest.TestCase):
     def _fake_agents(self, root, *agents):
@@ -236,6 +261,9 @@ class TestPublicCli(unittest.TestCase):
         self.assertNotEqual(data["version"], "99.0.0")
         self.assertEqual(sum("not adapter-certified" in item
                              for item in data["diagnostics"]), 3)
+        self.assertEqual(result.stderr.count("warning:"), 3)
+        self.assertIn("selection is not a native-compatibility or invocation pass",
+                      result.stderr)
 
     def test_expected_duplicate_visibility_is_prominent_and_installs_same_snapshot(self):
         result, home = self._run(

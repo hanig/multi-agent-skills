@@ -97,6 +97,7 @@ class InstallPlan:
     skipped: tuple[AgentTarget, ...]
     destinations: tuple[DestinationPlan, ...]
     competing_visibility: tuple[Mapping[str, Any], ...] = ()
+    certification_warnings: tuple[str, ...] = ()
 
 
 def parser() -> argparse.ArgumentParser:
@@ -285,6 +286,23 @@ def select_agents(targets: Iterable[AgentTarget], options: InstallOptions) -> tu
     return selected, skipped
 
 
+def _uncertified_target_warning(target: AgentTarget, *, automatic: bool) -> str:
+    """Describe why a selected target is not a compatibility certification."""
+    if automatic:
+        version = target.version or "unknown version"
+        return (
+            f"{target.name} {version} was selected from executable presence, but "
+            "this version is not adapter-certified; selection is not a "
+            "native-compatibility or invocation pass"
+        )
+    return (
+        f"{target.name} was selected explicitly with discovery state "
+        f"{target.state}; bootstrap destination planning proceeded, but "
+        "presence, native compatibility, and invocation remain unverified "
+        "(skip is not pass)"
+    )
+
+
 def build_plan(targets: Iterable[AgentTarget], options: InstallOptions) -> InstallPlan:
     selected, skipped = select_agents(targets, options)
     by_destination: dict[Path, list[AgentTarget]] = {}
@@ -303,7 +321,15 @@ def build_plan(targets: Iterable[AgentTarget], options: InstallOptions) -> Insta
         )
         for path, targets_at_path in by_destination.items()
     )
-    return InstallPlan(selected=selected, skipped=skipped, destinations=destinations)
+    certification_warnings = tuple(
+        _uncertified_target_warning(target, automatic=not options.agents)
+        for target in selected
+        if target.name != "prefix" and not target.discovery_verified
+    )
+    return InstallPlan(
+        selected=selected, skipped=skipped, destinations=destinations,
+        certification_warnings=certification_warnings,
+    )
 
 
 def build_discovery_plan(report: Mapping[str, Any], selection: Mapping[str, Any]) -> InstallPlan:
@@ -327,13 +353,13 @@ def build_discovery_plan(report: Mapping[str, Any], selection: Mapping[str, Any]
         selected_by_path.setdefault(path, []).append(name)
         selected.append(AgentTarget(
             name=name, state=record["state"],
-            discovery_verified=record["verification"] == "verified",
+            discovery_verified=item["certification"] == "verified",
             automatic=item["mode"] == "automatic", destinations=(path,),
             consumers=tuple(item["consumers"]), version=record.get("version"),
         ))
     skipped = tuple(AgentTarget(
         name=item["agent"], state=report["agents"][item["agent"]]["state"],
-        discovery_verified=report["agents"][item["agent"]]["verification"] == "verified",
+        discovery_verified=item["certification"] == "verified",
         automatic=report["agents"][item["agent"]]["eligible_for_automatic_target"],
         destinations=(), consumers=(), version=report["agents"][item["agent"]].get("version"),
     ) for item in selection["skipped"])
@@ -349,6 +375,7 @@ def build_discovery_plan(report: Mapping[str, Any], selection: Mapping[str, Any]
     return InstallPlan(
         tuple(selected), skipped, destinations,
         tuple(selection.get("competing_visibility", ())),
+        tuple(selection.get("certification_warnings", ())),
     )
 
 
@@ -649,22 +676,8 @@ def _document(*, operation: str, dry_run: bool, plan: InstallPlan,
                                              else "unverified"),
                             "selection": "automatic" if target.automatic else "explicit",
                             "consumers": list(target.consumers)})
-    selection_diagnostics = []
+    selection_diagnostics = list(plan.certification_warnings)
     for target in plan.selected:
-        if not target.discovery_verified:
-            agent_version = target.version or "unknown"
-            if target.automatic:
-                selection_diagnostics.append(
-                    f"{target.name} {agent_version} is present but not "
-                    "adapter-certified; destination planning proceeded, but "
-                    "native compatibility and invocation remain unverified "
-                    "(skip is not pass)")
-            else:
-                selection_diagnostics.append(
-                    f"{target.name} was selected explicitly with discovery state "
-                    f"{target.state}; bootstrap destination planning proceeded, "
-                    "but presence, native compatibility, and invocation remain "
-                    "unverified (skip is not pass)")
         if target.state == "slow":
             selection_diagnostics.append(
                 f"{target.name} version probe was SLOW and exceeded its measured "
@@ -687,6 +700,8 @@ def _print(document: Mapping[str, Any], options: InstallOptions, plan: InstallPl
            version: str) -> None:
     if options.json:
         print(json.dumps(document, sort_keys=True))
+        for warning in plan.certification_warnings:
+            print("warning: " + warning, file=sys.stderr)
         return
     print(render_plan(plan, options, version))
     for action in document["actions"]:
@@ -702,7 +717,8 @@ def _print(document: Mapping[str, Any], options: InstallOptions, plan: InstallPl
         if unowned:
             print(f"left {unowned} skill(s) without this repository's recorded ownership")
     for diagnostic in document["diagnostics"]:
-        print("note: " + diagnostic, file=sys.stderr)
+        label = "warning: " if diagnostic in plan.certification_warnings else "note: "
+        print(label + diagnostic, file=sys.stderr)
     for conflict in document["conflicts"]:
         print("conflict: " + conflict, file=sys.stderr)
 
