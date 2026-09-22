@@ -103,6 +103,30 @@ CLOSED_DECLARATIONS = {
         handoff.contents handoff.transfer takeover.verify
         limit.session-liveness
     """),
+    "hanig-project": _closed_ids("""
+        placement.behavior-deciding placement.reference-elaboration
+        placement.reference-dialect capability.host-policy capability.tracker
+        capability.install-boundary paths.skill-directory workflow.order
+        survey.read-before-ask survey.incomplete-walk survey.partition-state
+        adoption.context repository.destination repository.source-data
+        repository.creation-approval interview.judgment-only
+        interview.retry-boundary interview.dispatch-complete
+        interview.reporting-cadence plan.inputs plan.scheduler-route
+        plan.promotion code.configuration code.target-branch runtime.contract
+        retry.contract cluster.memory-flag cluster.account-allowance
+        cluster.memory-charging cluster.qos-scope findings.interview
+        unit.retry-size judgment.by-kind slurm.command-boundary
+        pipeline.command-boundary code.prompt-boundary
+        outputs.attempt-relative code.default-agent slurm.array-outputs
+        plan.required-fields code.write-scopes code.worktree-isolation
+        plan.docs-protection plan.human-document plan.validate tracker.team
+        tracker.credential-boundary tracker.approval tracker.autopilot
+        tracker.apply tracker.edges tracker.readback-shape tracker.attestation
+        tracker.check dispatch.sequence drain.authority closure.evidence
+        closure.by-kind drain.block-intent outbox.receipt outbox.idempotency
+        report.required report.evidence-source report.contents
+        findings.contract findings.bound adoption.remaining-work
+    """),
 }
 
 
