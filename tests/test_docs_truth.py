@@ -678,10 +678,18 @@ def check_canonical_suite_floor(filename, text, discovered):
 
 
 def check_live_suite_claims(documents, discovered):
-    """Reject marked live totals outside the canonical document."""
+    """Reject marked live totals outside the canonical document.
+
+    Returns the canonical document's soft report. luna: this called
+    `check_canonical_suite_floor` and threw the return value away, so the
+    report the scan exists to produce reached nobody -- computed and
+    dropped, which is worse than not computing it.
+    """
+    reported = []
     for path, text in documents:
         if path.name == CANONICAL_DOCUMENT.name:
-            check_canonical_suite_floor(path.name, text, discovered)
+            reported.extend(
+                check_canonical_suite_floor(path.name, text, discovered) or [])
             continue
         markers, _ = lex_document(text)
         if markers:
@@ -690,6 +698,7 @@ def check_live_suite_claims(documents, discovered):
             raise AssertionError(
                 f"{path.name}: marked live suite claim(s) must reference "
                 f"{CANONICAL_DOCUMENT.name}: {details}")
+    return reported
 
 
 def walk_suite(suite):
@@ -1134,11 +1143,17 @@ class TestDocsTruth(unittest.TestCase):
         }
         for name, block in inert_blocks.items():
             with self.subTest(name=name):
-                check_canonical_suite_floor(
-                    CANONICAL_DOCUMENT.name,
+                # HIDING direction: the lexer must have hidden this, so
+                # the report must be EMPTY. Asserting only that nothing
+                # raised became vacuous when the scan stopped raising --
+                # glm-5.3 showed mask_inline_text could be replaced with
+                # `return text` and all 1,751 tests would stay green.
+                self.assertEqual(
+                    competing_counts(
+                            CANONICAL_DOCUMENT.name,
                     text + "\n\n" + block + "\n",
-                    discovered,
-                )
+                    discovered,),
+                    [], "the lexer failed to hide this claim")
 
         visible_claim = f"Current suite total: {discovered + 1} tests."
         visible_blocks = {
@@ -1185,12 +1200,18 @@ class TestDocsTruth(unittest.TestCase):
         hidden_claim = f"Current suite total: {discovered + 1} tests."
         for delimiter in ("| - | -- |", "| -- | - |"):
             with self.subTest(delimiter=delimiter):
-                check_canonical_suite_floor(
-                    CANONICAL_DOCUMENT.name,
+                # HIDING direction: the lexer must have hidden this, so
+                # the report must be EMPTY. Asserting only that nothing
+                # raised became vacuous when the scan stopped raising --
+                # glm-5.3 showed mask_inline_text could be replaced with
+                # `return text` and all 1,751 tests would stay green.
+                self.assertEqual(
+                    competing_counts(
+                            CANONICAL_DOCUMENT.name,
                     text + "\n\n`opening | cell |\n" + delimiter + "\n"
                     + hidden_claim + "`\n",
-                    discovered,
-                )
+                    discovered,),
+                    [], "the lexer failed to hide this claim")
 
         for delimiter in ("| --- |", "| :- |", "| -: |", "| :-: |"):
             with self.subTest(valid=delimiter):
@@ -1210,11 +1231,17 @@ class TestDocsTruth(unittest.TestCase):
                     "| Kind | Value |\n| --- | --- |\n"
                     + marker + "\n  `opening\n  " + hidden_claim + "`"
                 )
-                check_canonical_suite_floor(
-                    CANONICAL_DOCUMENT.name,
+                # HIDING direction: the lexer must have hidden this, so
+                # the report must be EMPTY. Asserting only that nothing
+                # raised became vacuous when the scan stopped raising --
+                # glm-5.3 showed mask_inline_text could be replaced with
+                # `return text` and all 1,751 tests would stay green.
+                self.assertEqual(
+                    competing_counts(
+                            CANONICAL_DOCUMENT.name,
                     text + "\n\n" + block + "\n",
-                    discovered,
-                )
+                    discovered,),
+                    [], "the lexer failed to hide this claim")
 
     def test_comment_tails_keep_residual_for_paragraph_continuations(self):
         discovered = unittest.TestLoader().discover(
@@ -1227,11 +1254,17 @@ class TestDocsTruth(unittest.TestCase):
         )
         for prefix in prefixes:
             with self.subTest(prefix=prefix):
-                check_canonical_suite_floor(
-                    CANONICAL_DOCUMENT.name,
+                # HIDING direction: the lexer must have hidden this, so
+                # the report must be EMPTY. Asserting only that nothing
+                # raised became vacuous when the scan stopped raising --
+                # glm-5.3 showed mask_inline_text could be replaced with
+                # `return text` and all 1,751 tests would stay green.
+                self.assertEqual(
+                    competing_counts(
+                            CANONICAL_DOCUMENT.name,
                     text + "\n\n" + prefix + "\n" + hidden_claim + "`\n",
-                    discovered,
-                )
+                    discovered,),
+                    [], "the lexer failed to hide this claim")
 
     def test_a_component_count_below_the_floor_is_prose_not_a_claim(self):
         """luna's counterexample, reproduced and then fixed.
@@ -1400,6 +1433,32 @@ class TestDocsTruth(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "marker"):
             check_canonical_suite_floor(
                 CANONICAL_DOCUMENT.name, two_markers, discovered)
+
+    def test_the_entry_point_hands_the_report_to_its_caller(self):
+        """luna: the report was computed and thrown away.
+
+        `check_live_suite_claims` called the canonical check and discarded
+        its return value, so the soft report reached nobody -- which is
+        worse than not computing it, because the scan then costs work and
+        buys nothing.
+        """
+        discovered = unittest.TestLoader().discover(
+            str(ROOT / "tests")).countTestCases()
+        text = CANONICAL_DOCUMENT.read_text()
+        others = [(path, path.read_text()) for path in LIVE_DOCUMENTS
+                  if path.name != CANONICAL_DOCUMENT.name]
+
+        clean = check_live_suite_claims(
+            [(CANONICAL_DOCUMENT, text)] + others, discovered)
+        self.assertEqual(clean, [])
+
+        noisy = check_live_suite_claims(
+            [(CANONICAL_DOCUMENT,
+              text + f"\nHistorical suite size: {discovered + 1} tests.\n")]
+            + others, discovered)
+        self.assertTrue(
+            noisy, "the caller received no report for a competing count")
+        self.assertIn(discovered + 1, [count for _line, count in noisy])
 
 
 if __name__ == "__main__":
