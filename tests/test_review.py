@@ -709,19 +709,40 @@ class TestBoundedReads(unittest.TestCase):
     there blocked the gate forever and it never printed a verdict."""
 
     def test_fifo_file_argument_is_a_config_error_not_a_hang(self):
-        import tempfile as _tf, os as _os, signal
+        """`--no-probe`, because the probe is not what is under test.
+
+        Without it, `--list` makes a live request to every configured
+        provider before it prints anything: 13.3s wall at 1% CPU on an
+        ordinary run here, against this test's 15-second deadline. That
+        is a 1.1x margin on a network round trip, so the test reddened
+        the suite whenever a provider was slow -- twice in one session,
+        on two branches that touch neither this file nor the gate.
+
+        The failure was also self-defeating: a timeout expiring is
+        indistinguishable from the hang the test exists to refuse, so
+        the message accused the code of exactly the defect the network
+        had caused.
+
+        `--no-probe` reaches the same `--file` handling with no network
+        in the path -- 0.134s measured, a 100x margin -- and the
+        deadline goes back to being a backstop against a real hang
+        rather than a race against a provider.
+        """
+        import tempfile as _tf, os as _os
         tmp = Path(_tf.mkdtemp())
         fifo = tmp / "src.fifo"
         _os.mkfifo(fifo)
         pr = subprocess.Popen(
-            [sys.executable, str(SCRIPT), "--file", str(fifo), "--list"],
+            [sys.executable, str(SCRIPT), "--file", str(fifo),
+             "--list", "--no-probe"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
-            out, err = pr.communicate(timeout=15)
+            out, err = pr.communicate(timeout=60)
         except subprocess.TimeoutExpired:
             pr.kill()
             self.fail("review.py hung on a FIFO --file argument")
         self.assertIsNotNone(pr.returncode)
+        self.assertNotIn("Traceback", err)
 
     def test_bounded_reader_rejects_non_regular_files(self):
         import tempfile as _tf, os as _os
