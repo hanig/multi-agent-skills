@@ -872,8 +872,9 @@ def effective_remote_ref(facts):
     """
     schema = (facts or {}).get("schema_version", 0)
     if schema == 3:
+        branch = _as_text(facts.get("branch"))
         return (f"refs/heads/"
-                f"{render_for_record(facts.get('branch'), 4096, collapse=False)}")
+                f"{render_for_record(branch, len(branch), collapse=False)}")
     if schema >= 4:
         return facts.get("judgment_ref")
     return None

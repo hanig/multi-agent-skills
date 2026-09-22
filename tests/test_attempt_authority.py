@@ -867,6 +867,12 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         self.assertTrue(first_path.name.endswith("1.json"))
         self.assertTrue(second_path.name.endswith("2.json"))
 
+    def test_effective_remote_ref_preserves_an_overlong_branch(self):
+        branch = "b" * 5000
+        self.assertEqual(
+            W.effective_remote_ref({"schema_version": 3, "branch": branch}),
+            "refs/heads/" + branch)
+
     def test_the_whole_refusal_is_bounded_not_just_the_diagnostic(self):
         """kimi-k2.7-code: the recorded path went in verbatim.
 
