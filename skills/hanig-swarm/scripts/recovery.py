@@ -79,29 +79,45 @@ def _entry_digest(hasher, root, path):
             "refusing cleanup rather than omitting bytes")
 
 
-def _is_expected_git_pointer(path, expected_git_dir):
-    """True only for the exact linked-worktree pointer Git created."""
-    if expected_git_dir is None:
-        return False
+def git_pointer_digest(path):
+    """Return the exact content digest of a regular ``.git`` pointer file."""
+    path = Path(path)
     try:
         info = path.lstat()
-        if not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
-            return False
-        raw = path.read_bytes()
-        if not raw.startswith(b"gitdir: ") or not raw.endswith(b"\n"):
-            return False
-        target = raw[len(b"gitdir: "):-1]
-        if not target or b"\n" in target or b"\r" in target:
-            return False
-        target_path = Path(os.fsdecode(target))
-        if not target_path.is_absolute():
-            target_path = path.parent / target_path
-        return target_path.resolve() == Path(expected_git_dir).resolve()
-    except (OSError, UnicodeError, ValueError):
+        if not stat.S_ISREG(info.st_mode):
+            return None, f"Git pointer {path} is not a regular file"
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        return digest.hexdigest(), None
+    except OSError as exc:
+        return None, f"cannot digest Git pointer {path}: {exc}"
+
+
+def _is_expected_git_pointer(path, expected_git_dir,
+                             expected_git_pointer_sha256):
+    """True only when exact bytes match the coordinator's launch digest.
+
+    ``expected_git_dir`` remains part of the call shape for persisted-state
+    compatibility, but its normalized target does not decide identity. With
+    no launch-time content digest this fails closed and preserves ``.git``.
+    """
+    if not isinstance(expected_git_pointer_sha256, str):
         return False
+    if (len(expected_git_pointer_sha256) != 64
+            or any(character not in "0123456789abcdef"
+                   for character in expected_git_pointer_sha256)):
+        return False
+    observed, problem = git_pointer_digest(path)
+    return problem is None and observed == expected_git_pointer_sha256
 
 
-def tree_digest(root, expected_git_dir=None):
+def tree_digest(root, expected_git_dir=None,
+                expected_git_pointer_sha256=None):
     """Return ``(sha256, error)`` for worktree-owned filesystem objects.
 
     The exact linked-worktree pointer is Git metadata and may be excluded only
@@ -118,7 +134,9 @@ def tree_digest(root, expected_git_dir=None):
         return None, f"cannot list recovery source {root}: {exc}"
     for child in children:
         if (child.name == ".git"
-                and _is_expected_git_pointer(child, expected_git_dir)):
+                and _is_expected_git_pointer(
+                    child, expected_git_dir,
+                    expected_git_pointer_sha256)):
             continue
         problem = _entry_digest(digest, root, child)
         if problem:
@@ -126,11 +144,14 @@ def tree_digest(root, expected_git_dir=None):
     return digest.hexdigest(), None
 
 
-def _copy_contents(source, destination, expected_git_dir=None):
+def _copy_contents(source, destination, expected_git_dir=None,
+                   expected_git_pointer_sha256=None):
     destination.mkdir(mode=0o700)
     for child in source.iterdir():
         if (child.name == ".git"
-                and _is_expected_git_pointer(child, expected_git_dir)):
+                and _is_expected_git_pointer(
+                    child, expected_git_dir,
+                    expected_git_pointer_sha256)):
             continue
         target = destination / child.name
         try:
@@ -237,7 +258,8 @@ def validate_snapshot(record, unit_id=None, attempt_id=None,
 
 
 def preserve_worktree(source, recovery_root, unit_id, attempt_id,
-                      base_commit, base_tree, expected_git_dir=None):
+                      base_commit, base_tree, expected_git_dir=None,
+                      expected_git_pointer_sha256=None):
     """Publish a restore-checked snapshot, returning ``(record, error)``."""
     supplied_source = Path(source)
     if supplied_source.is_symlink():
@@ -245,7 +267,8 @@ def preserve_worktree(source, recovery_root, unit_id, attempt_id,
                       "refusing cleanup")
     source = supplied_source.resolve()
     recovery_root = Path(recovery_root).resolve()
-    before, problem = tree_digest(source, expected_git_dir)
+    before, problem = tree_digest(
+        source, expected_git_dir, expected_git_pointer_sha256)
     if problem:
         return None, problem
     binding = json.dumps(
@@ -264,7 +287,8 @@ def preserve_worktree(source, recovery_root, unit_id, attempt_id,
             record, unit_id, attempt_id, base_commit, base_tree)
         if problem:
             return None, problem
-        after, problem = tree_digest(source, expected_git_dir)
+        after, problem = tree_digest(
+            source, expected_git_dir, expected_git_pointer_sha256)
         if problem or after != before:
             return None, problem or "worktree changed while recovery was checked"
         return record, None
@@ -272,7 +296,9 @@ def preserve_worktree(source, recovery_root, unit_id, attempt_id,
     temporary = Path(tempfile.mkdtemp(prefix=".pending-", dir=str(recovery_root)))
     try:
         content = temporary / "content"
-        problem = _copy_contents(source, content, expected_git_dir)
+        problem = _copy_contents(
+            source, content, expected_git_dir,
+            expected_git_pointer_sha256)
         if problem:
             return None, problem
         copied, problem = tree_digest(content)
@@ -286,7 +312,8 @@ def preserve_worktree(source, recovery_root, unit_id, attempt_id,
         if problem or restored_digest != before:
             return None, problem or "restored recovery copy differs from its source"
         shutil.rmtree(str(restored))
-        after, problem = tree_digest(source, expected_git_dir)
+        after, problem = tree_digest(
+            source, expected_git_dir, expected_git_pointer_sha256)
         if problem or after != before:
             return None, problem or "worktree changed while recovery was copied"
         manifest = temporary / "manifest.json"

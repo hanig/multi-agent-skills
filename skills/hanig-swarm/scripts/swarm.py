@@ -2830,19 +2830,21 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
             # resources or resolving a live ref.
             save_state(state_dir, state)
         else:
-            reuse_workspace, create_error = _create_code_worktree(
-                state_dir, intent)
+            reuse_workspace, git_pointer_sha256, create_error = (
+                _create_code_worktree(state_dir, intent))
+            if reuse_workspace:
+                workspace_meta = _register_code_workspace(
+                    state, u, unit_dir, reuse_workspace,
+                    workspace_owner="coordinator")
+                # Registration precedes verification so even a rejected
+                # checkout remains visible to preservation and cleanup.
+                save_state(state_dir, state)
             if create_error:
                 return None, create_error
-            workspace_meta = _register_code_workspace(
-                state, u, unit_dir, reuse_workspace,
-                workspace_owner="coordinator")
-            # Registration precedes verification so even a rejected checkout
-            # remains visible to the preservation/cleanup lifecycle.
-            save_state(state_dir, state)
             complete_error = _complete_code_launch(
                 state, u, unit_dir, reuse_workspace,
-                workspace_owner="coordinator")
+                workspace_owner="coordinator",
+                git_pointer_sha256=git_pointer_sha256)
             if complete_error:
                 workspace_meta["verification"] = "refused"
                 workspace_meta["cleanup_pending"] = True
@@ -3702,23 +3704,31 @@ def _create_code_worktree(state_dir, intent):
     workspace = root / intent["worktree_slug"]
     try:
         if os.path.commonpath((str(source), str(root))) == str(source):
-            return None, (f"refusing coordinator worktree root {root}: it is "
-                          f"inside operated repository {source}")
+            return None, None, (
+                f"refusing coordinator worktree root {root}: it is "
+                f"inside operated repository {source}")
     except ValueError:
         pass
     if workspace.parent != root or workspace.exists() or workspace.is_symlink():
-        return None, f"coordinator worktree path {workspace} is not fresh"
+        return (None, None,
+                f"coordinator worktree path {workspace} is not fresh")
     try:
         root.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        return None, f"cannot create coordinator worktree root {root}: {exc}"
+        return (None, None,
+                f"cannot create coordinator worktree root {root}: {exc}")
     rc, _out, err = _git(
         source, "worktree", "add", "-q", "-b", intent["branch"],
         str(workspace), intent["base_commit"], timeout=120)
     if rc != 0:
-        return None, (f"cannot create coordinator-owned worktree {workspace}: "
-                      f"{err[:200]}")
-    return str(workspace.resolve()), None
+        return None, None, (f"cannot create coordinator-owned worktree "
+                            f"{workspace}: {err[:200]}")
+    resolved = str(workspace.resolve())
+    pointer_digest, pointer_error = R.git_pointer_digest(
+        Path(resolved) / ".git")
+    if pointer_error:
+        return resolved, None, pointer_error
+    return resolved, pointer_digest, None
 
 
 def _register_code_workspace(state, u, unit_dir, workspace, workspace_id=None,
@@ -3784,7 +3794,8 @@ def _write_code_launch_record(unit_dir, facts):
 
 
 def _complete_code_launch(state, u, unit_dir, workspace, workspace_id=None,
-                          recovery=False, workspace_owner=None):
+                          recovery=False, workspace_owner=None,
+                          git_pointer_sha256=None):
     """Complete trusted launch facts from the verified worktree cwd.
 
     A new launch must still be exactly at its pinned base. Crash recovery is
@@ -3798,6 +3809,14 @@ def _complete_code_launch(state, u, unit_dir, workspace, workspace_id=None,
     problem = _code_launch_intent_problem(intent, u, attempt)
     if problem:
         return problem
+    prior_facts = (us.get("attempt_launch_facts") or {}).get(attempt) or {}
+    prior_meta = (us.get("attempt_workspaces") or {}).get(attempt) or {}
+    prior_identity = (prior_facts.get("workspace_identity")
+                      or prior_meta.get("workspace_identity") or {})
+    if git_pointer_sha256 is None:
+        # Carry forward only a digest the coordinator already stored. Never
+        # manufacture a launch baseline by observing the agent's live file.
+        git_pointer_sha256 = prior_identity.get("git_pointer_sha256")
     workspace = str(Path(workspace).resolve())
     if workspace == intent["repo"]:
         return (f"the shared source checkout {workspace!r} was supplied "
@@ -3857,6 +3876,8 @@ def _complete_code_launch(state, u, unit_dir, workspace, workspace_id=None,
                 "git_dir": worktree_git_dir,
                 "git_dir_device": git_st.st_dev,
                 "git_dir_inode": git_st.st_ino}
+    if git_pointer_sha256 is not None:
+        identity["git_pointer_sha256"] = git_pointer_sha256
     intent_schema = intent.get("schema_version", 1)
     judgment_ref = intent.get("judgment_ref")
     direct_remote_judgment = intent_schema >= 3
@@ -6184,18 +6205,15 @@ def _archive_code_worktree(state, u, unit_dir, report, state_dir=None):
     recovery_records = us.setdefault("attempt_recovery_snapshots", {})
     workspace_path = meta.get("path")
     if workspace_path and os.path.isdir(workspace_path):
-        expected_git_dir = ((meta.get("workspace_identity") or {})
-                            .get("git_dir"))
-        if not expected_git_dir:
-            rc, observed_git_dir, _err = _git(
-                workspace_path, "rev-parse", "--git-dir")
-            if rc == 0:
-                expected_git_dir = str(
-                    (Path(workspace_path) / observed_git_dir).resolve())
+        workspace_identity = meta.get("workspace_identity") or {}
+        expected_git_dir = workspace_identity.get("git_dir")
+        expected_git_pointer_sha256 = workspace_identity.get(
+            "git_pointer_sha256")
         recovery_record, recovery_error = R.preserve_worktree(
             workspace_path, Path(state_dir) / "recovery-snapshots",
             u["id"], attempt, intent["base_commit"], intent["base_tree"],
-            expected_git_dir=expected_git_dir)
+            expected_git_dir=expected_git_dir,
+            expected_git_pointer_sha256=expected_git_pointer_sha256)
         if recovery_error:
             _worktree_cleanup_failed(
                 state, u, meta, report,
@@ -6209,7 +6227,8 @@ def _archive_code_worktree(state, u, unit_dir, report, state_dir=None):
         # call. A crash may retry cleanup but cannot lose this prerequisite.
         save_state(state_dir, state)
         current_digest, current_error = R.tree_digest(
-            workspace_path, expected_git_dir)
+            workspace_path, expected_git_dir,
+            expected_git_pointer_sha256)
         if (current_error
                 or current_digest != recovery_record["content_sha256"]):
             _worktree_cleanup_failed(

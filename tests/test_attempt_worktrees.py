@@ -142,7 +142,8 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         (workspace / "tracked.txt").write_bytes(b"uncommitted\x00change\n")
         (workspace / "untracked.bin").write_bytes(bytes(range(256)))
         before, problem = R.tree_digest(
-            workspace, facts["workspace_identity"]["git_dir"])
+            workspace, facts["workspace_identity"]["git_dir"],
+            facts["workspace_identity"]["git_pointer_sha256"])
         self.assertIsNone(problem)
         us = state["units"]["code"]
         us.update({"state": "FAILED", "terminal_reason": "REVIEW_FAIL"})
@@ -167,6 +168,22 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         after, problem = R.tree_digest(recovered)
         self.assertIsNone(problem)
         self.assertEqual(after, before)
+
+    def test_launch_records_the_exact_git_pointer_digest(self):
+        attempt = self.attempt("code", "pointer-digest")
+        unit = code_unit(self.repo)
+        state = {"units": {}}
+        _job, error = self.submit(unit, attempt, False, state)
+        self.assertIsNone(error)
+        facts = state["units"]["code"]["attempt_launch_facts"][attempt.name]
+        workspace = Path(facts["execution_workspace"])
+        observed, problem = R.git_pointer_digest(workspace / ".git")
+        self.assertIsNone(problem)
+        self.assertEqual(
+            facts["workspace_identity"]["git_pointer_sha256"], observed)
+        audit = json.loads(W.launch_record_path(str(attempt)).read_text())
+        self.assertEqual(
+            audit["workspace_identity"]["git_pointer_sha256"], observed)
 
     def test_preservation_failure_leaves_worktree_and_skips_teardown(self):
         attempt = self.attempt("code", "preserve-fails")
@@ -280,6 +297,54 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         restored = self.tmp / "restored-replaced-git"
         self.assertIsNone(R.restore_audit_copy(record, restored))
         self.assertEqual((restored / ".git").read_bytes(), replacement)
+
+    def test_dot_equivalent_replaced_git_pointer_is_preserved(self):
+        attempt = self.attempt("code", "dot-equivalent-git")
+        unit = code_unit(self.repo)
+        state = {"units": {}}
+        _job, error = self.submit(unit, attempt, False, state)
+        self.assertIsNone(error)
+        facts = state["units"]["code"]["attempt_launch_facts"][attempt.name]
+        workspace = Path(facts["execution_workspace"])
+        git_dir = Path(facts["workspace_identity"]["git_dir"])
+        target = str(git_dir.parent) + "/./" + git_dir.name
+        replacement = b"gitdir: " + os.fsencode(target) + b"\n"
+        self.assertIn(b"/./", replacement)
+        self.assertNotEqual((workspace / ".git").read_bytes(), replacement)
+        (workspace / ".git").write_bytes(replacement)
+        state_dir = self.tmp / "state"
+
+        S._archive_code_worktree(
+            state, unit, str(attempt), [], str(state_dir))
+
+        record = state["units"]["code"]["attempt_recovery_snapshots"][
+            attempt.name]
+        restored = self.tmp / "restored-dot-equivalent-git"
+        self.assertIsNone(R.restore_audit_copy(record, restored))
+        self.assertEqual((restored / ".git").read_bytes(), replacement)
+
+    def test_missing_pointer_digest_fails_closed_and_preserves_git_file(self):
+        attempt = self.attempt("code", "missing-pointer-digest")
+        unit = code_unit(self.repo)
+        state = {"units": {}}
+        _job, error = self.submit(unit, attempt, False, state)
+        self.assertIsNone(error)
+        us = state["units"]["code"]
+        facts = us["attempt_launch_facts"][attempt.name]
+        workspace = Path(facts["execution_workspace"])
+        pointer_bytes = (workspace / ".git").read_bytes()
+        facts["workspace_identity"].pop("git_pointer_sha256")
+        us["attempt_workspaces"][attempt.name]["workspace_identity"].pop(
+            "git_pointer_sha256", None)
+        state_dir = self.tmp / "state"
+
+        S._archive_code_worktree(
+            state, unit, str(attempt), [], str(state_dir))
+
+        record = us["attempt_recovery_snapshots"][attempt.name]
+        restored = self.tmp / "restored-missing-pointer-digest"
+        self.assertIsNone(R.restore_audit_copy(record, restored))
+        self.assertEqual((restored / ".git").read_bytes(), pointer_bytes)
 
     def test_missing_legacy_checkout_records_unrecoverable_migration(self):
         attempt = self.attempt("code", "legacy-already-gone")
