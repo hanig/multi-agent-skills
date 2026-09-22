@@ -118,8 +118,21 @@ def _as_text(value):
         # `.decode` is inside the guard: kimi-k2.7-code pointed out that a
         # bytes SUBCLASS can override it, and it was being called outside.
         if isinstance(value, bytes):
-            return value.decode("utf-8", "replace")
-        return str(value)
+            rendered = value.decode("utf-8", "replace")
+        else:
+            rendered = str(value)
+        # str() and .decode() both RETURN A SUBCLASS when handed one, so
+        # the subclass this branch exists to defuse walked straight
+        # through it and `_git` called its poisoned `.strip()` anyway --
+        # luna, one round after the isinstance fix, which is the fourth
+        # time this boundary has been claimed one value short.
+        #
+        # `"" + x` goes through `str.__add__`, which builds an exact
+        # str. It is the cheapest coercion that cannot be overridden,
+        # because the subclass is the right-hand operand of a real str.
+        if type(rendered) is not str:
+            rendered = "" + rendered
+        return rendered
     except BaseException:
         # BaseException, not Exception: kimi-k2.7-code pointed out that a
         # __str__ raising SystemExit escapes an `except Exception`. The

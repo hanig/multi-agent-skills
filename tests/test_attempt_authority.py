@@ -610,6 +610,24 @@ def _stderr_tail(text):
 # The functions whose refusals are fully rendered today. The module has
 # more, counted and filed rather than swept here; adding a name to this
 # tuple is the way to bring one in, and the test then enforces it.
+def _is_rendered(node, allowed_bare):
+    """True when this interpolated expression went through a renderer.
+
+    A call to `render_for_record` / `render_git_diagnostic`, a call to
+    `len` (an int cannot carry text), or one of the named bare values.
+    Anything else -- an arithmetic expression, a concatenation, an
+    attribute, a subscript -- is raw, whatever its source text mentions.
+    """
+    import ast as _ast
+    if isinstance(node, _ast.Call):
+        func = node.func
+        name = getattr(func, "id", None) or getattr(func, "attr", None)
+        return name in ("render_for_record", "render_git_diagnostic", "len")
+    if isinstance(node, _ast.Name):
+        return node.id in allowed_bare
+    return False
+
+
 RENDERED_REFUSAL_FUNCTIONS = (
     "judge_detail", "validate_pinned_head", "workspace_identity_problem")
 
@@ -1351,6 +1369,54 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         self.assertIn("not a git repository", why,
                       "git's own words did not reach the record")
 
+    def test_a_poisoned_str_subclass_cannot_escape_the_boundary(self):
+        """luna, one round after the isinstance fix, and the fourth time
+        this boundary has been claimed one value short.
+
+        `type(value) is str` sends a subclass to the `str(value)` branch
+        -- but `str()` RETURNS THE SUBCLASS when handed one, and so does
+        `bytes.decode` when overridden, so the subclass this branch
+        exists to defuse walked straight through it and `_git` called
+        its poisoned `.strip()` anyway.
+        """
+        class Poison(str):
+            def strip(self, *args):
+                raise RuntimeError("poisoned")
+
+            def __str__(self):
+                return self
+
+        class PoisonBytes(bytes):
+            def decode(self, *args, **kwargs):
+                return Poison("from bytes")
+
+        for label, value in (("a str subclass", Poison("hello")),
+                             ("a bytes subclass", PoisonBytes(b"x"))):
+            with self.subTest(value=label):
+                out = W._as_text(value)
+                self.assertIs(type(out), str,
+                              "%s escaped the boundary as %s"
+                              % (label, type(out).__name__))
+                self.assertEqual(out.strip(), out.strip())
+
+        # And end to end: a runner returning one must still produce a
+        # refusal rather than an exception.
+        real = U.run
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        facts = self.facts(attempt)
+        pinned = self.commit("A")
+
+        def poisoned(argv, **kwargs):
+            if "cat-file" in argv:
+                return 1, Poison(""), Poison("fatal: poisoned")
+            return real(argv, **kwargs)
+
+        why = W.validate_pinned_head(poisoned, facts, pinned)
+        self.assertIsNotNone(why)
+        self.assertIsInstance(why, str)
+        self.assertIn("poisoned", why)
+
     def test_no_refusal_interpolates_a_value_the_renderer_never_saw(self):
         """The one-renderer property, enforced instead of asserted.
 
@@ -1394,15 +1460,21 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
                     if not isinstance(value, ast.FormattedValue):
                         continue
                     expression = ast.get_source_segment(source, value.value)
-                    if expression is None:
-                        offenders.append((node.name, value.lineno, "?"))
+                    # By STRUCTURE, not by substring. luna: the first
+                    # version skipped any expression CONTAINING a
+                    # renderer's name, so `f"{repo + render_for_record('', 1)}"`
+                    # passed with `repo` raw, and anything starting
+                    # `len(` passed whatever followed. A guard written
+                    # to be unfoolable that can be fooled by a substring
+                    # is the same defect this repository fixed in the
+                    # skill-shape test one branch over.
+                    #
+                    # The interpolated expression must BE a call to a
+                    # renderer, or a bare name this module produces.
+                    if _is_rendered(value.value, allowed_bare):
                         continue
-                    if ("render_for_record" in expression
-                            or "render_git_diagnostic" in expression
-                            or expression in allowed_bare
-                            or expression.startswith("len(")):
-                        continue
-                    offenders.append((node.name, value.lineno, expression))
+                    offenders.append(
+                        (node.name, value.lineno, expression or "?"))
         self.assertEqual(
             offenders, [],
             "a refusal interpolates a value the renderer never saw. Every "
