@@ -833,6 +833,11 @@ FRONTMATTER = re.compile(r"\A---\n.*?\n---\n", re.DOTALL)
 # defeat the previous rule score six and seven. Three is far from both.
 SECOND_COPY_TOPICS = 3
 
+# What may sit between two items of a LIST: punctuation, one
+# conjunction, an article. Anything else and they are two mentions in a
+# sentence, not two entries in a list.
+LIST_SEPARATOR = re.compile(r"^[\s,;:]*(?:and|or|plus|then)?[\s,;:]*(?:the\s+)?$")
+
 
 class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
     """A statement can leave the decision surface and nothing notices.
@@ -937,14 +942,37 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
 
     @staticmethod
     def second_copies(named_sentences, topics):
-        """Sentences carrying enough of TOPICS to be a copy of the list."""
+        """Sentences that LIST enough of TOPICS to be a copy of the list.
+
+        Counting topics was not enough. kimi-k2.7-code: "The budget for
+        protected destinations determines retry exposure and reporting
+        cadence" carries four and is honest prose, so a count alone
+        fails an honest run -- the direction this test must never err
+        in, because it reddens correct work.
+
+        What separates a list from prose is what sits BETWEEN the
+        items. In a list it is punctuation and at most a conjunction;
+        in prose it is other words. So the topics must be adjacent:
+        three or more in a row with nothing but separators between
+        them.
+        """
         found = []
         for name, sentences in named_sentences:
             for sentence in sentences:
                 lowered = sentence.lower()
-                present = sorted(t for t in topics if t in lowered)
-                if len(present) >= SECOND_COPY_TOPICS:
-                    found.append((name, ", ".join(present), sentence))
+                hits = sorted((lowered.index(t), t)
+                              for t in topics if t in lowered)
+                run, best, listed = 1, 1, []
+                for (start, topic), (nxt, _) in zip(hits, hits[1:]):
+                    between = lowered[start + len(topic):nxt]
+                    if LIST_SEPARATOR.match(between):
+                        run += 1
+                    else:
+                        run = 1
+                    best = max(best, run)
+                if best >= SECOND_COPY_TOPICS:
+                    listed = [t for _p, t in hits]
+                    found.append((name, ", ".join(listed), sentence))
         return found
 
     @staticmethod
@@ -984,7 +1012,12 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
             head = text[:text.index(GENERATED_BEGIN)]
             tail = text[text.index(GENERATED_END) + len(GENERATED_END):]
             text = head + "\n" + tail
-        text = FRONTMATTER.sub("", text)
+        # The frontmatter is SCANNED now. It was stripped because an
+        # earlier rule keyed on the word "ask", and the description's
+        # when-to-use list tripped it. The rule keys on the registry's
+        # topics now, which the description does not contain, so the
+        # exemption bought nothing and left a surface a second copy
+        # could hide in -- luna.
         return re.split(r"(?<=[.!?])\s+", " ".join(text.split()))
 
     def test_the_declared_set_is_exactly_what_is_pinned(self):
@@ -1167,6 +1200,43 @@ class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
         # branch is about: a check whose only evidence is that it has not
         # complained. Every string here is a paraphrase a reviewer wrote
         # to walk past an earlier version of this test.
+        # The FRONTMATTER is part of the surface. luna: it was
+        # stripped, so a second copy could sit in the description and
+        # never be looked at. Asserted directly, because a mutation
+        # restoring the strip is invisible while no real frontmatter
+        # carries topics.
+        skill_md = SKILLS / "hanig-project" / "SKILL.md"
+        scanned = " ".join(self.sentences(skill_md))
+        self.assertIn(
+            "Start a swarm project", scanned,
+            "the frontmatter is not being scanned, so a second copy "
+            "could hide there")
+        planted = list(self.sentences(skill_md)) + [
+            "Ask about done criteria, the scientific claim, discardable "
+            "work, budget, protected destinations, retry exposure, and "
+            "reporting cadence."]
+        self.assertTrue(
+            self.second_copies([("SKILL.md", planted)], topics),
+            "a second copy in the scanned text was not detected")
+
+        # Honest prose carrying the topics in unrelated grammatical
+        # roles must NOT be flagged. kimi-k2.7-code wrote the first of
+        # these to refute the honest-run claim, and it did.
+        for label, honest in (
+                ("topics in unrelated roles",
+                 "The budget for protected destinations determines retry "
+                 "exposure and reporting cadence."),
+                ("two mentions in one sentence",
+                 "A unit with a budget must declare retry exposure, and "
+                 "its protected destinations are surveyed rather than "
+                 "asked about."),
+        ):
+            with self.subTest(honest=label):
+                self.assertEqual(
+                    self.second_copies([("planted.md", [honest])], topics),
+                    [],
+                    "honest prose was read as a second copy of the list")
+
         for label, paraphrase in (
                 ("no ask verb",
                  "Question the owner, one at a time, about done criteria, "
