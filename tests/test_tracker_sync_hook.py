@@ -59,6 +59,8 @@ OUTWARD = [
     "gh pr reopen 27",
     "gh pr comment 41 --body x",
     "gh issue comment ARC-689 --body x",
+    "gh issue create --title x",
+    "gh issue close ARC-689",
 ]
 
 # Read-only: these change nothing, and a reminder on them is the noise that
@@ -70,6 +72,9 @@ INWARD = [
     "gh pr list --state open",
     "gh pr diff 41",
     "gh pr checks 41",
+    "gh issue list",
+    "gh issue view ARC-689",
+    "gh issue status",
 ]
 
 
@@ -228,6 +233,31 @@ class TrackerSyncHookDelivery(unittest.TestCase):
         self.assertIn("gh pr merge", context)
         # Detection is loose, so the reminder must not assert the command ran.
         self.assertIn("may not have run", context)
+
+
+def _process_is_alive(pid):
+    """True only if the pid names a RUNNING process, not a zombie.
+
+    glm-5.3: os.kill(pid, 0) succeeds against a killed-but-unreaped
+    process, so under a non-reaping PID 1 -- `docker run` without --init,
+    where the test process itself adopts the dead grandchild -- the hook
+    correctly kills the descendant and the assertion fails anyway.
+    """
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    try:
+        state = subprocess.run(["ps", "-o", "state=", "-p", str(pid)],
+                               stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL,
+                               timeout=10).stdout.decode().strip()
+    except (OSError, subprocess.SubprocessError):
+        return True     # cannot tell; treat as alive rather than pass falsely
+    if not state:
+        return False
+    return not state.startswith("Z")
+
 
 
 def fake_repo(script_body, root):
@@ -442,6 +472,40 @@ class TrackerSyncHookOutboxReporting(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(out.strip(), "", "matched across separate commands")
 
+    def test_a_zombie_is_not_a_living_descendant(self):
+        """The liveness helper itself, tested against a real zombie.
+
+        glm-5.3's scenario needs a non-reaping PID 1, which this host does
+        not have -- launchd reaps, so os.kill already reports the dead
+        grandchild as gone and mutating the helper away does NOT fail the
+        descendant test here. That is an honest gap in the mutation, so
+        the helper is verified directly instead: fork a child, let it exit,
+        do not wait for it, and confirm the two answers disagree.
+        """
+        pid = os.fork()
+        if pid == 0:
+            os._exit(0)
+        try:
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    self.skipTest("this platform reaped before we looked")
+                    return
+                if not _process_is_alive(pid):
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("a zombie was still reported alive after 5s")
+            # os.kill still says yes; that is exactly the trap.
+            os.kill(pid, 0)
+        finally:
+            try:
+                os.waitpid(pid, 0)
+            except OSError:
+                pass
+
     def test_a_hanging_probe_is_bounded_and_leaves_no_descendants(self):
         """The defect class a step-back committee predicted would come next.
 
@@ -477,9 +541,7 @@ class TrackerSyncHookOutboxReporting(unittest.TestCase):
                  "test would pass without testing anything")
         alive = True
         for _ in range(50):
-            try:
-                os.kill(pid, 0)
-            except OSError:
+            if not _process_is_alive(pid):
                 alive = False
                 break
             time.sleep(0.1)
@@ -553,6 +615,47 @@ class TrackerSyncHookInputContract(unittest.TestCase):
                 self.assertEqual(out.strip(), "",
                                  "emitted on an unreadable event: %r" % out)
 
+    # 2. the command text --------------------------------------------------
+
+    def test_hostile_command_text_stays_bounded_and_correct(self):
+        """luna, kimi-k2.7-code and glm-5.3 all noted this class named the
+        command text and then tested ordinary commands in it."""
+        cases = {
+            # honest bulk script: must stay silent AND stay fast
+            "600 read-only lines": ("\n".join("gh pr view %d" % n
+                                              for n in range(600)), ""),
+            # the words exist but on separate commands
+            "verb on another line": ("gh pr view 1\necho merge\n", ""),
+            # read-only issue subcommands
+            "gh issue list": ("gh issue list", ""),
+            "gh issue view": ("gh issue view ARC-689", ""),
+            # a compound where the mutating verb IS the same command
+            "compound with a push": ("make build && git push origin HEAD",
+                                     "git push"),
+            "backslash continuation": ("gh pr \\\n  merge 41", "gh pr merge"),
+            # degenerate shapes
+            "empty command": ("", ""),
+            "only whitespace": ("   \n\t ", ""),
+            "no word characters": ("!!! ??? ***", ""),
+        }
+        for label, (command, expected) in cases.items():
+            with self.subTest(command=label):
+                started = time.time()
+                payload = json.dumps(
+                    {"tool_input": {"command": command}}).encode()
+                rc, out = self.invoke(payload, timeout=30)
+                elapsed = time.time() - started
+                self.assertEqual(rc, 0)
+                self.assertLess(elapsed, 10.0,
+                                "%s took %.1fs" % (label, elapsed))
+                if expected:
+                    context = injected_context(out)
+                    self.assertIsNotNone(context, out)
+                    self.assertIn(expected, context)
+                else:
+                    self.assertEqual(out.strip(), "",
+                                     "%s should be silent: %r" % (label, out))
+
     # 3. the repository locator -------------------------------------------
 
     def test_a_repository_without_the_probe_is_a_reported_unknown(self):
@@ -580,6 +683,32 @@ class TrackerSyncHookInputContract(unittest.TestCase):
         self.assertIsNotNone(context, out)
         self.assertIn("Unknown is not zero", context)
 
+    # 5. the probe's bytes --------------------------------------------------
+
+    def test_a_probe_that_writes_without_end_is_bounded_by_size(self):
+        """luna: the bound covered time and not size, so a probe writing
+        gigabytes exhausted memory before the reminder could be emitted."""
+        body = """
+            import sys
+            block = b"x" * 65536
+            while True:
+                sys.stdout.buffer.write(block)
+        """
+        fake_repo(body, os.path.join(self.tmp, "repo"))
+        payload = json.dumps(
+            {"tool_input": {"command": "git push origin HEAD"}}).encode()
+        started = time.time()
+        rc, out = self.invoke(payload, {"HANIG_TRACKER_PROBE_TIMEOUT_S": "60"},
+                              timeout=90)
+        elapsed = time.time() - started
+        self.assertEqual(rc, 0)
+        context = injected_context(out)
+        self.assertIsNotNone(context, out)
+        self.assertIn("Unknown is not zero", context)
+        self.assertLess(elapsed, 60,
+                        "the size cap must end this before the deadline "
+                        "does; took %.1fs" % elapsed)
+
     # the invariant that cuts across all five ------------------------------
 
     def test_total_zero_requires_every_input_to_have_been_validated(self):
@@ -595,6 +724,8 @@ class TrackerSyncHookInputContract(unittest.TestCase):
             "probe prints the wrong shape": PROBE_WRONG_SHAPE["no intents key"],
             "probe prints invalid utf-8": PROBE_MALFORMED["invalid utf-8"],
             "probe prints NaN": PROBE_MALFORMED["NaN in the payload"],
+            "intent has no ack_status": '    print(\'{"intents": [{}]}\')',
+            "intent is not an object": '    print(\'{"intents": ["x"]}\')',
         }
         payload = json.dumps(
             {"tool_input": {"command": "git push origin HEAD"}}).encode()

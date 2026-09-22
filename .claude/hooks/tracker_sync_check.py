@@ -95,10 +95,12 @@ import hashlib
 import json
 import os
 import re
+import select
 import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 # Detection is deliberately SENSITIVE, not precise, because the costs are not
 # symmetric. A spurious reminder costs one line of context. A missed one costs
@@ -111,6 +113,14 @@ import tempfile
 # and habituation is the way a reminder stops being read.
 PR_MUTATING = frozenset(
     "merge close create edit ready reopen comment review".split())
+
+# The same rule for `gh issue`, which was matched on the bare subcommand.
+# kimi-k2.7-code: `gh issue list` and `gh issue view ARC-689` change
+# nothing and fired the reminder anyway, contradicting this module's own
+# stated rule and producing exactly the habituation it warns about.
+ISSUE_MUTATING = frozenset(
+    "create close reopen edit comment delete transfer pin unpin lock "
+    "unlock develop".split())
 
 # Detection is a LINEAR token scan, not a regex.
 #
@@ -150,7 +160,10 @@ def matched_label(command):
         if "gh" not in words:
             continue
         if "issue" in words:
-            return "gh issue"
+            verbs = words & ISSUE_MUTATING
+            if verbs:
+                return "gh issue " + sorted(verbs)[0]
+            continue
         if "pr" in words:
             verbs = words & PR_MUTATING
             if verbs:
@@ -204,6 +217,62 @@ def state_dir_for(repo):
                         "%s-%s" % (slug or "project", digest), "state")
 
 
+# An outbox is kilobytes. communicate() buffers whatever it is given, so a
+# probe that writes gigabytes exhausts memory before this hook can emit the
+# reminder it promises -- luna found that the bound covered time and not
+# size. 8 MiB is far above any real outbox and far below anything that
+# hurts.
+_OUTPUT_LIMIT = 8 * 1024 * 1024
+
+
+def _reap(proc):
+    """Kill the probe's process group and wait, bounded."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except OSError:
+        pass
+    try:
+        proc.communicate(timeout=REAP_GRACE_S)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _read_bounded(proc):
+    """Read the probe's stdout under BOTH a deadline and a size cap.
+
+    Returns (bytes, overflowed). ``None`` for the bytes means the deadline
+    passed with the probe still running, which the caller reports as a
+    timeout. Reading incrementally is what makes the size cap possible:
+    communicate() has already allocated everything by the time it returns.
+    """
+    deadline = time.monotonic() + probe_timeout_s()
+    chunks, total = [], 0
+    stream = proc.stdout
+    fd = stream.fileno()
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None, False
+        try:
+            ready, _, _ = select.select([fd], [], [], min(remaining, 0.25))
+        except (OSError, ValueError):
+            return b"".join(chunks), False
+        if not ready:
+            if proc.poll() is not None:
+                return b"".join(chunks), False
+            continue
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError:
+            return b"".join(chunks), False
+        if not chunk:
+            return b"".join(chunks), False
+        total += len(chunk)
+        if total > _OUTPUT_LIMIT:
+            return b"".join(chunks), True
+        chunks.append(chunk)
+
+
 def _reject_constant(name):
     """Refuse the JSON extensions the outbox never writes."""
     raise ValueError("unexpected JSON constant %s" % name)
@@ -248,21 +317,21 @@ def read_outbox(repo, state):
             start_new_session=True)
     except OSError as exc:
         return None, "The outbox probe could not start (%s)." % exc.strerror
-    try:
-        out, _ = proc.communicate(timeout=probe_timeout_s())
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except OSError:
-            pass
-        try:
-            # Bounded even here: a child in uninterruptible I/O survives
-            # SIGKILL, and this hook must still answer rather than hang.
-            proc.communicate(timeout=REAP_GRACE_S)
-        except subprocess.TimeoutExpired:
-            pass
+    out, overflow = _read_bounded(proc)
+    if overflow:
+        _reap(proc)
+        return None, ("The outbox probe produced more than %d bytes, which "
+                      "no outbox does." % _OUTPUT_LIMIT)
+    if out is None:
+        _reap(proc)
         return None, ("The outbox probe did not finish within %gs."
                       % probe_timeout_s())
+    try:
+        proc.wait(timeout=REAP_GRACE_S)
+    except subprocess.TimeoutExpired:
+        # stdout closed but the process lingers: the answer is already
+        # read, so reap it and judge on what it wrote.
+        _reap(proc)
     if proc.returncode != 0:
         return None, ("The outbox probe exited %s." % proc.returncode)
     try:
@@ -291,9 +360,17 @@ def read_outbox(repo, state):
     else:
         return None, ("The outbox probe returned JSON this hook does not "
                       "recognise (%s)." % _shape_of(data))
-    if not all(isinstance(i, dict) for i in intents):
-        return None, ("The outbox probe returned %d intent(s), not all of "
-                      "which are objects." % len(intents))
+    # Each intent must be recognisable, not merely an object. luna:
+    # {"intents":[{}]} passed a list-of-dicts check, contributed nothing to
+    # the pending filter, and reported "total 0" -- a payload the reader
+    # does not understand counted as an outbox with nothing in it.
+    unreadable = [i for i in intents
+                  if not isinstance(i, dict)
+                  or not isinstance(i.get("ack_status"), str)]
+    if unreadable:
+        return None, ("The outbox probe returned %d intent(s), %d of which "
+                      "carry no readable ack_status."
+                      % (len(intents), len(unreadable)))
     pending = [i for i in intents
                if i.get("ack_status") == "unacknowledged"]
     verbs = collections.Counter(
