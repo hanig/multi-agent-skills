@@ -1408,24 +1408,43 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
                          (after.st_dev, after.st_ino),
                          "this platform does not preserve inode on rename")
 
-        identity = {"realpath": str(launched), "device": st.st_dev,
-                    "inode": st.st_ino}
-        current_path = str(Path(launched).resolve())
-        self.assertNotEqual(current_path, identity["realpath"],
-                            "resolve() did not move, so there is nothing "
-                            "to distinguish")
+        self.assertNotEqual(
+            str(Path(launched).resolve()), str(launched),
+            "resolve() did not move, so there is nothing to distinguish")
 
-        same_file = (after.st_dev == identity["device"]
-                     and after.st_ino == identity["inode"])
-        self.assertTrue(
-            same_file,
-            "the fixture must be the same file by device and inode")
-        # The wording the refusal must use for this case.
-        headline = ("still names the same file, but not by the launched "
-                    "identity" if same_file
-                    else "no longer names the launched directory")
-        self.assertIn("still names the same file", headline)
-        self.assertNotIn("no longer names the launched directory", headline)
+        # THE FUNCTION, not a copy of its arithmetic. kimi-k2.7-code,
+        # MAJOR, and correct: the first version of this test rebuilt
+        # `same_file` and the headline expression here and asserted on
+        # its own recomputation, so it passed whatever
+        # workspace_identity_problem actually said -- including the
+        # old wording it was written to forbid. A test satisfiable by
+        # its own source text is the thing this repo has a rule about.
+        facts = {
+            "execution_workspace": str(launched),
+            "workspace_identity": {
+                "path": str(launched), "realpath": str(launched),
+                "device": st.st_dev, "inode": st.st_ino,
+                "git_common_dir": str(self.repo / ".git"),
+                "git_dir": str(self.repo / ".git"),
+                "git_common_device": st.st_dev,
+                "git_common_inode": st.st_ino,
+                "git_dir_device": st.st_dev,
+                "git_dir_inode": st.st_ino}}
+        said = W.workspace_identity_problem(
+            lambda *a, **k: (1, "", "not a git repository"), facts)
+
+        self.assertTrue(said, "a moved path produced no refusal at all")
+        self.assertIn(
+            "still names the same file", said,
+            "the refusal does not say the path still names the same file, "
+            "so a rename is still reported as a substitution")
+        self.assertNotIn(
+            "no longer names the launched directory", said,
+            "the refusal still asserts the directory changed, which the "
+            "stat in that same conditional disproves")
+        self.assertIn(
+            "the resolved path is now", said,
+            "the refusal does not name which check differed")
 
     def test_head_equal_to_base_names_no_history(self):
         """luna: "nothing was committed" from HEAD == base alone.
