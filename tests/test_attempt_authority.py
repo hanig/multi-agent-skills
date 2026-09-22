@@ -639,6 +639,7 @@ RENDERED_REFUSAL_FUNCTIONS = (
     "refused_launch",
     "decode_artifact_basis",
     "decode_launch_facts",
+    "effective_remote_ref",
     "judge_detail",
     "stray_untracked",
     "validate_pinned_head",
