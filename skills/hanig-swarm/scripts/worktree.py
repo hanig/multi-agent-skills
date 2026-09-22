@@ -1009,12 +1009,16 @@ def workspace_identity_problem(runner, facts):
         current_path = str(Path(workspace).resolve())
         current = os.stat(workspace)
     except OSError as exc:
-        return f"cannot identify the anchored worktree {workspace!r}: {exc}"
+        return (f"cannot identify the anchored worktree "
+                f"{render_for_record(workspace, _PATH_LIMIT, collapse=False)}"
+                f": {render_for_record(exc, _DIAGNOSTIC_LIMIT)}")
     if (current_path != identity["realpath"]
             or current.st_dev != identity["device"]
             or current.st_ino != identity["inode"]):
-        return (f"the anchored worktree path {workspace!r} no longer names "
-                f"the launched directory (device/inode changed)")
+        return (f"the anchored worktree path "
+                f"{render_for_record(workspace, _PATH_LIMIT, collapse=False)}"
+                f" no longer names the launched directory (device/inode "
+                f"changed)")
     observed = {}
     for key, args in (
             ("top", ("rev-parse", "--show-toplevel")),
@@ -1024,7 +1028,7 @@ def workspace_identity_problem(runner, facts):
         rc, value, _ = _git(runner, workspace, *args)
         if rc != 0:
             return (f"cannot verify the anchored worktree's Git identity "
-                    f"({key} is unreadable)")
+                    f"({render_for_record(key, 32)} is unreadable)")
         observed[key] = value
     top = str(Path(observed["top"]).resolve())
     common = str((Path(workspace) / observed["git_common_dir"]).resolve())
@@ -1033,7 +1037,8 @@ def workspace_identity_problem(runner, facts):
         common_st = os.stat(common)
         git_st = os.stat(git_dir)
     except OSError as exc:
-        return f"cannot stat the anchored Git metadata: {exc}"
+        return ("cannot stat the anchored Git metadata: "
+                + render_for_record(exc, _DIAGNOSTIC_LIMIT))
     # Migration: launch snapshots written before the Git-metadata identity
     # fields were added recorded paths but not device/inode. Those attempts
     # keep the older, weaker path + worktree-root check until they finish;
@@ -1048,11 +1053,18 @@ def workspace_identity_problem(runner, facts):
             or (has_git_inode
                 and (git_st.st_dev != identity["git_dir_device"]
                      or git_st.st_ino != identity["git_dir_inode"]))):
-        return (f"the anchored directory {workspace!r} no longer has the "
-                f"launched Git worktree metadata identity")
+        return (f"the anchored directory "
+                f"{render_for_record(workspace, _PATH_LIMIT, collapse=False)}"
+                f" no longer has the launched Git worktree metadata "
+                f"identity")
     if observed["branch"] != facts.get("branch"):
-        return (f"the repository is on branch {observed['branch']!r}, but "
-                f"this attempt was anchored on {facts.get('branch')!r}")
+        # The message luna's 10,000-character branch actually reached.
+        # `judge_detail` carries the same sentence and was fixed first;
+        # this one fired before it and is the sibling that matters.
+        return (f"the repository is on branch "
+                f"{render_for_record(observed['branch'], _DIAGNOSTIC_LIMIT)}"
+                f", but this attempt was anchored on "
+                f"{render_for_record(facts.get('branch'), _DIAGNOSTIC_LIMIT)}")
     return None
 
 
@@ -1111,18 +1123,23 @@ def judge_detail(runner, unit_dir, spec, launch_facts=None, judgment=None):
     repo = rec.get("execution_workspace")
     if not repo:
         return False, None, (
-            f"this unit declares repo {spec['repo']!r}, but its launch record "
+            f"this unit declares repo "
+            f"{render_for_record(spec['repo'], _PATH_LIMIT, collapse=False)}"
+            f", but its launch record "
             f"anchored no execution worktree. The anchor was written before the unit "
             f"declared one, or _write_launch_record failed: either way "
             f"nothing captured a baseline, so re-dispatch this unit rather "
             f"than reading this as a configuration mistake")
     if not os.path.isdir(repo):
-        return False, None, f"the anchored repository {repo!r} is gone"
+        return False, None, (
+            f"the anchored repository "
+            f"{render_for_record(repo, _PATH_LIMIT, collapse=False)} is gone")
 
     if not rec.get("clean_at_launch", False):
         return False, None, (
             f"the repository was already dirty at launch "
-            f"({rec.get('dirty_paths_at_launch', '?')} path(s)), so there was "
+            f"({render_for_record(rec.get('dirty_paths_at_launch', '?'), 12)}"
+            f" path(s)), so there was "
             f"no clean state to transition FROM and any change now is "
             f"unattributable to this attempt")
 
@@ -1136,7 +1153,9 @@ def judge_detail(runner, unit_dir, spec, launch_facts=None, judgment=None):
     # tree. The claim was too broad; the code is right.
     rc, dirty = repo_status(runner, repo)
     if rc != 0:
-        return False, None, f"cannot read git status in {repo!r}"
+        return False, None, (
+            f"cannot read git status in "
+            f"{render_for_record(repo, _PATH_LIMIT, collapse=False)}")
     if dirty:
         return False, None, (
             f"{len(dirty)} path(s) are uncommitted. Work left in the working "
@@ -1145,8 +1164,11 @@ def judge_detail(runner, unit_dir, spec, launch_facts=None, judgment=None):
 
     rc, branch, _ = _git(runner, repo, "rev-parse", "--abbrev-ref", "HEAD")
     if rc == 0 and rec.get("branch") and branch != rec["branch"]:
-        return False, None, (f"the repository is on branch {branch!r}, but this "
-                       f"attempt was anchored on {rec['branch']!r}")
+        return False, None, (
+            f"the repository is on branch "
+            f"{render_for_record(branch, _DIAGNOSTIC_LIMIT)}, but this attempt "
+            f"was anchored on "
+            f"{render_for_record(rec['branch'], _DIAGNOSTIC_LIMIT)}")
 
     base = rec.get("base_commit")
     # The SIBLING of validate_pinned_head's lineage branch, swept with it.
@@ -1154,7 +1176,20 @@ def judge_detail(runner, unit_dir, spec, launch_facts=None, judgment=None):
     # failure CLAUDE.md warns about, and this is the same wound: nine
     # units read a false cause off a collapsed exit status, and this
     # function collapses the same status in the same way one screen up.
-    # Every value in the messages BELOW goes through the renderer too.
+    # Every value this function records goes through the renderer. The
+    # first pass covered only the four messages I had just rewritten,
+    # which luna and kimi-k2.7-code and glm-5.3 all then refuted from a
+    # different direction: `rec['branch']` was recorded raw, and an
+    # attempt record with a 10,000-character branch put all of it in a
+    # durable refusal. An AST sweep of both functions found nine raw
+    # interpolations, not one. All nine are rendered now; `len(dirty)`
+    # is an int and the PIN_VALIDATION_REFUSAL prefix is ours.
+    #
+    # The renderer's own docstring records this claim running ahead of
+    # the code, once per field, three times. This was the fourth, and
+    # fixing the field a reviewer names instead of sweeping is exactly
+    # the failure CLAUDE.md warns about -- so the sweep here was
+    # mechanical rather than by eye.
     # All three reviewers pointed at the same thing in the same round:
     # I rewrote these refusals and left them interpolating raw, while
     # claiming one renderer at one boundary. The renderer's own docstring
@@ -1208,9 +1243,12 @@ def judge_detail(runner, unit_dir, spec, launch_facts=None, judgment=None):
             "reverted before committing, moves HEAD without producing "
             "anything")
 
-    return True, head, (f"tree {tree[:12]} differs from the anchored base tree "
-                  f"{str(rec.get('base_tree'))[:12]}, on a commit descending "
-                  f"from {str(base)[:12]}, with a clean tree at both ends")
+    return True, head, (
+        f"tree {render_for_record(tree[:12], 12)} differs from the anchored "
+        f"base tree {render_for_record(str(rec.get('base_tree'))[:12], 12)}, "
+        f"on a commit descending from "
+        f"{render_for_record(str(base)[:12], 12)}, with a clean tree at both "
+        f"ends")
 
 
 def judge(runner, unit_dir, spec, launch_facts=None):

@@ -1,6 +1,7 @@
 """Mutation-sensitive tests for per-attempt authority and checker IPC."""
 import contextlib
 import hashlib
+import ast
 import inspect
 import io
 import json
@@ -604,6 +605,13 @@ Path(data["result"]).write_text(json.dumps(payload))
 def _stderr_tail(text):
     """The distinctive tail of a stderr line, as the refusal renders it."""
     return " ".join(text.split())[-30:]
+
+
+# The functions whose refusals are fully rendered today. The module has
+# more, counted and filed rather than swept here; adding a name to this
+# tuple is the way to bring one in, and the test then enforces it.
+RENDERED_REFUSAL_FUNCTIONS = (
+    "judge_detail", "validate_pinned_head", "workspace_identity_problem")
 
 
 class TestPinnedCommitIsNotAMovingRef(RepoCase):
@@ -1310,6 +1318,86 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
             not_an_ancestor, str(attempt), unit, anchor_facts["facts"])
         self.assertFalse(produced)
         self.assertIn("does not descend from the anchored base", why)
+
+    def test_no_refusal_interpolates_a_value_the_renderer_never_saw(self):
+        """The one-renderer property, enforced instead of asserted.
+
+        Four rounds running I claimed every interpolated value goes
+        through render_for_record, and four rounds running a reviewer
+        found a field that did not -- the last one `rec['branch']`,
+        where a 10,000-character recorded branch reached a durable
+        refusal whole. Fixing the field each reviewer names is the
+        sibling-sweep failure, and my "sweep" had been by eye.
+
+        kimi-k2.7-code also showed why a behavioural test cannot finish
+        the job: at the merge-base exit-1 sites the values are already
+        validated as hex object ids, so rendering is the identity and a
+        bypass there is unobservable no matter what a test feeds. The
+        property is syntactic, so this checks the syntax: no f-string in
+        either function may interpolate anything that has not been
+        through a renderer.
+
+        The allowances are named rather than pattern-matched, and each
+        one is a value this module produces itself.
+
+        SCOPED to the functions this change owns. An AST sweep of the
+        whole module finds 86 raw interpolations across 18 functions,
+        which is a rendering audit rather than a fix for the
+        missing-repository defect, and is filed separately. Widening
+        this tuple is how that audit gets done one function at a time
+        without the property silently reverting behind it.
+        """
+        source = inspect.getsource(W)
+        tree = ast.parse(source)
+        allowed_bare = {"shown_repo", "PIN_VALIDATION_REFUSAL"}
+        offenders = []
+        for node in ast.walk(tree):
+            if (not isinstance(node, ast.FunctionDef)
+                    or node.name not in RENDERED_REFUSAL_FUNCTIONS):
+                continue
+            for sub in ast.walk(node):
+                if not isinstance(sub, ast.JoinedStr):
+                    continue
+                for value in sub.values:
+                    if not isinstance(value, ast.FormattedValue):
+                        continue
+                    expression = ast.get_source_segment(source, value.value)
+                    if expression is None:
+                        offenders.append((node.name, value.lineno, "?"))
+                        continue
+                    if ("render_for_record" in expression
+                            or "render_git_diagnostic" in expression
+                            or expression in allowed_bare
+                            or expression.startswith("len(")):
+                        continue
+                    offenders.append((node.name, value.lineno, expression))
+        self.assertEqual(
+            offenders, [],
+            "a refusal interpolates a value the renderer never saw. Every "
+            "value either goes through render_for_record, or is named in "
+            "allowed_bare here with a reason.")
+
+    def test_a_recorded_branch_cannot_flood_a_durable_refusal(self):
+        """luna: `rec['branch']!r` put the whole recorded branch in the
+        record, so a 10,000-character branch produced a refusal nobody
+        can read and nothing can bound."""
+        real = U.run
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        unit = {"id": "u1", "kind": "code", "repo": str(self.repo)}
+        err, anchor_facts = S._write_launch_record(str(attempt), unit)
+        self.assertIsNone(err)
+        self.commit("A")
+        facts = dict(anchor_facts["facts"])
+        facts["branch"] = "b" * 10000 + "\n\t\x00"
+
+        produced, _head, why = W.judge_detail(
+            real, str(attempt), unit, facts)
+        self.assertFalse(produced)
+        self.assertIn("anchored on", why)
+        self.assertLess(len(why), 2000,
+                        "a recorded branch flooded the durable refusal")
+        self.assertTrue(why.isprintable(), repr(why[:200]))
 
     def test_judge_detail_renders_every_value_it_records(self):
         """luna, kimi-k2.7-code and glm-5.3, all three in one round.
