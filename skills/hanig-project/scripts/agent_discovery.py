@@ -15,15 +15,21 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 
-SCHEMA_VERSION = 1
-PROBE_TIMEOUT_SECONDS = 2.0
+SCHEMA_VERSION = 2
+# A probe deadline is derived from an observed wall time, rather than being a
+# single guess shared by unlike programs.  The multiplier is headroom for host
+# variance; it is not used to decide whether a timed-out executable exists.
+PROBE_DEADLINE_HEADROOM = 2.0
+PROBE_DEADLINE_FLOOR_SECONDS = 1.0
 PROBE_REAP_SECONDS = 0.5
 PROBE_OUTPUT_BYTES = 240
-STATES = ("executable_found", "configured", "absent", "undetermined")
+VERIFICATION_MAX_AGE_DAYS = 30
+STATES = ("executable_found", "slow", "probe_failed", "configured", "absent")
 VERIFICATION = ("verified", "unverified")
 
 # These are exact release gates. Root-policy evidence is tracked separately:
@@ -42,6 +48,7 @@ ADAPTERS: dict[str, dict[str, Any]] = {
             "https://code.claude.com/docs/en/claude-directory",
         ],
         "verified_on": "2026-09-05",
+        "probe_timing": {"measured_on": "2026-09-22", "observed_max_seconds": 0.123},
         "source_verification": {"release": "package_manifest", "root_policy": "unverified",
                                 "native_discovery": "unverified", "invocation": "unverified"},
         "roots": [
@@ -62,6 +69,7 @@ ADAPTERS: dict[str, dict[str, Any]] = {
             "https://github.com/openai/skills/blob/main/skills/.system/skill-installer/SKILL.md",
         ],
         "verified_on": "2026-09-05",
+        "probe_timing": {"measured_on": "2026-09-22", "observed_max_seconds": 0.018},
         "source_verification": {"release": "package_manifest", "root_policy": "unverified",
                                 "native_discovery": "unverified", "invocation": "unverified"},
         "roots": [
@@ -85,6 +93,7 @@ ADAPTERS: dict[str, dict[str, Any]] = {
             "https://github.com/anomalyco/opencode/blob/v1.18.29/packages/opencode/src/skill/index.ts",
         ],
         "verified_on": "2026-09-05",
+        "probe_timing": {"measured_on": "2026-09-22", "observed_max_seconds": 2.460},
         "source_verification": {"release": "package_manifest", "root_policy": "source_verified",
                                 "native_discovery": "unverified", "invocation": "unverified"},
         "roots": [
@@ -114,6 +123,7 @@ ADAPTERS: dict[str, dict[str, Any]] = {
             "https://github.com/badlogic/pi-mono/blob/v0.73.1/packages/coding-agent/src/config.ts",
         ],
         "verified_on": "2026-09-05",
+        "probe_timing": {"measured_on": "2026-09-22", "observed_max_seconds": 0.615},
         "source_verification": {"release": "package_manifest", "root_policy": "source_verified",
                                 "native_discovery": "unverified", "invocation": "unverified"},
         "roots": [
@@ -171,6 +181,26 @@ def schema() -> dict[str, Any]:
 def adapters() -> dict[str, dict[str, Any]]:
     """Return static, serializable adapter records and their evidence links."""
     return ADAPTERS
+
+
+def probe_deadline(spec: Mapping[str, Any]) -> float:
+    """Deadline derived from the adapter's measured ``--version`` wall time."""
+    observed = float(spec["probe_timing"]["observed_max_seconds"])
+    return max(PROBE_DEADLINE_FLOOR_SECONDS,
+               observed * PROBE_DEADLINE_HEADROOM)
+
+
+def verification_review_due(spec: Mapping[str, Any]) -> date:
+    """Date by which an exact-version certification must be reviewed again."""
+    verified = datetime.strptime(spec["verified_on"], "%Y-%m-%d").date()
+    return verified + timedelta(days=VERIFICATION_MAX_AGE_DAYS)
+
+
+def stale_adapter_certifications(as_of: Optional[date] = None) -> list[str]:
+    """Adapter IDs whose release evidence has passed its review deadline."""
+    observed = as_of or date.today()
+    return [name for name, spec in ADAPTERS.items()
+            if observed > verification_review_due(spec)]
 
 
 def _environment(env: Optional[Mapping[str, str]]) -> dict[str, str]:
@@ -335,9 +365,11 @@ while True:
 """
 
 
-def _default_probe(path: str, timeout: float, env: Mapping[str, str]) -> tuple[bool, str]:
-    """Run ``--version`` with fixed deadline, bounded memory, and group cleanup."""
-    timeout = min(PROBE_TIMEOUT_SECONDS, max(0.1, float(timeout)))
+def _default_probe(path: str, timeout: float,
+                   env: Mapping[str, str]) -> tuple[str, str, float]:
+    """Run ``--version`` with a measured deadline and classified outcome."""
+    started = time.monotonic()
+    timeout = max(0.1, float(timeout))
     deadline = time.monotonic() + timeout
     proc: Optional[subprocess.Popen[Any]] = None
     streams: list[Any] = []
@@ -365,17 +397,17 @@ def _default_probe(path: str, timeout: float, env: Mapping[str, str]) -> tuple[b
             try:
                 proc.wait(timeout=PROBE_REAP_SECONDS)
             except subprocess.TimeoutExpired:
-                return False, "timeout; process group did not exit"
-            return False, "timeout"
+                return "slow", "timeout; process group did not exit", time.monotonic() - started
+            return "slow", "timeout", time.monotonic() - started
         status = os.read(control_read, 128).decode("utf-8", "replace")
         if not status or status.startswith("OSError:"):
             _kill_group(proc)
-            return False, status or "no child status"
+            return "failed", status or "no child status", time.monotonic() - started
         try:
             code = int(status)
         except ValueError:
             _kill_group(proc)
-            return False, "invalid child status"
+            return "failed", "invalid child status", time.monotonic() - started
         # Normal pipes reach EOF when the direct child exits. Give their
         # readers only the fixed reap window; if a descendant inherited a
         # writer, it is killed rather than being allowed to hold the probe.
@@ -389,10 +421,10 @@ def _default_probe(path: str, timeout: float, env: Mapping[str, str]) -> tuple[b
                 reader.join(max(0.0, reap_deadline - time.monotonic()))
         output = stdout_tail.text() or stderr_tail.text()
         if code:
-            return False, "exit %d: %s" % (code, output)
-        return True, output
+            return "failed", "exit %d: %s" % (code, output), time.monotonic() - started
+        return "ok", output, time.monotonic() - started
     except OSError as exc:
-        return False, type(exc).__name__
+        return "failed", type(exc).__name__, time.monotonic() - started
     finally:
         if proc is not None:
             _kill_group(proc)
@@ -428,8 +460,8 @@ def _version(output: str) -> Optional[str]:
 def discover(
     env: Optional[Mapping[str, str]] = None,
     which: Optional[Callable[[str], Optional[str]]] = None,
-    probe: Optional[Callable[[str, float], tuple[bool, str]]] = None,
-    timeout: float = PROBE_TIMEOUT_SECONDS,
+    probe: Optional[Callable[[str, float], tuple[Any, ...]]] = None,
+    timeout: Optional[float] = None,
 ) -> dict[str, Any]:
     """Return a read-only discovery report using bounded ``--version`` probes.
 
@@ -447,23 +479,50 @@ def discover(
         evidence: dict[str, Any] = {"config_directories": [
             {"path": path, "exists": os.path.isdir(path)} for path in config_bases]}
         if executable:
-            ok, output = runner(executable, timeout)
-            evidence["executable"] = {"path": executable, "probe": "--version", "ok": ok, "output": output}
-            if not ok:
-                state, version = "undetermined", None
+            seconds = float(timeout) if timeout is not None else probe_deadline(spec)
+            result = runner(executable, seconds)
+            if len(result) == 2:
+                ok, output = result
+                # The legacy bool/string injection contract cannot distinguish
+                # why False was returned. Never infer authority from wording:
+                # only the explicit three-value contract may report SLOW.
+                outcome = "ok" if ok else "failed"
+                elapsed = None
             else:
-                state, version = "executable_found", _version(output)
+                outcome, output, elapsed = result
+            if outcome not in ("ok", "slow", "failed"):
+                raise ValueError("probe outcome must be ok, slow, or failed")
+            evidence["executable"] = {
+                "path": executable, "probe": "--version",
+                "outcome": outcome.upper(), "ok": outcome == "ok",
+                "output": output, "elapsed_seconds": elapsed,
+                "deadline_seconds": seconds,
+                "deadline_basis": ("caller override" if timeout is not None else
+                                   "measured %s max %.3fs x %.1f headroom" % (
+                                       spec["probe_timing"]["measured_on"],
+                                       spec["probe_timing"]["observed_max_seconds"],
+                                       PROBE_DEADLINE_HEADROOM)),
+            }
+            state = {"ok": "executable_found", "slow": "slow",
+                     "failed": "probe_failed"}[outcome]
+            version = _version(str(output)) if outcome == "ok" else None
         else:
             state, version = ("configured", None) if any(item["exists"] for item in evidence["config_directories"]) else ("absent", None)
         verified = bool(version and version in spec["verified_versions"])
+        review_due = verification_review_due(spec)
         found_agents[key] = {
             "identity": spec["identity"], "state": state,
             "verification": "verified" if verified else "unverified",
             "version": version, "verified_versions": spec["verified_versions"],
             "roots": roots, "evidence": evidence, "sources": spec["sources"],
             "verified_on": spec["verified_on"], "source_verification": spec["source_verification"],
+            "verification_review_due": review_due.isoformat(),
+            "verification_freshness": ("stale" if date.today() > review_due else "current"),
             "duplicate_behavior": spec["duplicates"],
-            "eligible_for_automatic_target": state == "executable_found" and verified,
+            # Presence chooses a destination; verification says whether that
+            # adapter version is certified. Conflating them made four present
+            # agents look exactly like no agents at all.
+            "eligible_for_automatic_target": state in ("executable_found", "slow"),
             "explicit_path_route": "select_target(report, agent_id) accepts this agent without a binary",
         }
     return {"schema_version": SCHEMA_VERSION, "agents": found_agents,
@@ -472,11 +531,12 @@ def discover(
 
 def select_targets(
     report: Mapping[str, Any], agents: Sequence[str] = (), exclude_agents: Sequence[str] = (),
+    as_of: Optional[date] = None,
 ) -> dict[str, Any]:
     """Plan targets for all detected agents or an explicit offline/bootstrap set.
 
-    An empty ``agents`` sequence means automatic mode: every reported agent is
-    considered, but only a verified executable is selected.  A non-empty
+    An empty ``agents`` sequence means automatic mode: every reported executable
+    is selected, while its independent verification field remains visible. A non-empty
     sequence is explicit mode and therefore permits absent/configured agents.
     Direct destinations are de-duplicated by physical path.  Destination
     planning uses the adapter declaration order, not flag order, so the same
@@ -486,6 +546,7 @@ def select_targets(
     instead of receiving an unnecessary second copy.
     """
     records = report["agents"]
+    stale_certifications = set(stale_adapter_certifications(as_of))
     requested, excluded = list(agents) or list(ADAPTERS), set(exclude_agents)
     if len(set(requested)) != len(requested):
         raise ValueError("agents contains a duplicate agent id")
@@ -497,11 +558,14 @@ def select_targets(
     eligible: set[str] = set()
     for agent in requested:
         record = records[agent]
+        certification = ("verified" if record["verification"] == "verified"
+                         and agent not in stale_certifications else "unverified")
         if agent in excluded:
-            skipped.append({"agent": agent, "reason": "excluded"})
+            skipped.append({"agent": agent, "reason": "excluded",
+                            "certification": certification})
         elif not agents and not record["eligible_for_automatic_target"]:
-            reason = "unverified_version" if record["state"] == "executable_found" else record["state"]
-            skipped.append({"agent": agent, "reason": reason})
+            skipped.append({"agent": agent, "reason": record["state"],
+                            "certification": certification})
         else:
             eligible.add(agent)
 
@@ -531,13 +595,43 @@ def select_targets(
         assignments[agent] = (item, False)
 
     selected = []
+    warnings = []
     for agent in requested:
         if agent not in eligible:
             continue
         item, covered = assignments[agent]
-        selected.append({"agent": agent, "status": "selected", "mode": mode,
-                         "covered_by": list(item["target_agents"]) if covered else None,
-                         "destination": item["destination"], "consumers": item["consumers"]})
+        record = records[agent]
+        agent_warnings = []
+        if record["verification"] != "verified":
+            if mode == "automatic":
+                version = record.get("version") or "unknown version"
+                agent_warnings.append(
+                    f"{agent} {version} was selected from executable presence, but "
+                    "this version is not adapter-certified; selection is not a "
+                    "native-compatibility or invocation pass")
+            else:
+                agent_warnings.append(
+                    f"{agent} was selected explicitly with discovery state "
+                    f"{record['state']}; bootstrap destination planning proceeded, "
+                    "but presence, native compatibility, and invocation remain "
+                    "unverified (skip is not pass)")
+        if agent in stale_certifications:
+            selection_basis = ("selection continued from executable presence"
+                               if mode == "automatic"
+                               else "explicit bootstrap selection proceeded")
+            agent_warnings.append(
+                f"{agent} adapter certification expired after "
+                f"{record['verification_review_due']}; {selection_basis}, but "
+                "the adapter evidence is stale")
+        warnings.extend(agent_warnings)
+        selected.append({
+            "agent": agent, "status": "selected", "mode": mode,
+            "covered_by": list(item["target_agents"]) if covered else None,
+            "destination": item["destination"], "consumers": item["consumers"],
+            "certification": ("verified" if record["verification"] == "verified"
+                              and agent not in stale_certifications else "unverified"),
+            "certification_warnings": agent_warnings,
+        })
     conflicts = []
     for consumer in ADAPTERS:
         visible = [item for item in direct.values() if consumer in item["consumers"]]
@@ -545,8 +639,9 @@ def select_targets(
             conflicts.append({"consumer": consumer, "physical_paths": [item["physical_path"] for item in visible],
                               "selected_agents": [agent for item in visible for agent in item["selected_agents"]],
                               "reason": "the loader can see multiple requested copies; consult adapter precedence"})
-    return {"schema_version": SCHEMA_VERSION, "mode": mode, "selected": selected, "skipped": skipped,
-            "destinations": list(direct.values()), "competing_visibility": conflicts}
+    return {"schema_version": SCHEMA_VERSION, "mode": mode, "selected": selected,
+            "skipped": skipped, "destinations": list(direct.values()),
+            "competing_visibility": conflicts, "certification_warnings": warnings}
 
 
 def select_target(report: Mapping[str, Any], agent_id: Optional[str] = None) -> dict[str, Any]:
@@ -559,4 +654,4 @@ def select_target(report: Mapping[str, Any], agent_id: Optional[str] = None) -> 
     if len(direct) == 1:
         return direct[0]
     return {"status": "requires_explicit_target", "eligible_agents": [item["agent"] for item in direct],
-            "reason": "no verified executable" if not direct else "multiple verified executables"}
+            "reason": "no executable found" if not direct else "multiple executables found"}
