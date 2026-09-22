@@ -150,6 +150,19 @@ class TrackerSyncHookDelivery(unittest.TestCase):
                 "the hook path must be quoted against a directory with a "
                 "space in it: " + command)
 
+    def test_the_wired_command_lives_in_this_repository(self):
+        """luna: a settings file is mutable, so "run whatever is wired" is
+        only as strong as where that thing is allowed to live.
+
+        The command must name a path under this repository's .claude/hooks,
+        so repointing the tests at a stand-in is a visible change to a
+        reviewed file rather than a quiet redirection.
+        """
+        for command in wired_commands():
+            with self.subTest(command=command):
+                self.assertIn('"$CLAUDE_PROJECT_DIR/.claude/hooks/', command)
+                self.assertNotIn("..", command)
+
     def test_the_wired_command_points_at_a_file_that_exists(self):
         for command in wired_commands():
             with self.subTest(command=command):
@@ -331,6 +344,33 @@ class TrackerSyncHookOutboxReporting(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIsNotNone(context, out)
         self.assertIn("Unknown is not zero", context)
+
+    def test_a_relative_repository_path_still_finds_the_probe(self):
+        """luna: cwd=repo plus a relative script path resolves it twice.
+
+        With the process working directory at /work and
+        HANIG_TRACKER_REPO=repo, the interpreter looked for
+        /work/repo/repo/skills/... and reported an unknown outbox while the
+        real state sat there unread -- a silent downgrade to "unknown" that
+        looks exactly like a genuine failure to read.
+        """
+        fake_repo(PROBE_OK, os.path.join(self.tmp, "repo"))
+        env = dict(os.environ)
+        env["HANIG_TRACKER_REPO"] = "repo"          # relative, on purpose
+        env["HANIG_TRACKER_STATE_DIR"] = os.path.join(self.tmp, "state")
+        env["CLAUDE_PROJECT_DIR"] = REPO_ROOT
+        commands = wired_commands()
+        payload = json.dumps({"hook_event_name": "PostToolUse",
+                              "tool_name": "Bash",
+                              "tool_input": {"command": "git push origin HEAD"}})
+        proc = subprocess.run(
+            ["/bin/sh", "-c", commands[0]], input=payload.encode("utf-8"),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env, cwd=self.tmp, timeout=60)
+        context = injected_context(proc.stdout.decode("utf-8"))
+        self.assertIsNotNone(context, proc.stdout)
+        self.assertIn("total 3", context)
+        self.assertNotIn("Unknown is not zero", context)
 
     def test_a_hanging_probe_is_bounded_and_leaves_no_descendants(self):
         """The defect class a step-back committee predicted would come next.

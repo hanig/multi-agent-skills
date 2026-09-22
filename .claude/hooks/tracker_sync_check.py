@@ -139,15 +139,28 @@ def read_outbox(repo, state):
     The probe is started in its own session so the timeout path can kill the
     whole process group. Killing only the direct child leaves the python
     grandchild alive holding the output pipe, which is the defect class a
-    step-back committee predicted would come next -- so it is closed here
-    rather than waited for.
+    step-back committee predicted would come next.
+
+    **Declared limit, not a closed one.** A descendant that calls setsid for
+    itself leaves the group and survives the kill -- luna established that,
+    and POSIX offers no way to reap it from here. The bound this keeps is on
+    the HOOK, not on the process tree: the reap itself is time-limited, so a
+    surviving descendant delays nothing and the reminder is still delivered.
+    That is the same shape as the exclusivity convention elsewhere in this
+    repository, where "live descendant processes are declared limits, not
+    closed ones".
     """
+    # Resolve ONCE. Passing a relative script path alongside cwd=repo makes
+    # the interpreter resolve it a second time against that cwd, so
+    # HANIG_TRACKER_REPO=repo looked for repo/repo/skills/... and reported an
+    # unknown outbox while the real state sat there unread.
+    root = os.path.abspath(repo)
     argv = [sys.executable or "python3",
-            os.path.join(repo, "skills", "hanig-swarm", "scripts", "swarm.py"),
+            os.path.join(root, "skills", "hanig-swarm", "scripts", "swarm.py"),
             "outbox", "--state-dir", state, "--json"]
     try:
         proc = subprocess.Popen(
-            argv, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            argv, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             start_new_session=True)
     except OSError as exc:
         return None, "The outbox probe could not start (%s)." % exc.strerror
