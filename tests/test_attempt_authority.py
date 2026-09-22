@@ -636,6 +636,7 @@ RENDERED_REFUSAL_FUNCTIONS = (
     "launch_facts_problem",
     "read_sealed_launch_record",
     "read_launch_record",
+    "remote_push_transport",
     "refused_launch",
     "decode_artifact_basis",
     "decode_launch_facts",

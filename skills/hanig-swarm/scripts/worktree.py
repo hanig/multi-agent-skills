@@ -900,7 +900,8 @@ def remote_push_transport(runner, repo):
         values = [v for v in raw.split("\0") if v]
     if len(values) != 1:
         return None, None, (
-            f"origin has {len(values)} push destinations; one code attempt "
+            f"origin has {render_for_record(len(values), 12)} push "
+            f"destinations; one code attempt "
             "can anchor and judge exactly one repository")
     raw_url = values[0]
     # `ls-remote --get-url` applies `url.*.insteadOf` but NOT
@@ -917,7 +918,8 @@ def remote_push_transport(runner, repo):
         runner, repo, "remote", "get-url", "--push", "origin")
     if rc != 0 or not resolved:
         return None, None, (
-            err or f"cannot resolve origin push destination from {raw_url!r}")
+            err or f"cannot resolve origin push destination from "
+            f"{render_for_record(raw_url, _DIAGNOSTIC_LIMIT, collapse=False)}")
     resolved = resolved.strip().splitlines()
     if len(resolved) != 1 or not resolved[0]:
         return None, None, (
