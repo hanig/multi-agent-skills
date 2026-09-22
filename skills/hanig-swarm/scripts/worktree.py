@@ -12,9 +12,10 @@ the worktree at all. And that predicate was never production evidence: the
 caller supplies the base, so HEAD may already be past the work, and a clean
 tree is clean precisely when nobody touched it.
 
-The live worktree then became a different false dependency: Paseo deletes it
-when an agent closes, so judgment raced cleanup. New attempts instead anchor an
-exact remote branch ref in coordinator state before the agent exists. The
+The live worktree then became a different false dependency: Paseo deleted it
+when an agent closed, so judgment raced cleanup. New attempts instead use a
+coordinator-owned worktree and anchor an exact remote branch ref in coordinator
+state before the agent exists. The
 judge resolves that ref directly from the anchored remote, so a narrow fetch
 refspec cannot hide a successful push, then validates the immutable commit
 without opening the worktree. Legacy launch snapshots retain the old worktree
@@ -1038,7 +1039,7 @@ def _judge_anchored_ref(runner, facts, judgment=None):
     head = lines[0][0]
     # Fetch the exact anchored ref into a coordinator namespace. ls-remote
     # establishes which value was observed; this fetch makes its commit/tree
-    # available even if Paseo deleted both the worktree and its local branch.
+    # available even after coordinator cleanup removes the worktree.
     # The explicit refspec ignores remote.origin.fetch and changes no config.
     cache_ref = ("refs/hanig-swarm/judgments/" +
                  str(facts["attempt_id"]))
