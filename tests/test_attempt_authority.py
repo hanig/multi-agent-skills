@@ -781,9 +781,18 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
 
         self.assertIn("no diagnostic output",
                       W.render_git_diagnostic(1, "   \n  "))
-        long_one = W.render_git_diagnostic(1, "x" * 5000)
-        self.assertLess(len(long_one), 600)
-        self.assertIn("[truncated]", long_one)
+        # The bound is on what gets rendered, not on the payload inside it.
+        for size in (400, 401, 5000):
+            with self.subTest(size=size):
+                long_one = W.render_git_diagnostic(1, "x" * size)
+                self.assertLessEqual(
+                    len(long_one), W._DIAGNOSTIC_LIMIT,
+                    "the rendered diagnostic is %d characters against a "
+                    "limit of %d" % (len(long_one), W._DIAGNOSTIC_LIMIT))
+        self.assertIn("[truncated]", W.render_git_diagnostic(1, "x" * 5000))
+        # A short one is not padded or mangled.
+        self.assertEqual(W.render_git_diagnostic(2, "fatal: nope"),
+                         "git exited 2 and said: fatal: nope")
 
     def test_an_empty_recorded_repository_refuses_before_running_git(self):
         attempt = self.tmp / "runs" / "u1" / "att1"

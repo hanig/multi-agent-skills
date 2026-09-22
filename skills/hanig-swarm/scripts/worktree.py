@@ -1256,9 +1256,16 @@ def render_git_diagnostic(rc, err):
         return f"git exited {rc} with no diagnostic output"
     flattened = " ".join(text.split())
     safe = "".join(c if c.isprintable() else "?" for c in flattened)
-    if len(safe) > _DIAGNOSTIC_LIMIT:
-        safe = safe[:_DIAGNOSTIC_LIMIT] + " [truncated]"
-    return f"git exited {rc} and said: {safe}"
+    rendered = f"git exited {rc} and said: {safe}"
+    if len(rendered) <= _DIAGNOSTIC_LIMIT:
+        return rendered
+    # Bound the WHOLE rendered string, not the payload inside it. Bounding
+    # the payload and then appending a prefix and a marker put a "400
+    # character" limit at 435, which luna and kimi-k2.7-code both caught:
+    # a limit that the thing being limited exceeds is not a limit.
+    marker = " [truncated]"
+    keep = max(0, _DIAGNOSTIC_LIMIT - len(rendered) + len(safe) - len(marker))
+    return f"git exited {rc} and said: {safe[:keep]}{marker}"
 
 
 def validate_pinned_head(runner, launch_facts, produced):
