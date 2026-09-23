@@ -22,6 +22,8 @@ Dispatch preserves the destination meaning of `target_branch`, the completion pr
 
 Merge admission compares the full judged and pull-request heads, reads the diff, waits for terminal green checks, and records any weaker judgment basis. <!-- declaration: merge.requirements -->
 
+A selected-panel pass is preliminary evidence rather than merge authority; the separation is between running a panel and being authorised to merge on its result, and the applicable tier is fixed in advance rather than chosen after an unfavourable outcome. Because the additional tier run can itself produce a false finding, a finding is challengeable on evidence and recorded as supported, disproven or unresolved, while an invalid review still does not become a pass. <!-- declaration: merge.requirements -->
+
 ## Tracker and the hourly report
 
 The tracker mirrors coordinator state, and GitHub's pull-request attachment does not perform the issue transition. <!-- declaration: tracker.authority -->

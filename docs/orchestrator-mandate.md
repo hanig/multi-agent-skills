@@ -255,6 +255,43 @@ happens before cleanup, every time:
   abbreviation and not a local path.
 - Read the diff. Agent evidence is a claim about the diff, not the diff.
 - Checks terminal and green, and an empty conclusion means pending, not passing.
+- **A non-tier pass is preliminary, not merge-authorizing.** The gap this
+  closes is not between running a panel and getting a verdict; it is between
+  *being able to run a panel* and *being authorized to use its pass for a
+  merge*. Read the panel off the evidence, not the verdict. A panel assembled
+  by explicit selection is not a declared tier, and its `REVIEW_PASS` is
+  preliminary evidence: obtain a declared-tier result before merging. The
+  applicable tier is fixed by policy in advance, never chosen after seeing an
+  unfavourable result, and the fresh-cycle rule does not override its
+  participation or quorum requirements.
+
+  Two pull requests in one run arrived `MERGEABLE`, all checks green, heads
+  matching the judged head — one passed by a single reviewer at quorum one, the
+  other by a pair drawn from outside any gate profile. Both excluded the
+  reviewers who had raised the findings. The tier panel then found two major
+  defects in each. The gate prints the panel size in its own summary; a pass
+  that says "1 model(s) failing to refute it" is telling you what it is.
+
+- **A tier finding needs a correction path that is not reviewer shopping.**
+  Requiring the extra tier run creates a new way for honest, defect-free work
+  to be blocked: the rerun can produce a false finding, as a wrong `--range`
+  once did here across three rounds. So a finding may be challenged — establish
+  the reviewed head and diff, put evidence against the finding, and record it
+  as supported, disproven, or unresolved. Reproduce where reproduction applies;
+  a design or policy finding may not be reproducible and is not thereby void.
+  A disproven finding stops blocking. An invalid review does **not** become a
+  pass, and neither correction lets a non-tier pass authorize a merge. If the
+  only way to clear a finding is dropping reviewers, abandoning the tier, or
+  retrying until someone says yes, the finding has not been answered.
+
+  **Unresolved is not a terminal state and must not become an indefinite
+  block.** A finding that cannot be disproven — which is the likely shape of a
+  false one, since an unreproducible finding cannot be conclusively refuted —
+  goes to the adjudication policy above as "unresolved, ambiguous in scope, or
+  outside delegated risk": investigate within budget, then ask the owner. That
+  row already exists and already terminates. Without routing there, a single
+  mistaken tier finding on defect-free work would block it forever, which is a
+  worse failure than the panel substitution this rule exists to prevent.
 - If the coordinator's judgement was lost — a unit going terminal in a race with
   its own output write, for instance — say so in the merge record. Verifying the
   head yourself is the same check made by a weaker party, and the record should
