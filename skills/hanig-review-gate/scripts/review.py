@@ -120,6 +120,20 @@ merge, or duplicate claims:
 - refuted:      the code contradicts the claim -- say exactly how
 - unverifiable: cannot be determined from what is shown (say what is missing)
 
+The mandatory counter-claim "This change cannot make an honest run fail." uses
+a term of art. An "honest run" is otherwise admissible, defect-free work,
+judged independently of whatever the changed rule accepts; "fail" means that
+such work is wrongly rejected. The claim remains falsifiable: refuting it
+requires naming specific otherwise admissible, defect-free work and explaining
+how the change wrongly rejects it. Merely observing that a change strengthens
+admission or withholds authorization when a declared requirement is unmet does
+not meet that burden: the reviewer must still name defect-free work and explain
+why its rejection is wrongful under acceptance criteria applicable independently
+of the change. Correctly discovering a defect does not refute the claim. Do not
+redefine "honest" or "defect-free" to mean whatever the changed rule accepts;
+that would make the claim circular. A false finding that blocks otherwise
+admissible, defect-free work does refute the claim.
+
 Reply with ONLY a JSON object, no prose or code fences:
 
 {

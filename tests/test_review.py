@@ -1111,6 +1111,99 @@ class TestScopeDiscipline(unittest.TestCase):
         self.assertIn("preconditions", review.SYSTEM)
 
 
+class TestHonestRunCounterClaimSemantics(unittest.TestCase):
+    """The prompt's decision boundary, exercised without paid model calls.
+
+    These are the three real refutations that exposed the ambiguity.  The test
+    records the evidence each statement actually supplies, then applies the
+    two necessary conditions defined by SYSTEM.  It deliberately does not try
+    to build a second natural-language reviewer in the test suite.
+    """
+
+    CASES = (
+        {
+            "reviewer": "luna",
+            "statement": (
+                "The new rule can reject an otherwise honest green run whose "
+                "selected panel returns REVIEW_PASS when the required full-tier "
+                "rerun finds a defect."
+            ),
+            "refutes": False,
+        },
+        {
+            "reviewer": "kimi",
+            "statement": (
+                "the declaration withholds merge authorization from any change "
+                "that lacks a declared-tier pass"
+            ),
+            "refutes": False,
+        },
+        {
+            "reviewer": "glm-5.3",
+            "statement": (
+                "a false tier finding recorded 'unresolved' continues to block "
+                "the merge; the merge stays blocked indefinitely and the "
+                "correct work never ships."
+            ),
+            "refutes": True,
+        },
+    )
+
+    def honest_run_policy(self):
+        claim = '"' + review.HONEST_RUN_CLAIM + '"'
+        start = review.SYSTEM.rfind("\n", 0, review.SYSTEM.index(claim)) + 1
+        end = review.SYSTEM.index("\n\nReply with ONLY", start)
+        return review.SYSTEM[start:end]
+
+    def assert_policy_concepts(self, policy):
+        normalized = policy.casefold().replace("-", " ")
+        for concept in ("admissible", "defect", "free", "independent",
+                        "wrong", "reject", "refut", "nam", "circular",
+                        "false finding"):
+            self.assertIn(concept, normalized,
+                          f"honest-run policy lost the {concept!r} concept")
+
+    def counter_claim_refuted(self, case):
+        policy = self.honest_run_policy()
+        self.assert_policy_concepts(policy)
+
+        statement = case["statement"].casefold()
+        names_defect_free_work = (
+            "defect-free work" in statement
+            or "correct work" in statement
+            or ("otherwise honest" in statement
+                and "finds a defect" not in statement)
+        )
+        names_wrongful_rejection = (
+            "wrongly reject" in statement
+            or ("false" in statement and "finding" in statement
+                and ("block" in statement or "reject" in statement))
+        )
+        return names_defect_free_work and names_wrongful_rejection
+
+    def test_system_defines_a_falsifiable_non_circular_boundary(self):
+        self.assert_policy_concepts(self.honest_run_policy())
+
+    def test_semantically_equivalent_rewording_is_not_phrase_locked(self):
+        policy = self.honest_run_policy().replace(
+            "otherwise admissible, defect-free work",
+            "work that is otherwise admissible and free of defects")
+        self.assertNotEqual(policy, self.honest_run_policy())
+        self.assert_policy_concepts(policy)
+
+    def test_real_refutations_discriminate_in_both_directions(self):
+        results = []
+        for case in self.CASES:
+            with self.subTest(reviewer=case["reviewer"],
+                              statement=case["statement"]):
+                actual = self.counter_claim_refuted(case)
+                self.assertEqual(actual, case["refutes"])
+                results.append(actual)
+
+        self.assertIn(False, results, "correct rejection became a refutation")
+        self.assertIn(True, results, "wrongful rejection became unrefutable")
+
+
 class TestThreatModelActuallyReachesReviewers(unittest.TestCase):
     """luna: --threat-model was parsed and then never passed to build_prompt,
     so a whole round ran with the feature silently inert while appearing to
