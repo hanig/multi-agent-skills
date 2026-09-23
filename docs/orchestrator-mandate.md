@@ -271,14 +271,39 @@ state: every issue in progress, whatever its age. Two issues sat in progress for
 seventeen days here and were found by the owner asking, not by the sweep; two
 more were merged and left open the same day.
 
+**Merging does not close an issue.** The GitHub integration attaches the pull
+request and changes nothing else, so every transition is a deliberate act. An
+orchestrator that assumes the merge did it will leave a trail of merged-and-open
+issues, which is how both of the above happened.
+
 After every push, merge and close, reconcile again.
 
-### Reporting
+### The hourly report has three parts, in this order
 
-Report on the hour without being asked, and include what has not moved. Name the
-time an observation was made. Report a failure with its output, say plainly what
-was skipped, and when a measurement turns out to be wrong, correct it in the next
-report rather than letting the earlier number stand.
+Report on the hour without being asked. Not only when something finished, and
+not only when the news is good — a report saying what has not moved is the one
+that shows a run is stuck.
+
+**1. Running work.** Agents, pull requests, checks. Name the time each
+observation was made, and keep running, progressing, permission-blocked and
+last-observed separate. A failure is reported with its output; a skipped step is
+named as skipped; a measurement that turns out to be wrong is corrected in the
+next report rather than left to stand.
+
+**2. The tracker, swept by state.** Every issue in progress whatever its age,
+anything merged but still open, and anything filed that has not moved. By state,
+never by recency, for the reason above.
+
+**3. What can start now — and then start it.** Look at the backlog against what
+just landed and dispatch. This step exists because describing ready work is not
+working it: a full backlog review was produced in one report, correctly
+identifying which issues had become actionable, and then nothing was dispatched
+until the owner asked why. Naming an unblocked issue in a report and leaving it
+unblocked is a worse outcome than not having looked, because it reads as
+progress.
+
+If nothing can start, say so and say why — every candidate blocked, or the
+machine already saturated. "Nothing to dispatch" is a finding. Silence is not.
 
 ### What none of this enforces
 
