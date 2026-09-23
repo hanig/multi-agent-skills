@@ -3574,9 +3574,10 @@ def _capture_code_launch(unit_dir, u):
                 f"{branch!r} already exists. Allocate a new attempt rather "
                 f"than asking Paseo to reuse its history"), None
     intent = {
-        "schema_version": 4,
+        "schema_version": 5,
         "unit_id": u.get("id"),
         "attempt_id": Path(unit_dir).name,
+        "launch_host": os.uname().nodename,
         "repo": repo,
         "repository_remote": remote,
         "repository_remote_raw": remote_raw,
@@ -3624,6 +3625,11 @@ def _code_launch_intent_problem(intent, u, attempt):
     if schema >= 4 and not intent.get("repository_remote_raw"):
         return (f"unit {u.get('id')!r}: worktree launch intent is "
                 "incomplete (missing repository_remote_raw)")
+    if (schema >= 5
+            and (not isinstance(intent.get("launch_host"), str)
+                 or not intent["launch_host"])):
+        return (f"unit {u.get('id')!r}: worktree launch intent is "
+                "incomplete (missing launch_host)")
     for key in ("base_commit", "base_tree"):
         value = intent[key]
         if (not isinstance(value, str) or len(value) not in (40, 64)
@@ -3749,6 +3755,9 @@ def _complete_code_launch(state, u, unit_dir, workspace, workspace_id=None,
     problem = _code_launch_intent_problem(intent, u, attempt)
     if problem:
         return problem
+    problem = W.launch_host_problem(intent)
+    if problem:
+        return problem
     workspace = str(Path(workspace).resolve())
     if workspace == intent["repo"]:
         return (f"Paseo reported the shared source checkout {workspace!r} "
@@ -3818,12 +3827,15 @@ def _complete_code_launch(state, u, unit_dir, workspace, workspace_id=None,
         # Schema 3 facts were emitted by the preserved first attempt and name
         # a local remote-tracking ref. Schema 4 facts are the first direct-ref
         # generation but predate the raw URL anchor. Keep both migrations
-        # byte-compatible; schema 5 records the raw and once-expanded route.
-        "schema_version": (5 if intent_schema >= 4 else
+        # byte-compatible; schema 5 records the raw and once-expanded route,
+        # and schema 6 binds the host-scoped identity to its launch host.
+        "schema_version": (6 if intent_schema >= 5 else
+                           5 if intent_schema >= 4 else
                            4 if direct_remote_judgment else
                            3 if judgment_ref else 2),
         "unit_id": u.get("id"),
         "attempt_id": attempt,
+        "launch_host": intent.get("launch_host"),
         "repo": intent["repo"],
         "repository_remote": intent.get("repository_remote"),
         "workspace_identity": identity,
@@ -3879,6 +3891,7 @@ def _write_launch_record(unit_dir, u):
     dirty = []
     rec = {"schema_version": 2, "unit": u.get("id"),
            "attempt": Path(unit_dir).name,
+           "launch_host": os.uname().nodename,
            "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
 
     if not repo:
@@ -4008,6 +4021,7 @@ def _write_launch_record(unit_dir, u):
         "schema_version": 1,
         "unit_id": rec.get("unit"),
         "attempt_id": rec.get("attempt"),
+        "launch_host": rec.get("launch_host"),
         "repo": rec.get("repo"),
         "repository_remote": rec.get("remote"),
         "workspace_identity": rec.get("workspace_identity"),
@@ -5419,6 +5433,25 @@ def trusted_launch_facts(state, unit, attempt_dir):
     return facts
 
 
+def trusted_launch_host_anchor(state, unit, attempt_dir):
+    """Coordinator-state host anchor, including an interrupted code launch.
+
+    Completed launch facts are the normal authority. A code launch can crash
+    after its pre-agent intent is durable but before Paseo's cwd completes the
+    facts; that intent already contains the coordinator-observed launch host.
+    Returning neither is unknown, never permission to act on host-local state.
+    """
+    facts = trusted_launch_facts(state, unit, attempt_dir)
+    if facts is not None:
+        return facts
+    if not attempt_dir:
+        return None
+    attempt = Path(attempt_dir).name
+    us = (state.get("units") or {}).get(unit) or {}
+    intent = (us.get("attempt_launch_intents") or {}).get(attempt)
+    return intent if isinstance(intent, dict) else None
+
+
 def trusted_produced_head(state, unit, attempt_dir):
     """The one judgment basis pinned for this exact attempt; no fallback."""
     if not attempt_dir:
@@ -5979,6 +6012,9 @@ def _recover_code_launch(state, u, unit_dir, agent):
     problem = _code_launch_intent_problem(intent, u, attempt)
     if problem:
         return problem
+    problem = W.launch_host_problem(intent)
+    if problem:
+        return problem
     try:
         agent_path = str(Path(workspace).resolve())
         agent_st = os.stat(agent_path)
@@ -6345,6 +6381,18 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         if (u.get("kind") == "code" and us.get("job_id")
                 and not trusted_launch_facts(
                     state, uid, us["attempt_dir"])):
+            host_problem = W.launch_host_problem(
+                trusted_launch_host_anchor(
+                    state, uid, us["attempt_dir"]))
+            if host_problem:
+                us["launch_recovery_pending"] = True
+                us["host_judgment"] = "UNJUDGEABLE_HERE"
+                us.pop("launch_recovery_problem", None)
+                report.append(f"{uid}: UNJUDGEABLE_HERE -- {host_problem}. "
+                              f"The agent is retained for a coordinator on "
+                              f"its launch host.")
+                save_state(state_dir, state)
+                continue
             recovery_error = _recover_code_launch(
                 state, u, us["attempt_dir"], us["job_id"])
             if recovery_error:
@@ -6388,6 +6436,22 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                                      kind=u.get("kind"))
         if job:
             if u.get("kind") == "code":
+                host_problem = W.launch_host_problem(
+                    trusted_launch_host_anchor(
+                        state, uid, us["attempt_dir"]))
+                if host_problem:
+                    # The discovered agent remains bound in coordinator state
+                    # so it is not rediscovered as an orphan, but no path or
+                    # inode from its launch host is inspected here.
+                    us["job_id"] = job
+                    us["launch_recovery_pending"] = True
+                    us["host_judgment"] = "UNJUDGEABLE_HERE"
+                    us.pop("launch_recovery_problem", None)
+                    report.append(f"{uid}: {note}; UNJUDGEABLE_HERE -- "
+                                  f"{host_problem}. The agent is retained for "
+                                  f"a coordinator on its launch host.")
+                    save_state(state_dir, state)
+                    continue
                 recovery_error = _recover_code_launch(
                     state, u, us["attempt_dir"], job)
                 if recovery_error:
@@ -6504,20 +6568,33 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             save_state(state_dir, state)
             return report, dispatched, state["halted"]
         us = _unit_state(state, uid)
-        if not us["attempt_dir"] or us["state"] == "DONE":
+        if not us["attempt_dir"]:
+            continue
+        attempt = us["attempt_dir"]
+        launch_facts = trusted_launch_facts(state, uid, attempt)
+        host_problem = W.launch_host_problem(
+            trusted_launch_host_anchor(state, uid, attempt))
+        if host_problem:
+            us["host_judgment"] = "UNJUDGEABLE_HERE"
+            us.pop("incomplete_since", None)
+            us.pop("launch_recovery_problem", None)
+            report.append(f"{uid}: UNJUDGEABLE_HERE -- {host_problem}")
+            save_state(state_dir, state)
             continue
         if us.get("launch_recovery_problem"):
             report.append(f"{uid}: NEEDS_HUMAN -- "
                           f"{us['launch_recovery_problem']}")
             continue
-        attempt = us["attempt_dir"]
+        us.pop("host_judgment", None)
+        if us["state"] == "DONE":
+            continue
         pinned_before = trusted_produced_head(state, uid, attempt)
         ran_check = not (u.get("kind") == "code" and pinned_before)
         protocol_problem = None
         if ran_check:
             isolation_facts = trusted_isolation_facts(state, u, attempt)
             check_args = (
-                attempt, trusted_launch_facts(state, uid, attempt),
+                attempt, launch_facts,
                 trusted_artifact_basis(state, uid, attempt))
             # Preserve the historical call shape for undeclared units and old
             # embedders. A declared profile takes the fourth, trusted-by-value
@@ -6564,7 +6641,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             if check_report and u.get("kind") == "code" and rc == DONE:
                 produced = check_report.get("produced_head")
                 basis_problem = W.validate_pinned_head(
-                    U.run, trusted_launch_facts(state, uid, attempt), produced)
+                    U.run, launch_facts, produced)
                 if basis_problem:
                     protocol_problem = basis_problem
                     report.append(f"{uid}: CHECK RESULT REFUSED -- "
