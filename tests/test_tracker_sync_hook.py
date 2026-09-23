@@ -893,6 +893,32 @@ class TrackerSyncHookInputContract(unittest.TestCase):
                 "cat | bash <<'EOF'\ngit push origin HEAD\nEOF", "git push"),
             "a shell after an earlier compound command": (
                 "true; bash <<'EOF'\ngit push origin HEAD\nEOF", "git push"),
+            # An IO_NUMBER stays adjacent to its redirection even when a
+            # preceding shell operator is adjacent too. fd 0 is stdin, so its
+            # heredoc is the shell's script; fd 2 is stderr, so the same body
+            # remains data. Run the whole operator class through the wired
+            # hook: shlex's punctuation lookahead used to lose the numeric
+            # token's raw position after every one of these separators.
+            "an fd-zero heredoc after an adjacent semicolon": (
+                "true;0<<'EOF' bash\ngit push origin HEAD\nEOF", "git push"),
+            "an fd-two heredoc after an adjacent semicolon is data": (
+                "true;2<<'EOF' bash\ngit push origin HEAD\nEOF", ""),
+            "an fd-zero heredoc after adjacent and-if": (
+                "true&&0<<'EOF' bash\ngit push origin HEAD\nEOF", "git push"),
+            "an fd-two heredoc after adjacent and-if is data": (
+                "true&&2<<'EOF' bash\ngit push origin HEAD\nEOF", ""),
+            "an fd-zero heredoc after adjacent or-if": (
+                "false||0<<'EOF' bash\ngit push origin HEAD\nEOF", "git push"),
+            "an fd-two heredoc after adjacent or-if is data": (
+                "false||2<<'EOF' bash\ngit push origin HEAD\nEOF", ""),
+            "an fd-zero heredoc after an adjacent pipe": (
+                "printf x|0<<'EOF' bash\ngit push origin HEAD\nEOF", "git push"),
+            "an fd-two heredoc after an adjacent pipe is data": (
+                "printf x|2<<'EOF' bash\ngit push origin HEAD\nEOF", ""),
+            "an fd-zero heredoc after adjacent backgrounding": (
+                "true&0<<'EOF' bash\ngit push origin HEAD\nEOF", "git push"),
+            "an fd-two heredoc after adjacent backgrounding is data": (
+                "true&2<<'EOF' bash\ngit push origin HEAD\nEOF", ""),
             "a shell-looking argument to a non-shell wrapper command": (
                 "env echo bash <<'EOF'\ngit push origin HEAD\nEOF", ""),
             "only the last of two heredocs is shell stdin": (

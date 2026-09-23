@@ -446,10 +446,23 @@ def _lex_line(line):
             # word. For `1<` that consumed fragment is exactly `1<`; for
             # `1 <` it ends in whitespace. Quoted or escaped digits do not
             # equal the raw prefix and therefore cannot become IO_NUMBERs.
+            #
+            # A preceding punctuation token also reads one character ahead.
+            # In `true;0<<EOF`, shlex pushes the `0` back while its stream is
+            # already past it, so the fragment observed for the later `0`
+            # token is only `<`. Include that one pushed-back character when
+            # checking the raw spelling; it is still required to equal the
+            # unquoted token exactly, so `'0'<<` and `\0<<` remain ordinary
+            # words rather than IO_NUMBERs.
+            raw_fragments = [consumed]
+            if start:
+                raw_fragments.append(line[start - 1:end])
             is_io_number = (value.isdigit()
-                            and len(consumed) == len(value) + 1
-                            and consumed.startswith(value)
-                            and consumed[-1:] in ("<", ">"))
+                            and any(
+                                len(fragment) == len(value) + 1
+                                and fragment.startswith(value)
+                                and fragment[-1:] in ("<", ">")
+                                for fragment in raw_fragments))
             tokens.append(_ShellToken(value, is_io_number))
     except ValueError:
         return None
