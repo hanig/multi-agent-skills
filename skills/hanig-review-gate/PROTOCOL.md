@@ -109,8 +109,12 @@ discovery and requires one assessment per remaining finding.
 
 The case ledger is authoritative for this protocol (the append-only round
 journal remains audit-only). It is keyed by explicit `--case` or by
-repository/branch/fork-point/kind, binds the frozen contract, fixed panel, reviewed HEAD
-and exact reviewed-content digest, and derives the next stage round. A fresh
+repository/branch/kind, so cases survive commits, merges and rebases. Pass an
+explicit `--case` before renaming a branch or starting unrelated sequential
+work on the same branch. The ledger binds the frozen
+contract, fixed panel, reviewed HEAD and exact reviewed-content digest, and
+derives the next stage round. Provider failure or unusable content consumes no
+round because it supplies no accepted decision. A fresh
 cycle requires `--new-cycle`, carries the history, and is refused when reviewed
 content is unchanged. Changing the panel additionally requires
 `--authorize-panel-change NAME`.
@@ -124,7 +128,19 @@ unavailable observations for the currently named adjudicator without consuming
 a closure round. Only after that bounded window may the predesignated alternate
 take the seat. An unpredesignated replacement requires
 `--reassign REVIEWER=REPLACEMENT --authorize-reassignment OWNER`; that named
-event is persisted before the replacement reviews anything.
+event is persisted before the replacement reviews anything. A predesignated
+alternate that is itself unavailable may be owner-reassigned immediately; it
+does not acquire a second automatic retry window. Reassignment is a separate
+event from starting a fresh cycle, and cannot claim a reviewer assigned or
+reserved for another fixed seat.
+
+A reviewer removed from routing remains an unavailable fixed seat rather than
+bricking the case. Closure records the same bounded observations and reaches
+the same alternate or owner-reassignment path. Escalated closure runs every
+tier containing a frozen seat; discovery may stop at quorum, closure may not.
+The same bounded path applies when availability preflight succeeds but the
+provider later fails; unusable reviewer content remains review-incomplete and
+is not relabeled as availability. An empty selected panel is never persisted.
 
 If the retry window expires and neither an available predesignated alternate
 nor owner-authorized reassignment exists, the result is
@@ -193,6 +209,11 @@ Accepted state decides the terminal result: open material violations block;
 fixed, independently refuted, and nonblocking findings clear; unresolved
 material disagreement is `REVIEW_ADJUDICATION`; and a reviewer that returns no
 usable content is `REVIEW_INCOMPLETE`.
+
+Closure assessments remain digest-bound. If every exact digest but one forms a
+bijection, the sole unmatched assessment is reconciled to the sole missing
+ledger digest; two mismatches, any duplicate, or any remaining omission is
+ambiguous and rejected.
 
 ## Convergence
 

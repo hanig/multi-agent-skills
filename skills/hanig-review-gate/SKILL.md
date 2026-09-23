@@ -116,9 +116,10 @@ Open-ended loops are how runaways happen, so every review cycle is bounded:
 ## Persistent cases and accepted states
 
 Implementation reviews persist one case ledger outside operated worktrees.
-The default case identity is repository/branch/fork-point/kind; pass `--case
-ID` when a review must survive a changed fork point or otherwise needs a more
-durable project identity. The first invocation freezes claims,
+The default case identity is repository/branch/kind and survives commits,
+merges, and rebases. Pass `--case ID` before a branch rename, for unrelated
+sequential work on one branch, or whenever a more durable project identity is
+needed. The first invocation freezes claims,
 context, threat model, and panel, and every event records HEAD plus the exact
 reviewed-content digest.
 
@@ -138,6 +139,18 @@ available. Otherwise a replacement needs
 path succeeds, the gate returns `REVIEW_ADJUDICATION` with the explicit
 `deferred-awaiting-authority` outcome. It preserves the open finding and frees
 the worker to stop; it never treats unavailability as clearance.
+
+Provider failure or unusable content consumes no discovery or closure round.
+A failed predesignated alternate may be owner-reassigned immediately, but no
+assignment or reserved fallback may collapse two fixed seats onto one reviewer.
+Fresh-cycle panel selection and reassignment are separate authority events.
+Removed routing entries remain unavailable fixed seats and follow that bounded
+replacement path. Escalated closure runs every tier needed to fill its frozen
+panel rather than stopping at discovery quorum.
+Provider transport failure during closure follows the same bounded replacement
+path, while unusable content remains `REVIEW_INCOMPLETE`. Empty selected panels
+are never persisted as case authority, and closure evidence must be non-empty
+without imposing a word-count proxy for adequacy.
 
 ## The step-back committee
 

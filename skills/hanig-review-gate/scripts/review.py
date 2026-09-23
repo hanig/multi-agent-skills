@@ -988,23 +988,40 @@ def closure_schema_error(verdict, required_digests):
     assessments = verdict.get("finding_assessments")
     if not isinstance(assessments, list):
         return "missing required finding_assessments array"
-    seen = set()
     required = set(required_digests)
-    for assessment in assessments:
+    seen = set()
+    unmatched = []
+    for index, assessment in enumerate(assessments):
         if not isinstance(assessment, dict):
             return "finding_assessments must contain objects"
         digest = assessment.get("digest")
-        if digest not in required or digest in seen:
+        if digest in seen:
             return f"unexpected or duplicate finding digest {digest!r}"
-        seen.add(digest)
+        if digest in required:
+            seen.add(digest)
+        else:
+            unmatched.append(index)
+    missing = required - seen
+    # A 64-character digest is an awkward wire identifier for a model. If
+    # every other assessment forms an exact bijection, the sole remaining
+    # assessment has exactly one possible ledger identity. More than one
+    # mismatch is ambiguous and still fails closed.
+    if len(unmatched) == 1 and len(missing) == 1:
+        assessments[unmatched[0]]["digest"] = next(iter(missing))
+        seen.update(missing)
+        missing.clear()
+    elif unmatched:
+        digest = assessments[unmatched[0]].get("digest")
+        return f"unexpected or duplicate finding digest {digest!r}"
+    if missing:
+        return "did not assess finding(s): " + ", ".join(sorted(missing))
+    for assessment in assessments:
+        digest = assessment["digest"]
         if assessment.get("status") not in ACCEPTED_FINDING_STATES:
             return f"invalid accepted finding status {assessment.get('status')!r}"
         evidence = assessment.get("evidence")
-        if not isinstance(evidence, str) or len(evidence.split()) < 4:
+        if not isinstance(evidence, str) or not evidence.strip():
             return f"finding {digest} needs specific verification evidence"
-    missing = required - seen
-    if missing:
-        return "did not assess finding(s): " + ", ".join(sorted(missing))
     return None
 
 
@@ -1043,12 +1060,27 @@ def accepted_terminal_state(findings, incomplete=False):
     return "REVIEW_PASS"
 
 
+def undecided_review_state(findings, incomplete=False):
+    """No raw reviewer result may override already accepted blocking state."""
+    if incomplete:
+        return "REVIEW_INCOMPLETE"
+    accepted = accepted_terminal_state(findings)
+    if accepted == "REVIEW_FAIL":
+        return accepted
+    return "REVIEW_PARTIAL"
+
+
 def active_panel(ledger):
     """Reviewers currently authorized for the frozen panel's named seats."""
     assignments = ledger.get("assignments") or {
         name: name for name in ledger["panel"]
     }
     return [assignments[name] for name in ledger["panel"]]
+
+
+def persistable_unavailable_case(ledger):
+    """An empty selected panel has no authority and must never poison state."""
+    return ledger is not None and bool(ledger.get("panel"))
 
 
 def closure_panel_complete(ledger, completed, failed, truncated=False):
@@ -1149,14 +1181,12 @@ def reviewed_snapshot(body, label):
 
 
 def default_case_id(args):
-    """Stable for one branch lineage without conflating sequential main work."""
+    """Stable across feature rebases without conflating sequential main work."""
     remote = git_out("remote", "get-url", "origin").strip()
     root = git_out("rev-parse", "--show-toplevel").strip()
     branch = git_out("symbolic-ref", "--short", "HEAD").strip()
-    head = git_out("rev-parse", "HEAD").strip()
-    fork = git_out("merge-base", "HEAD", "origin/main").strip() or head
     identity = [remote or root or str(Path.cwd().resolve()),
-                branch or "detached", fork, args.kind]
+                branch or "detached", args.kind]
     raw = json.dumps(identity, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:32]
 
@@ -1186,8 +1216,9 @@ def parse_reviewer_map(values, flag):
     return result
 
 
-def validate_reviewer_map(mapping, panel, known, flag):
-    """A frozen assignment must remain one-to-one and name configured peers."""
+def validate_reviewer_map(mapping, panel, known, flag, assignments=None,
+                          alternates=None):
+    """A frozen assignment and every pending fallback remain one-to-one."""
     unknown_sources = sorted(set(mapping) - set(panel))
     unknown_targets = sorted(set(mapping.values()) - set(known))
     if unknown_sources:
@@ -1198,10 +1229,21 @@ def validate_reviewer_map(mapping, panel, known, flag):
         config_error(f"{flag} names unknown reviewer(s): "
                      f"{', '.join(unknown_targets)}. Pass configured reviewer "
                      "names on the right side.")
-    assigned = [mapping.get(name, name) for name in panel]
-    if len(set(assigned)) != len(assigned):
+    current = dict(assignments or {name: name for name in panel})
+    assigned = {name: mapping.get(name, current[name]) for name in panel}
+    if len(set(assigned.values())) != len(assigned):
         config_error(f"{flag} would assign one reviewer to multiple fixed "
                      "panel seats. Pass distinct targets.")
+    reserved = dict(alternates or {})
+    after_fallback = [
+        reserved.get(name, assigned[name])
+        if assigned[name] == name else assigned[name]
+        for name in panel
+    ]
+    if len(set(after_fallback)) != len(after_fallback):
+        config_error(f"{flag} would conflict with another fixed seat's "
+                     "predesignated alternate. Pass a reviewer that is not "
+                     "already assigned or reserved for another seat.")
 
 
 def review_case_path(args):
@@ -1291,6 +1333,14 @@ def validate_case_ledger(data):
             or len(set(alternates.get(name, name) for name in panel))
             != len(panel)):
         raise OSError("case ledger predesignated alternates are invalid")
+    after_fallback = [
+        alternates.get(name, assignments[name])
+        if assignments[name] == name else assignments[name]
+        for name in panel
+    ]
+    if len(set(after_fallback)) != len(after_fallback):
+        raise OSError("case ledger assignments conflict with a predesignated "
+                      "alternate")
     availability_state = data.get("availability")
     if not isinstance(availability_state, dict):
         raise OSError("case ledger availability state is invalid")
@@ -1456,6 +1506,11 @@ def prepare_case_ledger(args, panel, snapshot, alternates=None,
         alternates = getattr(args, "_alternate_map", {})
     if reassignments is None:
         reassignments = getattr(args, "_reassignment_map", {})
+    if args.new_cycle and reassignments:
+        config_error("--new-cycle and --reassign cannot share an event. A new "
+                     "cycle freezes its selected panel and resets availability; "
+                     "Pass --new-cycle first, then use bounded reassignment "
+                     "only if one of its fixed seats becomes unavailable.")
     path = review_case_path(args)
     try:
         ledger = load_case_ledger(path)
@@ -1466,6 +1521,8 @@ def prepare_case_ledger(args, panel, snapshot, alternates=None,
     expected_generation = 0 if ledger is None else ledger["generation"]
     alternates = dict(alternates or {})
     reassignments = dict(reassignments or {})
+    panel_changed = False
+    next_cycle_alternates = None
     if ledger is None:
         ledger = new_case_ledger(path.stem, contract, panel, alternates)
     else:
@@ -1476,11 +1533,8 @@ def prepare_case_ledger(args, panel, snapshot, alternates=None,
                          "different work.")
         old_panel = ledger.get("panel")
         if old_panel != panel:
-            selected_names = set(getattr(args, "_selected_panel_all", panel))
-            unavailable_membership = (set(panel).issubset(set(old_panel))
-                                        and (set(old_panel) - set(panel))
-                                        .issubset(selected_names))
-            if unavailable_membership:
+            unavailable_membership = set(panel).issubset(set(old_panel))
+            if unavailable_membership and not args.new_cycle:
                 # Enabled-state is availability, not panel authority.  A
                 # reviewer disabled after case creation remains the named seat
                 # until the bounded reassignment protocol changes it.
@@ -1489,17 +1543,30 @@ def prepare_case_ledger(args, panel, snapshot, alternates=None,
                 config_error("the review panel is fixed for this case. Pass "
                              "--new-cycle --authorize-panel-change NAME only "
                              "for an explicit authorization event.")
-        if alternates and ledger.get("alternates") != alternates:
+            else:
+                panel_changed = True
+                next_cycle_alternates = (alternates if alternates else {
+                    seat: alternate
+                    for seat, alternate in ledger.get("alternates", {}).items()
+                    if seat in panel
+                })
+        if (not panel_changed and alternates
+                and ledger.get("alternates") != alternates):
             config_error("predesignated alternates are frozen when a case is "
                          "created. Pass the original --alternate mappings, or "
                          "use owner-authorized --reassign after the retry "
                          "window is exhausted.")
     known_enabled = getattr(args, "_enabled_names", None)
     if known_enabled is not None:
-        validate_reviewer_map(alternates, ledger["panel"], known_enabled,
-                              "--alternate")
+        if panel_changed:
+            validate_reviewer_map(next_cycle_alternates, panel, known_enabled,
+                                  "--alternate")
+        else:
+            validate_reviewer_map(alternates, ledger["panel"], known_enabled,
+                                  "--alternate")
         validate_reviewer_map(reassignments, ledger["panel"], known_enabled,
-                              "--reassign")
+                              "--reassign", ledger["assignments"],
+                              ledger["alternates"])
     cycle = ledger["cycles"][-1]
     events = cycle[args.stage]
     if args.new_cycle:
@@ -1528,7 +1595,7 @@ def prepare_case_ledger(args, panel, snapshot, alternates=None,
             })
             ledger["panel"] = panel
             ledger["assignments"] = {name: name for name in panel}
-            ledger["alternates"] = alternates
+            ledger["alternates"] = next_cycle_alternates
             ledger["availability"] = {
                 "retry_limit": MAX_AVAILABILITY_RETRIES,
                 "attempts": {}, "events": [], "outcome": None,
@@ -1546,7 +1613,13 @@ def prepare_case_ledger(args, panel, snapshot, alternates=None,
         for seat, replacement in reassignments.items():
             current = ledger["assignments"][seat]
             attempts = availability_state["attempts"].get(current, 0)
-            if attempts < availability_state["retry_limit"]:
+            alternate_failed = any(
+                event.get("reviewer") == current
+                and event.get("role") == "predesignated_alternate"
+                for event in availability_state["events"]
+            )
+            if (attempts < availability_state["retry_limit"]
+                    and not alternate_failed):
                 config_error(
                     f"the bounded retry window for {current!r} is not "
                     f"exhausted ({attempts}/{availability_state['retry_limit']}). "
@@ -1592,7 +1665,12 @@ def record_closure_unavailability(ledger, unavailable, snapshot):
         if current not in unavailable_names:
             continue
         alternate = ledger["alternates"].get(seat)
-        if alternate and current == seat:
+        occupied_elsewhere = {
+            assigned for other_seat, assigned in ledger["assignments"].items()
+            if other_seat != seat
+        }
+        if (alternate and current == seat
+                and alternate not in occupied_elsewhere):
             ledger["assignments"][seat] = alternate
             ledger["authorization_events"].append({
                 "kind": "predesignated_alternate", "by": "case_contract",
@@ -1623,6 +1701,31 @@ def record_alternate_unavailability(ledger, unavailable, snapshot):
         })
     state["outcome"] = "deferred-awaiting-authority"
     return "REVIEW_ADJUDICATION"
+
+
+def record_runtime_closure_failures(ledger, failed, snapshot):
+    """Route transport failures through authority; no-content is not one."""
+    transport = [item for item in failed if not item.get("incomplete")]
+    active = {assigned: seat
+              for seat, assigned in ledger["assignments"].items()}
+    named, alternates = [], []
+    for item in transport:
+        name = item["name"]
+        seat = active.get(name)
+        if seat is None:
+            continue
+        unavailable = {"name": name,
+                       "reason": str(item.get("error", "provider error"))}
+        (named if name == seat else alternates).append(unavailable)
+    state, substituted = (None, False)
+    if named:
+        state, substituted = record_closure_unavailability(
+            ledger, named, snapshot)
+    if alternates:
+        state = record_alternate_unavailability(ledger, alternates, snapshot)
+    if substituted and state is None:
+        state = "REVIEW_PARTIAL"
+    return state, substituted
 
 
 def apply_disposition_proposals(ledger, dispositions, actor):
@@ -1887,6 +1990,8 @@ def load_reviewers():
 
 def availability(rev):
     """Why a reviewer cannot run, or None if it can."""
+    if rev.get("_removed"):
+        return "reviewer removed from reviewers.json"
     if not rev.get("enabled", True):
         return "disabled in reviewers.json"
     env = {"openai": "OPENAI_API_KEY", "openrouter": "OPENROUTER_API_KEY"}
@@ -1896,6 +2001,16 @@ def availability(rev):
     if rev["provider"] not in PROVIDERS:
         return f"unknown provider {rev['provider']!r}"
     return None
+
+
+def assigned_reviewers(configured, names):
+    """Resolve frozen seats; removed routing entries remain unavailable seats."""
+    for name in set(names) - set(configured):
+        configured[name] = {
+            "name": name, "provider": "removed", "model": "removed",
+            "profiles": [], "enabled": True, "_removed": True,
+        }
+    return [configured[name] for name in names]
 
 
 def probe_liveness(rev, timeout=30):
@@ -2174,6 +2289,11 @@ def escalate(all_reviewers, prompt, args, truncated, label, body_len):
             or any(norm(c.get("status")) == "refuted"
                    for r in tier_completed for c in r["claims"])
         bad = bad_so_far
+        if getattr(args, "stage", "discovery") == "closure":
+            # Closure authority is the whole frozen panel, not a discovery
+            # quorum. Continue through every tier so escalation cannot freeze
+            # seats it will never ask to assess the ledger.
+            continue
         if bad and len(completed) >= args.quorum:
             if not args.json:
                 print(f"  -> tier {tier} found problems with "
@@ -2432,6 +2552,10 @@ def main():
         config_error("--alternate freezes case-creation authority while "
                      "--reassign records later owner authority. Pass only the "
                      "one that applies to this invocation.")
+    if args.new_cycle and reassignment_map:
+        config_error("--new-cycle and --reassign cannot share an event. Pass "
+                     "--new-cycle first; its new panel has no "
+                     "exhausted availability window to reassign yet.")
     if args.round is not None:
         if args.round < 1:
             config_error(f"--round must be 1 or more, got {args.round}.")
@@ -2547,13 +2671,7 @@ def main():
             args, panel, snapshot)
         upgrade_case_ledger(ledger)
         authority_dirty = bool(reassignment_map)
-        missing_assignments = sorted(set(active_panel(ledger)) - set(configured))
-        if missing_assignments:
-            config_error("the case ledger assigns removed reviewer(s): "
-                         f"{', '.join(missing_assignments)}. Restore those "
-                         "reviewer records or pass an owner-authorized "
-                         "--reassign after the retry window.")
-        reviewers = [configured[name] for name in active_panel(ledger)]
+        reviewers = assigned_reviewers(configured, active_panel(ledger))
         apply_disposition_proposals(ledger, dispositions, args.actor)
         cycle = ledger["cycles"][-1]
         if args.stage == "closure":
@@ -2587,7 +2705,7 @@ def main():
             ledger, unavailable, snapshot)
         authority_dirty = authority_dirty or substituted
         if substituted:
-            reviewers = [configured[name] for name in active_panel(ledger)]
+            reviewers = assigned_reviewers(configured, active_panel(ledger))
             runnable, unavailable = [], []
             for rev in reviewers:
                 why = availability(rev)
@@ -2642,10 +2760,20 @@ def main():
         sys.exit(STATES[availability_state])
 
     if not runnable:
+        if persistable_unavailable_case(ledger):
+            try:
+                save_case_ledger(ledger_path, ledger, ledger_generation)
+            except OSError as exc:
+                config_error(
+                    f"could not persist case ledger {ledger_path}: {exc}. "
+                    "Repair storage and re-run; the frozen case was not "
+                    "recorded before reviewer unavailability.")
+            ledger_generation = ledger["generation"]
         disarm_watchdog()
         journal = record_review_round(args, [], "REVIEW_UNAVAILABLE")
         report = {"state": "REVIEW_UNAVAILABLE", "checked_at": now(),
                   "reviewed": label, "unavailable": unavailable, "results": [],
+                  "case_ledger": (str(ledger_path) if ledger_path else None),
                   "journal": journal}
         if args.json:
             print(json.dumps(report, indent=2))
@@ -2680,6 +2808,12 @@ def main():
                 runnable))
         completed = [r for r in results if r["ok"]]
         failed = [r for r in results if not r["ok"]]
+
+    runtime_availability_state = None
+    if ledger is not None and args.stage == "closure" and failed:
+        runtime_availability_state, substituted = \
+            record_runtime_closure_failures(ledger, failed, snapshot)
+        authority_dirty = authority_dirty or substituted
 
     confirmed, refuted_claims, rejecting = [], [], []
     out_of_scope = []
@@ -2731,15 +2865,24 @@ def main():
         if accepted_decision:
             state = accepted_terminal_state(
                 ledger["findings"], incomplete=bool(incomplete))
-        cycle = ledger["cycles"][-1]
-        cycle[args.stage].append({
-            "round": args.round, "at": journal_timestamp(),
-            "reviewed": snapshot, "completed": [r["name"] for r in completed],
-            "failed": [{"name": r["name"], "incomplete": bool(r.get("incomplete"))}
-                       for r in failed],
-            "state": state,
-        })
-        ledger["reviewed_snapshots"].append(snapshot)
+        else:
+            state = (runtime_availability_state
+                     or undecided_review_state(
+                         ledger["findings"], incomplete=bool(incomplete)))
+        if accepted_decision:
+            cycle = ledger["cycles"][-1]
+            cycle[args.stage].append({
+                "round": args.round, "at": journal_timestamp(),
+                "reviewed": snapshot,
+                "completed": [r["name"] for r in completed],
+                "failed": [
+                    {"name": r["name"],
+                     "incomplete": bool(r.get("incomplete"))}
+                    for r in failed
+                ],
+                "state": state,
+            })
+            ledger["reviewed_snapshots"].append(snapshot)
         try:
             save_case_ledger(ledger_path, ledger, ledger_generation)
         except OSError as exc:
