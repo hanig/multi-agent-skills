@@ -12,7 +12,7 @@ Liveness, work evidence, permission events, and observation time remain separate
 
 The worker record and permission events provide evidence that directory timestamps and a running label do not. <!-- declaration: watch.source -->
 
-A watcher is tested against a condition already present, and its watch set is derived from coordinator state. <!-- declaration: watch.proof -->
+A watcher is armed in the dispatching turn, tested against a condition already present, and its watch set is derived from coordinator state. Arming it later is the same defect as omitting it, because nothing else wakes the session when a worker finishes and `swarm.py status` records neither an observation time nor a unit age. <!-- declaration: watch.proof -->
 
 ## Preservation, dispatch, and merge
 

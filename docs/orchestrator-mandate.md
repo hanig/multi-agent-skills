@@ -172,6 +172,14 @@ Running, progressing, permission-blocked and last-observed are four different
 facts, and a watcher that reports one of them as another is worse than no
 watcher, because its silence reads as health.
 
+- **Arm the watcher in the same turn as the dispatch.** Not as the next step,
+  and not once the wave looks like it is taking a while. Nothing else wakes the
+  session when an agent finishes, so an unwatched wave is not merely unattended:
+  it is unobservable after the fact, because `swarm.py status` carries no
+  timestamp and no unit age. A wave dispatched here without one left two
+  finished agents unprocessed for about two hours, and the gap was found by the
+  owner asking rather than by anything in the loop. Write the watcher before
+  running `swarm.py run`, so arming it cannot be forgotten.
 - **Read the agent's own record**, not a directory mtime. Deliverables are
   written at the end of a run, so a healthy agent thirty minutes in has written
   nothing and looks identical to a dead one.
