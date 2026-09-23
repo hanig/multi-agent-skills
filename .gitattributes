@@ -1,0 +1,9 @@
+skills/agent-bus/** -text
+skills/paseo/** -text
+skills/paseo-advisor/** -text
+skills/paseo-committee/** -text
+skills/paseo-handoff/** -text
+skills/paseo-loop/** -text
+skills/pi-fleet/** -text
+skills/start-a-sprint/** -text
+bin/bus -text

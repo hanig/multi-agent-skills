@@ -5,9 +5,12 @@ directory. They test loader artifacts and documented fallbacks; they do not
 try to provision a host agent, connector, credential, or optional daemon.
 """
 
+import hashlib
+import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -35,6 +38,19 @@ VENDORED = {
     "pi-fleet",
     "start-a-sprint",
 }
+VENDORED_FILES = {
+    "skills/agent-bus/SKILL.md",
+    "skills/paseo/SKILL.md",
+    "skills/paseo-advisor/SKILL.md",
+    "skills/paseo-committee/SKILL.md",
+    "skills/paseo-handoff/SKILL.md",
+    "skills/paseo-loop/SKILL.md",
+    "skills/pi-fleet/SKILL.md",
+    "skills/start-a-sprint/SKILL.md",
+    "skills/start-a-sprint/agents/openai.yaml",
+    "skills/start-a-sprint/scripts/validate_sprint_plan.py",
+}
+BUS_EXCEPTION = "bin/bus"
 
 
 def _frontmatter(path):
@@ -42,6 +58,44 @@ def _frontmatter(path):
     if not match:
         return None
     return match.group(1)
+
+
+def _read_regular(relative):
+    """Read a checker-owned path without following any symlink component."""
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    directory_fd = os.open(ROOT, directory_flags)
+    file_fd = None
+    try:
+        parts = Path(relative).parts
+        for part in parts[:-1]:
+            child_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = child_fd
+        file_fd = os.open(
+            parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd,
+        )
+        if not stat.S_ISREG(os.fstat(file_fd).st_mode):
+            raise OSError(f"{relative} is not a regular file")
+        with os.fdopen(file_fd, "rb") as handle:
+            file_fd = None
+            return handle.read()
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        os.close(directory_fd)
+
+
+def _sha256(relative):
+    return hashlib.sha256(_read_regular(relative)).hexdigest()
+
+
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate manifest key: {key}")
+        result[key] = value
+    return result
 
 
 class TestSkillCapabilities(unittest.TestCase):
@@ -123,6 +177,12 @@ class TestSkillCapabilities(unittest.TestCase):
         earlier form demanded the diff equal AUTHORED exactly, which could
         only hold for the one change that introduced the contract.
         """
+        available = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", "origin/main^{commit}"],
+            cwd=ROOT, text=True, capture_output=True,
+        )
+        if available.returncode != 0:
+            self.skipTest("origin/main is unavailable; offline manifest guard still ran")
         changed = subprocess.run(
             ["git", "diff", "--name-only", "origin/main", "--", "skills"],
             cwd=ROOT, text=True, capture_output=True, check=True,
@@ -135,6 +195,66 @@ class TestSkillCapabilities(unittest.TestCase):
         self.assertLessEqual(
             touched, AUTHORED,
             "a changed skill bundle must be listed in AUTHORED or VENDORED",
+        )
+
+    def test_vendored_payload_matches_offline_manifest(self):
+        """Hash the shipped vendored inventory without Git or a subprocess."""
+        manifest = json.loads(
+            _read_regular("docs/upstream-manifest.json").decode("utf-8"),
+            object_pairs_hook=_unique_object,
+        )
+        notice = " ".join(manifest.get("_notice", []))
+        self.assertIn("DATA, NOT AUTHORITY", notice)
+        self.assertIn("not evidence of upstream provenance", notice)
+        self.assertEqual(manifest.get("schema_version"), 1)
+        self.assertEqual(manifest.get("algorithm"), "sha256")
+        self.assertEqual(
+            manifest.get("vendored_skill_directories"),
+            sorted(VENDORED),
+            "manifest directory inventory must match the installer's non-hanig- classifier",
+        )
+
+        files = manifest.get("files")
+        exceptions = manifest.get("expected_exceptions")
+        self.assertIsInstance(files, dict)
+        self.assertIsInstance(exceptions, dict)
+        self.assertEqual(
+            set(files), VENDORED_FILES,
+            "manifest file inventory must match the shipped vendored snapshot",
+        )
+        self.assertEqual(
+            set(exceptions), {BUS_EXCEPTION},
+            "bin/bus must remain an explicit expected exception for ARC-270",
+        )
+        digest_pattern = re.compile(r"\A[0-9a-f]{64}\Z")
+        for relative in sorted(VENDORED_FILES):
+            with self.subTest(path=relative):
+                expected = files[relative]
+                self.assertIsInstance(expected, str)
+                self.assertRegex(expected, digest_pattern)
+                self.assertEqual(
+                    _sha256(relative),
+                    expected,
+                    f"{relative}: digest differs from the shipped vendored bytes",
+                )
+
+        record = exceptions[BUS_EXCEPTION]
+        self.assertIsInstance(record, dict)
+        self.assertEqual(set(record), {"sha256", "upstream_sha256", "reason"})
+        self.assertRegex(record.get("sha256", ""), digest_pattern)
+        self.assertRegex(record.get("upstream_sha256", ""), digest_pattern)
+        self.assertNotEqual(record["sha256"], record["upstream_sha256"])
+        self.assertIn("ARC-270", record.get("reason", ""))
+        actual = _sha256(BUS_EXCEPTION)
+        if actual == record["upstream_sha256"]:
+            self.fail(
+                f"{BUS_EXCEPTION}: tracked expected exception disappeared; "
+                "the ARC-270 patch was dropped"
+            )
+        self.assertEqual(
+            actual,
+            record["sha256"],
+            f"{BUS_EXCEPTION}: digest differs from its expected exception",
         )
 
 

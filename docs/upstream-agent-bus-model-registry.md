@@ -11,6 +11,10 @@ ARC-270 therefore uses the repository's tracked-local-patch fallback. The
 functional contract is pinned by `tests/test_bus_models.py`. During a future
 upstream resync, do not overwrite this change silently: either retain the
 patch, or replace it with an upstream version that passes those tests.
+`docs/upstream-manifest.json` records `bin/bus` as an explicit expected
+exception with both the repository and archived-upstream digests, so restoring
+the archived bytes is itself a failing integrity check rather than a quiet
+return to the vendored baseline.
 
 ## Defect
 
