@@ -685,10 +685,7 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
                     (state_dir / S.STATE_FILE).read_text())
                 seen.update(durable["units"]["u1"][
                     "attempt_launch_intents"]["att1"])
-                workspace = self.tmp / "managed" / "att1"
-                git(self.repo, "worktree", "add", "-q", "-b",
-                    argv[argv.index("--new-branch") + 1], str(workspace),
-                    argv[argv.index("--base") + 1])
+                workspace = Path(argv[argv.index("--cwd") + 1])
                 return 0, json.dumps({"agentId": "agent-1",
                                       "cwd": str(workspace)}), ""
             return real(argv, **kwargs)
@@ -707,7 +704,8 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
             self.assertIn(key, seen)
         facts = state["units"]["u1"]["attempt_launch_facts"]["att1"]
         self.assertEqual(facts["execution_workspace"],
-                         str((self.tmp / "managed" / "att1").resolve()))
+                         str((state_dir / "code-worktrees"
+                              / "att1").resolve()))
 
     def test_later_branch_movement_does_not_change_pinned_validation(self):
         attempt = self.tmp / "runs" / "u1" / "att1"
