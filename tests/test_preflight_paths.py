@@ -40,6 +40,7 @@ def repo_at(path):
     subprocess.run(["git", "init", "-q", "--bare", str(remote)],
                    check=True, env=ENV, capture_output=True, text=True)
     git(path, "remote", "add", "origin", str(remote))
+    git(path, "push", "-qu", "origin", "HEAD:refs/heads/main")
     return path
 
 

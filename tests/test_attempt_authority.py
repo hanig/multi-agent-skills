@@ -43,6 +43,7 @@ class RepoCase(unittest.TestCase):
         subprocess.run(["git", "init", "-q", "--bare", str(self.remote)],
                        check=True)
         git(self.repo, "remote", "add", "origin", str(self.remote))
+        git(self.repo, "push", "-qu", "origin", "HEAD:refs/heads/main")
         self.base = git(self.repo, "rev-parse", "HEAD")
         self.base_tree = git(self.repo, "rev-parse", "HEAD^{tree}")
         self.branch = git(self.repo, "rev-parse", "--abbrev-ref", "HEAD")

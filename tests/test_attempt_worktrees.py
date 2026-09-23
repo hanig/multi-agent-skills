@@ -107,6 +107,10 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         subprocess.run(["git", "init", "-q", "--bare", str(self.remote)],
                        check=True, env=ENV)
         git(self.repo, "remote", "add", "origin", str(self.remote))
+        # A code dispatch now observes the pull-request target before it
+        # anchors an attempt. Keep the fixture's origin/main real rather than
+        # relying on an empty bare remote that no pull request could target.
+        git(self.repo, "push", "-qu", "origin", "HEAD:refs/heads/main")
         self.real_run = S.U.run
         self.fake = FakePaseo(self, self.tmp / "managed", self.real_run)
         S.U.run = self.fake
@@ -521,6 +525,8 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         unit = code_unit(self.repo)
         unit["prompt"] = original
         unit["target_branch"] = "release/next"
+        git(self.repo, "checkout", "-qb", "release/next")
+        git(self.repo, "push", "-qu", "origin", "release/next")
         state = {"units": {}}
 
         job, err = self.submit(unit, attempt, False, state)
@@ -709,6 +715,8 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         push_remote = self.tmp / "push-origin.git"
         subprocess.run(["git", "init", "-q", "--bare", str(push_remote)],
                        check=True, env=ENV)
+        git(self.repo, "push", "-q", str(push_remote),
+            "HEAD:refs/heads/main")
         git(self.repo, "remote", "set-url", "--push", "origin",
             str(push_remote))
         attempt = self.attempt("code", "pushurl")
@@ -738,6 +746,28 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         self.assertTrue(changed, why)
         self.assertEqual(head, produced)
 
+    def test_push_insteadof_collision_is_checked_on_push_destination(self):
+        read_remote = self.tmp / "read-origin.git"
+        write_remote = self.tmp / "write-origin.git"
+        for remote in (read_remote, write_remote):
+            subprocess.run(["git", "init", "-q", "--bare", str(remote)],
+                           check=True, env=ENV)
+            git(self.repo, "push", "-q", str(remote),
+                "HEAD:refs/heads/main")
+        git(self.repo, "remote", "set-url", "origin", str(read_remote))
+        git(self.repo, "config", f"url.{write_remote}.pushInsteadOf",
+            str(read_remote))
+        attempt = self.attempt("code", "push-instead-collision")
+        branch = "swarm-push-instead-collision"
+        git(self.repo, "push", "-q", str(write_remote),
+            f"HEAD:refs/heads/{branch}")
+
+        error, anchored = S._capture_code_launch(
+            str(attempt), code_unit(self.repo))
+
+        self.assertIsNone(anchored)
+        self.assertIn("already exists on origin", error)
+
     def test_expanded_push_url_is_not_rewritten_a_second_time(self):
         primary_dir = self.tmp / "primary"
         mirror_dir = self.tmp / "mirror"
@@ -748,6 +778,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         for remote in (primary, mirror):
             subprocess.run(["git", "init", "-q", "--bare", str(remote)],
                            check=True, env=ENV)
+        git(self.repo, "push", "-q", str(primary), "HEAD:refs/heads/main")
         git(self.repo, "remote", "set-url", "origin", "arc642:origin.git")
         git(self.repo, "config", f"url.{primary_dir}/.insteadOf", "arc642:")
         git(self.repo, "config", f"url.{mirror_dir}/.insteadOf",

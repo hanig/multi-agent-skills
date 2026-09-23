@@ -430,6 +430,10 @@ class TestTheSealActuallyTravels(unittest.TestCase):
         subprocess.run(
             ["git", "-C", str(self.repo), "remote", "add", "origin",
              str(self.remote)], check=True, env=env, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(self.repo), "push", "-qu", "origin",
+             "HEAD:refs/heads/main"], check=True, env=env,
+            capture_output=True)
         self.att = self.tmp / "runs" / "u1" / "att1"
         self.att.mkdir(parents=True)
 
