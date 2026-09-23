@@ -49,29 +49,22 @@ of the actual one is what made the first version bypassable):
 | rule | how it is bypassed now |
 |---|---|
 | a review declares its kind | it cannot; `--kind` is required |
-| an implementation review declares its round | it cannot; `--round` is required with `--kind implementation` |
-| at most 3 rounds per change | claiming `--round 1` forever. Not detectable without a change identity the tool does not have. |
+| an implementation review declares its stage and round | it cannot; discovery is the default stage and `--round` is required with `--kind implementation` |
+| 3 discovery rounds plus 2 closure rounds per cycle | the case ledger derives the next round and refuses a fresh cycle on unchanged reviewed bytes |
 | an implementation review asserts the honest-run counter-claim | it cannot; every implementation invocation must include `--claim "This change cannot make an honest run fail."` |
-| round 2+ dispositions every prior confirmed finding | completeness rests on the supplied map, but `--dispositions FILE` is mandatory, every entry is digest-bound to its location and summary, and every disposition needs a one-line reason |
+| round 2+ dispositions every prior confirmed finding | `--dispositions FILE` is mandatory, every entry is digest-bound to a ledger finding, and each proposal records its actor and evidence without changing accepted state |
 | a not-reproduced finding reaches the next panel | it cannot; its summary is injected verbatim into the next round's prompt |
 | a plan panel is exactly two | it cannot; size is checked after selection |
 | the two are on different providers | it cannot; providers are compared after selection |
 | a plan review is never escalated | it cannot |
 | a plan review needs both verdicts | it cannot; quorum must be 2 |
 | an undeclared reviewer joins no profile | it cannot; membership must be declared |
+| contract or panel drift inside a case | the frozen contract digest and fixed panel are persisted; panel change needs a named authorization event |
+| an author-only rebuttal clears a finding | it cannot; only fixed-panel closure assessments update accepted state |
+| empty reviewer content counts as a defect or coverage | it cannot; it produces `REVIEW_INCOMPLETE` and no accepted-state transition |
 
 **Not enforced, and honestly out of reach of this tool:**
 
-- **The round bound rests on an honest `--round`.** Nothing ties a round number
-  to a change, so `--round 1` can be claimed forever. This is now a DECISION,
-  not a gap: a per-change receipt was designed, reviewed, and rejected. Both
-  plan reviewers independently showed it locks honest authors out -- editing
-  your own plan mid-change forfeits the change, adding an explicitly permitted
-  annotation invalidates the receipt, and three flaky reviewers exhaust the
-  bound on a change nobody reviewed. The gate is run by the person it
-  constrains, who can edit this file anyway; buying tamper-resistance with
-  honest-work failures is the wrong trade. See
-  `docs/proposal-protocol-hardening.md`.
 - **A structured threat model is not required.** Also designed and rejected:
   validation that accepts `trusted=["x"], hostile=["y"], out_of_scope=["z"]`
   buys ceremony, not constraint. The threat model stays free text, judged by
@@ -83,8 +76,7 @@ of the actual one is what made the first version bypassable):
 - **Declaring acceptance criteria before implementing.** The tool does not
   carry a receipt proving that the criteria predate the implementation.
 
-The remaining items require judgment or state that this invocation does not
-possess. The round identity is a gap with a deliberately rejected fix.
+The remaining items require judgment the persistent ledger does not possess.
 
 ## Review against declared criteria, never against perfection
 
@@ -106,28 +98,21 @@ honest run fail."** for every implementation review. Case and terminal
 period may vary; omitting the assertion is `REVIEW_ERROR` before any reviewer
 runs.
 
-## Bound it to three rounds per change
+## Three discovery rounds, then bounded closure
 
-`--round N`, refused past `MAX_ROUNDS = 3`.
+Discovery uses `--stage discovery --round N` and is refused past
+`MAX_ROUNDS = 3`. Closure uses `--stage closure --round N`, is refused until
+three discovery rounds are recorded, and is capped at two rounds. Closure gets
+the frozen contract and remaining ledger; its system prompt forbids new
+discovery and requires one assessment per remaining finding.
 
-Past three rounds the choice is NOT merge-or-abandon. `SKILL.md` states the
-third path and this file did not, which cost one orchestrator a wrong framing:
-**after 3 rounds without convergence, start fresh — new reviewers, full history
-of what was tried.** A fresh cycle is legitimate only when the mechanism
-changed or the history travels with it; restarting the counter on the same
-change with the same design is a dishonest round 4.
-
-**Nothing enforces that distinction.** `review.py` counts the `--round` you
-pass and refuses past three; it cannot tell a legitimate fresh cycle from a
-relabelled fourth round, and the audit journal records the round number you
-declared rather than deriving it. So this is a rule you keep, not one the
-program keeps for you — which is exactly the weakness this repository warns
-about, stated here rather than left for a reader to discover.
-
-What would close it: the journal already records `claim_digests` per round, so
-a gate could refuse `--round 1` when a recent record carries overlapping
-digests unless the invocation explicitly declares the prior history it
-carries. That is unbuilt.
+The case ledger is authoritative for this protocol (the append-only round
+journal remains audit-only). It is keyed by explicit `--case` or by
+repository/branch/fork-point/kind, binds the frozen contract, fixed panel, reviewed HEAD
+and exact reviewed-content digest, and derives the next stage round. A fresh
+cycle requires `--new-cycle`, carries the history, and is refused when reviewed
+content is unchanged. Changing the panel additionally requires
+`--authorize-panel-change NAME`.
 
 **Step back when round N+1 finds a defect in round N's fix.** Not at N+3. One
 session ran five rounds where rounds 3, 4 and 5 each found a defect in the
@@ -178,10 +163,16 @@ object mapping each prior confirmed finding's digest to its disposition:
 The key is the lowercase SHA-256 hex digest of the UTF-8 JSON encoding of
 `[location, summary]`, with `ensure_ascii=False` and separators `(",", ":")`.
 The disposition is exactly `reproduced`, `not-reproduced`, or `deferred`, and
-the reason must be one non-empty line. Every `not-reproduced` summary is copied
-verbatim into the next round's prompt so disagreement cannot be silently
-filtered. The invocation cannot independently know whether the map omitted a
-prior finding; completeness of the supplied map remains caller-attested.
+the reason must be one non-empty line. The ledger records it as a proposal by
+`--actor`, with the reason as evidence; it does not alter accepted state. Every
+`not-reproduced` summary is copied verbatim into the next discovery prompt.
+Closure then requires the fixed panel to accept `open`, `fixed`, `refuted`,
+`nonblocking`, or `disputed`, with evidence.
+
+Accepted state decides the terminal result: open material violations block;
+fixed, independently refuted, and nonblocking findings clear; unresolved
+material disagreement is `REVIEW_ADJUDICATION`; and a reviewer that returns no
+usable content is `REVIEW_INCOMPLETE`.
 
 ## Convergence
 
