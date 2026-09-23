@@ -57,17 +57,18 @@ every issue title for approval, files them in Linear, and dispatches.
 
 ---
 
-## The five skills we wrote
+## The six skills we wrote
 
 | Skill | One line |
 |---|---|
 | `hanig-project` | The front door: survey, interview, plan, approve, file, dispatch, report. |
+| `hanig-orchestrate` | The authorized loop: delegate, watch, adjudicate, merge, reconcile, report, hand off. |
 | `hanig-swarm` | The coordinator: validate a DAG, isolate each attempt, dispatch, advance, judge. |
 | `hanig-verified-workflow` | Declare and verify what "done" means for one batch job. |
 | `hanig-review-gate` | Adversarial multi-model review of code and of the claims made about it. |
 | `hanig-portable-handoff` | Capture and resume run state across machines. |
 
-All five are prefixed `hanig-` so they can never collide with an Arc
+All six are prefixed `hanig-` so they can never collide with an Arc
 org-managed skill name. That prefix is now load-bearing rather than tidy:
 `install.sh` reads it as the authorship namespace, and anything under
 `skills/` outside it is treated as vendored -- installed by us, written
@@ -249,6 +250,30 @@ dispatch needs (input paths and globs, output destinations, account, partition,
 any config file the command reads) must be settled before finishing. This is
 enforced, not remembered: `swarm.py validate` refuses a plan whose declared
 inputs are empty, still placeholders, or match nothing.
+
+### hanig-orchestrate
+
+The operating mode for a session driving an existing run. It points to the
+owner-originated mandate as the sole authority and covers authority
+confirmation, delegated prompts, watcher honesty, preservation, review
+adjudication, merge, tracker reconciliation, the ordered three-part report,
+and takeover.
+
+It has no coordinator executable of its own. Set `HANIG_ORCHESTRATE_DIR` to the
+loaded skill directory, then use the programs from the separately loaded
+`hanig-project`, `hanig-swarm`, `hanig-review-gate`, and
+`hanig-portable-handoff` skills through their own directory variables. A
+selective install names all five bundles:
+
+```sh
+./install.sh --agent codex \
+  --only hanig-orchestrate --only hanig-project --only hanig-swarm \
+  --only hanig-review-gate --only hanig-portable-handoff
+```
+
+`swarm.py advance` remains one offline, locked pass that exits. A deterministic
+host scheduler repeats it; the orchestrating session performs connected review,
+merge, tracker, and reporting work around those passes.
 
 ### hanig-swarm
 
@@ -608,7 +633,7 @@ org-managed collisions remain hard failures, and separately edited copies can
 still drift later.
 
 **`--allow-org-shadow` is required here, and permanently.** A copy of these
-skills is maintained on Claude Science, so all five also arrive in the Arc org
+skills is maintained on Claude Science, so all six also arrive in the Arc org
 store through catalog sync. That is deliberate, not a mistake to clean up.
 
 The installer still refuses by default, because the hazard is real: which store
@@ -810,6 +835,7 @@ bin/doctor                  what is installed, from where, and does it still run
 bin/probe.sh                read-only environment probe for a new host
 bin/make-release            release packaging
 skills/hanig-project/       survey.py, tickets.py
+skills/hanig-orchestrate/   authorized operating loop and takeover contract
 skills/hanig-swarm/         swarm.py, unit.py, converge.py, swarm-cron.sh
 skills/hanig-review-gate/   review.py, committee.py, reviewers.json, PROTOCOL.md
 skills/hanig-verified-workflow/  contract.py

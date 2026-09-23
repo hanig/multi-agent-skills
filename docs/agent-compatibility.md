@@ -88,6 +88,7 @@ support.
 
 | Bundle | Origin | Loader/frontmatter | Host-specific names, paths, siblings, optional services | Support classification |
 |---|---|---|---|---|
+| `hanig-orchestrate` | authored | portable / all four | owner mandate; authored project, swarm, review, and handoff siblings; optional scheduler, reviewers, tracker, and Paseo | capability-limited; installation supplies instructions, never authority or liveness |
 | `hanig-project` | authored | portable / all four | Python/Git helpers; sibling `hanig-swarm`; tracker connector and approval gate; optional scheduler/Paseo | capability-limited; Linear uses the outbox contract |
 | `hanig-swarm` | authored | portable / all four | Python/Git, Slurm, optional Paseo; sibling authored scripts; coordinator-only credentials | capability-limited; Slurm/dispatch behavior is not a host-worker promise |
 | `hanig-verified-workflow` | authored | portable / all four | Python helper, Git evidence, `sbatch`/`sacct`, project-local Nextflow/Snakemake | capability-limited; usable locally only where its workflow programs exist |
