@@ -520,12 +520,23 @@ A plan is JSON with a `units` list. Fields the coordinator reads:
 | `continuation` | `{"max": N}`: bounded nudges to a code agent that settled without producing |
 | `pool`, `gpu_hours`, `env` | declared resource facts |
 
-Every `code` unit must pass a NUL-safe Git cleanliness preflight on its exact
-execution checkout before Paseo is called. Staged, unstaged, conflicted,
-renamed, deleted, submodule-dirty, and untracked paths all refuse launch and
-are escaped in a durable per-attempt receipt. A non-code unit opts into the
-same rule with `workspace_policy: {"requires_clean_git": true, "path":
-"/checkout"}`. No refusal stashes, resets, deletes, commits, or ignores a path.
+Every `code` unit runs in a coordinator-created linked worktree at its anchored
+base; Paseo receives that existing path and never owns its cleanup. Before the
+coordinator removes it, tracked and untracked bytes must be copied outside the
+checkout, restore-checked by content digest, and atomically published as a
+complete snapshot.
+Failed preservation retains the worktree. The recovery copy is audit-only,
+never completion evidence or resume authority. A non-code unit can require a
+NUL-safe clean checkout with `workspace_policy: {"requires_clean_git": true,
+"path":"/checkout"}`. No refusal stashes, resets, deletes, commits, or ignores
+a path.
+
+Only the exact coordinator-bound linked-worktree `.git` pointer is excluded as
+Git metadata; if that object is replaced, its bytes are preserved like any
+other worktree content. Persisted legacy state whose Paseo-owned checkout was
+already absent before this invariant records that recovery is unavailable and
+runs no further cleanup—it cannot manufacture bytes that an older lifecycle
+already deleted.
 
 **`needs`, `inputs`, `outputs` and `sbatch` must be JSON lists.** A string is
 refused, because the code that reads them iterates character by character: for
