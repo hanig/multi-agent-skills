@@ -53,6 +53,7 @@ import worktree as W  # noqa: E402
 import verify as V  # noqa: E402
 import converge as CV  # noqa: E402  the declared-convergence gate
 import coordinator_paths as CP  # noqa: E402
+import recovery as R  # noqa: E402  audit-only worktree preservation
 
 STATE_FILE = "swarm-state.json"
 KINDS = U.KINDS
@@ -2716,10 +2717,8 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
     anchored_base = None
     if kind == "code":
         # Capture only facts the coordinator can know before the agent exists.
-        # Paseo chooses the managed worktree path while servicing `run`, so
-        # the final launch snapshot is completed from that command's trusted
-        # response below. The immutable base is durable before the command:
-        # recovery may ask Paseo for the path, but never re-resolves a ref.
+        # The immutable base and generated path are durable before the
+        # coordinator creates the worktree or asks Paseo to run in it.
         attempt = Path(unit_dir).name
         existing_intent = ((((state or {}).get("units") or {}).get(u["id"]) or {})
                            .get("attempt_launch_intents") or {}).get(attempt)
@@ -2793,9 +2792,9 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
                 anchored_base["seal"])
     if kind == "code" and not dry_run and state_dir is not None:
         # The immutable base and desired branch are authority. Persist them
-        # before Paseo can create an agent; a crash recovery may discover the
-        # cwd from Paseo, but it must never discover a replacement base from a
-        # ref that could have moved in the meantime.
+        # before a worktree or agent can exist; crash recovery may identify an
+        # existing checkout, but must never discover a replacement base from
+        # a ref that could have moved in the meantime.
         save_state(state_dir, state)
     if _requires_clean_workspace(u) and kind != "code" and not dry_run:
         facts = trusted_launch_facts(state or {}, u["id"], unit_dir)
@@ -2941,10 +2940,10 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
             return None, f"launched pid {proc.pid} but {werr}"
         return f"engine-{proc.pid}", None
     if kind == "code":
-        # Paseo owns both the agent and its per-attempt worktree. `--cwd`
-        # names the trusted SOURCE repository only so Paseo knows which
-        # project to branch from; the agent's cwd is the newly-created path
-        # returned by this command and recorded below.
+        # The coordinator owns the per-attempt worktree. Paseo receives it as
+        # an ordinary cwd and therefore cannot delete it when an agent closes.
+        # This is the lifecycle boundary that lets cleanup fail closed on a
+        # restore-checked snapshot instead of racing Paseo's workspace GC.
         attempt = Path(unit_dir).name
         intent = (((state or {}).get("units", {}).get(u["id"], {})
                    .get("attempt_launch_intents") or {}).get(attempt))
@@ -2997,7 +2996,8 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
                     f"pre-existing worktree {reuse_workspace!r}: "
                     f"{ownership_problem}")
             reuse_error = _complete_code_launch(
-                state, u, unit_dir, reuse_workspace)
+                state, u, unit_dir, reuse_workspace,
+                workspace_owner="coordinator")
             if reuse_error:
                 return None, (
                     f"attempt {attempt!r} has an unowned worktree, but it "
@@ -3006,6 +3006,30 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
             # safe to create the missing agent in it without recreating Git
             # resources or resolving a live ref.
             save_state(state_dir, state)
+        else:
+            reuse_workspace, git_pointer_sha256, create_error = (
+                _create_code_worktree(state_dir, intent))
+            if reuse_workspace:
+                workspace_meta = _register_code_workspace(
+                    state, u, unit_dir, reuse_workspace,
+                    workspace_owner="coordinator")
+                # Registration precedes verification so even a rejected
+                # checkout remains visible to preservation and cleanup.
+                save_state(state_dir, state)
+            if create_error:
+                return None, create_error
+            complete_error = _complete_code_launch(
+                state, u, unit_dir, reuse_workspace,
+                workspace_owner="coordinator",
+                git_pointer_sha256=git_pointer_sha256)
+            if complete_error:
+                workspace_meta["verification"] = "refused"
+                workspace_meta["cleanup_pending"] = True
+                workspace_meta["verification_problem"] = complete_error
+                save_state(state_dir, state)
+                return None, (f"coordinator-created worktree could not be "
+                              f"verified: {complete_error}")
+            save_state(state_dir, state)
         # U.run contains the short-lived Paseo client's environment. The
         # long-lived Paseo daemon is a separate process boundary: a live probe
         # showed its provider credentials can still reach an agent even when
@@ -3013,15 +3037,7 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
         # those provider variables. Do not mistake this boundary for daemon
         # isolation; the daemon must itself be launched without ambient keys.
         argv = ["paseo", "run", "--background", "--json",
-                "--cwd", str(source_repo)]
-        if reuse_workspace:
-            argv[argv.index("--cwd") + 1] = str(reuse_workspace)
-        else:
-            argv += ["--new-workspace", "worktree",
-                     "--worktree-mode", "branch-off",
-                     "--worktree-slug", intent["worktree_slug"],
-                     "--new-branch", intent["branch"],
-                     "--base", intent["base_commit"]]
+                "--cwd", str(reuse_workspace)]
         argv += ["--provider", u.get("provider") or DEFAULT_AGENT_PROVIDER,
                 # The title carries the ATTEMPT id, mirroring the Slurm job
                 # name, so an agent created just before a crash can be found
@@ -3067,6 +3083,13 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
 
         rc, out, err = U.run(argv, timeout=180)
         if rc != 0:
+            workspace_meta = _register_code_workspace(
+                state, u, unit_dir, reuse_workspace,
+                workspace_owner="coordinator")
+            workspace_meta["verification"] = "refused"
+            workspace_meta["cleanup_pending"] = True
+            workspace_meta["verification_problem"] = "paseo run failed"
+            save_state(state_dir, state)
             return None, f"paseo run failed: {_paseo_error(out, err)}"
         # Read the id from JSON. Scanning output tokens for "something long
         # with a dash in it" would happily return a branch name or a path.
@@ -3076,16 +3099,17 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
         rec = _paseo_json(out) or {}
         agent = (rec.get("agentId") or rec.get("AgentId")
                  or rec.get("id") or rec.get("Id"))
-        workspace = rec.get("cwd") or rec.get("Cwd")
+        reported_workspace = rec.get("cwd") or rec.get("Cwd")
+        workspace = reuse_workspace
         workspace_id = (_paseo_workspace_id(out)
                         or rec.get("workspaceId") or rec.get("WorkspaceId"))
         # Paseo has already acted. Persist ownership of the resource now,
         # before checks that may reject it; registration makes it cleanable
-        # and does not endorse its contents. Even a malformed response with
-        # no cwd gets an id/slug record rather than becoming invisible.
+        # and does not endorse its contents. Cleanup remains bound to the
+        # coordinator-created path even if Paseo omits or misreports cwd.
         workspace_meta = _register_code_workspace(
             state if state is not None else {}, u, unit_dir, workspace,
-            workspace_id=workspace_id)
+            workspace_id=workspace_id, workspace_owner="coordinator")
         if state_dir is not None:
             save_state(state_dir, state)
         if not agent:
@@ -3097,21 +3121,14 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
                 save_state(state_dir, state)
             return None, (f"paseo run returned no agent id: "
                           f"{_paseo_error(out, err)}")
-        if not workspace:
-            workspace_meta["verification"] = "refused"
-            workspace_meta["cleanup_pending"] = True
-            workspace_meta["verification_problem"] = (
-                f"Paseo returned agent {agent} but no worktree cwd")
-            if state_dir is not None:
-                save_state(state_dir, state)
-            return None, (f"paseo run returned agent {agent} but no worktree "
-                          f"cwd: {_paseo_error(out, err)}")
         if reuse_workspace:
             facts = trusted_launch_facts(state, u["id"], unit_dir)
             identity_error = W.workspace_identity_problem(U.run, facts)
-            if str(Path(workspace).resolve()) != reuse_workspace:
+            if (reported_workspace is not None
+                    and str(Path(reported_workspace).resolve())
+                    != reuse_workspace):
                 identity_error = (f"Paseo attached the recovered agent to "
-                                  f"{workspace!r}, not authenticated worktree "
+                                  f"{reported_workspace!r}, not authenticated worktree "
                                   f"{reuse_workspace!r}")
             if identity_error:
                 workspace_meta["verification"] = "refused"
@@ -3123,7 +3140,8 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
                               f"{identity_error}")
         complete_err = _complete_code_launch(
             state if state is not None else {}, u, unit_dir, workspace,
-            workspace_id=workspace_id, recovery=bool(reuse_workspace))
+            workspace_id=workspace_id, recovery=True,
+            workspace_owner="coordinator")
         if complete_err:
             workspace_meta["verification"] = "refused"
             workspace_meta["cleanup_pending"] = True
@@ -3581,7 +3599,7 @@ def _note_claimed_attempt(u, root, state_dir, attempt, job):
 
 
 def _code_worktree_names(unit_dir):
-    """Names Paseo/Git resources from the already-random attempt id."""
+    """Name coordinator/Git resources from the random attempt id."""
     attempt = Path(unit_dir).name
     return attempt, f"swarm-{attempt}"
 
@@ -3812,13 +3830,13 @@ def _dispatch_target_for_advance(u, cache):
 
 
 def _capture_code_launch(unit_dir, u, dispatch_source=None):
-    """Record the immutable input to Paseo's worktree creation.
+    """Record immutable input to coordinator worktree creation.
 
     The shared checkout is a SOURCE, not the execution tree. Its dirty index
     and working files cannot enter a worktree made from an object id, so
     checking them would both block unrelated human work and prove nothing
     about the tree the agent receives. The clean-at-launch guarantee comes
-    from Paseo constructing a new branch-off worktree from ``base_commit``.
+    from constructing a new branch-off worktree from ``base_commit``.
 
     The stash stack is the exception, and `_stash_refusal` says why.
     """
@@ -3836,13 +3854,13 @@ def _capture_code_launch(unit_dir, u, dispatch_source=None):
     slug, branch = _code_worktree_names(unit_dir)
     # The generated source name depends on the attempt id, so plan validation
     # cannot know this collision. Intent construction is the first point that
-    # can, and it is still before Paseo creates either an agent or worktree.
+    # can, and it is still before the coordinator creates a worktree or agent.
     if target == branch:
         return (f"unit {u.get('id')!r}: target_branch {target!r} is the same "
                 f"as generated attempt branch {branch!r}; a pull request "
                 f"cannot merge a branch into itself"), None
-    # Store the source identity in the same canonical form used for Paseo's
-    # returned cwd. This is an authority boundary, not a display path: a
+    # Store the source identity in the same canonical form used for the
+    # worktree cwd. This is an authority boundary, not a display path: a
     # relative spelling or symlink must not make the source checkout compare
     # unequal to itself later.
     repo = str(Path(repo).resolve())
@@ -3879,7 +3897,7 @@ def _capture_code_launch(unit_dir, u, dispatch_source=None):
                 f"attempt branch {branch!r} is absent on origin: "
                 f"{detail[:200]}. Refusing before agent creation"), None
     # The remote branch and the local branch are separate collision domains.
-    # Paseo must create the latter, while the former is the exact durable ref
+    # The coordinator creates the latter, while the former is the durable ref
     # the checker will query. A remote-tracking ref is deliberately irrelevant:
     # whether Git writes one after push is controlled by remote.origin.fetch.
     local_ref = f"refs/heads/{branch}"
@@ -3902,8 +3920,8 @@ def _capture_code_launch(unit_dir, u, dispatch_source=None):
         "base_tree": tree,
         "worktree_slug": slug,
         "branch": branch,
-        # The exact durable observation the checker will make after Paseo's
-        # managed worktree may already be gone. This is the remote ref NAME;
+        # The exact durable observation the checker will make after the
+        # worktree may already be gone. This is the remote ref NAME;
         # the agent controls its VALUE by pushing, and the checker derives and
         # validates that value rather than accepting an agent assertion.
         "judgment_ref": judgment_ref,
@@ -4002,17 +4020,53 @@ def _code_launch_record_payload(facts):
     return (json.dumps(rec, indent=1, sort_keys=True) + "\n").encode()
 
 
-def _register_code_workspace(state, u, unit_dir, workspace, workspace_id=None):
-    """Record a Paseo-created workspace before deciding whether to trust it.
+def _create_code_worktree(state_dir, intent):
+    """Create the linked worktree the coordinator, not Paseo, will own."""
+    source = Path(intent["repo"]).resolve()
+    root = (Path(state_dir).resolve() / "code-worktrees")
+    workspace = root / intent["worktree_slug"]
+    try:
+        if os.path.commonpath((str(source), str(root))) == str(source):
+            return None, None, (
+                f"refusing coordinator worktree root {root}: it is "
+                f"inside operated repository {source}")
+    except ValueError:
+        pass
+    if workspace.parent != root or workspace.exists() or workspace.is_symlink():
+        return (None, None,
+                f"coordinator worktree path {workspace} is not fresh")
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return (None, None,
+                f"cannot create coordinator worktree root {root}: {exc}")
+    rc, _out, err = _git(
+        source, "worktree", "add", "-q", "-b", intent["branch"],
+        str(workspace), intent["base_commit"], timeout=120)
+    if rc != 0:
+        return None, None, (f"cannot create coordinator-owned worktree "
+                            f"{workspace}: {err[:200]}")
+    resolved = str(workspace.resolve())
+    pointer_digest, pointer_error = R.git_pointer_digest(
+        Path(resolved) / ".git")
+    if pointer_error:
+        return resolved, None, pointer_error
+    return resolved, pointer_digest, None
+
+
+def _register_code_workspace(state, u, unit_dir, workspace, workspace_id=None,
+                             workspace_owner=None):
+    """Record a workspace before deciding whether to trust it.
 
     This is cleanup bookkeeping, not launch verification. In particular, a
     path that later fails branch, base, or Git-identity checks must remain
-    visible and archivable rather than becoming an unowned Paseo resource.
+    visible and recoverable rather than becoming an unowned resource.
     """
     attempt = Path(unit_dir).name
     us = state.setdefault("units", {}).setdefault(u["id"], {})
     intent = (us.get("attempt_launch_intents") or {}).get(attempt) or {}
     path = str(Path(workspace).resolve()) if workspace else None
+    prior = (us.get("attempt_workspaces") or {}).get(attempt) or {}
     meta = {
         "path": path,
         "branch": intent.get("branch"),
@@ -4020,8 +4074,13 @@ def _register_code_workspace(state, u, unit_dir, workspace, workspace_id=None):
         "archived": False,
         "verification": "pending",
     }
+    owner = workspace_owner or prior.get("workspace_owner")
+    if owner:
+        meta["workspace_owner"] = owner
     if workspace_id:
         meta["workspace_id"] = workspace_id
+    elif prior.get("workspace_id"):
+        meta["workspace_id"] = prior["workspace_id"]
     us.setdefault("attempt_workspaces", {})[attempt] = meta
     return meta
 
@@ -4058,8 +4117,9 @@ def _write_code_launch_record(unit_dir, facts):
 
 
 def _complete_code_launch(state, u, unit_dir, workspace, workspace_id=None,
-                          recovery=False):
-    """Complete trusted launch facts from Paseo's returned worktree cwd.
+                          recovery=False, workspace_owner=None,
+                          git_pointer_sha256=None):
+    """Complete trusted launch facts from the verified worktree cwd.
 
     A new launch must still be exactly at its pinned base. Crash recovery is
     different: the already-running agent may honestly have committed while
@@ -4075,15 +4135,23 @@ def _complete_code_launch(state, u, unit_dir, workspace, workspace_id=None,
     problem = W.launch_host_problem(intent)
     if problem:
         return problem
+    prior_facts = (us.get("attempt_launch_facts") or {}).get(attempt) or {}
+    prior_meta = (us.get("attempt_workspaces") or {}).get(attempt) or {}
+    prior_identity = (prior_facts.get("workspace_identity")
+                      or prior_meta.get("workspace_identity") or {})
+    if git_pointer_sha256 is None:
+        # Carry forward only a digest the coordinator already stored. Never
+        # manufacture a launch baseline by observing the agent's live file.
+        git_pointer_sha256 = prior_identity.get("git_pointer_sha256")
     workspace = str(Path(workspace).resolve())
     if workspace == intent["repo"]:
-        return (f"Paseo reported the shared source checkout {workspace!r} "
+        return (f"the shared source checkout {workspace!r} was supplied "
                 f"instead of a per-attempt worktree")
     if not os.path.isdir(workspace):
-        return f"Paseo reported missing worktree {workspace!r}"
+        return f"attempt worktree {workspace!r} is missing"
     rc, top, _ = _git(workspace, "rev-parse", "--show-toplevel")
     if rc != 0 or str(Path(top).resolve()) != workspace:
-        return f"Paseo reported cwd {workspace!r}, which is not a Git worktree root"
+        return f"attempt cwd {workspace!r} is not a Git worktree root"
     rc, source_common, _ = _git(intent["repo"], "rev-parse", "--git-common-dir")
     rc2, worktree_common, _ = _git(workspace, "rev-parse", "--git-common-dir")
     if rc != 0 or rc2 != 0:
@@ -4091,44 +4159,41 @@ def _complete_code_launch(state, u, unit_dir, workspace, workspace_id=None,
     source_common = str((Path(intent["repo"]) / source_common).resolve())
     worktree_common = str((Path(workspace) / worktree_common).resolve())
     if source_common != worktree_common:
-        return (f"Paseo cwd {workspace!r} is not a worktree of trusted source "
+        return (f"attempt cwd {workspace!r} is not a worktree of trusted source "
                 f"repository {intent['repo']!r}")
     rc, worktree_git_dir, _ = _git(workspace, "rev-parse", "--git-dir")
     if rc != 0:
         return f"cannot identify Git metadata directory for {workspace!r}"
     worktree_git_dir = str((Path(workspace) / worktree_git_dir).resolve())
     if worktree_git_dir == worktree_common:
-        return (f"Paseo cwd {workspace!r} is the repository's main checkout, "
+        return (f"attempt cwd {workspace!r} is the repository's main checkout, "
                 f"not a linked per-attempt worktree")
-    # `paseo run --background` starts the agent as it creates the workspace.
-    # If an unusually fast honest agent advances HEAD before this response is
-    # checked, it is refused: a bounded availability failure is cheaper than
-    # admitting an execution tree whose initial state was never corroborated.
-    # Removing that race would require separate workspace creation followed
-    # by agent creation in the verified workspace.
+    # Initial creation requires the exact base before Paseo starts. Recovery
+    # may see honest commits made by the already-running agent and therefore
+    # accepts only descendant history.
     rc, branch, _ = _git(workspace, "rev-parse", "--abbrev-ref", "HEAD")
     if rc != 0 or branch != intent["branch"]:
-        return (f"Paseo worktree {workspace!r} is on branch {branch!r}, not "
+        return (f"attempt worktree {workspace!r} is on branch {branch!r}, not "
                 f"trusted attempt branch {intent['branch']!r}")
     rc, head, _ = _git(workspace, "rev-parse", "HEAD")
     if rc != 0:
-        return f"Paseo worktree {workspace!r} has no readable HEAD"
+        return f"attempt worktree {workspace!r} has no readable HEAD"
     if recovery:
         rc, _, _ = _git(workspace, "merge-base", "--is-ancestor",
                          intent["base_commit"], head)
         if rc != 0:
-            return (f"recovered Paseo worktree {workspace!r} at {head} does "
+            return (f"recovered attempt worktree {workspace!r} at {head} does "
                     f"not descend from trusted base {intent['base_commit']}; "
                     f"its history was replaced rather than extended")
     elif head != intent["base_commit"]:
-        return (f"Paseo worktree {workspace!r} is at {head}, not trusted "
+        return (f"attempt worktree {workspace!r} is at {head}, not trusted "
                 f"base {intent['base_commit']}")
     try:
         st = os.stat(workspace)
         common_st = os.stat(worktree_common)
         git_st = os.stat(worktree_git_dir)
     except OSError as exc:
-        return f"cannot identify Paseo worktree {workspace!r}: {exc}"
+        return f"cannot identify attempt worktree {workspace!r}: {exc}"
     identity = {"path": workspace, "realpath": workspace,
                 "device": st.st_dev, "inode": st.st_ino,
                 "git_common_dir": worktree_common,
@@ -4137,6 +4202,8 @@ def _complete_code_launch(state, u, unit_dir, workspace, workspace_id=None,
                 "git_dir": worktree_git_dir,
                 "git_dir_device": git_st.st_dev,
                 "git_dir_inode": git_st.st_ino}
+    if git_pointer_sha256 is not None:
+        identity["git_pointer_sha256"] = git_pointer_sha256
     intent_schema = intent.get("schema_version", 1)
     judgment_ref = intent.get("judgment_ref")
     direct_remote_judgment = intent_schema >= 3
@@ -4172,9 +4239,13 @@ def _complete_code_launch(state, u, unit_dir, workspace, workspace_id=None,
     if error or not seal:
         return error or "worktree launch record has no recoverable seal"
     us.setdefault("attempt_launch_facts", {})[attempt] = facts
+    prior = (us.get("attempt_workspaces") or {}).get(attempt) or {}
     meta = {"path": workspace, "branch": intent["branch"],
             "slug": intent["worktree_slug"], "workspace_identity": identity,
-            "archived": False}
+            "archived": False,
+            "workspace_owner": (workspace_owner
+                                or prior.get("workspace_owner")
+                                or ("paseo" if workspace_id else "unknown"))}
     if workspace_id:
         meta["workspace_id"] = workspace_id
     us.setdefault("attempt_workspaces", {})[attempt] = meta
@@ -6435,7 +6506,7 @@ def _report_would_archive_code_worktree(state, u, unit_dir, report):
             or meta.get("cleanup_gave_up")):
         return
     target = meta.get("workspace_id") or meta.get("path") or "unknown workspace"
-    line = (f"{u['id']}: DRY RUN -- would archive Paseo worktree {target} "
+    line = (f"{u['id']}: DRY RUN -- would preserve and clean worktree {target} "
             f"for attempt {attempt}; no cleanup retry was charged")
     if line not in report:
         report.append(line)
@@ -6455,14 +6526,14 @@ def _worktree_cleanup_failed(state, u, meta, report, detail):
 
 
 def _archive_code_worktree(state, u, unit_dir, report, state_dir=None):
-    """Archive a finished attempt's Paseo workspace; keep its Git branch.
+    """Preserve, restore-check, then remove a finished code worktree.
 
-    Paseo owns worktree lifecycle. Archiving removes the managed checkout
-    after its last active reference, while the branch remains available for
-    PR creation and inspection. Failures are tried three times per worktree.
-    After that automatic retries stop and one aggregate NEEDS_HUMAN report
-    counts and names every retained path, rather than burying the condition
-    in one message per attempt.
+    Coordinator-owned worktrees are removed directly with Git. Legacy
+    Paseo-owned workspaces are archived through Paseo. Neither destructive
+    path is reachable until an atomic audit snapshot has preserved tracked and
+    untracked bytes, bound them to the coordinator-state base identity, and
+    restored an identical copy. Recovery records are cleanup inputs only;
+    judging and retry code never consume them.
     """
     if u.get("kind") != "code" or not unit_dir:
         return
@@ -6485,6 +6556,119 @@ def _archive_code_worktree(state, u, unit_dir, report, state_dir=None):
     # A crash may consume one retry, but can never reset the bound to zero.
     if state_dir is not None:
         save_state(state_dir, state)
+    if state_dir is None:
+        _worktree_cleanup_failed(
+            state, u, meta, report,
+            "refusing worktree cleanup without coordinator state_dir for "
+            "a durable recovery snapshot")
+        return
+    intent = (us.get("attempt_launch_intents") or {}).get(attempt)
+    intent_problem = _code_launch_intent_problem(intent, u, attempt)
+    if intent_problem:
+        _worktree_cleanup_failed(
+            state, u, meta, report,
+            f"cannot bind recovery snapshot: {intent_problem}")
+        save_state(state_dir, state)
+        return
+    recovery_records = us.setdefault("attempt_recovery_snapshots", {})
+    workspace_path = meta.get("path")
+    if workspace_path and os.path.isdir(workspace_path):
+        workspace_identity = meta.get("workspace_identity") or {}
+        expected_git_dir = workspace_identity.get("git_dir")
+        expected_git_pointer_sha256 = workspace_identity.get(
+            "git_pointer_sha256")
+        recovery_record, recovery_error = R.preserve_worktree(
+            workspace_path, Path(state_dir) / "recovery-snapshots",
+            u["id"], attempt, intent["base_commit"], intent["base_tree"],
+            expected_git_dir=expected_git_dir,
+            expected_git_pointer_sha256=expected_git_pointer_sha256)
+        if recovery_error:
+            _worktree_cleanup_failed(
+                state, u, meta, report,
+                f"worktree preservation failed; checkout retained: "
+                f"{recovery_error}")
+            save_state(state_dir, state)
+            return
+        recovery_records[attempt] = recovery_record
+        meta["recovery_snapshot"] = "restore-checked"
+        # The completed record is durable before either destructive cleanup
+        # call. A crash may retry cleanup but cannot lose this prerequisite.
+        save_state(state_dir, state)
+        current_digest, current_error = R.tree_digest(
+            workspace_path, expected_git_dir,
+            expected_git_pointer_sha256)
+        if (current_error
+                or current_digest != recovery_record["content_sha256"]):
+            _worktree_cleanup_failed(
+                state, u, meta, report,
+                "worktree changed after its recovery snapshot was saved; "
+                "checkout retained: "
+                + (current_error or "content digest differs"))
+            save_state(state_dir, state)
+            return
+    else:
+        recovery_record = recovery_records.get(attempt)
+        recovery_error = R.validate_snapshot(
+            recovery_record, u["id"], attempt,
+            intent["base_commit"], intent["base_tree"])
+        if recovery_error:
+            legacy_paseo = (meta.get("workspace_owner") == "paseo"
+                            or (not meta.get("workspace_owner")
+                                and bool(meta.get("workspace_id"))))
+            if legacy_paseo:
+                # Persisted legacy state can describe a Paseo-owned checkout
+                # that Paseo deleted before preservation became mandatory.
+                # No destructive action remains to gate and the lost bytes
+                # cannot be reconstructed. Record that bounded migration fact
+                # without inventing a snapshot or completion authority.
+                meta["recovery_snapshot"] = (
+                    "unavailable-before-preservation-enforcement")
+                meta["archived"] = True
+                meta.pop("cleanup_pending", None)
+                meta["archived_at"] = time.strftime(
+                    "%Y-%m-%dT%H:%M:%S%z")
+                meta["cleanup_problem"] = (
+                    "legacy checkout was already absent before preservation "
+                    "enforcement; no recovery bytes exist")
+                save_state(state_dir, state)
+                report.append(
+                    f"{u['id']}: legacy worktree {workspace_path} was already "
+                    "absent before preservation enforcement; recorded the "
+                    "unrecoverable migration without running cleanup")
+                return
+            _worktree_cleanup_failed(
+                state, u, meta, report,
+                "worktree disappeared without a valid recovery snapshot: "
+                + recovery_error)
+            save_state(state_dir, state)
+            return
+        meta["recovery_snapshot"] = "restore-checked"
+        meta["archived"] = True
+        meta.pop("cleanup_pending", None)
+        meta["archived_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        save_state(state_dir, state)
+        return
+
+    if meta.get("workspace_owner") == "coordinator":
+        rc, out, err = U.run(
+            ["git", "-C", intent["repo"], "worktree", "remove", "--force",
+             str(workspace_path)], timeout=120)
+        if rc != 0:
+            _worktree_cleanup_failed(
+                state, u, meta, report,
+                f"could not remove coordinator-owned worktree "
+                f"{workspace_path}: {(err or out).strip()[:200]}")
+            save_state(state_dir, state)
+            return
+        meta["archived"] = True
+        meta.pop("cleanup_pending", None)
+        meta["archived_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        save_state(state_dir, state)
+        report.append(
+            f"{u['id']}: preserved and removed finished worktree "
+            f"{workspace_path}; branch {meta.get('branch')} remains")
+        return
+
     workspace_id = meta.get("workspace_id")
     if not workspace_id and meta.get("path"):
         workspace_id = _paseo_workspace_for_path(meta.get("path"))
@@ -6494,16 +6678,9 @@ def _archive_code_worktree(state, u, unit_dir, report, state_dir=None):
             if state_dir is not None:
                 save_state(state_dir, state)
     if not workspace_id:
-        if meta.get("path") and not os.path.exists(meta["path"]):
-            meta["archived"] = True
-            meta.pop("cleanup_pending", None)
-            meta["archived_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-            if state_dir is not None:
-                save_state(state_dir, state)
-            return
         _worktree_cleanup_failed(
             state, u, meta, report,
-            f"could not identify Paseo workspace for finished attempt "
+            f"could not identify cleanup owner for preserved attempt "
             f"{attempt}")
         if state_dir is not None:
             save_state(state_dir, state)
@@ -6523,8 +6700,8 @@ def _archive_code_worktree(state, u, unit_dir, report, state_dir=None):
     meta["archived_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     if state_dir is not None:
         save_state(state_dir, state)
-    report.append(f"{u['id']}: archived finished worktree {meta.get('path')}; "
-                  f"branch {meta.get('branch')} remains")
+    report.append(f"{u['id']}: preserved and archived legacy worktree "
+                  f"{meta.get('path')}; branch {meta.get('branch')} remains")
 
 
 def reconcile_orphan(unit_dir, allocated_at=None, kind=None):
@@ -6657,7 +6834,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     # Worktrees are needed while an agent can still be continued. Once an
     # attempt has a terminal judgment (including READY_FOR_PR), its committed
     # branch is the durable handoff and the checkout is operational debris.
-    # Retry failed archives on every advance; this bounds managed worktrees to
+    # Retry failed cleanups on every advance; this bounds managed worktrees to
     # live/interactive attempts plus cleanup failures that remain visible.
     for uid, u in sorted(units.items()):
         us = _unit_state(state, uid)
@@ -6784,7 +6961,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 continue
             us.pop("launch_recovery_problem", None)
             _set_unit_state(us, "SUBMITTED")
-            report.append(f"{uid}: recovered the agent's Paseo worktree and "
+            report.append(f"{uid}: recovered the agent's attempt worktree and "
                           f"completed its trusted launch snapshot")
             save_state(state_dir, state)
         if us.get("bind_pending") and us.get("job_id"):

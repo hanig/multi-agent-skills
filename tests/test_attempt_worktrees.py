@@ -1,4 +1,4 @@
-"""C11: every code attempt executes in its own Paseo-managed worktree."""
+"""C11: every code attempt executes in a coordinator-owned worktree."""
 import contextlib
 import json
 import os
@@ -90,14 +90,8 @@ class FakePaseo:
         if argv[:2] != ["paseo", "run"]:
             return self.real_run(argv, **kwargs)
         self.launches.append(list(argv))
-        source = Path(argv[argv.index("--cwd") + 1])
-        slug = argv[argv.index("--worktree-slug") + 1]
-        branch = argv[argv.index("--new-branch") + 1]
-        base = argv[argv.index("--base") + 1]
-        workspace = self.root / slug
-        subprocess.run(["git", "-C", str(source), "worktree", "add", "-q",
-                        "-b", branch, str(workspace), base], check=True,
-                       env=ENV, capture_output=True, text=True)
+        workspace = Path(argv[argv.index("--cwd") + 1])
+        slug = workspace.name
         out = (f"Created workspace wks_{slug} - fixture\n" + json.dumps(
             {"agentId": f"agent-{slug}", "cwd": str(workspace)}))
         return 0, out, ""
@@ -251,7 +245,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
             W.code_failure_reason("remote-ref-moved-during-judgment"),
             "remote-ref-unreadable")
 
-    def test_paseo_argv_uses_trusted_base_and_records_returned_worktree(self):
+    def test_paseo_receives_coordinator_worktree_at_trusted_base(self):
         attempt = self.attempt("code", "a1")
         before = git(self.repo, "rev-parse", "HEAD")
         state = {"units": {}}
@@ -271,16 +265,18 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual(job, "agent-a1")
         argv = fake.launches[0]
-        self.assertEqual(argv[argv.index("--new-workspace") + 1], "worktree")
-        self.assertEqual(argv[argv.index("--worktree-mode") + 1], "branch-off")
-        self.assertEqual(argv[argv.index("--worktree-slug") + 1], "a1")
-        self.assertEqual(argv[argv.index("--new-branch") + 1], "swarm-a1")
-        self.assertEqual(argv[argv.index("--base") + 1], before)
+        self.assertNotIn("--new-workspace", argv)
+        self.assertNotIn("--new-branch", argv)
         self.assertNotEqual(before, moved["head"])
         facts = state["units"]["code"]["attempt_launch_facts"]["a1"]
         self.assertEqual(facts["base_commit"], before)
         self.assertEqual(facts["execution_workspace"],
-                         str((self.tmp / "managed" / "a1").resolve()))
+                         str((self.tmp / "state" / "code-worktrees"
+                              / "a1").resolve()))
+        self.assertEqual(argv[argv.index("--cwd") + 1],
+                         facts["execution_workspace"])
+        self.assertEqual(state["units"]["code"]["attempt_workspaces"]
+                         ["a1"]["workspace_owner"], "coordinator")
         self.assertNotEqual(facts["execution_workspace"], facts["repo"])
 
     def test_dispatched_prompt_names_source_target_base_and_survives_newlines(self):
@@ -799,7 +795,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         self.assertEqual((state_dir / S.STATE_FILE).read_bytes(), before)
         self.assertFalse((state_dir / S.OUTBOX).exists())
         joined = "\n".join(report)
-        self.assertIn("DRY RUN -- would archive", joined)
+        self.assertIn("DRY RUN -- would preserve and clean", joined)
         self.assertIn(S.WORKTREE_CLEANUP_SUMMARY_PREFIX, joined)
         self.assertIn("would re-emit tracker", joined)
 
@@ -838,27 +834,26 @@ class TestPerAttemptWorktrees(unittest.TestCase):
             False, max_new=1)
         self.assertEqual(dispatched, 1, report)
 
-    def test_terminal_cleanup_archives_workspace_but_keeps_branch(self):
+    def test_terminal_cleanup_preserves_then_removes_worktree_and_keeps_branch(self):
         attempt = self.attempt("code", "cleanup")
         state = {"units": {}}
         _job, err = self.submit(code_unit(self.repo), attempt, False, state)
         self.assertIsNone(err)
-        workspace = self.tmp / "managed" / "cleanup"
+        workspace = Path(state["units"]["code"]["attempt_launch_facts"]
+                         ["cleanup"]["execution_workspace"])
         archived = []
         fake = self.fake
 
         def archive_spy(argv, **kwargs):
             if argv[:3] == ["paseo", "workspace", "archive"]:
                 archived.append(list(argv))
-                git(self.repo, "worktree", "remove", "--force", str(workspace))
-                return 0, "{}", ""
             return fake(argv, **kwargs)
 
         S.U.run = archive_spy
         report = []
         S._archive_code_worktree(state, code_unit(self.repo), str(attempt),
-                                 report)
-        self.assertEqual(len(archived), 1)
+                                 report, str(self.tmp / "state"))
+        self.assertEqual(archived, [])
         self.assertFalse(workspace.exists())
         self.assertEqual(git(self.repo, "rev-parse", "swarm-cleanup"),
                          git(self.repo, "rev-parse", "HEAD"))
@@ -1394,7 +1389,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         self.assertIn("already has agent agent-foreign", error)
         self.assertEqual(launches, [])
 
-    def test_no_cwd_response_still_registers_created_workspace(self):
+    def test_no_cwd_response_uses_coordinator_owned_worktree(self):
         attempt = self.attempt("code", "nocwd")
         state = {"units": {}}
         state_dir = self.tmp / "no-cwd-state"
@@ -1410,13 +1405,14 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         S.U.run = omit_cwd
         job, error = S._submit(
             code_unit(self.repo), str(attempt), False, state, str(state_dir))
-        self.assertIsNone(job)
-        self.assertIn("no worktree cwd", error)
+        self.assertEqual(job, f"agent-{attempt.name}")
+        self.assertIsNone(error)
         meta = S.load_state(str(state_dir))["units"]["code"][
             "attempt_workspaces"][attempt.name]
         self.assertEqual(meta["workspace_id"], f"wks_{attempt.name}")
-        self.assertIsNone(meta["path"])
-        self.assertTrue(meta["cleanup_pending"])
+        self.assertEqual(meta["path"], str(
+            (state_dir / "code-worktrees" / attempt.name).resolve()))
+        self.assertEqual(meta["workspace_owner"], "coordinator")
 
     def test_failed_verification_registers_worktree_for_retained_report(self):
         attempt = self.attempt("code", "verify-fails")
@@ -1428,24 +1424,26 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         def wrong_branch(argv, **kwargs):
             result = fake(argv, **kwargs)
             if argv[:2] == ["paseo", "run"]:
-                workspace = self.tmp / "managed" / attempt.name
-                git(workspace, "switch", "-q", "-c", "wrong-branch")
+                workspace = Path(argv[argv.index("--cwd") + 1])
+                git(workspace, "checkout", "-q", "-b", "wrong-branch")
             return result
 
         S.U.run = wrong_branch
         job, error = S._submit(
             unit, str(attempt), False, state, str(state_dir))
         self.assertIsNone(job)
-        self.assertIn("not trusted attempt branch", error)
+        self.assertIn("branch wrong-branch", error)
         durable = S.load_state(str(state_dir))
         meta = durable["units"]["code"]["attempt_workspaces"][attempt.name]
         self.assertEqual(meta["verification"], "refused")
         self.assertTrue(meta["cleanup_pending"])
         self.assertEqual(meta["path"],
-                         str((self.tmp / "managed" / attempt.name).resolve()))
+                         str((state_dir / "code-worktrees"
+                              / attempt.name).resolve()))
 
         def failing_archive(argv, **kwargs):
-            if argv[:3] == ["paseo", "workspace", "archive"]:
+            if (argv[:2] == ["git", "-C"]
+                    and "worktree" in argv and "remove" in argv):
                 return 1, "", "archive unavailable"
             if argv[:3] == ["paseo", "ls", "--json"]:
                 return 0, "[]", ""
@@ -1477,11 +1475,15 @@ class TestPerAttemptWorktrees(unittest.TestCase):
 
     def test_archive_retries_are_bounded_and_name_the_retained_path(self):
         attempt = self.attempt("code", "archive-fails")
-        unit = code_unit(self.repo)
+        unit, state = self.intent_state(attempt)
         path = str(self.tmp / "managed" / "archive-fails")
-        state = {"units": {"code": {"attempt_workspaces": {
+        Path(path).mkdir(parents=True)
+        Path(path, "untracked.txt").write_text("preserve me\n")
+        state["units"]["code"]["attempt_workspaces"] = {
             attempt.name: {"path": path, "workspace_id": "wks_fails",
-                           "archived": False}}}}}
+                           "workspace_owner": "paseo", "archived": False}}
+        state_dir = self.tmp / "archive-fails-state"
+        S.save_state(str(state_dir), state)
         calls = []
 
         def failing_archive(argv, **_kwargs):
@@ -1493,7 +1495,8 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         S.U.run = failing_archive
         report = []
         for _ in range(S.WORKTREE_ARCHIVE_MAX_ATTEMPTS + 1):
-            S._archive_code_worktree(state, unit, str(attempt), report)
+            S._archive_code_worktree(
+                state, unit, str(attempt), report, str(state_dir))
         meta = state["units"]["code"]["attempt_workspaces"][attempt.name]
         self.assertEqual(len(calls), S.WORKTREE_ARCHIVE_MAX_ATTEMPTS)
         self.assertTrue(meta["cleanup_gave_up"])
@@ -1507,12 +1510,15 @@ class TestPerAttemptWorktrees(unittest.TestCase):
             pass
 
         attempt = self.attempt("code", "cleanup-crash")
-        unit = code_unit(self.repo)
+        unit, state = self.intent_state(attempt)
         state_dir = self.tmp / "state"
-        state = {"schema_version": 1, "halted": None, "units": {
-            "code": {"attempt_workspaces": {attempt.name: {
-                "path": str(self.tmp / "managed" / attempt.name),
-                "workspace_id": "wks_crash", "archived": False}}}}}
+        path = self.tmp / "managed" / attempt.name
+        path.mkdir(parents=True)
+        (path / "untracked.txt").write_text("preserve me\n")
+        state.update({"schema_version": 1, "halted": None})
+        state["units"]["code"]["attempt_workspaces"] = {attempt.name: {
+            "path": str(path), "workspace_id": "wks_crash",
+            "workspace_owner": "paseo", "archived": False}}
         S.save_state(str(state_dir), state)
 
         def crash_during_archive(argv, **_kwargs):
