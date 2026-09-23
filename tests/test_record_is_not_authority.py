@@ -98,6 +98,12 @@ ALLOWED = {
         "that closes, fails and admits nothing",
     ("worktree.py", "launch_facts_problem"):
         "validates the coordinator-state snapshot schema and identity",
+    ("worktree.py", "attempt_belongs_to_host"):
+        "answers from coordinator-state launch facts whether a host may act "
+        "on host-local attempt state",
+    ("worktree.py", "launch_host_problem"):
+        "compares the coordinator-state launch host to this coordinator "
+        "before any host-scoped identity is observed",
     ("worktree.py", "workspace_identity_problem"):
         "checks the live directory against coordinator-state identity",
     ("worktree.py", "validate_pinned_head"):

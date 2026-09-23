@@ -584,6 +584,7 @@ AUTHORITY_KEYS = frozenset({
     "repo", "remote", "repository_remote", "repository_remote_raw",
     "workspace_identity", "branch", "base_commit", "base_tree",
     "execution_workspace", "clean_at_launch", "dirty_paths", "judgment_ref",
+    "launch_host",
 })
 
 
@@ -831,6 +832,53 @@ def effective_remote_ref(facts):
     return None
 
 
+def attempt_belongs_to_host(facts, current_host=None):
+    """Whether this host owns the attempt: ``True``, ``False``, or unknown.
+
+    The recorded identifier is ``os.uname().nodename``, not a claim about
+    physical hardware. If that identifier changes, this predicate must return
+    ``False``: no trusted fact proves the renamed environment is the launch
+    host, and falling through to its device/inode namespace would recreate the
+    cross-host comparison this boundary exists to prevent.
+
+    Unknown is the answer for snapshots written before ``launch_host``. An
+    evaluator deciding whether to act on host-local timestamps must require
+    ``True``; treating unknown as local recreates the cross-host escalation
+    defect, while treating it as foreign invents launch authority.
+    """
+    launched = (facts or {}).get("launch_host")
+    if launched is None:
+        return None
+    here = os.uname().nodename if current_host is None else current_host
+    return launched == here
+
+
+def launch_host_problem(facts, current_host=None):
+    """Why host-scoped launch facts are unjudgeable here, or ``None``.
+
+    ``workspace_identity`` contains device and inode numbers assigned by one
+    kernel.  They have no meaning on another host, so callers must ask this
+    question before resolving, stating, or running Git in the recorded path.
+
+    Hostless snapshots predate this field.  They retain their legacy identity
+    checks: inventing a host after launch would rewrite the anchor rather than
+    explain it.  The optional ``current_host`` makes the predicate reusable by
+    evaluators that already captured their observation and by focused tests.
+    """
+    belongs = attempt_belongs_to_host(facts, current_host)
+    if belongs is not False:
+        return None
+    here = os.uname().nodename if current_host is None else current_host
+    launched = facts.get("launch_host")
+    return (
+        f"UNJUDGEABLE HERE: this attempt was launched on host "
+        f"{render_for_record(launched, _DIAGNOSTIC_LIMIT)}, but the current "
+        f"coordinator is host "
+        f"{render_for_record(here, _DIAGNOSTIC_LIMIT)}. Host-scoped paths, "
+        f"device numbers, and inode numbers are not compared across that "
+        f"boundary")
+
+
 def remote_push_transport(runner, repo):
     """Return (raw push URL, once-expanded URL, problem) for origin.
 
@@ -1026,6 +1074,9 @@ def _judge_anchored_ref(runner, facts, judgment=None):
 
 def workspace_identity_problem(runner, facts):
     """Return why judgment no longer addresses the launched Git worktree."""
+    host_problem = launch_host_problem(facts)
+    if host_problem:
+        return host_problem
     workspace = facts.get("execution_workspace")
     identity = facts.get("workspace_identity") or {}
     if not isinstance(identity, dict):
@@ -1175,6 +1226,10 @@ def judge_detail(runner, unit_dir, spec, launch_facts=None, judgment=None):
     if err:
         return False, None, err
     rec = launch_facts
+    err = launch_host_problem(rec)
+    if err:
+        _set_judgment_state(judgment, "unjudgeable-here")
+        return False, None, err
     # Ref-era attempts are judged from the durable remote branch selected
     # before the agent existed. Schema 3 recorded its local tracking name, so
     # effective_remote_ref derives the wire name from the separately anchored
@@ -1430,6 +1485,7 @@ def judge_and_capture(runner, unit_dir, spec, launch_facts=None):
 def code_failure_reason(production_state):
     """Machine reason for one failed durable-ref judgment."""
     return {
+        "unjudgeable-here": "unjudgeable-here",
         "worktree-lost-without-pushed-ref": "worktree-lost-before-push",
         "worktree-only-change-not-pushed": "no-pushed-ref",
         "no-pushed-ref-worktree-unreadable": "no-pushed-ref",
@@ -1616,6 +1672,9 @@ def validate_pinned_head(runner, launch_facts, produced):
     an availability failure and fails closed; another ref is never substituted.
     """
     problem = launch_facts_problem(launch_facts)
+    if problem:
+        return problem
+    problem = launch_host_problem(launch_facts)
     if problem:
         return problem
     if not isinstance(produced, str) or len(produced) not in (40, 64) or any(
