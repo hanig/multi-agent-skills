@@ -13,8 +13,10 @@ If you are driving a run rather than editing this repository, read `docs/orchest
 <!-- docs-truth:suite-lower-bound -->
 Full suite: at least 1,500 tests discoverable by unittest. Run the command below for the exact current total.
 
-Only the standalone marker above declares a live suite total. Other documents
-reference this floor; unmarked numbers remain ordinary prose.
+Only the standalone marker above declares the live suite total. A dated or
+historical count in this canonical document must have the standalone marker
+`<!-- docs-truth:historical -->` immediately above its prose paragraph. Other
+documents reference this floor and keep their count-shaped prose advisory.
 
 ```sh
 python3 -m unittest discover -s tests            # full suite, ~8 min
@@ -107,6 +109,7 @@ describes a stricter test than the code performs.
 
 Check every fix by mutation: revert the fix and the test must fail. A green suite after a change proves nothing on its own. When fixing an instance, sweep mechanically for its siblings instead of fixing the one in front of you. Correct the persisted state, not only the forward path: three review rounds in a row fixed how a value would be computed next time and left the wrong value on disk.
 
+<!-- docs-truth:historical -->
 Keep `if __name__ == "__main__"` at the bottom of a test file. A `__main__` block above later class definitions once hid 13 tests in one file and 9 classes in another while the suite stayed green. A test must not be satisfiable by its own source text: a grep that matches the comment explaining an absence is a false pass.
 
 ## Host facts that bite
