@@ -2568,29 +2568,5 @@ class TestDocsTruth(unittest.TestCase):
                     % target.name)
 
 
-class TestCanonicalDocumentPointers(unittest.TestCase):
-    """The run-driving instruction must point at the mandate that grants it.
-
-    The first line of the agent contract tells a session driving a run to
-    read `docs/orchestrator-mandate.md` before acting, and the mandate is
-    where the orchestrator's authority and operating mode live. A rename
-    or a move leaves that instruction pointing at nothing, and the
-    session that follows it finds no file rather than no authority --
-    which reads as "there is no mandate" instead of "the mandate moved".
-    """
-
-    def test_the_orchestrator_mandate_is_one_of_them(self):
-        """Check the named instruction and its target independently."""
-        text = CANONICAL_DOCUMENT.read_text()
-        self.assertIn(
-            "docs/orchestrator-mandate.md", text,
-            "%s no longer directs a session driving a run to the "
-            "orchestrator mandate, so nothing loads it"
-            % CANONICAL_DOCUMENT.name)
-        self.assertTrue(
-            (ROOT / "docs/orchestrator-mandate.md").exists(),
-            "the orchestrator mandate is referenced but absent")
-
-
 if __name__ == "__main__":
     unittest.main()

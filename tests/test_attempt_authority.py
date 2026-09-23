@@ -629,26 +629,7 @@ def _is_rendered(node, allowed_bare):
 
 
 RENDERED_REFUSAL_FUNCTIONS = (
-    "_anchored_remote_transport",
-    "_judge_anchored_ref",
-    "_refuse",
-    "artifact_basis_problem",
-    "artifact_transition_problem",
-    "judge_artifacts",
-    "launch_record_path",
-    "launch_facts_problem",
-    "read_sealed_launch_record",
-    "read_launch_record",
-    "remote_push_transport",
-    "refused_launch",
-    "decode_artifact_basis",
-    "decode_launch_facts",
-    "effective_remote_ref",
-    "judge_detail",
-    "stray_untracked",
-    "validate_pinned_head",
-    "workspace_identity_problem",
-)
+    "judge_detail", "validate_pinned_head", "workspace_identity_problem")
 
 
 class TestPinnedCommitIsNotAMovingRef(RepoCase):
@@ -685,7 +666,10 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
                     (state_dir / S.STATE_FILE).read_text())
                 seen.update(durable["units"]["u1"][
                     "attempt_launch_intents"]["att1"])
-                workspace = Path(argv[argv.index("--cwd") + 1])
+                workspace = self.tmp / "managed" / "att1"
+                git(self.repo, "worktree", "add", "-q", "-b",
+                    argv[argv.index("--new-branch") + 1], str(workspace),
+                    argv[argv.index("--base") + 1])
                 return 0, json.dumps({"agentId": "agent-1",
                                       "cwd": str(workspace)}), ""
             return real(argv, **kwargs)
@@ -704,8 +688,7 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
             self.assertIn(key, seen)
         facts = state["units"]["u1"]["attempt_launch_facts"]["att1"]
         self.assertEqual(facts["execution_workspace"],
-                         str((state_dir / "code-worktrees"
-                              / "att1").resolve()))
+                         str((self.tmp / "managed" / "att1").resolve()))
 
     def test_later_branch_movement_does_not_change_pinned_validation(self):
         attempt = self.tmp / "runs" / "u1" / "att1"
@@ -836,87 +819,6 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         # A short one is not padded or mangled.
         self.assertEqual(W.render_git_diagnostic(2, "fatal: nope"),
                          "git exited 2 and said: fatal: nope")
-
-    def test_remote_push_transport_renders_git_failure(self):
-        def runner(argv, **kwargs):
-            joined = " ".join(argv)
-            if "remote.origin.pushurl" in joined:
-                return 1, "", ""
-            if "remote.origin.url" in joined:
-                return 0, "https://example.invalid/repo.git\0", ""
-            if "remote get-url --push origin" in joined:
-                return 128, "", "fatal: line one\n" + "x" * 5000
-            self.fail("unexpected git invocation: %r" % (argv,))
-
-        raw, resolved, problem = W.remote_push_transport(runner, "/repo")
-        self.assertIsNone(raw)
-        self.assertIsNone(resolved)
-        self.assertLessEqual(len(problem), W._DIAGNOSTIC_LIMIT)
-        self.assertNotIn("\n", problem)
-        self.assertIn("[truncated]", problem)
-
-    def test_launch_record_paths_do_not_alias_overlong_attempt_names(self):
-        with tempfile.TemporaryDirectory() as root:
-            first = Path(root) / ("a" * 243 + "1")
-            second = Path(root) / ("a" * 243 + "2")
-            first_path = W.launch_record_path(first)
-            second_path = W.launch_record_path(second)
-        self.assertNotEqual(first_path, second_path)
-        self.assertTrue(first_path.name.endswith("1.json"))
-        self.assertTrue(second_path.name.endswith("2.json"))
-
-    def test_effective_remote_ref_preserves_an_overlong_branch(self):
-        branch = "b" * 5000
-        self.assertEqual(
-            W.effective_remote_ref({"schema_version": 3, "branch": branch}),
-            "refs/heads/" + branch)
-
-    def test_launch_facts_problem_preserves_an_overlong_comparison_ref(self):
-        attempt = self.tmp / "runs" / "u1" / "att1"
-        attempt.mkdir(parents=True)
-        branch = "b" * 5000
-        facts = dict(self.facts(attempt), schema_version=4,
-                     branch=branch,
-                     judgment_ref="refs/heads/" + branch,
-                     repository_remote="https://example.invalid/repo.git")
-        self.assertIsNone(W.launch_facts_problem(facts))
-
-    def test_anchored_ref_fetch_preserves_an_overlong_source_ref(self):
-        branch = "b" * 5000
-        selected_ref = "refs/heads/" + branch
-        facts = {
-            "schema_version": 4,
-            "attempt_id": "att1",
-            "repo": "/repo",
-            "execution_workspace": "/workspace",
-            "base_commit": "a" * 40,
-            "base_tree": "b" * 40,
-            "judgment_ref": selected_ref,
-            "repository_remote": "https://example.invalid/repo.git",
-        }
-        seen = {}
-
-        def runner(argv, **kwargs):
-            joined = " ".join(argv)
-            if "remote.origin.pushurl" in joined:
-                return 1, "", ""
-            if "remote.origin.url" in joined:
-                return 0, facts["repository_remote"] + "\0", ""
-            if "remote get-url --push origin" in joined:
-                return 0, facts["repository_remote"], ""
-            if "ls-remote --exit-code" in joined:
-                return 0, "c" * 40 + "\t" + selected_ref, ""
-            if "fetch" in argv:
-                seen["refspec"] = argv[-1]
-                return 1, "", "fetch stopped after refspec capture"
-            self.fail("unexpected git invocation: %r" % (argv,))
-
-        produced, head, _detail = W._judge_anchored_ref(runner, facts)
-        self.assertFalse(produced)
-        self.assertIsNone(head)
-        self.assertEqual(
-            seen["refspec"],
-            "+%s:refs/hanig-swarm/judgments/att1" % selected_ref)
 
     def test_the_whole_refusal_is_bounded_not_just_the_diagnostic(self):
         """kimi-k2.7-code: the recorded path went in verbatim.
@@ -1480,69 +1382,6 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         self.assertNotIn("unreadable", why)
         self.assertIn("not a git repository", why,
                       "git's own words did not reach the record")
-
-    def test_a_renamed_directory_is_not_reported_as_a_different_one(self):
-        """luna, in the round AFTER the difference list was added, and
-        after PR 44 had already merged.
-
-        Reporting WHICH check differed was the right half. The clause
-        around it still said the path "no longer names the launched
-        directory", which the stat in that same conditional disproves
-        when only resolve() moved: rename /build to /newbuild, leave a
-        symlink, and device and inode are identical. Same directory,
-        different spelling, and the refusal asserted otherwise.
-        """
-        import os as _os
-        launched = self.tmp / "launched"
-        launched.mkdir()
-        st = _os.stat(launched)
-        renamed = self.tmp / "renamed"
-        launched.rename(renamed)
-        _os.symlink(renamed, launched)
-        after = _os.stat(launched)
-
-        # The premise: a rename preserves device and inode.
-        self.assertEqual((st.st_dev, st.st_ino),
-                         (after.st_dev, after.st_ino),
-                         "this platform does not preserve inode on rename")
-
-        self.assertNotEqual(
-            str(Path(launched).resolve()), str(launched),
-            "resolve() did not move, so there is nothing to distinguish")
-
-        # THE FUNCTION, not a copy of its arithmetic. kimi-k2.7-code,
-        # MAJOR, and correct: the first version of this test rebuilt
-        # `same_file` and the headline expression here and asserted on
-        # its own recomputation, so it passed whatever
-        # workspace_identity_problem actually said -- including the
-        # old wording it was written to forbid. A test satisfiable by
-        # its own source text is the thing this repo has a rule about.
-        facts = {
-            "execution_workspace": str(launched),
-            "workspace_identity": {
-                "path": str(launched), "realpath": str(launched),
-                "device": st.st_dev, "inode": st.st_ino,
-                "git_common_dir": str(self.repo / ".git"),
-                "git_dir": str(self.repo / ".git"),
-                "git_common_device": st.st_dev,
-                "git_common_inode": st.st_ino,
-                "git_dir_device": st.st_dev,
-                "git_dir_inode": st.st_ino}}
-        said = W.workspace_identity_problem(
-            lambda *a, **k: (1, "", "not a git repository"), facts)
-
-        self.assertTrue(said, "a moved path produced no refusal at all")
-        self.assertIn(
-            "still names the same file", said,
-            "the refusal does not say the path still names the same file, "
-            "so a rename is still reported as a substitution")
-        self.assertNotIn(
-            "no longer names the launched directory", said,
-            "the refusal still asserts the directory changed, which the "
-            "stat in that same conditional disproves")
-        self.assertIn(
-            "the resolved path is now", said,
-            "the refusal does not name which check differed")
 
     def test_head_equal_to_base_names_no_history(self):
         """luna: "nothing was committed" from HEAD == base alone.

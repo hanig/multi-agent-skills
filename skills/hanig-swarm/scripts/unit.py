@@ -13,7 +13,7 @@ Two reviewers independently showed that is unreachable by observation: a window
 shows an artifact CHANGED, never which process changed it, and on a filesystem
 shared by ~18 people a concurrent writer is ordinary. No window length fixes it.
 
-Shreshth never had the problem. Each agent receives its own git worktree --
+Shreshth never had the problem. Paseo gives each agent its own git worktree --
 "one bounded, disjoint worker task and worktree per implementation worker" --
 so his cheap `--base` predicate is CONCLUSIVE because nothing else writes that
 tree. He did not solve attribution; an exclusive namespace made it unnecessary.
@@ -54,7 +54,7 @@ isolation boundary differ.
   code      judged HERE from a ref anchored before launch: the lifecycle is
             settled, declared outputs exist, and the pushed ref resolves to a
             committed tree change over the recorded base. The ref survives
-            coordinator cleanup. A merged pull request closes the
+            Paseo deleting its worktree. A merged pull request closes the
             unit. See `worktree.py`.
 
 The Slurm knowledge below is lifted VERBATIM from contract.py, which earned it

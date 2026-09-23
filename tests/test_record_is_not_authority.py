@@ -56,9 +56,6 @@ ALLOWED = {
         "intent (or validate_plan's fixed canary intent)",
     ("swarm.py", "_register_code_workspace"):
         "records cleanup metadata from the coordinator-state intent",
-    ("swarm.py", "_create_code_worktree"):
-        "creates the coordinator-owned worktree from the coordinator-state "
-        "launch intent before Paseo starts",
     ("swarm.py", "_registered_attempt_workspace"):
         "matches Paseo's registry against the coordinator-state intent",
     ("swarm.py", "_recover_code_launch"):
@@ -228,31 +225,6 @@ def _raw_reader_calls(path):
 
 
 class TestNoOneReadsAuthorityOutOfTheRecord(unittest.TestCase):
-
-    def test_recovery_material_has_no_judgment_or_resume_consumer(self):
-        uses = []
-        for path in sorted(SCRIPTS.glob("*.py")):
-            tree = ast.parse(path.read_text())
-            stack = []
-
-            class Visitor(ast.NodeVisitor):
-                def visit_FunctionDef(self, node):
-                    stack.append(node.name)
-                    self.generic_visit(node)
-                    stack.pop()
-
-                visit_AsyncFunctionDef = visit_FunctionDef
-
-                def visit_Constant(self, node):
-                    if node.value == "attempt_recovery_snapshots":
-                        uses.append((path.name,
-                                     stack[-1] if stack else "<module>"))
-
-            Visitor().visit(tree)
-        self.assertEqual(
-            uses, [("swarm.py", "_archive_code_worktree")],
-            "Recovery material may gate cleanup only. Judgment, completion, "
-            "retry, and resume paths must have no reader for it.")
 
     def test_every_use_of_an_authority_key_is_declared(self):
         offenders = []
@@ -446,7 +418,12 @@ class TestTheSealActuallyTravels(unittest.TestCase):
         def spy(argv, **kwargs):
             if argv and argv[0] == "paseo":
                 launched.append(argv)
-                workspace = Path(argv[argv.index("--cwd") + 1])
+                workspace = self.tmp / "managed" / "att1"
+                subprocess.run(
+                    ["git", "-C", str(self.repo), "worktree", "add", "-q",
+                     "-b", argv[argv.index("--new-branch") + 1],
+                     str(workspace), argv[argv.index("--base") + 1]],
+                    check=True, env=env, capture_output=True, text=True)
                 return 0, json.dumps({
                     "agentId": "11111111-2222-3333-4444-555555555555",
                     "cwd": str(workspace)}), ""

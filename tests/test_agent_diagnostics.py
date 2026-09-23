@@ -72,9 +72,7 @@ class TestAgentDiagnostics(unittest.TestCase):
             data = D.diagnostics(env=self._env(Path(tmp)))
         self.assertEqual(set(data["agents"]), {"claude", "codex", "opencode", "pi"})
         for agent in data["agents"].values():
-            self.assertIn(agent["agent_present"]["state"],
-                          {"absent", "configured", "slow", "probe_failed",
-                           "executable_found"})
+            self.assertIn(agent["agent_present"]["state"], {"absent", "configured", "undetermined", "executable_found"})
             self.assertIn("installation", agent)
             self.assertEqual(agent["discovery"]["native_probe"], "not run")
             self.assertIn("workflow", agent)
