@@ -45,6 +45,10 @@ EXPECTED_VERSIONS = {
 }
 VERSION_RE = re.compile(r"(?<!\d)(\d+\.\d+\.\d+)(?!\d)")
 MAX_CAPTURE_CHARS = 1_000_000
+PI_PACKAGE_NAMES = (
+    "@mariozechner/pi-coding-agent",
+    "@earendil-works/pi-coding-agent",
+)
 
 
 def _text(value: str | bytes | None) -> str:
@@ -661,31 +665,203 @@ def _opencode_discovery(
     }
 
 
-def _pi_package_root(
+def _readable_regular_file(path: Path) -> bool:
+    """Return whether the harness can actually read a regular-file entry."""
+    try:
+        if not path.is_file():
+            return False
+        with path.open("rb"):
+            return True
+    except OSError:
+        return False
+
+
+def _same_resolved_path(value: Any, expected: Path) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return Path(value).resolve() == expected.resolve()
+    except (OSError, RuntimeError, UnicodeError, ValueError):
+        return False
+
+
+def _pi_entry_path(package_root: Path, manifest: Mapping[str, Any]) -> Path | None:
+    main = manifest.get("main", "./dist/index.js")
+    if not isinstance(main, str) or not main:
+        return None
+    try:
+        return package_root / main
+    except (TypeError, ValueError, UnicodeError):
+        return None
+
+
+def _pi_package_roots(
     executable: str, *, cwd: Path, env: Mapping[str, str]
-) -> Path | None:
+) -> list[Path]:
     candidates: list[Path] = []
     resolved = Path(executable).resolve()
     candidates.extend(resolved.parents)
+    global_roots: list[Path] = []
     for command in (("npm", "root", "-g"), ("pnpm", "root", "-g")):
         if shutil.which(command[0], path=env.get("PATH")) is None:
             continue
         result = _run(command, cwd=cwd, env=env, timeout=15)
         if result["returncode"] == 0 and result["stdout"].strip():
-            candidates.append(
-                Path(result["stdout"].strip()) / "@mariozechner" / "pi-coding-agent"
-            )
+            global_roots.append(Path(result["stdout"].strip()))
+    # Preserve the legacy lookup order across every global package root.  The
+    # renamed identity is a fallback, so a partial renamed install in an
+    # earlier registry cannot shadow a working legacy install in a later one.
+    for package_name in PI_PACKAGE_NAMES:
+        for package_root in global_roots:
+            scope, name = package_name.split("/", 1)
+            candidates.append(package_root / scope / name)
+    matching: list[tuple[Path, dict[str, Any]]] = []
     for candidate in candidates:
         manifest = candidate / "package.json"
-        if not manifest.is_file():
-            continue
         try:
+            if not manifest.is_file():
+                continue
             data = json.loads(manifest.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
+        except (OSError, UnicodeError, ValueError, RecursionError):
             continue
-        if data.get("name") == "@mariozechner/pi-coding-agent":
-            return candidate
-    return None
+        if not isinstance(data, dict):
+            continue
+        if data.get("name") in PI_PACKAGE_NAMES:
+            matching.append((candidate, data))
+    # Identity priority applies across every source: the renamed package is a
+    # fallback even when it is an executable ancestor and the legacy package
+    # comes from a global package root.
+    complete: list[Path] = []
+    incomplete: list[Path] = []
+    for package_name in PI_PACKAGE_NAMES:
+        for candidate, data in matching:
+            if data.get("name") != package_name:
+                continue
+            entry = _pi_entry_path(candidate, data)
+            if entry is not None and _readable_regular_file(entry):
+                complete.append(candidate)
+            else:
+                incomplete.append(candidate)
+    # Preserve the more specific "entry point is absent" diagnostic when no
+    # candidate loads, without allowing an incomplete candidate to shadow a
+    # complete SDK later in the search order.
+    return complete + incomplete
+
+
+def _pi_package_root(
+    executable: str, *, cwd: Path, env: Mapping[str, str]
+) -> Path | None:
+    """Return the first ordered candidate for focused resolution checks."""
+    roots = _pi_package_roots(executable, cwd=cwd, env=env)
+    return roots[0] if roots else None
+
+
+def _pi_candidate_discovery(
+    package_root: Path,
+    *,
+    paths: Mapping[str, Path],
+    env: Mapping[str, str],
+    script: Path,
+) -> dict[str, Any]:
+    manifest_path = package_root / "package.json"
+    try:
+        if not manifest_path.is_file():
+            raise OSError(f"Pi SDK manifest is not a regular file: {manifest_path}")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, RecursionError) as exc:
+        return {"status": "failed", "kind": "native_discovery", "reason": str(exc)}
+    if not isinstance(manifest, dict):
+        return {
+            "status": "failed",
+            "kind": "native_discovery",
+            "reason": "Pi SDK package.json is not a JSON object",
+        }
+    entry = _pi_entry_path(package_root, manifest)
+    if entry is None or not _readable_regular_file(entry):
+        return {
+            "status": "unavailable",
+            "kind": "native_discovery",
+            "reason": f"Pi SDK entry point is absent or unreadable: {entry}",
+            "minimal_requirement": (
+                "a readable normal Node package build, not a CLI-only compiled binary"
+            ),
+            "invocation": {
+                "status": "not_run",
+                "reason": "actual invocation requires a configured model",
+            },
+        }
+    result = _run(
+        ["node", str(script), str(entry), str(paths["workspace"]), str(paths["pi"])],
+        cwd=paths["workspace"],
+        env=env,
+        timeout=30,
+    )
+    try:
+        payload = json.loads(result["stdout"])
+    except (json.JSONDecodeError, RecursionError, ValueError) as exc:
+        return {
+            "status": "failed",
+            "kind": "native_discovery",
+            "reason": f"Pi SDK loader output was not JSON: {exc}",
+            "stderr": result["stderr"].strip(),
+        }
+    if not isinstance(payload, dict):
+        return {
+            "status": "failed",
+            "kind": "native_discovery",
+            "reason": "Pi SDK loader output was not a JSON object",
+            "stderr": result["stderr"].strip(),
+        }
+    skills = payload.get("skills", [])
+    if not isinstance(skills, list):
+        skills = []
+    matches = [
+        skill
+        for skill in skills
+        if isinstance(skill, dict) and skill.get("name") == SKILL
+    ]
+    expected = paths["home"] / ".agents" / "skills" / SKILL / "SKILL.md"
+    matched_path = matches[0].get("filePath") if matches else None
+    diagnostics = payload.get("diagnostics")
+    checks = {
+        "command_succeeded": result["returncode"] == 0,
+        "one_representative_skill": len(matches) == 1,
+        "path_is_installed_copy": _same_resolved_path(matched_path, expected),
+        "loader_diagnostics_empty": isinstance(diagnostics, list)
+        and not diagnostics,
+    }
+    package_name = manifest.get("name")
+    package_version = manifest.get("version")
+    loader_passed = all(checks.values())
+    version_is_gated = (
+        package_name == PI_PACKAGE_NAMES[0]
+        and package_version == EXPECTED_VERSIONS["pi"]
+    )
+    return {
+        "status": (
+            "failed"
+            if not loader_passed
+            else ("passed" if version_is_gated else "unverified")
+        ),
+        "kind": "native_discovery",
+        "command": "node $SCRATCH/tmp/pi-native-loader.mjs <Pi SDK entry> "
+        "$SCRATCH/workspace $PI_CODING_AGENT_DIR",
+        "checks": checks,
+        "package_version_gate": {
+            "status": "passed" if version_is_gated else "failed",
+            "observed_package_name": package_name,
+            "observed_version": package_version,
+            "expected_package_name": PI_PACKAGE_NAMES[0],
+            "expected_version": EXPECTED_VERSIONS["pi"],
+        },
+        "skill": matches[0] if matches else None,
+        "loader_diagnostics": diagnostics,
+        "evidence": "Pi DefaultResourceLoader returned the installed shared skill",
+        "invocation": {
+            "status": "not_run",
+            "reason": "SDK loader discovery does not execute a configured model turn",
+        },
+    }
 
 
 def _pi_discovery(paths: Mapping[str, Path], env: Mapping[str, str]) -> dict[str, Any]:
@@ -701,31 +877,20 @@ def _pi_discovery(paths: Mapping[str, Path], env: Mapping[str, str]) -> dict[str
                 "reason": "Pi is absent and actual invocation also requires a configured model",
             },
         }
-    package_root = _pi_package_root(executable, cwd=paths["workspace"], env=env)
-    if package_root is None:
+    package_roots = _pi_package_roots(executable, cwd=paths["workspace"], env=env)
+    if not package_roots:
+        supported_names = " or ".join(PI_PACKAGE_NAMES)
         return {
             "status": "unavailable",
             "kind": "native_discovery",
-            "reason": "Pi CLI is present, but its installed SDK package root is not resolvable",
-            "minimal_requirement": "an importable @mariozechner/pi-coding-agent 0.73.1 package",
-            "invocation": {
-                "status": "not_run",
-                "reason": "actual invocation requires a configured model",
-            },
-        }
-    try:
-        manifest = json.loads(
-            (package_root / "package.json").read_text(encoding="utf-8")
-        )
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        return {"status": "failed", "kind": "native_discovery", "reason": str(exc)}
-    entry = package_root / str(manifest.get("main", "./dist/index.js"))
-    if not entry.is_file():
-        return {
-            "status": "unavailable",
-            "kind": "native_discovery",
-            "reason": f"Pi SDK entry point is absent: {entry}",
-            "minimal_requirement": "the normal Node package build, not a CLI-only compiled binary",
+            "reason": (
+                "Pi CLI is present, but its installed SDK package root is not "
+                f"resolvable under either supported package name: {supported_names}"
+            ),
+            "minimal_requirement": (
+                f"an importable {supported_names} package; the validated release "
+                "gate remains 0.73.1"
+            ),
             "invocation": {
                 "status": "not_run",
                 "reason": "actual invocation requires a configured model",
@@ -755,49 +920,31 @@ console.log(JSON.stringify({
 """,
         encoding="utf-8",
     )
-    result = _run(
-        ["node", str(script), str(entry), str(paths["workspace"]), str(paths["pi"])],
-        cwd=paths["workspace"],
-        env=env,
-        timeout=30,
-    )
-    try:
-        payload = json.loads(result["stdout"])
-    except json.JSONDecodeError as exc:
+    first_attempt: dict[str, Any] | None = None
+    for root in package_roots:
+        attempt = _pi_candidate_discovery(root, paths=paths, env=env, script=script)
+        if first_attempt is None:
+            first_attempt = attempt
+        if attempt.get("status") in ("passed", "unverified"):
+            return attempt
+    if first_attempt is None:
         return {
             "status": "failed",
             "kind": "native_discovery",
-            "reason": f"Pi SDK loader output was not JSON: {exc}",
-            "stderr": result["stderr"].strip(),
+            "reason": "Pi SDK candidates disappeared during discovery",
         }
-    matches = [
-        skill for skill in payload.get("skills", []) if skill.get("name") == SKILL
-    ]
-    expected = paths["home"] / ".agents" / "skills" / SKILL / "SKILL.md"
-    checks = {
-        "command_succeeded": result["returncode"] == 0,
-        "package_version_is_gated": manifest.get("version") == EXPECTED_VERSIONS["pi"],
-        "one_representative_skill": len(matches) == 1,
-        "path_is_installed_copy": bool(
-            matches
-            and Path(matches[0].get("filePath", "")).resolve() == expected.resolve()
-        ),
-        "loader_diagnostics_empty": not payload.get("diagnostics"),
-    }
-    return {
-        "status": "passed" if all(checks.values()) else "failed",
-        "kind": "native_discovery",
-        "command": "node $SCRATCH/tmp/pi-native-loader.mjs <Pi SDK entry> "
-        "$SCRATCH/workspace $PI_CODING_AGENT_DIR",
-        "checks": checks,
-        "skill": matches[0] if matches else None,
-        "loader_diagnostics": payload.get("diagnostics", []),
-        "evidence": "Pi DefaultResourceLoader returned the installed shared skill",
-        "invocation": {
-            "status": "not_run",
-            "reason": "SDK loader discovery does not execute a configured model turn",
-        },
-    }
+    supported_names = " or ".join(PI_PACKAGE_NAMES)
+    first_reason = first_attempt.get("reason", "native loader checks failed")
+    first_attempt["reason"] = (
+        "Pi CLI is present, but no importable SDK resolved under either "
+        f"supported package name: {supported_names}. First candidate failure: "
+        f"{first_reason}"
+    )
+    first_attempt["minimal_requirement"] = (
+        f"an importable {supported_names} package; the validated release gate "
+        "remains 0.73.1"
+    )
+    return first_attempt
 
 
 def _payload_execution(
@@ -867,6 +1014,20 @@ def _payload_execution(
         "stderr": result["stderr"].strip(),
         "native_agent_invocation": False,
     }
+
+
+def _version_gaps(
+    agents: Sequence[str],
+    versions: Mapping[str, Mapping[str, Any]],
+    native: Mapping[str, Mapping[str, Any]],
+) -> list[str]:
+    """Report either a CLI pin mismatch or a loadable but unpinned SDK."""
+    return [
+        agent
+        for agent in agents
+        if versions[agent].get("version_gate") != "passed"
+        or native[agent].get("status") == "unverified"
+    ]
 
 
 def _host() -> dict[str, Any]:
@@ -974,11 +1135,7 @@ def _non_claude_fixture(
     unavailable = [
         name for name, check in named_checks if check["status"] == "unavailable"
     ]
-    version_gaps = [
-        agent
-        for agent, version in versions.items()
-        if version.get("version_gate") != "passed"
-    ]
+    version_gaps = _version_gaps(NON_CLAUDE_AGENTS, versions, native)
     status = (
         "failed"
         if failures
@@ -1054,10 +1211,12 @@ def validate(source_root: Path = ROOT) -> tuple[dict[str, Any], int]:
             )
             if check.get("status") == "failed"
         ]
-        missing = [agent for agent in AGENTS if native[agent].get("status") != "passed"]
-        version_gaps = [
-            agent for agent in AGENTS if versions[agent].get("version_gate") != "passed"
+        missing = [
+            agent
+            for agent in AGENTS
+            if native[agent].get("status") in ("failed", "unavailable")
         ]
+        version_gaps = _version_gaps(AGENTS, versions, native)
         actual_invocation = {
             "status": "not_run",
             "reason": "this credentialless harness deliberately starts no paid/configured model",

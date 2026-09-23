@@ -1,6 +1,7 @@
 # Native agent validation
 
 - Date: 2026-09-05
+- Package-scope compatibility update: 2026-09-23
 - Initial integration: `2414d8a80e23ea8ae4e5638c65696b7a86f9f570`
 - Consumed installer commits: `9123802c9464dafade0356664a4fa7f2698d0c56`,
   then lifecycle hardening `c8c3650d725c42942888074690a3d752a210ac25`
@@ -59,7 +60,8 @@ model-driven invocation.
 | Host OpenCode | 1.15.12 at `/Users/hani/miniforge3/bin/opencode` |
 | Host Pi | not in `PATH` |
 | Disposable OpenCode | official npm `opencode-ai@1.18.29` |
-| Disposable Pi | official npm `@mariozechner/pi-coding-agent@0.73.1` |
+| Disposable Pi | official npm `@mariozechner/pi-coding-agent@0.73.1` (the validated release) |
+| Current host Pi | npm `@earendil-works/pi-coding-agent@0.86.1`; loader-compatible on 2026-09-23, but not version-gated by this report |
 
 The first CI evidence used official pinned agent packages with Node 26.7.0 on
 both hosts. The Linux artifact reports Ubuntu 22.04, x86_64, kernel 6.8,
@@ -99,6 +101,12 @@ disabled, and no auth variables. The exact releases were:
 |---|---:|---|---|
 | `opencode-ai` | 1.18.29 | `sha512-syIDVwlrYTgTOXzZe9SkInJWethbq6l3SNC762UeXyO0a9V0wGfd+U4yACvppwNBnhIsl0j2QPYYCyLpNaSomg==` | `https://registry.npmjs.org/opencode-ai/-/opencode-ai-1.18.29.tgz` |
 | `@mariozechner/pi-coding-agent` | 0.73.1 | `sha512-gXQh3SaZmWTfVMc4Ao5+LGbVeKvzyO7tolok0nLsZgq9nGjZx/EEU3NM8C+qUnB4Nvs2rswG5qOVgLzQkq0fHQ==` | `https://registry.npmjs.org/@mariozechner/pi-coding-agent/-/pi-coding-agent-0.73.1.tgz` |
+
+Pi is now also published as `@earendil-works/pi-coding-agent`. The host's
+0.86.1 package under that scope was loader-tested on 2026-09-23, but its
+tarball integrity digest was not measured here. The 0.73.1 version gate,
+digest, tarball URL, and disposable install below remain the proven old-scope
+provenance and are deliberately not relabelled or replaced.
 
 The disposable install command was equivalent to:
 
