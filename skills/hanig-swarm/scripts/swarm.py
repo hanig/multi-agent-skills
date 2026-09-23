@@ -2427,15 +2427,51 @@ def _deadline_exceeded(u, us, state, uid, observed_at=None):
 def _mark_deadline_exceeded(u, us, observed_at=None):
     """Persist the conservative escalation; return True on first breach."""
     now = time.time() if observed_at is None else float(observed_at)
-    first_breach = us.get("reason") != "deadline_exceeded"
+    active = (us.get("deadline_breach_active") is True
+              or us.get("reason") == "deadline_exceeded")
+    first_breach = not active
+    sequence = us.get("deadline_breach_seq")
+    if type(sequence) is not int or sequence < 1:
+        sequence = 0
+    if first_breach:
+        sequence += 1
+    elif sequence == 0:
+        # State written by the first deadline implementation has no sequence.
+        # Adopt its active breach as event one and retain that implementation's
+        # key until the breach ends rather than emitting a duplicate.
+        sequence = 1
+        us["deadline_breach_legacy_key"] = True
     prior_reason = us.get("reason")
     if first_breach and prior_reason:
         us["deadline_previous_reason"] = prior_reason
+    us["deadline_breach_active"] = True
+    us["deadline_breach_seq"] = sequence
     us["reason"] = "deadline_exceeded"
     us["deadline_s"] = float(u["deadline_s"])
     us["deadline_at"] = float(us["allocated_at"]) + float(u["deadline_s"])
-    _set_unit_state(us, "NEEDS_HUMAN", now)
+    # Marking the breach includes the operator-visible state transition. Every
+    # caller, including the post-check path, persists NEEDS_HUMAN through here.
+    _set_unit_state(us, "NEEDS_HUMAN", changed_at=now)
     return first_breach
+
+
+def _clear_deadline_breach(us):
+    """Clear one ended breach while retaining its monotonic event counter."""
+    was_active = (us.pop("deadline_breach_active", None) is True
+                  or us.get("reason") == "deadline_exceeded")
+    if not was_active:
+        return False
+    if us.get("reason") == "deadline_exceeded":
+        us.pop("reason", None)
+        prior_reason = us.pop("deadline_previous_reason", None)
+        if prior_reason:
+            us["reason"] = prior_reason
+    else:
+        us.pop("deadline_previous_reason", None)
+    us.pop("deadline_s", None)
+    us.pop("deadline_at", None)
+    us.pop("deadline_breach_legacy_key", None)
+    return True
 
 
 def _deadline_attempt_is_unresolved(u, us):
@@ -4544,7 +4580,15 @@ def _intent_key(project, uid, unit_state, us, verb, kind, evidence):
             and us.get("reason") == "deadline_exceeded"):
         # A prior NEEDS_HUMAN intent for a different reason must not suppress
         # the newly declared deadline breach for the same retained attempt.
-        key += "-deadline_exceeded"
+        # The coordinator-owned sequence also distinguishes a later breach
+        # after an operator ratifies a raised deadline for that attempt.
+        if us.get("deadline_breach_legacy_key") is True:
+            key += "-deadline_exceeded"
+        else:
+            sequence = us.get("deadline_breach_seq")
+            suffix = (str(sequence) if type(sequence) is int and sequence > 0
+                      else "legacy")
+            key += "-deadline_exceeded-" + suffix
     if verb == "close" and closing_evidence_for(kind) == "merged_pr":
         # Before merge-aware closure, a DONE code unit emitted open_pr under
         # the base key. Include the admitted receipt only for merge closes so
@@ -6498,9 +6542,10 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
 
     # A per-unit deadline is an escalation boundary, not a lease and not a
     # cancellation claim. Keep the attempt, job binding and output claim in
-    # place; stop judging or retrying it automatically and ask a person to
-    # inspect the still-possibly-live work. Raising/removing the deadline via
-    # the existing plan-ratification path lets a later advance resume checks.
+    # place. The boundary is a reason to inspect the attempt, so the checker
+    # still runs below; only a checked non-terminal result is escalated.
+    # Raising/removing the deadline via the existing plan-ratification path
+    # ends the active breach and lets a later crossing become a distinct event.
     deadline_observed_at = advance_observed_at
     for uid, u in sorted(units.items()):
         us = _unit_state(state, uid)
@@ -6510,30 +6555,10 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             report.append(
                 f"{uid}: DEADLINE_NOT_EVALUABLE_HERE -- {host_problem}")
             continue
-        if _deadline_exceeded(
-                u, us, state, uid, deadline_observed_at):
-            if dry_run:
-                report.append(
-                    f"{uid}: DRY RUN -- deadline_exceeded; would become "
-                    f"NEEDS_HUMAN without cancellation, claim release, or "
-                    f"retry")
-                continue
-            first_breach = _mark_deadline_exceeded(
-                u, us, deadline_observed_at)
-            if first_breach:
-                report.append(
-                    f"{uid}: NEEDS_HUMAN -- deadline_exceeded. The "
-                    f"{u['deadline_s']}s deadline measured from allocated_at "
-                    f"was crossed. The attempt remains bound and its output "
-                    f"claim is retained; no cancellation or retry was "
-                    f"requested.")
-        elif not dry_run and us.get("reason") == "deadline_exceeded":
-            us.pop("reason", None)
-            us.pop("deadline_s", None)
-            us.pop("deadline_at", None)
-            prior_reason = us.pop("deadline_previous_reason", None)
-            if prior_reason:
-                us["reason"] = prior_reason
+        if (not dry_run
+                and not _deadline_exceeded(
+                    u, us, state, uid, deadline_observed_at)):
+            _clear_deadline_breach(us)
     if not dry_run:
         save_state(state_dir, state)
 
@@ -6542,9 +6567,6 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     for uid, u in sorted(units.items()):
         us = _unit_state(state, uid)
         if dry_run or not us["attempt_dir"]:
-            continue
-        if _deadline_exceeded(
-                u, us, state, uid, deadline_observed_at):
             continue
         if (u.get("kind") == "code" and us.get("job_id")
                 and not trusted_launch_facts(
@@ -6566,6 +6588,17 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             if recovery_error:
                 us["launch_recovery_problem"] = recovery_error
                 _set_unit_state(us, "NEEDS_HUMAN")
+                # No trusted launch facts means the checker cannot run. A
+                # deadline crossed during that failed recovery may still
+                # supersede the recovery reason without inventing a verdict.
+                if _deadline_exceeded(u, us, state, uid):
+                    first_breach = _mark_deadline_exceeded(u, us)
+                    if first_breach:
+                        report.append(
+                            f"{uid}: NEEDS_HUMAN -- deadline_exceeded during "
+                            f"attempt recovery. The attempt remains bound; "
+                            f"no cancellation, claim release, or retry was "
+                            f"requested.")
                 report.append(f"{uid}: NEEDS_HUMAN -- {recovery_error}. The "
                               f"agent remains bound and no launch facts were "
                               f"admitted; repair or abandon this exact "
@@ -6629,6 +6662,14 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                     us["launch_recovery_pending"] = True
                     us["launch_recovery_problem"] = recovery_error
                     _set_unit_state(us, "NEEDS_HUMAN")
+                    if _deadline_exceeded(u, us, state, uid):
+                        first_breach = _mark_deadline_exceeded(u, us)
+                        if first_breach:
+                            report.append(
+                                f"{uid}: NEEDS_HUMAN -- deadline_exceeded "
+                                f"during attempt recovery. The attempt "
+                                f"remains bound; no cancellation, claim "
+                                f"release, or retry was requested.")
                     report.append(f"{uid}: {note}; NEEDS_HUMAN -- "
                                   f"{recovery_error}. The agent is retained, "
                                   f"but no launch facts were admitted.")
@@ -6756,26 +6797,6 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             report.append(f"{uid}: UNJUDGEABLE_HERE -- {host_problem}")
             save_state(state_dir, state)
             continue
-        if _deadline_exceeded(u, us, state, uid):
-            # Recovery can take long enough to cross the boundary after the
-            # advance-start observation. Re-evaluate with fresh time before
-            # invoking the checker: elapsed time cannot establish a verdict,
-            # and PREEMPTED here would mint the forbidden retry.
-            if dry_run:
-                report.append(
-                    f"{uid}: DRY RUN -- deadline_exceeded after recovery; "
-                    f"would become NEEDS_HUMAN without cancellation, claim "
-                    f"release, or retry")
-                continue
-            first_breach = _mark_deadline_exceeded(u, us)
-            if first_breach:
-                report.append(
-                    f"{uid}: NEEDS_HUMAN -- deadline_exceeded during "
-                    f"attempt recovery. It remains bound and its output "
-                    f"claim is retained; no cancellation or retry was "
-                    f"requested.")
-            save_state(state_dir, state)
-            continue
         if us.get("launch_recovery_problem"):
             report.append(f"{uid}: NEEDS_HUMAN -- "
                           f"{us['launch_recovery_problem']}")
@@ -6851,14 +6872,25 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         previous = us.get("state")
         previous_state_changed_at = us.get("state_changed_at")
         previous_state_changed_at_basis = us.get("state_changed_at_basis")
-        _set_unit_state(us, ("FAILED_EVIDENCE" if protocol_problem
-                             else NAME.get(rc, f"rc={rc}")))
+        checked_state = ("FAILED_EVIDENCE" if protocol_problem
+                         else NAME.get(rc, f"rc={rc}"))
 
-        # A check may itself span the deadline. Re-evaluate before the retry
-        # branch so a PREEMPTED result observed after the boundary cannot mint
-        # a fresh attempt. A genuine DONE/FAILED verdict remains terminal:
-        # elapsed time is telemetry and cannot replace execution evidence.
-        if _deadline_exceeded(u, us, state, uid):
+        # A deadline is a reason to inspect, never a reason to skip the only
+        # checker. Apply terminal execution evidence first. For a non-terminal
+        # result, re-evaluate after the check so PREEMPTED cannot mint a fresh
+        # attempt across the boundary. Keeping the active breach state in
+        # place also prevents one continuously exceeded deadline from looking
+        # like a new event on every poll.
+        terminal = {"DONE", "FAILED", "FAILED_EVIDENCE", "READY_FOR_PR",
+                    "PREFLIGHT_REFUSED", "HELD"}
+        if (checked_state not in terminal
+                and _deadline_exceeded(u, us, state, uid)):
+            if dry_run:
+                report.append(
+                    f"{uid}: DRY RUN -- deadline_exceeded after check; would "
+                    f"become NEEDS_HUMAN without cancellation, claim "
+                    f"release, or retry")
+                continue
             first_breach = _mark_deadline_exceeded(u, us)
             if first_breach:
                 report.append(
@@ -6868,6 +6900,9 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                     f"was requested.")
             save_state(state_dir, state)
             continue
+        _set_unit_state(us, checked_state)
+        if checked_state in terminal:
+            _clear_deadline_breach(us)
 
         # A DECLARED convergence criterion gates DONE. Undeclared, nothing
         # changes. This is the whole reason converge.py exists: the scheduler

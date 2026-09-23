@@ -136,7 +136,7 @@ class TestDeadlineBreach(unittest.TestCase):
         return (report, dispatched, halted,
                 S.load_state(str(state_dir)), state_dir, check, release)
 
-    def test_breach_blocks_without_check_retry_cancellation_or_claim_release(self):
+    def test_breach_checks_then_blocks_without_retry_cancel_or_claim_release(self):
         report, dispatched, halted, state, state_dir, check, release = \
             self._advance(allocated_at=100.0)
         current = state["units"]["u"]
@@ -146,7 +146,7 @@ class TestDeadlineBreach(unittest.TestCase):
         self.assertEqual(current["job_id"], "42")
         self.assertEqual(current["state_changed_at"], 200.0)
         self.assertEqual((dispatched, halted), (0, None))
-        check.assert_not_called()
+        check.assert_called_once()
         release.assert_not_called()
         self.assertIn("no cancellation or retry was requested",
                       "\n".join(report))
@@ -163,6 +163,47 @@ class TestDeadlineBreach(unittest.TestCase):
         self.assertNotIn("reason", current)
         check.assert_called_once()
         release.assert_not_called()
+
+    def test_success_evidence_waiting_since_before_deadline_wins_when_observed(self):
+        """A stopped coordinator observes at 200 work completed at 150."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_dir = root / "state"
+            attempt = root / "runs" / "u" / "a1"
+            state_dir.mkdir(parents=True)
+            attempt.mkdir(parents=True)
+            completed = attempt / "out.txt"
+            completed.write_text("done\n")
+            S.os.utime(completed, (150.0, 150.0))
+            plan = {"name": "p", "units": [unit(deadline_s=60)]}
+            state = {"schema_version": 1, "halted": None,
+                     "plan_digest": S.plan_digest(plan), "units": {"u": {
+                         "state": "SUBMITTED", "job_id": "42",
+                         "attempt_dir": str(attempt),
+                         "attempts": [str(attempt)], "gpu_hours": 0,
+                         "allocated_at": 100.0,
+                         "state_changed_at": 101.0}}}
+            anchor_launch_host(state, attempt)
+            S.save_state(str(state_dir), state)
+            check = mock.Mock(return_value=(S.DONE, "", "", "result"))
+            with mock.patch.object(S.time, "time", return_value=200.0), \
+                    mock.patch.object(S, "renew_lease", return_value=True), \
+                    mock.patch.object(S, "_check", check), \
+                    mock.patch.object(
+                        S, "_reported_check_result",
+                        return_value=({"receipt_sha256": "a" * 64}, None)), \
+                    mock.patch.object(S, "_release_output_claims"):
+                S.advance(plan, S.load_state(str(state_dir)),
+                          str(state_dir), str(root / "runs"), False)
+            current = S.load_state(str(state_dir))["units"]["u"]
+            intents = S.read_outbox(str(state_dir))
+            completed_at = int(completed.stat().st_mtime)
+        self.assertEqual(completed_at, 150)
+        self.assertEqual(current["state"], "DONE")
+        self.assertNotEqual(current.get("reason"), "deadline_exceeded")
+        self.assertFalse(any(intent["why"] == "deadline_exceeded"
+                             for intent in intents))
+        check.assert_called_once()
 
     def test_historical_state_gets_an_honest_first_observed_clock(self):
         _report, _dispatched, _halted, state, _sd, _check, _release = \
@@ -224,7 +265,7 @@ class TestDeadlineBreach(unittest.TestCase):
         self.assertEqual(current["attempt_dir"], str(attempt))
         allocate.assert_not_called()
 
-    def test_crossing_during_launch_recovery_blocks_before_check(self):
+    def test_crossing_during_launch_recovery_checks_then_blocks(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             state_dir = root / "state"
@@ -263,10 +304,11 @@ class TestDeadlineBreach(unittest.TestCase):
         self.assertEqual((dispatched, halted), (0, None))
         self.assertEqual(current["state"], "NEEDS_HUMAN")
         self.assertEqual(current["reason"], "deadline_exceeded")
-        self.assertIn("during attempt recovery", "\n".join(report))
+        self.assertIn("while the attempt was being checked",
+                      "\n".join(report))
         self.assertTrue(any(intent["why"] == "deadline_exceeded"
                             for intent in intents))
-        check.assert_not_called()
+        check.assert_called_once()
 
     def test_failed_launch_recovery_crossing_keeps_deadline_reason(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -312,6 +354,49 @@ class TestDeadlineBreach(unittest.TestCase):
         self.assertIn("during attempt recovery", "\n".join(report))
         self.assertTrue(any(intent["why"] == "deadline_exceeded"
                             for intent in intents))
+        check.assert_not_called()
+
+    def test_legacy_failed_launch_recovery_cannot_escalate_deadline(self):
+        """The recovery-error branch still requires exact local ownership."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_dir = root / "state"
+            attempt = root / "runs" / "u" / "a1"
+            state_dir.mkdir(parents=True)
+            attempt.mkdir(parents=True)
+            plan = {"name": "p", "units": [unit(
+                kind="code", repo=str(root / "repo"), deadline_s=60)]}
+            state = {"schema_version": 1, "halted": None,
+                     "plan_digest": S.plan_digest(plan), "units": {"u": {
+                         "state": "SUBMITTED", "job_id": "agent-1",
+                         "attempt_dir": str(attempt),
+                         "attempts": [str(attempt)], "gpu_hours": 0,
+                         "allocated_at": 100.0,
+                         "state_changed_at": 101.0,
+                         "attempt_launch_intents": {"a1": {}}}}}
+            S.save_state(str(state_dir), state)
+            clock = [150.0]
+
+            def recover(*_args, **_kwargs):
+                clock[0] = 170.0
+                return "workspace identity refused"
+
+            check = mock.Mock(side_effect=AssertionError(
+                "missing launch authority must stop before checking"))
+            with mock.patch.object(S.time, "time", side_effect=lambda: clock[0]), \
+                    mock.patch.object(S, "renew_lease", return_value=True), \
+                    mock.patch.object(S, "_recover_code_launch",
+                                      side_effect=recover), \
+                    mock.patch.object(S, "_check", check), \
+                    mock.patch.object(S, "_release_output_claims"):
+                S.advance(plan, S.load_state(str(state_dir)), str(state_dir),
+                          str(root / "runs"), False)
+            current = S.load_state(str(state_dir))["units"]["u"]
+            intents = S.read_outbox(str(state_dir))
+        self.assertEqual(current["state"], "NEEDS_HUMAN")
+        self.assertNotEqual(current.get("reason"), "deadline_exceeded")
+        self.assertFalse(any(intent["why"] == "deadline_exceeded"
+                             for intent in intents))
         check.assert_not_called()
 
     def test_terminal_done_evidence_remains_terminal_after_crossing(self):
@@ -365,6 +450,81 @@ class TestDeadlineBreach(unittest.TestCase):
         self.assertEqual([intent["why"] for intent in intents],
                          ["blocked on a person, not on compute",
                           "deadline_exceeded"])
+
+    def test_each_separate_breach_of_one_attempt_emits_its_own_intent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_dir = root / "state"
+            attempt = root / "runs" / "u" / "a1"
+            state_dir.mkdir(parents=True)
+            attempt.mkdir(parents=True)
+            first_plan = {"name": "p", "units": [unit(deadline_s=60)]}
+            raised_plan = {"name": "p", "units": [unit(deadline_s=6000)]}
+            state = {"schema_version": 1, "halted": None,
+                     "plan_digest": S.plan_digest(first_plan), "units": {"u": {
+                         "state": "SUBMITTED", "job_id": "42",
+                         "attempt_dir": str(attempt),
+                         "attempts": [str(attempt)], "gpu_hours": 0,
+                         "allocated_at": 100.0,
+                         "state_changed_at": 101.0}}}
+            anchor_launch_host(state, attempt)
+            S.save_state(str(state_dir), state)
+            check = mock.Mock(return_value=(S.RUNNING, "", "", ""))
+
+            def advance_at(plan, observed_at, accept_plan_change=False):
+                with mock.patch.object(
+                        S.time, "time", return_value=observed_at), \
+                        mock.patch.object(
+                            S, "renew_lease", return_value=True), \
+                        mock.patch.object(S, "_check", check), \
+                        mock.patch.object(S, "_release_output_claims"):
+                    S.advance(
+                        plan, S.load_state(str(state_dir)), str(state_dir),
+                        str(root / "runs"), False,
+                        accept_plan_change=accept_plan_change)
+
+            advance_at(first_plan, 200.0)
+            advance_at(first_plan, 201.0)
+            continuous = S.load_state(str(state_dir))["units"]["u"]
+            advance_at(raised_plan, 200.0, accept_plan_change=True)
+            middle = S.load_state(str(state_dir))["units"]["u"]
+            advance_at(raised_plan, 6200.0)
+            current = S.load_state(str(state_dir))["units"]["u"]
+            deadline_intents = [
+                intent for intent in S.read_outbox(str(state_dir))
+                if intent["why"] == "deadline_exceeded"]
+        self.assertEqual(continuous["deadline_breach_seq"], 1)
+        self.assertEqual(middle["state"], "RUNNING")
+        self.assertNotIn("deadline_breach_active", middle)
+        self.assertEqual(current["deadline_breach_seq"], 2)
+        self.assertEqual(len(deadline_intents), 2)
+        self.assertEqual(len({intent["key"] for intent in deadline_intents}), 2)
+        self.assertEqual(check.call_count, 4)
+
+    def test_adopting_active_legacy_breach_reuses_its_persisted_intent_key(self):
+        with tempfile.TemporaryDirectory() as state_dir:
+            declared = unit(deadline_s=60)
+            current = {"state": "NEEDS_HUMAN",
+                       "reason": "deadline_exceeded",
+                       "attempt_dir": "/runs/u/a1", "job_id": "42",
+                       "allocated_at": 100.0}
+            old_key = (S.outbox_key(
+                "p", "u", "NEEDS_HUMAN", current["attempt_dir"])
+                       + "-deadline_exceeded")
+            old_intent = {"key": old_key, "project": "p", "unit": "u",
+                          "verb": "block", "unit_state": "NEEDS_HUMAN",
+                          "why": "deadline_exceeded",
+                          "attempt_dir": current["attempt_dir"]}
+            Path(state_dir, S.OUTBOX).write_text(json.dumps(old_intent) + "\n")
+
+            self.assertFalse(S._mark_deadline_exceeded(
+                declared, current, observed_at=200.0))
+            emitted = S.emit_intent(
+                state_dir, "p", "u", "NEEDS_HUMAN", current, kind="slurm")
+            records = [json.loads(line) for line in
+                       Path(state_dir, S.OUTBOX).read_text().splitlines()]
+        self.assertIsNone(emitted)
+        self.assertEqual([record["key"] for record in records], [old_key])
 
     def test_deadline_supersedes_but_preserves_a_prior_human_reason(self):
         declared = unit(deadline_s=60)
@@ -595,6 +755,56 @@ class TestDeadlineBreach(unittest.TestCase):
             current = S.load_state(str(state_dir))["units"]["u"]
         self.assertEqual(current["state"], "NEEDS_HUMAN")
         self.assertEqual(current["state_changed_at"], 120.0)
+
+    def test_convergence_rejection_after_done_does_not_remint_deadline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_dir = root / "state"
+            attempt = root / "runs" / "u" / "a1"
+            state_dir.mkdir(parents=True)
+            attempt.mkdir(parents=True)
+            declared = unit(
+                deadline_s=60,
+                converge={"metrics": "m.jsonl",
+                          "criterion": {"metric": "loss", "mode": "min",
+                                        "threshold": 0.5}})
+            plan = {"name": "p", "units": [declared]}
+            state = {"schema_version": 1, "halted": None,
+                     "plan_digest": S.plan_digest(plan), "units": {"u": {
+                         "state": "NEEDS_HUMAN",
+                         "reason": "deadline_exceeded",
+                         "deadline_breach_active": True,
+                         "deadline_breach_seq": 1,
+                         "deadline_s": 60.0, "deadline_at": 160.0,
+                         "job_id": "42", "attempt_dir": str(attempt),
+                         "attempts": [str(attempt)], "gpu_hours": 0,
+                         "allocated_at": 100.0,
+                         "state_changed_at": 160.0}}}
+            anchor_launch_host(state, attempt)
+            S.save_state(str(state_dir), state)
+            with mock.patch.object(S.time, "time", return_value=200.0), \
+                    mock.patch.object(S, "renew_lease", return_value=True), \
+                    mock.patch.object(
+                        S, "_check", return_value=(S.DONE, "", "", "result")), \
+                    mock.patch.object(
+                        S, "_reported_check_result",
+                        return_value=({"receipt_sha256": "a" * 64}, None)), \
+                    mock.patch.object(
+                        S, "converge_verdict",
+                        return_value=("NOT_CONVERGED", ["loss too high"])), \
+                    mock.patch.object(S, "_release_output_claims"):
+                for _poll in range(2):
+                    S.advance(plan, S.load_state(str(state_dir)),
+                              str(state_dir), str(root / "runs"), False)
+            current = S.load_state(str(state_dir))["units"]["u"]
+            deadline_intents = [
+                intent for intent in S.read_outbox(str(state_dir))
+                if intent["why"] == "deadline_exceeded"]
+        self.assertEqual(current["state"], "NEEDS_HUMAN")
+        self.assertEqual(current["converge_verdict"], "NOT_CONVERGED")
+        self.assertEqual(current["deadline_breach_seq"], 1)
+        self.assertNotIn("deadline_breach_active", current)
+        self.assertEqual(deadline_intents, [])
 
 
 if __name__ == "__main__":
