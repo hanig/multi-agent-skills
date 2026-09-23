@@ -89,6 +89,47 @@ def _sha256(relative):
     return hashlib.sha256(_read_regular(relative)).hexdigest()
 
 
+def _collect_regular_files(directory_fd, relative, result):
+    """Collect regular files beneath an already-open directory."""
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    for name in os.listdir(directory_fd):
+        mode = os.stat(
+            name, dir_fd=directory_fd, follow_symlinks=False,
+        ).st_mode
+        child = relative / name
+        if stat.S_ISREG(mode):
+            result.add(child.as_posix())
+        elif stat.S_ISDIR(mode):
+            child_fd = os.open(name, directory_flags, dir_fd=directory_fd)
+            try:
+                _collect_regular_files(child_fd, child, result)
+            finally:
+                os.close(child_fd)
+
+
+def _vendored_regular_files():
+    """Return the regular-file inventory of every vendored skill tree."""
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    root_fd = os.open(ROOT, directory_flags)
+    skills_fd = None
+    try:
+        skills_fd = os.open("skills", directory_flags, dir_fd=root_fd)
+        result = set()
+        for name in sorted(VENDORED):
+            directory_fd = os.open(name, directory_flags, dir_fd=skills_fd)
+            try:
+                _collect_regular_files(
+                    directory_fd, Path("skills") / name, result,
+                )
+            finally:
+                os.close(directory_fd)
+        return result
+    finally:
+        if skills_fd is not None:
+            os.close(skills_fd)
+        os.close(root_fd)
+
+
 def _unique_object(pairs):
     result = {}
     for key, value in pairs:
@@ -221,6 +262,10 @@ class TestSkillCapabilities(unittest.TestCase):
         self.assertEqual(
             set(files), VENDORED_FILES,
             "manifest file inventory must match the shipped vendored snapshot",
+        )
+        self.assertEqual(
+            _vendored_regular_files(), set(files),
+            "observed vendored regular-file inventory must match the manifest",
         )
         self.assertEqual(
             set(exceptions), {BUS_EXCEPTION},
