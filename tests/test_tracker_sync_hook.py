@@ -884,6 +884,88 @@ class TrackerSyncHookInputContract(unittest.TestCase):
             # false positive -- the direction that reddens honest work.
             "a shell whose script came from -c": (
                 "bash -c ':' <<'EOF'\ngit push origin HEAD\nEOF", ""),
+            # Round 2. These execute through ordinary shell grammar; the
+            # consumer is the simple command carrying the heredoc, and only
+            # its last stdin heredoc can become the shell's script.
+            "a delimiter named like a shell option": (
+                "bash <<'-c'\ngit push origin HEAD\n-c", "git push"),
+            "a shell later in a pipeline": (
+                "cat | bash <<'EOF'\ngit push origin HEAD\nEOF", "git push"),
+            "a shell after an earlier compound command": (
+                "true; bash <<'EOF'\ngit push origin HEAD\nEOF", "git push"),
+            # An IO_NUMBER stays adjacent to its redirection even when a
+            # preceding shell operator is adjacent too. fd 0 is stdin, so its
+            # heredoc is the shell's script; fd 2 is stderr, so the same body
+            # remains data. Run the whole operator class through the wired
+            # hook: shlex's punctuation lookahead used to lose the numeric
+            # token's raw position after every one of these separators.
+            "an fd-zero heredoc after an adjacent semicolon": (
+                "true;0<<'EOF' bash\ngit push origin HEAD\nEOF", "git push"),
+            "an fd-two heredoc after an adjacent semicolon is data": (
+                "true;2<<'EOF' bash\ngit push origin HEAD\nEOF", ""),
+            "an fd-zero heredoc after adjacent and-if": (
+                "true&&0<<'EOF' bash\ngit push origin HEAD\nEOF", "git push"),
+            "an fd-two heredoc after adjacent and-if is data": (
+                "true&&2<<'EOF' bash\ngit push origin HEAD\nEOF", ""),
+            "an fd-zero heredoc after adjacent or-if": (
+                "false||0<<'EOF' bash\ngit push origin HEAD\nEOF", "git push"),
+            "an fd-two heredoc after adjacent or-if is data": (
+                "false||2<<'EOF' bash\ngit push origin HEAD\nEOF", ""),
+            "an fd-zero heredoc after an adjacent pipe": (
+                "printf x|0<<'EOF' bash\ngit push origin HEAD\nEOF", "git push"),
+            "an fd-two heredoc after an adjacent pipe is data": (
+                "printf x|2<<'EOF' bash\ngit push origin HEAD\nEOF", ""),
+            "an fd-zero heredoc after adjacent backgrounding": (
+                "true&0<<'EOF' bash\ngit push origin HEAD\nEOF", "git push"),
+            "an fd-two heredoc after adjacent backgrounding is data": (
+                "true&2<<'EOF' bash\ngit push origin HEAD\nEOF", ""),
+            "a shell-looking argument to a non-shell wrapper command": (
+                "env echo bash <<'EOF'\ngit push origin HEAD\nEOF", ""),
+            "only the last of two heredocs is shell stdin": (
+                "bash <<'FIRST' <<'LAST'\ngit push origin HEAD\nFIRST\n"
+                "echo ok\nLAST", ""),
+            "a later stdin redirection replaces the heredoc": (
+                "bash <<'EOF' < /dev/null\ngit push origin HEAD\nEOF", ""),
+            "a later fd-zero redirection replaces the heredoc": (
+                "bash <<'EOF' 0< /dev/null\ngit push origin HEAD\nEOF", ""),
+            "a later read-write redirection replaces the heredoc": (
+                "bash <<'EOF' <> /dev/null\ngit push origin HEAD\nEOF", ""),
+            "a later here-string replaces the heredoc": (
+                "bash <<'EOF' <<< ':'\ngit push origin HEAD\nEOF", ""),
+            "an earlier stdin redirection is replaced by the heredoc": (
+                "bash < /dev/null <<'EOF'\ngit push origin HEAD\nEOF",
+                "git push"),
+            "an fd-one input redirection does not replace shell stdin": (
+                "bash <<'EOF' 1< /dev/null\ngit push origin HEAD\nEOF",
+                "git push"),
+            "a separated number is an argument not a descriptor": (
+                "bash -s <<'EOF' 1 < /dev/null\ngit push origin HEAD\nEOF",
+                ""),
+            "duplicating stdin onto itself preserves the heredoc": (
+                "bash <<'EOF' <&0\ngit push origin HEAD\nEOF", "git push"),
+            "an explicit fd-zero self-duplication preserves the heredoc": (
+                "bash <<'EOF' 0<&0\ngit push origin HEAD\nEOF", "git push"),
+            "a non-stdin heredoc is data rather than a shell script": (
+                "bash 3<<'EOF'\ngit push origin HEAD\nEOF", ""),
+            "a non-stdin heredoc duplicated onto stdin is a script": (
+                "bash 3<<'EOF' <&3\ngit push origin HEAD\nEOF", "git push"),
+            "moving stdin away makes its heredoc data": (
+                "bash <<'EOF' 3<&0-\ngit push origin HEAD\nEOF", ""),
+            "moving a heredoc onto stdin makes it a script": (
+                "bash 3<<'EOF' <&3-\ngit push origin HEAD\nEOF", "git push"),
+            "closing stdin makes its heredoc data": (
+                "bash <<'EOF' <&-\ngit push origin HEAD\nEOF", ""),
+            "a compact consumed dup operand is not a new descriptor": (
+                "bash 3<<'EOF' <&3</dev/null\ngit push origin HEAD\nEOF", ""),
+            "a spaced consumed dup operand is not a new descriptor": (
+                "bash 3<<'EOF' <& 3</dev/null\ngit push origin HEAD\nEOF", ""),
+            "a moved-away heredoc restored to stdin is a script": (
+                "bash <<'EOF' 3<&0- 0<&3\ngit push origin HEAD\nEOF",
+                "git push"),
+            "a self-move preserves the stdin heredoc": (
+                "bash <<'EOF' 0<&0-\ngit push origin HEAD\nEOF", "git push"),
+            "a heredoc on cat after a shell pipeline command": (
+                "bash | cat <<'EOF'\ngit push origin HEAD\nEOF", ""),
             "a shell running something harmless too": (
                 "bash -c 'echo hi'", ""),
             # Round 1 of the restart. All three reviewers found the same

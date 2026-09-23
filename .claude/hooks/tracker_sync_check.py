@@ -267,7 +267,13 @@ _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
 _OPERATORS = frozenset(
     [";", "\n", "&&", "||", "|", "&", "|&", "(", ")", "{", "}"])
 
-_REDIRECTION = re.compile(r"^(?:&>>|&>|>&|>\||<>|<&|>>|>|<<-|<<|<)$")
+_REDIRECTION = re.compile(
+    r"^(?:&>>|&>|>&|>\||<>|<&|>>|>|<<<|<<-|<<|<)$")
+
+# Without an explicit descriptor these redirect fd 0. The distinction matters
+# to heredocs because redirections are applied left-to-right and the final
+# source bound to fd 0 supplies a shell's script.
+_STDIN_REDIRECTIONS = frozenset(["<", "<<", "<<-", "<<<", "<>", "<&"])
 
 
 
@@ -409,18 +415,150 @@ DEGENERATE_HEREDOC = object()
 OUT_OF_DEPTH = object()
 
 
+class _ShellToken(str):
+    """A shlex token carrying the one adjacency fact shlex otherwise loses."""
+
+    def __new__(cls, value, is_io_number=False):
+        token = str.__new__(cls, value)
+        token.is_io_number = is_io_number
+        return token
+
+
+def _is_io_number(token):
+    """True only for an unquoted number adjacent to a redirection operator."""
+    return bool(getattr(token, "is_io_number", False))
+
+
 def _lex_line(line):
     """Tokens for one line, or None if it cannot be lexed."""
     lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
+    tokens = []
     try:
-        return list(lexer)
+        while True:
+            start = lexer.instream.tell()
+            value = lexer.get_token()
+            if value == lexer.eof:
+                break
+            end = lexer.instream.tell()
+            consumed = line[start:end]
+            # shlex reads one punctuation character ahead before returning a
+            # word. For `1<` that consumed fragment is exactly `1<`; for
+            # `1 <` it ends in whitespace. Quoted or escaped digits do not
+            # equal the raw prefix and therefore cannot become IO_NUMBERs.
+            #
+            # A preceding punctuation token also reads one character ahead.
+            # In `true;0<<EOF`, shlex pushes the `0` back while its stream is
+            # already past it, so the fragment observed for the later `0`
+            # token is only `<`. Include that one pushed-back character when
+            # checking the raw spelling; it is still required to equal the
+            # unquoted token exactly, so `'0'<<` and `\0<<` remain ordinary
+            # words rather than IO_NUMBERs.
+            raw_fragments = [consumed]
+            if start:
+                raw_fragments.append(line[start - 1:end])
+            is_io_number = (value.isdigit()
+                            and any(
+                                len(fragment) == len(value) + 1
+                                and fragment.startswith(value)
+                                and fragment[-1:] in ("<", ">")
+                                for fragment in raw_fragments))
+            tokens.append(_ShellToken(value, is_io_number))
     except ValueError:
         return None
+    return tokens
 
 
-def _heredoc_delimiters(tokens):
-    """The words that would close a heredoc this line opens, or None.
+_Redirection = collections.namedtuple(
+    "Redirection", "destination operator operand heredoc_source")
+
+
+def _parse_redirections(tokens):
+    """Return (command words, ordered redirections), consuming each token.
+
+    Adjacency only makes a numeric token a *candidate* IO_NUMBER. This parser
+    assigns that role while advancing one cursor, so a duplication operand can
+    never be reconsidered as the descriptor of the following redirection.
+    The result is intentionally a bounded redirection grammar, not a shell AST.
+    """
+    words, redirections = [], []
+    index = 0
+    while index < len(tokens):
+        destination = None
+        if (index + 1 < len(tokens) and _is_io_number(tokens[index])
+                and _REDIRECTION.match(tokens[index + 1])):
+            destination = int(tokens[index])
+            index += 1
+
+        token = tokens[index]
+        if not _REDIRECTION.match(token):
+            words.append(token)
+            index += 1
+            continue
+
+        operator = token
+        index += 1
+        if index >= len(tokens):
+            return None
+        operand = tokens[index]
+        index += 1
+        if operator in ("<<", "<<-") and operand == "-":
+            if index >= len(tokens):
+                return None
+            operand = (operand, tokens[index])
+            index += 1
+        if destination is None:
+            destination = 0 if operator in _STDIN_REDIRECTIONS else 1
+        redirections.append(_Redirection(
+            destination, operator, operand,
+            object() if operator in ("<<", "<<-") else None))
+    return words, redirections
+
+
+def _heredoc_delimiters(redirection):
+    """The possible delimiters for one normalized heredoc redirection."""
+    word = redirection.operand
+    if isinstance(word, tuple):
+        return frozenset(word)
+    if word.startswith("-") and word[1:]:
+        return frozenset([word, word[1:]])
+    return frozenset([word])
+
+
+def _final_stdin_source(redirections):
+    """Fold supported redirections left-to-right into fd provenance."""
+    other_source = object()
+    sources = {0: other_source, 1: other_source, 2: other_source}
+    for redirection in redirections:
+        destination = redirection.destination
+        operator = redirection.operator
+        operand = redirection.operand
+        if operator in ("<<", "<<-"):
+            source = redirection.heredoc_source
+        elif operator in ("<&", ">&"):
+            if operand == "-":
+                source = other_source
+            else:
+                moved = re.match(r"^(\d+)-$", operand)
+                duplicated = moved or re.match(r"^(\d+)$", operand)
+                if duplicated:
+                    source_descriptor = int(duplicated.group(1))
+                    source = sources.get(source_descriptor, other_source)
+                    # Bash preserves a descriptor moved onto itself. For a
+                    # distinct move, snapshot its provenance and then close
+                    # the source descriptor.
+                    if moved and source_descriptor != destination:
+                        sources[source_descriptor] = other_source
+                else:
+                    source = other_source
+        else:
+            source = other_source
+        sources[destination] = source
+    return sources.get(0, other_source)
+
+
+def _heredoc_specs(tokens):
+    """The ordered heredocs this line opens and whether each is a script.
 
     Decided from TOKENS, never from raw text. The first version ran a
     regex over the raw command before shlex saw it, and luna and glm-5.3
@@ -435,7 +573,8 @@ def _heredoc_delimiters(tokens):
     quoted `'<<EOF'` as ONE token rather than the `<<` operator, and
     strips a `#` comment to nothing.
 
-    A SET, because this lexer cannot recover which shape was written.
+    Each delimiter is a SET, because this lexer cannot recover which shape
+    was written.
     `cat <<-EOF` arrives as ['cat', '<<', '-EOF'] and `cat << -EOF`
     arrives identically, but the first closes on `EOF` and the second on
     `-EOF`; the whitespace that distinguishes them is gone. Accepting
@@ -443,27 +582,32 @@ def _heredoc_delimiters(tokens):
     commands rather than less -- the direction this module's asymmetry
     points, since a spurious reminder costs a line of context and a
     missed one costs the sync.
+    Multiple heredocs are read in lexical order, but only the last stdin
+    redirection on one simple command supplies that command's stdin.  A
+    heredoc belongs to the simple command containing its operator, not to an
+    earlier command in a pipeline or compound list.
     """
-    for index, token in enumerate(tokens):
-        if token not in ("<<", "<<-"):
+    specs, start = [], 0
+    for end in range(len(tokens) + 1):
+        if end < len(tokens) and tokens[end] not in _OPERATORS:
             continue
-        rest = tokens[index + 1:]
-        if not rest or not rest[0]:
-            # A bare `<<` with nothing after it is not something to guess
-            # about. glm-5.3: returning "" made _lex skip every following
-            # line until a blank one, hiding a real push -- and a blank
-            # line inside the body then released it so body text fired.
+        command_tokens = tokens[start:end]
+        start = end + 1
+        if not any(token in ("<<", "<<-") for token in command_tokens):
+            continue
+        parsed = _parse_redirections(command_tokens)
+        if parsed is None:
             return DEGENERATE_HEREDOC
-        word = rest[0]
-        if word == "-":
-            # `cat <<- EOF` lexes as ['cat', '<<', '-', 'EOF'].
-            if len(rest) < 2 or not rest[1]:
-                return DEGENERATE_HEREDOC
-            return frozenset([word, rest[1]])
-        if word.startswith("-") and word[1:]:
-            return frozenset([word, word[1:]])
-        return frozenset([word])
-    return None
+        words, redirections = parsed
+        stdin_source = _final_stdin_source(redirections)
+        feeds_shell = _feeds_a_shell(words)
+        for redirection in redirections:
+            if redirection.operator not in ("<<", "<<-"):
+                continue
+            specs.append((
+                _heredoc_delimiters(redirection),
+                feeds_shell and stdin_source is redirection.heredoc_source))
+    return specs
 
 
 _NEWLINE = "\n"
@@ -474,8 +618,55 @@ _NEWLINE = "\n"
 _SCRIPT_BODIES = object()
 
 
-def _feeds_a_shell(line_tokens):
-    """True when this line hands its heredoc to something that runs it.
+def _without_redirections(tokens):
+    """Return command words with redirections and their operands removed."""
+    parsed = _parse_redirections(tokens)
+    return parsed[0] if parsed is not None else []
+
+
+_WRAPPER_VALUE_OPTIONS = {
+    "sudo": frozenset(["-u", "--user", "-g", "--group", "-h", "--host",
+                       "-p", "--prompt", "-C", "--close-from", "-D",
+                       "--chdir", "-R", "--chroot", "-T", "--command-timeout",
+                       "-U", "--other-user"]),
+    "doas": frozenset(["-C", "-u"]),
+    "env": frozenset(["-u", "--unset", "-C", "--chdir", "-S",
+                      "--split-string"]),
+    "timeout": frozenset(["-k", "--kill-after", "-s", "--signal"]),
+    "nice": frozenset(["-n", "--adjustment"]),
+}
+
+
+def _skip_wrapper_options(program, arguments):
+    """Return the first command word after one supported wrapper."""
+    index = 0
+    value_options = _WRAPPER_VALUE_OPTIONS.get(program, frozenset())
+    while index < len(arguments):
+        word = arguments[index]
+        if word == "--":
+            index += 1
+            break
+        if not word.startswith("-") or word == "-":
+            break
+        option = word.split("=", 1)[0]
+        index += 1
+        if option in value_options and "=" not in word:
+            index += 1
+
+    if program == "env":
+        while index < len(arguments) and _ASSIGNMENT.match(arguments[index]):
+            index += 1
+    elif program == "timeout":
+        # The duration is the one required operand before timeout's command.
+        index += 1
+
+    if index >= len(arguments):
+        return None, []
+    return arguments[index], arguments[index + 1:]
+
+
+def _feeds_a_shell(command_tokens):
+    """True when this simple command gives its heredoc to a shell's stdin.
 
     The program word decides it: `bash <<EOF` executes the body,
     `cat <<EOF` prints it and `cat > x.sh <<EOF` stores it. A wrapper
@@ -497,40 +688,28 @@ def _feeds_a_shell(line_tokens):
     close, arriving through the tokens either side of the program
     rather than through the heredoc.
 
-    So a redirection takes its operand with it, and a wrapper switches
-    to scanning the rest of the line, because where its arguments end
-    cannot be known without a table of every wrapper's options. A
-    command word reached before any wrapper still decides immediately,
-    which is what keeps `cat <<EOF` data.
+    Redirections and their operands are removed before command options are
+    considered: a delimiter named `-c` is data, not a bash option.  The
+    supported wrappers are unwrapped to their actual command word rather
+    than scanned for any later shell-looking argument, which keeps
+    `env echo bash <<EOF` as data.
 
     A shell handed its script another way does NOT run the heredoc:
     `bash -c ':' <<EOF` reads the body as stdin and ignores it, so
     calling that an outward action is a false positive (luna).
     """
-    tokens = list(line_tokens)
-    if any(token in _SHELL_COMMAND_OPTIONS for token in tokens):
-        return False
-    scanning = False
-    skip_operand = False
-    for token in tokens:
-        if skip_operand:
-            skip_operand = False
-            continue
-        if token in _OPERATORS:
-            continue
-        if _REDIRECTION.match(token):
-            skip_operand = True
-            continue
-        if _ASSIGNMENT.match(token):
-            continue
-        basename = token.rsplit("/", 1)[-1]
-        if basename in _SHELLS or basename in _EVAL:
-            return True
-        if basename in _WRAPPERS:
-            scanning = True
-            continue
-        if not scanning:
+    words = _without_redirections(command_tokens)
+    program, arguments = _command_word_and_arguments(words)
+    for _ in range(_SHELL_RECURSION_LIMIT):
+        if program is None:
             return False
+        basename = program.rsplit("/", 1)[-1]
+        if basename in _SHELLS:
+            return not any(_is_shell_command_option(word)
+                           for word in arguments)
+        if basename not in _WRAPPERS:
+            return False
+        program, arguments = _skip_wrapper_options(basename, arguments)
     return False
 
 
@@ -552,16 +731,17 @@ def _lex(command):
     guess about.
     """
     tokens = []
-    pending = None
-    pending_is_script = False
+    pending = collections.deque()
     script_bodies = []
     body = []
     for line in command.replace("\\\n", " ").splitlines():
-        if pending is not None:
-            if line.strip() in pending:
+        if pending:
+            delimiters, pending_is_script = pending[0]
+            if line.strip() in delimiters:
                 if pending_is_script:
                     script_bodies.append("\n".join(body))
-                pending, pending_is_script, body = None, False, []
+                pending.popleft()
+                body = []
                 continue
             if pending_is_script:
                 body.append(line)
@@ -573,10 +753,10 @@ def _lex(command):
             return None
         tokens.extend(line_tokens)
         tokens.append(_NEWLINE)
-        delimiters = _heredoc_delimiters(line_tokens)
-        if delimiters is DEGENERATE_HEREDOC:
+        specs = _heredoc_specs(line_tokens)
+        if specs is DEGENERATE_HEREDOC:
             return OUT_OF_DEPTH
-        pending = delimiters
+        pending.extend(specs)
         # WHOSE heredoc is it. astra: `bash <<'EOF' ... EOF` feeds the
         # body to a shell, which EXECUTES it -- the body is the script,
         # and discarding it as inert was the third detection regression
@@ -586,8 +766,7 @@ def _lex(command):
         # astra also bounded the fix: "I reject building a complete
         # shell interpreter." The consumer is the discriminator, and
         # nothing more is needed.
-        pending_is_script = bool(pending) and _feeds_a_shell(line_tokens)
-    if pending is not None and pending_is_script:
+    if pending and any(is_script for _, is_script in pending):
         # An unterminated heredoc that a shell would have run: the text
         # this parser never saw is executable, which is the strongest
         # case for the unknown answer rather than the weakest.
@@ -595,7 +774,7 @@ def _lex(command):
     if script_bodies:
         tokens.append(_SCRIPT_BODIES)
         tokens.extend(script_bodies)
-    if pending is not None:
+    if pending:
         # A heredoc whose delimiter never arrives: either the text is
         # truncated or the `<<` was not an operator at all -- a quoted
         # `'<<'` is indistinguishable from the real thing once shlex has
@@ -621,27 +800,15 @@ def _simple_commands(tokens):
 
 def _command_word_and_arguments(tokens):
     """Strip assignments and redirections; return (program, arguments)."""
+    parsed = _parse_redirections(tokens)
+    if parsed is None:
+        return None, []
+    tokens = parsed[0]
     index = 0
     while index < len(tokens):
         token = tokens[index]
         if _ASSIGNMENT.match(token):
             index += 1
-            continue
-        if _REDIRECTION.match(token):
-            index += 1
-            if index < len(tokens):
-                index += 1      # the redirection target
-            continue
-        # shlex splits `2>/dev/null` into `2`, `>`, `/dev/null`, so a bare
-        # descriptor number sits where the program word should be and the
-        # real command after it was missed -- luna and glm-5.3. glm also
-        # noted the `^\d*` in _REDIRECTION can never match under this
-        # lexer, which is right: the digits are always a separate token.
-        if (token.isdigit() and index + 1 < len(tokens)
-                and _REDIRECTION.match(tokens[index + 1])):
-            index += 2
-            if index < len(tokens):
-                index += 1      # the redirection target
             continue
         if token in _RESERVED_WORDS:
             index += 1
@@ -695,20 +862,13 @@ def _subcommands(arguments, value_options, depth):
     two functions were skipping the same tokens in one place and not the
     other.
     """
+    parsed = _parse_redirections(arguments)
+    if parsed is None:
+        return []
+    arguments = parsed[0]
     out, index = [], 0
     while index < len(arguments) and len(out) < depth:
         word = arguments[index]
-        if (word.isdigit() and index + 1 < len(arguments)
-                and _REDIRECTION.match(arguments[index + 1])):
-            index += 2
-            if index < len(arguments):
-                index += 1      # the redirection target
-            continue
-        if _REDIRECTION.match(word):
-            index += 1
-            if index < len(arguments):
-                index += 1      # the redirection target
-            continue
         if word.startswith("-"):
             if word in value_options and "=" not in word:
                 index += 1
