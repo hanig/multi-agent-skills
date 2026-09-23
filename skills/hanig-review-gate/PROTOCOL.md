@@ -59,6 +59,7 @@ of the actual one is what made the first version bypassable):
 | a plan review is never escalated | it cannot |
 | a plan review needs both verdicts | it cannot; quorum must be 2 |
 | an undeclared reviewer joins no profile | it cannot; membership must be declared |
+| empty reviewer content counts as coverage or a candidate defect | it cannot; it produces `REVIEW_INCOMPLETE` and contributes no completed judgment |
 
 **Not enforced, and honestly out of reach of this tool:**
 

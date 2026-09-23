@@ -25,8 +25,9 @@ Exit codes:
     2  REVIEW_UNAVAILABLE   no reviewer could run -- NOT a pass
     3  REVIEW_PARTIAL       some ran, quorum unmet -- caller decides
     4  REVIEW_ERROR         usage or configuration error
+    6  REVIEW_INCOMPLETE    required reviewer returned no usable content
 
-Never treat 2 or 3 as success. An unreviewed change is unreviewed.
+Never treat a nonzero state as success. An unreviewed change is unreviewed.
 
 Python 3.8+, standard library only.
 """
@@ -48,7 +49,8 @@ import urllib.request
 from pathlib import Path
 
 STATES = {"REVIEW_PASS": 0, "REVIEW_FAIL": 1, "REVIEW_UNAVAILABLE": 2,
-          "REVIEW_PARTIAL": 3, "REVIEW_ERROR": 4}
+          "REVIEW_PARTIAL": 3, "REVIEW_ERROR": 4,
+          "REVIEW_INCOMPLETE": 6}
 
 HERE = Path(__file__).resolve().parent
 CONFIG = HERE.parent / "reviewers.json"
@@ -536,6 +538,29 @@ def redact(text):
 
 # --- providers --------------------------------------------------------------
 
+def no_content_error(rev, text, *, finish_reason=None, reasoning_tokens=None,
+                     completion_tokens=None, status=None):
+    """Classify an empty provider reply consistently across both APIs."""
+    if (text or "").strip():
+        return None
+    if finish_reason in ("length", "max_output_tokens"):
+        return (f"no content: the model used its whole output budget "
+                f"({completion_tokens} tokens"
+                + (f", {reasoning_tokens} of them reasoning"
+                   if reasoning_tokens else "")
+                + f") before emitting any. Raise max_output_tokens for "
+                  f"{rev['name']} in reviewers.json, or review fewer files.")
+    details = []
+    if status is not None:
+        details.append(f"status={status!r}")
+    if finish_reason is not None:
+        details.append(f"finish_reason={finish_reason!r}")
+    if reasoning_tokens:
+        details.append(f"{reasoning_tokens} reasoning tokens")
+    return "no content in the reply" + (
+        " (" + ", ".join(details) + ")" if details else "")
+
+
 def _post(url, payload, headers, timeout, retries=3, deadline=None):
     """POST with backoff on transient failures. A gateway hiccup must not
     silently remove a reviewer from the panel -- that would quietly shrink the
@@ -633,6 +658,15 @@ def call_openai(rev, prompt, timeout, deadline=None):
     except (AttributeError, TypeError):
         return None, redact(f"unexpected response shape: {str(data)[:200]}")
     usage = data.get("usage", {})
+    detail = usage.get("output_tokens_details") or {}
+    incomplete_detail = data.get("incomplete_details") or {}
+    empty_error = no_content_error(
+        rev, text, status=data.get("status"),
+        finish_reason=incomplete_detail.get("reason"),
+        reasoning_tokens=detail.get("reasoning_tokens"),
+        completion_tokens=usage.get("output_tokens"))
+    if empty_error:
+        return None, empty_error
     return {"text": text,
             "in_tokens": usage.get("input_tokens"),
             "out_tokens": usage.get("output_tokens")}, None
@@ -663,23 +697,13 @@ def call_openrouter(rev, prompt, timeout, deadline=None):
         # redact: an error body can echo the Authorization header back.
         return None, redact(f"unexpected response shape: {str(data)[:200]}")
     usage = data.get("usage", {})
-    if not (text or "").strip():
-        # "empty response" hid the cause for a whole session: a heavy reasoner
-        # spent its ENTIRE output budget on reasoning tokens and never emitted
-        # content, with finish_reason=length. Say which it was.
-        reason = choice.get("finish_reason")
-        detail = usage.get("completion_tokens_details") or {}
-        think = detail.get("reasoning_tokens")
-        if reason == "length":
-            return None, (
-                f"no content: the model used its whole output budget "
-                f"({usage.get('completion_tokens')} tokens"
-                + (f", {think} of them reasoning" if think else "")
-                + f") before emitting any. Raise max_output_tokens for "
-                  f"{rev['name']} in reviewers.json, or review fewer files.")
-        return None, (f"no content in the reply (finish_reason="
-                      f"{reason!r}"
-                      + (f", {think} reasoning tokens" if think else "") + ")")
+    detail = usage.get("completion_tokens_details") or {}
+    empty_error = no_content_error(
+        rev, text, finish_reason=choice.get("finish_reason"),
+        reasoning_tokens=detail.get("reasoning_tokens"),
+        completion_tokens=usage.get("completion_tokens"))
+    if empty_error:
+        return None, empty_error
     return {"text": text,
             "in_tokens": usage.get("prompt_tokens"),
             "out_tokens": usage.get("completion_tokens")}, None
@@ -1258,6 +1282,7 @@ def _run_one(rev, prompt, timeout, require_claims=0, asserted=None):
         elapsed = round(time.time() - t0, 1)
         if err:
             return {"name": rev["name"], "ok": False, "error": err,
+                    "incomplete": str(err).lower().startswith("no content"),
                     "elapsed_s": elapsed}
         verdict, perr = parse_verdict(result["text"])
         why = perr
@@ -1478,11 +1503,12 @@ def disarm_watchdog():
 
 
 def decide_state(n_completed, n_failed, confirmed, refuted_claims,
-                 rejecting, truncated, quorum, n_out_of_scope_critical=0):
+                 rejecting, truncated, quorum, n_out_of_scope_critical=0,
+                 n_incomplete=0):
     """The gate's verdict. Extracted from main() so it can be tested directly:
     inline, the failed-reviewer hole below was invisible to every test."""
     if n_completed == 0:
-        return "REVIEW_UNAVAILABLE"
+        return "REVIEW_INCOMPLETE" if n_incomplete else "REVIEW_UNAVAILABLE"
     # Quorum gates the FAIL as well as the PASS. It used to sit below the
     # finding check, so one completed reviewer could deliver a verdict that the
     # panel never reached: found live when a plan review returned REVIEW_FAIL
@@ -1493,10 +1519,12 @@ def decide_state(n_completed, n_failed, confirmed, refuted_claims,
     # The finding is NOT discarded: it is still printed, and REVIEW_PARTIAL is
     # not a pass (the caller is told never to treat it as one). What changes is
     # that one opinion is not dignified as a committee verdict.
+    if n_completed >= quorum and (confirmed or refuted_claims):
+        return "REVIEW_FAIL"
+    if n_incomplete:
+        return "REVIEW_INCOMPLETE"
     if n_completed < quorum:
         return "REVIEW_PARTIAL"
-    if confirmed or refuted_claims:
-        return "REVIEW_FAIL"
     if n_failed:
         # A reviewer that errored, timed out, or returned unparseable output
         # produced no verdict. Quorum among the others does not speak for it,
@@ -1794,11 +1822,13 @@ def main():
 
     oos_critical = [f for f in out_of_scope
                     if norm(f.get("severity")) == "critical"]
+    incomplete = [r for r in failed if r.get("incomplete")]
     state = decide_state(n_completed=len(completed), n_failed=len(failed),
                          confirmed=confirmed, refuted_claims=refuted_claims,
                          rejecting=rejecting, truncated=truncated,
                          quorum=args.quorum,
-                         n_out_of_scope_critical=len(oos_critical))
+                         n_out_of_scope_critical=len(oos_critical),
+                         n_incomplete=len(incomplete))
     disarm_watchdog()
     journal = record_review_round(args, completed, state)
 
@@ -1808,7 +1838,9 @@ def main():
         "tiers_run": tiers_run,
         "truncated": truncated, "quorum": args.quorum,
         "completed": len(completed), "unavailable": unavailable,
-        "failed": [{"name": r["name"], "error": r["error"]} for r in failed],
+        "failed": [{"name": r["name"], "error": r["error"],
+                    "incomplete": bool(r.get("incomplete"))}
+                   for r in failed],
         "confirmed_findings": confirmed, "refuted_claims": refuted_claims,
         "out_of_scope_findings": out_of_scope,
         "rejecting_reviewers": rejecting,
@@ -1883,6 +1915,11 @@ def main():
                       f"implying review.")
         elif state == "REVIEW_UNAVAILABLE":
             print("  No reviewer completed. The change is unreviewed.")
+        elif state == "REVIEW_INCOMPLETE":
+            names = ", ".join(r["name"] for r in incomplete)
+            print(f"  Required reviewer content was unusable ({names}). "
+                  "This spent review budget but supplied no judgment; it is "
+                  "not an implementation defect and not a pass.")
         elif state == "REVIEW_PASS":
             names = ", ".join(r["name"] for r in completed)
             print(f"  Reviewed by: {names}. Absence of a finding is not proof "
