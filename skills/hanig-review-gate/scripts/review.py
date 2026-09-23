@@ -25,6 +25,7 @@ Exit codes:
     2  REVIEW_UNAVAILABLE   no reviewer could run -- NOT a pass
     3  REVIEW_PARTIAL       some ran, quorum unmet -- caller decides
     4  REVIEW_ERROR         usage or configuration error
+    5  REVIEW_ADJUDICATION  material dispute or reassignment authority required
     6  REVIEW_INCOMPLETE    required reviewer returned no usable content
 
 Never treat a nonzero state as success. An unreviewed change is unreviewed.
@@ -34,6 +35,7 @@ Python 3.8+, standard library only.
 
 import argparse
 import concurrent.futures
+import fcntl
 import hashlib
 import json
 import os
@@ -50,7 +52,7 @@ from pathlib import Path
 
 STATES = {"REVIEW_PASS": 0, "REVIEW_FAIL": 1, "REVIEW_UNAVAILABLE": 2,
           "REVIEW_PARTIAL": 3, "REVIEW_ERROR": 4,
-          "REVIEW_INCOMPLETE": 6}
+          "REVIEW_ADJUDICATION": 5, "REVIEW_INCOMPLETE": 6}
 
 HERE = Path(__file__).resolve().parent
 CONFIG = HERE.parent / "reviewers.json"
@@ -59,9 +61,17 @@ DEFAULT_PROFILE = "standard"
 # produced rounds 3, 4 and 5 each finding a defect in the previous round's fix.
 # That is the signal to step back to root cause, not to review again.
 MAX_ROUNDS = 3
+MAX_CLOSURE_ROUNDS = 2
+MAX_AVAILABILITY_RETRIES = 2
 
 HONEST_RUN_CLAIM = "This change cannot make an honest run fail."
 DISPOSITIONS = {"reproduced", "not-reproduced", "deferred"}
+ACCEPTED_FINDING_STATES = {
+    "open", "fixed", "refuted", "nonblocking", "disputed"
+}
+AVAILABILITY_OUTCOMES = {
+    None, "retrying-named-adjudicator", "deferred-awaiting-authority"
+}
 
 # Keep payloads bounded; an oversized diff silently truncated is a lie about
 # what was reviewed, so truncation is always reported in the output.
@@ -75,15 +85,15 @@ MAX_CHARS = 180_000
 DEFAULT_MAX_OUTPUT_TOKENS = 64_000
 
 JOURNAL_DIR = "hanig-review-gate"
+CASE_DIR = "hanig-review-gate-cases"
 JOURNAL_CHILD_ARG = "--_append-review-journal"
 JOURNAL_TIMEOUT_SECONDS = 5
 JOURNAL_DIAGNOSTIC_TIMEOUT_SECONDS = 0.25
 JOURNAL_NAME = "review-rounds"
 JOURNAL_HEADER = (
     "Append-only logical collection of immutable per-round JSON lines; "
-    "audit-only attested review history. This is not the rejected "
-    "mandatory per-change receipt: that receipt could lock honest authors out "
-    "of the gate, while this non-gating record cannot decide or block a verdict."
+    "audit-only attested review history. This is not the authoritative case "
+    "ledger and cannot decide or block a verdict."
 )
 
 
@@ -143,6 +153,31 @@ Reply with ONLY a JSON object, no prose or code fences:
 
 "verdict" is "refuted" if any IN-SCOPE finding is critical or major with high or
 medium confidence, or if any claim is refuted. Otherwise "upheld"."""
+
+
+CLOSURE_SYSTEM = """You are the independent closure reviewer for a fixed review
+panel. Discovery is over. Do not search for or introduce new findings. Assess
+only the ledger findings supplied in the prompt against the reviewed code and
+evidence. The author's proposal is evidence, never authority.
+
+For every supplied finding digest, return exactly one assessment. Statuses are:
+- open: the material violation still reproduces;
+- fixed: the violation existed and the reviewed change adequately fixes it;
+- refuted: the evidence disproves the violation itself;
+- nonblocking: it is outside the frozen contract or not material;
+- disputed: the evidence does not resolve a material disagreement.
+
+Reply with ONLY this JSON object, with no prose or code fences:
+{
+  "verdict": "closure",
+  "finding_assessments": [
+    {"digest": "lowercase sha256", "status": "open"|"fixed"|"refuted"|
+     "nonblocking"|"disputed", "evidence": "specific verification evidence"}
+  ],
+  "notes": "at most two sentences, or empty"
+}
+Do not accept an author's non-reproduction assertion without evidence that
+answers the finding's production failure scenario."""
 
 
 MAX_FILE_READ_BYTES = 64 * 1024 * 1024
@@ -232,8 +267,8 @@ def review_worktrees(files=()):
     return sorted(found, key=str)
 
 
-def review_journal_path(files=()):
-    """Journal below a state home outside every operated Git worktree.
+def review_state_home(files=()):
+    """Choose a state home outside every operated Git worktree.
 
     This follows coordinator_paths.py's candidate order and containment
     doctrine. A relative XDG_STATE_HOME is not a state home, and a candidate
@@ -257,6 +292,13 @@ def review_journal_path(files=()):
     if base is None:
         raise OSError("no review journal state location is available outside "
                       "the operated Git worktrees")
+    return base
+
+
+def review_journal_path(files=()):
+    """Journal below a state home outside every operated Git worktree."""
+    worktrees = review_worktrees(files)
+    base = review_state_home(files)
     path = base / JOURNAL_DIR / JOURNAL_NAME
     resolved_path = _resolved(path)
     for worktree in worktrees:
@@ -538,29 +580,6 @@ def redact(text):
 
 # --- providers --------------------------------------------------------------
 
-def no_content_error(rev, text, *, finish_reason=None, reasoning_tokens=None,
-                     completion_tokens=None, status=None):
-    """Classify an empty provider reply consistently across both APIs."""
-    if (text or "").strip():
-        return None
-    if finish_reason in ("length", "max_output_tokens"):
-        return (f"no content: the model used its whole output budget "
-                f"({completion_tokens} tokens"
-                + (f", {reasoning_tokens} of them reasoning"
-                   if reasoning_tokens else "")
-                + f") before emitting any. Raise max_output_tokens for "
-                  f"{rev['name']} in reviewers.json, or review fewer files.")
-    details = []
-    if status is not None:
-        details.append(f"status={status!r}")
-    if finish_reason is not None:
-        details.append(f"finish_reason={finish_reason!r}")
-    if reasoning_tokens:
-        details.append(f"{reasoning_tokens} reasoning tokens")
-    return "no content in the reply" + (
-        " (" + ", ".join(details) + ")" if details else "")
-
-
 def _post(url, payload, headers, timeout, retries=3, deadline=None):
     """POST with backoff on transient failures. A gateway hiccup must not
     silently remove a reviewer from the panel -- that would quietly shrink the
@@ -622,13 +641,36 @@ def _post(url, payload, headers, timeout, retries=3, deadline=None):
     return None, redact(f"{last} (after {retries} attempts)")
 
 
+def no_content_error(rev, text, *, finish_reason=None, reasoning_tokens=None,
+                     completion_tokens=None, status=None):
+    """One ARC-689 classifier shared by every provider path."""
+    if (text or "").strip():
+        return None
+    if finish_reason == "length":
+        return (f"no content: the model used its whole output budget "
+                f"({completion_tokens} tokens"
+                + (f", {reasoning_tokens} of them reasoning"
+                   if reasoning_tokens else "")
+                + f") before emitting any. Raise max_output_tokens for "
+                  f"{rev['name']} in reviewers.json, or review fewer files.")
+    details = []
+    if status is not None:
+        details.append(f"status={status!r}")
+    if finish_reason is not None:
+        details.append(f"finish_reason={finish_reason!r}")
+    if reasoning_tokens:
+        details.append(f"{reasoning_tokens} reasoning tokens")
+    return "no content in the reply" + (
+        " (" + ", ".join(details) + ")" if details else "")
+
+
 def call_openai(rev, prompt, timeout, deadline=None):
     key = os.environ.get("OPENAI_API_KEY")
     if not key:
         return None, "OPENAI_API_KEY not set"
     payload = {
         "model": rev["model"],
-        "input": f"{SYSTEM}\n\n---\n\n{prompt}",
+        "input": f"{rev.get('_system', SYSTEM)}\n\n---\n\n{prompt}",
         # Same default as call_openrouter. This path was left at 16000 when
         # that one was raised to 64000, and reviewers.json's own comment
         # already claimed "All reviewers use DEFAULT_MAX_OUTPUT_TOKENS
@@ -659,10 +701,8 @@ def call_openai(rev, prompt, timeout, deadline=None):
         return None, redact(f"unexpected response shape: {str(data)[:200]}")
     usage = data.get("usage", {})
     detail = usage.get("output_tokens_details") or {}
-    incomplete_detail = data.get("incomplete_details") or {}
     empty_error = no_content_error(
         rev, text, status=data.get("status"),
-        finish_reason=incomplete_detail.get("reason"),
         reasoning_tokens=detail.get("reasoning_tokens"),
         completion_tokens=usage.get("output_tokens"))
     if empty_error:
@@ -678,7 +718,8 @@ def call_openrouter(rev, prompt, timeout, deadline=None):
         return None, "OPENROUTER_API_KEY not set"
     payload = {
         "model": rev["model"],
-        "messages": [{"role": "system", "content": SYSTEM},
+        "messages": [{"role": "system",
+                      "content": rev.get("_system", SYSTEM)},
                      {"role": "user", "content": prompt}],
         "max_tokens": rev.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS),
     }
@@ -941,6 +982,32 @@ def verdict_schema_error(v, require_claims=0, asserted=None):
     return None
 
 
+def closure_schema_error(verdict, required_digests):
+    if not isinstance(verdict, dict) or norm(verdict.get("verdict")) != "closure":
+        return "closure verdict must be the string 'closure'"
+    assessments = verdict.get("finding_assessments")
+    if not isinstance(assessments, list):
+        return "missing required finding_assessments array"
+    seen = set()
+    required = set(required_digests)
+    for assessment in assessments:
+        if not isinstance(assessment, dict):
+            return "finding_assessments must contain objects"
+        digest = assessment.get("digest")
+        if digest not in required or digest in seen:
+            return f"unexpected or duplicate finding digest {digest!r}"
+        seen.add(digest)
+        if assessment.get("status") not in ACCEPTED_FINDING_STATES:
+            return f"invalid accepted finding status {assessment.get('status')!r}"
+        evidence = assessment.get("evidence")
+        if not isinstance(evidence, str) or len(evidence.split()) < 4:
+            return f"finding {digest} needs specific verification evidence"
+    missing = required - seen
+    if missing:
+        return "did not assess finding(s): " + ", ".join(sorted(missing))
+    return None
+
+
 def is_confirmed(f):
     """A finding counts against the gate only if it is serious AND the reviewer
     was reasonably sure AND it came with a concrete failure scenario AND it is
@@ -954,6 +1021,41 @@ def is_confirmed(f):
     return (norm(f.get("severity")) in ("critical", "major")
             and norm(f.get("confidence")) in ("high", "medium")
             and bool(str(f.get("failure_scenario", "")).strip()))
+
+
+def accepted_terminal_state(findings, incomplete=False):
+    """Verdict from independently accepted finding states.
+
+    A proposal is deliberately ignored here.  In particular, an author's
+    not-reproduced disposition cannot rewrite ``accepted_status``; only the
+    fixed review panel can do that during closure.
+    """
+    states = {entry.get("accepted_status", "open")
+              for entry in findings.values()}
+    if not states.issubset(ACCEPTED_FINDING_STATES):
+        return "REVIEW_ADJUDICATION"
+    if "open" in states:
+        return "REVIEW_FAIL"
+    if "disputed" in states:
+        return "REVIEW_ADJUDICATION"
+    if incomplete:
+        return "REVIEW_INCOMPLETE"
+    return "REVIEW_PASS"
+
+
+def active_panel(ledger):
+    """Reviewers currently authorized for the frozen panel's named seats."""
+    assignments = ledger.get("assignments") or {
+        name: name for name in ledger["panel"]
+    }
+    return [assignments[name] for name in ledger["panel"]]
+
+
+def closure_panel_complete(ledger, completed, failed, truncated=False):
+    """Closure authority requires every currently assigned panel member."""
+    return (not failed and not truncated
+            and {result["name"] for result in completed}
+            == set(active_panel(ledger)))
 
 
 # --- input gathering --------------------------------------------------------
@@ -1019,6 +1121,605 @@ def finding_digest(location, summary):
     identity = json.dumps([location, summary], ensure_ascii=False,
                           separators=(",", ":"))
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def contract_record(args):
+    """The frozen review contract.  It is data, not prompt prose."""
+    record = {
+        "kind": args.kind,
+        "claims": list(args.claim),
+        "context": args.context,
+        "threat_model": args.threat_model,
+    }
+    encoded = json.dumps(record, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":")).encode("utf-8")
+    record["digest"] = hashlib.sha256(encoded).hexdigest()
+    return record
+
+
+def reviewed_snapshot(body, label):
+    """Bind a ledger event to commit state and the exact bytes reviewed."""
+    head = git_out("rev-parse", "HEAD").strip() or None
+    base = git_out("merge-base", "HEAD", "origin/main").strip() or head
+    return {
+        "head": head, "base": base,
+        "source": label,
+        "content_digest": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+    }
+
+
+def default_case_id(args):
+    """Stable for one branch lineage without conflating sequential main work."""
+    remote = git_out("remote", "get-url", "origin").strip()
+    root = git_out("rev-parse", "--show-toplevel").strip()
+    branch = git_out("symbolic-ref", "--short", "HEAD").strip()
+    head = git_out("rev-parse", "HEAD").strip()
+    fork = git_out("merge-base", "HEAD", "origin/main").strip() or head
+    identity = [remote or root or str(Path.cwd().resolve()),
+                branch or "detached", fork, args.kind]
+    raw = json.dumps(identity, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:32]
+
+
+def validate_case_id(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,100}", value):
+        config_error("--case must contain 1..100 ASCII letters, digits, '.', "
+                     "'_' or '-'. Pass a stable project/change identifier.")
+    return value
+
+
+def parse_reviewer_map(values, flag):
+    """Parse repeatable REVIEWER=REVIEWER mappings without normalising names."""
+    result = {}
+    for value in values or []:
+        if not isinstance(value, str) or value.count("=") != 1:
+            config_error(f"{flag} requires REVIEWER=REVIEWER. Pass one exact "
+                         "configured reviewer name on each side of '='.")
+        source, target = value.split("=", 1)
+        if not source or not target or source == target:
+            config_error(f"{flag} requires two distinct non-empty reviewer "
+                         "names as REVIEWER=REVIEWER. Pass exact names.")
+        if source in result:
+            config_error(f"{flag} assigns {source!r} more than once. Pass one "
+                         "target for each named panel member.")
+        result[source] = target
+    return result
+
+
+def validate_reviewer_map(mapping, panel, known, flag):
+    """A frozen assignment must remain one-to-one and name configured peers."""
+    unknown_sources = sorted(set(mapping) - set(panel))
+    unknown_targets = sorted(set(mapping.values()) - set(known))
+    if unknown_sources:
+        config_error(f"{flag} names panel member(s) not in the fixed panel: "
+                     f"{', '.join(unknown_sources)}. Pass a member of the "
+                     "effective panel on the left side.")
+    if unknown_targets:
+        config_error(f"{flag} names unknown reviewer(s): "
+                     f"{', '.join(unknown_targets)}. Pass configured reviewer "
+                     "names on the right side.")
+    assigned = [mapping.get(name, name) for name in panel]
+    if len(set(assigned)) != len(assigned):
+        config_error(f"{flag} would assign one reviewer to multiple fixed "
+                     "panel seats. Pass distinct targets.")
+
+
+def review_case_path(args):
+    case_id = validate_case_id(args.case or default_case_id(args))
+    return review_state_home(args.file) / CASE_DIR / (case_id + ".json")
+
+
+def _read_case_from_fd(directory_fd, name):
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+    except FileNotFoundError:
+        return None
+    try:
+        status = os.fstat(fd)
+        if not stat.S_ISREG(status.st_mode) or status.st_nlink != 1:
+            raise OSError("case ledger is not a singly linked regular file")
+        raw = bytearray()
+        while len(raw) <= MAX_FILE_READ_BYTES:
+            chunk = os.read(fd, min(65536, MAX_FILE_READ_BYTES + 1 - len(raw)))
+            if not chunk:
+                break
+            raw.extend(chunk)
+        if len(raw) > MAX_FILE_READ_BYTES:
+            raise OSError("case ledger exceeds the 64MB read limit")
+    finally:
+        os.close(fd)
+    try:
+        data = json.loads(bytes(raw).decode("utf-8"),
+                          object_pairs_hook=reject_duplicate_keys)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise OSError(f"case ledger is invalid JSON: {exc}")
+    upgrade_case_ledger(data)
+    validate_case_ledger(data)
+    return data
+
+
+def upgrade_case_ledger(data):
+    """Upgrade the recovery attempt's schema without discarding its history."""
+    if not isinstance(data, dict) or data.get("schema_version") != 1:
+        return
+    panel = data.get("panel")
+    if not isinstance(panel, list):
+        return
+    data["schema_version"] = 2
+    data["assignments"] = {name: name for name in panel}
+    data["alternates"] = {}
+    data["availability"] = {
+        "retry_limit": MAX_AVAILABILITY_RETRIES,
+        "attempts": {}, "events": [], "outcome": None,
+    }
+
+
+def validate_case_ledger(data):
+    """Refuse malformed authority rather than normalising it into a pass."""
+    if not isinstance(data, dict) or data.get("schema_version") != 2:
+        raise OSError("case ledger has an unsupported schema")
+    generation = data.get("generation")
+    if (not isinstance(generation, int) or isinstance(generation, bool)
+            or generation < 0):
+        raise OSError("case ledger generation is invalid")
+    contract = data.get("contract")
+    if not isinstance(contract, dict) or not isinstance(contract.get("digest"), str):
+        raise OSError("case ledger contract is invalid")
+    contract_body = {key: value for key, value in contract.items()
+                     if key != "digest"}
+    encoded = json.dumps(contract_body, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":")).encode("utf-8")
+    if hashlib.sha256(encoded).hexdigest() != contract["digest"]:
+        raise OSError("case ledger frozen contract digest does not match")
+    panel = data.get("panel")
+    if (not isinstance(panel, list) or not panel
+            or not all(isinstance(name, str) and name for name in panel)
+            or len(set(panel)) != len(panel)):
+        raise OSError("case ledger fixed panel is invalid")
+    assignments = data.get("assignments")
+    if (not isinstance(assignments, dict)
+            or set(assignments) != set(panel)
+            or not all(isinstance(name, str) and name
+                       for name in assignments.values())
+            or len(set(assignments.values())) != len(assignments)):
+        raise OSError("case ledger reviewer assignments are invalid")
+    alternates = data.get("alternates")
+    if (not isinstance(alternates, dict)
+            or not set(alternates).issubset(set(panel))
+            or not all(isinstance(name, str) and name
+                       for name in alternates.values())
+            or len(set(alternates.get(name, name) for name in panel))
+            != len(panel)):
+        raise OSError("case ledger predesignated alternates are invalid")
+    availability_state = data.get("availability")
+    if not isinstance(availability_state, dict):
+        raise OSError("case ledger availability state is invalid")
+    retry_limit = availability_state.get("retry_limit")
+    attempts = availability_state.get("attempts")
+    if (not isinstance(retry_limit, int) or isinstance(retry_limit, bool)
+            or retry_limit < 1 or not isinstance(attempts, dict)
+            or not all(isinstance(name, str) and name
+                       and isinstance(count, int) and not isinstance(count, bool)
+                       and 0 <= count <= retry_limit
+                       for name, count in attempts.items())
+            or not isinstance(availability_state.get("events"), list)
+            or availability_state.get("outcome") not in AVAILABILITY_OUTCOMES):
+        raise OSError("case ledger availability retry history is invalid")
+    for event in availability_state["events"]:
+        if (not isinstance(event, dict)
+                or not isinstance(event.get("reviewer"), str)
+                or not isinstance(event.get("attempt"), int)
+                or not isinstance(event.get("reason"), str)
+                or not isinstance(event.get("reviewed"), dict)):
+            raise OSError("case ledger availability event is invalid")
+    cycles = data.get("cycles")
+    if not isinstance(cycles, list) or not cycles:
+        raise OSError("case ledger has no review cycle")
+    for index, cycle in enumerate(cycles, 1):
+        if (not isinstance(cycle, dict) or cycle.get("number") != index
+                or not isinstance(cycle.get("discovery"), list)
+                or not isinstance(cycle.get("closure"), list)
+                or len(cycle["discovery"]) > MAX_ROUNDS
+                or len(cycle["closure"]) > MAX_CLOSURE_ROUNDS):
+            raise OSError("case ledger review cycle is invalid")
+    findings = data.get("findings")
+    if not isinstance(findings, dict):
+        raise OSError("case ledger findings must be an object")
+    authorization_events = data.get("authorization_events")
+    if not isinstance(authorization_events, list):
+        raise OSError("case ledger authorization events must be a list")
+    for event in authorization_events:
+        if (not isinstance(event, dict)
+                or not isinstance(event.get("by"), str)
+                or not isinstance(event.get("from"), list)
+                or not isinstance(event.get("to"), list)
+                or not all(isinstance(name, str) and name
+                           for name in event["from"] + event["to"])):
+            raise OSError("case ledger panel authorization event is invalid")
+    for digest, finding in findings.items():
+        if (not isinstance(digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                or not isinstance(finding, dict)
+                or finding.get("digest") != digest
+                or finding.get("accepted_status") not in ACCEPTED_FINDING_STATES):
+            raise OSError(f"case ledger finding {digest!r} is invalid")
+        accepted_by = finding.get("accepted_by")
+        historical_panel = set(panel)
+        for event in authorization_events:
+            if isinstance(event, dict):
+                historical_panel.update(event.get("from") or [])
+                historical_panel.update(event.get("to") or [])
+        if (not isinstance(accepted_by, list) or not accepted_by
+                or not all(isinstance(name, str) and name in historical_panel
+                           for name in accepted_by)):
+            raise OSError(f"case ledger finding {digest} has invalid acceptors")
+        if not isinstance(finding.get("acceptance_history", []), list):
+            raise OSError(
+                f"case ledger finding {digest} has invalid acceptance history")
+        proposals = finding.get("proposals", [])
+        if not isinstance(proposals, list):
+            raise OSError(f"case ledger finding {digest} has invalid proposals")
+        for proposal in proposals:
+            if (not isinstance(proposal, dict)
+                    or proposal.get("status") not in DISPOSITIONS
+                    or not isinstance(proposal.get("by"), str)
+                    or not isinstance(proposal.get("evidence"), str)):
+                raise OSError(
+                    f"case ledger finding {digest} has invalid proposal")
+    if not isinstance(data.get("reviewed_snapshots"), list):
+        raise OSError("case ledger reviewed snapshots must be a list")
+
+
+def load_case_ledger(path):
+    directory_fd = _open_directory_chain(Path(path).parent)
+    try:
+        return _read_case_from_fd(directory_fd, Path(path).name)
+    finally:
+        os.close(directory_fd)
+
+
+def save_case_ledger(path, ledger, expected_generation):
+    """Atomically replace a case ledger and refuse concurrent lost updates."""
+    directory_fd = _open_directory_chain(Path(path).parent)
+    pending = ".%s.%s.%s.pending" % (
+        Path(path).name, os.getpid(), os.urandom(8).hex())
+    fd = lock_fd = None
+    try:
+        lock_fd = os.open(".case-ledger.lock",
+                          os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+                          0o600, dir_fd=directory_fd)
+        lock_status = os.fstat(lock_fd)
+        if (not stat.S_ISREG(lock_status.st_mode)
+                or lock_status.st_nlink != 1):
+            raise OSError("case ledger lock is not a singly linked regular file")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        current = _read_case_from_fd(directory_fd, Path(path).name)
+        actual = 0 if current is None else current.get("generation")
+        if actual != expected_generation:
+            raise OSError("case ledger changed during review; refusing to "
+                          "overwrite another review event")
+        ledger["generation"] = expected_generation + 1
+        payload = (json.dumps(ledger, ensure_ascii=False, sort_keys=True,
+                              indent=2) + "\n").encode("utf-8")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        fd = os.open(pending, flags, 0o600, dir_fd=directory_fd)
+        written = 0
+        while written < len(payload):
+            count = os.write(fd, payload[written:])
+            if count <= 0:
+                raise OSError("case ledger write made no progress")
+            written += count
+        os.fsync(fd)
+        os.close(fd)
+        fd = None
+        os.rename(pending, Path(path).name, src_dir_fd=directory_fd,
+                  dst_dir_fd=directory_fd)
+        os.fsync(directory_fd)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if lock_fd is not None:
+            os.close(lock_fd)
+        try:
+            os.unlink(pending, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+        os.close(directory_fd)
+
+
+def new_case_ledger(case_id, contract, panel, alternates=None):
+    panel = sorted(panel)
+    return {
+        "schema_version": 2,
+        "generation": 0,
+        "case_id": case_id,
+        "contract": contract,
+        "panel": panel,
+        "assignments": {name: name for name in panel},
+        "alternates": dict(alternates or {}),
+        "availability": {
+            "retry_limit": MAX_AVAILABILITY_RETRIES,
+            "attempts": {}, "events": [], "outcome": None,
+        },
+        "authorization_events": [],
+        "cycles": [{"number": 1, "discovery": [], "closure": []}],
+        "findings": {},
+        "reviewed_snapshots": [],
+    }
+
+
+def prepare_case_ledger(args, panel, snapshot, alternates=None,
+                        reassignments=None):
+    """Load and validate fixed contract/panel/cycle authority."""
+    panel = sorted(panel)
+    if alternates is None:
+        alternates = getattr(args, "_alternate_map", {})
+    if reassignments is None:
+        reassignments = getattr(args, "_reassignment_map", {})
+    path = review_case_path(args)
+    try:
+        ledger = load_case_ledger(path)
+    except OSError as exc:
+        config_error(f"cannot read case ledger {path}: {exc}. Repair or "
+                     "remove that ledger before reviewing this case.")
+    contract = contract_record(args)
+    expected_generation = 0 if ledger is None else ledger["generation"]
+    alternates = dict(alternates or {})
+    reassignments = dict(reassignments or {})
+    if ledger is None:
+        ledger = new_case_ledger(path.stem, contract, panel, alternates)
+    else:
+        if ledger.get("contract", {}).get("digest") != contract["digest"]:
+            config_error("the review contract is frozen for this case and the "
+                         "claims, context, or threat model changed. Pass the "
+                         "original contract or use a new --case for genuinely "
+                         "different work.")
+        old_panel = ledger.get("panel")
+        if old_panel != panel:
+            selected_names = set(getattr(args, "_selected_panel_all", panel))
+            unavailable_membership = (set(panel).issubset(set(old_panel))
+                                        and (set(old_panel) - set(panel))
+                                        .issubset(selected_names))
+            if unavailable_membership:
+                # Enabled-state is availability, not panel authority.  A
+                # reviewer disabled after case creation remains the named seat
+                # until the bounded reassignment protocol changes it.
+                panel = list(old_panel)
+            elif not (args.new_cycle and args.authorize_panel_change):
+                config_error("the review panel is fixed for this case. Pass "
+                             "--new-cycle --authorize-panel-change NAME only "
+                             "for an explicit authorization event.")
+        if alternates and ledger.get("alternates") != alternates:
+            config_error("predesignated alternates are frozen when a case is "
+                         "created. Pass the original --alternate mappings, or "
+                         "use owner-authorized --reassign after the retry "
+                         "window is exhausted.")
+    known_enabled = getattr(args, "_enabled_names", None)
+    if known_enabled is not None:
+        validate_reviewer_map(alternates, ledger["panel"], known_enabled,
+                              "--alternate")
+        validate_reviewer_map(reassignments, ledger["panel"], known_enabled,
+                              "--reassign")
+    cycle = ledger["cycles"][-1]
+    events = cycle[args.stage]
+    if args.new_cycle:
+        previous = ledger["reviewed_snapshots"][-1] if ledger["reviewed_snapshots"] else None
+        if previous and previous["content_digest"] == snapshot["content_digest"]:
+            config_error("a fresh review cycle on unchanged code is refused. "
+                         "Change the reviewed code or continue the existing "
+                         "closure/adjudication state.")
+        unresolved = any(
+            finding.get("accepted_status") in ("open", "disputed")
+            for finding in ledger["findings"].values())
+        exhausted = (len(cycle["discovery"]) >= MAX_ROUNDS
+                     and (not unresolved
+                          or len(cycle["closure"]) >= MAX_CLOSURE_ROUNDS))
+        if not exhausted:
+            config_error(
+                "a fresh cycle is available only after discovery and closure "
+                "are exhausted. Pass the next recorded stage round first.")
+        if args.round != 1:
+            config_error("--new-cycle starts at --round 1. Pass --round 1.")
+        if ledger.get("panel") != panel:
+            ledger["authorization_events"].append({
+                "by": args.authorize_panel_change,
+                "from": ledger.get("panel"), "to": panel,
+                "at": journal_timestamp(),
+            })
+            ledger["panel"] = panel
+            ledger["assignments"] = {name: name for name in panel}
+            ledger["alternates"] = alternates
+            ledger["availability"] = {
+                "retry_limit": MAX_AVAILABILITY_RETRIES,
+                "attempts": {}, "events": [], "outcome": None,
+            }
+        cycle = {"number": cycle["number"] + 1,
+                 "discovery": [], "closure": []}
+        ledger["cycles"].append(cycle)
+        events = cycle[args.stage]
+    elif args.round != len(events) + 1:
+        config_error(f"case history requires {args.stage} round "
+                     f"{len(events) + 1}, not {args.round}. Pass the next "
+                     "round number recorded in the ledger.")
+    if reassignments:
+        availability_state = ledger["availability"]
+        for seat, replacement in reassignments.items():
+            current = ledger["assignments"][seat]
+            attempts = availability_state["attempts"].get(current, 0)
+            if attempts < availability_state["retry_limit"]:
+                config_error(
+                    f"the bounded retry window for {current!r} is not "
+                    f"exhausted ({attempts}/{availability_state['retry_limit']}). "
+                    "Re-run the named adjudicator first; then pass the same "
+                    "owner-authorized reassignment.")
+            ledger["authorization_events"].append({
+                "kind": "owner_reassignment", "by": args.authorize_reassignment,
+                "seat": seat, "from": [current], "to": [replacement],
+                "at": journal_timestamp(),
+            })
+            ledger["assignments"][seat] = replacement
+        availability_state["outcome"] = None
+    return path, ledger, expected_generation
+
+
+def record_closure_unavailability(ledger, unavailable, snapshot):
+    """Persist a bounded wait, then use pre-authorized alternates or defer.
+
+    Availability never clears a finding.  This function changes only who may
+    perform closure and the explicit wait outcome; accepted finding states are
+    untouched.
+    """
+    state = ledger["availability"]
+    limit = state["retry_limit"]
+    unavailable_names = {item["name"] for item in unavailable}
+    for item in unavailable:
+        name = item["name"]
+        count = min(limit, state["attempts"].get(name, 0) + 1)
+        state["attempts"][name] = count
+        state["events"].append({
+            "at": journal_timestamp(), "reviewer": name,
+            "attempt": count, "reason": str(item.get("reason", "unavailable")),
+            "reviewed": dict(snapshot),
+        })
+
+    if any(state["attempts"][name] < limit for name in unavailable_names):
+        state["outcome"] = "retrying-named-adjudicator"
+        return "REVIEW_PARTIAL", False
+
+    replaced = []
+    for seat in ledger["panel"]:
+        current = ledger["assignments"][seat]
+        if current not in unavailable_names:
+            continue
+        alternate = ledger["alternates"].get(seat)
+        if alternate and current == seat:
+            ledger["assignments"][seat] = alternate
+            ledger["authorization_events"].append({
+                "kind": "predesignated_alternate", "by": "case_contract",
+                "seat": seat, "from": [current], "to": [alternate],
+                "at": journal_timestamp(),
+            })
+            replaced.append((current, alternate))
+
+    unresolved = [name for name in unavailable_names
+                  if not any(old == name for old, _new in replaced)]
+    if unresolved:
+        state["outcome"] = "deferred-awaiting-authority"
+        return "REVIEW_ADJUDICATION", False
+    state["outcome"] = None
+    return None, bool(replaced)
+
+
+def record_alternate_unavailability(ledger, unavailable, snapshot):
+    """A failed predesignated alternate requires new owner authority."""
+    state = ledger["availability"]
+    for item in unavailable:
+        name = item["name"]
+        state["attempts"][name] = 1
+        state["events"].append({
+            "at": journal_timestamp(), "reviewer": name, "attempt": 1,
+            "reason": str(item.get("reason", "unavailable")),
+            "reviewed": dict(snapshot), "role": "predesignated_alternate",
+        })
+    state["outcome"] = "deferred-awaiting-authority"
+    return "REVIEW_ADJUDICATION"
+
+
+def apply_disposition_proposals(ledger, dispositions, actor):
+    for proposal in dispositions:
+        digest = proposal["digest"]
+        finding = ledger["findings"].get(digest)
+        if finding is None:
+            config_error(f"disposition {digest} is not in this case ledger. "
+                         "Pass dispositions for ledger findings only.")
+        proposed = {"status": proposal["disposition"], "by": actor,
+                    "evidence": proposal["reason"],
+                    "at": journal_timestamp()}
+        finding.setdefault("proposals", []).append(proposed)
+
+
+def merge_discovery_findings(ledger, completed, confirmed, refuted_claims):
+    """Admit material panel findings as open accepted states."""
+    panel = [result["name"] for result in completed]
+    material = list(confirmed)
+    for claim in refuted_claims:
+        material.append({
+            "file": "claim", "line": claim.get("claim_index", "?"),
+            "summary": "refuted claim: " + str(claim.get("claim", "")),
+            "failure_scenario": claim.get("why", "claim is false"),
+            "severity": "major", "confidence": "high",
+            "reviewer": claim.get("reviewer", "unknown"),
+        })
+    for finding in material:
+        location = "%s:%s" % (finding.get("file", "?"),
+                               finding.get("line", "?"))
+        digest = finding_digest(location, str(finding.get("summary", "")))
+        entry = ledger["findings"].setdefault(digest, {
+            "digest": digest, "location": location,
+            "summary": str(finding.get("summary", "")),
+            "failure_scenario": str(finding.get("failure_scenario", "")),
+            "accepted_status": "open", "accepted_by": panel,
+            "acceptance_evidence": "material finding admitted at panel quorum",
+            "acceptance_history": [], "observations": [],
+        })
+        # A later material rediscovery is new accepted evidence.  Do not leave
+        # a previously cleared persisted state in place while recording that
+        # the violation has reappeared.
+        entry["accepted_status"] = "open"
+        entry["accepted_by"] = panel
+        entry["acceptance_evidence"] = (
+            "material finding admitted at panel quorum")
+        entry.setdefault("acceptance_history", []).append({
+            "status": "open", "by": panel,
+            "evidence": "material finding admitted at panel quorum",
+            "at": journal_timestamp(),
+        })
+        entry["observations"].append({
+            "reviewer": finding.get("reviewer"), "at": journal_timestamp(),
+            "severity": finding.get("severity"),
+            "confidence": finding.get("confidence"),
+        })
+
+
+def apply_closure_assessments(ledger, completed):
+    """Only an independently completed fixed panel can change accepted state."""
+    open_digests = {digest for digest, finding in ledger["findings"].items()
+                    if finding.get("accepted_status") in ("open", "disputed")}
+    for digest in open_digests:
+        assessments = []
+        for result in completed:
+            assessment = next(item for item in result["finding_assessments"]
+                              if item["digest"] == digest)
+            assessments.append({"by": result["name"],
+                                "status": assessment["status"],
+                                "evidence": assessment["evidence"]})
+        statuses = {item["status"] for item in assessments}
+        accepted = statuses.pop() if len(statuses) == 1 else "disputed"
+        finding = ledger["findings"][digest]
+        finding["accepted_status"] = accepted
+        finding["accepted_by"] = [item["by"] for item in assessments]
+        finding["acceptance_evidence"] = assessments
+        finding.setdefault("acceptance_history", []).append({
+            "status": accepted, "by": finding["accepted_by"],
+            "evidence": assessments, "at": journal_timestamp(),
+        })
+
+
+def closure_prompt(body, ledger):
+    remaining = [finding for finding in ledger["findings"].values()
+                 if finding.get("accepted_status") in ("open", "disputed")]
+    lines = ["FROZEN CONTRACT", json.dumps(ledger["contract"], sort_keys=True),
+             "", "REMAINING FINDING LEDGER"]
+    for finding in remaining:
+        lines.extend([
+            "  digest: " + finding["digest"],
+            "  location: " + finding["location"],
+            "  violation: " + finding["summary"],
+            "  failure scenario: " + finding["failure_scenario"],
+            "  author proposals: " + json.dumps(finding.get("proposals", [])),
+        ])
+    lines.extend(["", "CODE UNDER REVIEW:", body])
+    return "\n".join(lines), [finding["digest"] for finding in remaining]
 
 
 def reject_duplicate_keys(pairs):
@@ -1090,7 +1791,7 @@ def load_dispositions(path):
         except UnicodeEncodeError:
             config_error(f"disposition {digest!r} has a reason that is not "
                          f"valid UTF-8 text. Pass text without lone surrogates.")
-        entries.append(entry)
+        entries.append({**entry, "digest": digest})
     return entries
 
 
@@ -1243,11 +1944,13 @@ def _short_error(err):
     return " ".join(s.split())[:150]
 
 
-def run_one(rev, prompt, timeout, require_claims=0, asserted=None):
+def run_one(rev, prompt, timeout, require_claims=0, asserted=None,
+            closure_digests=None):
     """Never raises: one malformed provider response must degrade that reviewer,
     not take the whole panel down with a traceback."""
     try:
-        return _run_one(rev, prompt, timeout, require_claims, asserted)
+        return _run_one(rev, prompt, timeout, require_claims, asserted,
+                        closure_digests)
     except Exception as e:
         return {"name": rev.get("name", "?"), "ok": False,
                 "error": redact(f"reviewer crashed: {type(e).__name__}: {e}"),
@@ -1261,8 +1964,17 @@ RETRY_NUDGE = ("\n\nIMPORTANT: your previous reply could not be used: {why}\n"
                "entry per asserted claim carrying its \"claim_index\" and a "
                "\"status\" of supported, refuted, or unverifiable.")
 
+CLOSURE_RETRY_NUDGE = (
+    "\n\nIMPORTANT: your previous closure reply could not be used: {why}\n"
+    "Reply with ONLY a single valid JSON object matching the closure schema. "
+    "Set verdict to \"closure\" and include exactly one finding_assessments "
+    "entry for every supplied digest. Each entry needs digest, a status of "
+    "open, fixed, refuted, nonblocking, or disputed, and specific evidence."
+)
 
-def _run_one(rev, prompt, timeout, require_claims=0, asserted=None):
+
+def _run_one(rev, prompt, timeout, require_claims=0, asserted=None,
+             closure_digests=None):
     t0 = time.time()
     # One reviewer never gets more than 2x its timeout in total, however many
     # transport retries or schema retries occur inside that budget.
@@ -1277,17 +1989,24 @@ def _run_one(rev, prompt, timeout, require_claims=0, asserted=None):
                                     f"(reviewer budget of "
                                     f"{int(deadline - t0)}s exhausted)"),
                     "elapsed_s": round(time.time() - t0, 1)}
-        result, err = PROVIDERS[rev["provider"]](rev, attempt_prompt, timeout,
-                                                deadline=deadline)
+        call_rev = dict(rev)
+        if closure_digests is not None:
+            call_rev["_system"] = CLOSURE_SYSTEM
+        result, err = PROVIDERS[rev["provider"]](
+            call_rev, attempt_prompt, timeout, deadline=deadline)
         elapsed = round(time.time() - t0, 1)
         if err:
             return {"name": rev["name"], "ok": False, "error": err,
-                    "incomplete": str(err).lower().startswith("no content"),
+                    "incomplete": ("no content" in str(err).lower()
+                                   or "empty response" in str(err).lower()),
                     "elapsed_s": elapsed}
         verdict, perr = parse_verdict(result["text"])
         why = perr
         if not why:
-            why = verdict_schema_error(verdict, require_claims, asserted)
+            if closure_digests is None:
+                why = verdict_schema_error(verdict, require_claims, asserted)
+            else:
+                why = closure_schema_error(verdict, closure_digests)
             kind = "invalid verdict schema"
         else:
             kind = "unparseable verdict"
@@ -1298,10 +2017,12 @@ def _run_one(rev, prompt, timeout, require_claims=0, asserted=None):
             return {"name": rev["name"], "ok": False,
                     "error": redact(f"{last_why} (after a retry)"),
                     "elapsed_s": elapsed}
-        attempt_prompt = prompt + RETRY_NUDGE.format(why=why)
+        nudge = (CLOSURE_RETRY_NUDGE if closure_digests is not None
+                 else RETRY_NUDGE)
+        attempt_prompt = prompt + nudge.format(why=why)
     # Scrub at ingestion. Redacting the serialized report was not enough: a key
     # containing a quote is JSON-escaped on the way out and stops matching.
-    return {"name": rev["name"], "ok": True, "elapsed_s": elapsed,
+    output = {"name": rev["name"], "ok": True, "elapsed_s": elapsed,
             "retried": last_why is not None,
             "model": rev["model"], "effort": rev.get("effort"),
             "in_tokens": result.get("in_tokens"),
@@ -1310,6 +2031,10 @@ def _run_one(rev, prompt, timeout, require_claims=0, asserted=None):
             "findings": deep_redact(verdict.get("findings", []) or []),
             "claims": deep_redact(verdict.get("claims", []) or []),
             "notes": redact(verdict.get("notes", ""))}
+    if closure_digests is not None:
+        output["finding_assessments"] = deep_redact(
+            verdict.get("finding_assessments", []))
+    return output
 
 
 # --- commands ---------------------------------------------------------------
@@ -1423,7 +2148,8 @@ def escalate(all_reviewers, prompt, args, truncated, label, body_len):
                 max_workers=len(runnable)) as ex:
             res = list(ex.map(
                 lambda r: run_one(r, prompt, args.timeout, len(args.claim),
-                                  args.claim),
+                                  args.claim,
+                                  getattr(args, "_closure_digests", None)),
                 runnable))
         tier_completed = [r for r in res if r["ok"]]
         completed.extend(tier_completed)
@@ -1605,6 +2331,26 @@ def main():
                     help="which round this is for the change under review. "
                          "Past MAX_ROUNDS the gate refuses: more rounds on one "
                          "change means the framing is wrong, not the code.")
+    ap.add_argument("--stage", choices=["discovery", "closure"],
+                    default="discovery",
+                    help="discovery finds material violations (three rounds); "
+                         "closure only verifies ledger fixes/disputes (two rounds)")
+    ap.add_argument("--case", default=None,
+                    help="stable case identifier; defaults to repository, branch, and kind")
+    ap.add_argument("--actor", default=os.environ.get("USER", "author"),
+                    help="identity proposing dispositions (recorded, never authoritative)")
+    ap.add_argument("--new-cycle", action="store_true",
+                    help="start a fresh cycle after code changed; unchanged code is refused")
+    ap.add_argument("--authorize-panel-change", metavar="NAME",
+                    help="record who authorized changing the fixed panel; requires --new-cycle")
+    ap.add_argument("--alternate", action="append", default=[],
+                    metavar="REVIEWER=ALTERNATE",
+                    help="predesignate a closure alternate when creating a case; repeatable")
+    ap.add_argument("--reassign", action="append", default=[],
+                    metavar="REVIEWER=REPLACEMENT",
+                    help="reassign an unavailable fixed-panel seat after its retry window")
+    ap.add_argument("--authorize-reassignment", metavar="NAME",
+                    help="owner identity authorizing --reassign; recorded in the case ledger")
     ap.add_argument("--dispositions", metavar="FILE",
                     help="round 2 and later: digest-keyed JSON mapping every "
                          "prior confirmed finding to reproduced, "
@@ -1612,11 +2358,16 @@ def main():
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--list", action="store_true", help="show reviewers and availability")
     args = ap.parse_args()
+    alternate_map = parse_reviewer_map(args.alternate, "--alternate")
+    reassignment_map = parse_reviewer_map(args.reassign, "--reassign")
+    args._alternate_map = alternate_map
+    args._reassignment_map = reassignment_map
     # A total bound on top of every per-reviewer timeout.
     arm_watchdog(args.watchdog if args.watchdog is not None
                  else max(1800, args.timeout * 3))
 
-    reviewers = load_reviewers()
+    all_reviewers = load_reviewers()
+    reviewers = list(all_reviewers)
     # --- the protocol, enforced rather than remembered ---------------------
     # Every rule below was already written down, and drifted from anyway,
     # because prose in a memory file is not a constraint. See PROTOCOL.md.
@@ -1646,7 +2397,8 @@ def main():
             f"every implementation review must assert the required "
             f"counter-claim: {HONEST_RUN_CLAIM!r} Pass it with --claim so the "
             f"gate checks that honest work still succeeds.")
-    if (args.kind == "implementation" and args.round is not None
+    if (args.kind == "implementation" and args.stage == "discovery"
+            and args.round is not None
             and args.round >= 2 and not args.list and not args.dispositions):
         config_error(
             "implementation round 2 and later requires --dispositions FILE "
@@ -1654,6 +2406,9 @@ def main():
             "not-reproduced, or deferred with a one-line reason. Pass the "
             "digest-keyed JSON file from the prior round.")
     if args.kind == "plan":
+        if args.stage != "discovery":
+            config_error("plan reviews have no closure stage. Pass --stage "
+                         "discovery or remove --stage closure.")
         if args.escalate:
             config_error("--plan and --escalate are contradictory: a plan "
                          "review is TWO contrasting models and stops there. "
@@ -1666,13 +2421,26 @@ def main():
         if args.quorum > 2:
             config_error(f"--plan runs two reviewers, so quorum {args.quorum} "
                          f"can never be met. Pass --quorum 2, or drop --plan.")
+    if args.authorize_panel_change and not args.new_cycle:
+        config_error("--authorize-panel-change requires --new-cycle. Pass both "
+                     "flags so the authorization event has a cycle boundary.")
+    if bool(reassignment_map) != bool(args.authorize_reassignment):
+        config_error("--reassign and --authorize-reassignment must be passed "
+                     "together. Pass the replacement mapping and the owner "
+                     "identity that authorized it.")
+    if args.alternate and args.reassign:
+        config_error("--alternate freezes case-creation authority while "
+                     "--reassign records later owner authority. Pass only the "
+                     "one that applies to this invocation.")
     if args.round is not None:
         if args.round < 1:
             config_error(f"--round must be 1 or more, got {args.round}.")
-        if args.round > MAX_ROUNDS:
+        limit = (MAX_CLOSURE_ROUNDS if args.stage == "closure"
+                 else MAX_ROUNDS)
+        if args.round > limit:
             config_error(
-                f"round {args.round} exceeds the bound of {MAX_ROUNDS} for one "
-                f"change. Past this, more rounds have not converged -- they "
+                f"{args.stage} round {args.round} exceeds the bound of {limit} "
+                f"for one cycle. Past this, more rounds have not converged -- they "
                 f"have been finding defects in the previous round's fixes. "
                 f"Step back to root cause: state what keeps recurring, fix "
                 f"THAT, declare new acceptance criteria, and start again at "
@@ -1756,14 +2524,122 @@ def main():
     truncated = len(body) > MAX_CHARS
     if truncated:
         body = body[:MAX_CHARS]
-    prompt = build_prompt(body, args.claim, truncated, args.context,
-                          args.threat_model, dispositions)
+    ledger_path = ledger = snapshot = None
+    ledger_generation = None
+    closure_digests = None
+    authority_dirty = False
+    if args.kind == "implementation":
+        args._selected_panel_all = [
+            r["name"] for r in reviewers
+            if not args.escalate
+            or any(in_profile(r, tier) for tier in LADDER)
+        ]
+        panel = [r["name"] for r in reviewers
+                 if r.get("enabled", True)
+                 and (not args.escalate
+                      or any(in_profile(r, tier) for tier in LADDER))]
+        configured = {r["name"]: r for r in all_reviewers}
+        enabled_names = {name for name, reviewer in configured.items()
+                         if reviewer.get("enabled", True)}
+        args._enabled_names = enabled_names
+        snapshot = reviewed_snapshot(body, label)
+        ledger_path, ledger, ledger_generation = prepare_case_ledger(
+            args, panel, snapshot)
+        upgrade_case_ledger(ledger)
+        authority_dirty = bool(reassignment_map)
+        missing_assignments = sorted(set(active_panel(ledger)) - set(configured))
+        if missing_assignments:
+            config_error("the case ledger assigns removed reviewer(s): "
+                         f"{', '.join(missing_assignments)}. Restore those "
+                         "reviewer records or pass an owner-authorized "
+                         "--reassign after the retry window.")
+        reviewers = [configured[name] for name in active_panel(ledger)]
+        apply_disposition_proposals(ledger, dispositions, args.actor)
+        cycle = ledger["cycles"][-1]
+        if args.stage == "closure":
+            if len(cycle["discovery"]) < MAX_ROUNDS:
+                config_error(
+                    f"closure starts after {MAX_ROUNDS} discovery rounds; "
+                    f"this cycle records {len(cycle['discovery'])}. Pass the "
+                    f"next discovery round first.")
+            if not any(f.get("accepted_status") in ("open", "disputed")
+                       for f in ledger["findings"].values()):
+                config_error("closure has no open or disputed ledger finding. "
+                             "Drop --stage closure and use the ledger's "
+                             "terminal REVIEW_PASS state.")
+            prompt, closure_digests = closure_prompt(body, ledger)
+        else:
+            prompt = build_prompt(body, args.claim, truncated, args.context,
+                                  args.threat_model, dispositions)
+    else:
+        prompt = build_prompt(body, args.claim, truncated, args.context,
+                              args.threat_model, dispositions)
 
     runnable, unavailable = [], []
     for rev in reviewers:
         why = availability(rev)
         (unavailable if why else runnable).append(
             {"name": rev["name"], "reason": why} if why else rev)
+
+    availability_state = None
+    if ledger is not None and args.stage == "closure" and unavailable:
+        availability_state, substituted = record_closure_unavailability(
+            ledger, unavailable, snapshot)
+        authority_dirty = authority_dirty or substituted
+        if substituted:
+            reviewers = [configured[name] for name in active_panel(ledger)]
+            runnable, unavailable = [], []
+            for rev in reviewers:
+                why = availability(rev)
+                (unavailable if why else runnable).append(
+                    {"name": rev["name"], "reason": why} if why else rev)
+            if unavailable:
+                availability_state = record_alternate_unavailability(
+                    ledger, unavailable, snapshot)
+
+    if authority_dirty:
+        try:
+            save_case_ledger(ledger_path, ledger, ledger_generation)
+        except OSError as exc:
+            config_error(f"could not persist case ledger {ledger_path}: {exc}. "
+                         "Repair storage and re-run; no reassigned reviewer "
+                         "has authority until this event is durable.")
+        ledger_generation = ledger["generation"]
+
+    if availability_state is not None:
+        if not authority_dirty:
+            try:
+                save_case_ledger(ledger_path, ledger, ledger_generation)
+            except OSError as exc:
+                config_error(
+                    f"could not persist case ledger {ledger_path}: {exc}. "
+                    "Repair storage and re-run; the availability window was "
+                    "not recorded.")
+            ledger_generation = ledger["generation"]
+        disarm_watchdog()
+        journal = record_review_round(args, [], availability_state)
+        report = {
+            "state": availability_state, "checked_at": now(),
+            "reviewed": label, "unavailable": unavailable, "results": [],
+            "case_ledger": str(ledger_path),
+            "availability_outcome": ledger["availability"]["outcome"],
+            "active_panel": active_panel(ledger), "journal": journal,
+        }
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            if ledger["availability"]["outcome"] == \
+                    "deferred-awaiting-authority":
+                print("REVIEW_ADJUDICATION — deferred - awaiting authority")
+                print("  The named adjudicator exhausted its bounded retry "
+                      "window and no available predesignated or owner-authorized "
+                      "replacement exists. Work is preserved; no finding was "
+                      "cleared and no automatic release was granted.")
+            else:
+                print("REVIEW_PARTIAL — named adjudicator unavailable")
+                print("  The bounded retry window remains open. No closure "
+                      "round was consumed and no finding state changed.")
+        sys.exit(STATES[availability_state])
 
     if not runnable:
         disarm_watchdog()
@@ -1786,6 +2662,7 @@ def main():
               f"with {len(runnable)} reviewer(s) [profile: {profile}]...")
 
     tiers_run = ["fast->deep" if args.escalate else profile]
+    args._closure_digests = closure_digests
     if args.escalate:
         completed, failed, unavailable, tiers_run = escalate(
             reviewers, prompt, args, truncated, label, len(body))
@@ -1799,7 +2676,7 @@ def main():
                 max_workers=len(runnable)) as ex:
             results = list(ex.map(
                 lambda r: run_one(r, prompt, args.timeout, len(args.claim),
-                                  args.claim),
+                                  args.claim, closure_digests),
                 runnable))
         completed = [r for r in results if r["ok"]]
         failed = [r for r in results if not r["ok"]]
@@ -1823,12 +2700,52 @@ def main():
     oos_critical = [f for f in out_of_scope
                     if norm(f.get("severity")) == "critical"]
     incomplete = [r for r in failed if r.get("incomplete")]
-    state = decide_state(n_completed=len(completed), n_failed=len(failed),
-                         confirmed=confirmed, refuted_claims=refuted_claims,
-                         rejecting=rejecting, truncated=truncated,
-                         quorum=args.quorum,
-                         n_out_of_scope_critical=len(oos_critical),
-                         n_incomplete=len(incomplete))
+    raw_state = decide_state(
+        n_completed=len(completed), n_failed=len(failed),
+        confirmed=confirmed, refuted_claims=refuted_claims,
+        rejecting=rejecting, truncated=truncated, quorum=args.quorum,
+        n_out_of_scope_critical=len(oos_critical),
+        n_incomplete=len(incomplete))
+    if ledger is not None and args.stage == "closure":
+        if not closure_panel_complete(ledger, completed, failed, truncated):
+            raw_state = ("REVIEW_INCOMPLETE" if incomplete
+                         else "REVIEW_PARTIAL")
+    state = raw_state
+    if ledger is not None:
+        ambiguous_rejection = (rejecting and not confirmed
+                               and not refuted_claims)
+        panel_quorum = (len(completed) >= args.quorum and not truncated
+                        and not ambiguous_rejection)
+        fixed_panel_complete = closure_panel_complete(
+            ledger, completed, failed, truncated)
+        accepted_decision = False
+        if args.stage == "closure" and fixed_panel_complete:
+            apply_closure_assessments(ledger, completed)
+            accepted_decision = True
+        elif panel_quorum:
+            if args.stage == "discovery" and (
+                    not failed or confirmed or refuted_claims):
+                merge_discovery_findings(
+                    ledger, completed, confirmed, refuted_claims)
+                accepted_decision = True
+        if accepted_decision:
+            state = accepted_terminal_state(
+                ledger["findings"], incomplete=bool(incomplete))
+        cycle = ledger["cycles"][-1]
+        cycle[args.stage].append({
+            "round": args.round, "at": journal_timestamp(),
+            "reviewed": snapshot, "completed": [r["name"] for r in completed],
+            "failed": [{"name": r["name"], "incomplete": bool(r.get("incomplete"))}
+                       for r in failed],
+            "state": state,
+        })
+        ledger["reviewed_snapshots"].append(snapshot)
+        try:
+            save_case_ledger(ledger_path, ledger, ledger_generation)
+        except OSError as exc:
+            config_error(f"could not persist case ledger {ledger_path}: {exc}. "
+                         "Repair storage and re-run this review; no accepted "
+                         "verdict was recorded.")
     disarm_watchdog()
     journal = record_review_round(args, completed, state)
 
@@ -1838,12 +2755,15 @@ def main():
         "tiers_run": tiers_run,
         "truncated": truncated, "quorum": args.quorum,
         "completed": len(completed), "unavailable": unavailable,
-        "failed": [{"name": r["name"], "error": r["error"],
-                    "incomplete": bool(r.get("incomplete"))}
-                   for r in failed],
+        "failed": [{"name": r["name"], "error": r["error"]} for r in failed],
         "confirmed_findings": confirmed, "refuted_claims": refuted_claims,
         "out_of_scope_findings": out_of_scope,
         "rejecting_reviewers": rejecting,
+        "case_ledger": (str(ledger_path) if ledger_path else None),
+        "accepted_findings": (ledger["findings"] if ledger else None),
+        "active_panel": (active_panel(ledger) if ledger else None),
+        "availability_outcome": (
+            ledger["availability"]["outcome"] if ledger else None),
         "journal": journal,
         "results": completed,
     }
@@ -1920,6 +2840,10 @@ def main():
             print(f"  Required reviewer content was unusable ({names}). "
                   "This spent review budget but supplied no judgment; it is "
                   "not an implementation defect and not a pass.")
+        elif state == "REVIEW_ADJUDICATION":
+            print("  The fixed panel did not resolve a material dispute. "
+                  "Preserve the work and adjudicate; this is not a pass and "
+                  "not a claimed defect verdict.")
         elif state == "REVIEW_PASS":
             names = ", ".join(r["name"] for r in completed)
             print(f"  Reviewed by: {names}. Absence of a finding is not proof "
