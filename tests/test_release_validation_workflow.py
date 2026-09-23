@@ -12,7 +12,10 @@ EXPECTED_PYTHONS = ["3.9", "3.10", "3.12"]
 
 def yaml_atom(value):
     value = value.strip()
-    return ast.literal_eval(value) if value[0] in "'\"" else value
+    try:
+        return ast.literal_eval(value)
+    except (SyntaxError, ValueError):
+        return value
 
 
 def mapping_block(text, key, indent):
@@ -118,6 +121,23 @@ class TestReleaseValidationWorkflow(unittest.TestCase):
             "          - '3.12'",
         )
         self.assert_trigger_and_python_matrices(block_style)
+
+    def test_python_versions_must_be_quoted_strings(self):
+        quoted = "python-version: ['3.9', '3.10', '3.12']"
+        unquoted = "python-version: ['3.9', 3.10, '3.12']"
+        self.assertEqual(self.workflow.count(quoted), 2)
+
+        first = self.workflow.index(quoted)
+        second = self.workflow.index(quoted, first + len(quoted))
+        for start in (first, second):
+            with self.subTest(matrix_offset=start):
+                mutated = (
+                    self.workflow[:start]
+                    + unquoted
+                    + self.workflow[start + len(quoted):]
+                )
+                with self.assertRaises(AssertionError):
+                    self.assert_trigger_and_python_matrices(mutated)
 
     def test_an_unrelated_job_cannot_substitute_for_a_release_job_matrix(self):
         missing_regression_matrix = self.workflow.replace(
