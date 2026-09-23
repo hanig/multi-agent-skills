@@ -276,7 +276,19 @@ request and changes nothing else, so every transition is a deliberate act. An
 orchestrator that assumes the merge did it will leave a trail of merged-and-open
 issues, which is how both of the above happened.
 
-After every push, merge and close, reconcile again.
+**A dispatch is a tracker event.** The moment a wave goes out, every issue it
+covers moves to in progress, named with the unit working it. Not when the first
+pull request appears, and not at the next sweep. An issue sitting in the backlog
+while an agent is actively working it is a lie in the direction that costs most:
+it invites a second dispatch on the same work, and it hides the fact that the
+run is busy. This was noticed by the owner, not by me, after a six-agent wave
+left six issues untouched in the backlog.
+
+The same applies at the other end. When an attempt stops without shipping,
+say so on the issue and say where the work was preserved, because a recovery
+ref nobody knows about is not preservation.
+
+After every dispatch, push, merge and close, reconcile again.
 
 ### The hourly report has three parts, in this order
 
@@ -304,6 +316,9 @@ progress.
 
 If nothing can start, say so and say why — every candidate blocked, or the
 machine already saturated. "Nothing to dispatch" is a finding. Silence is not.
+
+Whatever is dispatched in step three is recorded in the tracker before the
+report is written, not afterwards.
 
 ### What none of this enforces
 
