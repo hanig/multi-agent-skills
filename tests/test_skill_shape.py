@@ -7,11 +7,14 @@ reference prose only needs mechanical modal-to-id ties, not English inference.
 """
 
 from pathlib import Path
+import ast
 import importlib.util
 import json
+import os
 import re
 import shutil
 import string
+import subprocess
 import tempfile
 import unittest
 
@@ -54,6 +57,73 @@ DECLARATION_SPEC = importlib.util.spec_from_file_location(
 )
 DECLARATION_REGISTRY = importlib.util.module_from_spec(DECLARATION_SPEC)
 DECLARATION_SPEC.loader.exec_module(DECLARATION_REGISTRY)
+
+ORCHESTRATE_DECLARATIONS = (
+    "placement.behavior-deciding",
+    "placement.reference-elaboration",
+    "placement.reference-dialect",
+    "capability.host-policy",
+    "capability.dependencies",
+    "paths.skill-directory",
+    "authority.source",
+    "authority.confirmation",
+    "authority.narrow-mode",
+    "authority.revocation",
+    "role.supervision",
+    "delegation.whole-loop",
+    "delegation.prompt",
+    "delegation.configuration",
+    "delegation.continuation",
+    "retry.boundary",
+    "evidence.checkable",
+    "evidence.authority",
+    "review.panel-source",
+    "review.author-exclusion",
+    "review.claims",
+    "review.honesty",
+    "review.cost",
+    "review.effort",
+    "review.rounds",
+    "adjudication.matrix",
+    "adjudication.concurrence",
+    "adjudication.record",
+    "adjudication.nonoverridable",
+    "adjudication.honesty",
+    "watch.facts",
+    "watch.source",
+    "watch.proof",
+    "loop.quiescence",
+    "loop.advance",
+    "loop.yield",
+    "preservation.before-cleanup",
+    "dispatch.mechanics",
+    "merge.requirements",
+    "tracker.authority",
+    "tracker.reconcile",
+    "report.three-parts",
+    "handoff.contents",
+    "handoff.transfer",
+    "takeover.verify",
+    "limit.session-liveness",
+)
+
+
+def _orchestrate_completeness_problems(skill):
+    actual = tuple(item["id"] for item in
+                   DECLARATION_REGISTRY.load_registry(skill))
+    problems = [
+        "missing declaration: " + declaration_id
+        for declaration_id in ORCHESTRATE_DECLARATIONS
+        if declaration_id not in actual
+    ]
+    problems.extend(
+        "unexpected declaration: " + declaration_id
+        for declaration_id in actual
+        if declaration_id not in ORCHESTRATE_DECLARATIONS
+    )
+    if not problems and actual != ORCHESTRATE_DECLARATIONS:
+        problems.append("declaration order differs")
+    return problems
 
 
 def _body(path):
@@ -520,6 +590,229 @@ class TestAuthoredSkillShape(unittest.TestCase):
     def test_swarm_reference_modals_are_tied_to_registered_declarations(self):
         skill = SKILLS / "hanig-swarm"
         self.assertEqual(DECLARATION_REGISTRY.reference_problems(skill), [])
+
+    def test_orchestrate_declaration_block_matches_the_canonical_registry(self):
+        skill = SKILLS / "hanig-orchestrate"
+        self.assertEqual(DECLARATION_REGISTRY.body_diff(skill), "")
+        self.assertEqual(_orchestrate_completeness_problems(skill), [])
+
+    def test_orchestrate_reference_modals_are_tied_to_registered_declarations(self):
+        skill = SKILLS / "hanig-orchestrate"
+        self.assertEqual(DECLARATION_REGISTRY.reference_problems(skill), [])
+
+    def test_orchestrate_reads_authority_from_the_current_mandate(self):
+        skill = SKILLS / "hanig-orchestrate"
+        mandate = (ROOT / "docs" / "orchestrator-mandate.md").read_text(
+            encoding="utf-8")
+        declarations = {
+            item["id"]: item["normative_text"]
+            for item in DECLARATION_REGISTRY.load_registry(skill)
+        }
+        authority_sections = (
+            "Granted, without asking",
+            "Bounded by",
+            "Always stop and ask",
+        )
+        for heading in authority_sections:
+            with self.subTest(heading=heading):
+                self.assertIn("## " + heading, mandate)
+                self.assertIn(heading, declarations["authority.confirmation"])
+        for copied_id in (
+                "authority.grant", "authority.bounds", "authority.stop"):
+            self.assertNotIn(
+                copied_id, declarations,
+                "the operating skill copied authority that belongs only in "
+                "the current mandate")
+        self.assertIn("current mandate", declarations["authority.confirmation"])
+        self.assertIn("current mandate", declarations["authority.narrow-mode"])
+
+        bundle = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (skill / "SKILL.md", *sorted(
+                (skill / "references").glob("*.md")))
+        )
+        for stale_copy in (
+                "The seven granted powers",
+                "The six bounds retain",
+                "The five stop conditions"):
+            self.assertNotIn(stale_copy, bundle)
+
+    def test_orchestrate_carries_dispatch_tracker_and_report_order(self):
+        declarations = {
+            item["id"]: item["normative_text"]
+            for item in DECLARATION_REGISTRY.load_registry(
+                SKILLS / "hanig-orchestrate")
+        }
+        tracker = declarations["tracker.reconcile"]
+        for required in (
+                "each dispatch as a tracker event", "after each dispatch",
+                "move to in progress with its unit", "connector is available",
+                "pending synchronization without blocking unrelated dispatch",
+                "stopped unshipped attempt", "work was preserved"):
+            self.assertIn(required, tracker)
+        report = declarations["report.three-parts"]
+        self.assertIn("three ordered parts", report)
+        self.assertIn("step-three dispatches", report)
+        self.assertIn("before writing the report", report)
+        self.assertIn("pending synchronization", report)
+
+    def test_orchestrate_installs_and_doctor_calls_it_authored(self):
+        names = (
+            "hanig-orchestrate",
+            "hanig-project",
+            "hanig-swarm",
+            "hanig-review-gate",
+            "hanig-portable-handoff",
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            prefix = root / "skills"
+            command = [str(ROOT / "install.sh"), "--prefix", str(prefix)]
+            for name in names:
+                command.extend(("--only", name))
+            installed = subprocess.run(
+                command,
+                cwd=str(ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                universal_newlines=True,
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout)
+            self.assertTrue((prefix / "hanig-orchestrate" / "SKILL.md").is_file())
+
+            doctor = subprocess.run(
+                ["sh", str(ROOT / "bin" / "doctor"), "--prefix", str(prefix)],
+                cwd=str(ROOT),
+                env={**dict(os.environ), "HOME": str(root / "home")},
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                universal_newlines=True,
+            )
+            self.assertEqual(doctor.returncode, 0, doctor.stdout)
+            authored = [line for line in doctor.stdout.splitlines()
+                        if "hanig-orchestrate" in line]
+            self.assertEqual(len(authored), 1, doctor.stdout)
+            self.assertIn("ours (version", authored[0])
+
+    def test_orchestrate_review_facts_match_the_named_sources(self):
+        reference = (SKILLS / "hanig-orchestrate" / "references" /
+                     "delegation-evidence.md").read_text(encoding="utf-8")
+        config = json.loads(
+            (SKILLS / "hanig-review-gate" / "reviewers.json").read_text(
+                encoding="utf-8"))
+        reviewers = config["reviewers"]
+        for profile in ("plan", "fast", "standard", "deep", "committee"):
+            names = [reviewer["name"] for reviewer in reviewers
+                     if reviewer.get("enabled", True)
+                     and profile in (reviewer.get("profiles") or [])]
+            published = re.search(
+                r"^`{}`: (.+)\.$".format(re.escape(profile)),
+                reference,
+                re.MULTILINE,
+            )
+            self.assertIsNotNone(published, profile)
+            self.assertCountEqual(
+                [name.strip() for name in published.group(1).split(",")],
+                names,
+            )
+
+        for reviewer in reviewers:
+            if not reviewer.get("enabled", True) or not reviewer.get("_cost"):
+                continue
+            cost = reviewer["_cost"]
+            self.assertIn(
+                "{} input ${} and output ${}".format(
+                    reviewer["name"], cost["in"], cost["out"]),
+                reference,
+            )
+        astra = next(item for item in reviewers if item["name"] == "astra")
+        self.assertNotIn("_cost", astra)
+        self.assertIn("Astra has no `_cost` record", reference)
+
+        effort_note = config["_effort_null_is_deliberate"]
+        for measured in (
+                "3 of 3 samples",
+                "at effort=low in 2 of 3",
+                "4581-character review for $0.016 in 3 of 3",
+                "high cost 83% more"):
+            self.assertIn(measured, effort_note)
+        for published in (
+                "3 of 3 high samples",
+                "2 of 3 low samples",
+                "4581-character review costing $0.016 in 3 of 3",
+                "high cost 83 percent more"):
+            self.assertIn(published, reference)
+
+    def test_orchestrate_describes_advance_as_the_one_pass_it_is(self):
+        source = (SKILLS / "hanig-swarm" / "scripts" / "swarm.py").read_text(
+            encoding="utf-8")
+        functions = {node.name: node for node in ast.parse(source).body
+                     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        body = functions["cmd_advance"].body
+        self.assertEqual(len(body), 1)
+        self.assertIsInstance(body[0], ast.Return)
+        self.assertIsInstance(body[0].value, ast.Call)
+        self.assertEqual(body[0].value.func.id, "cmd_run")
+
+        cmd_run = functions["cmd_run"]
+        guarded = [node for node in cmd_run.body if isinstance(node, ast.Try)]
+        self.assertEqual(len(guarded), 1)
+        try_index = cmd_run.body.index(guarded[0])
+        acquire_calls = [node for statement in cmd_run.body[:try_index]
+                         for node in ast.walk(statement)
+                         if isinstance(node, ast.Call)
+                         and isinstance(node.func, ast.Name)
+                         and node.func.id == "acquire_lease"]
+        self.assertEqual(len(acquire_calls), 1)
+        advance_calls = [node for node in ast.walk(guarded[0])
+                         if isinstance(node, ast.Call)
+                         and isinstance(node.func, ast.Name)
+                         and node.func.id == "advance"]
+        self.assertEqual(len(advance_calls), 1)
+        release_calls = [node for node in ast.walk(
+            ast.Module(body=guarded[0].finalbody, type_ignores=[]))
+                         if isinstance(node, ast.Call)
+                         and isinstance(node.func, ast.Name)
+                         and node.func.id == "release_lease"]
+        self.assertEqual(len(release_calls), 1)
+        exiting_prints = [node for node in ast.walk(cmd_run)
+                          if isinstance(node, ast.Call)
+                          and isinstance(node.func, ast.Name)
+                          and node.func.id == "print"
+                          and "coordinator exiting" in ast.unparse(node)]
+        self.assertEqual(len(exiting_prints), 1)
+        loop_reference = (SKILLS / "hanig-orchestrate" / "references" /
+                          "operating-loop.md").read_text(encoding="utf-8")
+        self.assertIn("calls `advance` once under the state lock", loop_reference)
+        self.assertIn("prints that the coordinator is exiting", loop_reference)
+
+    def test_moving_an_orchestrate_rule_to_a_reference_fails_completeness(self):
+        with tempfile.TemporaryDirectory() as raw:
+            skill = Path(raw) / "hanig-orchestrate"
+            shutil.copytree(SKILLS / "hanig-orchestrate", skill)
+            registry = skill / "declarations.json"
+            data = json.loads(registry.read_text(encoding="utf-8"))
+            data["declarations"] = [
+                item for item in data["declarations"]
+                if item["id"] != "delegation.prompt"
+            ]
+            registry.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            reference = skill / "references" / "delegation-evidence.md"
+            reference.write_text(
+                reference.read_text(encoding="utf-8").replace(
+                    "declaration: delegation.prompt",
+                    "declaration: placement.reference-elaboration") +
+                "\nA delegated prompt must still carry the complete rule here. "
+                "<!-- declaration: placement.reference-elaboration -->\n",
+                encoding="utf-8",
+            )
+            DECLARATION_REGISTRY.write_body(skill)
+            self.assertEqual(DECLARATION_REGISTRY.body_diff(skill), "")
+            self.assertEqual(DECLARATION_REGISTRY.reference_problems(skill), [])
+            self.assertEqual(
+                _orchestrate_completeness_problems(skill),
+                ["missing declaration: delegation.prompt"],
+            )
 
     def test_an_unregistered_reference_imperative_is_rejected(self):
         with tempfile.TemporaryDirectory() as raw:

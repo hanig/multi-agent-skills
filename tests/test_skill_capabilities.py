@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILLS = ROOT / "skills"
 COMPATIBILITY = ROOT / "docs" / "agent-compatibility.md"
 AUTHORED = {
+    "hanig-orchestrate",
     "hanig-project",
     "hanig-swarm",
     "hanig-verified-workflow",
@@ -44,7 +45,7 @@ def _frontmatter(path):
 
 
 class TestSkillCapabilities(unittest.TestCase):
-    def test_all_thirteen_bundles_have_portable_loader_metadata(self):
+    def test_all_fourteen_bundles_have_portable_loader_metadata(self):
         bundles = {path.parent.name for path in SKILLS.glob("*/SKILL.md")}
         self.assertEqual(bundles, AUTHORED | VENDORED)
         for name in sorted(bundles):
@@ -102,6 +103,7 @@ class TestSkillCapabilities(unittest.TestCase):
 
     def test_authored_skills_state_their_host_safe_boundaries(self):
         expected = {
+            "hanig-orchestrate": "Host capability boundary",
             "hanig-project": "current session's real connector",
             "hanig-swarm": "Host capability boundary",
             "hanig-verified-workflow": "Host capability boundary",
