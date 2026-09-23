@@ -79,7 +79,7 @@ class HermeticRoots(unittest.TestCase):
             return True, versions[name]
 
         report = discovery.discover(self.env(**env), which=which, probe=probe)
-        self.assertEqual(report["schema_version"], 2)
+        self.assertEqual(report["schema_version"], 1)
         self.assertEqual(tuple(report["agents"]), AGENTS)
         self.assert_confined(report)
         return report

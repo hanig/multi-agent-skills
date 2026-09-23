@@ -12,10 +12,9 @@ the worktree at all. And that predicate was never production evidence: the
 caller supplies the base, so HEAD may already be past the work, and a clean
 tree is clean precisely when nobody touched it.
 
-The live worktree then became a different false dependency: Paseo deleted it
-when an agent closed, so judgment raced cleanup. New attempts instead use a
-coordinator-owned worktree and anchor an exact remote branch ref in coordinator
-state before the agent exists. The
+The live worktree then became a different false dependency: Paseo deletes it
+when an agent closes, so judgment raced cleanup. New attempts instead anchor an
+exact remote branch ref in coordinator state before the agent exists. The
 judge resolves that ref directly from the anchored remote, so a narrow fetch
 refspec cannot hide a successful push, then validates the immutable commit
 without opening the worktree. Legacy launch snapshots retain the old worktree
@@ -86,8 +85,7 @@ def decode_launch_facts(payload):
     try:
         facts = json.loads(payload)
     except (TypeError, ValueError) as exc:
-        return None, ("trusted launch snapshot is malformed JSON: "
-                      + render_for_record(exc, _DIAGNOSTIC_LIMIT))
+        return None, f"trusted launch snapshot is malformed JSON: {exc}"
     if not isinstance(facts, dict):
         return None, "trusted launch snapshot is not a JSON object"
     return facts, None
@@ -355,9 +353,7 @@ def stray_untracked(runner, spec, launch_facts=None):
     rc, entries = repo_status(runner, repo)
     if rc != 0:
         return {"workspace": repo, "paths": [], "count": 0,
-                "error": ("cannot read git status in "
-                          + render_for_record(
-                              repo, _PATH_LIMIT, collapse=False))}
+                "error": f"cannot read git status in {repo!r}"}
     declared = _declared_names(spec)
     stray = sorted(e["path"] for e in entries
                    if e.get("status") == UNTRACKED_STATUS
@@ -419,8 +415,7 @@ def decode_artifact_basis(payload):
     try:
         basis = json.loads(payload)
     except (TypeError, ValueError) as exc:
-        return None, ("the pre-dispatch artifact digest is malformed JSON: "
-                      + render_for_record(exc, _DIAGNOSTIC_LIMIT))
+        return None, f"the pre-dispatch artifact digest is malformed JSON: {exc}"
     if not isinstance(basis, dict):
         return None, "the pre-dispatch artifact digest is not a JSON object"
     return basis, None
@@ -440,25 +435,21 @@ def artifact_basis_problem(basis, unit_dir=None, spec=None):
                 "attempt's declared artifacts")
     if basis.get("schema_version") != ARTIFACT_BASIS_SCHEMA:
         return (f"the pre-dispatch artifact digest declares schema_version "
-                f"{render_for_record(basis.get('schema_version'), 32)}; "
-                f"this build understands "
-                f"{render_for_record(ARTIFACT_BASIS_SCHEMA, 12)}")
+                f"{basis.get('schema_version')!r}; this build understands "
+                f"{ARTIFACT_BASIS_SCHEMA}")
     if unit_dir is not None and basis.get("attempt_id") != Path(unit_dir).name:
         return (f"the pre-dispatch artifact digest belongs to attempt "
-                f"{render_for_record(basis.get('attempt_id'), 160, collapse=False)}, "
-                f"not {render_for_record(Path(unit_dir).name, 255, collapse=False)}")
+                f"{basis.get('attempt_id')!r}, not {Path(unit_dir).name!r}")
     expected_unit = (spec or {}).get("task_id") or (spec or {}).get("id")
     if expected_unit and basis.get("unit_id") != expected_unit:
         return (f"the pre-dispatch artifact digest belongs to unit "
-                f"{render_for_record(basis.get('unit_id'), 160, collapse=False)}, "
-                f"not {render_for_record(expected_unit, 160, collapse=False)}")
+                f"{basis.get('unit_id')!r}, not {expected_unit!r}")
     if not isinstance(basis.get("declared"), list):
         return ("the pre-dispatch artifact digest names no declared artifact "
                 "list")
     for key in ("absent", "escaped"):
         if not isinstance(basis.get(key), list):
-            return (f"the pre-dispatch artifact digest has no "
-                    f"{render_for_record(key, 32, collapse=False)} list")
+            return f"the pre-dispatch artifact digest has no {key!r} list"
     if not isinstance(basis.get("present"), dict):
         return "the pre-dispatch artifact digest has no 'present' map"
     return None
@@ -511,9 +502,8 @@ def artifact_transition_problem(basis, unit_dir, spec, observed):
     now_declared = [str(rel) for rel in (spec.get("declared_outputs") or [])]
     if sorted(now_declared) != sorted(declared):
         return (f"this attempt's spec now declares "
-                f"{render_for_record(', '.join(sorted(now_declared)) or 'nothing', _DIAGNOSTIC_LIMIT, collapse=False)}, but the "
-                f"coordinator digested "
-                f"{render_for_record(', '.join(sorted(declared)) or 'nothing', _DIAGNOSTIC_LIMIT, collapse=False)} "
+                f"{', '.join(sorted(now_declared)) or 'nothing'}, but the "
+                f"coordinator digested {', '.join(sorted(declared)) or 'nothing'} "
                 f"before dispatch. The declaration changed after the baseline "
                 f"was taken, so the baseline does not cover what is being "
                 f"judged"), []
@@ -531,9 +521,7 @@ def artifact_transition_problem(basis, unit_dir, spec, observed):
     refusals, weak = [], []
     for rel in declared:
         if rel in escaped:
-            refusals.append(
-                f"{render_for_record(rel, _PATH_LIMIT, collapse=False)} "
-                f"resolved outside the exclusive write root "
+            refusals.append(f"{rel} resolved outside the exclusive write root "
                             f"before dispatch, so it was never isolated")
             continue
         if rel in absent:
@@ -542,22 +530,18 @@ def artifact_transition_problem(basis, unit_dir, spec, observed):
         if not isinstance(was, dict):
             # Declared, and the basis says neither "absent" nor what it
             # looked like. That is a hole in the baseline, not a pass.
-            refusals.append(
-                f"{render_for_record(rel, _PATH_LIMIT, collapse=False)} "
-                f"is declared, and nothing was digested for "
+            refusals.append(f"{rel} is declared, and nothing was digested for "
                             f"it before dispatch")
             continue
         changed, is_weak = _artifact_changed(was, (observed or {}).get(rel))
         if changed is None:
             refusals.append(
-                f"{render_for_record(rel, _PATH_LIMIT, collapse=False)} "
-                f"cannot be compared against its pre-dispatch digest "
-                f"(before: {render_for_record(was.get('method', was.get('error', 'nothing recorded')), _DIAGNOSTIC_LIMIT)}, "
-                f"now: {render_for_record(((observed or {}).get(rel) or {}).get('method', 'nothing recorded'), _DIAGNOSTIC_LIMIT)})")
+                f"{rel} cannot be compared against its pre-dispatch digest "
+                f"(before: {was.get('method', was.get('error', 'nothing recorded'))!r}, "
+                f"now: {((observed or {}).get(rel) or {}).get('method', 'nothing recorded')!r})")
         elif not changed:
             refusals.append(
-                f"{render_for_record(rel, _PATH_LIMIT, collapse=False)} "
-                f"is identical to the artifact that was already there "
+                f"{rel} is identical to the artifact that was already there "
                 f"when this attempt was dispatched, so nothing shows this "
                 f"attempt produced it. A declared output that existed "
                 f"beforehand and did not change is an input")
@@ -580,15 +564,12 @@ def judge_artifacts(state, basis, unit_dir, spec, observed, notes):
         return state
     problem, weak = artifact_transition_problem(basis, unit_dir, spec, observed)
     if problem:
-        notes.append(
-            f"REASON={render_for_record(REASON_ARTIFACT_UNCHANGED, 64, collapse=False)}")
+        notes.append(f"REASON={REASON_ARTIFACT_UNCHANGED}")
         notes.append(problem)
         return "INCOMPLETE"
     if weak:
         notes.append(
-            f"production of "
-            f"{render_for_record(', '.join(sorted(weak)), _DIAGNOSTIC_LIMIT, collapse=False)} "
-            f"was established by "
+            f"production of {', '.join(sorted(weak))} was established by "
             f"size and mtime rather than content, because the artifact is "
             f"over the digest limit. A rewrite to the same length inside the "
             f"same second would be invisible to that comparison.")
@@ -635,8 +616,7 @@ class EvidenceRecord(dict):
 
     def _refuse(self, key):
         raise AuthorityFromEvidence(
-            f"{render_for_record(key, 80, collapse=False)} decides something, "
-            f"and this launch record was read "
+            f"{key!r} decides something, and this launch record was read "
             f"without its seal, so it is evidence rather than authority. Take "
             f"the value from the plan or from coordinator state; if you are "
             f"cross-checking the record's claim against one of those and will "
@@ -685,9 +665,7 @@ def record_claim(rec, key):
 
 def launch_record_path(unit_dir):
     """One place for the convention, which three call sites had inlined."""
-    attempt = Path(unit_dir).name
-    return Path(unit_dir).parent / (
-        f"launch-{render_for_record(attempt, len(attempt), collapse=False)}.json")
+    return Path(unit_dir).parent / f"launch-{Path(unit_dir).name}.json"
 
 
 def read_sealed_launch_record(unit_dir, seal):
@@ -713,9 +691,7 @@ def read_sealed_launch_record(unit_dir, seal):
                       "state before the agent ran, so no transition can be "
                       "judged")
     except OSError as exc:
-        return None, (f"cannot read the launch record at "
-                      f"{render_for_record(path, _PATH_LIMIT, collapse=False)}: "
-                      f"{render_for_record(exc, _DIAGNOSTIC_LIMIT)}")
+        return None, f"cannot read the launch record at {path}: {exc}"
     # Checked AFTER the file, so an absent record still reports as absent.
     # That case grants nothing either way, and the missing-anchor message is
     # the one that tells an operator what to do.
@@ -727,24 +703,16 @@ def read_sealed_launch_record(unit_dir, seal):
     actual = hashlib.sha256(raw).hexdigest()
     if actual != seal:
         return None, (
-            f"the launch record at "
-            f"{render_for_record(path, _PATH_LIMIT, collapse=False)} no longer "
-            f"matches the digest the coordinator recorded when it wrote it "
-            f"(sealed {render_for_record(seal[:12], 12)}, "
-            f"found {render_for_record(actual[:12], 12)}). It was changed "
-            f"after the agent started, "
+            f"the launch record at {path} no longer matches the digest the "
+            f"coordinator recorded when it wrote it (sealed {seal[:12]}, "
+            f"found {actual[:12]}). It was changed after the agent started, "
             f"so nothing in it can be used to judge what the agent did")
     try:
         rec = json.loads(raw)
     except ValueError as exc:
-        return None, (f"the launch record at "
-                      f"{render_for_record(path, _PATH_LIMIT, collapse=False)} "
-                      f"is not readable JSON: "
-                      f"{render_for_record(exc, _DIAGNOSTIC_LIMIT)}")
+        return None, f"the launch record at {path} is not readable JSON: {exc}"
     if not isinstance(rec, dict):
-        return None, (f"the launch record at "
-                      f"{render_for_record(path, _PATH_LIMIT, collapse=False)} "
-                      f"is not a JSON object")
+        return None, f"the launch record at {path} is not a JSON object"
     return rec, None
 
 
@@ -764,14 +732,10 @@ def refused_launch(unit_dir):
     if pre.get("status") != "refused":
         return None
     ws = pre.get("workspace") or "the workspace"
-    return (f"attempt "
-            f"{render_for_record(Path(unit_dir).name, 160, collapse=False)} "
-            f"was REFUSED at launch preflight "
-            f"({render_for_record(ws, _PATH_LIMIT, collapse=False)} was not "
-            f"clean), so nothing was dispatched and there is no "
+    return (f"attempt {Path(unit_dir).name} was REFUSED at launch preflight "
+            f"({ws} was not clean), so nothing was dispatched and there is no "
             f"job to bind. Its receipt is at "
-            f"{render_for_record(launch_record_path(unit_dir), _PATH_LIMIT, collapse=False)}. "
-            f"Clean the workspace and "
+            f"{launch_record_path(unit_dir)}. Clean the workspace and "
             f"allocate a new attempt.")
 
 
@@ -786,14 +750,9 @@ def read_launch_record(unit_dir):
                       "state before the agent ran, so no transition can be "
                       "judged. Re-dispatch through the coordinator.")
     except (OSError, ValueError) as exc:
-        return None, (f"launch record at "
-                      f"{render_for_record(path, _PATH_LIMIT, collapse=False)} "
-                      f"is unreadable: "
-                      f"{render_for_record(exc, _DIAGNOSTIC_LIMIT)}")
+        return None, f"launch record at {path} is unreadable: {exc}"
     if not isinstance(rec, dict):
-        return None, (f"launch record at "
-                      f"{render_for_record(path, _PATH_LIMIT, collapse=False)} "
-                      f"is not an object")
+        return None, f"launch record at {path} is not an object"
     # Refusing type, so a computed key or an aliased reader cannot quietly
     # take an authority field from an unsealed record.
     return EvidenceRecord(rec), None
@@ -814,20 +773,17 @@ def launch_facts_problem(facts, unit_dir=None, spec=None):
         attempt = Path(unit_dir).name
         if facts.get("attempt_id") != attempt:
             return (f"the trusted launch snapshot belongs to attempt "
-                    f"{render_for_record(facts.get('attempt_id'), 160, collapse=False)}, "
-                    f"not {render_for_record(attempt, 160, collapse=False)}")
+                    f"{facts.get('attempt_id')!r}, not {attempt!r}")
     expected_unit = (spec or {}).get("task_id") or (spec or {}).get("id")
     if expected_unit and facts.get("unit_id") != expected_unit:
         return (f"the trusted launch snapshot belongs to unit "
-                f"{render_for_record(facts.get('unit_id'), 160, collapse=False)}, "
-                f"not {render_for_record(expected_unit, 160, collapse=False)}")
+                f"{facts.get('unit_id')!r}, not {expected_unit!r}")
     required = ("repo", "execution_workspace", "workspace_identity",
                 "base_commit", "base_tree", "branch", "clean_at_launch")
     missing = [key for key in required if key not in facts]
     if missing:
         return ("the trusted launch snapshot is incomplete (missing "
-                f"{render_for_record(', '.join(missing), 200, collapse=False)}). "
-                f"Re-dispatch this attempt")
+                f"{', '.join(missing)}). Re-dispatch this attempt")
     identity = facts.get("workspace_identity")
     if (not isinstance(identity, dict)
             or identity.get("realpath") != facts.get("execution_workspace")):
@@ -836,8 +792,7 @@ def launch_facts_problem(facts, unit_dir=None, spec=None):
         value = facts.get(key)
         if not isinstance(value, str) or len(value) not in (40, 64) or any(
                 c not in "0123456789abcdef" for c in value.lower()):
-            return (f"the trusted launch snapshot has an invalid "
-                    f"{render_for_record(key, 32, collapse=False)}")
+            return f"the trusted launch snapshot has an invalid {key}"
     if facts.get("clean_at_launch") is not True:
         return ("the repository was already dirty at launch according to "
                 "the trusted launch snapshot, so production is "
@@ -845,16 +800,12 @@ def launch_facts_problem(facts, unit_dir=None, spec=None):
     judgment_ref = facts.get("judgment_ref")
     schema = facts.get("schema_version", 0)
     if schema >= 3:
-        branch = _as_text(facts.get("branch"))
-        expected = (
-            f"refs/heads/{render_for_record(branch, len(branch), collapse=False)}"
-            if schema >= 4 else
-            f"refs/remotes/origin/{render_for_record(branch, len(branch), collapse=False)}")
+        expected = (f"refs/heads/{facts.get('branch')}" if schema >= 4 else
+                    f"refs/remotes/origin/{facts.get('branch')}")
         if judgment_ref != expected:
             return (f"the trusted launch snapshot has judgment_ref "
-                    f"{render_for_record(judgment_ref, 4096, collapse=False)}, "
-                    f"not the schema-{render_for_record(schema, 12)} ref "
-                    f"{render_for_record(expected, 4096, collapse=False)}")
+                    f"{judgment_ref!r}, not the schema-{schema} ref "
+                    f"{expected!r}")
         if not facts.get("repository_remote"):
             return ("the trusted launch snapshot has no anchored origin URL "
                     "for direct remote-ref judgment")
@@ -874,9 +825,7 @@ def effective_remote_ref(facts):
     """
     schema = (facts or {}).get("schema_version", 0)
     if schema == 3:
-        branch = _as_text(facts.get("branch"))
-        return (f"refs/heads/"
-                f"{render_for_record(branch, len(branch), collapse=False)}")
+        return f"refs/heads/{facts.get('branch')}"
     if schema >= 4:
         return facts.get("judgment_ref")
     return None
@@ -905,8 +854,7 @@ def remote_push_transport(runner, repo):
         values = [v for v in raw.split("\0") if v]
     if len(values) != 1:
         return None, None, (
-            f"origin has {render_for_record(len(values), 12)} push "
-            f"destinations; one code attempt "
+            f"origin has {len(values)} push destinations; one code attempt "
             "can anchor and judge exactly one repository")
     raw_url = values[0]
     # `ls-remote --get-url` applies `url.*.insteadOf` but NOT
@@ -922,11 +870,8 @@ def remote_push_transport(runner, repo):
     rc, resolved, err = _git(
         runner, repo, "remote", "get-url", "--push", "origin")
     if rc != 0 or not resolved:
-        if err:
-            return None, None, render_git_diagnostic(rc, err)
         return None, None, (
-            f"cannot resolve origin push destination from "
-            f"{render_for_record(raw_url, _DIAGNOSTIC_LIMIT, collapse=False)}")
+            err or f"cannot resolve origin push destination from {raw_url!r}")
     resolved = resolved.strip().splitlines()
     if len(resolved) != 1 or not resolved[0]:
         return None, None, (
@@ -943,16 +888,12 @@ def _anchored_remote_transport(runner, facts):
     anchored_raw = facts.get("repository_remote_raw")
     if anchored_raw is not None and raw != anchored_raw:
         return None, (
-            f"origin raw push URL changed after launch "
-            f"({render_for_record(anchored_raw, _DIAGNOSTIC_LIMIT, collapse=False)} -> "
-            f"{render_for_record(raw, _DIAGNOSTIC_LIMIT, collapse=False)}); "
-            f"refusing to select a new repository")
+            f"origin raw push URL changed after launch ({anchored_raw!r} -> "
+            f"{raw!r}); refusing to select a new repository")
     if resolved != facts.get("repository_remote"):
         return None, (
             f"origin push destination changed after launch "
-            f"({render_for_record(facts.get('repository_remote'), _DIAGNOSTIC_LIMIT, collapse=False)} -> "
-            f"{render_for_record(resolved, _DIAGNOSTIC_LIMIT, collapse=False)}); "
-            f"refusing "
+            f"({facts.get('repository_remote')!r} -> {resolved!r}); refusing "
             "to select a new repository")
     return raw, None
 
@@ -1013,18 +954,13 @@ def _judge_anchored_ref(runner, facts, judgment=None):
         else:
             detail = "the remaining managed worktree is unreadable"
         return False, None, (
-            f"the anchored remote ref "
-            f"{render_for_record(ref, _DIAGNOSTIC_LIMIT, collapse=False)} "
-            f"is absent on the anchored origin; "
-            f"{render_for_record(detail, _DIAGNOSTIC_LIMIT)}. A commit pushed "
-            f"under another ref is never "
+            f"the anchored remote ref {ref!r} is absent on the anchored "
+            f"origin; {detail}. A commit pushed under another ref is never "
             "substituted")
     if rc != 0:
         _set_judgment_state(judgment, "remote-ref-unreadable")
         return False, None, (
-            f"cannot resolve anchored remote ref "
-            f"{render_for_record(ref, _DIAGNOSTIC_LIMIT, collapse=False)} "
-            f"from the anchored "
+            f"cannot resolve anchored remote ref {ref!r} from the anchored "
             f"origin: {render_git_diagnostic(rc, err or out)}")
     lines = [line.split() for line in out.splitlines() if line.strip()]
     if (len(lines) != 1 or len(lines[0]) != 2 or lines[0][1] != ref
@@ -1034,75 +970,58 @@ def _judge_anchored_ref(runner, facts, judgment=None):
         _set_judgment_state(judgment, "remote-ref-unreadable")
         return False, None, (
             f"anchored origin returned an invalid exact-ref answer for "
-            f"{render_for_record(ref, _DIAGNOSTIC_LIMIT, collapse=False)}; "
-            f"refusing to guess a produced head")
+            f"{ref!r}; refusing to guess a produced head")
     head = lines[0][0]
     # Fetch the exact anchored ref into a coordinator namespace. ls-remote
     # establishes which value was observed; this fetch makes its commit/tree
-    # available even after coordinator cleanup removes the worktree.
+    # available even if Paseo deleted both the worktree and its local branch.
     # The explicit refspec ignores remote.origin.fetch and changes no config.
     cache_ref = ("refs/hanig-swarm/judgments/" +
                  str(facts["attempt_id"]))
     rc, _fetch_out, fetch_err = _git(
         runner, repo, "fetch", "--no-tags", "--force",
         "--recurse-submodules=no", remote,
-        f"+{render_for_record(ref, len(ref), collapse=False)}:"
-        f"{render_for_record(cache_ref, 4096, collapse=False)}", timeout=120)
+        f"+{ref}:{cache_ref}", timeout=120)
     if rc != 0:
         _set_judgment_state(judgment, "remote-head-unavailable-locally")
         return False, None, (
-            f"anchored remote ref "
-            f"{render_for_record(ref, _DIAGNOSTIC_LIMIT, collapse=False)} "
-            f"resolves to {render_for_record(head[:12], 12)}, but its exact "
-            f"commit could not be fetched: "
-            f"{render_for_record(fetch_err, 160)}")
+            f"anchored remote ref {ref!r} resolves to {head[:12]}, but its "
+            f"exact commit could not be fetched: {fetch_err[:160]}")
     rc, fetched_head, _ = _git(
         runner, repo, "rev-parse", "--verify", cache_ref + "^{commit}")
     if rc != 0 or fetched_head != head:
         _set_judgment_state(judgment, "remote-ref-moved-during-judgment")
         return False, None, (
-            f"anchored remote ref "
-            f"{render_for_record(ref, _DIAGNOSTIC_LIMIT, collapse=False)} "
-            f"changed while it was being "
+            f"anchored remote ref {ref!r} changed while it was being "
             "resolved; refusing to choose between two values")
     base = facts["base_commit"]
     if head == base:
         _set_judgment_state(judgment, "pushed-ref-no-tree-change")
         return False, None, (
-            f"the anchored remote ref "
-            f"{render_for_record(ref, _DIAGNOSTIC_LIMIT, collapse=False)} was "
-            f"pushed but still names the launch base, "
+            f"the anchored remote ref {ref!r} was pushed but still names the launch base, "
             "so it contains no produced commit")
     rc, _, _ = _git(runner, repo, "merge-base", "--is-ancestor", base, head)
     if rc != 0:
         _set_judgment_state(judgment, "pushed-ref-invalid-history")
         return False, None, (
-            f"the anchored remote ref "
-            f"{render_for_record(ref, _DIAGNOSTIC_LIMIT, collapse=False)} "
-            f"names {render_for_record(head[:12], 12)}, which does not "
-            f"descend from anchored base {render_for_record(base[:12], 12)}")
+            f"the anchored remote ref {ref!r} names {head[:12]}, which does "
+            f"not descend from anchored base {base[:12]}")
     rc, tree, _ = _git(runner, repo, "rev-parse", head + "^{tree}")
     if rc != 0:
         _set_judgment_state(judgment, "remote-head-tree-unreadable")
         return False, None, (
-            f"cannot read the tree of {render_for_record(head[:12], 12)} from "
-            f"anchored remote ref "
-            f"{render_for_record(ref, _DIAGNOSTIC_LIMIT, collapse=False)}")
+            f"cannot read the tree of {head[:12]} from anchored remote ref "
+            f"{ref!r}")
     if tree == facts["base_tree"]:
         _set_judgment_state(judgment, "pushed-ref-no-tree-change")
         return False, None, (
-            f"the anchored remote ref "
-            f"{render_for_record(ref, _DIAGNOSTIC_LIMIT, collapse=False)} was "
-            f"pushed and advanced, but its tree is "
+            f"the anchored remote ref {ref!r} was pushed and advanced, but its tree is "
             "identical to the launch base tree")
     _set_judgment_state(judgment, "pushed-ref-produced-change")
     return True, head, (
-        f"coordinator resolved anchored remote ref "
-        f"{render_for_record(ref, _DIAGNOSTIC_LIMIT, collapse=False)} to "
-        f"{render_for_record(head[:12], 12)}; its tree "
-        f"{render_for_record(tree[:12], 12)} differs from anchored base tree "
-        f"{render_for_record(facts['base_tree'][:12], 12)}, and it descends "
-        f"from {render_for_record(base[:12], 12)}")
+        f"coordinator resolved anchored remote ref {ref!r} to {head[:12]}; "
+        f"its tree {tree[:12]} differs from anchored base tree "
+        f"{facts['base_tree'][:12]}, and it descends from {base[:12]}")
 
 
 def workspace_identity_problem(runner, facts):
@@ -1153,29 +1072,13 @@ def workspace_identity_problem(runner, facts):
     if current.st_ino != identity["inode"]:
         differences.append("the inode differs")
     if differences:
-        # The SENTENCE has to stop claiming more than the list does.
-        # luna, in the round after the list was added: "no longer names
-        # the launched directory" is disproved by the stat in this very
-        # conditional when only resolve() moved -- same device, same
-        # inode, same directory, different spelling. I reported WHICH
-        # check differed and left the clause around it asserting the
-        # thing that check had just refuted.
-        #
-        # Same file identity is now said so explicitly, because that is
-        # the case an operator most needs told apart from a
-        # substitution.
-        same_file = (current.st_dev == identity["device"]
-                     and current.st_ino == identity["inode"])
-        headline = ("still names the same file, but not by the launched "
-                    "identity" if same_file
-                    else "no longer names the launched directory")
         # The join goes through the renderer too. My own AST guard
         # flagged it, correctly: it cannot know the pieces were
         # rendered individually, and rendering the assembled string
         # bounds the COMBINED length, which nothing else did.
         return (f"the anchored worktree path "
                 f"{render_for_record(workspace, _PATH_LIMIT, collapse=False)}"
-                f" {render_for_record(headline, _DIAGNOSTIC_LIMIT)}: "
+                f" no longer names the launched directory: "
                 f"{render_for_record('; '.join(differences), _DIAGNOSTIC_LIMIT, collapse=False)}")
     observed = {}
     for key, args in (

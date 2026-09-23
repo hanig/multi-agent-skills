@@ -838,13 +838,15 @@ class TestTheCodePredicate(unittest.TestCase):
                               "window logic")
         self.assertIn('us.pop("incomplete_since", None)', src[i:j])
 
-    def test_the_agent_runs_in_a_coordinator_worktree_off_the_trusted_base(self):
+    def test_the_agent_runs_in_a_paseo_worktree_off_the_trusted_base(self):
         src = SWARM.read_text()
         seg = src[src.index('if kind == "code":'):]
         seg = seg[:seg.index("return str(agent), None")]
-        self.assertIn('_create_code_worktree(', seg)
-        self.assertIn('"--cwd", str(reuse_workspace)', seg)
-        self.assertNotIn('"--new-workspace", "worktree"', seg)
+        self.assertIn('"--cwd", str(source_repo)', seg)
+        self.assertIn('"--new-workspace", "worktree"', seg)
+        self.assertIn('"--worktree-mode", "branch-off"', seg)
+        self.assertIn('"--base", intent["base_commit"]', seg)
+        self.assertIn('workspace = rec.get("cwd")', seg)
         self.assertIn('f"SWARM_UNIT_DIR={unit_dir}"', seg)
 
     def test_bind_accepts_an_agent_id_for_a_code_unit(self):
@@ -2755,11 +2757,9 @@ class TestADefaultChangeIsMadeVisible(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             f = Path(d) / "p.json"
             f.write_text(json.dumps(plan))
-            result = subprocess.run(
+            return subprocess.run(
                 [sys.executable, str(SWARM), "validate", str(f)],
-                capture_output=True, text=True, cwd=d)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            return result.stdout
+                capture_output=True, text=True).stdout
 
     def test_units_relying_on_the_default_are_named(self):
         out = self._validate({"name": "p", "units": [

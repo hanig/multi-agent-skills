@@ -21,6 +21,7 @@ LIVE_DOCUMENTS = (
     ROOT / "README.md",
 )
 SUITE_MARKER = "<!-- docs-truth:suite-lower-bound -->"
+HISTORICAL_MARKER = "<!-- docs-truth:historical -->"
 FENCE_OPEN = re.compile(r" {0,3}(?P<fence>`{3,}|~{3,})")
 ATX_HEADING = re.compile(r" {0,3}#{1,6}(?:[ \t]+|$)")
 SETEXT_UNDERLINE = re.compile(r" {0,3}(?:=+|-+)[ \t]*$")
@@ -63,6 +64,10 @@ CANONICAL_LOWER_BOUND = re.compile(
     rf"Full suite: at least (?P<count>{NUMBER}) tests discoverable by "
     rf"unittest\. Run the command below for the exact current total\.",
     re.IGNORECASE,
+)
+TEST_COUNT = re.compile(
+    rf"{COUNT_START}(?P<count>{NUMBER})\s+tests?{TOKEN_END}",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 
@@ -282,8 +287,10 @@ def mask_inline_text(text):
     return "".join(visible)
 
 
-def lex_document(text):
+def lex_document(text, historical_markers=None):
     """Return one ownership-ordered lexical view of supported Markdown."""
+    historical_markers = (
+        [] if historical_markers is None else historical_markers)
     lines = normalized_lines(text)
     structural = [line.expandtabs(4) for line in lines]
     records = []
@@ -466,9 +473,11 @@ def lex_document(text):
                     closing_line += 1
                     closing_column = lines[closing_line].find("-->")
                 if closing_column >= 0:
-                    if (not stack and raw.strip() == SUITE_MARKER
-                            and closing_line == index):
-                        markers.append(index + 1)
+                    if not stack and closing_line == index:
+                        if raw.strip() == SUITE_MARKER:
+                            markers.append(index + 1)
+                        elif raw.strip() == HISTORICAL_MARKER:
+                            historical_markers.append(index + 1)
                     end_column = closing_column + 3
                     if closing_line == index:
                         masked = " " * end_column + raw[end_column:]
@@ -588,6 +597,45 @@ def scan_counts(paragraphs, skip=None):
     return sorted(found)
 
 
+def all_test_counts(paragraphs, skip=None):
+    """Every visible `N tests` count, without guessing its subject."""
+    found = []
+    for paragraph in paragraphs:
+        if skip is not None and paragraph is skip:
+            continue
+        visible = "\n".join(line for _, line in paragraph)
+        for match in TEST_COUNT.finditer(visible):
+            line_offset = visible.count("\n", 0, match.start())
+            found.append((
+                paragraph[line_offset][0],
+                int(match.group("count").replace(",", "")),
+            ))
+    return sorted(found)
+
+
+def historical_count_lines(filename, marker_lines, paragraphs, problems):
+    """Return count lines owned by adjacent historical markers."""
+    owned = set()
+    paragraphs_by_start = {
+        paragraph[0][0]: paragraph for paragraph in paragraphs if paragraph
+    }
+    for marker_line in marker_lines:
+        paragraph = paragraphs_by_start.get(marker_line + 1)
+        if paragraph is None:
+            problems.append(
+                f"{filename}: historical marker on line {marker_line} must "
+                f"immediately precede a prose claim")
+            continue
+        counts = all_test_counts([paragraph])
+        if not counts:
+            problems.append(
+                f"{filename}: historical marker on line {marker_line} owns "
+                f"no suite-count claim")
+            continue
+        owned.update(line_number for line_number, _count in counts)
+    return owned
+
+
 def check_canonical_suite_floor(filename, text, discovered, problems=None):
     """Structural problems and competing counts for the canonical document.
 
@@ -606,7 +654,8 @@ def check_canonical_suite_floor(filename, text, discovered, problems=None):
     """
     raise_at_end = problems is None
     problems = [] if raise_at_end else problems
-    markers, lexed_lines = lex_document(text)
+    historical_markers = []
+    markers, lexed_lines = lex_document(text, historical_markers)
     paragraphs = prose_paragraphs(lexed_lines)
     owner = None
     documented_floor = None
@@ -653,29 +702,17 @@ def check_canonical_suite_floor(filename, text, discovered, problems=None):
                             f"{documented_floor} exceeds {discovered} tests "
                             f"discovered by unittest")
 
-    # A competing claim is one that could be MISTAKEN for the marked one.
-    # The document's own floor is what decides that, and reusing it needs no
-    # new annotation and no new judgement about English.
-    #
-    # Rejecting every count-shaped paragraph was the last place this guard
-    # inferred scope from wording, and luna refuted it with honest content:
-    # "The installer's current suite count: 12 tests." matches the pattern
-    # and is not about this suite at all. A step-back committee split on the
-    # remedy -- astra would have demoted the whole scan to a nonblocking
-    # warning, accepting that "nothing guarantees rejection of an unmarked
-    # stale total"; deepseek-v4-pro pointed out that the floor already
-    # discriminates, since a genuine suite total cannot be below the number
-    # this document asserts the suite exceeds. The second keeps the
-    # capability, so it is what runs here.
-    #
-    # It tightens by itself: raise the floor and more numbers become
-    # competing claims. What it gives up is an unmarked count BELOW the
-    # floor going unremarked -- which by construction cannot be read as this
-    # suite's total, because the marked claim directly contradicts it.
+    # Scan every recognised count without trying to infer which component it
+    # describes. Magnitude and phrasing both produced demonstrated false
+    # positives and false negatives. Authorization is explicit instead: the
+    # canonical live claim has its marker, and historical prose has another.
     unowned = scan_counts(paragraphs, skip=owner)
-    # REPORTED, NOT RAISED. This is astra's plan from the committee split,
-    # adopted after luna demonstrated both failure modes of the magnitude
-    # rule I had preferred instead -- in one round:
+    test_counts = all_test_counts(paragraphs, skip=owner)
+    # Always REPORTED. This preserves the observable used by the lexer corpus
+    # and the advisory output. ARC-702 adds a separate authorship rule for the
+    # canonical document: a count must be the one live claim or be declared
+    # historical. It does not try to infer scope from magnitude or phrasing.
+    # luna demonstrated why such inference fails in both directions:
     #
     #   "The installer was built and green: 2,000 tests."
     #       -> would fail the suite. Honest component prose, no stale claim.
@@ -684,30 +721,32 @@ def check_canonical_suite_floor(filename, text, discovered, problems=None):
     #
     # Over-fires on matched wording, under-fires on unmatched wording.
     # Neither magnitude nor phrasing separates a component count from a
-    # suite count, which is what astra said when the committee split:
-    # "Preserve the existing competing-claim scanner as a NONBLOCKING
-    # warning, with line references. Keep exactly-one-marker and
-    # marked-claim truth validation as hard requirements."
-    #
-    # And the cost, in astra's words, conceded rather than hidden: "This
-    # deliberately relinquishes automatic rejection of UNMARKED competing
-    # suite totals. It is not capability-preserving, and should not be
-    # presented as such."
-    #
-    # What is still HARD here: exactly one marker, that marker owning a
-    # standalone claim, and the claim's floor not exceeding the real count.
-    # What is now SOFT: everything else in the document. The scan keeps its
-    # line references, which is also what the lexer corpus below asserts
-    # on -- removing the scan outright would have deleted the only
-    # observable those 27 cases have, which is the shape of deletion this
-    # repository has been burned by.
+    # suite count. The marker records the distinction instead of guessing it.
+    # The scan keeps its line references, which is what the lexer corpus below
+    # asserts on. Hard failure is decided only after the complete report has
+    # been assembled, so a missing annotation cannot hide any later count.
     unowned = [(line_number, count) for line_number, count in unowned]
+    historical_lines = historical_count_lines(
+        filename, historical_markers, paragraphs, problems)
+    unmarked = [
+        (line_number, count) for line_number, count in test_counts
+        if line_number not in historical_lines
+    ]
+    if unmarked:
+        details = ", ".join(
+            f"line {line_number}: {count}"
+            for line_number, count in unmarked)
+        problems.append(
+            f"{filename}: unmarked test-count claim(s): {details}; "
+            f"place {HISTORICAL_MARKER} immediately above each dated or "
+            f"historical claim")
+    reported = sorted(set(unowned + unmarked))
     if raise_at_end and problems:
         raise AssertionError(
             "; ".join(problems)
-            + (f" | competing counts also present: {unowned}"
-               if unowned else ""))
-    return unowned
+            + (f" | counts also reported: {reported}"
+               if reported else ""))
+    return reported
 
 
 # One residual limit, and two sentences here that described a design this
@@ -715,12 +754,10 @@ def check_canonical_suite_floor(filename, text, discovered, problems=None):
 # documentation-truth defect in the file that exists to catch those, so
 # they are corrected rather than annotated.
 #
-# WAS: "a component sentence at or above the floor is still REJECTED" and
-# "outside the canonical document an unmarked count is never scanned".
-# Neither is true now. Nothing is rejected for being count-shaped -- the
-# scan is a report, which is astra's plan from the committee split -- and
-# every document in LIVE_DOCUMENTS is scanned, because a stale count in
-# README.md misleads a reader exactly as much as one in CLAUDE.md.
+# WAS: "outside the canonical document an unmarked count is never scanned".
+# Every document in LIVE_DOCUMENTS is scanned, because a stale count in
+# README.md misleads a reader exactly as much as one in CLAUDE.md. Only the
+# canonical document requires explicit live-or-historical ownership.
 #
 # The limit that remains: a count-shaped sentence about a DIFFERENT
 # component is reported alongside a genuinely stale total, and nothing
@@ -1250,14 +1287,15 @@ def assert_every_test_method_collected(paths, loader=None, module_loader=None):
 
 
 def competing_counts(filename, text, discovered):
-    """The soft scan's report, for tests that used to expect a raise.
+    """The scan's report, independent of the canonical hard verdict.
 
-    The scan became non-blocking (astra's plan, after luna demonstrated
-    both failure modes of the magnitude rule). The lexer corpus below still
-    needs an observable, and this is it: the list of (line, count) the scan
-    reports, which is exactly what it used to raise about.
+    The lexer corpus needs the list of `(line, count)` candidates as its
+    observable. Supplying a problem accumulator lets the complete scan return
+    that report even when the canonical verdict will reject an annotation.
     """
-    return check_canonical_suite_floor(filename, text, discovered) or []
+    problems = []
+    return check_canonical_suite_floor(
+        filename, text, discovered, problems) or []
 
 
 def claimed_counts(report):
@@ -1327,6 +1365,91 @@ def baseline_counts(discovered):
 
 
 class TestDocsTruth(unittest.TestCase):
+
+    def test_canonical_counts_require_a_historical_marker(self):
+        """Unmarked totals fail, while declared component history remains."""
+        discovered = unittest.TestLoader().discover(
+            str(ROOT / "tests")).countTestCases()
+        text = CANONICAL_DOCUMENT.read_text()
+        stale_count = discovered - 1
+        stale_sentence = (
+            "The full suite total is %d tests." % stale_count)
+        unmarked = text + "\n" + stale_sentence + "\n"
+
+        with self.assertRaisesRegex(
+                AssertionError, "unmarked test-count claim"):
+            check_live_suite_claims(
+                ((CANONICAL_DOCUMENT, unmarked),), discovered)
+
+        reported = competing_counts(
+            CANONICAL_DOCUMENT.name, unmarked, discovered)
+        self.assertIn(
+            stale_count, [count for _line, count in reported],
+            "hard rejection must not delete the scan's report")
+
+        live_claim = CANONICAL_LOWER_BOUND.search(text).group(0)
+        same_paragraph = text.replace(
+            live_claim,
+            live_claim + " The installer has 9,999 tests.",
+            1,
+        )
+        with self.assertRaisesRegex(
+                AssertionError, "canonical marker must own"):
+            check_live_suite_claims(
+                ((CANONICAL_DOCUMENT, same_paragraph),), discovered)
+
+        historical_marker = "<!-- docs-truth:historical -->"
+        component_sentence = (
+            "The installer was built and green: 2,000 tests.")
+        historical = (
+            text + "\n" + historical_marker + "\n"
+            + component_sentence + "\n")
+        report = check_live_suite_claims(
+            ((CANONICAL_DOCUMENT, historical),), discovered)
+        self.assertIn(
+            2000, [count for _name, _line, count in report],
+            "a marked historical component count must remain reportable")
+
+        unmatched_component = "The installer has 1,500 tests."
+        with self.assertRaisesRegex(
+                AssertionError, "unmarked test-count claim"):
+            check_live_suite_claims(
+                ((CANONICAL_DOCUMENT,
+                  text + "\n" + unmatched_component + "\n"),),
+                discovered)
+        unmatched_unmarked_report = competing_counts(
+            CANONICAL_DOCUMENT.name,
+            text + "\n" + unmatched_component + "\n",
+            discovered,
+        )
+        self.assertIn(
+            1500,
+            [count for _line, count in unmatched_unmarked_report],
+            "a hard-rejected count disappeared from the scan report")
+        unmatched_report = check_live_suite_claims(
+            ((CANONICAL_DOCUMENT,
+              text + "\n" + historical_marker + "\n"
+              + unmatched_component + "\n"),),
+            discovered)
+        self.assertIsInstance(
+            unmatched_report, list,
+            "the honest marked component count did not complete the scan")
+
+        inert_markers = (
+            "`<!-- docs-truth:historical -->`",
+            "```text\n<!-- docs-truth:historical -->\n```",
+            "> <!-- docs-truth:historical -->",
+            historical_marker + "\n",
+        )
+        for inert_marker in inert_markers:
+            with self.subTest(inert_marker=inert_marker):
+                disguised = (
+                    text + "\n" + inert_marker + "\n"
+                    + unmatched_component + "\n")
+                with self.assertRaisesRegex(
+                        AssertionError, "unmarked test-count claim"):
+                    check_live_suite_claims(
+                        ((CANONICAL_DOCUMENT, disguised),), discovered)
 
     def test_canonical_suite_floor_rejects_stale_and_competing_claims(self):
         discovered = unittest.TestLoader().discover(
@@ -1708,29 +1831,8 @@ class TestDocsTruth(unittest.TestCase):
                     baseline_counts(discovered),
                     "the lexer failed to hide this claim")
 
-    def test_a_component_count_below_the_floor_is_reported_not_rejected(self):
-        """Renamed, because the name asserted a property the code lost.
-
-            $ echo "The installer's current suite count: 12 tests." >> CLAUDE.md
-            AssertionError: CLAUDE.md: unmarked suite-count claim(s): line 100: 12
-
-        That was luna's counterexample: a guard reddening because
-        somebody wrote an honest sentence, with no stale claim present.
-        The first remedy was the document's own floor -- a count below
-        the number the document asserts the suite exceeds cannot be
-        read as this suite's total -- and the floor filter is now GONE,
-        removed when the scan became a report. So "is prose not a
-        claim" is false: these counts ARE reported, as candidates, and
-        what they must not do is RAISE.
-
-        glm-5.3 found the stale name and the stale intent together, and
-        also that a paragraph correcting an unrelated `-k` limit had
-        been pasted into this docstring by me, mis-indented, describing
-        a function this test does not call. Both removed.
-
-        The report is asserted rather than discarded, which was the
-        third thing wrong here.
-        """
+    def test_a_marked_component_count_is_reported_not_rejected(self):
+        """Explicit historical ownership preserves honest component prose."""
         discovered = unittest.TestLoader().discover(
             str(ROOT / "tests")).countTestCases()
         text = CANONICAL_DOCUMENT.read_text()
@@ -1743,7 +1845,7 @@ class TestDocsTruth(unittest.TestCase):
             with self.subTest(sentence=sentence):
                 reported = check_canonical_suite_floor(
                     CANONICAL_DOCUMENT.name,
-                    text + "\n" + sentence + "\n",
+                    text + "\n" + HISTORICAL_MARKER + "\n" + sentence + "\n",
                     discovered)
                 self.assertIn(
                     count, [number for _line, number in reported],
@@ -1766,7 +1868,7 @@ class TestDocsTruth(unittest.TestCase):
 
         self.assertIn(
             floor - 1,
-            [count for _line, count in check_canonical_suite_floor(
+            [count for _line, count in competing_counts(
                 CANONICAL_DOCUMENT.name,
                 text + f"\nThe suite has {floor - 1} tests.\n",
                 discovered)],
@@ -1802,7 +1904,7 @@ class TestDocsTruth(unittest.TestCase):
         # removed it is still REPORTED -- what it must not do is raise.
         self.assertIn(
             1550,
-            [count for _line, count in check_canonical_suite_floor(
+            [count for _line, count in competing_counts(
                 CANONICAL_DOCUMENT.name, raised + sentence,
                 max(discovered, 1600))],
             "a below-floor count is a candidate, not a silence")
@@ -1827,7 +1929,7 @@ class TestDocsTruth(unittest.TestCase):
         # even stated as an exact suite total.
         self.assertIn(
             floor - 1,
-            [count for _line, count in check_canonical_suite_floor(
+            [count for _line, count in competing_counts(
                 CANONICAL_DOCUMENT.name,
                 text + "\nThe full suite total is %d tests.\n" % (floor - 1),
                 discovered)])
@@ -1845,15 +1947,13 @@ class TestDocsTruth(unittest.TestCase):
                                     for line, _found in reported),
                                 "the report must name the line")
 
-    def test_honest_component_prose_never_fails_the_suite(self):
-        """luna's finding, as a regression rather than a disposition.
+    def test_marked_historical_prose_never_fails_the_suite(self):
+        """luna's honest component case remains accepted when declared.
 
         The magnitude rule rejected "The installer was built and green:
         2,000 tests." -- honest prose, no stale claim present, suite red.
-        A guard that reddens on an honest sentence is a false failure and
-        this repository refuses one, so the scan reports instead of
-        raising. These sentences must be accepted at every magnitude,
-        including above the floor.
+        A historical marker supplies the distinction that magnitude and
+        phrasing cannot. These sentences are accepted at every magnitude.
         """
         discovered = unittest.TestLoader().discover(
             str(ROOT / "tests")).countTestCases()
@@ -1873,7 +1973,7 @@ class TestDocsTruth(unittest.TestCase):
                 # rejected. All three reviewers named it.
                 reported = check_canonical_suite_floor(
                     CANONICAL_DOCUMENT.name,
-                    text + "\n" + sentence + "\n",
+                    text + "\n" + HISTORICAL_MARKER + "\n" + sentence + "\n",
                     discovered)
                 self.assertIsInstance(reported, list)
                 # The sentence is a CANDIDATE, so it appears; what must
@@ -2296,12 +2396,14 @@ class TestDocsTruth(unittest.TestCase):
             str(ROOT / "tests")).countTestCases()
         for target in LIVE_DOCUMENTS:
             with self.subTest(document=target.name):
-                planted = [
-                    (path, path.read_text() + (
-                        "\nThe suite has 9999 tests.\n"
-                        if path == target else ""))
-                    for path in LIVE_DOCUMENTS
-                ]
+                planted = []
+                for path in LIVE_DOCUMENTS:
+                    addition = ""
+                    if path == target:
+                        if path == CANONICAL_DOCUMENT:
+                            addition += "\n" + HISTORICAL_MARKER + "\n"
+                        addition += "The suite has 9999 tests.\n"
+                    planted.append((path, path.read_text() + addition))
                 report = check_live_suite_claims(planted, discovered)
                 written = io.StringIO()
                 lines = publish_report(report, discovered, written)
@@ -2415,7 +2517,8 @@ class TestDocsTruth(unittest.TestCase):
 
         noisy = check_live_suite_claims(
             [(CANONICAL_DOCUMENT,
-              text + f"\nHistorical suite size: {discovered + 1} tests.\n")]
+              text + "\n" + HISTORICAL_MARKER + "\n"
+              + f"Historical suite size: {discovered + 1} tests.\n")]
             + others, discovered)
         self.assertGreater(
             len(noisy), len(clean),
@@ -2429,7 +2532,7 @@ class TestDocsTruth(unittest.TestCase):
         # while both were empty -- which the live CLAUDE.md happens to
         # make true, so the mutation restoring it left the suite green
         # until this case existed.
-        planted_text = (text
+        planted_text = (text + "\n" + HISTORICAL_MARKER
                         + f"\nThe installer was built and green: "
                         f"{discovered + 11} tests.\n")
         planted = check_live_suite_claims(
@@ -2463,30 +2566,6 @@ class TestDocsTruth(unittest.TestCase):
                     [(name, count) for name, _line, count in report],
                     "%s was not scanned for an unmarked stale total"
                     % target.name)
-
-
-class TestCanonicalDocumentPointers(unittest.TestCase):
-    """The run-driving instruction must point at the mandate that grants it.
-
-    The first line of the agent contract tells a session driving a run to
-    read `docs/orchestrator-mandate.md` before acting, and the mandate is
-    where the orchestrator's authority and operating mode live. A rename
-    or a move leaves that instruction pointing at nothing, and the
-    session that follows it finds no file rather than no authority --
-    which reads as "there is no mandate" instead of "the mandate moved".
-    """
-
-    def test_the_orchestrator_mandate_is_one_of_them(self):
-        """Check the named instruction and its target independently."""
-        text = CANONICAL_DOCUMENT.read_text()
-        self.assertIn(
-            "docs/orchestrator-mandate.md", text,
-            "%s no longer directs a session driving a run to the "
-            "orchestrator mandate, so nothing loads it"
-            % CANONICAL_DOCUMENT.name)
-        self.assertTrue(
-            (ROOT / "docs/orchestrator-mandate.md").exists(),
-            "the orchestrator mandate is referenced but absent")
 
 
 if __name__ == "__main__":

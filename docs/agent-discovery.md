@@ -29,34 +29,26 @@ bootstrap = select_targets(report, agents=("pi",))  # binary may be absent
 ```
 
 `schema()` returns the draft 2020-12 JSON Schema. Every discovery report has
-`schema_version: 2`, an `agents` object, and a normalized `destinations` list.
-Each agent reports `state` (`executable_found`, `slow`, `probe_failed`,
-`configured`, or `absent`), `verification`, roots, evidence, source URLs, and duplicate
+`schema_version: 1`, an `agents` object, and a normalized `destinations` list.
+Each agent reports `state` (`executable_found`, `configured`, `absent`, or
+`undetermined`), `verification`, roots, evidence, source URLs, and duplicate
 behaviour, plus `source_verification` for the release/root-policy/native-runtime
 distinction. `adapters()` exposes the versioned static records for callers that
 need a UI without probing the machine.
 
 `discover()` accepts injectable `which` and `probe` callables. Its normal
-probe is `<resolved executable> --version` with a per-adapter monotonic deadline
-derived from measured wall time plus explicit headroom. A timeout is `SLOW`; a
-failed invocation is `FAILED`, so the two no longer collapse into one state.
+probe is `<resolved executable> --version` with a two-second monotonic deadline.
 It drains stdout/stderr into fixed 240-byte in-memory tails, uses a short-lived
 supervisor process group, and kills inherited writers after the direct child
 reports, so noisy or detached-looking probes neither spool output nor survive.
 It does not treat an existing configuration directory as a runnable installation:
-that is `configured` evidence only. Conversely, an executable is eligible for
-destination planning even if its version is uncertified or its bounded probe is
-slow; those facts remain explicit and do not become a support claim.
+that is `configured` evidence only. Conversely, a successful, version-verified
+binary is eligible even if no skill directory exists yet.
 
 `select_targets(report, agents=(), exclude_agents=())` considers every detected
-agent by default. Automatic mode selects present executables, while reporting
-version certification independently; an unverified target is planned but never
-described as supported. Selection calls the dated certification check and
-returns `certification_warnings`; stale evidence downgrades an otherwise exact
-version to unverified. The installer persists those warnings in JSON and also
-prints them to stderr in both human and JSON modes, so automatic selection is
-never the only operator-visible fact. Absent and configured-only agents remain in `skipped`;
-an explicit `agents` sequence supports offline/bootstrap installation.
+agent by default. Automatic mode selects only successful, exact-version probes
+and reports absent, configured, failed-probe, and unverified-version agents in
+`skipped`; an explicit `agents` sequence supports offline/bootstrap installation.
 It plans destinations in the fixed adapter declaration order, so reversing
 equivalent `--agent` flags does not change filesystem topology. The `selected`
 and `skipped` presentation records still retain caller order. It collapses a
