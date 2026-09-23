@@ -48,9 +48,6 @@ ORCHESTRATE_DECLARATIONS = (
     "authority.source",
     "authority.confirmation",
     "authority.narrow-mode",
-    "authority.grant",
-    "authority.bounds",
-    "authority.stop",
     "authority.revocation",
     "role.supervision",
     "delegation.whole-loop",
@@ -570,6 +567,62 @@ class TestAuthoredSkillShape(unittest.TestCase):
     def test_orchestrate_reference_modals_are_tied_to_registered_declarations(self):
         skill = SKILLS / "hanig-orchestrate"
         self.assertEqual(DECLARATION_REGISTRY.reference_problems(skill), [])
+
+    def test_orchestrate_reads_authority_from_the_current_mandate(self):
+        skill = SKILLS / "hanig-orchestrate"
+        mandate = (ROOT / "docs" / "orchestrator-mandate.md").read_text(
+            encoding="utf-8")
+        declarations = {
+            item["id"]: item["normative_text"]
+            for item in DECLARATION_REGISTRY.load_registry(skill)
+        }
+        authority_sections = (
+            "Granted, without asking",
+            "Bounded by",
+            "Always stop and ask",
+        )
+        for heading in authority_sections:
+            with self.subTest(heading=heading):
+                self.assertIn("## " + heading, mandate)
+                self.assertIn(heading, declarations["authority.confirmation"])
+        for copied_id in (
+                "authority.grant", "authority.bounds", "authority.stop"):
+            self.assertNotIn(
+                copied_id, declarations,
+                "the operating skill copied authority that belongs only in "
+                "the current mandate")
+        self.assertIn("current mandate", declarations["authority.confirmation"])
+        self.assertIn("current mandate", declarations["authority.narrow-mode"])
+
+        bundle = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (skill / "SKILL.md", *sorted(
+                (skill / "references").glob("*.md")))
+        )
+        for stale_copy in (
+                "The seven granted powers",
+                "The six bounds retain",
+                "The five stop conditions"):
+            self.assertNotIn(stale_copy, bundle)
+
+    def test_orchestrate_carries_dispatch_tracker_and_report_order(self):
+        declarations = {
+            item["id"]: item["normative_text"]
+            for item in DECLARATION_REGISTRY.load_registry(
+                SKILLS / "hanig-orchestrate")
+        }
+        tracker = declarations["tracker.reconcile"]
+        for required in (
+                "each dispatch as a tracker event", "after each dispatch",
+                "move to in progress with its unit", "connector is available",
+                "pending synchronization without blocking unrelated dispatch",
+                "stopped unshipped attempt", "work was preserved"):
+            self.assertIn(required, tracker)
+        report = declarations["report.three-parts"]
+        self.assertIn("three ordered parts", report)
+        self.assertIn("step-three dispatches", report)
+        self.assertIn("before writing the report", report)
+        self.assertIn("pending synchronization", report)
 
     def test_orchestrate_installs_and_doctor_calls_it_authored(self):
         names = (

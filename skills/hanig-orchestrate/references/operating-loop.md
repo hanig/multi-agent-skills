@@ -26,7 +26,7 @@ Merge admission compares the full judged and pull-request heads, reads the diff,
 
 The tracker mirrors coordinator state, and GitHub's pull-request attachment does not perform the issue transition. <!-- declaration: tracker.authority -->
 
-The sweep examines every in-progress issue regardless of age and repeats after outward transitions. <!-- declaration: tracker.reconcile -->
+The sweep examines every in-progress issue regardless of age and repeats after each dispatch, push, merge, and close. A dispatch immediately records the tracker event that moves every covered issue to in progress with its unit; the connector applies it when available, while an outage leaves pending synchronization without blocking unrelated dispatch. A stopped attempt that did not ship similarly records its state and preservation ref. <!-- declaration: tracker.reconcile -->
 
 The reporting order incorporates the still-open pull request 60 source material:
 
@@ -34,4 +34,4 @@ The reporting order incorporates the still-open pull request 60 source material:
 2. Tracker: every in-progress, merged-but-open, and filed-but-unmoved issue, swept by state.
 3. Ready work: compare the backlog to what landed and dispatch; otherwise state the exact blocker or saturation reason.
 
-The order and the dispatch action are part of the decision surface rather than a pointer-only recommendation. <!-- declaration: report.three-parts -->
+The order and the dispatch action are part of the decision surface rather than a pointer-only recommendation. Before the report is written, step-three dispatches reach the tracker or the report names their pending synchronization when the connector is unavailable. <!-- declaration: report.three-parts -->

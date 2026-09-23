@@ -4,15 +4,9 @@ The owner-originated mandate remains the authority; this skill publishes its dec
 
 ## Confirmation boundary
 
-The startup presentation uses the complete grant, bounds, and stop list from the body. It is once per run, and a successor reads the durable confirmation rather than accepting a predecessor's recollection. <!-- declaration: authority.confirmation -->
+The startup presentation reads the complete grant, bounds, and stop lists from the current mandate rather than copying them into this skill. It is once per run, and a successor reads the durable confirmation rather than accepting a predecessor's recollection. <!-- declaration: authority.confirmation -->
 
-Before confirmation the narrow mode leaves inspection, planning, review, and reporting available while withholding outward or spending actions. <!-- declaration: authority.narrow-mode -->
-
-The seven granted powers are dispatch, review, anchored pull requests, eligible merge, state advancement and drain, this project's tracker work, and bounded model spend. <!-- declaration: authority.grant -->
-
-The six bounds retain the mandate's non-overridable classes, spend ceiling, immutable-history rule, vendored boundary, guard-strength rule, and repository/project scope. <!-- declaration: authority.bounds -->
-
-The five stop conditions are goal change, authority expansion, genuinely missing outward approval, boundedly inconclusive evidence, and mandate changes. <!-- declaration: authority.stop -->
+Before confirmation the session follows the current mandate's narrow mode, whose contents remain authoritative there rather than in this skill. <!-- declaration: authority.narrow-mode -->
 
 ## Findings
 
