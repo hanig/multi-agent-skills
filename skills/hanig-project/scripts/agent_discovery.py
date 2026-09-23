@@ -109,6 +109,7 @@ ADAPTERS: dict[str, dict[str, Any]] = {
         "invocation": ["pi", "--version"],
         "sources": [
             "https://registry.npmjs.org/@mariozechner/pi-coding-agent/0.73.1",
+            "https://registry.npmjs.org/@earendil-works/pi-coding-agent",
             "https://github.com/badlogic/pi-mono/blob/v0.73.1/packages/coding-agent/docs/skills.md",
             "https://github.com/badlogic/pi-mono/blob/v0.73.1/packages/coding-agent/src/config.ts",
         ],
