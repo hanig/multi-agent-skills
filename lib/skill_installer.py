@@ -29,7 +29,15 @@ if str(_CHECKOUT_ROOT) not in sys.path:
 
 
 SUPPORTED_AGENTS = ("claude", "codex", "opencode", "pi")
-WORKFLOW_DEPENDENCIES = {"hanig-project": ("hanig-swarm",)}
+WORKFLOW_DEPENDENCIES = {
+    "hanig-project": ("hanig-swarm",),
+    "hanig-orchestrate": (
+        "hanig-project",
+        "hanig-swarm",
+        "hanig-review-gate",
+        "hanig-portable-handoff",
+    ),
+}
 MAX_FRONTMATTER_BYTES = 64 * 1024
 _FRONTMATTER_KEY = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):(?:[ \t]*(.*))?$")
 _BLOCK_SCALARS = frozenset((">", ">-", ">+", "|", "|-", "|+"))

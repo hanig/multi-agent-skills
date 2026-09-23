@@ -17,8 +17,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 SKILLS = REPO / "skills"
-AUTHORED = ("hanig-portable-handoff", "hanig-project", "hanig-review-gate",
-            "hanig-swarm", "hanig-verified-workflow")
+AUTHORED = ("hanig-orchestrate", "hanig-portable-handoff", "hanig-project",
+            "hanig-review-gate", "hanig-swarm", "hanig-verified-workflow")
 
 
 class InstalledSnapshot(unittest.TestCase):
