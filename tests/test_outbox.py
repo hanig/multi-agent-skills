@@ -325,11 +325,19 @@ class TestNothingClosesOnASelfReport(unittest.TestCase):
         # state that the coordinator genuinely produces failed the guard until
         # somebody remembered to edit it here too -- a guard that cries wolf
         # about correct code is one that gets edited away rather than heeded.
-        # Every literal assigned to us["state"] counts as produced.
+        # Every literal assigned through the one transition helper counts as
+        # produced. AST keeps comments and test prose from satisfying this.
         import ast
         src = SWARM.read_text()
         produced = set(S.NAME.values())
         for node in ast.walk(ast.parse(src)):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "_set_unit_state"
+                    and len(node.args) >= 2
+                    and isinstance(node.args[1], ast.Constant)
+                    and isinstance(node.args[1].value, str)):
+                produced.add(node.args[1].value)
             if not isinstance(node, ast.Assign):
                 continue
             for tgt in node.targets:
@@ -1484,15 +1492,27 @@ class TestTheTwoWaysAUnitCanBeUnjudgeable(unittest.TestCase):
 
     def test_a_clean_exit_with_no_output_becomes_FAILED_not_FAILED_EVIDENCE(self):
         """Verified live on lambda: a job that exited 0 and wrote nothing."""
-        src = SWARM.read_text()
-        seg = src[src.index("elif time.time() - float(first) > SETTLE_S:"):]
-        seg = seg[:seg.index("else:\n            us.pop")]
-        self.assertIn('us["state"] = "FAILED"', seg)
-        self.assertIn('us["state"] = "FAILED_EVIDENCE"', seg)
-        i = seg.index("REASON_NO_OUTPUTS")
-        j = seg.index('us["state"] = "FAILED"')
-        self.assertLess(i, j, "FAILED must be chosen BECAUSE of the reason "
-                              "code, not by falling through to it")
+        import ast
+        tree = ast.parse(SWARM.read_text())
+        advance = next(node for node in tree.body
+                       if isinstance(node, ast.FunctionDef)
+                       and node.name == "advance")
+        branch = next(node for node in ast.walk(advance)
+                      if isinstance(node, ast.If)
+                      and "REASON_NO_OUTPUTS" in ast.dump(node.test)
+                      and isinstance(node.test, ast.Compare))
+
+        def transitions(nodes):
+            return {call.args[1].value for parent in nodes
+                    for call in ast.walk(parent)
+                    if isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Name)
+                    and call.func.id == "_set_unit_state"
+                    and len(call.args) >= 2
+                    and isinstance(call.args[1], ast.Constant)}
+
+        self.assertIn("FAILED", transitions(branch.body))
+        self.assertIn("FAILED_EVIDENCE", transitions(branch.orelse))
 
     def test_the_message_does_not_send_the_operator_to_sacct_for_a_clean_job(self):
         src = SWARM.read_text()
