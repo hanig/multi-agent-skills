@@ -79,6 +79,8 @@ JOURNAL_CHILD_ARG = "--_append-review-journal"
 JOURNAL_TIMEOUT_SECONDS = 5
 JOURNAL_DIAGNOSTIC_TIMEOUT_SECONDS = 0.25
 JOURNAL_NAME = "review-rounds"
+JOURNAL_TEST_MARKER = "HANIG_REVIEW_GATE_TESTING"
+JOURNAL_TEST_ROOT_PREFIX = ".hanig-review-gate-tests-"
 JOURNAL_HEADER = (
     "Append-only logical collection of immutable per-round JSON lines; "
     "audit-only attested review history. This is not the rejected "
@@ -322,6 +324,30 @@ def append_review_journal(path, kind, round_no, effective_panel, verdict,
     and are never canonical history.
     """
     path = Path(path)
+    test_root = os.environ.get(JOURNAL_TEST_MARKER)
+    if test_root is not None:
+        lexical_root = Path(os.path.expanduser(test_root))
+        if not test_root or not lexical_root.is_absolute():
+            raise OSError(
+                f"{JOURNAL_TEST_MARKER} must name the absolute temporary "
+                "root allowed for review-test journals")
+        allowed_root = _resolved(lexical_root)
+        try:
+            root_status = lexical_root.lstat()
+        except OSError as exc:
+            raise OSError(
+                f"{JOURNAL_TEST_MARKER} root {str(lexical_root)!r} is not "
+                f"an existing directory: {exc}")
+        if (lexical_root != allowed_root
+                or not stat.S_ISDIR(root_status.st_mode)
+                or not allowed_root.name.startswith(JOURNAL_TEST_ROOT_PREFIX)):
+            raise OSError(
+                f"{JOURNAL_TEST_MARKER} must name a canonical directory "
+                f"whose basename starts with {JOURNAL_TEST_ROOT_PREFIX!r}")
+        if not _inside(path, allowed_root):
+            raise OSError(
+                f"test-marked review journal {str(path)!r} resolves outside "
+                f"the isolated temporary root {str(allowed_root)!r}")
     record = {
         "type": "review_round",
         "schema_version": 1,
