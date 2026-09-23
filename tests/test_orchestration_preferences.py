@@ -33,12 +33,6 @@ PLAN = ROOT / "docs" / "plan-field-reports.md"
 README = ROOT / "README.md"
 LIVE_NAME = "orchestration-preferences.json"
 LIVE_PATH = "~/.paseo/" + LIVE_NAME
-SHIPPED_SKILLS = (
-    "agent-bus", "hanig-portable-handoff", "hanig-project",
-    "hanig-review-gate", "hanig-swarm", "hanig-verified-workflow",
-    "paseo", "paseo-advisor", "paseo-committee", "paseo-handoff",
-    "paseo-loop", "pi-fleet", "start-a-sprint",
-)
 
 
 def skill_categories():
@@ -205,16 +199,14 @@ class TestItIsObviouslyNotTheLiveFile(unittest.TestCase):
         self.assertIn(LIVE_PATH, cfg["_comment"])
 
     def test_the_repo_ships_no_second_copy(self):
-        """The reserved shipped locations contain only the example.
-
-        This is intentionally a finite source-layout assertion, not a scan of
-        operator-created files elsewhere in the checkout.
-        """
-        candidates = [TEMPLATE, ROOT / LIVE_NAME]
-        candidates.extend(ROOT / "skills" / name / LIVE_NAME
-                          for name in SHIPPED_SKILLS)
-        found = sorted(str(path.relative_to(ROOT)) for path in candidates
-                       if path.is_file())
+        """One template, in one place, under examples/. A copy at the repo
+        root or inside a skill directory reads as live configuration, and the
+        two would drift."""
+        found = []
+        for base, dirs, files in os.walk(ROOT):
+            dirs[:] = [d for d in dirs if d not in (".git", "__pycache__")]
+            if LIVE_NAME in files:
+                found.append(str(Path(base, LIVE_NAME).relative_to(ROOT)))
         self.assertEqual(found, ["examples/" + LIVE_NAME])
 
     def test_the_readme_tells_you_to_copy_it(self):

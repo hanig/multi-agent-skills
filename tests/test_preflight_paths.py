@@ -8,7 +8,6 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -70,8 +69,13 @@ def paseo_stub_path(root, env):
 
 
 def fake_paseo_result(argv, root, agent="agent-123"):
-    """Return the coordinator-owned cwd from a mocked successful run."""
-    workspace = Path(argv[argv.index("--cwd") + 1])
+    """Create the worktree that a mocked successful Paseo run promises."""
+    source = argv[argv.index("--cwd") + 1]
+    slug = argv[argv.index("--worktree-slug") + 1]
+    branch = argv[argv.index("--new-branch") + 1]
+    base = argv[argv.index("--base") + 1]
+    workspace = Path(root) / slug
+    git(source, "worktree", "add", "-q", "-b", branch, str(workspace), base)
     return 0, json.dumps({"agentId": agent, "cwd": str(workspace)}), ""
 
 
@@ -79,21 +83,6 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        self.state_home = self.tmp / "state-home"
-        home = self.tmp / "home"
-        temp_dir = self.tmp / "tmp"
-        for path in (self.state_home, home, temp_dir):
-            path.mkdir()
-        state_env = mock.patch.dict(
-            os.environ,
-            {"XDG_STATE_HOME": str(self.state_home),
-             "HOME": str(home),
-             "TMPDIR": str(temp_dir),
-             "PATH": os.environ.get("PATH", os.defpath),
-             "LANG": "C", "LC_ALL": "C"},
-            clear=True)
-        state_env.start()
-        self.addCleanup(state_env.stop)
 
 
 def _state_with_seal(uid, attempt, seal, facts=None):
@@ -112,8 +101,6 @@ class TestExternalPathPolicy(Base):
             plan=plan, cwd=repo, need_root=True)
         state2, root2, _ = CP.resolve_paths(cwd=repo, need_root=True)
         self.assertEqual((state1, root1), (state2, root2))
-        state1.relative_to(self.state_home.resolve())
-        root1.relative_to(self.state_home.resolve())
         for path in (state1, root1):
             for worktree in worktrees:
                 with self.assertRaises(ValueError):
@@ -373,8 +360,7 @@ class TestPreflightIsTheLaunchChokepoint(Base):
         self.assertEqual(job, "agent-123")
         self.assertIsNone(err)
         self.assertEqual(len(launched), 1)
-        self.assertFalse((self.tmp / "state" / "code-worktrees" / "attempt"
-                          / "dirty.txt").exists())
+        self.assertFalse((self.tmp / "managed" / "attempt" / "dirty.txt").exists())
 
     def test_a_later_shared_checkout_edit_does_not_move_the_trusted_base(self):
         repo = repo_at(self.tmp / "repo")
@@ -400,9 +386,7 @@ class TestPreflightIsTheLaunchChokepoint(Base):
             S.U.run = real
         self.assertEqual(job, "agent-123")
         self.assertIsNone(refusal)
-        workspace = Path(launched[0][launched[0].index("--cwd") + 1])
-        self.assertEqual(git(workspace, "rev-parse", "HEAD").stdout.strip(),
-                         base)
+        self.assertEqual(launched[0][launched[0].index("--base") + 1], base)
 
     def test_direct_code_submit_without_workspace_fails_closed(self):
         attempt = self.tmp / "runs" / "code" / "attempt"
@@ -437,11 +421,10 @@ class TestPreflightIsTheLaunchChokepoint(Base):
         def spy(argv, **kwargs):
             if argv and argv[0] == "paseo":
                 durable = state["units"]["code"]["attempt_launch_intents"]
-                workspace = Path(argv[argv.index("--cwd") + 1])
-                self.assertEqual(
-                    git(workspace, "rev-parse", "HEAD").stdout.strip(),
-                    durable["attempt"]["base_commit"])
-                self.assertNotEqual(str(workspace), str(repo.resolve()))
+                self.assertEqual(durable["attempt"]["base_commit"],
+                                 argv[argv.index("--base") + 1])
+                self.assertEqual(argv[argv.index("--cwd") + 1],
+                                 str(repo.resolve()))
                 launched.append(argv)
                 return fake_paseo_result(argv, self.tmp / "managed")
             return real(argv, **kwargs)
@@ -459,8 +442,7 @@ class TestPreflightIsTheLaunchChokepoint(Base):
         self.assertTrue(state["units"]["code"]["attempt_bases"]["attempt"])
         facts = state["units"]["code"]["attempt_launch_facts"]["attempt"]
         self.assertEqual(facts["execution_workspace"],
-                         str((self.tmp / "state" / "code-worktrees"
-                              / "attempt").resolve()))
+                         str((self.tmp / "managed" / "attempt").resolve()))
         self.assertTrue((attempt.parent / "launch-attempt.json").is_file())
 
     def test_non_code_is_checked_only_when_policy_requires_it(self):
