@@ -28,6 +28,8 @@ The tracker mirrors coordinator state, and GitHub's pull-request attachment does
 
 The sweep examines every in-progress issue regardless of age and repeats after each dispatch, push, merge, and close. A dispatch immediately records the tracker event that moves every covered issue to in progress with its unit; the connector applies it when available, while an outage leaves pending synchronization without blocking unrelated dispatch. A stopped attempt that did not ship similarly records its state and preservation ref. <!-- declaration: tracker.reconcile -->
 
+Blocking relationships are recorded as tracker relations, established at filing and at dispatch, and dispatch order is read from the resulting graph. A dependency stated only in an issue's prose is not traversable, so no query surfaces what a piece of work is waiting on. <!-- declaration: tracker.dag -->
+
 The reporting order incorporates the still-open pull request 60 source material:
 
 1. Running work: agents, pull requests, checks, failures, skips, corrections, and observation times.
