@@ -262,9 +262,10 @@ Each reviewer marks every claim `supported`, `refuted`, or `unverifiable`.
 | 2 | `REVIEW_UNAVAILABLE` | No reviewer ran — **not a pass** |
 | 3 | `REVIEW_PARTIAL` | Some ran, quorum unmet — degraded, caller decides |
 | 4 | `REVIEW_ERROR` | Usage or configuration error |
+| 6 | `REVIEW_INCOMPLETE` | A required reviewer returned no usable content |
 
-2 and 3 are not success. If the gate could not run, the change is unreviewed and
-must be described that way.
+Every nonzero state is non-success. Incomplete review is not an implementation
+failure, but it supplies no judgment and cannot satisfy required coverage.
 
 A finding counts against the gate only if it is critical or major, at high or
 medium confidence, **and** carries a concrete failure scenario. That filter

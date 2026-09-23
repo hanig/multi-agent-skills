@@ -1025,8 +1025,39 @@ class TestFailedReviewerIsNotAPass(unittest.TestCase):
 
     def test_every_non_pass_state_is_non_zero(self):
         for st in ("REVIEW_FAIL", "REVIEW_PARTIAL", "REVIEW_UNAVAILABLE",
-                   "REVIEW_ERROR"):
+                   "REVIEW_ERROR", "REVIEW_INCOMPLETE"):
             self.assertNotEqual(review.STATES[st], 0, st)
+
+
+class TestReviewIncomplete(unittest.TestCase):
+    BASE = dict(n_completed=0, n_failed=1, confirmed=[], refuted_claims=[],
+                rejecting=[], truncated=False, quorum=1,
+                n_out_of_scope_critical=0)
+
+    def test_silent_reviewer_is_incomplete_not_clean_or_a_finding(self):
+        state = review.decide_state(**self.BASE, n_incomplete=1)
+        self.assertEqual(state, "REVIEW_INCOMPLETE")
+        self.assertNotEqual(state, "REVIEW_PASS")
+        self.assertNotEqual(state, "REVIEW_FAIL")
+        self.assertNotEqual(review.STATES[state], 0)
+
+    def test_silent_reviewer_does_not_satisfy_required_coverage(self):
+        state = review.decide_state(**self.BASE, n_incomplete=1)
+        self.assertNotEqual(state, "REVIEW_PASS",
+                            "zero content filled a one-reviewer quorum")
+
+    def test_clean_single_reviewer_still_passes(self):
+        state = review.decide_state(
+            **{**self.BASE, "n_completed": 1, "n_failed": 0},
+            n_incomplete=0)
+        self.assertEqual(state, "REVIEW_PASS")
+
+    def test_confirmed_finding_at_quorum_still_fails(self):
+        state = review.decide_state(
+            **{**self.BASE, "n_completed": 1,
+               "confirmed": [{"severity": "major"}]},
+            n_incomplete=1)
+        self.assertEqual(state, "REVIEW_FAIL")
 
 
 class TestScopeDiscipline(unittest.TestCase):
@@ -1287,6 +1318,48 @@ class TestEmptyContentNamesItsCause(unittest.TestCase):
         res, err = self.call(self._reply('{"verdict": "upheld"}', "stop"))
         self.assertIsNone(err)
         self.assertEqual(res["text"], '{"verdict": "upheld"}')
+
+    def test_empty_openai_reply_is_classified_as_no_content(self):
+        old_post = review._post
+        old_key = os.environ.get("OPENAI_API_KEY")
+        try:
+            os.environ["OPENAI_API_KEY"] = "sk-test"
+            review._post = lambda *_args, **_kwargs: ({
+                "status": "incomplete", "output": [],
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "usage": {
+                    "output_tokens": 69000,
+                    "output_tokens_details": {"reasoning_tokens": 69000},
+                },
+            }, None)
+            result, error = review.call_openai(
+                {"name": "luna", "model": "m"}, "prompt", 1)
+        finally:
+            review._post = old_post
+            if old_key is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = old_key
+        self.assertIsNone(result)
+        self.assertIn("no content", error)
+        self.assertIn("69000", error)
+        self.assertIn("whole output budget", error)
+        self.assertIn("max_output_tokens", error)
+
+    def test_both_providers_call_the_shared_empty_classifier(self):
+        import ast
+        tree = ast.parse(SCRIPT.read_text())
+        calls = {}
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name in (
+                    "call_openai", "call_openrouter"):
+                calls[node.name] = [
+                    child for child in ast.walk(node)
+                    if isinstance(child, ast.Call)
+                    and isinstance(child.func, ast.Name)
+                    and child.func.id == "no_content_error"]
+        self.assertEqual(len(calls.get("call_openai", [])), 1)
+        self.assertEqual(len(calls.get("call_openrouter", [])), 1)
 
     def test_every_reviewer_has_room_to_reason_and_then_answer(self):
         """Was asserted per-reviewer for kimi; deepseek then hit the same wall
@@ -1958,6 +2031,37 @@ class TestReviewJournal(unittest.TestCase):
         self.assertEqual(code, review.STATES["REVIEW_PARTIAL"])
         self.assertEqual(json.loads(stdout)["state"], "REVIEW_PARTIAL")
         self.assertEqual(self.records()[-1]["effective_panel"], ["answered"])
+
+    def test_silent_single_reviewer_is_review_incomplete(self):
+        original_post = review._post
+        original_key = os.environ.get("OPENAI_API_KEY")
+        review.load_reviewers = lambda: [{
+            "name": "silent", "provider": "openai", "model": "m",
+            "profiles": ["standard"], "enabled": True,
+        }]
+        review.run_one = self.saved["run_one"]
+        try:
+            os.environ["OPENAI_API_KEY"] = "sk-test"
+            review._post = lambda *_args, **_kwargs: ({
+                "status": "incomplete", "output": [],
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "usage": {
+                    "output_tokens": 69000,
+                    "output_tokens_details": {"reasoning_tokens": 69000},
+                },
+            }, None)
+            code, stdout, _stderr = self.invoke(only="silent")
+        finally:
+            review._post = original_post
+            if original_key is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = original_key
+        self.assertEqual(code, review.STATES["REVIEW_INCOMPLETE"])
+        report = json.loads(stdout)
+        self.assertEqual(report["state"], "REVIEW_INCOMPLETE")
+        self.assertEqual(report["completed"], 0)
+        self.assertTrue(report["failed"][0]["incomplete"])
 
     def test_existing_journal_cannot_decide_the_verdict(self):
         self.seed_record("000-seed", {
