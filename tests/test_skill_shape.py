@@ -100,6 +100,7 @@ ORCHESTRATE_DECLARATIONS = (
     "merge.requirements",
     "tracker.authority",
     "tracker.reconcile",
+    "tracker.dag",
     "report.three-parts",
     "handoff.contents",
     "handoff.transfer",

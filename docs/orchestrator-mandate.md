@@ -298,6 +298,26 @@ ref nobody knows about is not preservation.
 
 After every dispatch, push, merge and close, reconcile again.
 
+**The tracker is a graph, not a list.** An issue's blockers and the issues it
+blocks are recorded as tracker relations, set when it is filed and again when it
+is dispatched. Writing "Related: ARC-678" into a description does not create an
+edge: no query traverses prose, so nothing can answer what a piece of work is
+waiting on, or what becomes available when it lands. Five issues were filed here
+with no relations at all, and the owner had to point out that the tracker was
+being used as a flat list beside a coordinator whose plan units carry `needs`.
+
+This is not bookkeeping. The first pass of drawing the edges found that a
+dispatched unit would have shipped a defect: ARC-691 evaluates a new per-unit
+deadline from `allocated_at`, and 32 units in the live state file were launched
+on another host, 14 of them still reading `RUNNING` at ages from 2.4 to 6.9
+days. All of them breach on the first advance, so the feature would have emitted
+fourteen false `block` intents. Nothing in the backlog's priority order implied
+that ordering; asking "what must be true before this can be evaluated" did.
+
+Read dispatch order off the graph rather than off priority alone. An urgent
+issue behind an open blocker is not startable, and a medium one that unblocks
+three others is usually worth more than its rank suggests.
+
 ### The hourly report has three parts, in this order
 
 Report on the hour without being asked. Not only when something finished, and
