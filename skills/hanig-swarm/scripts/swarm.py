@@ -1185,6 +1185,23 @@ def validate_plan(plan, survey=None):
     for u in units:
         if not isinstance(u, dict):
             continue
+        deadline = u.get("deadline_s")
+        try:
+            finite_deadline = (float(deadline) if deadline is not None
+                               and not isinstance(deadline, bool)
+                               and isinstance(deadline, (int, float))
+                               else None)
+        except (OverflowError, ValueError):
+            finite_deadline = None
+        if (deadline is not None
+                and (finite_deadline is None
+                     or finite_deadline != finite_deadline
+                     or finite_deadline in (float("inf"), float("-inf"))
+                     or finite_deadline <= 0)):
+            raise PlanError(
+                f"unit {u.get('id','?')!r} has deadline_s={deadline!r}; "
+                f"it must be a positive, finite number of seconds measured "
+                f"from the coordinator-written allocated_at timestamp.")
         for field in ("needs", "inputs", "outputs", "sbatch",
                       "requires_verification"):
             val = u.get(field)
@@ -2349,6 +2366,78 @@ def _unit_state(state, uid):
     return state["units"].setdefault(
         uid, {"state": None, "attempt_dir": None, "attempts": [],
               "gpu_hours": 0.0})
+
+
+def _set_unit_state(us, value, changed_at=None):
+    """Set a unit state and durably date a real transition.
+
+    The timestamp is coordinator state, not worker evidence. Historical state
+    has no trustworthy transition time, so advance marks it from first
+    observation rather than inventing an earlier event.
+    """
+    previous = us.get("state")
+    if previous != value:
+        us["state_changed_at"] = (time.time() if changed_at is None
+                                  else float(changed_at))
+        us.pop("state_changed_at_basis", None)
+        if previous == "NEEDS_HUMAN" and value != "NEEDS_HUMAN":
+            us.pop("reason", None)
+            us.pop("deadline_previous_reason", None)
+    us["state"] = value
+
+
+def _normalise_state_clock(us, observed_at):
+    """Give historical state an honest clock from its first observation."""
+    if us.get("state") is not None and us.get("state_changed_at") is None:
+        us["state_changed_at"] = float(observed_at)
+        us["state_changed_at_basis"] = "first_observed"
+
+
+def _deadline_exceeded(u, us, observed_at=None):
+    """Whether this active attempt crossed its declared allocation deadline."""
+    deadline = u.get("deadline_s")
+    allocated = us.get("allocated_at")
+    if deadline is None or allocated is None or not us.get("attempt_dir"):
+        return False
+    terminal = {"DONE", "FAILED", "FAILED_EVIDENCE", "READY_FOR_PR",
+                "PREFLIGHT_REFUSED", "HELD"}
+    if us.get("state") in terminal:
+        return False
+    now = time.time() if observed_at is None else float(observed_at)
+    return now - float(allocated) >= float(deadline)
+
+
+def _mark_deadline_exceeded(u, us, observed_at=None):
+    """Persist the conservative escalation; return True on first breach."""
+    now = time.time() if observed_at is None else float(observed_at)
+    first_breach = us.get("reason") != "deadline_exceeded"
+    prior_reason = us.get("reason")
+    if first_breach and prior_reason:
+        us["deadline_previous_reason"] = prior_reason
+    us["reason"] = "deadline_exceeded"
+    us["deadline_s"] = float(u["deadline_s"])
+    us["deadline_at"] = float(us["allocated_at"]) + float(u["deadline_s"])
+    _set_unit_state(us, "NEEDS_HUMAN", now)
+    return first_breach
+
+
+def _deadline_attempt_is_unresolved(u, us):
+    """Whether a declared deadline still protects this attempt's resources."""
+    terminal = {"DONE", "FAILED", "FAILED_EVIDENCE", "READY_FOR_PR",
+                "PREFLIGHT_REFUSED", "HELD"}
+    return (u.get("deadline_s") is not None
+            and bool(us.get("attempt_dir"))
+            and us.get("state") not in terminal)
+
+
+def _occupies_live_resources(u, us):
+    """Whether an attempt may still execute and must retain its claim/slot.
+
+    Deadline protection depends on the declared attempt, never on whether a
+    later phase has already rewritten the operator-facing state/reason.
+    """
+    return (us.get("state") in LIVE_STATES
+            or _deadline_attempt_is_unresolved(u, us))
 
 
 # --- dispatch -------------------------------------------------------------
@@ -4420,6 +4509,11 @@ def _has_bound_merge_evidence(uid, us, evidence):
 
 def _intent_key(project, uid, unit_state, us, verb, kind, evidence):
     key = outbox_key(project, uid, unit_state, us.get("attempt_dir"))
+    if (verb == "block" and unit_state == "NEEDS_HUMAN"
+            and us.get("reason") == "deadline_exceeded"):
+        # A prior NEEDS_HUMAN intent for a different reason must not suppress
+        # the newly declared deadline breach for the same retained attempt.
+        key += "-deadline_exceeded"
     if verb == "close" and closing_evidence_for(kind) == "merged_pr":
         # Before merge-aware closure, a DONE code unit emitted open_pr under
         # the base key. Include the admitted receipt only for merge closes so
@@ -4441,6 +4535,8 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
     if not action:
         return None
     verb, why = action
+    if unit_state == "NEEDS_HUMAN" and us.get("reason") == "deadline_exceeded":
+        why = "deadline_exceeded"
 
     # A code predicate reaches READY_FOR_PR, but an admitted merge advances it
     # to DONE. Only the exact merge receipt persisted by that admission may
@@ -5373,7 +5469,7 @@ def maybe_continue(state_dir, uid, u, us, report, state=None):
     if rc != 0:
         entry["error"] = (err or out or "").strip()[:200]
     else:
-        us["state"] = "RUNNING"
+        _set_unit_state(us, "RUNNING")
     save_state(state_dir, state)
     if rc != 0:
         report.append(f"{uid}: continuation {used + 1}/{limit} could not be "
@@ -6225,6 +6321,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     acts."""
     units = {u["id"]: u for u in plan["units"]}
     report, dispatched, halted = [], 0, state.get("halted")
+    advance_observed_at = time.time()
 
     # A DRY RUN MUST NOT CONTAMINATE A REAL PROJECT. Recording a fake
     # `dry-...` job id into a live state directory wedges that unit forever:
@@ -6240,8 +6337,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                       if (_unit_state(state, uid).get("job_id")
                           and not str(_unit_state(state, uid)["job_id"])
                           .startswith("dry-")
-                          and _unit_state(state, uid).get("state")
-                          in LIVE_STATES))
+                          and _occupies_live_resources(
+                              units[uid], _unit_state(state, uid))))
         if real:
             return ([f"REFUSING to dry-run against a state directory that "
                      f"holds REAL attempts ({', '.join(real)}).",
@@ -6253,6 +6350,15 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                      f"$(mktemp -d)/state --root $(mktemp -d)/runs"], 0, None)
     before_states = {uid: (_unit_state(state, uid) or {}).get("state")
                      for uid in units}
+
+    # Persist a state clock for snapshots created before state_changed_at
+    # existed. The honest reference is when this coordinator first observed
+    # the old state, not allocated_at: a unit may have changed states long
+    # after allocation, and pretending otherwise would overstate its stall.
+    clock_observed_at = advance_observed_at
+    if not dry_run:
+        for uid in units:
+            _normalise_state_clock(_unit_state(state, uid), clock_observed_at)
 
     # NORMALISE PERSISTED STATE FIRST. Converting DONE to READY_FOR_PR only in
     # the fresh-check path left every ALREADY-persisted DONE untouched: a
@@ -6266,7 +6372,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         us = _unit_state(state, uid)
         if (us.get("state") == "DONE"
                 and closing_evidence_for(u.get("kind")) != "predicate_receipt"):
-            us["state"] = "READY_FOR_PR"
+            _set_unit_state(us, "READY_FOR_PR")
             report.append(
                 f"{uid}: recorded DONE, but a {u.get('kind')} unit is closed "
                 f"by a merged pull request, not by its own receipt. Corrected "
@@ -6336,11 +6442,47 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                  f"attempt. Units already DONE are not re-dispatched."], 0,
                 "plan changed mid-flight")
 
+    # A per-unit deadline is an escalation boundary, not a lease and not a
+    # cancellation claim. Keep the attempt, job binding and output claim in
+    # place; stop judging or retrying it automatically and ask a person to
+    # inspect the still-possibly-live work. Raising/removing the deadline via
+    # the existing plan-ratification path lets a later advance resume checks.
+    deadline_observed_at = advance_observed_at
+    for uid, u in sorted(units.items()):
+        us = _unit_state(state, uid)
+        if _deadline_exceeded(u, us, deadline_observed_at):
+            if dry_run:
+                report.append(
+                    f"{uid}: DRY RUN -- deadline_exceeded; would become "
+                    f"NEEDS_HUMAN without cancellation, claim release, or "
+                    f"retry")
+                continue
+            first_breach = _mark_deadline_exceeded(
+                u, us, deadline_observed_at)
+            if first_breach:
+                report.append(
+                    f"{uid}: NEEDS_HUMAN -- deadline_exceeded. The "
+                    f"{u['deadline_s']}s deadline measured from allocated_at "
+                    f"was crossed. The attempt remains bound and its output "
+                    f"claim is retained; no cancellation or retry was "
+                    f"requested.")
+        elif not dry_run and us.get("reason") == "deadline_exceeded":
+            us.pop("reason", None)
+            us.pop("deadline_s", None)
+            us.pop("deadline_at", None)
+            prior_reason = us.pop("deadline_previous_reason", None)
+            if prior_reason:
+                us["reason"] = prior_reason
+    if not dry_run:
+        save_state(state_dir, state)
+
     # An attempt allocated but never bound may still have reached the
     # scheduler. Ask before dispatching anything else.
     for uid, u in sorted(units.items()):
         us = _unit_state(state, uid)
         if dry_run or not us["attempt_dir"]:
+            continue
+        if _deadline_exceeded(u, us, deadline_observed_at):
             continue
         if (u.get("kind") == "code" and us.get("job_id")
                 and not trusted_launch_facts(
@@ -6348,7 +6490,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             recovery_error = _recover_code_launch(
                 state, u, us["attempt_dir"], us["job_id"])
             if recovery_error:
-                us["state"] = "NEEDS_HUMAN"
+                _set_unit_state(us, "NEEDS_HUMAN")
                 us["launch_recovery_problem"] = recovery_error
                 report.append(f"{uid}: NEEDS_HUMAN -- {recovery_error}. The "
                               f"agent remains bound and no launch facts were "
@@ -6357,14 +6499,14 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 save_state(state_dir, state)
                 continue
             us.pop("launch_recovery_problem", None)
-            us["state"] = "SUBMITTED"
+            _set_unit_state(us, "SUBMITTED")
             report.append(f"{uid}: recovered the agent's Paseo worktree and "
                           f"completed its trusted launch snapshot")
             save_state(state_dir, state)
         if us.get("bind_pending") and us.get("job_id"):
             if not _bind(us["attempt_dir"], us["job_id"]):
                 us.pop("bind_pending", None)
-                us["state"] = "SUBMITTED"
+                _set_unit_state(us, "SUBMITTED")
                 report.append(f"{uid}: binding to job {us['job_id']} succeeded "
                               f"on retry; the unit can now be judged.")
                 save_state(state_dir, state)
@@ -6379,7 +6521,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                           f"it, so the unit will dispatch normally.")
             us["job_id"] = None
             us["attempt_dir"] = None
-            us["state"] = None
+            _set_unit_state(us, None)
             save_state(state_dir, state)
             continue
         if us.get("job_id"):
@@ -6395,7 +6537,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                     # exact agent again instead of repeating title discovery.
                     us["job_id"] = job
                     us["launch_recovery_pending"] = True
-                    us["state"] = "NEEDS_HUMAN"
+                    _set_unit_state(us, "NEEDS_HUMAN")
                     us["launch_recovery_problem"] = recovery_error
                     report.append(f"{uid}: {note}; NEEDS_HUMAN -- "
                                   f"{recovery_error}. The agent is retained, "
@@ -6409,7 +6551,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             # an idempotent bind instead of leaving unauthorised evidence.
             us["job_id"] = job
             us["bind_pending"] = True
-            us["state"] = "SUBMITTED"
+            _set_unit_state(us, "SUBMITTED")
             save_state(state_dir, state)
             bind_error = _bind(us["attempt_dir"], job)
             if bind_error:
@@ -6418,6 +6560,13 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             else:
                 us.pop("bind_pending", None)
             report.append(f"{uid}: {note}")
+            save_state(state_dir, state)
+        elif _deadline_exceeded(u, us):
+            _mark_deadline_exceeded(u, us)
+            report.append(
+                f"{uid}: NEEDS_HUMAN -- deadline_exceeded while recovering "
+                f"the unbound attempt. It remains allocated; no submission, "
+                f"release, or retry was performed.")
             save_state(state_dir, state)
         elif note == "UNKNOWN":
             report.append(f"{uid}: allocated at {us['attempt_dir']} with no "
@@ -6444,13 +6593,13 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                         recovered_job, problem = _submit(
                             u, us["attempt_dir"], False, state, state_dir)
                         if problem:
-                            us["state"] = "NEEDS_HUMAN"
+                            _set_unit_state(us, "NEEDS_HUMAN")
                             us["launch_recovery_problem"] = problem
                             report.append(f"{uid}: NEEDS_HUMAN -- {problem}")
                             save_state(state_dir, state)
                             continue
                         us["job_id"] = str(recovered_job)
-                        us["state"] = "SUBMITTED"
+                        _set_unit_state(us, "SUBMITTED")
                         us["bind_pending"] = True
                         save_state(state_dir, state)
                         bind_error = _bind(us["attempt_dir"], recovered_job)
@@ -6505,6 +6654,11 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             return report, dispatched, state["halted"]
         us = _unit_state(state, uid)
         if not us["attempt_dir"] or us["state"] == "DONE":
+            continue
+        if _deadline_exceeded(u, us, deadline_observed_at):
+            # The breach was persisted above. Observing elapsed time cannot
+            # establish a verdict, and PREEMPTED here would mint the retry the
+            # deadline contract explicitly forbids.
             continue
         if us.get("launch_recovery_problem"):
             report.append(f"{uid}: NEEDS_HUMAN -- "
@@ -6577,8 +6731,25 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             # the mutable ref again could replace pinned A with later C.
             rc, stdout, stderr = DONE, "", ""
         previous = us.get("state")
-        us["state"] = ("FAILED_EVIDENCE" if protocol_problem
-                       else NAME.get(rc, f"rc={rc}"))
+        previous_state_changed_at = us.get("state_changed_at")
+        previous_state_changed_at_basis = us.get("state_changed_at_basis")
+        _set_unit_state(us, ("FAILED_EVIDENCE" if protocol_problem
+                             else NAME.get(rc, f"rc={rc}")))
+
+        # A check may itself span the deadline. Re-evaluate before the retry
+        # branch so a PREEMPTED result observed after the boundary cannot mint
+        # a fresh attempt. A genuine DONE/FAILED verdict remains terminal:
+        # elapsed time is telemetry and cannot replace execution evidence.
+        if _deadline_exceeded(u, us):
+            first_breach = _mark_deadline_exceeded(u, us)
+            if first_breach:
+                report.append(
+                    f"{uid}: NEEDS_HUMAN -- deadline_exceeded while the "
+                    f"attempt was being checked. It remains bound and its "
+                    f"output claim is retained; no cancellation or retry "
+                    f"was requested.")
+            save_state(state_dir, state)
+            continue
 
         # A DECLARED convergence criterion gates DONE. Undeclared, nothing
         # changes. This is the whole reason converge.py exists: the scheduler
@@ -6597,7 +6768,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             us["converge_verdict"] = verdict
             us["converge_reasons"] = list(why)
             if verdict != "CONVERGED":
-                us["state"] = "NEEDS_HUMAN"
+                _set_unit_state(us, "NEEDS_HUMAN")
             report.append(f"{uid}: convergence {verdict} -- " +
                           " ".join(str(w) for w in why))
 
@@ -6696,7 +6867,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             receipt, refusal = ((None, vrefusal) if vrefusal else
                                 (merge_receipt, merge_refusal))
             if receipt:
-                us["state"] = "DONE"
+                _set_unit_state(us, "DONE")
                 us["merged_as"] = receipt.get("merged_as")
                 us["merge_pr"] = receipt.get("pr")
                 # Persist the exact admitted receipt. The outbox is emitted
@@ -6710,7 +6881,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                     f"is attested, not verified; the head it pins was "
                     f"produced by this attempt.")
             else:
-                us["state"] = "READY_FOR_PR"
+                _set_unit_state(us, "READY_FOR_PR")
                 us["merge_refusal"] = refusal
                 report.append(f"{uid}: READY_FOR_PR. {refusal}")
         report.append(f"{uid}: {us['state']}")
@@ -6751,7 +6922,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                             f"produced nothing. The bound is the point: this "
                             f"fails for missing production evidence rather "
                             f"than being prodded again.")
-                    us["state"] = "FAILED"
+                    _set_unit_state(us, "FAILED")
                     report.append(
                         f"{uid}: the job finished cleanly and its declared "
                         f"outputs never appeared, {waited}s on. This is a "
@@ -6759,7 +6930,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                         f"will tell you it succeeded. Read the job's own log "
                         f"in {us['attempt_dir']}.")
                 else:
-                    us["state"] = "FAILED_EVIDENCE"
+                    _set_unit_state(us, "FAILED_EVIDENCE")
                     report.append(
                         f"{uid}: no verdict {waited}s after the first "
                         f"INCOMPLETE, past the {SETTLE_S}s accounting settle "
@@ -6785,7 +6956,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 report.append(f"{uid}: preempted, will re-attempt "
                               f"({len(real_attempts)}/{policy})")
             else:
-                us["state"] = "FAILED"
+                _set_unit_state(us, "FAILED")
                 if policy == 1 and "max_attempts" not in u:
                     # The default is now 1, so a SINGLE preemption ends the
                     # unit. "preempted 1 times, giving up" reads like a bug
@@ -6806,6 +6977,15 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                         f"'retry' contract, or split the unit smaller.")
                 else:
                     report.append(f"{uid}: preempted {policy} times, giving up")
+        if us.get("state") == previous:
+            # Policy can pass through internal states and return to the same
+            # operator-visible state. Polling is not a transition, so retain
+            # the original time-in-state rather than resetting it here.
+            us["state_changed_at"] = previous_state_changed_at
+            if previous_state_changed_at_basis is None:
+                us.pop("state_changed_at_basis", None)
+            else:
+                us["state_changed_at_basis"] = previous_state_changed_at_basis
         if us.get("state") in WORKTREE_CLEANUP_STATES:
             # The checker result, produced head, and terminal state are the
             # conclusion that justifies teardown. Persist that conclusion
@@ -6828,7 +7008,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     #     and `acquire_lease` already serialises access to it.
     if not dry_run:
         for uid, u in sorted(units.items()):
-            if _unit_state(state, uid).get("state") not in LIVE_STATES:
+            if not _occupies_live_resources(u, _unit_state(state, uid)):
                 _release_output_claims(u, root, state_dir)
 
     # 2. Budget. Charged on DISPATCH, not on completion: a budget that only
@@ -6852,7 +7032,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                            if _unit_state(state, d)["state"] in
                            ("FAILED", "HELD", "FAILED_EVIDENCE")]
         if failed_upstream:
-            us["state"] = "HELD"
+            _set_unit_state(us, "HELD")
             report.append(f"{uid}: held, upstream "
                           f"{', '.join(failed_upstream)} will not complete")
             save_state(state_dir, state)
@@ -6879,7 +7059,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         # recoverable are also sixteen simultaneous readers of a filesystem
         # shared by everyone else.
         live = [x for x in units
-                if _unit_state(state, x).get("state") in LIVE_STATES]
+                if _occupies_live_resources(units[x], _unit_state(state, x))]
         cap_all = (plan.get("limits") or {}).get("max_running")
         if cap_all is not None and len(live) >= cap_all:
             report.append(f"{uid}: waiting, {len(live)} of {cap_all} slots in "
@@ -6896,7 +7076,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
 
         unit_dir, err = _allocate(plan, u, root)
         if err:
-            us["state"] = "FAILED"
+            _set_unit_state(us, "FAILED")
             report.append(f"{uid}: {err}")
             save_state(state_dir, state)
             continue
@@ -6907,8 +7087,9 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         # when counting the retry budget.
         us["attempts"].append(f"{DRY_PREFIX}{unit_dir}" if dry_run
                               else unit_dir)
-        us["state"] = "ALLOCATED"
-        us["allocated_at"] = time.time()
+        allocated_at = time.time()
+        us["allocated_at"] = allocated_at
+        _set_unit_state(us, "ALLOCATED", allocated_at)
         # ACCUMULATE. Overwriting meant a unit preempted twice was charged
         # once, so retries could walk straight through a ceiling: budget 8,
         # three 4-hour attempts, 12 committed.
@@ -6975,7 +7156,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                     if last in (str(unit_dir), f"{DRY_PREFIX}{unit_dir}"):
                         us["attempts"].pop()
                 us["attempt_dir"] = None
-                us["state"] = "PREFLIGHT_REFUSED"
+                _set_unit_state(us, "PREFLIGHT_REFUSED")
                 us.pop("allocated_at", None)
                 us["gpu_hours"] = max(
                     0.0, float(us.get("gpu_hours") or 0) - want)
@@ -6984,7 +7165,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 report.append(f"{uid}: {err}" +
                               (f"\n  receipt: {cited}" if cited else ""))
             else:
-                us["state"] = "FAILED"
+                _set_unit_state(us, "FAILED")
                 report.append(f"{uid}: {err}")
             save_state(state_dir, state)
             continue
@@ -6995,7 +7176,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         needs_bind = bool(
             job_id and not str(job_id).startswith(("dry-", "engine-")))
         us["job_id"] = str(job_id)
-        us["state"] = "SUBMITTED"
+        _set_unit_state(us, "SUBMITTED")
         if needs_bind:
             us["bind_pending"] = True
         # Persist the binding authority before unit.py writes its marker.
@@ -7834,6 +8015,11 @@ SCHEMA_FIELDS = [
      "report reads from the project directory rather than the write root"),
     ("max_attempts", "all", "optional",
      "default 1. Above 1 requires a retry contract with max_lost"),
+    ("deadline_s", "all", "optional",
+     "positive finite seconds measured from allocated_at, the coordinator-"
+     "written allocation timestamp. A breach becomes NEEDS_HUMAN with "
+     "reason deadline_exceeded; it does not cancel work, release an output "
+     "claim, or mint a retry"),
     ("retry", "all", "optional",
      '{"mode": "restart", "max_lost": {...}}. "resume" is REFUSED'),
     ("gpu_hours", "all", "optional", "charged against the plan's budget"),
@@ -8200,11 +8386,25 @@ def _cmd_outbox_inner(args, intents):
     return EXIT_CONFLICT if conflicts else EXIT_OK
 
 
-def _status_rows(plan, state, state_dir):
+def _elapsed_seconds(observed_at, started_at):
+    """A non-negative whole-second age, or None when history is unknown."""
+    if started_at is None or isinstance(started_at, bool):
+        return None
+    try:
+        started = float(started_at)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if started != started or started in (float("inf"), float("-inf")):
+        return None
+    return max(0, int(float(observed_at) - started))
+
+
+def _status_rows(plan, state, state_dir, observed_at=None):
     """Everything an operator needs, derived from DURABLE STATE ONLY.
 
     Reads no scheduler and launches nothing, so it renders correctly with the
     coordinator stopped, which is exactly when someone wants to look."""
+    observed_at = time.time() if observed_at is None else float(observed_at)
     units = {u["id"]: u for u in plan.get("units") or []}
     promoted = {}
     try:
@@ -8234,6 +8434,13 @@ def _status_rows(plan, state, state_dir):
         rows.append({
             "id": uid, "kind": u.get("kind", "?"), "state": st,
             "job_id": us.get("job_id"), "attempt_dir": us.get("attempt_dir"),
+            "allocated_at": us.get("allocated_at"),
+            "state_changed_at": us.get("state_changed_at"),
+            "state_changed_at_basis": us.get("state_changed_at_basis"),
+            "age_s": _elapsed_seconds(observed_at, us.get("allocated_at")),
+            "state_age_s": _elapsed_seconds(
+                observed_at, us.get("state_changed_at")),
+            "reason": us.get("reason"),
             "attempts": len(us.get("attempts") or []),
             "gpu_hours": float(us.get("gpu_hours") or 0),
             "needs": u.get("needs") or [],
@@ -8254,8 +8461,11 @@ def _status_rows(plan, state, state_dir):
     return rows
 
 
-def status_report(plan, state, state_dir):
-    rows = _status_rows(plan, state, state_dir)
+def status_report(plan, state, state_dir, observed_at=None):
+    observed_at = time.time() if observed_at is None else float(observed_at)
+    rows = _status_rows(plan, state, state_dir, observed_at=observed_at)
+    observation = time.strftime("%Y-%m-%dT%H:%M:%S%z",
+                                time.localtime(observed_at))
     declared = (plan.get("budget") or {}).get("gpu_hours")
     spent = sum(r["gpu_hours"] for r in rows)
     # READY_FOR_PR belongs here: no mechanism can leave that state today, so
@@ -8266,7 +8476,8 @@ def status_report(plan, state, state_dir):
                                    "READY_FOR_PR", "PREFLIGHT_REFUSED")]
     return {
         "project": plan.get("name"),
-        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "observed_at": observation,
+        "generated_at": observation,
         "halted": state.get("halted"),
         "budget": {"declared_gpu_hours": declared, "spent_gpu_hours": spent,
                    "remaining_gpu_hours": (None if declared is None
@@ -8291,12 +8502,22 @@ def cmd_status(args):
     else:
         rows = rep["units"]
         w = max([len(r["id"]) for r in rows] + [4])
+        print(f"  observed at {rep['observed_at']}")
         print(f"  {'unit'.ljust(w)}  {'kind':9} {'state':13} {'job':14} "
-              f"{'gpuh':>5} att")
+              f"{'gpuh':>5} att {'age':>8} {'in-state':>8}")
         for r in rows:
             job = str(r["job_id"] or "-")
+            age = "-" if r["age_s"] is None else f"{r['age_s']}s"
+            state_age = ("-" if r["state_age_s"] is None
+                         else f"{r['state_age_s']}s")
+            if (r["state_age_s"] is not None
+                    and r["state_changed_at_basis"] == "first_observed"):
+                state_age = ">=" + state_age
             print(f"  {r['id'].ljust(w)}  {r['kind']:9} {r['state']:13} "
-                  f"{job[:14]:14} {r['gpu_hours']:>5g} {r['attempts']}")
+                  f"{job[:14]:14} {r['gpu_hours']:>5g} {r['attempts']} "
+                  f"{age:>8} {state_age:>8}")
+            if r["reason"]:
+                print(f"  {'':{w}}    reason: {r['reason']}")
             # A held unit must say WHY, or the operator reads it as "waiting".
             if r["held_by"]:
                 print(f"  {'':{w}}    held by {', '.join(r['held_by'])}, which "
