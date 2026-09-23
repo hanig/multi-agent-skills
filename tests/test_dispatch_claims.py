@@ -527,6 +527,7 @@ class TestANonEmptyStashStackRefusesACodeDispatch(unittest.TestCase):
         subprocess.run(["git", "init", "-q", "--bare", str(self.remote)],
                        check=True, env=ENV)
         git(self.repo, "remote", "add", "origin", str(self.remote))
+        git(self.repo, "push", "-qu", "origin", "HEAD:refs/heads/main")
         self.attempt = self.tmp / "runs" / "code" / "a1"
         self.attempt.mkdir(parents=True)
 

@@ -1665,6 +1665,29 @@ def validate_plan(plan, survey=None):
             raise PlanError(f"unit {uid!r} is kind {u['kind']} with no "
                             f"'command' to submit")
 
+    dispatch_canary = plan.get("dispatch_canary")
+    if dispatch_canary is not None:
+        if not isinstance(dispatch_canary, dict):
+            raise PlanError("'dispatch_canary' must be an object with unit "
+                            "and width")
+        canary_id = dispatch_canary.get("unit")
+        width = dispatch_canary.get("width")
+        if canary_id not in by_id:
+            raise PlanError(
+                f"dispatch_canary names unit {canary_id!r}, which is absent "
+                f"from the plan")
+        if (not isinstance(width, int) or isinstance(width, bool)
+                or width < 1):
+            raise PlanError(
+                f"dispatch_canary.width={width!r}; it must be an integer of "
+                f"at least 1")
+        if by_id[canary_id].get("needs"):
+            raise PlanError(
+                f"dispatch canary {canary_id!r} must have no dependencies. "
+                f"The coordinator withholds fan-out until this unit reaches "
+                f"DONE, so withholding an ancestor it needs would deadlock "
+                f"qualification.")
+
     # Dependencies must exist and must not cycle. Cycle detection lifted in
     # shape from start-a-sprint's validator.
     for uid, u in by_id.items():
@@ -2128,10 +2151,15 @@ def plan_digest(plan):
                 if k not in COSMETIC_FIELDS}
     units = sorted((unit_payload(u) for u in (plan.get("units") or [])),
                    key=lambda d: json.dumps(d, sort_keys=True))
-    payload = json.dumps(
-        {"units": units,
-         "budget": plan.get("budget"),
-         "root": plan.get("root")}, sort_keys=True, default=str)
+    payload = {"units": units,
+               "budget": plan.get("budget"),
+               "root": plan.get("root")}
+    # Compatibility is persisted state, not just the forward path. Adding a
+    # null key would change every old plan's digest after an upgrade and halt
+    # unchanged live runs. Only a declared canary changes dispatch semantics.
+    if plan.get("dispatch_canary") is not None:
+        payload["dispatch_canary"] = plan["dispatch_canary"]
+    payload = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
@@ -3111,6 +3139,86 @@ def _git(repo, *args, timeout=60):
     return rc, (out or "").strip(), (err or "").strip()
 
 
+def _git_push_destination(repo, raw, resolved, remote_index, *args,
+                          timeout=60):
+    """Run a remote command against origin's once-expanded push route.
+
+    Passing ``resolved`` back to Git can apply a second insteadOf rewrite.
+    Passing ``raw`` alone misses pushInsteadOf, because fetch and ls-remote do
+    not apply push-only rewrites. A command-local, unguessable alias maps to
+    the anchored destination. Its complete spelling is a longer match than
+    any pre-existing rewrite of the raw URL, and Git applies URL rewriting
+    once rather than recursively rewriting the resulting destination.
+    """
+    routed_args = list(args)
+    if (remote_index < 0 or remote_index >= len(routed_args)
+            or routed_args[remote_index] != raw):
+        return 2, "", "internal error: push-route argument is not anchored"
+    alias = "hanig-swarm-route:" + os.urandom(16).hex()
+    routed_args[remote_index] = alias
+    # Keep key and value separate. `git -c name=value` splits at the first
+    # equals sign, including one inside a URL used as the key's subsection;
+    # a push destination containing `=` therefore became a truncated invalid
+    # key and refused every dispatch. Write the one mapping with `git config`,
+    # whose key and value are separate argv elements, then include that file.
+    # This works on the repository's Git 2.23 floor; --config-env does not.
+    handle = tempfile.NamedTemporaryFile(
+        prefix="hanig-swarm-push-route-", delete=False)
+    config_path = handle.name
+    handle.close()
+    try:
+        rc, out, err = U.run(
+            ["git", "config", "--file", config_path, "--add",
+             f"url.{resolved}.insteadOf", alias], timeout=timeout)
+        if rc != 0:
+            return rc, (out or "").strip(), (err or "").strip()
+        return _git(repo, "-c", f"include.path={config_path}", *routed_args,
+                    timeout=timeout)
+    finally:
+        try:
+            os.unlink(config_path)
+        except OSError:
+            pass
+
+
+def _exact_remote_ref_head(listing, ref):
+    """Return the one valid object id reported for exactly ``ref``.
+
+    ls-remote patterns match a ref's suffix, not its full name. The query for
+    refs/heads/zzz can therefore also return refs/heads/refs/heads/zzz, and
+    its output order is not authority. Decide from the returned ref name.
+    """
+    matches = []
+    for line in listing.splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[1] == ref:
+            matches.append(fields[0])
+    if len(matches) != 1:
+        return None
+    head = matches[0]
+    if (len(head) not in (40, 64)
+            or any(c not in "0123456789abcdef" for c in head.lower())):
+        return None
+    return head
+
+
+def _commit_relation(repo, head, target_head):
+    """Classify HEAD against target, preserving Git's diagnostic on error."""
+    behind_rc, _out, behind_err = _git(
+        repo, "merge-base", "--is-ancestor", head, target_head)
+    if behind_rc == 0:
+        return "behind", ""
+    if behind_rc != 1:
+        return "unknown", behind_err
+    ahead_rc, _out, ahead_err = _git(
+        repo, "merge-base", "--is-ancestor", target_head, head)
+    if ahead_rc == 0:
+        return "ahead", ""
+    if ahead_rc == 1:
+        return "diverged", ""
+    return "unknown", ahead_err
+
+
 def _unattended_mode_example(provider):
     """An unattended mode this provider actually accepts.
 
@@ -3162,6 +3270,15 @@ class PreflightRefusal(str):
     # paths, and the run report rendered a zero count as "uncommitted
     # changes", which misstates why nothing ran.
     reason = "dirty-worktree"
+
+
+def _dispatch_base_refusal(uid, repo, message):
+    """Return a launch refusal that also makes the command exit nonzero."""
+    refusal = PreflightRefusal(f"unit {uid!r}: {message}")
+    refusal.workspace = str(repo)
+    refusal.dirty_count = 0
+    refusal.reason = "dispatch-base"
+    return refusal
 
 
 def _plan_workspace(u):
@@ -3672,6 +3789,18 @@ def _capture_code_launch(unit_dir, u):
     if rc != 0:
         return (f"unit {u['id']!r}: {repo!r} has no HEAD to anchor to. "
                 f"An empty repository gives nothing to transition FROM."), None
+    rc, base_ref, _ = _git(repo, "symbolic-ref", "--quiet", "HEAD")
+    if rc != 0:
+        base_ref = None
+        base_branch = "(detached HEAD)"
+    elif base_ref.startswith("refs/heads/"):
+        # Render only after the authority decision below. `--short` is not a
+        # safe decision value: with refs/tags/main present Git disambiguates
+        # refs/heads/main as heads/main, which is display truth but not ref
+        # identity.
+        base_branch = base_ref[len("refs/heads/"):]
+    else:
+        base_branch = base_ref
     rc, tree, _ = _git(repo, "rev-parse", head + "^{tree}")
     if rc != 0:
         return f"unit {u['id']!r}: cannot read the tree of {head[:12]}", None
@@ -3686,24 +3815,164 @@ def _capture_code_launch(unit_dir, u):
                 f"attempts must push their generated "
                 f"branch to origin so the coordinator can judge the exact "
                 f"ref it anchored before the agent existed"), None
+    target_ref = f"refs/heads/{target}"
+    target_rc, target_listing, target_err = _git_push_destination(
+        repo, remote_raw, remote, 2, "ls-remote", "--exit-code", remote_raw,
+        target_ref)
+    if target_rc != 0:
+        detail = (target_err or "git ls-remote returned %s" % target_rc).strip()
+        return _dispatch_base_refusal(
+            u.get("id"), repo,
+            f"cannot resolve origin/{target} before dispatch: {detail[:200]}. "
+            f"The proposed base is {head} from branch {base_branch!r}; "
+            f"refusing because the pull-request target is unknown."), None
+    target_head = _exact_remote_ref_head(target_listing, target_ref)
+    if target_head is None:
+        return _dispatch_base_refusal(
+            u.get("id"), repo,
+            f"origin/{target} returned no single valid exact-ref answer; "
+            f"the proposed base is {head} from branch {base_branch!r}."), None
+    # ls-remote observes the destination, while fetch makes a DIFFERENT exact
+    # object available for the ancestry decision. Equality already supplies
+    # that object as local HEAD; requiring upload-pack access in that case
+    # rejects an honest current checkout even though the target is observed
+    # twice below. Comparing unequal heads still requires the fetch rather
+    # than a stale refs/remotes/origin/* ref.
+    object_rc, _object_out, object_err = _git(
+        repo, "cat-file", "-e", target_head + "^{commit}")
+    if head != target_head and object_rc != 0:
+        fetch_rc, _fetch_out, fetch_err = _git_push_destination(
+            repo, remote_raw, remote, 4, "fetch", "--quiet", "--no-tags",
+            "--recurse-submodules=no", remote_raw, target_ref, timeout=120)
+        if fetch_rc != 0:
+            return _dispatch_base_refusal(
+                u.get("id"), repo,
+                f"cannot fetch observed origin/{target} commit {target_head}: "
+                f"{fetch_err[:200]}. The proposed base is {head} from branch "
+                f"{base_branch!r}; refusing rather than deciding from a stale "
+                f"remote-tracking ref."), None
+        object_rc, _object_out, object_err = _git(
+            repo, "cat-file", "-e", target_head + "^{commit}")
+    confirm_rc, confirmed_listing, confirm_err = _git_push_destination(
+        repo, remote_raw, remote, 2, "ls-remote", "--exit-code", remote_raw,
+        target_ref)
+    confirmed_head = _exact_remote_ref_head(confirmed_listing, target_ref)
+    if (object_rc != 0 or confirm_rc != 0 or confirmed_head != target_head):
+        detail = object_err or confirm_err or (
+            f"origin/{target} moved from {target_head} to {confirmed_head}")
+        return _dispatch_base_refusal(
+            u.get("id"), repo,
+            f"could not pin the observed origin/{target} commit "
+            f"{target_head}: {detail[:200]}. The proposed base is {head} "
+            f"from branch {base_branch!r}; retry after the target settles."), None
+
+    if base_ref != target_ref:
+        return _dispatch_base_refusal(
+            u.get("id"), repo,
+            f"checkout branch {base_branch!r} at {head} is not the plan's "
+            f"target branch {target!r}, observed at {target_head} on origin. "
+            f"Being ahead does not qualify a different branch: unrelated "
+            f"commits would be inherited by every attempt. Check out "
+            f"{target!r} before dispatch."), None
+    if head != target_head:
+        relation, relation_err = _commit_relation(repo, head, target_head)
+        if relation in ("diverged", "unknown"):
+            shallow_rc, shallow_out, _shallow_err = _git(
+                repo, "rev-parse", "--is-shallow-repository")
+            if shallow_rc == 0 and shallow_out == "true":
+                # The push destination may expose target_branch under a name
+                # the fetch repository does not have. Deepen through origin's
+                # configured fetch refs rather than requiring that adjacent
+                # naming fact. If they cannot remove the shallow boundary,
+                # ancestry remains unknown and the guard refuses below.
+                deepen_rc, _deepen_out, deepen_err = _git(
+                    repo, "fetch", "--quiet", "--unshallow", "--no-tags",
+                    "--recurse-submodules=no", "origin", timeout=120)
+                still_rc, still_shallow, still_err = _git(
+                    repo, "rev-parse", "--is-shallow-repository")
+                push_deepen_err = ""
+                if still_rc != 0 or still_shallow != "false":
+                    # The checkout's fetch route is not guaranteed to carry
+                    # every parent object available at the independently
+                    # anchored push destination. Try that exact route too,
+                    # through the per-call alias that prevents a second URL
+                    # rewrite. Fetch the exact target ref whose observed
+                    # object is being judged: a repository's HEAD or another
+                    # advertised ref is adjacent naming, not evidence that it
+                    # carries the target's missing parents.
+                    _push_rc, _push_out, push_deepen_err = (
+                        _git_push_destination(
+                            repo, remote_raw, remote, 5,
+                            "fetch", "--quiet", "--unshallow", "--no-tags",
+                            "--recurse-submodules=no", remote_raw, target_ref,
+                            timeout=120))
+                    still_rc, still_shallow, still_err = _git(
+                        repo, "rev-parse", "--is-shallow-repository")
+                if still_rc != 0 or still_shallow != "false":
+                    detail = push_deepen_err or deepen_err or still_err or (
+                        "the fetch completed but the repository is still "
+                        "shallow")
+                    return _dispatch_base_refusal(
+                        u.get("id"), repo,
+                        f"cannot establish ancestry for shallow checkout "
+                        f"{base_branch!r} at {head}: {detail[:200]}. "
+                        f"The observed origin/{target} is {target_head}; "
+                        f"refusing because freshness is unknown."), None
+                relation, relation_err = _commit_relation(
+                    repo, head, target_head)
+        if relation == "behind":
+            return _dispatch_base_refusal(
+                u.get("id"), repo,
+                f"checkout {base_branch!r} at {head} is behind "
+                f"origin/{target} at {target_head}. Bring the checkout "
+                f"current before dispatch."), None
+        if relation == "unknown":
+            return _dispatch_base_refusal(
+                u.get("id"), repo,
+                f"cannot compare checkout {base_branch!r} at {head} with "
+                f"origin/{target} at {target_head}: {relation_err[:200]}. "
+                f"Refusing because freshness is unknown."), None
+        if relation == "diverged":
+            return _dispatch_base_refusal(
+                u.get("id"), repo,
+                f"checkout {base_branch!r} at {head} has diverged from "
+                f"origin/{target} at {target_head}. It is neither current "
+                f"nor ahead of the observed target; refusing unrelated "
+                f"history before dispatch."), None
     judgment_ref = f"refs/heads/{branch}"
     # Query the PUSH destination, not the raw fetch spelling: with
     # `url.*.pushInsteadOf` configured they are different repositories, and
     # the attempt will push to the former. Checking the latter for collisions
     # asks the wrong repository and later judges the wrong one too.
-    remote_rc, _remote_head, remote_err = _git(
-        repo, "ls-remote", "--exit-code", remote,
-        f"refs/heads/{branch}")
+    remote_rc, _remote_head, remote_err = _git_push_destination(
+        repo, remote_raw, remote, 2, "ls-remote", "--exit-code", remote_raw,
+        judgment_ref)
+    existing_head = _exact_remote_ref_head(_remote_head, judgment_ref)
     if remote_rc == 0:
-        return (f"unit {u.get('id')!r}: generated attempt branch {branch!r} "
-                f"already exists on origin. Allocate a new attempt rather "
-                f"than asking an agent to overwrite unrelated remote "
-                f"history"), None
-    if remote_rc != 2:
+        if existing_head is None:
+            return _dispatch_base_refusal(
+                u.get("id"), repo,
+                f"origin returned no single valid exact-ref answer for "
+                f"generated attempt branch {branch!r}. Refusing because "
+                f"its absence is unknown"), None
+        return _dispatch_base_refusal(
+            u.get("id"), repo,
+            f"generated attempt branch {branch!r} already exists on origin. "
+            f"Allocate a new attempt rather than asking an agent to "
+            f"overwrite unrelated remote history"), None
+    if remote_rc == 2 and (_remote_head or "").strip():
+        return _dispatch_base_refusal(
+            u.get("id"), repo,
+            f"origin returned contradictory evidence for generated attempt "
+            f"branch {branch!r}: ls-remote reported it absent but also "
+            f"returned a listing. Refusing because its absence is unknown"), None
+    if remote_rc not in (0, 2):
         detail = (remote_err or "git ls-remote returned %s" % remote_rc).strip()
-        return (f"unit {u.get('id')!r}: cannot establish that generated "
-                f"attempt branch {branch!r} is absent on origin: "
-                f"{detail[:200]}. Refusing before agent creation"), None
+        return _dispatch_base_refusal(
+            u.get("id"), repo,
+            f"cannot establish that generated attempt branch {branch!r} is "
+            f"absent on origin: {detail[:200]}. Refusing before agent "
+            f"creation"), None
     # The remote branch and the local branch are separate collision domains.
     # Paseo must create the latter, while the former is the exact durable ref
     # the checker will query. A remote-tracking ref is deliberately irrelevant:
@@ -3712,11 +3981,16 @@ def _capture_code_launch(unit_dir, u):
     ref_rc, _out, _err = _git(
         repo, "show-ref", "--verify", "--quiet", local_ref)
     if ref_rc == 0:
-        return (f"unit {u.get('id')!r}: generated local attempt branch "
-                f"{branch!r} already exists. Allocate a new attempt rather "
-                f"than asking Paseo to reuse its history"), None
+        return _dispatch_base_refusal(
+            u.get("id"), repo,
+            f"generated local attempt branch {branch!r} already exists. "
+            f"Allocate a new attempt rather than asking Paseo to reuse its "
+            f"history"), None
     intent = {
-        "schema_version": 5,
+        # Schema 5 belongs to ARC-706's launch-host anchor. Schema 6 is used
+        # by completed host-bound facts, so the combined intent advances to 7
+        # rather than reinterpreting persisted state from either feature.
+        "schema_version": 7,
         "unit_id": u.get("id"),
         "attempt_id": Path(unit_dir).name,
         "launch_host": os.uname().nodename,
@@ -3725,6 +3999,9 @@ def _capture_code_launch(unit_dir, u):
         "repository_remote_raw": remote_raw,
         "base_commit": head,
         "base_tree": tree,
+        "base_branch": base_branch,
+        "base_ref": base_ref,
+        "target_commit": target_head,
         "worktree_slug": slug,
         "branch": branch,
         # The exact durable observation the checker will make after Paseo's
@@ -3772,7 +4049,23 @@ def _code_launch_intent_problem(intent, u, attempt):
                  or not intent["launch_host"])):
         return (f"unit {u.get('id')!r}: worktree launch intent is "
                 "incomplete (missing launch_host)")
-    for key in ("base_commit", "base_tree"):
+    if schema >= 7:
+        for key in ("base_branch", "target_commit"):
+            if not intent.get(key):
+                return (f"unit {u.get('id')!r}: worktree launch intent is "
+                        f"incomplete (missing {key})")
+        if not intent.get("base_ref"):
+            return (f"unit {u.get('id')!r}: worktree launch intent is "
+                    "incomplete (missing base_ref)")
+        expected_base_ref = f"refs/heads/{intent['target_branch']}"
+        if intent["base_ref"] != expected_base_ref:
+            return (f"unit {u.get('id')!r}: trusted launch base ref "
+                    f"{intent['base_ref']!r} is not target ref "
+                    f"{expected_base_ref!r}")
+    digest_keys = ["base_commit", "base_tree"]
+    if schema >= 7:
+        digest_keys.append("target_commit")
+    for key in digest_keys:
         value = intent[key]
         if (not isinstance(value, str) or len(value) not in (40, 64)
                 or any(c not in "0123456789abcdef" for c in value.lower())):
@@ -6025,6 +6318,129 @@ WORKTREE_CLEANUP_STATES = frozenset(
 WORKTREE_ARCHIVE_MAX_ATTEMPTS = 3
 
 
+def _terminal_capacity_claim(u, us):
+    """Return whether a terminal attempt's execution claim is closed.
+
+    FAILED is a unit outcome, not executor-liveness evidence.  Capacity may be
+    released only when the relevant registry positively says that the
+    attempt is absent.  Re-evaluate on every advance rather than persisting a
+    once-true observation: a later-live executor must consume capacity and
+    trigger a refusal instead of remaining silently discounted.
+    """
+    attempts = us.get("attempts") or []
+    recorded = us.get("attempt_dir") or (attempts[-1] if attempts else None)
+    if not recorded:
+        return CLAIM_UNKNOWN, (
+            "coordinator state records no attempt identity, so no executor "
+            "registry can be asked about it")
+    recorded = str(recorded)
+    dry = recorded.startswith(DRY_PREFIX)
+    attempt_path = recorded[len(DRY_PREFIX):] if dry else recorded
+    claim = {
+        "attempt": Path(attempt_path).name,
+        "kind": u.get("kind"),
+        # _claim_liveness treats a dry admission as positively executor-free.
+        "job": us.get("job_id") or (recorded if dry else ""),
+    }
+    return _claim_liveness(claim)
+
+
+def _terminal_capacity_refusal(uid, state_name, verdict, why, width=None,
+                               occupied=None):
+    """Explain a failed closure proof without overstating liveness."""
+    known = (f"coordinator state is {state_name}, so it accepts no further "
+             f"work under that claim")
+    if verdict == CLAIM_LIVE:
+        missing = f"an executor remains active: {why}"
+    else:
+        missing = ("could not establish whether an executor or lease remains "
+                   f"active: {why}")
+    excess = ""
+    if width is not None and occupied is not None and occupied > width:
+        excess = (f" active capacity would be {occupied} past declared "
+                  f"width {width}.")
+    return (f"Cannot dispatch canary: capacity claim for terminal unit "
+            f"{uid!r} is not established closed; {known}, but {missing};"
+            f"{excess} canary DONE evidence is absent.")
+
+
+def _dispatch_canary_guard(plan, state, units, candidate):
+    """Decide one admission from live state at the dispatch chokepoint.
+
+    Returns ``(allowed, wait_reason, halt_reason)``.  Only DONE opens the
+    gate.  Every other state is either an admission, a retryable reservation,
+    or a terminal refusal; callers do not cache or reconstruct this decision
+    on the paths that happen to change a canary's state.
+    """
+    canary = plan.get("dispatch_canary") or {}
+    canary_id = canary.get("unit")
+    width = canary.get("width")
+    if not canary_id:
+        return True, None, None
+
+    canary_state = _unit_state(state, canary_id).get("state")
+    if canary_state == "DONE":
+        return True, None, None
+    if canary_state in ("FAILED", "FAILED_EVIDENCE", "HELD"):
+        reason = (f"Cannot dispatch canary: {canary_id!r} is "
+                  f"{canary_state}, not DONE; canary DONE evidence is "
+                  f"absent, so failure cannot qualify further fan-out.")
+        return False, reason, reason
+
+    terminal_capacity = {}
+    for uid, unit in sorted(units.items()):
+        us = _unit_state(state, uid)
+        if (uid != canary_id
+                and us.get("state") in ("FAILED", "FAILED_EVIDENCE")
+                and (us.get("attempts") or us.get("job_id"))):
+            terminal_capacity[uid] = _terminal_capacity_claim(unit, us)
+
+    history = [
+        uid for uid in units
+        if (_unit_state(state, uid).get("attempts")
+            or _unit_state(state, uid).get("job_id"))
+        and _unit_state(state, uid).get("state") != "DONE"]
+    capacity = [
+        uid for uid in history
+        if not (uid in terminal_capacity
+                and terminal_capacity[uid][0] == CLAIM_FREE)]
+
+    # A retryable canary preflight refusal clears the unstarted attempt and
+    # its budget charge.  It does not open the canary slot to a non-canary:
+    # the live refusal reserves that slot so only the canary's retry can use
+    # it.  This is derived at the decision point, not persisted as a fake
+    # attempt or repaired by the refusal path.
+    retryable_reservation = (
+        canary_state == "PREFLIGHT_REFUSED" and canary_id not in history)
+
+    unresolved = [
+        uid for uid in capacity
+        if uid in terminal_capacity
+        and terminal_capacity[uid][0] != CLAIM_FREE]
+    if unresolved and len(capacity) >= width:
+        blocked = unresolved[0]
+        verdict, why = terminal_capacity[blocked]
+        reason = _terminal_capacity_refusal(
+            blocked, _unit_state(state, blocked).get("state"), verdict,
+            why, width, len(capacity))
+        return False, reason, reason
+
+    # Closed failed capacity may be reused only by the canary.  Its admission
+    # remains in history so failure never permits another non-canary before
+    # DONE evidence exists.
+    if candidate == canary_id:
+        occupancy = capacity
+    else:
+        occupancy = list(history)
+        if retryable_reservation:
+            occupancy.append(canary_id)
+    if candidate not in occupancy and len(occupancy) >= width:
+        reason = (f"dispatch canary {canary_id!r} has not reached DONE; "
+                  f"refusing any new admission past declared width {width}")
+        return False, reason, None
+    return True, None, None
+
+
 def _paseo_json(out):
     """One implementation, in paseo_io. See that module for why."""
     return PIO.first_json_object(out)
@@ -6418,6 +6834,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     acts."""
     units = {u["id"]: u for u in plan["units"]}
     report, dispatched, halted = [], 0, state.get("halted")
+    transient_halt = None
     advance_observed_at = time.time()
 
     # A DRY RUN MUST NOT CONTAMINATE A REAL PROJECT. Recording a fake
@@ -7169,8 +7586,18 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     budget = (plan.get("budget") or {}).get("gpu_hours")
     spent = sum(_unit_state(state, uid)["gpu_hours"] for uid in units)
 
-    # 3. Dispatch every unit whose dependencies are DONE.
-    for uid, u in sorted(units.items()):
+    # 3. Dispatch every unit whose dependencies are DONE.  Put the canary
+    # first while its gate is closed, then ask the gate exactly once for each
+    # candidate at the side-effect boundary below.
+    dispatch_order = sorted(units)
+    dispatch_canary = (plan.get("dispatch_canary") or {}).get("unit")
+    if (dispatch_canary in units
+            and _unit_state(state, dispatch_canary).get("state") != "DONE"):
+        dispatch_order.remove(dispatch_canary)
+        dispatch_order.insert(0, dispatch_canary)
+
+    for uid in dispatch_order:
+        u = units[uid]
         us = _unit_state(state, uid)
         if us["attempt_dir"] or us["state"] in ("DONE", "FAILED",
                                                 "FAILED_EVIDENCE"):
@@ -7226,6 +7653,19 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 report.append(f"{uid}: waiting, pool {pool!r} full "
                               f"({len(in_pool)} of {caps[pool]})")
                 continue
+
+        # THE CANARY CHOKEPOINT.  Every path that can dispatch reaches this
+        # live-state decision immediately before allocation.  State-changing
+        # paths do not each carry their own repair check; the next candidate
+        # simply asks this one guard again.
+        allowed, wait_reason, gate_halt = _dispatch_canary_guard(
+            plan, state, units, uid)
+        if not allowed:
+            report.append(f"{uid}: waiting -- {wait_reason}")
+            if gate_halt and not transient_halt:
+                transient_halt = gate_halt
+                report.append(f"REFUSING -- {gate_halt}")
+            continue
 
         unit_dir, err = _allocate(plan, u, root)
         if err:
@@ -7317,10 +7757,16 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 cited = us["preflight_refusals"][-1]["receipt"]
                 report.append(f"{uid}: {err}" +
                               (f"\n  receipt: {cited}" if cited else ""))
+                if err.reason == "dispatch-base":
+                    transient_halt = (
+                        f"dispatch base refused for unit {uid!r}")
             else:
                 _set_unit_state(us, "FAILED")
                 report.append(f"{uid}: {err}")
             save_state(state_dir, state)
+            if (isinstance(err, PreflightRefusal)
+                    and err.reason == "dispatch-base"):
+                break
             continue
         # Bind EVERY kind that has an id. The old guard bound only numeric
         # ids, so a code unit's agent id never reached unit.json and its
@@ -7354,8 +7800,28 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         else:
             us.pop("bind_pending", None)
         dispatched += 1
+        if u.get("kind") == "code":
+            attempt = Path(unit_dir).name
+            intent = ((_unit_state(state, uid).get(
+                "attempt_launch_intents") or {}).get(attempt) or {})
+            report.append(
+                f"{uid}: dispatch base {intent.get('base_commit')} from "
+                f"branch {intent.get('base_branch')!r}; origin/"
+                f"{intent.get('target_branch')} was "
+                f"{intent.get('target_commit')}")
         report.append(f"{uid}: submitted {job_id} -> {unit_dir}")
         save_state(state_dir, state)
+
+    # Refusal is an exit-status fact as well as text.  Re-evaluate after every
+    # transition so a canary that failed allocation/submission, or terminal
+    # capacity whose closure cannot be established, cannot end with
+    # ``halted=None`` merely because its path printed a warning.
+    if dispatch_canary:
+        _allowed, _wait, final_halt = _dispatch_canary_guard(
+            plan, state, units, dispatch_canary)
+        if final_halt and not transient_halt:
+            transient_halt = final_halt
+            report.append(f"REFUSING -- {final_halt}")
 
     state["halted"] = halted
     save_state(state_dir, state)
@@ -7446,7 +7912,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                         f"intent from durable state {now}")
             continue
         emit_intent(state_dir, project, uid, now, us, evidence, kind=kind)
-    return report, dispatched, halted
+    return report, dispatched, (halted or transient_halt)
 
 
 def _load_plan(path):
