@@ -1001,6 +1001,128 @@ class TestRangeDivergence(unittest.TestCase):
                 diff=False, staged=False, range=range_spec, file=[]))
         return body, label, stderr.getvalue()
 
+    def range_cli(self, range_spec):
+        env = dict(os.environ)
+        env.pop("OPENAI_API_KEY", None)
+        env.pop("OPENROUTER_API_KEY", None)
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "--range", range_spec,
+             "--kind", "implementation", "--round", "1",
+             "--claim", review.HONEST_RUN_CLAIM],
+            capture_output=True, text=True, env=env, timeout=30)
+
+    def test_unresolvable_three_dot_base_names_ref_instead_of_empty(self):
+        result = self.range_cli("deadbeef...HEAD")
+        self.assertIn("unresolvable ref 'deadbeef'", result.stderr)
+        self.assertEqual(result.returncode, review.STATES["REVIEW_ERROR"])
+        self.assertIn("REVIEW_ERROR", result.stderr)
+        git_error = subprocess.run(
+            ["git", "rev-parse", "--verify", "deadbeef^{commit}"],
+            capture_output=True, text=True, check=False)
+        self.assertNotEqual(git_error.returncode, 0)
+        self.assertTrue(git_error.stderr.strip())
+        self.assertIn(git_error.stderr.strip(), result.stderr)
+        self.assertNotIn("empty", result.stdout + result.stderr)
+
+    def test_unresolvable_endpoint_is_rejected_in_every_range_form(self):
+        for range_spec in ("deadbeef..HEAD", "HEAD..deadbeef",
+                           "HEAD...deadbeef", "deadbeef",
+                           "deadbeef..", "..deadbeef",
+                           "deadbeef...", "...deadbeef"):
+            with self.subTest(range_spec=range_spec):
+                result = self.range_cli(range_spec)
+                self.assertIn("unresolvable ref 'deadbeef'", result.stderr)
+                self.assertIn("REVIEW_ERROR", result.stderr)
+                self.assertEqual(result.returncode, review.STATES["REVIEW_ERROR"])
+                self.assertNotIn("empty", result.stdout + result.stderr)
+
+    def test_resolvable_empty_ranges_still_report_empty(self):
+        for range_spec in ("HEAD..HEAD", "HEAD...HEAD", "HEAD",
+                           "HEAD..", "..HEAD", "HEAD...", "...HEAD"):
+            with self.subTest(range_spec=range_spec):
+                result = self.range_cli(range_spec)
+                self.assertEqual(result.returncode, review.STATES["REVIEW_ERROR"])
+                self.assertIn(
+                    "nothing to review (commit range " + range_spec + " is empty)",
+                    result.stdout)
+                self.assertEqual(result.stderr, "")
+
+    def test_single_commit_keeps_working_tree_diff(self):
+        (self.repo / "branch.txt").write_text("uncommitted change\n")
+        body, label, warning = self.gather("HEAD")
+        self.assertEqual(body, self.git("diff", "HEAD"))
+        self.assertIn("+uncommitted change", body)
+        self.assertEqual(label, "commit range HEAD")
+        self.assertEqual(warning, "")
+
+    def test_single_commit_range_shorthands_keep_git_diff_semantics(self):
+        for range_spec in ("HEAD^!", "HEAD^@", "HEAD^-", "HEAD^-1"):
+            with self.subTest(range_spec=range_spec):
+                body, _label, warning = self.gather(range_spec)
+                self.assertTrue(body)
+                self.assertEqual(body, self.git("diff", range_spec))
+                self.assertEqual(warning, "")
+
+    def test_commit_search_expressions_are_resolved_before_splitting(self):
+        self.git("commit", "--allow-empty", "-qm", "needle..dots needle...dots")
+        self.commit_file("later.txt", "after the matching commit\n")
+        for expression in ("HEAD^{/needle..dots}", "HEAD^{/needle...dots}",
+                           ":/needle..dots", ":/needle...dots", ":/needle"):
+            with self.subTest(expression=expression):
+                body, label, warning = self.gather(expression)
+                self.assertTrue(body)
+                self.assertEqual(body, self.git("diff", expression))
+                self.assertEqual(label, "commit range " + expression)
+                self.assertEqual(warning, "")
+
+    def test_dotted_search_in_right_endpoint_preserves_range_operator(self):
+        self.git("commit", "--allow-empty", "-qm", "needle..dots needle...dots")
+        for operator in ("..", "..."):
+            for search in ("needle..dots", "needle...dots"):
+                expression = "base" + operator + "HEAD^{/" + search + "}"
+                with self.subTest(expression=expression):
+                    body, _label, warning = self.gather(expression)
+                    self.assertTrue(body)
+                    self.assertEqual(body, self.git("diff", expression))
+                    if operator == "..":
+                        self.assertIn("2 commits on base are NOT in", warning)
+                    else:
+                        self.assertEqual(warning, "")
+
+    def test_single_commit_shorthands_still_reject_unresolvable_refs(self):
+        for range_spec, bad_ref in (("deadbeef^!", "deadbeef"),
+                                    ("deadbeef^@", "deadbeef"),
+                                    ("deadbeef^-", "deadbeef"),
+                                    ("HEAD^-2", "HEAD^2")):
+            with self.subTest(range_spec=range_spec):
+                result = self.range_cli(range_spec)
+                self.assertEqual(result.returncode, review.STATES["REVIEW_ERROR"])
+                self.assertIn("unresolvable ref " + repr(bad_ref), result.stderr)
+                self.assertNotIn("empty", result.stdout + result.stderr)
+
+    def test_commit_tag_and_three_dot_omitted_endpoints_keep_diff(self):
+        self.git("tag", "-a", "start", "-m", "start", "HEAD~1")
+        for range_spec in ("start..HEAD", "start...HEAD", "start...",
+                           "...base", "HEAD~1", "start"):
+            with self.subTest(range_spec=range_spec):
+                body, _label, warning = self.gather(range_spec)
+                self.assertTrue(body)
+                self.assertEqual(body, self.git("diff", range_spec))
+                self.assertEqual(warning, "")
+
+    def test_existing_tree_object_is_not_a_commit_endpoint(self):
+        result = self.range_cli("HEAD^{tree}")
+        self.assertEqual(result.returncode, review.STATES["REVIEW_ERROR"])
+        self.assertIn("unresolvable ref 'HEAD^{tree}'", result.stderr)
+        self.assertNotIn("empty", result.stdout + result.stderr)
+
+    def test_bad_endpoint_is_rejected_before_collecting_any_diff(self):
+        with patch.object(review, "git_out") as git_out:
+            with self.assertRaises(SystemExit) as stopped:
+                self.gather("HEAD..deadbeef")
+        self.assertEqual(stopped.exception.code, review.STATES["REVIEW_ERROR"])
+        git_out.assert_not_called()
+
     def test_diverged_two_dot_warns_with_base_only_count(self):
         body, label, warning = self.gather("base..branch")
         self.assertIn("WARNING", warning)

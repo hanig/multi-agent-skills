@@ -1069,15 +1069,78 @@ def git_out(*args):
         return ""
 
 
+def range_endpoints(range_spec):
+    """Split at the first dotted operator, as Git's range parser does."""
+    index = range_spec.find("..")
+    if index < 0:
+        return None
+    separator = "..." if range_spec.startswith("...", index) else ".."
+    return (separator, range_spec[:index] or "HEAD",
+            range_spec[index + len(separator):] or "HEAD")
+
+
+def resolve_range_ref(ref):
+    """Let Git parse a revision before peeling its resolved object to a commit.
+
+    Appending ^{commit} directly to :/regex changes the search pattern.
+    Return failed Git results intact so the caller can name the original ref.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", ref],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            encoding="utf-8", errors="replace", timeout=120)
+        if result.returncode == 0:
+            result = subprocess.run(
+                ["git", "rev-parse", "--verify",
+                 f"{result.stdout.strip()}^{{commit}}"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                encoding="utf-8", errors="replace", timeout=120)
+        return result
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        config_error(f"cannot resolve ref {ref!r}: {exc}. "
+                     "Pass a resolvable commit ref in --range.")
+
+
+def validate_range_endpoints(range_spec):
+    """Reject bad refs before diff collection; return whether this is two-dot.
+
+    Give Git the whole expression first: dots can be commit-search text.
+    Only failed single-expression resolution needs range/shorthand parsing.
+    """
+    whole = resolve_range_ref(range_spec)
+    if whole.returncode == 0:
+        return False
+    endpoints = range_endpoints(range_spec)
+    refs = list(endpoints[1:]) if endpoints else [range_spec]
+    if not endpoints:
+        # Git's single-commit range shorthands expand to commit endpoints;
+        # appending ^{commit} to the shorthand itself is not valid syntax.
+        if len(range_spec) > 2 and range_spec.endswith(("^!", "^@")):
+            refs = [range_spec[:-2]]
+        else:
+            parent_range = re.fullmatch(r"(.+)\^-(\d*)", range_spec)
+            if parent_range:
+                ref, parent = parent_range.groups()
+                refs = [ref, f"{ref}^{parent or '1'}"]
+    for ref in refs:
+        result = whole if ref == range_spec else resolve_range_ref(ref)
+        if result.returncode != 0:
+            config_error(f"unresolvable ref {ref!r}: {result.stderr.strip()} "
+                         "Pass a resolvable commit ref in --range.")
+    return bool(endpoints and endpoints[0] == "..")
+
+
 def range_divergence_warning(range_spec):
     """Advisory only: a two-dot diff may reverse changes unique to its base.
 
     git_out returns an empty string on failure. Every ancestry command here
     must return non-empty output before we can report known divergence.
     """
-    if ".." not in range_spec or "..." in range_spec:
+    endpoints = range_endpoints(range_spec)
+    if not endpoints or endpoints[0] != "..":
         return ""
-    left, right = (end or "HEAD" for end in range_spec.split("..", 1))
+    _separator, left, right = endpoints
     alternative = (f"{left}...{right} would review only changes from the "
                    f"merge-base to {right}. The requested two-dot diff is "
                    f"unchanged.")
@@ -1111,8 +1174,9 @@ def gather(args):
         parts.append(git_out("diff", "--cached"))
     elif args.range:
         label = f"commit range {args.range}"
+        two_dot = validate_range_endpoints(args.range)
         parts.append(git_out("diff", args.range))
-        warning = range_divergence_warning(args.range)
+        warning = range_divergence_warning(args.range) if two_dot else ""
         if warning:
             print(f"WARNING: two-dot range {args.range} -- {warning}",
                   file=sys.stderr)
