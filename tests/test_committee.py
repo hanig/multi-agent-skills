@@ -222,7 +222,8 @@ class TestCommitteeTiebreak(unittest.TestCase):
         self.assertEqual(saved["resolution"]["reason"], self.tie_error)
 
     def test_astra_author_refuses_without_a_tiebreak_call(self):
-        for author in ("gpt-6-astra", "openai/gpt-6-astra", "astra", "astra-xhigh"):
+        for author in ("gpt-6-astra", "openai/gpt-6-astra", "codex/gpt-6-astra",
+                       "astra", "astra-xhigh"):
             with self.subTest(author=author):
                 committee.save_session("split", self.session)
                 self.calls.clear()
@@ -231,6 +232,23 @@ class TestCommitteeTiebreak(unittest.TestCase):
                 self.assertIn("cannot judge itself", output)
                 self.assertEqual(saved["resolution"]["status"], "OWNER")
                 self.assertEqual(self.calls, [])
+
+    def test_repeated_authors_include_astra_on_tiebreak_and_reload(self):
+        code, output, saved = self.invoke(
+            "tiebreak", "--author", "codex/gpt-6-astra",
+            author="codex/gpt-5.6-sol")
+        self.assertEqual(code, 1, output)
+        self.assertEqual(saved["author"], ["codex/gpt-5.6-sol", "codex/gpt-6-astra"])
+        self.assertEqual(self.calls, [])
+        self.assertIn("cannot judge itself", saved["resolution"]["reason"])
+        self.assertEqual(self.invoke("tiebreak", author=None)[0], 1)
+        self.assertEqual(self.calls, [])
+
+    def test_equivalent_provider_declaration_preserves_existing_authors(self):
+        self.assertEqual(self.invoke("tiebreak", author="codex/gpt-5.6-sol")[0], 0)
+        code, output, saved = self.invoke("tiebreak", author="openai/gpt-5.6-sol")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(saved["author"], "codex/gpt-5.6-sol")
 
     def test_synthesis_divergence_respects_astra_author(self):
         code, output, _saved = self.invoke(author="gpt-6-astra")
@@ -480,6 +498,117 @@ class TestCommitteeTiebreak(unittest.TestCase):
              "assert 'review' not in sys.modules", str(swarm_scripts)],
             capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class TestCommitteeAuthorMembers(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        patcher = mock.patch.object(committee, "SESSIONS", self.root)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def invoke(self, command, *flags):
+        argv = [str(SCRIPT), command, "authors", *flags]
+        output = io.StringIO()
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(committee, "ask_member",
+                                  return_value=("Final position", None, None)) as ask, \
+                redirect_stdout(output):
+            with self.assertRaises(SystemExit) as stopped:
+                committee.main()
+        return stopped.exception.code, output.getvalue(), ask.call_count
+
+    def test_explicit_sol_author_is_refused_before_session_or_provider(self):
+        code, output, calls = self.invoke(
+            "open", "--member", "sol", "--member", "kimi-k2.7-code",
+            "--author", "codex/gpt-5.6-sol", "--problem", "Which ordering?")
+        self.assertNotEqual(code, 0, output)
+        self.assertIn("sol refused: authored this change", str(code))
+        self.assertEqual(calls, 0)
+        self.assertFalse(committee.session_path("authors").exists())
+
+    def test_default_committee_cannot_seat_its_author(self):
+        code, _output, calls = self.invoke(
+            "open", "--author", "codex/gpt-5.6-luna", "--problem", "Order?")
+        self.assertIn("luna refused: authored this change", str(code))
+        self.assertEqual(calls, 0)
+
+    def test_repeated_author_exclusion_is_not_last_flag_wins(self):
+        code, _output, calls = self.invoke(
+            "open", "--member", "sol,kimi-k2.7-code", "--problem", "Order?",
+            "--author", "codex/gpt-5.6-sol", "--author", "codex/gpt-6-astra")
+        self.assertIn("sol refused: authored this change", str(code))
+        self.assertEqual(calls, 0)
+
+    def test_model_containing_astra_is_not_astra(self):
+        code, output, calls = self.invoke(
+            "open", "--member", "astra,kimi-k2.7-code", "--problem", "Order?",
+            "--author", "codex/my-gpt-6-astra-helper")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(calls, 2)
+
+    def test_repeated_authors_are_saved_and_checked_on_later_turns(self):
+        authors = ["codex/gpt-5.6-sol", "codex/gpt-6-astra"]
+        code, output, calls = self.invoke(
+            "open", "--member", "luna,kimi-k2.7-code", "--problem", "Order?",
+            "--author", authors[0], "--author", authors[1])
+        self.assertEqual(code, 0, output)
+        self.assertEqual(calls, 2)
+        self.assertEqual(committee.load_session("authors")["author"], authors)
+        code, output, calls = self.invoke("ask", "--prompt", "Clarify")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(calls, 2)
+        code, output, calls = self.invoke(
+            "ask", "--prompt", "Clarify", "--author", authors[0])
+        self.assertEqual(code, 1, output)
+        self.assertEqual(calls, 0)
+        saved = committee.load_session("authors")
+        self.assertEqual(saved["author"], authors)
+        self.assertIn("conflicts", saved["resolution"]["reason"])
+
+    def test_legacy_self_review_is_refused_and_stale_resolution_replaced(self):
+        for command in ("ask", "review", "synthesize", "tiebreak"):
+            for declared in (False, True):
+                with self.subTest(command=command, declared=declared):
+                    session = {
+                        "name": "authors", "phase": "plan", "problem": "Order?",
+                        "members": {
+                            "sol": {"model": "gpt-5.6-sol", "provider": "openai",
+                                    "history": [{"role": "assistant", "content": "A"}]},
+                            "kimi-k2.7-code": {"model": "moonshotai/kimi-k2.7-code",
+                                              "provider": "openrouter", "history": []}},
+                        "turns": [],
+                        "resolution": {"status": "CONVERGED", "plan": "stale"},
+                        "decisions": [{"status": "CONVERGED", "plan": "stale"}]}
+                    flags = ["--author", "codex/gpt-5.6-sol"] if declared else []
+                    if not declared:
+                        session["author"] = "codex/gpt-5.6-sol"
+                    committee.save_session("authors", session)
+                    code, output, calls = self.invoke(command, *flags)
+                    self.assertEqual(code, 1, output)
+                    self.assertEqual(calls, 0)
+                    saved = committee.load_session("authors")
+                    self.assertEqual(saved["author"], "codex/gpt-5.6-sol")
+                    self.assertEqual(saved["resolution"]["status"], "OWNER")
+                    self.assertIn("sol refused", saved["resolution"]["reason"])
+                    self.assertNotIn("plan", saved["resolution"])
+                    self.assertEqual(saved["decisions"][0]["plan"], "stale")
+
+    def test_saved_member_model_survives_roster_route_change(self):
+        session = {"name": "authors", "author": "codex/gpt-5.6-sol",
+                   "members": {"sol": {"model": "gpt-5.6-sol"}}, "turns": []}
+        committee.save_session("authors", session)
+        roster = committee.R.load_reviewers()
+        for member in roster:
+            if member["name"] == "sol":
+                member["model"] = "different-model"
+        with mock.patch.object(committee.R, "load_reviewers", return_value=roster):
+            code, output, calls = self.invoke("ask", "--prompt", "Clarify")
+        self.assertEqual(code, 1, output)
+        self.assertIn("sol refused", output)
+        self.assertEqual(calls, 0)
 
 
 if __name__ == "__main__":

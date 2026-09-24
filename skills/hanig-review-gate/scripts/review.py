@@ -1538,6 +1538,51 @@ class _ArgParser(argparse.ArgumentParser):
 LADDER = ["fast", "standard", "deep"]
 
 
+def author_argument(value):
+    """Keep the complete model ID after the first provider separator."""
+    provider, separator, model = value.partition("/")
+    if (not separator or not provider or not model
+            or any(c.isspace() for c in value)):
+        raise argparse.ArgumentTypeError(
+            "author must be PROVIDER/MODEL without whitespace; "
+            "pass e.g. codex/gpt-5.6-sol")
+    return value
+
+
+def author_model_ids(authors, roster=(), legacy=False):
+    """Match model IDs exactly, independently of the author's transport.
+
+    Codex authors and OpenAI API reviewers can use the same model. Split only
+    the outer provider prefix: openrouter/moonshotai/kimi-k2.7-code retains
+    moonshotai/kimi-k2.7-code. Only committee's older bare declarations accept
+    configured seat aliases (case-insensitive), never model substrings.
+    """
+    models = set()
+    for author in authors:
+        if legacy and author in {r["model"] for r in roster}:
+            models.add(author)
+        elif legacy and "/" not in author:
+            aliases = {r["model"] for r in roster
+                       if r["name"].casefold() == author.casefold()}
+            models.update(aliases or {author})
+        else:
+            models.add(author.partition("/")[2])
+    return models
+
+
+def exclude_authors(reviewers, models):
+    """One exact-model exclusion rule shared with committee membership."""
+    kept, excluded = [], []
+    for reviewer in reviewers:
+        if reviewer["model"] in models:
+            excluded.append({"name": reviewer["name"],
+                             "model": reviewer["model"],
+                             "reason": "authored this change"})
+        else:
+            kept.append(reviewer)
+    return kept, excluded
+
+
 def in_profile(rev, profile):
     """THE eligibility rule. Both selection paths must call this one.
 
@@ -1843,6 +1888,10 @@ def main():
     ap.add_argument("--only", action="append", default=[],
                     help="run only these reviewers; repeatable, and also "
                          "accepts a comma-separated list")
+    ap.add_argument("--author", action="append", default=[],
+                    type=author_argument, metavar="PROVIDER/MODEL",
+                    help="exclude this author's exact model ID from every "
+                         "selected panel; repeatable; never lowers quorum")
     ap.add_argument("--profile", default=None,
                     choices=["plan", "fast", "standard", "deep"],
                     help="reviewer panel (default from reviewers.json). "
@@ -1973,6 +2022,36 @@ def main():
             config_error(f"no reviewer matches {wanted}. Available: {have}. "
                          f"Pass one of those, or drop --only to use the "
                          f"profile.")
+    excluded = []
+    if args.author:
+        reviewers, excluded = exclude_authors(
+            reviewers, author_model_ids(args.author))
+        if not args.json:
+            for removal in excluded:
+                print(f"{removal['name']} excluded: {removal['reason']}")
+        # Check capacity before contacting anyone, including the entire ladder
+        # and any fresh-cycle floor. Author removal cannot relax either floor.
+        required = max(args.quorum, 2 if args.kind == "plan" else 1)
+        if args.fresh_cycle_from:
+            required = max(required, 2, len({r["name"] for r in roster
+                           if r.get("enabled", True)
+                           and in_profile(r, args.fresh_cycle_from)}))
+        remaining = sum(1 for r in reviewers if r.get("enabled", True)
+                        and (not args.escalate or
+                             any(in_profile(r, tier) for tier in LADDER)))
+        if excluded and remaining < required and not args.list:
+            reason = (f"author exclusion leaves {remaining} eligible reviewers; "
+                      f"required quorum is {required}. Select more independent "
+                      "reviewers; author exclusion cannot lower quorum.")
+            disarm_watchdog()
+            if args.json:
+                print(json.dumps({"state": "REVIEW_UNAVAILABLE",
+                                  "checked_at": now(), "reason": reason,
+                                  "quorum": required, "excluded": excluded,
+                                  "results": []}, indent=2))
+            else:
+                print("REVIEW_UNAVAILABLE — " + reason)
+            sys.exit(STATES["REVIEW_UNAVAILABLE"])
     # --- validate the EFFECTIVE panel -------------------------------------
     # Every earlier version of this checked the panel BEFORE selection, so
     # `--plan --only a,b,c` ran three reviewers and `--plan --only x --quorum 1`
@@ -2040,6 +2119,7 @@ def main():
         journal = record_review_round(args, [], "REVIEW_UNAVAILABLE")
         report = {"state": "REVIEW_UNAVAILABLE", "checked_at": now(),
                   "reviewed": label, "unavailable": unavailable, "results": [],
+                  "excluded": excluded,
                   "panel_policy": args.panel_policy,
                   "journal": journal}
         if args.json:
@@ -2108,6 +2188,7 @@ def main():
     report = {
         "state": state, "checked_at": now(), "reviewed": label,
         "profile": profile, "escalated": bool(args.escalate),
+        "excluded": excluded,
         "tiers_run": tiers_run,
         "panel_policy": args.panel_policy,
         "truncated": truncated, "quorum": args.quorum,

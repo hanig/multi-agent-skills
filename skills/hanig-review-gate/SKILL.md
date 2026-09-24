@@ -58,8 +58,28 @@ plan review would have rejected.
 
 ## The author does not judge their own work
 
-When a reviewer proposes a design, exclude it from the panel that reviews the
-proposal: `--only` the others. A design's author is the worst judge of whether
+Declare every author with repeatable `--author PROVIDER/MODEL`, for example
+`--author codex/gpt-5.6-sol`. The gate removes matching models from fixed,
+explicit `--only`, and escalated panels and names each removal, such as
+`sol excluded: authored this change`. It compares the complete model ID after
+the first slash exactly, independent of transport provider: Codex's
+`codex/gpt-5.6-sol` matches the `openai` reviewer model `gpt-5.6-sol`, and
+`openrouter/moonshotai/kimi-k2.7-code` retains the nested model ID. Model
+substrings, case variants, and seat names are not model matches. If exclusion
+leaves too few eligible reviewers for quorum (including a fresh-cycle floor),
+the gate returns `REVIEW_UNAVAILABLE` before calling any reviewer; it never
+reduces quorum. Author declarations are caller-supplied, not inferred from Git
+or dispatch, so an omitted author is not automatically excluded.
+
+Committee `open` accepts the same repeatable flag and refuses a matching
+explicit or default member before calling providers. The author set persists;
+`ask`, `review`, `synthesize`, and `tiebreak` check it on reuse, and accept the
+flag to declare authors on older sessions. A conflicting replacement set is
+refused. Existing bare model IDs and configured seat aliases remain accepted
+by committee for compatibility. A refused legacy session replaces its current
+resolution with `OWNER` while retaining previous decisions as history.
+
+A design's author is the worst judge of whether
 its residual is complete. Asked to fix a recurring problem, one reviewer wrote a
 proposal with a "residual risk" section listing three ways through; the panel
 found two more it had not named, one of them inside the proposal's own API.
@@ -135,10 +155,10 @@ The purpose is to step back, not double down. The committee may well say the
 design is wrong, which is the point of asking.
 
 After challenging the members, run
-`python3 "$HANIG_REVIEW_GATE_DIR/scripts/committee.py" synthesize SESSION --author MODEL`.
+`python3 "$HANIG_REVIEW_GATE_DIR/scripts/committee.py" synthesize SESSION --author PROVIDER/MODEL`.
 Convergence produces a unified plan; divergence automatically calls the
 `astra-xhigh` seat (`gpt-6-astra`, effort `xhigh`, profile `tiebreak` only).
-For an already identified split, use `tiebreak SESSION --author MODEL` directly.
+For an already identified split, use `tiebreak SESSION --author PROVIDER/MODEL` directly.
 It receives the question and every member's final position verbatim and saves
 a RULING adopting a named position with the deciding evidence, not a fresh plan.
 
@@ -149,8 +169,9 @@ with `--stop-and-ask REASON`, which refuses without calling a provider and is
 retained in the session. Semantic classification otherwise rests on the model
 and an honest caller; a ruling supplies analysis, never additional authority.
 An unavailable, empty, truncated or malformed answer routes to OWNER (exit 1)
-with a persisted reason. An Astra author (`--author gpt-6-astra`, also recognized
-by its configured aliases) refuses the tie-break. Missing or conflicting author
+with a persisted reason. Any Astra coauthor (`--author codex/gpt-6-astra`, also
+recognized by its legacy bare model and configured aliases) refuses the
+tie-break using the same model exclusion rule as membership. Missing or conflicting author
 declarations also route to the owner; existing sessions can declare their author
 on first use. `show SESSION` displays the current resolution, and a later member
 turn invalidates it while retaining the earlier decision's audit record.
@@ -226,9 +247,9 @@ deep      + sol @ xhigh
 ```
 
 A failing change costs one cheap tier, not the whole panel. Only code that
-already survived the cheap readers pays for Sol. A change Sol itself
-authored (Sol drove code units until 2026-09-24) stops at `standard`: `deep`
-would seat its author, and nothing but this sentence prevents it (ARC-755). This matters more than it
+already survived the cheap readers pays for Sol. Pass
+`--author codex/gpt-5.6-sol` for a change Sol authored: the gate excludes Sol
+even at `deep`, provided the remaining independent panel can reach quorum. This matters more than it
 sounds: across six review rounds on this repo, **every single one failed**, and
 running the full panel each time paid the slowest, dearest reviewer to re-find
 defects a cheap one had already caught.
