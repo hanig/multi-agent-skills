@@ -1593,6 +1593,86 @@ class _ArgParser(argparse.ArgumentParser):
 LADDER = ["fast", "standard", "deep"]
 
 
+def changed_paths(args):
+    """Collect paths for the same sources as gather; uncertainty costs a tier.
+
+    NUL delimiters preserve whitespace in names; --no-relative retains the
+    repository prefix even from a subdirectory with diff.relative enabled.
+    Disabling rename detection
+    includes both the removed and added path, so renaming code to docs cannot
+    hide the code side. Range syntax remains Git's, not another parser here.
+    """
+    paths = set()
+    revision = (["HEAD"] if args.diff else ["--cached"] if args.staged
+                else [args.range] if args.range else None)
+    if revision is not None:
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--name-only", "-z", "--no-relative", "--no-renames",
+                 "--no-ext-diff", "--no-textconv", *revision, "--"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            if result.returncode:
+                return None, "Git could not determine changed paths"
+            raw = result.stdout.decode("utf-8")
+            if raw and not raw.endswith("\0"):
+                return None, "Git returned an incomplete changed-path set"
+            paths.update(raw[:-1].split("\0") if raw else [])
+        except (OSError, subprocess.SubprocessError, UnicodeError, ValueError):
+            return None, "Git changed-path lookup was unavailable"
+    if args.file:
+        top = git_out("rev-parse", "--show-toplevel").rstrip("\n")
+        root = Path(top) if top else Path.cwd()
+        for value in args.file:
+            path = Path(value)
+            if ".." in path.parts:
+                return None, "a --file path contains unresolved parent components"
+            absolute = path if path.is_absolute() else Path.cwd() / path
+            try:
+                lexical = absolute.relative_to(root)
+                target = absolute.resolve(strict=True).relative_to(root.resolve())
+                # Keep BOTH identities: a symlink must not hide either an
+                # executable lexical directory or an executable target path.
+                paths.update((lexical.as_posix(), target.as_posix()))
+            except (OSError, RuntimeError, ValueError):
+                return None, "a --file path or target is outside the review root or unresolved"
+    return paths, ""
+
+
+def profile_for_paths(paths, unknown_reason=""):
+    """Only a known, nonempty, wholly documentary path set earns fast."""
+    if paths is None:
+        return "standard", unknown_reason or "changed paths could not be determined"
+    if not paths:
+        return "standard", "no changed paths could be determined"
+    for path in paths:
+        parts = path.split("/")
+        # Executable/gate locations take precedence over the .md convention.
+        if (parts[-1] == "reviewers.json"
+                or any(p in ("scripts", "lib", "bin", "tests") for p in parts[:-1])
+                or not (path.endswith(".md")
+                        or path.startswith(("docs/", "examples/")))):
+            return "standard", "at least one changed path is not documentation"
+    return "fast", f"all {len(paths)} changed paths are documentation"
+
+
+def select_profile(args):
+    if args.profile is not None:
+        return args.profile, ("plan review" if args.kind == "plan"
+                              else "explicit --profile")
+    if args.list:
+        return DEFAULT_PROFILE, "configured default for --list"
+    return profile_for_paths(*changed_paths(args))
+
+
+def escalation_tiers(args):
+    # Direct callers predating automatic selection retain the original ladder.
+    start = getattr(args, "selected_profile", "fast")
+    if start not in LADDER:
+        config_error("--escalate requires an implementation tier: "
+                     "Pass --profile fast, standard, or deep.")
+    return LADDER[LADDER.index(start):]
+
+
 def author_argument(value):
     """Keep the complete model ID after the first provider separator."""
     provider, separator, model = value.partition("/")
@@ -1690,7 +1770,8 @@ def implementation_panel_policy(args, roster, selected):
         floor = max(2, len(previous))
         selected_names = [r["name"] for r in selected if r.get("enabled", True)
                           and (not args.escalate
-                               or any(in_profile(r, tier) for tier in LADDER))]
+                               or any(in_profile(r, tier)
+                                      for tier in escalation_tiers(args)))]
         panel = set(selected_names)
         if len(panel) != len(selected_names):
             config_error("a fresh cycle cannot count duplicate reviewer "
@@ -1742,6 +1823,7 @@ def escalate(all_reviewers, prompt, args, truncated, label, body_len):
     """
     seen, completed, failed, unavailable = set(), [], [], []
     tiers_run = []
+    tiers = escalation_tiers(args)
     # Findings ACCUMULATE across tiers. Computed per tier, a finding from an
     # earlier tier was forgotten once a later tier came back clean with quorum
     # met, so the ladder fell through to the dearest reviewer with a defect
@@ -1751,10 +1833,10 @@ def escalate(all_reviewers, prompt, args, truncated, label, body_len):
     # anything". Tightening in_profile() makes that reachable: a roster whose
     # entries all lack a `profiles` key now matches no tier at all. Refuse it
     # here, where the cause is still visible.
-    if not any(in_profile(r, tier) for tier in LADDER for r in all_reviewers):
+    if not any(in_profile(r, tier) for tier in tiers for r in all_reviewers):
         config_error(
             "no reviewer is in any escalation tier "
-            f"({', '.join(LADDER)}). A reviewer with no 'profiles' key, or an "
+            f"({', '.join(tiers)}). A reviewer with no 'profiles' key, or an "
             f"empty one, is in NO profile, so --escalate would run nobody "
             f"and report no findings, which is indistinguishable from a "
             f"clean review. Name one or more tiers in that reviewer's "
@@ -1762,7 +1844,7 @@ def escalate(all_reviewers, prompt, args, truncated, label, body_len):
             f"reviewers directly.")
 
     bad_so_far = False
-    for tier in LADDER:
+    for tier in tiers:
         panel = [r for r in all_reviewers
                  if in_profile(r, tier) and r["name"] not in seen]
         runnable, tier_unavail = [], []
@@ -1949,7 +2031,8 @@ def main():
                          "selected panel; repeatable; never lowers quorum")
     ap.add_argument("--profile", default=None,
                     choices=["plan", "fast", "standard", "deep"],
-                    help="reviewer panel (default from reviewers.json). "
+                    help="reviewer panel (default: fast for documentation-only "
+                         "paths, standard otherwise or when paths are unknown). "
                          "--only overrides it.")
     ap.add_argument("--kind", choices=["plan", "implementation"], default=None,
                     help="what is being reviewed. REQUIRED for a real review: "
@@ -1962,7 +2045,7 @@ def main():
                          "REVIEW_UNAVAILABLE if exceeded (default: 3x the "
                          "per-reviewer timeout, minimum 1800)")
     ap.add_argument("--escalate", action="store_true",
-                    help="run tiers cheapest-first (fast -> standard -> deep), "
+                    help="run tiers from the selected profile up to deep, "
                          "stopping at the first failure. Each tier adds only "
                          "the reviewers the previous tier did not run, so a "
                          "failure costs one cheap tier instead of the whole "
@@ -2050,7 +2133,13 @@ def main():
                 f"THAT, declare new acceptance criteria, and start again at "
                 f"--round 1. Override only if you have done that and the "
                 f"change is genuinely new.")
-    profile = args.profile or DEFAULT_PROFILE
+    if not (args.diff or args.staged or args.range or args.file):
+        args.diff = True  # same default source for selection and gathering
+    profile, profile_reason = select_profile(args)
+    args.selected_profile = profile
+    tier_text = f"tier: {profile} ({profile_reason})"
+    if not args.json:
+        print(tier_text)
     if not args.only and not args.escalate:
         # An UNDECLARED reviewer is in NO profile. It used to be in every
         # profile, so adding an entry without a `profiles` key silently put a
@@ -2093,7 +2182,8 @@ def main():
                            and in_profile(r, args.fresh_cycle_from)}))
         remaining = sum(1 for r in reviewers if r.get("enabled", True)
                         and (not args.escalate or
-                             any(in_profile(r, tier) for tier in LADDER)))
+                             any(in_profile(r, tier)
+                                 for tier in escalation_tiers(args))))
         if excluded and remaining < required and not args.list:
             reason = (f"author exclusion leaves {remaining} eligible reviewers; "
                       f"required quorum is {required}. Select more independent "
@@ -2101,6 +2191,8 @@ def main():
             disarm_watchdog()
             if args.json:
                 print(json.dumps({"state": "REVIEW_UNAVAILABLE",
+                                  "profile": profile,
+                                  "profile_reason": profile_reason,
                                   "checked_at": now(), "reason": reason,
                                   "quorum": required, "excluded": excluded,
                                   "results": []}, indent=2))
@@ -2147,9 +2239,6 @@ def main():
         config_error(f"--quorum must be at least 1, got {args.quorum}")
     args.panel_policy = implementation_panel_policy(args, roster, reviewers)
     policy_text = panel_policy_text(args.panel_policy)
-    if not (args.diff or args.staged or args.range or args.file):
-        args.diff = True  # reviewing the current change is the common case
-
     dispositions = (load_dispositions(args.dispositions)
                     if args.dispositions else [])
 
@@ -2173,6 +2262,7 @@ def main():
         disarm_watchdog()
         journal = record_review_round(args, [], "REVIEW_UNAVAILABLE")
         report = {"state": "REVIEW_UNAVAILABLE", "checked_at": now(),
+                  "profile": profile, "profile_reason": profile_reason,
                   "reviewed": label, "unavailable": unavailable, "results": [],
                   "excluded": excluded,
                   "panel_policy": args.panel_policy,
@@ -2192,7 +2282,7 @@ def main():
               f"{', TRUNCATED' if truncated else ''}) "
               f"with {len(runnable)} reviewer(s) [profile: {profile}]...")
 
-    tiers_run = ["fast->deep" if args.escalate else profile]
+    tiers_run = [profile]
     if args.escalate:
         completed, failed, unavailable, tiers_run = escalate(
             reviewers, prompt, args, truncated, label, len(body))
@@ -2243,6 +2333,7 @@ def main():
     report = {
         "state": state, "checked_at": now(), "reviewed": label,
         "profile": profile, "escalated": bool(args.escalate),
+        "profile_reason": profile_reason,
         "excluded": excluded,
         "tiers_run": tiers_run,
         "panel_policy": args.panel_policy,
@@ -2309,7 +2400,7 @@ def main():
                 if f.get("preconditions"):
                     print(redact(f"      requires: {f.get('preconditions')}"))
 
-        print(f"\n{state}{policy_text}")
+        print(f"\n{state}{policy_text} [{tier_text}]")
         if state == "REVIEW_PARTIAL":
             if rejecting:
                 print(f"  Rejected by {', '.join(rejecting)} with no finding or "

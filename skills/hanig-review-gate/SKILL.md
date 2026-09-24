@@ -40,7 +40,7 @@ because these rules were written down once and drifted from anyway.
 |---|---|---|
 | when | before code exists | after the change is written |
 | panel | **two contrasting models** | fixed profile or cheapest-first ladder |
-| escalation | **never** | optional; `--escalate` starts at `fast` |
+| escalation | **never** | optional; `--escalate` starts at the selected tier |
 | flag | `--kind plan` | `--kind implementation --round N [--escalate]` |
 | judged against | do these criteria hold together | does the code meet them |
 
@@ -235,8 +235,9 @@ python3 "$R" --escalate --diff \
   --claim "another assertion being made"
 ```
 
-**Use `--escalate`.** It runs the tiers cheapest-first and stops at the first
-failure, adding only the reviewers the previous tier did not run:
+**Use `--escalate` for a ladder review.** It starts at the selected tier and
+walks toward `deep`, stopping at the first failure with quorum and adding only
+the reviewers the previous tier did not run:
 
 ```
 fast      luna + kimi-k2.7-code
@@ -246,8 +247,8 @@ standard  + glm-5.3
 deep      + sol @ xhigh
 ```
 
-A failing change costs one cheap tier, not the whole panel. Only code that
-already survived the cheap readers pays for Sol. Pass
+A failing change costs its starting tier when that tier reaches quorum.
+Pass
 `--author codex/gpt-5.6-sol` for a change Sol authored: the gate excludes Sol
 even at `deep`, provided the remaining independent panel can reach quorum. This matters more than it
 sounds: across six review rounds on this repo, **every single one failed**, and
@@ -280,8 +281,24 @@ verdict; everything else gates as before. Without the flag, every finding gates.
 
 Sources: `--diff` (working tree, default), `--staged`, `--range HEAD~3..HEAD`,
 `--file PATH` (repeatable). `--list` shows reviewers and live availability.
-`--profile plan|fast|standard|deep` picks a single fixed panel instead of the
-ladder. `--only NAME` restricts to named reviewers, accepts `a,b,c` or repeated
+Without `--profile`, implementation reviews select `fast` only when every
+changed path is documentation (`*.md`, `docs/**`, or `examples/**`). Paths
+under any `scripts/`, `lib/`, `bin/`, or `tests/` directory, and any
+`reviewers.json`, take precedence and select `standard`; all other changes
+also select `standard`. Git supplies the paths for `--diff`, `--staged`, and
+`--range`, including both sides of renames; repeatable `--file` inputs join
+that set. Explicit file symlinks retain both their supplied path and their
+resolved target in the set; targets outside the review root are undetermined.
+Empty or undeterminable path sets use `standard` and say why.
+Parent components in `--file` paths and files outside the review root are
+conservatively undetermined. The chosen tier and reason appear in text and
+JSON output. This is path classification, not an inspection of document contents.
+
+An explicit `--profile plan|fast|standard|deep` always wins: it picks a fixed
+panel, or the starting tier with `--escalate`. Plan reviews retain their
+two-model panel, and `--list` without a profile retains the configured default.
+Author exclusion and panel floors apply after tier selection.
+`--only NAME` restricts to named reviewers, accepts `a,b,c` or repeated
 flags, and is not combinable with `--escalate`.
 
 `--kind plan|implementation` is REQUIRED for a real review, because a plan and
