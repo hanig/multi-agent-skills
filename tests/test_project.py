@@ -57,6 +57,49 @@ def controlled_env(root, **extra):
     return env
 
 
+def _kill_group_for_cleanup(pgid):
+    """Best-effort cleanup only; this supplies no evidence of termination.
+
+    macOS can return EPERM for a group containing only exited, unreaped
+    members. Treat that like ESRCH here; assertions establish termination
+    separately.
+    """
+    try:
+        os.kill(-pgid, signal.SIGKILL)
+    except (PermissionError, ProcessLookupError):
+        pass
+
+
+class TestProcessGroupCleanup(unittest.TestCase):
+    def test_exited_or_missing_group_does_not_raise(self):
+        import errno
+        from unittest import mock
+
+        for error in (PermissionError(errno.EPERM, "exited group"),
+                      ProcessLookupError(errno.ESRCH, "missing group")):
+            with self.subTest(error=type(error).__name__):
+                with mock.patch.object(os, "kill", side_effect=error) as kill:
+                    _kill_group_for_cleanup(12345)
+                kill.assert_called_once_with(-12345, signal.SIGKILL)
+
+    def test_live_group_still_receives_kill(self):
+        from unittest import mock
+
+        with mock.patch.object(os, "kill") as kill:
+            _kill_group_for_cleanup(12345)
+        kill.assert_called_once_with(-12345, signal.SIGKILL)
+
+    def test_other_kill_errors_still_raise(self):
+        import errno
+        from unittest import mock
+
+        error = OSError(errno.EINVAL, "invalid signal")
+        with mock.patch.object(os, "kill", side_effect=error):
+            with self.assertRaises(OSError) as raised:
+                _kill_group_for_cleanup(12345)
+        self.assertIs(raised.exception, error)
+
+
 class TestSurveyIsBounded(unittest.TestCase):
     """The first version was pointed at a cluster home directory and never
     returned: an unbounded `**` glob plus an unbounded walk. A survey that
@@ -2701,7 +2744,6 @@ class TestTheWalkCannotBeHeldOpenByASyscall(unittest.TestCase):
         Bounded by this test's own subprocess timeout, so a regression fails
         here instead of hanging the suite; start_new_session + killpg so the
         walk child goes too."""
-        import signal as _sig
         import time as _t
         sys.path.insert(0, str(SCRIPTS))
         import survey as S2
@@ -2718,7 +2760,8 @@ class TestTheWalkCannotBeHeldOpenByASyscall(unittest.TestCase):
                 out, err = proc.communicate(
                     timeout=S2.WALK_KILL_SECONDS + 90)
             except subprocess.TimeoutExpired:
-                os.killpg(os.getpgid(proc.pid), _sig.SIGKILL)
+                proc.poll()  # Reap our direct child if it has already exited.
+                _kill_group_for_cleanup(proc.pid)
                 proc.communicate()
                 self.fail("the survey never returned: a blocked opendir is "
                           "still able to hang it")
@@ -3537,14 +3580,12 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
             except subprocess.TimeoutExpired:
                 self.fail("continuous output starved the monotonic deadline")
             finally:
+                running = proc.poll() is None  # Reap only the child we own.
                 if pidfile.exists():
                     child = int(pidfile.read_text())
-                    try:
-                        os.kill(-child, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                if proc.poll() is None:
-                    os.killpg(proc.pid, signal.SIGKILL)
+                    _kill_group_for_cleanup(child)
+                if running:
+                    _kill_group_for_cleanup(proc.pid)
                     proc.communicate()
 
     def test_group_setup_and_wait_errors_fail_closed(self):
@@ -3814,13 +3855,11 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
                 else:
                     self.fail("TERM-ignoring group child survived final KILL")
             finally:
+                running = proc.poll() is None
                 if leader is not None:
-                    try:
-                        os.kill(-leader, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                if proc.poll() is None:
-                    os.killpg(proc.pid, signal.SIGKILL)
+                    _kill_group_for_cleanup(leader)
+                if running:
+                    _kill_group_for_cleanup(proc.pid)
                     proc.communicate()
 
     def test_interrupt_signals_clean_up_the_isolated_probe_group(self):
@@ -3882,13 +3921,11 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
                             self.fail("%s left probe pid %s alive" %
                                       (signame, pid))
                 finally:
+                    running = proc.poll() is None
                     if leader is not None:
-                        try:
-                            os.kill(-leader, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
-                    if proc.poll() is None:
-                        os.killpg(proc.pid, signal.SIGKILL)
+                        _kill_group_for_cleanup(leader)
+                    if running:
+                        _kill_group_for_cleanup(proc.pid)
                         proc.communicate()
 
     def test_timeout_transition_preserves_armed_cleanup_deadline(self):
@@ -4017,13 +4054,11 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
                     "negative-PGID KILL did not terminate the group witness")
             finally:
                 try:
+                    running = proc is not None and proc.poll() is None
                     if leader is not None:
-                        try:
-                            os.kill(-leader, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
-                    if proc is not None and proc.poll() is None:
-                        os.killpg(proc.pid, signal.SIGKILL)
+                        _kill_group_for_cleanup(leader)
+                    if running:
+                        _kill_group_for_cleanup(proc.pid)
                         proc.communicate()
                 finally:
                     os.close(read_fd)
