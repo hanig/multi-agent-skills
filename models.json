@@ -43,6 +43,19 @@
       "notes": "Default audit/research provider per orchestration preferences (omit model override)."
     },
     {
+      "id": "codex/gpt-6-astra",
+      "label": "GPT-6 Astra",
+      "intelligence_index": null,
+      "intelligence_index_source": "not measured here; null rather than a guessed number",
+      "coding_index": null,
+      "modalities": [
+        "text"
+      ],
+      "cost_tier": "unmeasured",
+      "quota": "codex plan; live rate-limit windows read from codex rollouts",
+      "notes": "Default code-unit driver since 2026-09-24 by owner decision. Dispatch verified live on the coordinator host: paseo inspect read Provider codex, Model gpt-6-astra, Thinking high, and the agent answered. Both indexes are deliberately null: nothing here measured them, and a plausible number would be fabricated evidence."
+    },
+    {
       "id": "codex/gpt-5.6-luna",
       "label": "GPT-5.6 Luna",
       "intelligence_index": 52,
