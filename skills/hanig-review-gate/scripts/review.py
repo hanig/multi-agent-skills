@@ -990,6 +990,38 @@ def git_out(*args):
         return ""
 
 
+def range_divergence_warning(range_spec):
+    """Advisory only: a two-dot diff may reverse changes unique to its base.
+
+    git_out returns an empty string on failure. Every ancestry command here
+    must return non-empty output before we can report known divergence.
+    """
+    if ".." not in range_spec or "..." in range_spec:
+        return ""
+    left, right = (end or "HEAD" for end in range_spec.split("..", 1))
+    alternative = (f"{left}...{right} would review only changes from the "
+                   f"merge-base to {right}. The requested two-dot diff is "
+                   f"unchanged.")
+    unknown = ("divergence is UNKNOWN (Git could not establish ancestry or "
+               "the base-only commit count). " + alternative)
+    left_commit = git_out("rev-parse", "--verify", f"{left}^{{commit}}").strip()
+    right_commit = git_out("rev-parse", "--verify", f"{right}^{{commit}}").strip()
+    if not left_commit or not right_commit:
+        return unknown
+    base = git_out("merge-base", left_commit, right_commit).strip()
+    if not base:
+        return unknown
+    if base == left_commit:
+        return ""
+    count = git_out("rev-list", "--count",
+                    f"{right_commit}..{left_commit}").strip()
+    if not re.fullmatch(r"[0-9]+", count) or int(count) < 1:
+        return unknown
+    noun, verb = ("commit", "is") if int(count) == 1 else ("commits", "are")
+    return (f"{count} {noun} on {left} {verb} NOT in {right}; base-only "
+            f"changes can appear as deletions. " + alternative)
+
+
 def gather(args):
     parts, label = [], ""
     if args.diff:
@@ -1001,6 +1033,11 @@ def gather(args):
     elif args.range:
         label = f"commit range {args.range}"
         parts.append(git_out("diff", args.range))
+        warning = range_divergence_warning(args.range)
+        if warning:
+            print(f"WARNING: two-dot range {args.range} -- {warning}",
+                  file=sys.stderr)
+            label += f" -- {warning}"
     for f in args.file:
         p = Path(f)
         if not p.exists():
