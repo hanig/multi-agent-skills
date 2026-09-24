@@ -3175,13 +3175,14 @@ class TestReviewJournal(unittest.TestCase):
             "out_tokens": 1,
         }
 
-    def invoke(self, only="answered"):
+    def invoke(self, only="answered", extra_args=()):
         sys.argv = [str(SCRIPT), "--kind", "implementation", "--round", "1",
                     "--profile", "standard", "--quorum", "1",
                     "--allow-single-reviewer", "offline singleton fixture",
                     "--claim", self.CLAIM, "--file", str(SCRIPT), "--json"]
         if only is not None:
             sys.argv.extend(["--only", only])
+        sys.argv.extend(extra_args)
         stdout, stderr = io.StringIO(), io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
             with self.assertRaises(SystemExit) as stopped:
@@ -3202,6 +3203,283 @@ class TestReviewJournal(unittest.TestCase):
         path = event / filename
         path.write_text(json.dumps(record) + "\n")
         return path
+
+    def test_finding_location_and_summary_are_readable_and_redacted(self):
+        secret = 'sk-"journal\\secret\nvalue'
+        finding = {
+            "file": "src/" + secret + ".py", "line": 17,
+            "severity": "minor", "confidence": "high",
+            "summary": "reported " + secret + "\nsecond line",
+            "failure_scenario": "a diagnostic includes " + secret,
+        }
+        result = self.answer({"name": "answered"})
+        result["findings"] = [finding]
+        review.run_one = lambda *_args, **_kwargs: result
+        with patch.dict(os.environ, {"OPENAI_API_KEY": secret}):
+            code, stdout, stderr = self.invoke()
+        self.assertEqual(code, review.STATES["REVIEW_PASS"])
+        self.assertEqual(stderr, "")
+        path = Path(json.loads(stdout)["journal"]["path"])
+        raw = path.read_bytes()
+        self.assertEqual(raw.count(b"\n"), 1)
+        self.assertTrue(raw.endswith(b"\n"))
+        record = json.loads(raw)
+        saved = record["results"][0]["findings"][0]
+        self.assertEqual(saved["location"],
+                         "src/<OPENAI_API_KEY redacted>.py:17")
+        self.assertEqual(saved["summary"],
+                         "reported <OPENAI_API_KEY redacted>\nsecond line")
+        self.assertEqual(saved["failure_scenario"],
+                         "a diagnostic includes <OPENAI_API_KEY redacted>")
+        self.assertEqual(saved["severity"], "minor")
+        self.assertIs(saved["confirmed"], False)
+        self.assertNotIn("journal\\secret", str(record))
+        self.assertFalse(list(self.journal_path().glob("*/record.pending")))
+
+    def test_every_reviewer_finding_and_refuted_claim_survives_the_round(self):
+        findings = [
+            {"file": "sample.py", "line": 10, "severity": "Major",
+             "confidence": "High", "summary": "confirmed defect",
+             "failure_scenario": "missing input leads to an empty result"},
+            {"file": "sample.py", "line": 20, "severity": "minor",
+             "confidence": "high", "summary": "minor diagnostic",
+             "failure_scenario": "a message omits context"},
+            {"file": "sample.py", "line": 30, "severity": "major",
+             "confidence": "low", "summary": "uncertain defect",
+             "failure_scenario": "an uncertain input could be lost"},
+            {"file": "sample.py", "line": 40, "severity": "major",
+             "confidence": "high", "summary": "outside the model",
+             "failure_scenario": "an excluded writer replaces the file",
+             "in_scope": False, "preconditions": "an excluded writer"},
+        ]
+
+        def answer(reviewer, *_args, **_kwargs):
+            result = self.answer(reviewer)
+            if reviewer["name"] == "answered":
+                result["verdict"] = "Refuted"
+                result["findings"] = findings
+                result["claims"][0].update(
+                    status="Refuted", why="sample.py loses the missing input")
+                result["notes"] = "the input loss explains this rejection"
+            return result
+
+        review.run_one = answer
+        code, stdout, stderr = self.invoke(only=None)
+        self.assertEqual(code, review.STATES["REVIEW_FAIL"])
+        self.assertEqual(stderr, "")
+        record = self.records()[0]
+        self.assertEqual(record["schema_version"], 2)
+        self.assertEqual([(r["name"], r["verdict"])
+                          for r in record["results"]],
+                         [("answered", "Refuted"), ("errored", "upheld")])
+        saved = record["results"][0]["findings"]
+        self.assertEqual([f["confirmed"] for f in saved],
+                         [True, False, False, False])
+        self.assertEqual([f["location"] for f in saved],
+                         ["sample.py:10", "sample.py:20", "sample.py:30",
+                          "sample.py:40"])
+        for original, persisted in zip(findings, saved):
+            for key, value in original.items():
+                self.assertEqual(persisted[key], value)
+        self.assertEqual(record["results"][1]["findings"], [])
+        self.assertEqual(record["rejecting_reviewers"], ["answered"])
+        self.assertEqual(record["refuted_claims"], [{
+            "claim_index": 0, "claim": self.CLAIM, "status": "Refuted",
+            "why": "sample.py loses the missing input", "reviewer": "answered",
+        }])
+        self.assertEqual(record["results"][0]["notes"],
+                         "the input loss explains this rejection")
+        report = json.loads(stdout)
+        self.assertEqual(record["refuted_claims"], report["refuted_claims"])
+        self.assertEqual(record["rejecting_reviewers"],
+                         report["rejecting_reviewers"])
+
+    def test_claim_text_is_redacted_without_changing_original_digests(self):
+        secret = 'sk-"claim\\secret\nvalue'
+        claim = "The reader preserves this exact claim: " + secret
+        with patch.dict(os.environ, {"OPENAI_API_KEY": secret}):
+            code, _stdout, stderr = self.invoke(extra_args=["--claim", claim])
+        self.assertEqual(code, review.STATES["REVIEW_PASS"])
+        self.assertEqual(stderr, "")
+        record = self.records()[0]
+        self.assertEqual(record["claims"], [
+            self.CLAIM,
+            "The reader preserves this exact claim: <OPENAI_API_KEY redacted>",
+        ])
+        self.assertEqual(record["claim_digests"], [
+            hashlib.sha256(text.encode("utf-8")).hexdigest()
+            for text in (self.CLAIM, claim)
+        ])
+        self.assertNotEqual(record["claim_digests"][1], hashlib.sha256(
+            record["claims"][1].encode("utf-8")).hexdigest())
+
+    def test_direct_append_redacts_all_persisted_text(self):
+        secrets = {"OPENAI_API_KEY": "sk-direct-openai-secret",
+                   "OPENROUTER_API_KEY": 'sk-direct-"router\\secret',
+                   "ANTHROPIC_API_KEY": "sk-direct-anthropic-secret"}
+        first, second, third = secrets.values()
+        result = self.answer({"name": first})
+        result.update(verdict="refuted", notes=third)
+        result["findings"] = [{
+            "file": first, "line": 9, "severity": "major",
+            "confidence": "high", "summary": second,
+            "failure_scenario": third, "preconditions": first,
+            "extra": {second: [third]},
+        }]
+        result["claims"] = [{"claim": first, "status": "refuted", "why": third}]
+        with patch.dict(os.environ, secrets):
+            returned, path = review.append_review_journal(
+                self.journal_path(), "implementation", 1, [first],
+                "REVIEW_FAIL", [second], results=[result],
+                panel_policy={third: second})
+        persisted = json.loads(path.read_text())
+        self.assertEqual(returned, persisted)
+        for name, secret in secrets.items():
+            self.assertNotIn(secret, str(persisted))
+            self.assertIn("<" + name + " redacted>", str(persisted))
+        self.assertEqual(persisted["effective_panel"],
+                         ["<OPENAI_API_KEY redacted>"])
+        self.assertEqual(persisted["panel_policy"], {
+            "<ANTHROPIC_API_KEY redacted>": "<OPENROUTER_API_KEY redacted>",
+        })
+        self.assertEqual(persisted["results"][0]["findings"][0]["extra"], {
+            "<OPENROUTER_API_KEY redacted>": ["<ANTHROPIC_API_KEY redacted>"],
+        })
+        self.assertEqual(persisted["refuted_claims"][0]["why"],
+                         "<ANTHROPIC_API_KEY redacted>")
+
+    def test_version_one_history_is_readable_and_unchanged_after_append(self):
+        legacy = {
+            "type": "review_round", "schema_version": 1,
+            "journal_header": review.JOURNAL_HEADER,
+            "date": "2026-01-01T00:00:00.000000000Z", "kind": "implementation",
+            "round": 1, "effective_panel": ["answered"], "verdict": "REVIEW_PASS",
+            "claim_digests": [hashlib.sha256(self.CLAIM.encode()).hexdigest()],
+        }
+        old_path = self.seed_record("000-legacy", legacy)
+        old_bytes = old_path.read_bytes()
+        code, _stdout, stderr = self.invoke()
+        self.assertEqual(code, review.STATES["REVIEW_PASS"])
+        self.assertEqual(stderr, "")
+        self.assertEqual(old_path.read_bytes(), old_bytes)
+        records = self.records()
+        self.assertEqual(records[0], legacy)
+        self.assertEqual(records[1]["schema_version"], 2)
+        for key in ("type", "kind", "round", "effective_panel", "verdict",
+                    "claim_digests"):
+            self.assertEqual([record[key] for record in records], [legacy[key]] * 2)
+
+    def test_journal_payload_failure_cannot_change_a_review_verdict(self):
+        with patch.object(review, "claim_digests",
+                          side_effect=ValueError("injected digest failure")):
+            code, stdout, stderr = self.invoke()
+        self.assertEqual(code, review.STATES["REVIEW_PASS"])
+        self.assertEqual(json.loads(stdout)["state"], "REVIEW_PASS")
+        self.assertFalse(json.loads(stdout)["journal"]["written"])
+        self.assertIn("JOURNAL_WRITE_FAILED", stderr)
+        self.assertIn("injected digest failure", stderr)
+        self.assertEqual(self.records(), [])
+
+    def test_round_metadata_and_rejection_reasons_are_redacted(self):
+        secret = "sk-round-metadata-secret"
+        result = self.answer({"name": secret})
+        result.update(verdict="refuted", notes="reviewer note: " + secret)
+        result["claims"][0].update(
+            status="refuted", why="reviewer reason: " + secret)
+        review.run_one = lambda *_args, **_kwargs: result
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": secret}):
+            code, _stdout, stderr = self.invoke(
+                extra_args=["--allow-single-reviewer", "exception: " + secret])
+        self.assertEqual(code, review.STATES["REVIEW_FAIL"])
+        self.assertEqual(stderr, "")
+        record = self.records()[0]
+        tag = "<OPENROUTER_API_KEY redacted>"
+        self.assertEqual(record["effective_panel"], [tag])
+        self.assertEqual(record["rejecting_reviewers"], [tag])
+        self.assertEqual(record["results"][0]["name"], tag)
+        self.assertEqual(record["results"][0]["notes"], "reviewer note: " + tag)
+        self.assertEqual(record["refuted_claims"][0]["why"],
+                         "reviewer reason: " + tag)
+        self.assertEqual(record["panel_policy"]["single_reviewer_override"],
+                         "exception: " + tag)
+        self.assertNotIn(secret, json.dumps(record))
+
+    def test_redaction_cannot_reclassify_completed_reviewer_results(self):
+        result = self.answer({"name": "answered"})
+        result["verdict"] = "REFUTED"
+        result["claims"][0]["status"] = "REFUTED"
+        review.run_one = lambda *_args, **_kwargs: result
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "REFUTED"}):
+            code, stdout, stderr = self.invoke()
+        self.assertEqual(code, review.STATES["REVIEW_FAIL"])
+        self.assertEqual(stderr, "")
+        record = self.records()[0]
+        report = json.loads(stdout)
+        self.assertEqual(record["rejecting_reviewers"], ["answered"])
+        self.assertEqual(record["rejecting_reviewers"],
+                         report["rejecting_reviewers"])
+        self.assertEqual(record["refuted_claims"], report["refuted_claims"])
+        self.assertEqual(record["results"][0]["verdict"],
+                         "<OPENAI_API_KEY redacted>")
+
+    def test_digest_collisions_obey_mandatory_redaction(self):
+        digest = hashlib.sha256(b"abc").hexdigest()
+        self.assertIn("4141", digest)
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "4141"}):
+            code, _stdout, stderr = self.invoke(extra_args=["--claim", "abc"])
+        self.assertEqual(code, review.STATES["REVIEW_PASS"])
+        self.assertEqual(stderr, "")
+        record = self.records()[0]
+        self.assertEqual(record["claims"], [self.CLAIM, "abc"])
+        self.assertEqual(record["claim_digests"][1],
+                         digest.replace("4141", "<OPENAI_API_KEY redacted>"))
+        self.assertNotIn("4141", json.dumps(record))
+
+    def test_transport_key_collisions_cannot_drop_or_rehash_record_data(self):
+        for secret in ("files", "record_line", "details", "claims", "claim",
+                       "claim_digests", "kind", "round", "effective_panel",
+                       "verdict", "panel_policy", "results"):
+            with self.subTest(secret=secret):
+                result = self.answer({"name": "answered"})
+                result["verdict"] = "refuted"
+                result["claims"][0].update(status="refuted",
+                                           why="the input loses a required row")
+                result["findings"] = [{
+                    "file": "sample.py", "line": 7, "severity": "major",
+                    "confidence": "high", "summary": "required row lost",
+                    "failure_scenario": "missing input produces an empty row",
+                }]
+                review.run_one = lambda *_args, **_kwargs: result
+                with patch.dict(os.environ, {"OPENAI_API_KEY": secret}):
+                    code, stdout, stderr = self.invoke(extra_args=["--claim", secret])
+                self.assertEqual(code, review.STATES["REVIEW_FAIL"])
+                self.assertEqual(stderr, "")
+                self.assertTrue(json.loads(stdout)["journal"]["written"])
+                record = self.records()[-1]
+                tag = "<OPENAI_API_KEY redacted>"
+                saved = record["results".replace(secret, tag)][0]
+                self.assertEqual(saved["findings"][0]["summary"], "required row lost")
+                self.assertEqual(saved["findings"][0]["location"], "sample.py:7")
+                self.assertIs(saved["findings"][0]["confirmed"], True)
+                self.assertEqual(record["rejecting_reviewers"], ["answered"])
+                self.assertEqual(record["refuted_claims".replace(secret, tag)][0]
+                                 ["why"], "the input loses a required row")
+                self.assertEqual(record["claims".replace(secret, tag)][1], tag)
+                self.assertEqual(record["claim_digests".replace(secret, tag)][1],
+                                 hashlib.sha256(secret.encode()).hexdigest())
+                self.assertNotIn("record_line", record)
+
+    def test_child_refuses_multiple_or_unterminated_prepared_lines(self):
+        for line in ("{}\n{}\n", "{}", "", None):
+            with self.subTest(line=line):
+                result = subprocess.run(
+                    [sys.executable, str(SCRIPT), review.JOURNAL_CHILD_ARG],
+                    input=json.dumps({"files": [str(SCRIPT)], "record_line": line}),
+                    capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("one newline-terminated JSON line",
+                              json.loads(result.stdout)["error"])
+                self.assertEqual(self.records(), [])
 
     def test_two_invocations_append_two_records_with_monotonic_timestamps(self):
         self.assertEqual(self.invoke()[0], review.STATES["REVIEW_PASS"])
