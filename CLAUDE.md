@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Private repository: it carries cluster hostnames, partitions, account names and measured host probes. Do not publish any of it.
+This repository is public by owner decision (2026-09-24). It carries cluster hostnames, partition and account names and measured host probes; never commit credentials, tokens or secrets. Pull-request titles, bodies and comments must not add further cluster detail.
 
 If you are driving a run rather than editing this repository, read `docs/orchestrator-mandate.md` first. It is the orchestrator's authority, it is owner-granted by merge rather than by conversation, and a new session must show the owner its enumerated grant and bounds and get confirmation before operating unattended. Until that confirmation you may read, survey, plan, run the gate and report, and you may not dispatch, merge, spend or mutate a tracker.
 
