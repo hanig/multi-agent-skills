@@ -7342,6 +7342,12 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             # conclusion that justifies teardown. Persist that conclusion
             # before Paseo can remove the evidence used to reach it.
             if not dry_run:
+                if u.get("kind") == "code":
+                    watch = _current_code_terminal_watch(
+                        state, uid, Path(attempt).name, us.get("job_id"))
+                    if watch is not None:
+                        watch["status"] = "checked"
+                        watch["checked_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
                 save_state(state_dir, state)
                 _archive_code_worktree(
                     state, u, attempt, report, state_dir)
@@ -7793,6 +7799,11 @@ def _observe_code_terminal_watch(state_dir, uid, attempt, watch):
     outcome, ignored = _read_code_terminal_outcome(
         state_dir, uid, attempt, watch.get("agent_id"))
     result.update(outcome)
+    # The outcome describes wait, while this field records a later locked
+    # coordinator check. Re-reading the retained outcome must not undo it.
+    if watch.get("status") == "checked":
+        result["status"] = "checked"
+        result["checked_at"] = watch.get("checked_at")
     if ignored:
         result["outcome_ignored"] = ignored
     if result.get("status") in ("starting", "waiting"):
