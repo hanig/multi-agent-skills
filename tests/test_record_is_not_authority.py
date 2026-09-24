@@ -379,6 +379,39 @@ class TestTrustedSnapshotMakesTheRecordAuditOnly(unittest.TestCase):
             self.U.run, str(self.att), self.spec, anchor["facts"])
         self.assertTrue(produced, why)
 
+    def test_author_routing_is_not_admission_or_closure_authority(self):
+        # Neither the absence of routing nor a bogus author in the worker's
+        # audit file can affect the real transition judgment.
+        err, anchor = self.S._write_launch_record(str(self.att), self.spec)
+        self.assertIsNone(err)
+        self._commit("b.txt")
+        path = self.W.launch_record_path(str(self.att))
+        record = json.loads(path.read_text())
+        expected = self.W.judge_detail(
+            self.U.run, str(self.att), self.spec, anchor["facts"])
+        self.assertTrue(expected[0], expected[2])
+        for routing in ({}, {"provider": "unknown", "model": "not-an-author"}):
+            with self.subTest(routing=routing):
+                path.write_text(json.dumps(dict(record, **routing)))
+                self.assertEqual(self.W.judge_detail(
+                    self.U.run, str(self.att), self.spec, anchor["facts"]),
+                    expected)
+
+        # Admission reads coordinator intents, not audit records. Routing is
+        # still optional prompt metadata in those intents, even at schema 5.
+        intent = {"schema_version": 5, "unit_id": "u1", "attempt_id": "att1",
+                  "repo": str(self.repo), "branch": "swarm-att1",
+                  "worktree_slug": "att1", "target_branch": "main",
+                  "captured_at": "2026-09-24", "launch_host": "test-host",
+                  "base_commit": "a" * 40, "base_tree": "b" * 40,
+                  "repository_remote": "https://example.invalid/repo",
+                  "repository_remote_raw": "https://example.invalid/repo",
+                  "judgment_ref": "refs/heads/swarm-att1"}
+        unit = dict(self.spec, target_branch="main")
+        for routing in ({}, {"provider": "unknown", "model": "not-an-author"}):
+            self.assertIsNone(self.S._code_launch_intent_problem(
+                dict(intent, **routing), unit, "att1"))
+
     def test_no_trusted_snapshot_means_no_judgment(self):
         err, _anchor = self.S._write_launch_record(str(self.att), self.spec)
         self.assertIsNone(err)

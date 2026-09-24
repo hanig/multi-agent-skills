@@ -439,9 +439,9 @@ class TestTheProtocolForbidsGitStash(unittest.TestCase):
 
     def test_it_requires_porcelain_before_committing(self):
         text = self.protocol()
-        line = [l for l in text.splitlines() if "git status --porcelain" in l]
+        line = [l for l in text.splitlines() if "Before every commit" in l]
         self.assertEqual(len(line), 1, text)
-        self.assertIn("Before every commit", line[0])
+        self.assertIn("git status --porcelain", line[0])
         self.assertIn("STOP AND REPORT", line[0])
         self.assertIn("another agent's files", line[0])
 
@@ -522,6 +522,250 @@ class TestTheProtocolReservesMergingForTheOrchestrator(unittest.TestCase):
                         {"kind": "code", "prompt": "work"}, INTENT)
                     problem = S._code_protocol_problem(prompt, INTENT)
                 self.assertIn(name, problem or "")
+
+
+# --- ARC-679 -------------------------------------------------------------
+
+GATE_CLAUSE = "Before opening a pull request, run this repository's review gate."
+PUSH_CLAUSE = "Push after every meaningful edit."
+
+
+class TestTheProtocolRequiresReviewAndPush(unittest.TestCase):
+    def test_author_comes_from_coordinator_intent(self):
+        cases = (
+            ({"provider": "codex", "model": "gpt-6-astra"},
+             "codex/gpt-6-astra"),
+            ({"provider": "codex/gpt-6-astra"}, "codex/gpt-6-astra"),
+            ({"provider": "codex/gpt-6-astra", "model": "gpt-5.6-luna"},
+             "codex/gpt-5.6-luna"),
+            ({"provider": "openrouter", "model": "moonshotai/kimi-k2.7-code"},
+             "openrouter/moonshotai/kimi-k2.7-code"),
+        )
+        for routing, author in cases:
+            with self.subTest(routing=routing):
+                intent = dict(INTENT, **routing)
+                unit = dict(routing, kind="code", prompt="work")
+                prompt = S._dispatch_prompt(unit, intent)
+                self.assertIn("--author " + author, prompt)
+                self.assertIsNone(S._code_protocol_problem(prompt, intent))
+
+    def test_missing_identity_is_explicit_and_never_filled_from_a_default(self):
+        for routing in ({}, {"provider": "codex"},
+                        {"model": "gpt-6-astra"},
+                        {"provider": None, "model": "gpt-6-astra"}):
+            with self.subTest(routing=routing):
+                intent = dict(INTENT, **routing)
+                prompt = S._dispatch_prompt({"kind": "code"}, intent)
+                self.assertIn("provider/model for this unit is UNKNOWN", prompt)
+                self.assertIn("do not invent an author or omit --author", prompt)
+                self.assertNotIn("Pass --author", prompt)
+                self.assertIsNone(S._code_protocol_problem(prompt, intent))
+
+    def test_review_covers_committed_delta_and_preserves_a_failed_review(self):
+        protocol = S._code_completion_protocol(INTENT)
+        for sentence in (
+                GATE_CLAUSE, "hanig-review-gate's review.py",
+                "--range " + INTENT["base_commit"] + "..HEAD",
+                "COMPLETE delta from the recorded base",
+                "Commit all intended edits first and leave the worktree clean",
+                "Only exit 0 (REVIEW_PASS) permits opening a pull request",
+                "Reproduce each confirmed finding before acting on it.",
+                "If a reproduced failure remains, do NOT open a pull request",
+                "RECOVERY, NOT READY:", "refs/heads/recovery/swarm-a1",
+                "without moving the anchored attempt ref",
+                "REVIEW_PASS means the panel failed to refute the claims, not proof."):
+            self.assertIn(sentence, protocol)
+
+    def test_push_requires_changed_content(self):
+        protocol = S._code_completion_protocol(INTENT)
+        self.assertIn(PUSH_CLAUSE, protocol)
+        self.assertIn("Commit and push the actual changed content", protocol)
+        self.assertIn("An empty or marker commit preserves no implementation", protocol)
+        self.assertIn("a tree identical to the recorded base is refused", protocol)
+
+    def test_plan_validation_refuses_either_missing_clause(self):
+        unit = {"id": "code", "kind": "code", "repo": "/src/project",
+                "target_branch": "main", "prompt": "work",
+                "mode": "full-access", "outputs": ["o"]}
+        real_protocol = S._code_completion_protocol
+        for name, clause in (("review gate", GATE_CLAUSE),
+                             ("push discipline", PUSH_CLAUSE)):
+            with self.subTest(clause=name):
+                def missing(intent):
+                    protocol = real_protocol(intent)
+                    self.assertIn(clause, protocol)
+                    return protocol.replace(clause, "")
+                with fake_bin(paseo="exit 99\n"), mock.patch.object(
+                        S, "_code_completion_protocol", side_effect=missing):
+                    with self.assertRaisesRegex(S.PlanError, name):
+                        S.validate_plan(plan_of(unit))
+
+
+class TestReviewAndPushBeforeAgentCreation(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="protocol-dispatch-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.repo = self.tmp / "repo"
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True,
+                       env=ENV)
+        (self.repo / "tracked.txt").write_text("base\n")
+        git(self.repo, "add", "tracked.txt")
+        git(self.repo, "commit", "-qm", "base")
+        self.remote = self.tmp / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(self.remote)],
+                       check=True, env=ENV)
+        git(self.repo, "remote", "add", "origin", str(self.remote))
+        git(self.repo, "branch", "-M", "main")
+        git(self.repo, "push", "-qu", "origin", "main")
+        self.attempt = self.tmp / "runs" / "code" / "a1"
+        self.attempt.mkdir(parents=True)
+        self.unit = {"id": "code", "kind": "code", "repo": str(self.repo),
+                     "target_branch": "main", "prompt": "work",
+                     "mode": "full-access", "outputs": ["o"]}
+        self.launches = []
+        real_run = S.U.run
+
+        def run(argv, **kwargs):
+            if argv[:2] == ["paseo", "run"]:
+                self.launches.append(argv)
+                return 1, "", "test stopped at agent creation"
+            return real_run(argv, **kwargs)
+
+        patch = mock.patch.object(S.U, "run", side_effect=run)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def submit(self):
+        return S._submit(self.unit, str(self.attempt), False,
+                         {"units": {}}, str(self.tmp / "state"))
+
+    def assert_missing_clause_refuses(self, clause, name):
+        real_protocol = S._code_completion_protocol
+
+        def missing(intent):
+            protocol = real_protocol(intent)
+            self.assertIn(clause, protocol)
+            return protocol.replace(clause, "")
+
+        # Patch the builder too, so suffix equality cannot mask a missing
+        # required-set check. The real _submit must refuse before U.run.
+        with mock.patch.object(S, "_code_completion_protocol", side_effect=missing):
+            job, error = self.submit()
+        self.assertEqual(self.launches, [], "missing clause reached agent creation")
+        self.assertIsNone(job)
+        self.assertIn("missing " + name, error or "")
+
+    def test_missing_gate_clause_refuses_before_agent_creation(self):
+        self.assert_missing_clause_refuses(GATE_CLAUSE, "review gate")
+
+    def test_missing_push_clause_refuses_before_agent_creation(self):
+        self.assert_missing_clause_refuses(PUSH_CLAUSE, "push discipline")
+
+    def test_intact_protocol_reaches_agent_creation(self):
+        _job, error = self.submit()
+        self.assertEqual(len(self.launches), 1, error)
+        prompt = self.launches[0][-1]
+        self.assertIn(GATE_CLAUSE, prompt)
+        self.assertIn(PUSH_CLAUSE, prompt)
+        # This is a NEW launch: its default is recorded before agent creation.
+        self.assertIn("--author " + S.DEFAULT_AGENT_PROVIDER, prompt)
+
+
+class TestRecoveryCommandsPreserveContent(unittest.TestCase):
+    """Execute the recovery block delivered to workers, against a real remote."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="protocol-recovery-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.repo = self.tmp / "repo"
+        self.remote = self.tmp / "origin.git"
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True,
+                       env=ENV)
+        subprocess.run(["git", "init", "-q", "--bare", str(self.remote)],
+                       check=True, env=ENV)
+        git(self.remote, "config", "core.logAllRefUpdates", "true")
+        (self.repo / "tracked.txt").write_text("base\n")
+        git(self.repo, "add", "tracked.txt")
+        git(self.repo, "commit", "-qm", "base")
+        git(self.repo, "branch", "-M", "swarm-a1")
+        git(self.repo, "remote", "add", "origin", str(self.remote))
+        self.base = git(self.repo, "rev-parse", "HEAD").strip()
+        self.anchored_ref = "refs/heads/swarm-a1"
+        git(self.repo, "push", "-q", "origin",
+            self.base + ":" + self.anchored_ref)
+        self.recovery_ref = "refs/heads/recovery/swarm-a1"
+        self.message = ("RECOVERY, NOT READY: not reviewed; must not be merged; "
+                        "open reproduced finding: sample failure")
+        self.protocol = S._code_completion_protocol(dict(
+            INTENT, repo=str(self.repo), repository_remote=str(self.remote),
+            base_commit=self.base, judgment_ref=self.anchored_ref))
+
+    def run_recovery(self):
+        # Nothing restates the shell commands: mutations to the delivered
+        # block are executed by the consumer, /bin/sh, in this real repo.
+        block = self.protocol.split("```sh\n", 1)[1].split("\n```", 1)[0]
+        return subprocess.run(
+            ["sh", "-c", block], cwd=self.repo, capture_output=True, text=True,
+            env=dict(ENV, SWARM_RECOVERY_MESSAGE=self.message))
+
+    def make_work(self, committed):
+        (self.repo / "tracked.txt").write_text("changed\n")
+        (self.repo / "new.txt").write_text("new content\n")
+        # Stage exactly the work the caller inspected and owns, per protocol.
+        git(self.repo, "add", "tracked.txt", "new.txt")
+        if committed:
+            git(self.repo, "commit", "-qm", "implementation")
+
+    def check_recovered(self, committed):
+        self.make_work(committed)
+        content_head = git(self.repo, "rev-parse", "HEAD").strip()
+        result = self.run_recovery()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(git(self.repo, "status", "--porcelain"), "")
+        head = git(self.repo, "rev-parse", "HEAD").strip()
+        self.assertEqual(git(self.remote, "rev-parse", self.recovery_ref).strip(), head)
+        self.assertEqual(git(self.remote, "rev-parse", self.anchored_ref).strip(),
+                         self.base, "recovery moved the attempt's anchored ref")
+        self.assertEqual(git(self.remote, "show", head + ":tracked.txt"), "changed\n")
+        self.assertEqual(git(self.remote, "show", head + ":new.txt"), "new content\n")
+        self.assertEqual(git(self.remote, "log", "-1", "--format=%s", head).strip(),
+                         self.message)
+        pushed = git(self.remote, "reflog", "show", "--format=%H",
+                     self.recovery_ref).splitlines()
+        self.assertEqual(len(pushed), 2 if committed else 1)
+        if committed:
+            self.assertEqual(pushed[-1], content_head,
+                             "the first push must preserve the existing content")
+            self.assertEqual(git(self.remote, "rev-parse", head + "^1").strip(),
+                             content_head)
+            self.assertEqual(git(self.remote, "rev-parse", head + "^{tree}"),
+                             git(self.remote, "rev-parse", content_head + "^{tree}"))
+
+    def test_dirty_tree_is_committed_and_pushed(self):
+        self.check_recovered(committed=False)
+
+    def test_clean_tree_pushes_content_before_empty_recovery_label(self):
+        self.check_recovered(committed=True)
+
+    def test_empty_label_alone_is_not_preservation(self):
+        git(self.repo, "commit", "--allow-empty", "-qm", self.message)
+        before = git(self.repo, "rev-parse", "HEAD")
+        result = self.run_recovery()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires real content", result.stderr)
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), before)
+        self.assertEqual(git(self.remote, "for-each-ref", self.recovery_ref), "")
+
+    def test_failed_content_push_does_not_create_a_label(self):
+        self.make_work(committed=True)
+        before = git(self.repo, "rev-parse", "HEAD")
+        hook = self.remote / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+        result = self.run_recovery()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), before)
+        self.assertEqual(git(self.remote, "for-each-ref", self.recovery_ref), "")
 
 
 class TestTheCoordinatorRunsNoStashOfItsOwn(unittest.TestCase):

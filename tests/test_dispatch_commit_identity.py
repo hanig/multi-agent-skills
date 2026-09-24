@@ -79,6 +79,72 @@ class CommitIdentityTests(unittest.TestCase):
         self.assertEqual(intent["base_commit"], self.target)
         self.assertEqual(intent["target_commit"], self.target)
 
+    def test_capture_records_routing_for_the_protocol(self):
+        cases = (
+            ({"provider": "codex", "model": "gpt-6-astra"},
+             "codex/gpt-6-astra"),
+            ({}, S.DEFAULT_AGENT_PROVIDER),
+            ({"provider": "codex/gpt-6-astra"}, "codex/gpt-6-astra"),
+            ({"provider": "codex/gpt-6-astra", "model": "gpt-5.6-luna"},
+             "codex/gpt-5.6-luna"),
+            ({"provider": "openrouter", "model": "moonshotai/kimi-k2.7-code"},
+             "openrouter/moonshotai/kimi-k2.7-code"),
+        )
+        for index, (routing, author) in enumerate(cases):
+            with self.subTest(routing=routing):
+                unit = dict(self.plan["units"][0], **routing)
+                attempt = self.tmp / ("routing-%s" % index)
+                attempt.mkdir()
+                error, anchor = S._capture_code_launch(str(attempt), unit)
+                self.assertIsNone(error)
+                intent = anchor["intent"]
+                self.assertIn("--author " + author,
+                              S._dispatch_prompt(unit, intent))
+                self.assertEqual(intent["provider"],
+                                 routing.get("provider") or S.DEFAULT_AGENT_PROVIDER)
+                self.assertEqual(intent["model"], routing.get("model"))
+
+    def test_dispatch_persists_and_delivers_the_recorded_author(self):
+        self.plan["units"][0].update(provider="codex", model="gpt-6-astra")
+        result, _state = self.run_advance()
+        self.assertEqual(result[1], 1, result[0])
+        durable = S.load_state(str(self.tmp / "state"))["units"]["code"]
+        intent = durable["attempt_launch_intents"]["attempt-1"]
+        self.assertEqual((intent["provider"], intent["model"]),
+                         ("codex", "gpt-6-astra"))
+        self.assertIn("--author codex/gpt-6-astra", self.fake.launches[0][-1])
+        facts = durable["attempt_launch_facts"]["attempt-1"]
+        record = json.loads(S.W.launch_record_path(
+            str(self.tmp / "runs" / "code" / "attempt-1")).read_text())
+        for audit_or_authority in (facts, record):
+            self.assertNotIn("provider", audit_or_authority)
+            self.assertNotIn("model", audit_or_authority)
+
+    def test_legacy_intent_remains_unknown_on_redispatch(self):
+        unit = dict(self.plan["units"][0], provider="codex", model="gpt-6-astra")
+        attempt = self.tmp / "legacy-routing"
+        attempt.mkdir()
+        error, anchor = S._capture_code_launch(str(attempt), unit)
+        self.assertIsNone(error)
+        intent = anchor["intent"]
+        intent.pop("provider", None)
+        intent.pop("model", None)
+        original = json.dumps(intent, sort_keys=True)
+        state = {"units": {"code": {"attempt_launch_intents": {
+            attempt.name: intent}}}}
+        state_dir = str(self.tmp / "legacy-routing-state")
+        S.save_state(state_dir, state)
+        job, error = S._submit(unit, str(attempt), False,
+                               S.load_state(state_dir), state_dir)
+        self.assertIsNone(error)
+        self.assertTrue(job)
+        prompt = self.fake.launches[0][-1]
+        self.assertIn("provider/model for this unit is UNKNOWN", prompt)
+        self.assertNotIn("Pass --author", prompt)
+        durable = S.load_state(state_dir)["units"]["code"]
+        self.assertEqual(json.dumps(durable["attempt_launch_intents"][attempt.name],
+                                    sort_keys=True), original)
+
     def test_checkout_ahead_on_another_branch_is_refused(self):
         git(self.repo, "checkout", "-qb", "topic")
         (self.repo / "tracked.txt").write_text("topic\n")
@@ -342,6 +408,8 @@ class CommitIdentityTests(unittest.TestCase):
         # The base shipped schema 5 without target_commit. No new required
         # field or migration may be imposed on these already-launched bytes.
         intent.pop("target_commit")
+        intent.pop("provider", None)
+        intent.pop("model", None)
         legacy_intent = dict(intent)
         facts = us["attempt_launch_facts"][attempt.name]
         workspace = Path(facts["execution_workspace"])
