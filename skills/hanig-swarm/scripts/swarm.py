@@ -57,6 +57,7 @@ import coordinator_paths as CP  # noqa: E402
 import recovery as R  # noqa: E402  audit-only worktree preservation
 
 STATE_FILE = "swarm-state.json"
+STATE_EPOCH_FILE = "state-epoch.json"
 KINDS = U.KINDS
 
 # What a `code` unit runs unless it says otherwise.
@@ -2160,7 +2161,8 @@ def plan_digest(plan):
 # locked. Caught by the new tests, which is what they are for.
 _LOCK_FDS = {}
 # Pinned on actual acquisition, not refreshed from a later state read. Keep
-# the pin after release so a stale object cannot save over a successor.
+# the pin after release so a stale process cannot save over a successor.
+# Legacy unleased helpers pin on their first save instead (see save_state).
 _LOCK_EPOCHS = {}
 # The pid that owns the entries above. flock is held per OPEN FILE
 # DESCRIPTION, which a fork shares, so a forked child would inherit this dict
@@ -2289,16 +2291,15 @@ def acquire_lease(state_dir):
     _LOCK_OWNER_PID = os.getpid()
     # Detection only: no heartbeat, TTL, expiry, mtime aging or timer. Nothing
     # reads this epoch to grant, steal or release custody; flock still decides
-    # acquisition. One writer per plan and authority in coordinator state stay
-    # the design. Concurrent reads/replaces and stale filesystem reads remain
-    # outside that guarantee; this is not a distributed lock or a CAS.
+    # acquisition. The separate file keeps a no-op acquisition from rewriting
+    # swarm-state.json. Concurrent reads/replaces and stale filesystem reads
+    # remain outside this guarantee; this is not a distributed lock or a CAS.
     try:
-        state = load_state(state_dir)
-        epoch = state.get("epoch", 0)
-        if type(epoch) is not int or epoch < 0:
-            sys.exit("HALTED: invalid coordinator state epoch")
-        state["epoch"] = epoch + 1
-        err = U.write_json(Path(state_dir) / STATE_FILE, state)
+        epoch, err = _read_state_epoch(state_dir)
+        if err:
+            sys.exit(f"HALTED: {err}")
+        err = U.write_json(Path(state_dir) / STATE_EPOCH_FILE,
+                           {"epoch": epoch + 1})
         if err:
             sys.exit(f"HALTED: cannot persist coordinator state epoch: {err}")
         _LOCK_EPOCHS[key] = (os.getpid(), epoch + 1)
@@ -2375,6 +2376,20 @@ def release_lease(state_dir):
 
 
 # --- durable state --------------------------------------------------------
+def _read_state_epoch(state_dir):
+    """Read only the fence file; absent legacy directories start at zero."""
+    try:
+        record = json.loads((Path(state_dir) / STATE_EPOCH_FILE).read_text())
+    except FileNotFoundError:
+        return 0, None
+    except (OSError, ValueError) as exc:
+        return None, f"unreadable coordinator state epoch: {exc}"
+    if (not isinstance(record, dict) or type(record.get("epoch")) is not int
+            or record["epoch"] < 0):
+        return None, "invalid coordinator state epoch"
+    return record["epoch"], None
+
+
 def load_state(state_dir):
     """Load the durable side of the coordinator's lifecycle invariant.
 
@@ -2395,17 +2410,20 @@ def load_state(state_dir):
 
 def save_state(state_dir, state):
     key = str(Path(state_dir).resolve())
+    epoch, err = _read_state_epoch(state_dir)
+    # A lease holder always uses its process pin, even after reloading state.
     # Legacy direct helpers (including promotion) do not acquire a lease:
-    # compare their snapshot's epoch without granting them a lock or bumping
-    # it. A lease holder always uses its process pin, even after reloading.
-    owner, expected = _LOCK_EPOCHS.get(key, (os.getpid(), state.get("epoch", 0)))
-    epoch = load_state(state_dir).get("epoch", 0)
-    if (owner != os.getpid() or type(epoch) is not int or epoch < 0
-            or type(expected) is not int or epoch != expected):
+    # their first save pins the observed epoch without bumping it or granting
+    # custody. This cannot detect stale snapshots before that first save.
+    owner, expected = _LOCK_EPOCHS.get(key, (os.getpid(), epoch))
+    if err or owner != os.getpid() or epoch != expected:
         # Do not persist the halt into the successor's state.
+        reason = err or "state epoch changed or process pin was inherited"
         sys.exit("HALTED: another coordinator has written state under us "
-                 "(state epoch changed or is invalid); refusing to save")
-    state["epoch"] = expected
+                 f"({reason}); refusing to save")
+    _LOCK_EPOCHS.setdefault(key, (owner, expected))
+    # Retire the old inline field on a normal save, never on acquisition.
+    state.pop("epoch", None)
     Path(state_dir).mkdir(parents=True, exist_ok=True)
     err = U.write_json(Path(state_dir) / STATE_FILE, state)
     if err:
