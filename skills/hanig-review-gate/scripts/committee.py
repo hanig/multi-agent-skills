@@ -128,8 +128,32 @@ def pick_members(explicit):
     return chosen
 
 
+def response_usage(data, provider):
+    """Normalize the provider's usage object without inventing a value."""
+    usage = data.get("usage") if isinstance(data, dict) else None
+    if not isinstance(usage, dict):
+        return {"in_tokens": None, "out_tokens": None}
+    if provider == "openai":
+        return {"in_tokens": usage.get("input_tokens"),
+                "out_tokens": usage.get("output_tokens")}
+    return {"in_tokens": usage.get("prompt_tokens"),
+            "out_tokens": usage.get("completion_tokens")}
+
+
+def format_usage(usage):
+    """Human-readable usage; missing provider evidence stays unknown."""
+    usage = usage or {}
+    in_tokens = usage.get("in_tokens")
+    out_tokens = usage.get("out_tokens")
+    if in_tokens is None and out_tokens is None:
+        return "unknown"
+    shown_in = "unknown" if in_tokens is None else in_tokens
+    shown_out = "unknown" if out_tokens is None else out_tokens
+    return f"{shown_in}in/{shown_out}out"
+
+
 def ask_member(member, history, prompt, timeout):
-    """One turn. Returns (reply_text, error). History is the full prior
+    """One turn. Returns (reply_text, error, usage). History is the full prior
     exchange, so the member answers WITH its own earlier reasoning in view --
     the property a stateless gate cannot have."""
     msgs = list(history) + [{"role": "user", "content": prompt}]
@@ -137,7 +161,7 @@ def ask_member(member, history, prompt, timeout):
                "openrouter": "OPENROUTER_API_KEY"}.get(member["provider"])
     if not key_var:
         return None, (f"provider {member['provider']!r} is not supported here; "
-                      f"use openai or openrouter, or add a call path")
+                      f"use openai or openrouter, or add a call path"), None
     key = os.environ.get(key_var)
     if not key:
         # Name the action. The keys live in ~/.zshrc, so a non-login shell has
@@ -145,7 +169,7 @@ def ask_member(member, history, prompt, timeout):
         # committee its first run.
         return None, (f"{key_var} not set in this environment. The keys are "
                       f"exported from ~/.zshrc, so run under a login shell: "
-                      f"zsh -lic '...'")
+                      f"zsh -lic '...'"), None
 
     budget = member.get("max_output_tokens", R.DEFAULT_MAX_OUTPUT_TOKENS)
     if member["provider"] == "openai":
@@ -159,7 +183,8 @@ def ask_member(member, history, prompt, timeout):
                             {"Authorization": f"Bearer {key}",
                              "Content-Type": "application/json"}, timeout)
         if err:
-            return None, err
+            return None, err, None
+        usage = response_usage(data, member["provider"])
         text = "".join(
             c.get("text", "")
             for o in (data.get("output") or [])
@@ -177,16 +202,19 @@ def ask_member(member, history, prompt, timeout):
                             {"Authorization": f"Bearer {key}",
                              "Content-Type": "application/json"}, timeout)
         if err:
-            return None, err
+            return None, err, None
+        usage = response_usage(data, member["provider"])
         try:
             text = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError):
-            return None, R.redact(f"unexpected response shape: {str(data)[:200]}")
+            return (None,
+                    R.redact(f"unexpected response shape: {str(data)[:200]}"),
+                    usage)
     if not (text or "").strip():
         return None, ("empty reply; the model may have spent its whole output "
                       "budget on reasoning. Raise max_output_tokens for "
-                      f"{member['name']} in reviewers.json.")
-    return text, None
+                      f"{member['name']} in reviewers.json."), usage
+    return text, None, usage
 
 
 SYSTEM_PLANNER = """You are one of two members of a technical committee, chosen \
@@ -235,12 +263,12 @@ def run_turn(members, session, prompt, timeout, label):
         for fut in concurrent.futures.as_completed(futs):
             m = futs[fut]
             try:
-                text, err = fut.result()
+                text, err, usage = fut.result()
             except Exception as e:                     # noqa: BLE001
-                text, err = None, f"{type(e).__name__}: {e}"
-            results[m["name"]] = (text, err)
+                text, err, usage = None, f"{type(e).__name__}: {e}", None
+            results[m["name"]] = (text, err, usage)
     for m in members:
-        text, err = results[m["name"]]
+        text, err, usage = results[m["name"]]
         rec = session["members"][m["name"]]
         rec["history"].append({"role": "user", "content": prompt})
         if err:
@@ -249,6 +277,12 @@ def run_turn(members, session, prompt, timeout, label):
             rec.setdefault("errors", []).append({"phase": label, "error": err})
         else:
             rec["history"].append({"role": "assistant", "content": text})
+        usage = usage or {"in_tokens": None, "out_tokens": None}
+        rec.setdefault("usage", []).append({
+            "phase": label,
+            "in_tokens": usage.get("in_tokens"),
+            "out_tokens": usage.get("out_tokens"),
+        })
     session["turns"].append({"label": label, "prompt": prompt,
                              "at": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
     return results
@@ -256,13 +290,14 @@ def run_turn(members, session, prompt, timeout, label):
 
 def show_results(results, quiet=False):
     ok = 0
-    for name, (text, err) in sorted(results.items()):
+    for name, (text, err, usage) in sorted(results.items()):
         print(f"\n{'=' * 70}\n{name}\n{'=' * 70}")
         if err:
             print(f"  [no reply] {err}")
         else:
             ok += 1
             print(text if not quiet else text[:2000])
+        print(f"  token usage: {format_usage(usage)}")
     return ok
 
 
