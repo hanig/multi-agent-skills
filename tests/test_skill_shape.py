@@ -2,19 +2,21 @@
 
 The local-reference contract is deliberately file-level: relative inline
 Markdown links only, with fragments and queries refused rather than interpreted
-as renderer-specific navigation. Swarm declarations come from structured data;
+as renderer-specific navigation. Behavior declarations come from structured data;
 reference prose only needs mechanical modal-to-id ties, not English inference.
 """
 
 from pathlib import Path
 import ast
 import importlib.util
+import io
 import json
 import os
 import re
 import shutil
 import string
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -22,28 +24,6 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 SKILLS = ROOT / "skills"
 DEFAULT_BODY_LINE_BUDGET = 500
-BODY_LINE_BUDGETS = {
-    # A separate planned unit owns this already-measured split: ARC-612,
-    # which applies the declaration registry that landed for hanig-swarm and
-    # RETIRES this entry. Until it lands the number is a holding position.
-    #
-    # Raised 600 -> 618 on 2026-09-21 because PR #39 added the reporting
-    # cadence interview to this body and turned `main` red: the gate passed
-    # the change and no suite was run before merging, so nothing caught it.
-    # The alternative was cutting behaviour-deciding prose by hand to fit,
-    # which is the failure this budget's own unit exists to stop -- kimi, on
-    # the committee that designed the registry: "The criterion cannot be
-    # sacrificed to the budget. If the full registry does not fit, the budget
-    # or the criterion is wrong, not the inclusion of behaviour rules."
-    #
-    # 618 is the body's EXACT measured length, so any addition trips this:
-    # one added line measures 619 and fails, removing it passes.
-    # A first attempt set 615 against a 612-line body and described three
-    # lines of slack as "so the next addition trips it again"; luna refuted
-    # that in one line -- a one-line addition yields 613 and passes. A margin
-    # is not a tripwire. There is no margin here.
-    "hanig-project": 618,
-}
 EXTERNAL_MARKDOWN_LINK = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
 MARKDOWN_ESCAPABLE = frozenset(
     r"!\"#$%&'()*+,-./:;<=>?@[\]^_`{|}~\\"
@@ -184,12 +164,127 @@ ORCHESTRATE_DECLARATIONS = (
     "limit.session-liveness",
 )
 
+PROJECT_DECLARATIONS = (
+    "placement.behavior-deciding",
+    "placement.reference-elaboration",
+    "placement.reference-dialect",
+    "capability.host-policy",
+    "capability.tracker",
+    "capability.install-boundary",
+    "paths.skill-directory",
+    "workflow.order",
+    "survey.read-before-ask",
+    "survey.incomplete-walk",
+    "survey.partition-state",
+    "adoption.context",
+    "repository.destination",
+    "repository.source-data",
+    "repository.creation-approval",
+    "interview.judgment-only",
+    "interview.retry-boundary",
+    "interview.dispatch-complete",
+    "interview.reporting-cadence",
+    "plan.inputs",
+    "plan.scheduler-route",
+    "plan.promotion",
+    "code.configuration",
+    "code.target-branch",
+    "runtime.contract",
+    "retry.contract",
+    "cluster.memory-flag",
+    "cluster.account-allowance",
+    "cluster.memory-charging",
+    "cluster.qos-scope",
+    "findings.interview",
+    "unit.retry-size",
+    "judgment.by-kind",
+    "slurm.command-boundary",
+    "pipeline.command-boundary",
+    "code.prompt-boundary",
+    "outputs.attempt-relative",
+    "code.default-agent",
+    "slurm.array-outputs",
+    "plan.required-fields",
+    "code.write-scopes",
+    "code.worktree-isolation",
+    "plan.docs-protection",
+    "plan.human-document",
+    "plan.validate",
+    "tracker.team",
+    "tracker.credential-boundary",
+    "tracker.approval",
+    "tracker.autopilot",
+    "tracker.apply",
+    "tracker.edges",
+    "tracker.readback-shape",
+    "tracker.attestation",
+    "tracker.check",
+    "dispatch.sequence",
+    "drain.authority",
+    "closure.evidence",
+    "closure.by-kind",
+    "drain.block-intent",
+    "outbox.receipt",
+    "outbox.idempotency",
+    "report.required",
+    "report.evidence-source",
+    "report.contents",
+    "findings.contract",
+    "findings.bound",
+    "adoption.remaining-work",
+)
+
 DECLARATION_INVENTORIES = {
+    "hanig-project": PROJECT_DECLARATIONS,
     "hanig-orchestrate": ORCHESTRATE_DECLARATIONS,
     "hanig-swarm": SWARM_DECLARATIONS,
 }
 
 REFERENCE_ELABORATION_INVENTORIES = {
+    "hanig-project": (
+        ('references/reporting-evidence.md', 'findings.bound', 3),
+        ('references/reporting-evidence.md', 'findings.contract', 2),
+        ('references/reporting-evidence.md', 'findings.interview', 2),
+        ('references/reporting-evidence.md', 'placement.reference-elaboration', 1),
+        ('references/reporting-evidence.md', 'report.contents', 4),
+        ('references/reporting-evidence.md', 'report.evidence-source', 1),
+        ('references/reporting-evidence.md', 'report.required', 2),
+        ('references/survey-interview.md', 'adoption.context', 2),
+        ('references/survey-interview.md', 'adoption.remaining-work', 2),
+        ('references/survey-interview.md', 'cluster.account-allowance', 6),
+        ('references/survey-interview.md', 'cluster.memory-charging', 3),
+        ('references/survey-interview.md', 'cluster.qos-scope', 4),
+        ('references/survey-interview.md', 'interview.dispatch-complete', 3),
+        ('references/survey-interview.md', 'interview.judgment-only', 4),
+        ('references/survey-interview.md', 'interview.reporting-cadence', 5),
+        ('references/survey-interview.md', 'placement.reference-elaboration', 2),
+        ('references/survey-interview.md', 'plan.scheduler-route', 4),
+        ('references/survey-interview.md', 'repository.destination', 1),
+        ('references/survey-interview.md', 'repository.source-data', 2),
+        ('references/survey-interview.md', 'survey.incomplete-walk', 1),
+        ('references/survey-interview.md', 'survey.partition-state', 2),
+        ('references/survey-interview.md', 'survey.read-before-ask', 2),
+        ('references/tracker-sync.md', 'capability.tracker', 3),
+        ('references/tracker-sync.md', 'drain.authority', 1),
+        ('references/tracker-sync.md', 'outbox.receipt', 3),
+        ('references/tracker-sync.md', 'placement.reference-elaboration', 1),
+        ('references/tracker-sync.md', 'tracker.apply', 2),
+        ('references/tracker-sync.md', 'tracker.approval', 1),
+        ('references/tracker-sync.md', 'tracker.attestation', 2),
+        ('references/tracker-sync.md', 'tracker.credential-boundary', 1),
+        ('references/tracker-sync.md', 'tracker.edges', 3),
+        ('references/tracker-sync.md', 'tracker.readback-shape', 4),
+        ('references/unit-contract.md', 'code.configuration', 7),
+        ('references/unit-contract.md', 'code.default-agent', 2),
+        ('references/unit-contract.md', 'code.prompt-boundary', 3),
+        ('references/unit-contract.md', 'code.target-branch', 2),
+        ('references/unit-contract.md', 'code.worktree-isolation', 1),
+        ('references/unit-contract.md', 'code.write-scopes', 2),
+        ('references/unit-contract.md', 'outputs.attempt-relative', 3),
+        ('references/unit-contract.md', 'placement.reference-elaboration', 1),
+        ('references/unit-contract.md', 'slurm.array-outputs', 2),
+        ('references/unit-contract.md', 'slurm.command-boundary', 2),
+    ),
     "hanig-swarm": (
         ("references/capability-fallbacks.md", "capability.paseo-bus", 1),
         ("references/capability-fallbacks.md", "capability.python-git", 1),
@@ -537,12 +632,11 @@ class TestAuthoredSkillShape(unittest.TestCase):
         self.assertTrue(docs, "the authored-skill sweep matched no files")
         for doc in docs:
             body_lines = len(_body(doc).splitlines())
-            budget = BODY_LINE_BUDGETS.get(doc.parent.name,
-                                           DEFAULT_BODY_LINE_BUDGET)
             with self.subTest(skill=doc.parent.name):
                 self.assertLessEqual(
-                    body_lines, budget,
-                    f"{doc}: authored body has {body_lines} lines; budget is {budget}",
+                    body_lines, DEFAULT_BODY_LINE_BUDGET,
+                    f"{doc}: authored body has {body_lines} lines; "
+                    f"budget is {DEFAULT_BODY_LINE_BUDGET}",
                 )
 
     def test_body_markdown_paths_exist_inside_the_skill(self):
@@ -1114,28 +1208,32 @@ class TestAuthoredSkillShape(unittest.TestCase):
             self.assertEqual(record["reason"], reason)
 
     def test_closed_inventory_rejects_deleting_both_active_and_ledger_entries(self):
-        with tempfile.TemporaryDirectory() as raw:
-            source = SKILLS / "hanig-orchestrate"
-            skill = Path(raw) / source.name
-            shutil.copytree(source, skill)
-            registry = skill / "declarations.json"
-            data = json.loads(registry.read_text(encoding="utf-8"))
-            removed = next(
-                item for item in data["declarations"]
-                if not item.get("references")
-            )
-            data["declarations"].remove(removed)
-            data["known_declarations"].remove(removed["id"])
-            registry.write_text(
-                json.dumps(data, indent=2) + "\n", encoding="utf-8"
-            )
-            message = "hanig-orchestrate missing known declaration: {}".format(
-                removed["id"]
-            )
-            with self.assertRaisesRegex(
-                    DECLARATION_REGISTRY.RegistryError,
-                    re.escape(message)):
-                DECLARATION_REGISTRY.write_body(skill)
+        sources = sorted(
+            path.parent for path in SKILLS.glob("hanig-*/declarations.json")
+        )
+        for source in sources:
+            with self.subTest(skill=source.name):
+                with tempfile.TemporaryDirectory() as raw:
+                    skill = Path(raw) / source.name
+                    shutil.copytree(source, skill)
+                    registry = skill / "declarations.json"
+                    data = json.loads(registry.read_text(encoding="utf-8"))
+                    removed = next(
+                        item for item in data["declarations"]
+                        if not item.get("references")
+                    )
+                    data["declarations"].remove(removed)
+                    data["known_declarations"].remove(removed["id"])
+                    registry.write_text(
+                        json.dumps(data, indent=2) + "\n", encoding="utf-8"
+                    )
+                    message = "{} missing known declaration: {}".format(
+                        source.name, removed["id"]
+                    )
+                    with self.assertRaisesRegex(
+                            DECLARATION_REGISTRY.RegistryError,
+                            re.escape(message)):
+                        DECLARATION_REGISTRY.write_body(skill)
 
     def test_deleting_a_registered_reference_elaboration_is_detected(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -1165,6 +1263,94 @@ class TestAuthoredSkillShape(unittest.TestCase):
                  "references/operating-loop.md expected 1 occurrence(s), "
                  "found 0"],
             )
+
+    def test_project_declaration_block_matches_the_canonical_registry(self):
+        skill = SKILLS / "hanig-project"
+        self.assertEqual(DECLARATION_REGISTRY.body_diff(skill), "")
+        self.assertEqual(_declaration_completeness_problems(skill), [])
+
+    def test_project_reference_modals_are_tied_to_registered_declarations(self):
+        skill = SKILLS / "hanig-project"
+        self.assertEqual(DECLARATION_REGISTRY.reference_problems(skill), [])
+        self.assertEqual(_reference_elaboration_problems(skill), [])
+
+    def test_project_default_agent_matches_the_coordinator(self):
+        source = (SKILLS / "hanig-swarm" / "scripts" / "swarm.py").read_text(
+            encoding="utf-8")
+        defaults = {
+            target.id: node.value.value
+            for node in ast.parse(source).body
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+            for target in node.targets if isinstance(target, ast.Name)
+        }
+        skill = SKILLS / "hanig-project"
+        declaration = next(
+            item for item in DECLARATION_REGISTRY.load_registry(skill)
+            if item["id"] == "code.default-agent"
+        )
+        for surface in (declaration["normative_text"],
+                        (skill / "SKILL.md").read_text(encoding="utf-8"),
+                        (skill / "references" / "unit-contract.md").read_text(
+                            encoding="utf-8")):
+            self.assertIn("`{}`".format(defaults["DEFAULT_AGENT_PROVIDER"]), surface)
+            self.assertIn("`thinking: {}`".format(
+                defaults["DEFAULT_AGENT_THINKING"]), surface)
+
+    def test_project_keeps_partition_routing_as_owner_judgment(self):
+        declarations = {
+            item["id"]: item["normative_text"]
+            for item in DECLARATION_REGISTRY.load_registry(
+                SKILLS / "hanig-project"
+            )
+        }
+        self.assertIn(
+            "ask the owner whether CPU-only work may run",
+            declarations["cluster.account-allowance"],
+        )
+
+    def test_project_keeps_active_host_policy_in_the_registry(self):
+        declarations = {
+            item["id"]: item["normative_text"]
+            for item in DECLARATION_REGISTRY.load_registry(
+                SKILLS / "hanig-project"
+            )
+        }
+        self.assertIn(
+            "Follow the active host's discovered project instructions",
+            declarations["capability.host-policy"],
+        )
+
+    def test_project_registry_keeps_interview_speech_acts(self):
+        declarations = {
+            item["id"]: item["normative_text"]
+            for item in DECLARATION_REGISTRY.load_registry(
+                SKILLS / "hanig-project"
+            )
+        }
+        required = {
+            "repository.destination": "State the adopted remote and branch",
+            "survey.partition-state": "report an unknown state",
+            "cluster.account-allowance": "named denial is not a question",
+            "cluster.memory-charging": "recommend shrinking per-job memory",
+            "plan.docs-protection": "tell the owner",
+            "closure.by-kind": "merge observations are attested",
+            "code.configuration": "confirm the selected provider's exact mode spelling",
+            "capability.tracker": "report the pending synchronization",
+            "findings.bound": "reason for each",
+            "closure.evidence": "report an issue closed without it as an integrity violation",
+            "judgment.by-kind": "coordinator-pinned pre-dispatch artifact basis",
+        }
+        for declaration_id, speech_act in required.items():
+            with self.subTest(declaration=declaration_id):
+                self.assertIn(speech_act, declarations[declaration_id])
+        self.assertIn(
+            "coordinator does not validate the mode",
+            declarations["code.configuration"],
+        )
+        self.assertNotIn(
+            "dispatch must refuse unsupported provider-mode pairs",
+            declarations["code.configuration"],
+        )
 
     def test_an_unregistered_reference_imperative_is_rejected(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -1425,6 +1611,937 @@ class TestAuthoredSkillShape(unittest.TestCase):
                  "references/field-evidence.md:2: unsupported reference syntax: "
                  "declaration marker must follow prose on the same line"],
             )
+
+
+GENERATED_BEGIN = "<!-- BEGIN GENERATED DECLARATIONS"
+GENERATED_END = "<!-- END GENERATED DECLARATIONS -->"
+FRONTMATTER = re.compile(r"\A---\n.*?\n---\n", re.DOTALL)
+
+# How many of the registry's own interview topics may appear in one
+# authored sentence before it is a second copy of the list. The honest
+# tree's maximum is ONE; the three paraphrases three reviewers wrote to
+# defeat the previous rule score six and seven. Three is far from both.
+SECOND_COPY_TOPICS = 3
+
+# What may sit between two items of a LIST: punctuation, one
+# conjunction, an article. Anything else and they are two mentions in a
+# sentence, not two entries in a list.
+# What may sit between two items of a LIST. The first version admitted
+# only whitespace, commas, semicolons and colons -- so a Markdown
+# BULLET list, which is how a list is most naturally written, evaded it
+# entirely: `sentences()` collapses the newlines and leaves " - "
+# between items, and "-" was outside the class. luna and glm-5.3 both
+# found it. Numerals and their separators are here for the same reason.
+def excerpt_line(path, excerpt):
+    """The line in PATH where EXCERPT starts, or None.
+
+    Not computable inside the scan. `sentences` flattens a surface with
+    `" ".join(text.split())`, so the string the scan measures spans
+    against has no newlines at all and every offset in it reports line
+    1. The first version of this did exactly that and printed
+    `SKILL.md:1` for a duplicate planted at the end of the file -- a
+    line number that is worse than none, because it is followable and
+    wrong.
+
+    So the line is resolved where the newlines still exist. The
+    excerpt's words are matched with `\\s+` between them, because the
+    run may be split across lines in the source and is collapsed in
+    the report (luna).
+
+    The resolver must search the same authored surface as the scanner.
+    A generated declaration can contain the same normalized run as an
+    authored duplicate, but `sentences` removes that block before the
+    scan. Exclude it here too, and return no line when more than one
+    authored occurrence remains rather than attributing the candidate
+    to the wrong one.
+    """
+    if path is None:
+        return None
+    try:
+        text = path.read_text()
+    except OSError:
+        return None
+    pattern = r"\s+".join(re.escape(word) for word in excerpt.split())
+    matches = list(re.finditer(pattern, text))
+    if GENERATED_BEGIN in text and GENERATED_END in text:
+        generated_start = text.index(GENERATED_BEGIN)
+        generated_end = text.index(GENERATED_END) + len(GENERATED_END)
+        matches = [match for match in matches
+                   if match.end() <= generated_start
+                   or match.start() >= generated_end]
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+    return text.count("\n", 0, match.start()) + 1
+
+
+def publish_second_copies(found, sources=None, stream=None):
+    """Write second-copy candidates where a person will see them.
+
+    ADVISORY, not authority. astra:
+
+      "Enumeration describes syntax, not purpose: comparisons,
+       examples, and interview instructions can enumerate identical
+       words ... The guard is inferring semantic ownership from
+       unrestricted prose instead of enforcing explicit ownership.
+       The false alarm is the symptom; assigning enforcement authority
+       to that inference is the problem."
+
+    The concrete false failure: "Do not treat budget, retry exposure,
+    and reporting cadence as interchangeable." Three topics, adjacent,
+    ordinary separators -- and it is a warning against conflating them,
+    not a second checklist. No separator rule tells those apart, which
+    is why the answer is to stop failing on the guess rather than to
+    refine it.
+
+    Returns how many candidates were written, so a test can prove the
+    step happened.
+    """
+    stream = sys.stderr if stream is None else stream
+    if not found:
+        return 0
+    stream.write("\ninterview-topic candidates (advisory):\n")
+    for name, listed, excerpt in found:
+        line_number = excerpt_line((sources or {}).get(name), excerpt)
+        stream.write("  %s%s: %s\n    ...%s...\n"
+                     % (name,
+                        "" if line_number is None else ":%d" % line_number,
+                        listed, " ".join(excerpt.split())[:200]))
+    stream.write("  Each excerpt carries several topics in a row. That may be\n"
+                 "  a second copy of the list, or a comparison that mentions\n"
+                 "  them. Whitespace in the quote is collapsed onto one line,\n"
+                 "  so go by the line number, not by searching for the text.\n"
+                 "  Nothing here failed; read them and judge.\n")
+    return len(found)
+
+
+def _aligned_lower(text):
+    """Lowercase that never changes length, so offsets stay valid.
+
+    luna, against the excerpt this report prints: `str.lower()` is not
+    length-preserving. U+0130 LATIN CAPITAL LETTER I WITH DOT ABOVE
+    lowercases to two code points, so every offset after it is shifted
+    and a span found in the lowered text slices the wrong bytes out of
+    the original.
+
+    Measured, one such character before the run:
+
+        span from lowered : 'done criteria, ... discardable work'
+        same span from src: 'one criteria, ... discardable work.'
+
+    A character whose lowercase is not a single code point is left as
+    it stands. It then matches no topic, which is correct: every topic
+    needle here is ASCII, so nothing that could have matched is lost.
+    """
+    folded = []
+    for character in text:
+        lowered = character.lower()
+        folded.append(lowered if len(lowered) == 1 else character)
+    return "".join(folded)
+
+
+def _all_positions(haystack, needle):
+    """Every start offset of NEEDLE, not merely the first."""
+    found, start = [], haystack.find(needle)
+    while start != -1:
+        found.append(start)
+        start = haystack.find(needle, start + 1)
+    return found
+
+
+_SEP = r"[\s,;:.\-\u2013\u2014*+\u2022|/]"
+LIST_SEPARATOR = re.compile(
+    r"^" + _SEP + r"*"
+    r"(?:\d{1,2}[.)])?" + _SEP + r"*"
+    r"(?:and|or|plus|then)?"
+    + _SEP + r"*(?:the\s+)?$")
+
+
+class TestDeclarationsDoNotSilentlyLeave(unittest.TestCase):
+    """ARC-612's declaration snapshot and advisory interview scan.
+
+    Before ARC-701, body-generation and reference-drift checks could agree
+    after a declaration silently left. Schema v2 now enforces an ordered
+    known-declaration ledger and explicit retirement/replacement records.
+    These restored snapshot checks use that ledger; body presence is checked
+    for active declarations so an acknowledged retirement remains legal.
+
+    That is not hypothetical. This branch's own restructuring deleted the
+    reporting-cadence interview -- a statement that changes what the agent
+    ASKS and WRITES, which is the registry's own definition of
+    behaviour-deciding -- and it survived in no declaration, no reference
+    and no body text. Three reviewers found it independently; no test did.
+
+    The first version of this pinned seven ids and called itself "a floor,
+    not a schema". luna and glm-5.3 both refused that: sixty of the
+    sixty-seven declarations could still be deleted with every check green,
+    including `closure.evidence`, the rule that refuses a close without
+    evidence. A floor that omits most of the building is not a floor. So
+    the whole set is pinned.
+
+    This is a SNAPSHOT, not a schema. Adding a declaration fails this list
+    too, which is the point: the list is the place a reader looks to see
+    what the skill decides, and changing that set should be a deliberate
+    edit with a reason in the commit, not a side effect of regenerating a
+    body.
+    """
+
+    DECLARED = {"hanig-project": PROJECT_DECLARATIONS}
+
+    @staticmethod
+    def second_copies(named_sentences, topics):
+        """Sentences that LIST enough of TOPICS to be a copy of the list.
+
+        Counting topics was not enough. kimi-k2.7-code: "The budget for
+        protected destinations determines retry exposure and reporting
+        cadence" carries four and is honest prose, so a count alone
+        fails an honest run -- the direction this test must never err
+        in, because it reddens correct work.
+
+        What separates a list from prose is what sits BETWEEN the
+        items. In a list it is punctuation and at most a conjunction;
+        in prose it is other words. So the topics must be adjacent:
+        three or more in a row with nothing but separators between
+        them.
+        """
+        found = []
+        for name, sentences in named_sentences:
+            for sentence in sentences:
+                lowered = _aligned_lower(sentence)
+                # EVERY occurrence, not just the first. luna and
+                # glm-5.3, independently: `.index()` recorded a topic at
+                # an earlier PROSE mention, so the slot it occupies in a
+                # later genuine list was never seen and the run broke
+                # there. A sentence that mentions a topic and then lists
+                # it is the ordinary way to write one.
+                hits = sorted(
+                    (position, topic)
+                    for topic in topics
+                    for position in _all_positions(lowered, topic))
+                # DISTINCT topics in the run. Counting hits let
+                # "budget, budget, budget" score three, which is a
+                # repetition and not a copy of anything -- my own
+                # false positive, from allowing every occurrence a
+                # moment after allowing only the first.
+                # The run carries its SPAN as well as its topics. The
+                # report is advisory, so it has to be worth reading:
+                # `whole_text` hands this the entire surface as one
+                # string, and quoting the head of that means pointing a
+                # reader at the frontmatter while the duplicate sits
+                # 400 lines below. A diagnostic that names the wrong
+                # place is worse than none.
+                run, best = set(), set()
+                run_span = best_span = (0, 0)
+                for index, (start, topic) in enumerate(hits):
+                    if not run:
+                        run = {topic}
+                        run_span = (start, start + len(topic))
+                    if index + 1 >= len(hits):
+                        break
+                    nxt, nxt_topic = hits[index + 1]
+                    between = lowered[start + len(topic):nxt]
+                    if LIST_SEPARATOR.match(between):
+                        run.add(nxt_topic)
+                        run_span = (run_span[0], nxt + len(nxt_topic))
+                    else:
+                        run = {nxt_topic}
+                        run_span = (nxt, nxt + len(nxt_topic))
+                    if len(run) > len(best):
+                        best, best_span = set(run), run_span
+                if len(best) >= SECOND_COPY_TOPICS:
+                    found.append((name, ", ".join(sorted(best)),
+                                  sentence[best_span[0]:best_span[1]]))
+        return found
+
+    @staticmethod
+    def interview_topics(enumeration):
+        """The topics `interview.judgment-only` itself names.
+
+        Read out of the declaration rather than written down here, so
+        this test has no second copy of the list either -- which would
+        be the same defect it exists to catch.
+        """
+        listing = enumeration.split("At least:", 1)[1].split(". ", 1)[0]
+        topics = []
+        for piece in re.split(r",|\band\b", listing):
+            topic = re.sub(r"^the ", "", piece.strip().strip(".").lower())
+            if len(topic) > 3:
+                topics.append(topic)
+        return topics
+
+    def registry_topics(self):
+        """The interview topics, read from the registry every time."""
+        with open(SKILLS / "hanig-project" / "declarations.json") as handle:
+            declared = {entry["id"]: entry["normative_text"]
+                        for entry in json.load(handle)["declarations"]}
+        return self.interview_topics(declared["interview.judgment-only"])
+
+    @staticmethod
+    def surface_name(surface):
+        """A surface's name in the report: unique, and still readable.
+
+        `surface.name` alone is a basename, and two SKILL.md files
+        under different skills share it.
+        """
+        try:
+            return str(surface.relative_to(SKILLS))
+        except ValueError:
+            return surface.name
+
+    def authored_surfaces(self):
+        """Every hanig-project surface a human wrote, generated block cut."""
+        skill = SKILLS / "hanig-project"
+        return [skill / "SKILL.md"] + sorted(
+            (skill / "references").glob("*.md"))
+
+    @classmethod
+    def whole_text(cls, surface):
+        """The authored text as ONE string, generated block removed."""
+        return " ".join(cls.sentences(surface))
+
+    @staticmethod
+    def sentences(surface):
+        """Sentences of the AUTHORED text: no frontmatter, no generated
+        block.
+
+        The frontmatter is metadata rather than guidance -- its
+        `description` is a when-to-use list and legitimately reads as one
+        -- and the generated block is derived from the registry, so
+        holding it to a rule about second copies would fail the first one.
+        """
+        text = surface.read_text()
+        if GENERATED_BEGIN in text and GENERATED_END in text:
+            head = text[:text.index(GENERATED_BEGIN)]
+            tail = text[text.index(GENERATED_END) + len(GENERATED_END):]
+            text = head + "\n" + tail
+        # The frontmatter is SCANNED now. It was stripped because an
+        # earlier rule keyed on the word "ask", and the description's
+        # when-to-use list tripped it. The rule keys on the registry's
+        # topics now, which the description does not contain, so the
+        # exemption bought nothing and left a surface a second copy
+        # could hide in -- luna.
+        return re.split(r"(?<=[.!?])\s+", " ".join(text.split()))
+
+    def test_the_declared_set_is_exactly_what_is_pinned(self):
+        for skill, ids in self.DECLARED.items():
+            registry = SKILLS / skill / "declarations.json"
+            with open(registry) as handle:
+                declared = json.load(handle)["known_declarations"]
+            with self.subTest(skill=skill):
+                self.assertEqual(
+                    declared, list(ids),
+                    "%s's known declaration set or order changed. Update "
+                    "both closed inventories in the same commit and "
+                    "say in the message what was added or dropped and why."
+                    % skill)
+                self.assertEqual(
+                    len(declared), len(set(declared)),
+                    "%s declares the same id twice" % skill)
+
+    def test_required_declaration_ids_are_present(self):
+        for skill, ids in self.DECLARED.items():
+            registry = SKILLS / skill / "declarations.json"
+            with open(registry) as handle:
+                declared = set(json.load(handle)["known_declarations"])
+            DECLARATION_REGISTRY.load_registry(SKILLS / skill)
+            for required in ids:
+                with self.subTest(skill=skill, declaration=required):
+                    self.assertIn(
+                        required, declared,
+                        "%s left %s's known ledger. Retired and replaced "
+                        "declarations must retain their ledger entries and "
+                        "lifecycle reasons." % (required, skill))
+
+    def test_each_required_declaration_reaches_the_generated_body(self):
+        """Present in the registry is not present in the body."""
+        for skill in self.DECLARED:
+            text = (SKILLS / skill / "SKILL.md").read_text()
+            for entry in DECLARATION_REGISTRY.load_registry(SKILLS / skill):
+                required = entry["id"]
+                with self.subTest(skill=skill, declaration=required):
+                    self.assertIn("`%s`:" % required, text)
+
+    def test_the_dialect_declaration_matches_what_the_checker_does(self):
+        """The declaration says what is refused; this checks each one.
+
+        kimi-k2.7-code read "raw HTML ... are refused" as covering the
+        `<!-- declaration: id -->` markers the reference files are full
+        of, and posed a dilemma: either the checker flags every
+        reference file, or it silently exempts HTML and the declaration
+        is a false promise. Neither holds -- the sentence's first clause
+        permits valid same-line comments and its second refuses OTHER
+        raw HTML.
+
+        Then, the round after: only the HTML half was exercised, while
+        the declaration names five more forms. "An invariant written in
+        prose is not an invariant" and a declaration is prose, so every
+        form it promises to refuse is planted here and every one must be
+        caught. Planted in a COPY, because the first version edited the
+        tracked source file and restored it, which glm-5.3 noted races
+        with a concurrent run and leaves the file mutated if one is
+        killed.
+        """
+        skill = SKILLS / "hanig-project"
+        self.assertEqual(DECLARATION_REGISTRY.reference_problems(skill), [],
+                         "the markers the files already use must be accepted")
+
+        refused = (
+            ("raw HTML", "<div>raw html</div>"),
+            ("tab", "\tA tab-indented behaviour-deciding line."),
+            ("indentation of four or more spaces",
+             "    A four-space indented line."),
+            ("blockquote", "> A quoted behaviour-deciding line."),
+            ("prose indentation must be two spaces",
+             " A one-space indented line."),
+            ("nested list", "  - a nested list item"),
+        )
+        for expected, planted in refused:
+            with self.subTest(form=expected):
+                with tempfile.TemporaryDirectory() as tmp:
+                    copy = Path(tmp) / "hanig-project"
+                    shutil.copytree(skill, copy)
+                    reference = copy / "references" / "unit-contract.md"
+                    reference.write_text(
+                        reference.read_text() + "\n" + planted + "\n")
+                    problems = DECLARATION_REGISTRY.reference_problems(copy)
+                self.assertTrue(
+                    any(expected in problem for problem in problems),
+                    "placement.reference-dialect promises %r is refused; "
+                    "the checker said %r" % (expected, problems))
+
+        # And the copy itself is clean before anything is planted, so a
+        # subTest failure above means the planted line, not the copy.
+        with tempfile.TemporaryDirectory() as tmp:
+            copy = Path(tmp) / "hanig-project"
+            shutil.copytree(skill, copy)
+            self.assertEqual(DECLARATION_REGISTRY.reference_problems(copy), [])
+
+    def test_declarations_do_not_contradict_each_other(self):
+        """Two declarations I wrote disagreed, and nothing noticed.
+
+        luna: `interview.judgment-only` enumerated the interview's
+        categories as if exhaustive, and the enumeration omitted the
+        reporting cadence that `interview.reporting-cadence` separately
+        requires. An agent following the first skips the second.
+
+        There is no general contradiction checker and this does not build
+        one. It pins the specific pairing: an enumeration of what to ask
+        must name every topic another declaration makes mandatory, or say
+        it is not exhaustive.
+        """
+        with open(SKILLS / "hanig-project" / "declarations.json") as handle:
+            declared = {entry["id"]: entry["normative_text"]
+                        for entry in json.load(handle)["declarations"]}
+
+        enumeration = declared["interview.judgment-only"]
+        self.assertIn(
+            "cadence", enumeration.lower(),
+            "the interview enumeration omits the reporting cadence that "
+            "interview.reporting-cadence separately requires")
+        self.assertIn(
+            "not an exhaustive", enumeration.lower(),
+            "an enumeration that reads as exhaustive must say it is not, "
+            "or the next mandatory topic silently falls outside it")
+
+        # ONE COPY -- detected by the registry's own topics, not by any
+        # pattern I write.
+        #
+        # Three rounds of this test looked for English and three rounds
+        # of reviewers wrote English that missed it. First the literal
+        # phrases "done criteria" and "protected destinations" (luna
+        # paraphrased them). Then any sentence that both asks and lists
+        # five items -- luna, kimi-k2.7-code and glm-5.3 independently
+        # produced "Question the owner, one at a time, about ...", which
+        # has no "ask", and a semicolon list, which has no commas. Each
+        # round I widened the pattern and the next round walked past it,
+        # which is the same losing move recorded in the tracker hook's
+        # header for the same reason.
+        #
+        # So the needles come from `interview.judgment-only` itself. A
+        # second copy of the list is a sentence carrying several of the
+        # topics the list names, whatever verb introduces it and whatever
+        # punctuation separates them. It cannot be paraphrased around
+        # without changing the topic words -- at which point it is a
+        # different list saying different things, which no test can
+        # police and the registry does not claim to. And it tightens by
+        # itself: add a topic to the declaration and the needle set grows
+        # with it.
+        # NO INTERMEDIATE BINDING. luna and glm-5.3 both showed that
+        # `topics = self.interview_topics(enumeration)` could be
+        # replaced by a literal seven-item list and every assertion
+        # still passed -- the perturbation check called the parser
+        # separately, so nothing tied the DETECTOR's needles to the
+        # registry. A value cannot distinguish a literal from a parse
+        # when the two are equal today, so the binding is gone and
+        # every use calls the parser. The only mutation left is inside
+        # the parser, which the perturbation below kills.
+        topics = self.interview_topics(enumeration)
+        self.assertEqual(
+            topics, self.interview_topics(enumeration),
+            "the parser is not deterministic")
+        self.assertGreaterEqual(len(topics), 5,
+                                "the topic list did not parse: %r" % (topics,))
+
+        # The needles must FOLLOW the declaration, not merely equal it
+        # today. luna, kimi-k2.7-code and glm-5.3 all made the same
+        # point in one round: my mutation replaced the parser with a
+        # one-item list, which trips the length check, but replacing it
+        # with a hardcoded copy of the same seven topics passes
+        # everything -- and a hardcoded copy is the second copy this
+        # whole test exists to forbid. So the declaration is perturbed
+        # and the output has to move with it.
+        moved = enumeration.replace("budget", "spending ceiling")
+        self.assertNotEqual(moved, enumeration, "the perturbation missed")
+        perturbed = self.interview_topics(moved)
+        self.assertIn("spending ceiling", perturbed,
+                      "the needles are not read from the declaration")
+        self.assertNotIn("budget", perturbed)
+        self.assertEqual(len(perturbed), len(topics))
+
+        # THE WHOLE PIPELINE, against a perturbed REGISTRY ON DISK.
+        # Twice now I have claimed the detector is tied to the parsed
+        # needles and twice a reviewer has shown that replacing
+        # `topics = self.interview_topics(enumeration)` with an equal
+        # literal passes everything -- assertEqual cannot tell equal
+        # values apart, and the perturbation assertions called the
+        # parser into a separate variable. glm-5.3 named the comment
+        # that claimed otherwise.
+        #
+        # So the registry is rewritten in a copy of the skill, and the
+        # scan is run against that copy. A hardcoded list cannot
+        # follow a file it never reads.
+        with tempfile.TemporaryDirectory() as tmp:
+            copy = Path(tmp) / "hanig-project"
+            shutil.copytree(SKILLS / "hanig-project", copy)
+            registry = copy / "declarations.json"
+            data = json.loads(registry.read_text())
+            for entry in data["declarations"]:
+                if entry["id"] == "interview.judgment-only":
+                    entry["normative_text"] = entry["normative_text"].replace(
+                        "budget", "spending ceiling")
+            registry.write_text(json.dumps(data, indent=2) + "\n")
+
+            moved_enumeration = [
+                entry["normative_text"]
+                for entry in json.loads(registry.read_text())["declarations"]
+                if entry["id"] == "interview.judgment-only"][0]
+            moved_topics = self.interview_topics(moved_enumeration)
+            self.assertIn("spending ceiling", moved_topics)
+
+            planted = ("Ask about %s, and spending ceiling."
+                       % ", ".join(moved_topics[:4]))
+            self.assertTrue(
+                self.second_copies([("copy.md", [planted])], moved_topics),
+                "the scan does not follow the registry on disk")
+            # The SAME sentence, against the real registry, is not a
+            # copy of the real list: 'spending ceiling' is not one of
+            # its topics, so only four of the five words match and the
+            # run breaks where the unknown word sits.
+            self.assertFalse(
+                self.second_copies(
+                    [("copy.md", ["Ask about spending ceiling alone."])],
+                    topics),
+                "a word absent from the real declaration was treated as "
+                "a topic")
+
+        # And the DETECTOR follows them. A list written with the
+        # perturbed topic must be caught by the perturbed needles and
+        # missed by the real ones; a hardcoded list cannot do both.
+        planted_new = "Ask about %s." % ", ".join(perturbed)
+        self.assertTrue(
+            self.second_copies([("p.md", [planted_new])], perturbed),
+            "the detector does not use the needles the parser produced")
+        planted_old = planted_new.replace(
+            "discardable work, spending ceiling, protected destinations",
+            "discardable work, spending ceiling, unrelated wording")
+        self.assertFalse(
+            self.second_copies([("p.md", [
+                "A spending ceiling is not a topic the registry names."])],
+                topics),
+            "a word absent from the real declaration was treated as a topic")
+
+        # The WHOLE surface, not sentence fragments. luna and glm-5.3:
+        # `sentences()` splits on a period followed by whitespace, so
+        # `1. done criteria 2. ...` became one-topic fragments that can
+        # never reach the threshold -- and my own numbered-list case
+        # passed only because it handed `second_copies` a pre-split
+        # string and never went through the splitter at all. Measured
+        # both ways: True direct, False through the real path.
+        #
+        # Adjacency already does the discrimination, so sentence
+        # boundaries add nothing and break lists. Checked against three
+        # separate sentences each mentioning one topic: still clean.
+        # Named by the path under skills/, not the basename. luna: the
+        # sources map was keyed by `surface.name`, so two SKILL.md files
+        # collide and a candidate found in one is looked up in the
+        # other -- reporting a line from the wrong file, which is the
+        # followable-and-wrong failure this report already learned
+        # once. The five surfaces today do not collide; the key is not
+        # allowed to depend on that.
+        named = [(self.surface_name(surface), [self.whole_text(surface)])
+                 for surface in self.authored_surfaces()]
+        # ADVISORY. This used to fail the suite, and astra showed a
+        # correct document edit that it rejects: "Do not treat budget,
+        # retry exposure, and reporting cadence as interchangeable."
+        # A test-only guard is not cost-free -- a false failure blocks
+        # every subsequent change -- and no refinement separates a
+        # checklist from a comparison, because enumeration is syntax
+        # and ownership is purpose.
+        #
+        # The STRUCTURAL checks below stay hard: the declaration
+        # snapshot, the body/registry diff, the reference ties and the
+        # dialect. Those enforce explicit ownership. This one guesses,
+        # so it reports.
+        publish_second_copies(
+            self.second_copies(named, topics),
+            {self.surface_name(surface): surface
+             for surface in self.authored_surfaces()})
+
+        # The rule must also FIRE. Disabling the threshold left the suite
+        # green until this case existed, which is the shape this whole
+        # branch is about: a check whose only evidence is that it has not
+        # complained. Every string here is a paraphrase a reviewer wrote
+        # to walk past an earlier version of this test.
+        # The FRONTMATTER is part of the surface. luna: it was
+        # stripped, so a second copy could sit in the description and
+        # never be looked at. Asserted directly, because a mutation
+        # restoring the strip is invisible while no real frontmatter
+        # carries topics.
+        skill_md = SKILLS / "hanig-project" / "SKILL.md"
+        scanned = " ".join(self.sentences(skill_md))
+        self.assertIn(
+            "Start a swarm project", scanned,
+            "the frontmatter is not being scanned, so a second copy "
+            "could hide there")
+        planted = list(self.sentences(skill_md)) + [
+            "Ask about %s." % ", ".join(topics)]
+        self.assertTrue(
+            self.second_copies([("SKILL.md", planted)], topics),
+            "a second copy in the scanned text was not detected")
+
+        # Honest prose carrying the topics in unrelated grammatical
+        # roles must NOT be flagged. kimi-k2.7-code wrote the first of
+        # these to refute the honest-run claim, and it did.
+        for label, honest in (
+                ("topics in unrelated roles",
+                 "The budget for protected destinations determines retry "
+                 "exposure and reporting cadence."),
+                ("two mentions in one sentence",
+                 "A unit with a budget must declare retry exposure, and "
+                 "its protected destinations are surveyed rather than "
+                 "asked about."),
+        ):
+            with self.subTest(honest=label):
+                self.assertEqual(
+                    self.second_copies([("planted.md", [honest])], topics),
+                    [],
+                    "honest prose was read as a second copy of the list")
+
+        # Every LIST FORM, planted. Each of these was verified at a
+        # console while fixing the reviewer finding that named it, and
+        # not one was planted as a case -- so reverting the separator
+        # class or the whole-surface scan left the suite green. That
+        # is the same gap five times over in this session: probing the
+        # fix and never pinning it.
+        # The SEPARATOR is what each of these varies; the topics come
+        # from the registry, because a literal list holds whatever
+        # topics it was written with and an honest rename of four of
+        # them would redden every case here (glm-5.3).
+        four = topics[:4]
+        three = topics[:3]
+        for label, listed in (
+                ("a numbered list",
+                 "Ask about: " + " ".join("%d. %s" % (n + 1, topic)
+                                          for n, topic in enumerate(four))),
+                ("bullets whose items end in periods",
+                 " ".join("- %s." % topic for topic in four)),
+                ("a pipe table", "| " + " | ".join(three) + " |"),
+                ("a slash list", " / ".join(three)),
+        ):
+            with self.subTest(form=label):
+                self.assertTrue(
+                    self.second_copies([("planted.md", [listed])], topics),
+                    "%s is a second copy and was not detected" % label)
+
+        # THROUGH THE REAL PATH. The cases above hand `second_copies`
+        # one string, which is exactly the bypass that hid the defect:
+        # my numbered-list case passed while the shipped scan, which
+        # goes through the sentence helper first, did not catch it.
+        # This writes a surface and reads it the way the check does.
+        with tempfile.TemporaryDirectory() as tmp:
+            surface = Path(tmp) / "planted.md"
+            surface.write_text(
+                "# A reference\n"
+                "\n"
+                "Ask about: " + " ".join(
+                    "%d. %s" % (n + 1, topic)
+                    for n, topic in enumerate(topics[:4])) + "\n")
+            self.assertTrue(
+                self.second_copies(
+                    [(surface.name, [self.whole_text(surface)])], topics),
+                "a numbered list in a real file was not detected, so the "
+                "surface is being split before the scan sees it")
+
+        # Three separate sentences each mentioning one topic are NOT a
+        # list, which is the false positive whole-surface scanning
+        # could have introduced and does not.
+        self.assertEqual(
+            self.second_copies([("planted.md", [
+                "A budget is required. Work here is discardable. Some "
+                "destinations are protected by policy."])], topics),
+            [],
+            "three ordinary sentences were read as a list")
+
+        for label, paraphrase in (
+                ("no ask verb",
+                 "Question the owner, one at a time, about %s."
+                 % ", ".join(topics)),
+                ("semicolons instead of commas",
+                 "Interview coverage: %s." % "; ".join(topics)),
+                ("a different verb",
+                 "The interview must cover: %s." % ", ".join(topics)),
+        ):
+            with self.subTest(paraphrase=label):
+                self.assertTrue(
+                    self.second_copies([("planted.md", [paraphrase])], topics),
+                    "a second copy phrased as %r was not detected" % label)
+
+    def test_the_reported_excerpt_survives_a_case_expanding_character(self):
+        """The excerpt must be the text that is actually there.
+
+        luna, on the first version of this report: the span is found in
+        the lowered text and sliced out of the original, and
+        `str.lower()` is not length-preserving. One U+0130 ahead of the
+        run shifts every later offset by one, so the excerpt loses its
+        first character and takes a trailing one that is not part of
+        the list.
+
+        An advisory diagnostic that quotes text the document does not
+        contain is worse than no diagnostic: it sends a reader looking
+        for a string that is not there. Same defect as naming the wrong
+        surface, one level down.
+        """
+        topics = self.registry_topics()
+        run = ", ".join(topics[:3])
+        for label, prefix in (("no expansion", "Note. "),
+                              ("case-expanding", "\u0130nterview note. ")):
+            with self.subTest(prefix=label):
+                sentence = prefix + "Ask about " + run + "."
+                found = self.second_copies([("planted.md", [sentence])],
+                                           topics)
+                self.assertTrue(found, "the planted run was not detected")
+                excerpt = found[0][2]
+                self.assertIn(
+                    excerpt, sentence,
+                    "the excerpt is not text that appears in the sentence")
+                self.assertTrue(
+                    excerpt.startswith(topics[0]),
+                    "the excerpt starts mid-topic (%r), so the span was "
+                    "applied to a string it was not measured against"
+                    % excerpt[:20])
+                self.assertTrue(
+                    excerpt.endswith(topics[2]),
+                    "the excerpt runs past the list (%r)" % excerpt[-20:])
+
+    def test_a_reported_line_number_points_at_the_planted_line(self):
+        """THROUGH THE REAL SCAN, because that is where this broke.
+
+        The first version computed the line inside `second_copies`,
+        from an offset into the string it was scanning. That string
+        comes from `sentences`, which flattens a surface with
+        `" ".join(text.split())` and so contains no newlines at all.
+        Every line came out as 1. A duplicate planted at the end of
+        SKILL.md was reported as `SKILL.md:1`.
+
+        A unit test on the helper passed, because it handed the helper
+        raw text with real newlines in it. Only running the scan the
+        way the suite runs it showed the flattening. That is the third
+        time on this branch that testing a function instead of the
+        path through it hid the defect, so this one plants a line in a
+        real tree, runs the real test in a subprocess, and reads the
+        line number back out of what the operator sees.
+        """
+        # SPLIT ACROSS LINES, which is the case the report's whitespace
+        # collapsing exists for and the one a literal search cannot
+        # find. A single-line plant let `re.escape(excerpt)` pass, so
+        # the flexibility the resolver claims was untested -- the
+        # mutation survived and said so.
+        topics = self.registry_topics()
+        marker = "Ask about %s,\n%s, and\n%s." % (
+            ", ".join(topics[:-2]), topics[-2], topics[-1])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "tree"
+            (root / "tests").mkdir(parents=True)
+            shutil.copytree(SKILLS, root / "skills", symlinks=True)
+            shutil.copy(Path(__file__), root / "tests" / Path(__file__).name)
+            registry = (root / "skills" / "hanig-project" /
+                        "declarations.json")
+            declared = json.loads(registry.read_text())
+            for entry in declared["declarations"]:
+                if entry["id"] == "interview.judgment-only":
+                    entry["normative_text"] = entry["normative_text"].replace(
+                        "the scientific claim", "scientific claim")
+                    self.assertIn("scientific claim",
+                                  entry["normative_text"])
+                    self.assertNotIn("the scientific claim",
+                                     entry["normative_text"])
+            registry.write_text(json.dumps(declared, indent=2) + "\n")
+            regenerated = subprocess.run(
+                [sys.executable,
+                 str(root / "skills" / "hanig-swarm" / "scripts" /
+                     "declaration_registry.py"),
+                 "write-body", "--skill-dir",
+                 str(root / "skills" / "hanig-project")],
+                cwd=str(root), stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, universal_newlines=True)
+            self.assertEqual(regenerated.returncode, 0, regenerated.stdout)
+            surface = root / "skills" / "hanig-project" / "SKILL.md"
+            body = surface.read_text() + "\nA closing note.\n" + marker + "\n"
+            surface.write_text(body)
+            planted_line = body[:body.index(marker)].count("\n") + 1
+
+            done = subprocess.run(
+                [sys.executable, "-m", "unittest",
+                 "tests.%s.%s.%s" % (Path(__file__).stem,
+                                     type(self).__name__,
+                                     "test_declarations_do_not_contradict_"
+                                     "each_other")],
+                cwd=str(root), stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, universal_newlines=True)
+
+        reported = re.findall(r"SKILL\.md:(\d+)", done.stdout)
+        self.assertTrue(
+            reported,
+            "the report carries no line number for the planted copy.\n%s"
+            % done.stdout)
+        self.assertIn(
+            str(planted_line), reported,
+            "the report points at line(s) %s, but the duplicate was "
+            "planted at line %d. A followable wrong line is worse than "
+            "none.\n%s" % (reported, planted_line, done.stdout))
+
+    def test_a_second_copy_is_reported_and_does_not_fail_the_run(self):
+        """The advisory boundary, through the harness that delivers it.
+
+        A guard is not what its function returns, it is what the
+        consumer does with it. This repo has already shipped a
+        reminder that printed to stdout and exited 0, where the
+        harness showed it only in transcript mode: every message it
+        produced reached a transcript and no reader. So this runs the
+        REAL test, in a subprocess, over a REAL tree with a duplicate
+        planted in it, and reads what actually came out.
+
+        Two things must both hold, and they pull in opposite
+        directions: the run must PASS, because astra showed a correct
+        document edit this heuristic rejects --
+
+          "Do not treat budget, retry exposure, and reporting cadence
+           as interchangeable."
+
+        -- and the candidate must still be VISIBLE, because silence
+        would delete the check rather than demote it.
+
+        Mutating the call site back to a hard assertion fails this on
+        the exit status; deleting the publish call fails it on the
+        missing diagnostic.
+        """
+        # Built FROM the registry, never written out. glm-5.3: a
+        # hardcoded marker holds whatever topics it was written with,
+        # so an honest, snapshot-acknowledged rename of four of them
+        # leaves two in the string, the scan finds nothing to report,
+        # and this test fails on a correct change. Measured: renaming
+        # done criteria, budget, retry exposure and reporting cadence
+        # drops the marker from six topics to two, under the threshold
+        # of three.
+        #
+        # It is the same rule the scan test states two hundred lines
+        # up -- no intermediate binding, every use calls the parser --
+        # and these two tests were the place it was not followed.
+        planted = "\nAsk about %s.\n" % ", ".join(self.registry_topics())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "tree"
+            (root / "tests").mkdir(parents=True)
+            shutil.copytree(SKILLS, root / "skills", symlinks=True)
+            shutil.copy(Path(__file__), root / "tests" / Path(__file__).name)
+            # kimi-k2.7-code raised this as a confirmed MAJOR and it does
+            # NOT reproduce: there is no tests/__init__.py today, this
+            # module imports nothing but the standard library, and
+            # planting an __init__.py in the real tree leaves the inner
+            # run passing, because the copied tree is a namespace
+            # package either way. Copied anyway, because the cost is one
+            # line and the day someone adds one is not the day to find
+            # out this test assumed otherwise.
+            package_marker = Path(__file__).parent / "__init__.py"
+            if package_marker.exists():
+                shutil.copy(package_marker, root / "tests" / "__init__.py")
+            surface = root / "skills" / "hanig-project" / "SKILL.md"
+            surface.write_text(surface.read_text() + planted)
+
+            done = subprocess.run(
+                [sys.executable, "-m", "unittest", "-v",
+                 "tests.%s.%s.%s" % (Path(__file__).stem,
+                                     type(self).__name__,
+                                     "test_declarations_do_not_contradict_"
+                                     "each_other")],
+                cwd=str(root), stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, universal_newlines=True)
+
+        self.assertEqual(
+            done.returncode, 0,
+            "a planted second copy failed the suite. It is a candidate for "
+            "a reader to judge, not a verdict: no separator rule "
+            "distinguishes a checklist from a sentence warning against "
+            "conflating the same topics.\n%s" % done.stdout)
+        self.assertIn(
+            "interview-topic candidates", done.stdout,
+            "the planted copy was neither reported nor failed on, so the "
+            "check is delivering nothing.\n%s" % done.stdout)
+        self.assertIn(
+            "SKILL.md", done.stdout.split("interview-topic candidates")[1],
+            "the report does not name the surface the candidate is on, "
+            "which is the one thing a reader needs to go look.\n%s"
+            % done.stdout)
+
+    def test_every_declaration_elaboration_mentions_its_subject(self):
+        """glm-5.3: the cadence declaration pointed at a reference that
+        contained no cadence content at all, so following the link for
+        guidance found a category list that omitted it.
+
+        A narrow check, not a general one: a reference named as a
+        declaration's elaboration must carry at least one line tied to
+        that declaration's id.
+        """
+        skill = SKILLS / "hanig-project"
+        with open(skill / "declarations.json") as handle:
+            entries = json.load(handle)["declarations"]
+        for entry in entries:
+            for relative in entry.get("references", ()):
+                path = skill / relative
+                with self.subTest(declaration=entry["id"], ref=relative):
+                    self.assertIn(
+                        "<!-- declaration: %s -->" % entry["id"],
+                        path.read_text(),
+                        "%s names %s as its elaboration, but that file ties "
+                        "no line to it" % (entry["id"], relative))
+
+    def test_normative_text_is_grammatical_where_it_was_not(self):
+        """kimi-k2.7-code found two noun-adjunct ambiguities.
+
+        "judgment inspection cannot settle" parses as a compound noun
+        rather than "judgment THAT inspection cannot settle", and "grants
+        a worker coordinator authority" as "a worker-coordinator role"
+        rather than "a worker the coordinator's authority". A normative
+        sentence that can be parsed two ways states two rules.
+        """
+        with open(SKILLS / "hanig-project" / "declarations.json") as handle:
+            declared = {entry["id"]: entry["normative_text"]
+                        for entry in json.load(handle)["declarations"]}
+        self.assertNotIn("judgment inspection cannot",
+                         declared["interview.judgment-only"])
+        self.assertNotIn("a worker coordinator authority",
+                         declared["capability.install-boundary"])
+        self.assertIn("coordinator's authority",
+                      declared["capability.install-boundary"])
 
 
 if __name__ == "__main__":
