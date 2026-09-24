@@ -38,6 +38,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -2758,6 +2759,11 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
                 unit_dir, u, dispatch_source=dispatch_source)
         if anchor_err:
             return None, anchor_err
+        # One warning point for cached/uncached sources and restored intents.
+        # Keep it outside their branches so every code snapshot is reported.
+        _warn_installed_skill_drift(
+            anchored_base["intent"].get("installed_skills"),
+            anchored_base["base"], u.get("id"))
     elif _requires_clean_workspace(u):
         anchor_err, anchored_base = _write_launch_record(unit_dir, u)
         if anchor_err:
@@ -3829,6 +3835,142 @@ def _dispatch_target_for_advance(u, cache):
     return cache[key]
 
 
+def _installed_skill_source_version(marker):
+    """Read a marker's claim, never installation or execution authority."""
+    fd = None
+    try:
+        fd = os.open(str(marker), os.O_RDONLY | os.O_NONBLOCK)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None, "marker is not a regular file"
+        with os.fdopen(fd, "rb") as stream:
+            fd = None
+            raw = stream.read(65537)
+        if len(raw) > 65536:
+            return None, "marker exceeds 65536 bytes"
+        versions = [line.partition("=")[2]
+                    for line in raw.decode("utf-8").splitlines()
+                    if line.startswith("source_version=")]
+        if len(versions) != 1 or not versions[0]:
+            return None, "marker needs one non-empty source_version"
+        return versions[0], None
+    except (OSError, UnicodeError) as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _installed_skill_snapshot(repo, base):
+    """Best-effort audit of ~/.agents/skills and ~/.claude/skills only.
+
+    These are available candidates, not evidence of which skill a worker
+    loads. Loader precedence, project/custom stores and later edits are not
+    observed. Keep each path and raw marker claim, including duplicate names.
+    A symlinked skill store holding a link install can yield the wrong sidecar
+    path (for example after relocation); record an advisory error instead of
+    a version and report it at dispatch. This does not certify installed bytes.
+    """
+    snapshot = {"skills": [], "errors": []}
+    resolved_versions = {}
+    try:
+        home = Path.home()
+    except (OSError, RuntimeError) as exc:
+        snapshot["errors"].append({"path": "~", "error": str(exc)})
+        return snapshot
+    for root in (home / ".agents" / "skills", home / ".claude" / "skills"):
+        try:
+            candidates = sorted(root.iterdir())
+        except FileNotFoundError as exc:
+            # An absent optional store is quiet. A dangling store symlink
+            # still exists as an entry and needs a visible audit error.
+            error = exc
+            try:
+                root.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as probe_error:
+                error = probe_error
+            snapshot["errors"].append({"path": str(root), "error": str(error)})
+            continue
+        except OSError as exc:
+            snapshot["errors"].append({"path": str(root), "error": str(exc)})
+            continue
+        for skill in candidates:
+            if not skill.name.startswith("hanig-"):
+                continue
+            try:
+                if not (skill / "SKILL.md").is_file():
+                    continue
+                marker = skill / ".installed-by-multi-agent-skills"
+                # Link installs keep provenance beside the destination. This
+                # mirrors the installer's default sidecar naming only; the
+                # recorded claim does not certify ownership or current bytes.
+                # A marker in the linked source describes that source copy,
+                # not this link installation; the sidecar takes precedence.
+                if skill.is_symlink():
+                    destination = skill.parent.resolve() / skill.name
+                    digest = hashlib.sha256(os.fsencode(str(destination)))
+                    marker = (destination.parent / ".multi-agent-skills-provenance"
+                              / f"{skill.name}-{digest.hexdigest()[:24]}.provenance")
+                version, error = _installed_skill_source_version(marker)
+            except (OSError, RuntimeError) as exc:
+                snapshot["errors"].append({"path": str(skill), "error": str(exc)})
+                continue
+            entry = {"skill": skill.name, "path": str(skill),
+                     "marker": str(marker), "source_version": version}
+            if error:
+                entry["error"] = error
+            # Keep the marker's spelling. Search the object namespace only:
+            # revision expressions can instead resolve a hash-named ref.
+            # Equality needs exactly one object, the full pinned base; an
+            # ambiguous or unavailable claim remains advisory uncertainty.
+            # Several skills commonly share one installed revision, so only
+            # resolve each distinct claim once in this dispatch snapshot.
+            if (version and version != base
+                    and re.fullmatch(r"[0-9a-fA-F]{4,64}", version)):
+                if version not in resolved_versions:
+                    rc, resolved, _ = _git(repo, "rev-parse",
+                                           "--disambiguate=" + version, timeout=5)
+                    resolved_versions[version] = (
+                        base if rc == 0 and resolved == base else None)
+                if resolved_versions[version] is not None:
+                    entry["resolved_commit"] = resolved_versions[version]
+            snapshot["skills"].append(entry)
+    return snapshot
+
+
+def _warn_installed_skill_drift(snapshot, base, uid):
+    """Report audit observations; never return an admission decision."""
+    observations = []
+    for entry in (snapshot or {}).get("skills", []):
+        version = entry["source_version"]
+        if entry.get("error"):
+            observations.append(
+                f"installed skill audit incomplete at {entry['path']!r}: "
+                f"marker={entry['marker']!r}; {entry['error']!r}.")
+        elif (version is not None and version != base
+                and entry.get("resolved_commit") != base):
+            observations.append(
+                f"installed skill drift check at {entry['path']!r}: "
+                f"source_version={version!r}; attempt base={base!r}. "
+                "Equality was not established.")
+    for error in (snapshot or {}).get("errors", []):
+        observations.append(
+            f"installed skill audit incomplete at {error['path']!r}: "
+            f"{error['error']!r}.")
+    for observation in observations:
+        try:
+            print(f"WARNING: unit {uid!r}: {observation} Only ~/.agents/skills "
+                  "and ~/.claude/skills are scanned; project/custom stores "
+                  "are not scanned; symlinked skill stores may hide "
+                  "link-install sidecars. Advisory only; dispatch continues.",
+                  file=sys.stderr, flush=True)
+        except (OSError, ValueError):
+            # A closed/broken diagnostic stream must not turn this audit
+            # warning into a new dispatch refusal. The snapshot persists.
+            pass
+
+
 def _capture_code_launch(unit_dir, u, dispatch_source=None):
     """Record immutable input to coordinator worktree creation.
 
@@ -3930,6 +4072,9 @@ def _capture_code_launch(unit_dir, u, dispatch_source=None):
         # compare exact expected bytes and restore the original seal without
         # trusting or laundering fields out of the file.
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        # Audit-only, captured before Paseo runs and persisted with the intent
+        # so recovery retains this observation instead of sampling a new one.
+        "installed_skills": _installed_skill_snapshot(repo, head),
     }
     return None, {"base": head, "intent": intent}
 
@@ -4235,6 +4380,10 @@ def _complete_code_launch(state, u, unit_dir, workspace, workspace_id=None,
         facts["repository_remote_raw"] = intent["repository_remote_raw"]
     if judgment_ref:
         facts["judgment_ref"] = judgment_ref
+    # Old intents have no observation to recover. Do not backfill them from
+    # today's installs or change their deterministic audit bytes.
+    if "installed_skills" in intent:
+        facts["installed_skills"] = intent["installed_skills"]
     seal, error = _write_code_launch_record(unit_dir, facts)
     if error or not seal:
         return error or "worktree launch record has no recoverable seal"
