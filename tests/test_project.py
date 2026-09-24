@@ -12,6 +12,7 @@ import json
 import os
 import re
 import signal
+import shlex
 import shutil
 import socket
 import subprocess
@@ -27,6 +28,8 @@ SCRIPTS = ROOT / "skills" / "hanig-project" / "scripts"
 SURVEY, TICKETS = SCRIPTS / "survey.py", SCRIPTS / "tickets.py"
 sys.path.insert(0, str(SCRIPTS))
 import tickets as T  # noqa: E402
+sys.path.insert(0, str(ROOT / "tests"))
+from fixture_processes import FixtureProcesses  # noqa: E402
 
 PLAN = {"name": "p", "units": [
     {"id": "a", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o.txt"],
@@ -68,6 +71,23 @@ def _kill_group_for_cleanup(pgid):
         os.kill(-pgid, signal.SIGKILL)
     except (PermissionError, ProcessLookupError):
         pass
+
+
+class _FixtureTestCase(unittest.TestCase):
+    @contextlib.contextmanager
+    def _fixture_directory(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        if not hasattr(self, "_fixture_scopes"):
+            self._fixture_scopes = {}
+        self._fixture_scopes[directory.name] = FixtureProcesses(
+            self, directory.name, _kill_group_for_cleanup)
+        # Keep PID files until all process cleanups and the guard have run,
+        # including when an assertion or a subprocess timeout exits this block.
+        yield directory.name
+
+    def _fixture_scope(self, directory):
+        return self._fixture_scopes[str(directory)]
 
 
 class TestProcessGroupCleanup(unittest.TestCase):
@@ -1116,7 +1136,7 @@ class TestTicketsFailClosed(unittest.TestCase):
         self.assertEqual(T.check(PLAN, T.draft(PLAN)), [])
 
 
-class TestRound2ProjectFindings(unittest.TestCase):
+class TestRound2ProjectFindings(_FixtureTestCase):
     """Round 2 of the pre-publication gate. Every test here is written to fail
     against the implementation it replaced, because a reviewer showed several
     of my earlier ones would not."""
@@ -1148,7 +1168,7 @@ class TestRound2ProjectFindings(unittest.TestCase):
         real finding. Hence the POSITIVE CONTROL below: if the filter cannot
         be made to fire at all, this test has proved nothing."""
         import subprocess as sp
-        with tempfile.TemporaryDirectory() as base:
+        with self._fixture_directory() as base:
             r, marker = self._repo_with_a_filter(base)
             self.assertTrue(marker.exists(),
                             "positive control failed: the filter never fired "
@@ -1179,7 +1199,10 @@ class TestRound2ProjectFindings(unittest.TestCase):
         sys.path.insert(0, str(SCRIPTS))
         import survey as S2
         t0 = _t.time()
-        rc, out, err = S2.run(["sh", "-c", "sleep 30"], timeout=2)
+        with self._fixture_directory() as d:
+            with self._fixture_scope(d).capture_popen():
+                rc, out, err = S2.run(
+                    ["sh", "-c", "exec sleep 30"], timeout=2)
         elapsed = _t.time() - t0
         self.assertLess(elapsed, 15, "the timeout did not apply")
         self.assertIn("timed out", err)
@@ -1207,7 +1230,7 @@ class TestRound2ProjectFindings(unittest.TestCase):
         full of files trips that instead and the test passes either way. My
         first version did exactly that and was vacuous, which the mutation
         check caught."""
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             r = Path(d) / "r"
             r.mkdir()
             sys.path.insert(0, str(SCRIPTS))
@@ -1276,7 +1299,7 @@ class TestRound2ProjectFindings(unittest.TestCase):
     def test_a_first_run_with_no_existing_draft_is_not_refused(self):
         """The fail-closed path must not fire when there is simply nothing
         there yet, which would block every first use."""
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             plan = Path(d) / "plan.json"
             plan.write_text(json.dumps(PLAN))
             r = run(TICKETS, "draft", str(plan))
@@ -1902,7 +1925,7 @@ class TestVendoredSkillsAreNotOursToDelete(unittest.TestCase):
             self.assertEqual(skills(positional), skills(flagged))
 
 
-class TestVendoredAgentBusLayoutIsExplicit(unittest.TestCase):
+class TestVendoredAgentBusLayoutIsExplicit(_FixtureTestCase):
     """ARC-272. The vendored skills name upstream's executable location, but
     this repository installs only skills and keeps bus in its checkout. The
     local documentation must leave an operator with a workflow that runs."""
@@ -1954,7 +1977,7 @@ class TestVendoredAgentBusLayoutIsExplicit(unittest.TestCase):
                     entries.append((rel, "dir", mode, None))
             return entries
 
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             sandbox = Path(d)
             checkout = sandbox / "checkout"
             (checkout / "bin").mkdir(parents=True)
@@ -2062,7 +2085,7 @@ class TestVendoredAgentBusLayoutIsExplicit(unittest.TestCase):
             self.assertIsNotNone(match, stderr)
             return Path(match.group(1))
 
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             sandbox = Path(d)
             fake_home = sandbox / "home"
             outside = sandbox / "outside"
@@ -2089,12 +2112,12 @@ class TestVendoredAgentBusLayoutIsExplicit(unittest.TestCase):
             self.assertFalse(printed_path(failed.stderr).exists())
             self.assertEqual(list(scratch.iterdir()), [])
 
-            fake_bus.write_text(
+            fake_bus.write_text(self._fixture_scope(d).shell_script(
                 "#!/bin/sh\n"
                 "trap 'exit 143' HUP INT TERM\n"
-                "while :; do sleep 1; done\n")
+                "while :; do sleep 1; done\n"))
             fake_bus.chmod(0o700)
-            proc = subprocess.Popen(
+            proc = self._fixture_scope(d).popen(
                 ["sh", "-c", documented], cwd=outside, env=env,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 stdin=subprocess.DEVNULL, start_new_session=True)
@@ -2131,7 +2154,7 @@ class TestVendoredAgentBusLayoutIsExplicit(unittest.TestCase):
                 entries.append((rel, mode, value))
             return entries
 
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             sandbox = Path(d)
             fake_home = sandbox / "home"
             outside = sandbox / "outside"
@@ -2653,7 +2676,7 @@ class TestTheSurveySaysWhoMayUseAPartition(unittest.TestCase):
             self.assertEqual(data["scheduler"], {"present": False})
 
 
-class TestTheWalkCannotBeHeldOpenByASyscall(unittest.TestCase):
+class TestTheWalkCannotBeHeldOpenByASyscall(_FixtureTestCase):
     """WALK_SECONDS was a COOPERATIVE bound: `deadline = time.time() +
     WALK_SECONDS`, checked in the `while stack` loop between entries. When
     os.scandir blocks inside opendir() the loop never reaches its own check,
@@ -2703,7 +2726,7 @@ class TestTheWalkCannotBeHeldOpenByASyscall(unittest.TestCase):
         import time as _t
         sys.path.insert(0, str(SCRIPTS))
         import survey as S2
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             root, site = self._hostile_tree(d)
             # The kill deadline is shortened rather than waited out: what is
             # under test is that the walk returns when the deadline passes,
@@ -2714,7 +2737,8 @@ class TestTheWalkCannotBeHeldOpenByASyscall(unittest.TestCase):
             os.environ["PYTHONPATH"] = str(site)
             try:
                 t0 = _t.time()
-                out = S2.repo(str(root))
+                with self._fixture_scope(d).capture_popen():
+                    out = S2.repo(str(root))
                 elapsed = _t.time() - t0
             finally:
                 S2.WALK_KILL_SECONDS, S2.REAP_SECONDS = keep[0], keep[1]
@@ -2747,12 +2771,12 @@ class TestTheWalkCannotBeHeldOpenByASyscall(unittest.TestCase):
         import time as _t
         sys.path.insert(0, str(SCRIPTS))
         import survey as S2
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             root, site = self._hostile_tree(d)
             env = dict(os.environ)
             env["PYTHONPATH"] = str(site)
             t0 = _t.time()
-            proc = subprocess.Popen(
+            proc = self._fixture_scope(d).popen(
                 [sys.executable, str(SURVEY), "--repo", str(root)],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 stdin=subprocess.DEVNULL, env=env, start_new_session=True)
@@ -2760,9 +2784,6 @@ class TestTheWalkCannotBeHeldOpenByASyscall(unittest.TestCase):
                 out, err = proc.communicate(
                     timeout=S2.WALK_KILL_SECONDS + 90)
             except subprocess.TimeoutExpired:
-                proc.poll()  # Reap our direct child if it has already exited.
-                _kill_group_for_cleanup(proc.pid)
-                proc.communicate()
                 self.fail("the survey never returned: a blocked opendir is "
                           "still able to hang it")
             elapsed = _t.time() - t0
@@ -2782,7 +2803,7 @@ class TestTheWalkCannotBeHeldOpenByASyscall(unittest.TestCase):
         meaning THERE WAS TOO MUCH: a plan author reads a capped count as a
         big repo and a stuck one as a host with a filesystem that does not
         answer, and does something different about each."""
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             r = Path(d) / "r"
             r.mkdir()
             sys.path.insert(0, str(SCRIPTS))
@@ -2802,7 +2823,7 @@ class TestTheWalkCannotBeHeldOpenByASyscall(unittest.TestCase):
     def test_a_walk_that_finished_says_so_and_invents_no_reason(self):
         """The cries-wolf direction: an ordinary repo must not come back
         carrying a warning, or the warning stops being read."""
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             (Path(d) / "x.py").write_text("print(1)\n")
             res = run(SURVEY, "--repo", d, "--json")
             data = json.loads(res.stdout)
@@ -2858,7 +2879,7 @@ class TestTheWalkCannotBeHeldOpenByASyscall(unittest.TestCase):
         must not claim a bound it no longer has."""
         sys.path.insert(0, str(SCRIPTS))
         import survey as S2
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             (Path(d) / "x.py").write_text("print(1)\n")
             keep = sys.executable
             try:
@@ -3316,7 +3337,7 @@ def _closed_port():
     return "127.0.0.1:%d" % port
 
 
-class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
+class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(_FixtureTestCase):
     """ARC-265. Paseo was installed, its daemon was answering on
     127.0.0.1:6767 and ~/.paseo was populated -- and `command -v paseo` found
     nothing, because the macOS CLI lives inside the app bundle. swarm.py gates
@@ -3354,7 +3375,7 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
         for name in self.TOOLS:
             if name in overrides:
                 p = b / name
-                p.write_text(overrides[name])
+                p.write_text(self._fixture_scope(d).shell_script(overrides[name]))
                 p.chmod(0o755)
                 continue
             real = shutil.which(name)
@@ -3362,7 +3383,7 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
                 os.symlink(real, b / name)
         if python and "python3" in overrides:
             p = b / "python3"
-            p.write_text(overrides["python3"])
+            p.write_text(self._fixture_scope(d).shell_script(overrides["python3"]))
             p.chmod(0o755)
         elif python:
             os.symlink(sys.executable, b / "python3")
@@ -3381,8 +3402,11 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
         argv = ["sh", str(DOCTOR)]
         if prefix:
             argv.extend(["--prefix", str(prefix)])
-        r = subprocess.run(argv, capture_output=True,
-                           text=True, cwd=ROOT, env=env, timeout=120)
+        proc = self._fixture_scope(d).popen(
+            argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, cwd=ROOT, env=env, start_new_session=True)
+        out, err = proc.communicate(timeout=120)
+        r = subprocess.CompletedProcess(argv, proc.returncode, out, err)
         self.assertIn("=== PREREQUISITES ===", r.stdout, r.stderr)
         return r
 
@@ -3405,7 +3429,7 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
     # --- the four states, which are two facts and not one -------------------
 
     def test_the_cli_on_PATH_is_reported_as_the_path_it_was_found_at(self):
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             with _answering_daemon() as addr:
                 out = self._doctor(d, cli=True, listen=addr).stdout
             self.assertEqual(self._field(out, "paseo"),
@@ -3416,7 +3440,7 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
         """The reported defect. A reinstall does not fix this and a symlink
         does, so the report has to name the symlink rather than leave a reader
         to conclude "not installed" from a CLI that is missing."""
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             with _answering_daemon() as addr:
                 out = self._doctor(d, cli=False, listen=addr).stdout
             sec = self._section(out)
@@ -3428,7 +3452,7 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
             self.assertTrue("ln -s" in sec or "app bundle" in sec, sec)
 
     def test_neither_the_CLI_nor_the_daemon_is_absence_not_ignorance(self):
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             out = self._doctor(d, cli=False).stdout
             daemon = self._field(out, "daemon")
             self.assertIn("not running", daemon)
@@ -3441,7 +3465,7 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
         it always says which look failed. Reported as absent, this sends
         someone to install what they have -- the errand ARC-244, ARC-245 and
         ARC-251 each closed somewhere else."""
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             out = self._doctor(d, cli=False, python=False).stdout
             daemon = self._field(out, "daemon")
             self.assertIn("COULD NOT DETERMINE", daemon)
@@ -3467,7 +3491,7 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
     def test_timed_out_health_output_cannot_report_the_daemon_up(self):
         """Retained output is evidence only when the child answered. A probe
         can print a plausible success prefix and then exceed its deadline."""
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             marker = Path(d) / "health-plausible-ran"
             stub = self._plausible_python_then_hang(
                 marker, "socket.create_connection",
@@ -3483,7 +3507,7 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
     def test_the_CLI_and_the_daemon_are_never_collapsed_into_one_verdict(self):
         """A live daemon is what made the old report confident. It must not
         put a path on the CLI line."""
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             with _answering_daemon() as addr:
                 out = self._doctor(d, cli=False, listen=addr).stdout
             self.assertNotRegex(self._field(out, "paseo"), r"^/")
@@ -3491,7 +3515,7 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
     # --- the probe is bounded, because doctor is what you run when it hangs --
 
     def test_a_listener_that_never_answers_does_not_hang_doctor(self):
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             with _silent_listener() as addr:
                 start = time.monotonic()
                 out = self._doctor(d, cli=True, listen=addr).stdout
@@ -3533,7 +3557,7 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
         bound anything. Poison all three: doctor must finish, and none may be
         invoked. The hanging python test below proves the replacement deadline
         still runs rather than merely avoiding these helpers."""
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             marker = Path(d) / "unbounded-helper-ran"
             poison = ("#!/bin/sh\n"
                       "printf 'invoked' >%s\n"
@@ -3551,7 +3575,7 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
         """An unbounded drain-until-EAGAIN loop can stay inside drain forever
         when several writers keep the pipe readable. Each drain quantum must
         yield to the monotonic state machine while retaining the 64 KiB tail."""
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             script = Path(d) / "noisy"
             pidfile = Path(d) / "noisy.pid"
             script.write_text(
@@ -3562,8 +3586,10 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
                 "writer & writer & writer & writer &\n"
                 "writer & writer & writer & writer &\n"
                 "wait\n")
+            script.write_text(self._fixture_scope(d).shell_script(
+                script.read_text()))
             script.chmod(0o755)
-            proc = subprocess.Popen(
+            proc = self._fixture_scope(d).popen(
                 [shutil.which("perl"), "-e", self._supervisor_source(),
                  "1", "1", str(script)],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -3579,14 +3605,6 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
                 self.assertEqual(set(lines[2]), {"0"})
             except subprocess.TimeoutExpired:
                 self.fail("continuous output starved the monotonic deadline")
-            finally:
-                running = proc.poll() is None  # Reap only the child we own.
-                if pidfile.exists():
-                    child = int(pidfile.read_text())
-                    _kill_group_for_cleanup(child)
-                if running:
-                    _kill_group_for_cleanup(proc.pid)
-                    proc.communicate()
 
     def test_group_setup_and_wait_errors_fail_closed(self):
         """This is structural/code-inspection coverage: setpgid/waitpid
@@ -3735,33 +3753,29 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
         group. The first fix killed bash alone and left that child behind.
         Group cleanup is best-effort (a hostile setsid escape is out of scope),
         but the ordinary case is both useful and runtime-testable."""
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             pidfile = Path(d) / "profile-child.pid"
             bash = ("#!/bin/sh\n"
-                    "/bin/sleep 600 &\n"
+                    "%s 600 &\n"
                     "printf '%s\\n' \"$!\" >%s\n"
                     "trap '' TERM\n"
-                    "while :; do :; done\n") % ("%s", pidfile)
+                    "while :; do :; done\n") % (
+                        shlex.quote(str(self._fixture_scope(d).sleep_command())),
+                        "%s", pidfile)
             r = self._doctor(
                 d, claude=False, overrides={"bash": bash})
             self.assertTrue(pidfile.exists(),
                             "the descendant-producing profile did not run")
             pid = int(pidfile.read_text())
-            try:
-                deadline = time.monotonic() + 5
-                while time.monotonic() < deadline:
-                    try:
-                        os.kill(pid, 0)
-                    except ProcessLookupError:
-                        break
-                    time.sleep(0.05)
-                else:
-                    self.fail("login-profile descendant survived timeout")
-            finally:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
                 try:
-                    os.kill(pid, signal.SIGKILL)
+                    os.kill(pid, 0)
                 except ProcessLookupError:
-                    pass
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("login-profile descendant survived timeout")
             self.assertIn("login shell timed out", r.stdout)
 
     def test_timeout_waits_for_grace_then_kills_group_after_parent_exits(self):
@@ -3769,7 +3783,7 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
         when TERM arrives while its same-group child ignores TERM. Reaping the
         shell must not turn TIMED_OUT back into completion or skip the KILL at
         the one absolute grace deadline."""
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             pidfile = Path(d) / "term-ignoring-child.pid"
             bash = ("#!/bin/sh\n"
                     "(trap '' TERM; while :; do :; done) &\n"
@@ -3783,21 +3797,15 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
             self.assertTrue(pidfile.exists(),
                             "the TERM-ignoring group child did not run")
             pid = int(pidfile.read_text())
-            try:
-                deadline = time.monotonic() + 5
-                while time.monotonic() < deadline:
-                    try:
-                        os.kill(pid, 0)
-                    except ProcessLookupError:
-                        break
-                    time.sleep(0.05)
-                else:
-                    self.fail("group child survived the grace-deadline KILL")
-            finally:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
                 try:
-                    os.kill(pid, signal.SIGKILL)
+                    os.kill(pid, 0)
                 except ProcessLookupError:
-                    pass
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("group child survived the grace-deadline KILL")
             self.assertGreaterEqual(
                 elapsed, 4.5, "supervisor returned when the parent was reaped")
             self.assertLess(elapsed, 15, "grace deadline did not bound timeout")
@@ -3808,7 +3816,7 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
         """After TERM the direct parent exits while a same-group child ignores
         it. The parent must remain an unreaped zombie until the absolute grace
         deadline, reserving the PID/PGID that the final negative-PID KILL uses."""
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             leader_file = Path(d) / "leader.pid"
             child_file = Path(d) / "child.pid"
             script = Path(d) / "term-parent"
@@ -3819,48 +3827,42 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
                 "printf '%s' \"$$\" >" + str(leader_file) + "\n"
                 "trap 'exit 0' TERM\n"
                 "while :; do :; done\n")
+            script.write_text(self._fixture_scope(d).shell_script(
+                script.read_text()))
             script.chmod(0o755)
             started = time.monotonic()
-            proc = subprocess.Popen(
+            proc = self._fixture_scope(d).popen(
                 [shutil.which("perl"), "-e", self._supervisor_source(),
                  "1", "3", str(script)], stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, text=True, start_new_session=True)
             leader = child = None
-            try:
-                deadline = started + 3
-                while time.monotonic() < deadline:
-                    if leader_file.exists() and child_file.exists():
-                        leader = int(leader_file.read_text())
-                        child = int(child_file.read_text())
-                        state = subprocess.run(
-                            ["ps", "-o", "stat=", "-p", str(leader)],
-                            capture_output=True, text=True).stdout.strip()
-                        if state.startswith("Z"):
-                            break
-                    time.sleep(0.02)
-                else:
-                    self.fail("TERM-exited group leader was reaped before grace")
-                self.assertLess(time.monotonic() - started, 3.5)
-                out, err = proc.communicate(timeout=4)
-                self.assertEqual(proc.returncode, 0, err)
-                self.assertEqual(out.splitlines()[:2], ["timeout", "124"])
-                self.assertGreaterEqual(time.monotonic() - started, 3.5)
-                gone = time.monotonic() + 3
-                while time.monotonic() < gone:
-                    try:
-                        os.kill(child, 0)
-                    except ProcessLookupError:
+            deadline = started + 3
+            while time.monotonic() < deadline:
+                if leader_file.exists() and child_file.exists():
+                    leader = int(leader_file.read_text())
+                    child = int(child_file.read_text())
+                    state = subprocess.run(
+                        ["ps", "-o", "stat=", "-p", str(leader)],
+                        capture_output=True, text=True).stdout.strip()
+                    if state.startswith("Z"):
                         break
-                    time.sleep(0.02)
-                else:
-                    self.fail("TERM-ignoring group child survived final KILL")
-            finally:
-                running = proc.poll() is None
-                if leader is not None:
-                    _kill_group_for_cleanup(leader)
-                if running:
-                    _kill_group_for_cleanup(proc.pid)
-                    proc.communicate()
+                time.sleep(0.02)
+            else:
+                self.fail("TERM-exited group leader was reaped before grace")
+            self.assertLess(time.monotonic() - started, 3.5)
+            out, err = proc.communicate(timeout=4)
+            self.assertEqual(proc.returncode, 0, err)
+            self.assertEqual(out.splitlines()[:2], ["timeout", "124"])
+            self.assertGreaterEqual(time.monotonic() - started, 3.5)
+            gone = time.monotonic() + 3
+            while time.monotonic() < gone:
+                try:
+                    os.kill(child, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail("TERM-ignoring group child survived final KILL")
 
     def test_interrupt_signals_clean_up_the_isolated_probe_group(self):
         """The supervisor receives the interruption, not its isolated probe.
@@ -3869,7 +3871,7 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
         for signum, signame in ((signal.SIGHUP, "HUP"),
                                 (signal.SIGINT, "INT"),
                                 (signal.SIGTERM, "TERM")):
-            with self.subTest(signal=signame), tempfile.TemporaryDirectory() as d:
+            with self.subTest(signal=signame), self._fixture_directory() as d:
                 leader_file = Path(d) / "leader.pid"
                 child_file = Path(d) / "child.pid"
                 script = Path(d) / "ignore-signals"
@@ -3880,53 +3882,47 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
                     "printf '%s' \"$!\" >" + str(child_file) + "\n"
                     "printf '%s' \"$$\" >" + str(leader_file) + "\n"
                     "while :; do :; done\n")
+                script.write_text(self._fixture_scope(d).shell_script(
+                    script.read_text()))
                 script.chmod(0o755)
-                proc = subprocess.Popen(
+                proc = self._fixture_scope(d).popen(
                     [shutil.which("perl"), "-e", self._supervisor_source(),
                      "30", "2", str(script)], stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE, text=True, start_new_session=True)
                 leader = child = None
-                try:
-                    deadline = time.monotonic() + 3
-                    while time.monotonic() < deadline:
-                        if leader_file.exists() and child_file.exists():
-                            leader = int(leader_file.read_text())
-                            child = int(child_file.read_text())
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    if leader_file.exists() and child_file.exists():
+                        leader = int(leader_file.read_text())
+                        child = int(child_file.read_text())
+                        break
+                    time.sleep(0.02)
+                else:
+                    self.fail("signal-ignoring probe group did not start")
+                started = time.monotonic()
+                # Repeated delivery must not move the first interruption's
+                # absolute cleanup deadline. An implementation that resets
+                # it on every signal takes well over this test's bound.
+                for _ in range(5):
+                    os.kill(proc.pid, signum)
+                    time.sleep(0.3)
+                out, err = proc.communicate(timeout=3)
+                self.assertLess(time.monotonic() - started, 2.8)
+                self.assertEqual(proc.returncode, 0, err)
+                self.assertEqual(out.splitlines()[:2],
+                                 ["supervisor-error", "127"])
+                self.assertIn("interrupted by SIG" + signame, out)
+                for pid in (leader, child):
+                    gone = time.monotonic() + 3
+                    while time.monotonic() < gone:
+                        try:
+                            os.kill(pid, 0)
+                        except ProcessLookupError:
                             break
                         time.sleep(0.02)
                     else:
-                        self.fail("signal-ignoring probe group did not start")
-                    started = time.monotonic()
-                    # Repeated delivery must not move the first interruption's
-                    # absolute cleanup deadline. An implementation that resets
-                    # it on every signal takes well over this test's bound.
-                    for _ in range(5):
-                        os.kill(proc.pid, signum)
-                        time.sleep(0.3)
-                    out, err = proc.communicate(timeout=3)
-                    self.assertLess(time.monotonic() - started, 2.8)
-                    self.assertEqual(proc.returncode, 0, err)
-                    self.assertEqual(out.splitlines()[:2],
-                                     ["supervisor-error", "127"])
-                    self.assertIn("interrupted by SIG" + signame, out)
-                    for pid in (leader, child):
-                        gone = time.monotonic() + 3
-                        while time.monotonic() < gone:
-                            try:
-                                os.kill(pid, 0)
-                            except ProcessLookupError:
-                                break
-                            time.sleep(0.02)
-                        else:
-                            self.fail("%s left probe pid %s alive" %
-                                      (signame, pid))
-                finally:
-                    running = proc.poll() is None
-                    if leader is not None:
-                        _kill_group_for_cleanup(leader)
-                    if running:
-                        _kill_group_for_cleanup(proc.pid)
-                        proc.communicate()
+                        self.fail("%s left probe pid %s alive" %
+                                  (signame, pid))
 
     def test_timeout_transition_preserves_armed_cleanup_deadline(self):
         """Execute the shipped timeout transition with deterministic state.
@@ -3978,8 +3974,9 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
         observer pauses for five seconds.  No elapsed bound judges the product;
         the deterministic transition test separately proves deadline choice.
         """
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             script = Path(d) / "ignore-term"
+            witness = self._fixture_scope(d).sleep_command()
             read_fd, write_fd = os.pipe()
             barrier_read, barrier_write = os.pipe()
             leader = None
@@ -3987,14 +3984,16 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
             try:
                 script.write_text(
                     "#!/bin/sh\n"
-                    "trap '' HUP INT TERM\n"
+                    "trap '' HUP INT TERM\n" +
                     # This alone exceeded the rejected readiness precondition.
-                    "/bin/sleep 3.2\n"
+                    shlex.quote(str(witness)) + " 3.2\n"
                     "(trap '' HUP INT TERM; "
                     "printf 'W\\n' >&" + str(write_fd) + "; "
-                    "exec /bin/sleep 600) &\n"
+                    "exec " + shlex.quote(str(witness)) + " 600) &\n"
                     "printf 'L %s\\n' \"$$\" >&" + str(write_fd) + "\n"
-                    "exec /bin/sleep 600\n")
+                    "exec " + shlex.quote(str(witness)) + " 600\n")
+                script.write_text(self._fixture_scope(d).shell_script(
+                    script.read_text()))
                 script.chmod(0o755)
 
                 source = self._supervisor_source()
@@ -4015,7 +4014,7 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
                 source = source.replace(loop_anchor, barrier + loop_anchor)
                 env = os.environ.copy()
                 env["HANIG_TEST_BARRIER_FD"] = str(barrier_read)
-                proc = subprocess.Popen(
+                proc = self._fixture_scope(d).popen(
                     [shutil.which("perl"), "-e", source,
                      "3", "2", str(script)],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -4053,28 +4052,21 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
                     os.read(read_fd, 1), b"",
                     "negative-PGID KILL did not terminate the group witness")
             finally:
-                try:
-                    running = proc is not None and proc.poll() is None
-                    if leader is not None:
-                        _kill_group_for_cleanup(leader)
-                    if running:
-                        _kill_group_for_cleanup(proc.pid)
-                        proc.communicate()
-                finally:
-                    os.close(read_fd)
-                    if write_fd is not None:
-                        os.close(write_fd)
-                    if barrier_read is not None:
-                        os.close(barrier_read)
-                    if barrier_write is not None:
-                        os.close(barrier_write)
+                os.close(read_fd)
+                if write_fd is not None:
+                    os.close(write_fd)
+                if barrier_read is not None:
+                    os.close(barrier_read)
+                if barrier_write is not None:
+                    os.close(barrier_write)
 
     def test_timeout_does_not_wait_for_a_descendant_that_calls_setsid(self):
         """Arbitrary-grandchild quiescence is outside the declared boundary.
         A child that deliberately leaves the dedicated group can survive, but
         it cannot extend the supervisor's absolute grace deadline."""
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             pidfile = Path(d) / "setsid-child.pid"
+            self._fixture_scope(d).record_pidfile(pidfile)
             code = ("use POSIX qw(setsid); setsid(); "
                     "open(my $f, q(>), q(%s)) or die $!; "
                     "print $f $$; close $f; sleep 600") % pidfile
@@ -4092,11 +4084,6 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(unittest.TestCase):
                 os.kill(pid, 0)
             except ProcessLookupError:
                 self.fail("the supervisor claimed quiescence outside its group")
-            finally:
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
             self.assertLess(elapsed, 15, "a setsid escape held doctor open")
             self.assertIn("login shell timed out", r.stdout)
 
@@ -4112,7 +4099,7 @@ exec %s "$@"
 """ % (when, marker, delegate)
 
     def test_a_hung_python_version_is_timeout_not_absence(self):
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             marker = Path(d) / "python-version-ran"
             stub = self._hanging_probe(
                 marker, '[ "$1" = --version ]', sys.executable)
@@ -4122,7 +4109,7 @@ exec %s "$@"
             self.assertNotIn("python3: ABSENT", out)
 
     def test_a_hung_git_version_is_timeout_not_absence(self):
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             marker = Path(d) / "git-version-ran"
             stub = self._hanging_probe(
                 marker, '[ "$1" = --version ]', shutil.which("git"))
@@ -4132,7 +4119,7 @@ exec %s "$@"
             self.assertNotIn("git: ABSENT", out)
 
     def test_a_hung_login_shell_is_unknown_not_claude_absence(self):
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             marker = Path(d) / "login-shell-ran"
             stub = self._hanging_probe(marker, "true", shutil.which("bash"))
             out = self._doctor(
@@ -4143,7 +4130,7 @@ exec %s "$@"
             self.assertNotIn("claude: ABSENT", out)
 
     def test_the_bounded_login_fallback_still_finds_cluster_claude(self):
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             bash = """#!/bin/sh
 printf 'profile chatter that is not the answer\n'
 printf 'found:/cluster/profile/bin/claude\n'
@@ -4154,7 +4141,7 @@ printf 'found:/cluster/profile/bin/claude\n'
                 "claude: /cluster/profile/bin/claude (login shell only)", out)
 
     def test_a_successful_silent_compiler_is_an_answer_not_a_timeout(self):
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             prefix = Path(d) / "skills"
             script = prefix / "example" / "scripts" / "ok.py"
             script.parent.mkdir(parents=True)
@@ -4165,7 +4152,7 @@ printf 'found:/cluster/profile/bin/claude\n'
             self.assertEqual(r.returncode, 0, r.stdout)
 
     def test_a_nonzero_compiler_is_a_syntax_failure_not_a_timeout(self):
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             prefix = Path(d) / "skills"
             script = prefix / "example" / "scripts" / "bad.py"
             script.parent.mkdir(parents=True)
@@ -4179,7 +4166,7 @@ printf 'found:/cluster/profile/bin/claude\n'
         """The public deadline is a classification boundary, not a claim the
         valid work would never finish. Slow valid work is indeterminate and
         makes doctor nonzero; it is neither absent nor a syntax failure."""
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             marker = Path(d) / "compiler-ran"
             prefix = Path(d) / "skills"
             script = prefix / "example" / "scripts" / "ok.py"
@@ -4208,7 +4195,7 @@ printf 'found:/cluster/profile/bin/claude\n'
     def test_timed_out_registry_output_cannot_report_a_model_count(self):
         """A plausible retained count from a child that never completed is
         indeterminate, not an answered registry inspection."""
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             marker = Path(d) / "registry-plausible-ran"
             home = Path(d) / "home"
             reg = self._registry(home / ".agent-bus" / "models.json")
@@ -4224,7 +4211,7 @@ printf 'found:/cluster/profile/bin/claude\n'
             self.assertNotIn("999 models", field)
 
     def test_a_present_registry_is_reported_with_what_is_in_it(self):
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             home = Path(d) / "home"
             reg = self._registry(home / ".agent-bus" / "models.json")
             out = self._doctor(d, cli=True, home=home).stdout
@@ -4238,7 +4225,7 @@ printf 'found:/cluster/profile/bin/claude\n'
         --json` to route, and the file that belongs there is in this
         checkout. Saying only "missing" would leave the reader to find that
         out."""
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             out = self._doctor(d, cli=True).stdout
             sec, field = self._section(out), self._field(out, "models registry")
             self.assertIn("NOT PRESENT", field)
@@ -4249,7 +4236,7 @@ printf 'found:/cluster/profile/bin/claude\n'
     def test_an_unreadable_registry_is_unknown_and_not_missing(self):
         if os.geteuid() == 0:
             self.skipTest("root reads everything, so nothing is unreadable")
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             home = Path(d) / "home"
             reg = self._registry(home / ".agent-bus" / "models.json")
             reg.chmod(0o000)
@@ -4263,7 +4250,7 @@ printf 'found:/cluster/profile/bin/claude\n'
 
     def test_a_registry_that_will_not_parse_is_not_reported_as_working(self):
         """Doctor and bus both reject corruption without calling it absent."""
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             home = Path(d) / "home"
             self._registry(home / ".agent-bus" / "models.json", "{oops")
             out = self._doctor(d, cli=True, home=home).stdout
@@ -4273,7 +4260,7 @@ printf 'found:/cluster/profile/bin/claude\n'
 
     def test_an_empty_registry_is_unusable_not_healthy(self):
         """ARC-270: doctor must agree when bus models cannot route."""
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             home = Path(d) / "home"
             self._registry(home / ".agent-bus" / "models.json",
                            json.dumps({"models": []}))
@@ -4285,7 +4272,7 @@ printf 'found:/cluster/profile/bin/claude\n'
 
     def test_an_invalid_model_entry_is_unusable_not_counted(self):
         """The diagnostic and routing command share the entry contract."""
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             home = Path(d) / "home"
             document = {"models": [{"id": "test/model", "modalities": "text"}]}
             self._registry(home / ".agent-bus" / "models.json",
@@ -4299,7 +4286,7 @@ printf 'found:/cluster/profile/bin/claude\n'
     def test_the_registry_is_looked_for_where_bus_would_look_for_it(self):
         """bin/bus honours AGENT_BUS_HOME, so a report about ~/.agent-bus on a
         host that sets it would be a fact about a path nothing reads."""
-        with tempfile.TemporaryDirectory() as d:
+        with self._fixture_directory() as d:
             elsewhere = Path(d) / "bus-elsewhere"
             reg = self._registry(elsewhere / "models.json")
             field = self._field(self._doctor(d, cli=True,
