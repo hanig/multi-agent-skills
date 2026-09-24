@@ -222,12 +222,12 @@ def current_intent(state_dir, binding, root, repair=True):
         abandonment_path = state_dir / ("merge-abandonment-" + operation_id + ".json")
         intent = read_object(path) if path.exists() else None
         if intent is not None and (
-                intent.get("operation_id") != operation_id
-                or intent.get("binding") != binding or intent.get("root") != root):
+                intent.get("binding") != binding or intent.get("root") != root):
             raise Refusal("durable merge intent conflicts with current authority/root")
         if not abandonment_path.exists():
-            if intent is not None and intent.get("phase") not in (
-                    "merge_requested", "merged", "receipt_recorded"):
+            # Legacy metadata never gated ordinary MERGED reconciliation.
+            # Only our new resolution marker requires a companion record.
+            if intent is not None and intent.get("phase") == "resolved_by_abandonment":
                 raise Refusal("merge intent has no valid resolution record")
             return operation_id, path, intent
         record = read_object(abandonment_path)
@@ -253,17 +253,17 @@ def current_intent(state_dir, binding, root, repair=True):
             (operation_id + ":after-abandonment").encode()).hexdigest()
 
 
-def abandon(args, intent_path, intent, pr):
+def abandon(args, intent_path, intent, pr, operation_id):
     record_path = intent_path.with_name(
-        "merge-abandonment-" + intent["operation_id"] + ".json")
-    record = {"schema_version": 1, "operation_id": intent["operation_id"],
+        "merge-abandonment-" + operation_id + ".json")
+    record = {"schema_version": 1, "operation_id": operation_id,
               "intent": intent, "approver": args.approver, "reason": args.reason,
               "observed_at": datetime.now(timezone.utc).isoformat(), "observed_pr": pr}
     durable_write(record_path, record)
     resolved = dict(intent, phase="resolved_by_abandonment", abandonment=record_path.name)
     durable_write(intent_path, resolved)
     print("Abandoned merge intent {}; record: {}. No merge or advance ran.".format(
-        intent["operation_id"], record_path))
+        operation_id, record_path))
 
 
 def reconcile(args, plan):
@@ -304,7 +304,7 @@ def reconcile(args, plan):
     if args.abandon_intent and pr["state"] == "OPEN":
         if intent["phase"] != "merge_requested":
             raise Refusal("cannot abandon an intent that already observed a merge")
-        abandon(args, intent_path, intent, pr)
+        abandon(args, intent_path, intent, pr, operation_id)
         return None
     if pr["state"] == "OPEN":
         if intent:
@@ -360,7 +360,8 @@ def reconcile(args, plan):
     if intent is None:
         intent = {"schema_version": 1, "operation_id": operation_id,
                   "binding": binding, "root": root}
-    intent.update({"phase": "merged", "merged_as": merged, "target_commit": target,
+    intent.update({"operation_id": operation_id,
+                   "phase": "merged", "merged_as": merged, "target_commit": target,
                    "reconciliation": observation})
     durable_write(intent_path, intent)
     expected = {"unit": args.unit, "repo": binding["repo"], "pr": url,

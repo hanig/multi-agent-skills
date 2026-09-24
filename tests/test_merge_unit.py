@@ -783,6 +783,62 @@ class TestMergeUnit(unittest.TestCase):
         self.assertIn("no valid resolution record", result.stderr)
         self.assertEqual(len(self.calls(["pr", "merge"])), 1)
 
+    def test_legacy_intent_metadata_does_not_block_merged_reconciliation(self):
+        intent = self.leave_transport_failure()
+        path = self.state_dir / ("merge-unit-" + intent["operation_id"] + ".json")
+        for field, value in (("phase", None), ("phase", "submitted"),
+                             ("phase", "absent"), ("operation_id", "absent"),
+                             ("operation_id", "older-metadata")):
+            with self.subTest(field=field, value=value):
+                legacy = dict(intent, **{field: value})
+                if value == "absent":
+                    del legacy[field]
+                path.write_text(json.dumps(legacy))
+                self.forge["pr"].update(state="MERGED", mergeCommit={"oid": self.merged})
+                self.save()
+                receipt_path = self.state_dir / S.MERGE_RECEIPTS
+                if receipt_path.exists():
+                    receipt_path.unlink()
+                result = self.invoke()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(len(self.calls(["pr", "merge"])), 1)
+                self.assertEqual(self.receipts()[0]["head"], self.head)
+                self.assertEqual(self.intent()["phase"], "receipt_recorded")
+                self.assertEqual(self.intent()["operation_id"], intent["operation_id"])
+                self.assertEqual(self.abandonment_records(), [])
+
+    def test_legacy_intent_metadata_does_not_allow_an_open_request_to_repeat(self):
+        intent = self.leave_transport_failure()
+        path = self.state_dir / ("merge-unit-" + intent["operation_id"] + ".json")
+        for field in ("phase", "operation_id"):
+            with self.subTest(field=field):
+                legacy = dict(intent)
+                del legacy[field]
+                path.write_text(json.dumps(legacy))
+                result = self.invoke()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("unresolved outcome", result.stderr)
+                self.assertEqual(len(self.calls(["pr", "merge"])), 1)
+                self.assertEqual(self.receipts(), [])
+
+    def test_abandon_uses_binding_identity_instead_of_legacy_id_metadata(self):
+        intent = self.leave_transport_failure()
+        legacy = dict(intent)
+        del legacy["operation_id"]
+        path = self.state_dir / ("merge-unit-" + intent["operation_id"] + ".json")
+        path.write_text(json.dumps(legacy))
+        result = self.abandon_intent(intent)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        record_path, = self.abandonment_records()
+        record = json.loads(record_path.read_text())
+        self.assertEqual(record["operation_id"], intent["operation_id"])
+        self.assertEqual(record["intent"], legacy)
+        self.assertNotEqual(self.invoke().returncode, 0)  # second transport failure
+        self.assertNotEqual(self.invoke().returncode, 0)  # never resubmitted
+        forge = json.loads(Path(self.env["FORGE_STATE"]).read_text())
+        self.assertEqual(len(set(forge["merge_operations"])), 2)
+        self.assertEqual(len(self.calls(["pr", "merge"])), 2)
+
     def test_advance_failure_preserves_receipt_for_retry(self):
         self.state["halted"] = "test hold"
         self.save()
