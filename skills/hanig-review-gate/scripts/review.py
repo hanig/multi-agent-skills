@@ -34,6 +34,7 @@ Python 3.8+, standard library only.
 
 import argparse
 import concurrent.futures
+import errno
 import hashlib
 import json
 import os
@@ -79,6 +80,8 @@ JOURNAL_CHILD_ARG = "--_append-review-journal"
 JOURNAL_TIMEOUT_SECONDS = 5
 JOURNAL_DIAGNOSTIC_TIMEOUT_SECONDS = 0.25
 JOURNAL_NAME = "review-rounds"
+JOURNAL_TEST_MARKER = "HANIG_REVIEW_GATE_TESTING"
+JOURNAL_TEST_ROOT_PREFIX = ".hanig-review-gate-tests-"
 JOURNAL_HEADER = (
     "Append-only logical collection of immutable per-round JSON lines; "
     "audit-only attested review history. This is not the rejected "
@@ -198,6 +201,32 @@ def _inside(path, directory):
         return True
     except ValueError:
         return False
+
+
+def _require_git_free_test_root(path):
+    """Return a resolved test root only when no ancestor has a .git entry.
+
+    This deliberately checks the filesystem rather than invoking Git.  Normal
+    worktrees have a .git directory and linked worktrees have a .git file; a
+    dangling symlink is also conservatively an entry.  Absence is normal, but
+    an inspection error cannot establish eligibility and therefore fails
+    closed.
+    """
+    root = _resolved(path)
+    for directory in (root, *root.parents):
+        marker = directory / ".git"
+        try:
+            marker.lstat()
+        except OSError as exc:
+            if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+                continue
+            raise OSError(
+                f"cannot establish whether test root {str(root)!r} is below "
+                f"a Git worktree: cannot inspect {str(marker)!r}: {exc}")
+        raise OSError(
+            f"test root {str(root)!r} is below Git worktree marker "
+            f"{str(marker)!r}")
+    return root
 
 
 def _attached_worktrees(place):
@@ -322,6 +351,37 @@ def append_review_journal(path, kind, round_no, effective_panel, verdict,
     and are never canonical history.
     """
     path = Path(path)
+    test_root = os.environ.get(JOURNAL_TEST_MARKER)
+    if test_root is not None:
+        raw_root = Path(test_root)
+        if not test_root or not raw_root.is_absolute():
+            raise OSError(
+                f"{JOURNAL_TEST_MARKER} must name the absolute temporary "
+                "root allowed for review-test journals")
+        lexical_root = Path(os.path.expanduser(test_root))
+        allowed_root = _resolved(lexical_root)
+        try:
+            root_status = lexical_root.lstat()
+        except OSError as exc:
+            raise OSError(
+                f"{JOURNAL_TEST_MARKER} root {str(lexical_root)!r} is not "
+                f"an existing directory: {exc}")
+        if (test_root != str(allowed_root)
+                or not stat.S_ISDIR(root_status.st_mode)
+                or not allowed_root.name.startswith(JOURNAL_TEST_ROOT_PREFIX)):
+            raise OSError(
+                f"{JOURNAL_TEST_MARKER} must name a canonical directory "
+                f"whose basename starts with {JOURNAL_TEST_ROOT_PREFIX!r}")
+        try:
+            _require_git_free_test_root(allowed_root)
+        except OSError as exc:
+            raise OSError(
+                f"{JOURNAL_TEST_MARKER} root {str(allowed_root)!r} is not "
+                f"eligible for isolated test state: {exc}")
+        if not _inside(path, allowed_root):
+            raise OSError(
+                f"test-marked review journal {str(path)!r} resolves outside "
+                f"the isolated temporary root {str(allowed_root)!r}")
     record = {
         "type": "review_round",
         "schema_version": 1,
