@@ -2685,7 +2685,17 @@ class TestFindingDispositions(unittest.TestCase):
 class TestReviewSuiteJournalIsolation(unittest.TestCase):
     """Journal-capable tests cannot leak audit records into operator state."""
 
-    GUARD_CHILD = "HANIG_REVIEW_GATE_ISOLATION_GUARD_CHILD"
+    # Exercise the lazy record wrapper first, before tests that explicitly
+    # acquire the module fixture. These cover review.main -> journal child,
+    # repeated child writes, and direct append, with no live providers.
+    JOURNAL_WRITING_TESTS = (
+        "tests.test_review.TestFindingDispositions."
+        "test_cli_wires_not_reproduced_finding_into_reviewer_prompt",
+        "tests.test_review.TestReviewJournal."
+        "test_two_invocations_append_two_records_with_monotonic_timestamps",
+        "tests.test_review.TestReviewSuiteJournalIsolation."
+        "test_fixture_allows_a_real_isolated_append",
+    )
 
     def test_unrelated_selected_test_needs_no_same_device_journal_root(self):
         program = "\n".join((
@@ -2923,9 +2933,6 @@ class TestReviewSuiteJournalIsolation(unittest.TestCase):
                 temporary.cleanup()
 
     def test_module_suite_leaves_the_user_journal_untouched(self):
-        if os.environ.get(self.GUARD_CHILD) == "1":
-            return
-
         fixture_root = _ensure_module_state_home()
         for mode in ("default", "custom-xdg", "fallback"):
             with self.subTest(mode=mode):
@@ -2957,7 +2964,6 @@ class TestReviewSuiteJournalIsolation(unittest.TestCase):
                 env.pop(review.JOURNAL_TEST_MARKER, None)
                 env.pop("OPENAI_API_KEY", None)
                 env.pop("OPENROUTER_API_KEY", None)
-                env[self.GUARD_CHILD] = "1"
 
                 for index, candidate in enumerate(candidates):
                     seed = candidate / ("seed-%d" % index) / "record.jsonl"
@@ -2977,10 +2983,13 @@ class TestReviewSuiteJournalIsolation(unittest.TestCase):
                 before = {path: snapshot(path) for path in candidates}
 
                 result = subprocess.run(
-                    [sys.executable, "-m", "unittest", "discover", "-s",
-                     "tests", "-p", "test_review.py"],
+                    [sys.executable, "-m", "unittest",
+                     *self.JOURNAL_WRITING_TESTS],
                     cwd=REPO, env=env, capture_output=True, text=True,
-                    timeout=180)
+                    # A hang bound for three fixed writers, independent of
+                    # the growing module's runtime. TimeoutExpired is an
+                    # error, never evidence that the journal stayed intact.
+                    timeout=600)
 
                 self.assertEqual(
                     {path: snapshot(path) for path in candidates}, before,
@@ -2989,6 +2998,18 @@ class TestReviewSuiteJournalIsolation(unittest.TestCase):
                 self.assertEqual(
                     result.returncode, 0,
                     result.stdout[-2000:] + result.stderr[-2000:])
+
+    def test_nested_journal_timeout_is_not_a_pass(self):
+        _ensure_module_state_home()
+        case = type(self)("test_module_suite_leaves_the_user_journal_untouched")
+        result = unittest.TestResult()
+        with patch.object(subprocess, "run", side_effect=
+                          subprocess.TimeoutExpired("journal writers", 600)):
+            case.run(result)
+        self.assertFalse(result.wasSuccessful())
+        self.assertEqual(len(result.errors), 3)
+        for _case, error in result.errors:
+            self.assertIn("TimeoutExpired", error)
 
     def test_fixture_allows_a_real_isolated_append(self):
         fixture_root = _ensure_module_state_home()
