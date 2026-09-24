@@ -67,6 +67,7 @@ SWARM_DECLARATIONS = (
     "authority.coordinator-state",
     "closure.by-kind",
     "code.remote-ref",
+    "code.merge-scope",
     "compatibility.judgment-generation",
     "verifier.corpus",
     "verifier.integration",
@@ -315,6 +316,7 @@ REFERENCE_ELABORATION_INVENTORIES = {
         ("references/limits.md", "limit.worktree-adoption", 1),
         ("references/limits.md", "limit.worktree-inode", 1),
         ("references/limits.md", "placement.reference-elaboration", 3),
+        ("references/protocol-details.md", "code.merge-scope", 1),
         ("references/protocol-details.md", "placement.reference-elaboration", 1),
     ),
     "hanig-orchestrate": (

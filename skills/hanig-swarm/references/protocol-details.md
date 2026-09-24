@@ -48,6 +48,34 @@ URL. Schema-4 intents/schema-5 facts additionally anchor the raw URL used for
 exactly-once `insteadOf` expansion. A ref-era snapshot missing its generation's
 anchors fails closed; deleting coordinator state is not migration.
 
+## Merge scope precondition
+
+```json
+{"scope":["tests/**","skills/hanig-swarm/scripts/swarm.py"]}
+```
+
+```bash
+python3 "$HANIG_SWARM_DIR/scripts/swarm.py" scope-check plan.json \
+  --state-dir "$STATE" --unit impl --json
+```
+
+Matching uses Python's case-sensitive `fnmatchcase`: `*`, `**`, `?`, and bracket
+classes match raw Git paths, and slashes are ordinary characters. For example,
+`tests/**` covers descendants at every depth and `*.py` also matches nested
+Python files. An explicit empty list allows no changed paths; an absent field
+is unchecked. Paths use repository-relative `/` spelling.
+
+The orchestrator requires exit 0 before merging; exit 1 reports `out_of_scope`, and exit 2 reports `unchecked`, including missing scope, launch intent, judged head, or local objects. Neither nonzero result is a pass. <!-- declaration: code.merge-scope -->
+
+The command compares immutable commits from the current attempt's coordinator
+state using local `git diff --name-status -M` with NUL-delimited paths. Both
+rename endpoints appear in the changed-path comparison. JSON reports
+`out_of_scope` and the separate `deletions_out_of_scope` subset, where a rename
+contributes its old path. Missing authority has no worker-file or branch
+fallback. State and closure authority stay unchanged; advancement is independent
+of this advisory command. The comparison describes that base and judged head,
+not the eventual merge tree or a later PR head.
+
 ## Cron shape
 
 Use the host's deterministic scheduler, for example:

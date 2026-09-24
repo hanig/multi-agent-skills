@@ -32,6 +32,7 @@ Python 3.8+, stdlib only, login-node safe.
 import argparse
 import errno
 import fcntl
+import fnmatch
 import hashlib
 import json
 import os
@@ -137,6 +138,10 @@ EXIT_USAGE = 64
 # gets its own code and a script can branch on it.
 EXIT_CONFLICT = 3
 
+# Advisory scope-check outcomes; neither nonzero value is merge permission.
+EXIT_SCOPE_OUTSIDE = 1
+EXIT_SCOPE_UNCHECKED = 2
+
 
 class OutboxError(Exception):
     """The receipt journal cannot be written or read safely."""
@@ -147,6 +152,26 @@ class PlanError(Exception):
 
 
 # --- plan validation ------------------------------------------------------
+def declared_scope(u):
+    """Return optional fnmatch patterns without normalizing deciding bytes."""
+    if "scope" not in u:
+        return None
+    patterns = u["scope"]
+    if (not isinstance(patterns, list)
+            or any(not isinstance(p, str) for p in patterns)):
+        raise PlanError(f"unit {u.get('id', '?')!r}: scope must be a JSON "
+                        "list of strings")
+    for pattern in patterns:
+        if (not pattern or "\0" in pattern
+                or pattern.startswith(("/", "\\"))
+                or re.match(r"^[A-Za-z]:", pattern)
+                or ".." in re.split(r"[/\\]", pattern)):
+            raise PlanError(f"unit {u.get('id', '?')!r}: scope pattern "
+                            f"{pattern!r} must be repo-relative, non-empty, "
+                            "and contain no '..' segments")
+    return patterns
+
+
 def _norm_scope(scope):
     """A write scope as a comparable path prefix. From start-a-sprint."""
     s = str(scope).strip().replace("\\", "/")
@@ -1204,6 +1229,7 @@ def validate_plan(plan, survey=None):
     for u in units:
         if not isinstance(u, dict):
             continue
+        declared_scope(u)
         deadline = u.get("deadline_s")
         try:
             finite_deadline = (float(deadline) if deadline is not None
@@ -8725,6 +8751,12 @@ SCHEMA_FIELDS = [
     ("write_scopes", "all", "optional",
      "must not overlap between concurrent units. Names FILES; does NOT "
      "isolate a code unit's repository"),
+    ("scope", "all", "optional",
+     "JSON list of repo-relative, case-sensitive fnmatch globs; no absolute "
+     "paths or '..' segments. Wildcards, including **, span any depth. "
+     "An empty list allows no changed paths. scope-check compares the code "
+     "attempt's recorded base and judged head locally; it is an advisory "
+     "merge precondition and never blocks advance or changes closure"),
     ("workspace_policy", "slurm, pipeline", "optional",
      '{"requires_clean_git": true, "path": "/checkout"}; opt-in launch '
      "preflight for a non-code unit"),
@@ -8817,6 +8849,138 @@ def _wrap(text, width):
     if cur:
         lines.append(cur)
     return lines or [""]
+
+
+def _scope_git(repo, *args):
+    """Read local Git objects, preserving filename bytes and denying fetches."""
+    env_program = shutil.which("env", path=os.defpath)
+    if not env_program:
+        raise PlanError("system env executable is unavailable")
+    argv = [env_program]
+    for key in os.environ:
+        if key.startswith("GIT_"):
+            argv.extend(("-u", key))
+    argv.extend(("GIT_CONFIG_NOSYSTEM=1", f"GIT_CONFIG_GLOBAL={os.devnull}",
+                 "GIT_NO_LAZY_FETCH=1", "GIT_ALLOW_PROTOCOL=",
+                 "GIT_TERMINAL_PROMPT=0", "git", "--no-replace-objects",
+                 "-C", repo))
+    try:
+        result = subprocess.run(
+            argv + list(args),
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, env=CE.child_env(), timeout=60, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PlanError(f"local Git read unavailable: {exc}")
+    if result.returncode:
+        raise PlanError("local Git read failed: " + W.render_git_diagnostic(
+            result.returncode, result.stderr.decode("utf-8", "replace")))
+    return result.stdout.decode("utf-8", "surrogateescape")
+
+
+def _scope_changed_paths(repo, base, head):
+    """Read both rename endpoints; no quoting, whitespace folding or filters."""
+    for commit in (base, head):
+        if _scope_git(repo, "cat-file", "-t", commit).strip() != "commit":
+            raise PlanError("scope-check basis is not a commit object")
+    raw = _scope_git(repo, "diff", "--name-status", "-z", "-M",
+                     "--no-ext-diff", "--no-textconv", "--no-relative",
+                     "--ignore-submodules=none", "--no-color",
+                     base, head, "--")
+    if not raw:
+        return [], []
+    if not raw.endswith("\0"):
+        raise PlanError("incomplete local Git name-status output")
+    fields = iter(raw[:-1].split("\0"))
+    changed, removed = [], []
+    try:
+        for status in fields:
+            if not re.fullmatch(r"[ADMTUXB]|[RC][0-9]+|M[0-9]+", status):
+                raise PlanError(f"unknown local Git change status {status!r}")
+            path = next(fields)
+            changed.append(path)
+            if status == "D" or status.startswith("R"):
+                removed.append(path)
+            if status.startswith(("R", "C")):
+                changed.append(next(fields))
+    except StopIteration:
+        raise PlanError("incomplete local Git name-status record")
+    return changed, removed
+
+
+def cmd_scope_check(args):
+    """Advisory merge precondition; reads state, never judges or mutates it."""
+    report = {"unit": args.unit, "status": "unchecked", "attempt": None,
+              "base": None, "head": None, "scope": None,
+              "out_of_scope": [], "deletions_out_of_scope": []}
+    code = EXIT_SCOPE_UNCHECKED
+    try:
+        plan, error = U.read_json(args.plan)
+        if error or not isinstance(plan, dict):
+            raise PlanError(f"no readable plan: {error or 'not an object'}")
+        units = plan.get("units")
+        if not isinstance(units, list):
+            raise PlanError("plan units must be a JSON list")
+        matches = [u for u in units if isinstance(u, dict)
+                   and u.get("id") == args.unit]
+        if len(matches) != 1:
+            raise PlanError("scope-check needs one matching plan unit")
+        u = matches[0]
+        patterns = declared_scope(u)
+        report["scope"] = patterns
+        if patterns is None:
+            raise PlanError("unit declares no scope")
+        if u.get("kind") != "code":
+            raise PlanError("unit has no code-attempt judgment")
+        # Explicit state-dir: validate containment without default migration.
+        state_dir, _root, _trees = CP.resolve_paths(
+            args.state_dir, plan=plan, cwd=os.getcwd())
+        state, error = U.read_json(state_dir / STATE_FILE)
+        if error or not isinstance(state, dict):
+            raise PlanError(f"no readable coordinator state: "
+                            f"{error or 'not an object'}")
+        us = (state.get("units") or {}).get(args.unit) or {}
+        attempt_dir = us.get("attempt_dir")
+        if not isinstance(attempt_dir, str) or not attempt_dir:
+            raise PlanError("no current attempt in coordinator state")
+        attempt = Path(attempt_dir).name
+        report["attempt"] = attempt
+        intent = (us.get("attempt_launch_intents") or {}).get(attempt)
+        problem = _code_launch_intent_problem(intent, u, attempt)
+        if problem:
+            raise PlanError(problem)
+        base, repo = intent["base_commit"], intent["repo"]
+        head = trusted_produced_head(state, args.unit, attempt_dir)
+        report.update({"base": base, "head": head})
+        if (not isinstance(head, str)
+                or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", head)):
+            raise PlanError("no valid judged head for this attempt in "
+                            "coordinator state")
+        if not isinstance(repo, str) or not repo:
+            raise PlanError("no repository in coordinator launch intent")
+        CP.resolve_paths(args.state_dir, plan=plan, cwd=os.getcwd(),
+                         extra_repos=[repo])
+        changed, removed = _scope_changed_paths(repo, base, head)
+        outside = lambda path: not any(fnmatch.fnmatchcase(path, pattern)
+                                       for pattern in patterns)
+        report["out_of_scope"] = sorted(set(filter(outside, changed)))
+        report["deletions_out_of_scope"] = sorted(set(filter(outside, removed)))
+        report["status"] = ("out_of_scope" if report["out_of_scope"]
+                            else "in_scope")
+        code = EXIT_SCOPE_OUTSIDE if report["out_of_scope"] else EXIT_OK
+    except (PlanError, CP.PathPolicyError, TypeError, ValueError,
+            AttributeError) as exc:
+        report["reason"] = str(exc)
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(f"scope-check {args.unit!r}: {report['status']}")
+        if report.get("reason"):
+            print(f"  unchecked: {report['reason']}")
+        for path in report["out_of_scope"]:
+            print("  out of scope: " + json.dumps(path))
+        for path in report["deletions_out_of_scope"]:
+            print("  deletion or rename-away out of scope: " + json.dumps(path))
+    return code
 
 
 def cmd_verify(args):
@@ -9373,6 +9537,13 @@ def main():
                                       "required, and what it couples to")
     sc.add_argument("--json", action="store_true")
     sc.set_defaults(fn=cmd_schema)
+
+    sc = sub.add_parser("scope-check", help="advisory local merge scope check")
+    sc.add_argument("plan")
+    sc.add_argument("--state-dir", required=True)
+    sc.add_argument("--unit", required=True)
+    sc.add_argument("--json", action="store_true")
+    sc.set_defaults(fn=cmd_scope_check)
 
     v = sub.add_parser("verify", help="run an authorized pinned verifier")
     v.add_argument("--state-dir", default=None)

@@ -66,7 +66,7 @@ CLOSED_DECLARATIONS = {
         isolation.exclusive-root isolation.done-predicate
         isolation.artifact-basis isolation.container-profile
         isolation.container-attestation authority.coordinator-state
-        closure.by-kind code.remote-ref compatibility.judgment-generation
+        closure.by-kind code.remote-ref code.merge-scope compatibility.judgment-generation
         verifier.corpus verifier.integration code.write-scopes
         code.worktree-identity code.adoption code.worktree-preservation usage.outputs
         scheduler.queued-job cluster.plan-specific cluster.access

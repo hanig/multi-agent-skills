@@ -130,6 +130,9 @@ ALLOWED = {
         "reads the base only from the coordinator-state snapshot",
     ("swarm.py", "cmd_verify"):
         "uses repository and base only from the coordinator-state snapshot",
+    ("swarm.py", "cmd_scope_check"):
+        "reads repository and base from the current attempt's coordinator "
+        "launch intent; the produced head comes only from coordinator state",
 }
 
 # The UNSEALED reader. This is the sharper invariant: naming a field is not
