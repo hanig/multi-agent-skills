@@ -1520,8 +1520,116 @@ class TestFailedReviewerIsNotAPass(unittest.TestCase):
 
     def test_every_non_pass_state_is_non_zero(self):
         for st in ("REVIEW_FAIL", "REVIEW_PARTIAL", "REVIEW_UNAVAILABLE",
-                   "REVIEW_ERROR", "REVIEW_INCOMPLETE"):
+                   "REVIEW_ERROR", "REVIEW_INCOMPLETE", "REVIEW_CLAIMS_REFUTED"):
             self.assertNotEqual(review.STATES[st], 0, st)
+
+
+class TestClaimsRefuted(unittest.TestCase):
+    BASE = dict(n_completed=3, n_failed=0, confirmed=[], refuted_claims=[],
+                rejecting=[], truncated=False, quorum=3)
+
+    def test_000_claim_refutation_is_distinct_from_a_confirmed_defect(self):
+        claim = {"claim": "every input is accepted", "status": "refuted"}
+        finding = {"severity": "major", "confidence": "high",
+                   "failure_scenario": "valid input is rejected"}
+        self.assertEqual(review.decide_state(
+            **{**self.BASE, "refuted_claims": [claim]}),
+            "REVIEW_CLAIMS_REFUTED")
+        for claims in ([], [claim]):
+            with self.subTest(claims=claims):
+                self.assertEqual(review.decide_state(
+                    **{**self.BASE, "confirmed": [finding],
+                       "refuted_claims": claims}), "REVIEW_FAIL")
+        code = review.STATES["REVIEW_CLAIMS_REFUTED"]
+        self.assertEqual(code, 7)
+        self.assertNotIn(code, (0, 1, 2, 3, 4, 5, 6))
+
+    def test_quorum_and_other_nonpass_precedence_are_preserved(self):
+        for overrides, expected in (
+                ({}, "REVIEW_PASS"),
+                ({"n_completed": 2, "refuted_claims": ["c"]}, "REVIEW_PARTIAL"),
+                ({"n_completed": 2, "refuted_claims": ["c"],
+                  "n_incomplete": 1}, "REVIEW_INCOMPLETE"),
+                ({"refuted_claims": ["c"], "n_failed": 1,
+                  "n_incomplete": 1, "truncated": True,
+                  "n_out_of_scope_critical": 1}, "REVIEW_CLAIMS_REFUTED"),
+                ({"refuted_claims": ["c"], "confirmed": ["f"],
+                  "n_incomplete": 1}, "REVIEW_FAIL")):
+            with self.subTest(overrides=overrides):
+                self.assertEqual(review.decide_state(**{**self.BASE, **overrides}),
+                                 expected)
+
+    def test_cli_exit_text_json_escalation_and_persisted_verdict(self):
+        claim = "The reader preserves café rows:\n" + "row detail; " * 50
+        reason = "The reader drops the last row:\n" + "missing café row; " * 50
+        roster = [{"name": name, "model": name, "provider": "offline",
+                   "profiles": profiles} for name, profiles in (
+                       ("a", ["fast", "standard", "deep"]),
+                       ("b", ["fast", "standard", "deep"]),
+                       ("c", ["standard", "deep"]),
+                       ("d", ["deep"]))]
+        with tempfile.TemporaryDirectory(dir=_ensure_module_state_home()) as tmp:
+            for rendering in ([], ["--json"]):
+                for ladder in ([], ["--escalate", "--profile", "fast"]):
+                    with self.subTest(rendering=rendering, ladder=ladder):
+                        called = []
+
+                        def answer(reviewer, _prompt, _timeout, _count, asserted):
+                            called.append(reviewer["name"])
+                            claims = [{"claim_index": i, "claim": text,
+                                       "status": "supported",
+                                       "why": "the fixture supports this exact assertion"}
+                                      for i, text in enumerate(asserted)]
+                            if reviewer["name"] == "a":
+                                claims[1].update(status="refuted", why=reason)
+                            return {"name": reviewer["name"], "ok": True,
+                                    "elapsed_s": 0, "findings": [], "claims": claims,
+                                    "verdict": ("refuted" if reviewer["name"] == "a"
+                                                else "upheld")}
+
+                        argv = [str(SCRIPT), "--diff", "--kind", "implementation",
+                                "--round", "1", "--profile", "standard",
+                                "--quorum", "3", "--author", "codex/gpt-6-astra",
+                                "--claim", review.HONEST_RUN_CLAIM,
+                                "--claim", claim, *rendering, *ladder]
+                        stdout, stderr = io.StringIO(), io.StringIO()
+                        with patch.object(sys, "argv", argv), \
+                                patch.object(review, "load_reviewers", return_value=roster), \
+                                patch.object(review, "availability", return_value=None), \
+                                patch.object(review, "run_one", side_effect=answer), \
+                                patch.object(review, "gather", return_value=("diff", "fixture")), \
+                                patch.object(review, "arm_watchdog"), \
+                                patch.dict(os.environ, {"XDG_STATE_HOME": tmp}), \
+                                redirect_stdout(stdout), redirect_stderr(stderr):
+                            with self.assertRaises(SystemExit) as stopped:
+                                review.main()
+                        self.assertEqual(stopped.exception.code, 7)
+                        self.assertEqual(stderr.getvalue(), "")
+                        self.assertEqual(set(called), {"a", "b", "c"})
+                        self.assertEqual(len(called), 3)
+                        records = sorted((Path(tmp) / review.JOURNAL_DIR /
+                                          review.JOURNAL_NAME).glob("*/record.jsonl"))
+                        persisted = json.loads(records[-1].read_text())
+                        self.assertEqual(persisted["schema_version"], 2)
+                        self.assertEqual(persisted["verdict"], "REVIEW_CLAIMS_REFUTED")
+                        self.assertEqual(persisted["refuted_claims"][0]["claim"], claim)
+                        self.assertEqual(persisted["refuted_claims"][0]["why"], reason)
+                        if rendering:
+                            report = json.loads(stdout.getvalue())
+                            self.assertEqual(report["state"], "REVIEW_CLAIMS_REFUTED")
+                            self.assertEqual(report["confirmed_findings"], [])
+                            self.assertEqual(report["refuted_claims"], persisted["refuted_claims"])
+                            self.assertEqual(report["tiers_run"],
+                                             ["fast", "standard"] if ladder else ["standard"])
+                            action = report["next_action"]
+                        else:
+                            action = stdout.getvalue()
+                            self.assertIn("REVIEW_CLAIMS_REFUTED", action)
+                            self.assertIn(claim, action)
+                            self.assertIn(reason, action)
+                        self.assertIn("Correct the claim (or the code)", action)
+                        self.assertIn("Do not argue", action)
+                        self.assertIn("not a pass", action)
 
 
 class TestReviewIncomplete(unittest.TestCase):
@@ -2368,10 +2476,10 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
         for round_no in (1, 2, 3):
             result = self.cycle_cli("--round", str(round_no), "--quorum", "3",
                                     failing=True)
-            self.assertEqual(result.returncode, review.STATES["REVIEW_FAIL"])
+            self.assertEqual(result.returncode, review.STATES["REVIEW_CLAIMS_REFUTED"])
         history = self.cycle_records()
         self.assertEqual([r["round"] for r in history], [1, 2, 3])
-        self.assertEqual([r["verdict"] for r in history], ["REVIEW_FAIL"] * 3)
+        self.assertEqual([r["verdict"] for r in history], ["REVIEW_CLAIMS_REFUTED"] * 3)
         # Even the ordinary singleton exception cannot relax a fresh cycle.
         # Removing the fresh-cycle floor makes the override case PASS.
         for override in ([], ["--allow-single-reviewer", "diagnostic exception"]):
@@ -2462,7 +2570,7 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
     def test_fresh_cycle_ladder_does_not_stop_below_replacement_floor(self):
         result = self.cycle_cli("--fresh-cycle-from", "standard", "--escalate",
                                 "--json", failing=True)
-        self.assertEqual(result.returncode, review.STATES["REVIEW_FAIL"])
+        self.assertEqual(result.returncode, review.STATES["REVIEW_CLAIMS_REFUTED"])
         self.assertEqual(set(result.called), {"a", "b", "c"})
         self.assertEqual(json.loads(result.stdout)["quorum"], 3)
 
@@ -3503,7 +3611,7 @@ class TestReviewJournal(unittest.TestCase):
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": secret}):
             code, _stdout, stderr = self.invoke(
                 extra_args=["--allow-single-reviewer", "exception: " + secret])
-        self.assertEqual(code, review.STATES["REVIEW_FAIL"])
+        self.assertEqual(code, review.STATES["REVIEW_CLAIMS_REFUTED"])
         self.assertEqual(stderr, "")
         record = self.records()[0]
         tag = "<OPENROUTER_API_KEY redacted>"
@@ -3524,7 +3632,7 @@ class TestReviewJournal(unittest.TestCase):
         review.run_one = lambda *_args, **_kwargs: result
         with patch.dict(os.environ, {"OPENAI_API_KEY": "REFUTED"}):
             code, stdout, stderr = self.invoke()
-        self.assertEqual(code, review.STATES["REVIEW_FAIL"])
+        self.assertEqual(code, review.STATES["REVIEW_CLAIMS_REFUTED"])
         self.assertEqual(stderr, "")
         record = self.records()[0]
         report = json.loads(stdout)

@@ -361,7 +361,7 @@ class TestChangedPathProfiles(unittest.TestCase):
         self.write(self.code)
         code, output, err, called = self.invoke("--diff", "--escalate", "--json",
                                                failing=True)
-        self.assertEqual(code, R.STATES["REVIEW_FAIL"], err)
+        self.assertEqual(code, R.STATES["REVIEW_CLAIMS_REFUTED"], err)
         self.assertEqual(json.loads(output)["tiers_run"], ["standard"])
         self.assertEqual(set(called), {"luna", "kimi-k2.7-code", "glm-5.3"})
 
