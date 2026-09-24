@@ -185,6 +185,45 @@ does not reproduce, say so explicitly in the next round's context rather than
 quietly dropping it, and if a reviewer keeps asserting it, that disagreement is
 itself information.
 
+## Record external adjudication
+
+The owner or the orchestrator acting under the owner's mandate can adjudicate a
+confirmed finding; the author can never accept its own rebuttal. This ledger
+records their declared decision, identity and reason, not authenticated authority.
+It grants no merge authority and never changes a recorded verdict: `REVIEW_FAIL` remains
+`REVIEW_FAIL`, including after an adjudication or a subsequent review.
+
+```bash
+python3 "$HANIG_REVIEW_GATE_DIR/scripts/review.py" --open-findings --head SHA
+python3 "$HANIG_REVIEW_GATE_DIR/scripts/review.py" --adjudicate FINDING_DIGEST \
+  --head SHA --accepted-by OWNER_OR_ORCHESTRATOR --reason "Evidence and rationale" \
+  --decision overruled --author codex/gpt-6-astra
+```
+
+Both commands are offline and emit JSON. `--head` takes the complete lowercase
+commit SHA. Reviews using two- or three-dot `--range` bind the journal head to the
+resolved commits supplied to Git's diff. Working-tree, single-revision and file
+inputs have no bound head; older headless records remain intact and unattributed.
+Use the same state home and project directory as the original review.
+
+Recording requires a matching confirmed finding on that head and a non-empty
+reason. If the digest occurs in multiple rounds, add `--round N`. Decisions are
+`overruled`, `accepted` or `refuted_by_reproduction`; each records a disposition,
+not a fix or a pass. Declare all authors with repeatable `--author`; the record's
+`author` field is that list. Acceptor models use ARC-755's exact model-ID comparison
+after the outer provider prefix; names are not case-folded or substring-matched.
+
+The read-only query exits 1 when confirmed findings lack an adjudication for
+that head, round and digest, 0 when none are recorded as open, and 4 on invalid
+input or unreadable canonical history. Zero certifies neither review coverage nor
+complete historical capture. It ignores unpublished pending files.
+
+Adjudications append redacted, immutable JSON lines through the same atomic,
+bounded, non-gating writer as reviews. A valid recording request exits 0 even
+when persistence is unconfirmed: inspect `journal.written` and the
+`ADJUDICATION_RECORDED` or `ADJUDICATION_UNCONFIRMED` status. A write failure
+emits `JOURNAL_WRITE_FAILED`; it never closes a finding without a canonical record.
+
 ## Convergence
 
 Review is done when the findings still arriving are **out of scope, minor, or
@@ -342,7 +381,7 @@ These rounds count toward the same round bound.
 | 6 | `REVIEW_INCOMPLETE` | A required reviewer returned no usable content |
 | 7 | `REVIEW_CLAIMS_REFUTED` | Quorum reviewed; refuted claims and zero confirmed findings — **not a pass** |
 
-Exit 5 remains reserved for ARC-709's `REVIEW_ADJUDICATION` recovery work.
+Exit 5 remains reserved; adjudication introduces no review verdict.
 
 Every nonzero state is non-success. Incomplete review is not an implementation
 failure, but it supplies no judgment and cannot satisfy required coverage.
