@@ -603,48 +603,123 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         self.assertEqual(head, produced)
 
     def test_terminal_watcher_checks_without_scheduled_advance(self):
-        attempt = self.attempt("code", "terminal-watch")
-        plan = {"name": "watch-test", "units": [code_unit(self.repo)]}
-        state = {"plan_digest": S.plan_digest(plan), "units": {"code": {
-            "attempt_dir": str(attempt), "job_id": "agent-watch",
+        unit = dict(code_unit(self.repo), inputs=[],
+                    outputs=["evidence.md", "test-output.txt"])
+        plan = {"name": "watch-test", "units": [unit]}
+        state = {"schema_version": 1, "halted": None,
+                 "plan_digest": S.plan_digest(plan), "units": {}}
+        directory, error = S._allocate(plan, unit, self.tmp / "runs")
+        self.assertIsNone(error)
+        attempt = Path(directory)
+        S._capture_artifact_basis(state, "code", directory, unit)
+        agent = "12345678-1234-1234-1234-123456789abc"
+
+        def launch(argv, **kwargs):
+            rc, out, err = self.fake(argv, **kwargs)
+            return rc, out.replace("agent-" + attempt.name, agent), err
+
+        with mock.patch.object(S.U, "run", side_effect=launch):
+            launched, error = self.submit(unit, attempt, False, state)
+        self.assertIsNone(error)
+        self.assertEqual(launched, agent)
+        self.assertIsNone(S._bind(directory, agent))
+        facts = S.trusted_launch_facts(state, "code", directory)
+        workspace = Path(facts["execution_workspace"])
+        (workspace / "made.txt").write_text("made\n")
+        git(workspace, "add", "made.txt")
+        git(workspace, "commit", "-qm", "attempt work")
+        produced = git(workspace, "rev-parse", "HEAD")
+        push_attempt(workspace, facts)
+        for output in unit["outputs"]:
+            (attempt / output).write_text("fixture output\n")
+        state["units"]["code"].update({
+            "attempt_dir": directory, "job_id": agent,
             "state": "SUBMITTED", "attempts": [str(attempt)],
             "gpu_hours": 0.0,
             "code_terminal_watches": {attempt.name: {
-                "agent_id": "agent-watch", "status": "waiting"}},
-        }}}
-        order = []
-
-        def immediate_advance(_plan, current, *_args, **_kwargs):
-            order.append("advance")
-            current["units"]["code"].setdefault(
-                "attempt_produced_heads", {})[attempt.name] = "a" * 40
-            return ["code: READY_FOR_PR"], 0, None
-
+                "agent_id": agent, "status": "waiting"}},
+        })
         args = Namespace(
             plan=str(self.tmp / "plan.json"),
             state_dir=str(self.tmp / "watch-state"),
             root=str(self.tmp / "runs"), unit="code",
-            attempt=attempt.name, agent="agent-watch")
-        with mock.patch.object(
-                S.U, "run",
-                side_effect=lambda *_a, **_k: (
-                    order.append("wait") or (0, '{"status":"idle"}', ""))), \
-             mock.patch.object(S, "acquire_lease", return_value=(True, None)), \
-             mock.patch.object(S, "release_lease"), \
-             mock.patch.object(S, "_load_plan", return_value=plan), \
-             mock.patch.object(S, "load_state", return_value=state), \
-             mock.patch.object(S, "save_state"), \
-             mock.patch.object(S, "advance", side_effect=immediate_advance):
+            attempt=attempt.name, agent=agent)
+        Path(args.plan).write_text(json.dumps(plan))
+        S.save_state(args.state_dir, state)
+
+        # Fake only the service boundary. The child coordinator, its lease,
+        # advance, unit.py check, Git judgment and state persistence are real.
+        fakebin = self.tmp / "watch-bin"
+        fakebin.mkdir()
+        events = self.tmp / "watch-events.jsonl"
+        paseo = fakebin / "paseo"
+        paseo.write_text(
+            "#!" + sys.executable + "\n"
+            "import fcntl, json, os, sys\nfrom pathlib import Path\n"
+            "argv = sys.argv[1:]\n"
+            "if argv[0] == 'inspect':\n"
+            "    with open(" + repr(str(Path(args.state_dir) / S.LOCK)) + ", 'r') as lock:\n"
+            "        try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+            "        except BlockingIOError: pass\n"
+            "        else: raise AssertionError('checker ran without coordinator lease')\n"
+            "with open(" + repr(str(events)) + ", 'a') as log:\n"
+            "    log.write(json.dumps({'argv': argv, 'pid': os.getpid()}) + '\\n')\n"
+            "if argv == " + repr(["wait", agent, "--json"]) + ":\n"
+            "    print(json.dumps({'status': 'idle'}))\n"
+            "elif argv == " + repr(["inspect", "--json", agent]) + ":\n"
+            "    print(json.dumps({'status': 'idle'}))\n"
+            "elif argv[:2] == ['workspace', 'archive']:\n"
+            "    print('{}')\n"
+            "else: sys.exit(127)\n")
+        paseo.chmod(0o755)
+        commands = []
+
+        def run(argv, **kwargs):
+            commands.append(list(argv))
+            self.assertIsNone(kwargs["timeout"])
+            return self.real_run(argv, **kwargs)
+
+        with mock.patch.dict(os.environ, {
+                "PATH": str(fakebin) + os.pathsep + os.environ.get("PATH", "")}), \
+             mock.patch.object(S.U, "run", side_effect=run), \
+             mock.patch.object(S, "load_state", side_effect=AssertionError("watcher loaded state")), \
+             mock.patch.object(S, "save_state", side_effect=AssertionError("watcher wrote state")), \
+             mock.patch.object(S, "acquire_lease", side_effect=AssertionError("watcher took lease")), \
+             mock.patch.object(S, "advance", side_effect=AssertionError("watcher advanced in-process")):
             result = S.cmd_watch_code_terminal(args)
 
         self.assertEqual(result, S.EXIT_OK)
-        self.assertEqual(order, ["wait", "advance"])
+        self.assertEqual(commands, [
+            ["paseo", "wait", agent, "--json"],
+            [sys.executable, str(SCRIPTS / "swarm.py"), "advance-code-terminal",
+             args.plan, "--state-dir", args.state_dir, "--root", args.root,
+             "--unit", "code", "--attempt", attempt.name, "--agent", agent]])
+        observed = [json.loads(line) for line in events.read_text().splitlines()]
+        self.assertEqual([event["argv"][0] for event in observed],
+                         ["wait", "inspect"])
+        self.assertTrue(all(event["pid"] != os.getpid() for event in observed))
+        state = S.load_state(args.state_dir)
         self.assertEqual(
             state["units"]["code"]["attempt_produced_heads"][attempt.name],
-            "a" * 40)
+            produced)
+        self.assertEqual(state["units"]["code"]["state"], "READY_FOR_PR")
         self.assertEqual(
             state["units"]["code"]["code_terminal_watches"]
             [attempt.name]["status"], "checked")
+        self.assertTrue(state["units"]["code"]["code_terminal_watches"]
+                        [attempt.name]["checked_at"])
+        # A retained idle outcome cannot downgrade the coordinator's check
+        # on the next status read or locked import.
+        self.assertEqual(S._code_terminal_status(
+            state, args.state_dir, "code", attempt.name)["status"], "checked")
+        ok, why = S.acquire_lease(args.state_dir)
+        self.assertTrue(ok, why)
+        try:
+            S._refresh_code_terminal_watches(state, args.state_dir, [])
+            self.assertEqual(state["units"]["code"]["code_terminal_watches"]
+                             [attempt.name]["status"], "checked")
+        finally:
+            S.release_lease(args.state_dir)
 
     def test_live_code_attempt_starts_only_one_terminal_watcher(self):
         attempt = self.attempt("code", "start-watch")
