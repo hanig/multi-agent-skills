@@ -41,7 +41,7 @@ because these rules were written down once and drifted from anyway.
 | when | before code exists | after the change is written |
 | panel | **two contrasting models** | fixed profile or cheapest-first ladder |
 | escalation | **never** | optional; `--escalate` starts at `fast` |
-| flag | `--kind plan` | `--kind implementation --round N [--escalate]` |
+| flag | `--kind plan` | `--kind implementation --stage discovery|closure --round N [--escalate]` |
 | judged against | do these criteria hold together | does the code meet them |
 
 **Two contrasting models for a plan, never escalated.** A third adds agreement,
@@ -103,12 +103,54 @@ that cries wolf gets switched off, which costs more than the defect it prevents.
 
 Open-ended loops are how runaways happen, so every review cycle is bounded:
 
-- **Max 3 rounds per change.** Not per session: per change.
+- **Three discovery rounds, then at most two closure rounds.** Closure receives
+  the persistent finding ledger and verifies only remaining fixes or disputes;
+  it does not restart unrestricted discovery.
 - **If round N+1 finds a defect in round N's fix, stop patching.** That is the
   signal that the problem is upstream of the symptom. Convene a step-back
   committee (below) with the full history rather than shipping another patch.
-- **After 3 rounds without convergence, start fresh** — new reviewers, full
-  history of what was tried. The current context has drifted too far to help.
+- **After closure exhausts without convergence, preserve the explicit ledger
+  state.** Open defects remain failures; unresolved material disagreements are
+  adjudication; empty reviewer output is incomplete review. None is a pass.
+
+## Persistent cases and accepted states
+
+Implementation reviews persist one case ledger outside operated worktrees.
+The default case identity is repository/branch/kind and survives commits,
+merges, and rebases. Pass `--case ID` before a branch rename, for unrelated
+sequential work on one branch, or whenever a more durable project identity is
+needed. The first invocation freezes claims,
+context, threat model, and panel, and every event records HEAD plus the exact
+reviewed-content digest.
+
+Round-2 dispositions are proposals by `--actor`, with their reason recorded as
+evidence. They do not clear findings. During `--stage closure`, the fixed panel
+must independently accept each remaining finding as `open`, `fixed`,
+`refuted`, `nonblocking`, or `disputed`. A panel change requires
+`--new-cycle --authorize-panel-change NAME`; a fresh cycle on unchanged code is
+refused.
+
+Panel seats are fixed, but an unavailable adjudicator is not an indefinite
+veto. At case creation, `--alternate REVIEWER=ALTERNATE` may predesignate who
+can take a seat. Closure persists two unavailable observations for the named
+reviewer without consuming a closure round, then uses that alternate if it is
+available. Otherwise a replacement needs
+`--reassign REVIEWER=REPLACEMENT --authorize-reassignment OWNER`. If neither
+path succeeds, the gate returns `REVIEW_ADJUDICATION` with the explicit
+`deferred-awaiting-authority` outcome. It preserves the open finding and frees
+the worker to stop; it never treats unavailability as clearance.
+
+Provider failure or unusable content consumes no discovery or closure round.
+A failed predesignated alternate may be owner-reassigned immediately, but no
+assignment or reserved fallback may collapse two fixed seats onto one reviewer.
+Fresh-cycle panel selection and reassignment are separate authority events.
+Removed routing entries remain unavailable fixed seats and follow that bounded
+replacement path. Escalated closure runs every tier needed to fill its frozen
+panel rather than stopping at discovery quorum.
+Provider transport failure during closure follows the same bounded replacement
+path, while unusable content remains `REVIEW_INCOMPLETE`. Empty selected panels
+are never persisted as case authority, and closure evidence must be non-empty
+without imposing a word-count proxy for adequacy.
 
 ## The step-back committee
 
@@ -236,12 +278,9 @@ implicit is how a design proposal got reviewed by the implementation panel.
 that will ACTUALLY run, after `--only` and `--profile`: exactly two reviewers,
 on two different providers, quorum 2, never escalated.
 
-`--round N` is required with `--kind implementation` and declares which round
-this is for the change under review. Past `MAX_ROUNDS` (3) the gate refuses and
-names the step-back. **It rests on an honest round number:** nothing ties a
-round to a change, so `--round 1` can be claimed forever. Closing that needs a
-per-change receipt keyed to a plan digest, which is not built. See PROTOCOL.md
-for the full list of what is and is not enforced.
+`--round N` is required with `--kind implementation`. The persistent case
+ledger derives the next legal round, caps discovery at 3 and closure at 2, and
+refuses relabeling a repeated round. See PROTOCOL.md for the full state model.
 `--json` for machine consumption.
 
 ## Claims are the point
@@ -257,15 +296,17 @@ Each reviewer marks every claim `supported`, `refuted`, or `unverifiable`.
 
 | Exit | State | Meaning |
 |---|---|---|
-| 0 | `REVIEW_PASS` | Quorum reviewed; no confirmed defect, no refuted claim |
-| 1 | `REVIEW_FAIL` | A confirmed defect, or a refuted claim |
+| 0 | `REVIEW_PASS` | Quorum reviewed; every ledger finding is accepted clear |
+| 1 | `REVIEW_FAIL` | An accepted material violation remains open |
 | 2 | `REVIEW_UNAVAILABLE` | No reviewer ran — **not a pass** |
 | 3 | `REVIEW_PARTIAL` | Some ran, quorum unmet — degraded, caller decides |
 | 4 | `REVIEW_ERROR` | Usage or configuration error |
+| 5 | `REVIEW_ADJUDICATION` | Material dispute unresolved, or closure deferred awaiting reassignment authority |
 | 6 | `REVIEW_INCOMPLETE` | A required reviewer returned no usable content |
 
-Every nonzero state is non-success. Incomplete review is not an implementation
-failure, but it supplies no judgment and cannot satisfy required coverage.
+Every nonzero state is non-success. In particular, adjudication is not a
+claimed defect and incomplete review is not an implementation failure, but
+neither permits completion.
 
 A finding counts against the gate only if it is critical or major, at high or
 medium confidence, **and** carries a concrete failure scenario. That filter
@@ -273,8 +314,9 @@ exists to keep speculative and stylistic noise from blocking real work.
 
 ## Reading a pass honestly
 
-`REVIEW_PASS` means *N models failed to refute this*. It is not proof of
-correctness, and should be reported as what it is. Say which reviewers ran.
+`REVIEW_PASS` means the fixed panel left no accepted blocking finding: discovery
+failed to refute the work, or closure independently accepted the remaining
+findings as clear. It is not proof of correctness. Say which reviewers ran.
 Never describe a change as "reviewed by three models" when two were skipped —
 the gate prints exactly who ran, who errored, and who was unavailable, so the
 honest sentence is always available.

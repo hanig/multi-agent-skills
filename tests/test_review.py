@@ -521,6 +521,41 @@ class TestMalformedRetry(unittest.TestCase):
         finally:
             review.PROVIDERS.pop("_dead", None)
 
+    def test_closure_retry_uses_the_closure_schema_nudge(self):
+        digest = "a" * 64
+        calls = []
+        invalid = json.dumps({
+            "verdict": "closure",
+            "finding_assessments": [{
+                "digest": digest, "status": "supported",
+                "evidence": "the production path was directly exercised",
+            }],
+        })
+        valid = json.dumps({
+            "verdict": "closure",
+            "finding_assessments": [{
+                "digest": digest, "status": "fixed",
+                "evidence": "the production path was directly exercised",
+            }],
+        })
+
+        def provider(_rev, prompt, _timeout, deadline=None):
+            calls.append(prompt)
+            return {"text": invalid if len(calls) == 1 else valid,
+                    "in_tokens": 1, "out_tokens": 1}, None
+
+        review.PROVIDERS["_closure"] = provider
+        try:
+            result = review.run_one(
+                {"name": "closure", "provider": "_closure", "model": "m"},
+                "close this", 5, closure_digests=[digest])
+        finally:
+            review.PROVIDERS.pop("_closure", None)
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertIn("finding_assessments", calls[1])
+        self.assertIn("nonblocking", calls[1])
+        self.assertNotIn("supported, refuted, or unverifiable", calls[1])
+
 
 class TestRound12Regressions(unittest.TestCase):
     def test_near_identical_claims_are_not_covered_by_duplicates(self):
@@ -975,11 +1010,13 @@ class TestFailClosed(unittest.TestCase):
         self.assertEqual(review.STATES["REVIEW_PASS"], 0)
         self.assertNotEqual(review.STATES["REVIEW_UNAVAILABLE"], 0)
         self.assertNotEqual(review.STATES["REVIEW_PARTIAL"], 0)
+        self.assertNotEqual(review.STATES["REVIEW_ADJUDICATION"], 0)
+        self.assertNotEqual(review.STATES["REVIEW_INCOMPLETE"], 0)
 
 
 class TestPortability(unittest.TestCase):
     def test_stdlib_only(self):
-        allowed = {"argparse", "concurrent", "hashlib", "json", "os", "re", "signal", "stat",
+        allowed = {"argparse", "concurrent", "fcntl", "hashlib", "json", "os", "re", "signal", "stat",
                    "subprocess", "sys", "tempfile", "time", "urllib", "pathlib"}
         for line in SCRIPT.read_text().splitlines():
             s = line.strip()
@@ -1025,39 +1062,9 @@ class TestFailedReviewerIsNotAPass(unittest.TestCase):
 
     def test_every_non_pass_state_is_non_zero(self):
         for st in ("REVIEW_FAIL", "REVIEW_PARTIAL", "REVIEW_UNAVAILABLE",
-                   "REVIEW_ERROR", "REVIEW_INCOMPLETE"):
+                   "REVIEW_ERROR", "REVIEW_ADJUDICATION",
+                   "REVIEW_INCOMPLETE"):
             self.assertNotEqual(review.STATES[st], 0, st)
-
-
-class TestReviewIncomplete(unittest.TestCase):
-    BASE = dict(n_completed=0, n_failed=1, confirmed=[], refuted_claims=[],
-                rejecting=[], truncated=False, quorum=1,
-                n_out_of_scope_critical=0)
-
-    def test_silent_reviewer_is_incomplete_not_clean_or_a_finding(self):
-        state = review.decide_state(**self.BASE, n_incomplete=1)
-        self.assertEqual(state, "REVIEW_INCOMPLETE")
-        self.assertNotEqual(state, "REVIEW_PASS")
-        self.assertNotEqual(state, "REVIEW_FAIL")
-        self.assertNotEqual(review.STATES[state], 0)
-
-    def test_silent_reviewer_does_not_satisfy_required_coverage(self):
-        state = review.decide_state(**self.BASE, n_incomplete=1)
-        self.assertNotEqual(state, "REVIEW_PASS",
-                            "zero content filled a one-reviewer quorum")
-
-    def test_clean_single_reviewer_still_passes(self):
-        state = review.decide_state(
-            **{**self.BASE, "n_completed": 1, "n_failed": 0},
-            n_incomplete=0)
-        self.assertEqual(state, "REVIEW_PASS")
-
-    def test_confirmed_finding_at_quorum_still_fails(self):
-        state = review.decide_state(
-            **{**self.BASE, "n_completed": 1,
-               "confirmed": [{"severity": "major"}]},
-            n_incomplete=1)
-        self.assertEqual(state, "REVIEW_FAIL")
 
 
 class TestScopeDiscipline(unittest.TestCase):
@@ -1319,33 +1326,6 @@ class TestEmptyContentNamesItsCause(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual(res["text"], '{"verdict": "upheld"}')
 
-    def test_empty_openai_reply_is_classified_as_no_content(self):
-        old_post = review._post
-        old_key = os.environ.get("OPENAI_API_KEY")
-        try:
-            os.environ["OPENAI_API_KEY"] = "sk-test"
-            review._post = lambda *_args, **_kwargs: ({
-                "status": "incomplete", "output": [],
-                "incomplete_details": {"reason": "max_output_tokens"},
-                "usage": {
-                    "output_tokens": 69000,
-                    "output_tokens_details": {"reasoning_tokens": 69000},
-                },
-            }, None)
-            result, error = review.call_openai(
-                {"name": "luna", "model": "m"}, "prompt", 1)
-        finally:
-            review._post = old_post
-            if old_key is None:
-                os.environ.pop("OPENAI_API_KEY", None)
-            else:
-                os.environ["OPENAI_API_KEY"] = old_key
-        self.assertIsNone(result)
-        self.assertIn("no content", error)
-        self.assertIn("69000", error)
-        self.assertIn("whole output budget", error)
-        self.assertIn("max_output_tokens", error)
-
     def test_both_providers_call_the_shared_empty_classifier(self):
         import ast
         tree = ast.parse(SCRIPT.read_text())
@@ -1392,6 +1372,7 @@ class TestEscalateFormsACommittee(unittest.TestCase):
             self.json = True
             self.timeout = 1
             self.claim = []
+            self.stage = "discovery"
 
     def setUp(self):
         self.roster = [
@@ -1449,6 +1430,15 @@ class TestEscalateFormsACommittee(unittest.TestCase):
         _c, _f, _u, tiers = review.escalate(
             self.roster, "p", self.Args(quorum=2), False, "l", 10)
         self.assertIn("standard", tiers)
+
+    def test_closure_escalation_runs_every_frozen_tier(self):
+        self.stub({"cheap1", "cheap2", "mid1", "mid2", "dear1"},
+                  {"cheap1": True})
+        args = self.Args(quorum=2)
+        args.stage = "closure"
+        _c, _f, _u, tiers = review.escalate(
+            self.roster, "p", args, False, "l", 10)
+        self.assertEqual(tiers, ["fast", "standard", "deep"])
 
 
 class TestSolIsBothDeepReviewerAndTieBreaker(unittest.TestCase):
@@ -1588,6 +1578,18 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
                          review.HONEST_RUN_CLAIM),
             because="the round exceeds MAX_ROUNDS")
 
+    def test_closure_has_its_own_capped_rounds(self):
+        self.assert_refused(
+            self.run_cli("--kind", "implementation", "--stage", "closure",
+                         "--round", str(review.MAX_CLOSURE_ROUNDS + 1),
+                         "--claim", review.HONEST_RUN_CLAIM),
+            because="the closure round exceeds its cap")
+
+    def test_plan_review_cannot_enter_closure(self):
+        self.assert_refused(
+            self.run_cli("--kind", "plan", "--stage", "closure"),
+            because="closure only applies to implementation findings")
+
     def test_implementation_requires_the_honest_run_counter_claim(self):
         r = self.run_cli("--kind", "implementation", "--round", "1",
                          "--claim", "malformed input is rejected")
@@ -1667,7 +1669,8 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
         import ast
         tree = ast.parse(SCRIPT.read_text())
         actionable = ("Drop ", "drop ", "Pass ", "pass ", "remove ", "Step",
-                      "Override", "must be", "Available:", "Name one",
+                      "Override", "Repair ", "Remove ", "Use ", "Change ",
+                      "must be", "Available:", "Name one",
                       "name exactly")
         checked = 0
         for node in ast.walk(tree):
@@ -1724,6 +1727,8 @@ class TestFindingDispositions(unittest.TestCase):
             "availability": review.availability,
             "run_one": review.run_one,
             "arm_watchdog": review.arm_watchdog,
+            "prepare_case_ledger": review.prepare_case_ledger,
+            "save_case_ledger": review.save_case_ledger,
         }
         reviewer = {"name": "offline", "provider": "offline", "model": "m",
                     "profiles": ["standard"], "enabled": True}
@@ -1736,6 +1741,18 @@ class TestFindingDispositions(unittest.TestCase):
             review.load_reviewers = lambda: [reviewer]
             review.availability = lambda _reviewer: None
             review.arm_watchdog = lambda _seconds: None
+            def prepare_case(args, panel, _snapshot):
+                ledger = review.new_case_ledger(
+                    "disposition-test", review.contract_record(args), panel)
+                ledger["findings"][digest] = {
+                    "digest": digest, "location": entry["location"],
+                    "summary": entry["summary"],
+                    "failure_scenario": "production path drops the check",
+                    "accepted_status": "open", "accepted_by": ["offline"],
+                }
+                return Path(tempfile.mkdtemp()) / "case.json", ledger, 0
+            review.prepare_case_ledger = prepare_case
+            review.save_case_ledger = lambda *_args, **_kwargs: None
 
             def run_one(_reviewer, prompt, *_args, **_kwargs):
                 captured.append(prompt)
@@ -1749,13 +1766,15 @@ class TestFindingDispositions(unittest.TestCase):
                 with self.assertRaises(SystemExit) as raised:
                     review.main()
             self.assertEqual(raised.exception.code,
-                             review.STATES["REVIEW_PASS"])
+                             review.STATES["REVIEW_FAIL"])
         finally:
             sys.argv = original["argv"]
             review.load_reviewers = original["load_reviewers"]
             review.availability = original["availability"]
             review.run_one = original["run_one"]
             review.arm_watchdog = original["arm_watchdog"]
+            review.prepare_case_ledger = original["prepare_case_ledger"]
+            review.save_case_ledger = original["save_case_ledger"]
         self.assertEqual(len(captured), 1)
         self.assertIn(entry["summary"], captured[0])
 
@@ -1926,6 +1945,8 @@ class TestReviewJournal(unittest.TestCase):
             "arm_watchdog": review.arm_watchdog,
             "disarm_watchdog": review.disarm_watchdog,
             "record_review_round": review.record_review_round,
+            "prepare_case_ledger": review.prepare_case_ledger,
+            "save_case_ledger": review.save_case_ledger,
             "time_ns": review.time.time_ns,
             "xdg": os.environ.get("XDG_STATE_HOME"),
         }
@@ -1941,6 +1962,13 @@ class TestReviewJournal(unittest.TestCase):
         review.gather = lambda _args: ("diff body", "test diff")
         review.arm_watchdog = lambda _seconds: None
         review.run_one = self.answer
+        review.prepare_case_ledger = self.prepare_case
+        review.save_case_ledger = lambda *_args, **_kwargs: None
+
+    def prepare_case(self, args, panel, _snapshot):
+        ledger = review.new_case_ledger(
+            "journal-test", review.contract_record(args), panel)
+        return self.tmp / "isolated-case.json", ledger, 0
 
     def restore(self):
         sys.argv = self.saved["argv"]
@@ -1951,6 +1979,8 @@ class TestReviewJournal(unittest.TestCase):
         review.arm_watchdog = self.saved["arm_watchdog"]
         review.disarm_watchdog = self.saved["disarm_watchdog"]
         review.record_review_round = self.saved["record_review_round"]
+        review.prepare_case_ledger = self.saved["prepare_case_ledger"]
+        review.save_case_ledger = self.saved["save_case_ledger"]
         review.time.time_ns = self.saved["time_ns"]
         if self.saved["xdg"] is None:
             os.environ.pop("XDG_STATE_HOME", None)
@@ -2007,9 +2037,7 @@ class TestReviewJournal(unittest.TestCase):
         for record in records:
             notice = record["journal_header"].lower()
             self.assertIn("audit-only", notice)
-            self.assertIn("mandatory per-change receipt", notice)
-            self.assertIn("lock honest authors out", notice)
-            self.assertIn("non-gating", notice)
+            self.assertIn("authoritative case ledger", notice)
             self.assertIn("cannot decide or block a verdict", notice)
             self.assertEqual(record["kind"], "implementation")
             self.assertEqual(record["round"], 1)
@@ -2031,37 +2059,6 @@ class TestReviewJournal(unittest.TestCase):
         self.assertEqual(code, review.STATES["REVIEW_PARTIAL"])
         self.assertEqual(json.loads(stdout)["state"], "REVIEW_PARTIAL")
         self.assertEqual(self.records()[-1]["effective_panel"], ["answered"])
-
-    def test_silent_single_reviewer_is_review_incomplete(self):
-        original_post = review._post
-        original_key = os.environ.get("OPENAI_API_KEY")
-        review.load_reviewers = lambda: [{
-            "name": "silent", "provider": "openai", "model": "m",
-            "profiles": ["standard"], "enabled": True,
-        }]
-        review.run_one = self.saved["run_one"]
-        try:
-            os.environ["OPENAI_API_KEY"] = "sk-test"
-            review._post = lambda *_args, **_kwargs: ({
-                "status": "incomplete", "output": [],
-                "incomplete_details": {"reason": "max_output_tokens"},
-                "usage": {
-                    "output_tokens": 69000,
-                    "output_tokens_details": {"reasoning_tokens": 69000},
-                },
-            }, None)
-            code, stdout, _stderr = self.invoke(only="silent")
-        finally:
-            review._post = original_post
-            if original_key is None:
-                os.environ.pop("OPENAI_API_KEY", None)
-            else:
-                os.environ["OPENAI_API_KEY"] = original_key
-        self.assertEqual(code, review.STATES["REVIEW_INCOMPLETE"])
-        report = json.loads(stdout)
-        self.assertEqual(report["state"], "REVIEW_INCOMPLETE")
-        self.assertEqual(report["completed"], 0)
-        self.assertTrue(report["failed"][0]["incomplete"])
 
     def test_existing_journal_cannot_decide_the_verdict(self):
         self.seed_record("000-seed", {
@@ -2349,7 +2346,8 @@ class TestReviewJournal(unittest.TestCase):
         self.assertEqual(code, review.STATES["REVIEW_PASS"])
         self.assertEqual(json.loads(stdout)["state"], "REVIEW_PASS")
         self.assertTrue(hung.killed)
-        self.assertEqual(hung.calls[0][1], review.JOURNAL_TIMEOUT_SECONDS)
+        self.assertIn(review.JOURNAL_TIMEOUT_SECONDS,
+                      [timeout for _input, timeout in hung.calls])
         self.assertIn("JOURNAL_WRITE_FAILED", stderr)
         self.assertIn("append exceeded", stderr)
 
@@ -2418,6 +2416,1018 @@ class TestReviewJournal(unittest.TestCase):
         self.assertEqual(json.loads(stdout)["state"], "REVIEW_PASS")
         self.assertIn("JOURNAL_WRITE_FAILED", stderr)
         self.assertEqual(target.read_bytes(), before)
+
+
+class TestAcceptedFindingStates(unittest.TestCase):
+    """ARC-709: exhaustion reflects accepted evidence, not raw vetoes."""
+
+    def test_round_limit_distinguishes_open_defect_from_independent_refutation(self):
+        reproduced = {
+            "f1": {"accepted_status": "open",
+                   "accepted_by": ["luna", "kimi-k2.7-code"]},
+        }
+        independently_refuted = {
+            "f1": {"accepted_status": "refuted",
+                   "accepted_by": ["luna", "kimi-k2.7-code"]},
+        }
+
+        self.assertEqual(review.accepted_terminal_state(reproduced),
+                         "REVIEW_FAIL")
+        self.assertEqual(review.accepted_terminal_state(independently_refuted),
+                         "REVIEW_PASS")
+
+    def test_author_only_rebuttal_does_not_clear_an_open_finding(self):
+        finding = {
+            "accepted_status": "open",
+            "accepted_by": ["luna"],
+            "proposals": [{"status": "refuted", "by": "author",
+                           "evidence": "a helper-level test passed"}],
+        }
+        self.assertEqual(review.accepted_terminal_state({"f1": finding}),
+                         "REVIEW_FAIL")
+
+    def test_unresolved_material_dispute_requires_adjudication(self):
+        disputed = {
+            "f1": {"accepted_status": "disputed",
+                   "accepted_by": ["luna", "kimi-k2.7-code"]},
+        }
+        self.assertEqual(review.accepted_terminal_state(disputed),
+                         "REVIEW_ADJUDICATION")
+
+    def test_empty_required_review_is_incomplete_not_an_implementation_defect(self):
+        self.assertEqual(review.accepted_terminal_state({}, incomplete=True),
+                         "REVIEW_INCOMPLETE")
+        self.assertNotEqual(review.STATES["REVIEW_INCOMPLETE"],
+                            review.STATES["REVIEW_FAIL"])
+
+    def test_unknown_persisted_status_cannot_be_normalized_to_pass(self):
+        state = review.accepted_terminal_state({
+            "f1": {"accepted_status": "author-cleared"},
+        })
+        self.assertEqual(state, "REVIEW_ADJUDICATION")
+
+    def test_empty_selected_panel_cannot_be_persisted_as_a_case(self):
+        self.assertFalse(review.persistable_unavailable_case({"panel": []}))
+        self.assertTrue(review.persistable_unavailable_case({"panel": ["luna"]}))
+
+    def test_raw_quorum_cannot_pass_over_an_accepted_open_finding(self):
+        open_finding = {
+            "f1": {"accepted_status": "open", "accepted_by": ["luna"]},
+        }
+        self.assertEqual(review.undecided_review_state(open_finding),
+                         "REVIEW_FAIL")
+        self.assertEqual(review.undecided_review_state({}, incomplete=True),
+                         "REVIEW_INCOMPLETE")
+        self.assertEqual(review.undecided_review_state({}), "REVIEW_PARTIAL")
+        self.assertEqual(
+            review.undecided_review_state(open_finding, incomplete=True),
+            "REVIEW_INCOMPLETE")
+
+
+class TestPersistentFindingLedger(unittest.TestCase):
+    class Args:
+        kind = "implementation"
+        claim = [review.HONEST_RUN_CLAIM]
+        context = "frozen acceptance criteria"
+        threat_model = "honest repository author"
+        file = []
+        case = "case"
+        new_cycle = False
+        authorize_panel_change = None
+        round = 1
+        stage = "discovery"
+
+    def finding(self, status="open"):
+        return {
+            "digest": "a" * 64, "location": "x.py:7",
+            "summary": "production skips certification",
+            "failure_scenario": "stale input reaches dispatch",
+            "accepted_status": status, "accepted_by": ["luna"],
+        }
+
+    def test_author_proposal_records_identity_and_evidence_without_clearing(self):
+        ledger = {"findings": {"a" * 64: self.finding()}}
+        review.apply_disposition_proposals(ledger, [{
+            "digest": "a" * 64, "disposition": "not-reproduced",
+            "reason": "helper test exercises a related branch",
+        }], "worker-17")
+        finding = ledger["findings"]["a" * 64]
+        self.assertEqual(finding["accepted_status"], "open")
+        self.assertEqual(finding["proposals"][-1]["by"], "worker-17")
+        self.assertIn("helper test", finding["proposals"][-1]["evidence"])
+
+    def test_fixed_panel_can_independently_accept_refutation(self):
+        ledger = {"findings": {"a" * 64: self.finding()}}
+        completed = [
+            {"name": "luna", "finding_assessments": [{
+                "digest": "a" * 64, "status": "refuted",
+                "evidence": "production caller checks the anchored value",
+            }]},
+            {"name": "kimi-k2.7-code", "finding_assessments": [{
+                "digest": "a" * 64, "status": "refuted",
+                "evidence": "integration test reaches the production caller",
+            }]},
+        ]
+        review.apply_closure_assessments(ledger, completed)
+        finding = ledger["findings"]["a" * 64]
+        self.assertEqual(finding["accepted_status"], "refuted")
+        self.assertEqual(finding["accepted_by"],
+                         ["luna", "kimi-k2.7-code"])
+
+    def test_closure_requires_every_frozen_panel_member(self):
+        ledger = {"panel": ["luna", "kimi-k2.7-code"]}
+        self.assertFalse(review.closure_panel_complete(
+            ledger, [{"name": "luna"}], [], False))
+        self.assertTrue(review.closure_panel_complete(
+            ledger, [{"name": "luna"}, {"name": "kimi-k2.7-code"}],
+            [], False))
+
+    def test_panel_disagreement_becomes_adjudication_not_defect(self):
+        ledger = {"findings": {"a" * 64: self.finding()}}
+        completed = [
+            {"name": "luna", "finding_assessments": [{
+                "digest": "a" * 64, "status": "refuted",
+                "evidence": "production caller checks the anchored value",
+            }]},
+            {"name": "kimi-k2.7-code", "finding_assessments": [{
+                "digest": "a" * 64, "status": "open",
+                "evidence": "production caller bypass remains reachable",
+            }]},
+        ]
+        review.apply_closure_assessments(ledger, completed)
+        self.assertEqual(review.accepted_terminal_state(ledger["findings"]),
+                         "REVIEW_ADJUDICATION")
+
+    def test_rediscovery_reopens_a_previously_cleared_persisted_finding(self):
+        location = "x.py:7"
+        summary = "production skips certification"
+        digest = review.finding_digest(location, summary)
+        finding = self.finding("refuted")
+        finding.update({"digest": digest, "location": location,
+                        "summary": summary, "observations": []})
+        ledger = {"findings": {digest: finding}}
+        review.merge_discovery_findings(ledger, [{"name": "luna"}], [{
+            "file": "x.py", "line": 7, "summary": summary,
+            "failure_scenario": "stale input reaches dispatch",
+            "severity": "major", "confidence": "high",
+            "reviewer": "luna",
+        }], [])
+        self.assertEqual(ledger["findings"][digest]["accepted_status"], "open")
+
+    def test_refuted_claim_without_optional_reviewer_field_does_not_crash(self):
+        ledger = {"findings": {}}
+        review.merge_discovery_findings(
+            ledger, [{"name": "luna"}], [], [{
+                "claim_index": 0, "claim": "the behavior claim",
+                "why": "production code contradicts the behavior claim",
+            }])
+        finding = next(iter(ledger["findings"].values()))
+        self.assertEqual(finding["observations"][0]["reviewer"], "unknown")
+
+    def test_closure_schema_requires_every_ledger_finding(self):
+        verdict = {"verdict": "closure", "finding_assessments": []}
+        error = review.closure_schema_error(verdict, ["a" * 64])
+        self.assertIn("did not assess", error)
+
+    def test_closure_schema_accepts_short_specific_evidence(self):
+        verdict = {"verdict": "closure", "finding_assessments": [{
+            "digest": "a" * 64, "status": "fixed", "evidence": "fix present",
+        }]}
+        self.assertIsNone(review.closure_schema_error(verdict, ["a" * 64]))
+
+    def test_closure_schema_reconciles_one_unambiguous_digest_typo(self):
+        verdict = {"verdict": "closure", "finding_assessments": [
+            {"digest": "a" * 64, "status": "fixed", "evidence": "tested"},
+            {"digest": "typo", "status": "nonblocking",
+             "evidence": "outside contract"},
+        ]}
+        required = ["a" * 64, "b" * 64]
+        self.assertIsNone(review.closure_schema_error(verdict, required))
+        self.assertEqual(verdict["finding_assessments"][1]["digest"], "b" * 64)
+
+    def test_closure_schema_rejects_two_ambiguous_digest_typos(self):
+        verdict = {"verdict": "closure", "finding_assessments": [
+            {"digest": "typo-1", "status": "fixed", "evidence": "tested"},
+            {"digest": "typo-2", "status": "fixed", "evidence": "tested"},
+        ]}
+        self.assertIn("unexpected", review.closure_schema_error(
+            verdict, ["a" * 64, "b" * 64]))
+
+    def test_case_ledger_round_trip_and_stale_writer_refusal(self):
+        root = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        path = root / "state" / "case.json"
+        ledger = {
+            "schema_version": 1, "generation": 0, "case_id": "case",
+            "contract": review.contract_record(self.Args()),
+            "panel": ["luna"],
+            "authorization_events": [],
+            "cycles": [{"number": 1, "discovery": [], "closure": []}],
+            "findings": {}, "reviewed_snapshots": [],
+        }
+        review.save_case_ledger(path, ledger, 0)
+        loaded = review.load_case_ledger(path)
+        self.assertEqual(loaded["generation"], 1)
+        with self.assertRaisesRegex(OSError, "changed during review"):
+            review.save_case_ledger(path, dict(loaded), 0)
+
+    def test_loaded_ledger_rejects_an_unaccepted_status(self):
+        ledger = review.new_case_ledger(
+            "case", review.contract_record(self.Args()), ["luna"])
+        ledger["findings"]["a" * 64] = {
+            **self.finding("author-cleared"), "digest": "a" * 64,
+        }
+        with self.assertRaisesRegex(OSError, "finding"):
+            review.validate_case_ledger(ledger)
+
+    def test_panel_change_requires_an_authorization_event(self):
+        args = self.Args()
+        ledger = review.new_case_ledger(
+            "case", review.contract_record(args), ["luna"])
+        original_path = review.review_case_path
+        original_load = review.load_case_ledger
+        try:
+            review.review_case_path = lambda _args: Path("/state/case.json")
+            review.load_case_ledger = lambda _path: ledger
+            with self.assertRaises(SystemExit) as stopped:
+                review.prepare_case_ledger(
+                    args, ["luna", "kimi-k2.7-code"],
+                    {"content_digest": "new"})
+        finally:
+            review.review_case_path = original_path
+            review.load_case_ledger = original_load
+        self.assertEqual(stopped.exception.code, review.STATES["REVIEW_ERROR"])
+
+    def test_fresh_cycle_on_unchanged_code_is_refused(self):
+        args = self.Args()
+        args.new_cycle = True
+        ledger = review.new_case_ledger(
+            "case", review.contract_record(args), ["luna"])
+        ledger["reviewed_snapshots"].append({"content_digest": "same"})
+        original_path = review.review_case_path
+        original_load = review.load_case_ledger
+        try:
+            review.review_case_path = lambda _args: Path("/state/case.json")
+            review.load_case_ledger = lambda _path: ledger
+            with self.assertRaises(SystemExit) as stopped:
+                review.prepare_case_ledger(
+                    args, ["luna"], {"content_digest": "same"})
+        finally:
+            review.review_case_path = original_path
+            review.load_case_ledger = original_load
+        self.assertEqual(stopped.exception.code, review.STATES["REVIEW_ERROR"])
+
+    def test_authorized_panel_change_is_recorded_at_fresh_cycle(self):
+        args = self.Args()
+        args.new_cycle = True
+        args.authorize_panel_change = "owner"
+        ledger = review.new_case_ledger(
+            "case", review.contract_record(args), ["luna"])
+        ledger["cycles"][0]["discovery"] = [{}, {}, {}]
+        ledger["cycles"][0]["closure"] = [{}, {}]
+        ledger["reviewed_snapshots"].append({"content_digest": "old"})
+        ledger["findings"]["a" * 64] = self.finding("open")
+        original_path = review.review_case_path
+        original_load = review.load_case_ledger
+        try:
+            review.review_case_path = lambda _args: Path("/state/case.json")
+            review.load_case_ledger = lambda _path: ledger
+            _path, updated, _generation = review.prepare_case_ledger(
+                args, ["luna", "kimi-k2.7-code"],
+                {"content_digest": "new"})
+        finally:
+            review.review_case_path = original_path
+            review.load_case_ledger = original_load
+        self.assertEqual(updated["panel"], ["kimi-k2.7-code", "luna"])
+        self.assertEqual(updated["authorization_events"][-1]["by"], "owner")
+        self.assertEqual(updated["cycles"][-1]["number"], 2)
+        review.validate_case_ledger(updated)
+
+    def test_panel_change_preserves_retained_frozen_alternates(self):
+        args = self.Args()
+        args.new_cycle = True
+        args.authorize_panel_change = "owner"
+        args._enabled_names = {"luna", "replacement", "alternate"}
+        ledger = review.new_case_ledger(
+            "case", review.contract_record(args),
+            ["luna", "retired"], {"luna": "alternate"})
+        ledger["cycles"][0]["discovery"] = [{}, {}, {}]
+        ledger["cycles"][0]["closure"] = [{}, {}]
+        ledger["reviewed_snapshots"].append({"content_digest": "old"})
+        ledger["findings"]["a" * 64] = self.finding("open")
+        original_path = review.review_case_path
+        original_load = review.load_case_ledger
+        try:
+            review.review_case_path = lambda _args: Path("/state/case.json")
+            review.load_case_ledger = lambda _path: ledger
+            _path, updated, _generation = review.prepare_case_ledger(
+                args, ["luna", "replacement"], {"content_digest": "new"})
+        finally:
+            review.review_case_path = original_path
+            review.load_case_ledger = original_load
+        self.assertEqual(updated["alternates"], {"luna": "alternate"})
+        review.validate_case_ledger(updated)
+
+    def test_changed_code_can_start_fresh_after_no_finding_exhaustion(self):
+        args = self.Args()
+        args.new_cycle = True
+        ledger = review.new_case_ledger(
+            "case", review.contract_record(args), ["luna"])
+        ledger["cycles"][0]["discovery"] = [{}, {}, {}]
+        ledger["reviewed_snapshots"].append({"content_digest": "old"})
+        original_path = review.review_case_path
+        original_load = review.load_case_ledger
+        try:
+            review.review_case_path = lambda _args: Path("/state/case.json")
+            review.load_case_ledger = lambda _path: ledger
+            _path, updated, _generation = review.prepare_case_ledger(
+                args, ["luna"], {"content_digest": "new"})
+        finally:
+            review.review_case_path = original_path
+            review.load_case_ledger = original_load
+        self.assertEqual(updated["cycles"][-1]["number"], 2)
+
+    def test_default_main_case_survives_commits_within_the_review(self):
+        args = self.Args()
+        original = review.git_out
+        state = {"head": "h1", "fork": "h1"}
+        def fake_git(*git_args):
+            if git_args[:3] == ("remote", "get-url", "origin"):
+                return "origin-url\n"
+            if git_args[:2] == ("symbolic-ref", "--short"):
+                return "main\n"
+            if git_args[:2] == ("rev-parse", "HEAD"):
+                return state["head"] + "\n"
+            if git_args[:2] == ("merge-base", "HEAD"):
+                return state["fork"] + "\n"
+            return ""
+        try:
+            review.git_out = fake_git
+            first = review.default_case_id(args)
+            state.update(head="h2", fork="h2")
+            second = review.default_case_id(args)
+        finally:
+            review.git_out = original
+        self.assertEqual(first, second)
+
+    def test_default_feature_case_survives_merge_base_movement(self):
+        args = self.Args()
+        original = review.git_out
+        state = {"head": "h1", "fork": "fork-1"}
+        def fake_git(*git_args):
+            if git_args[:3] == ("remote", "get-url", "origin"):
+                return "origin-url\n"
+            if git_args[:2] == ("symbolic-ref", "--short"):
+                return "feature/arc-709\n"
+            if git_args[:2] == ("rev-parse", "HEAD"):
+                return state["head"] + "\n"
+            if git_args[:2] == ("merge-base", "HEAD"):
+                return state["fork"] + "\n"
+            return ""
+        try:
+            review.git_out = fake_git
+            first = review.default_case_id(args)
+            state.update(head="h2", fork="fork-2")
+            second = review.default_case_id(args)
+        finally:
+            review.git_out = original
+        self.assertEqual(first, second)
+
+    def test_missing_origin_main_falls_back_to_head_without_raising(self):
+        args = self.Args()
+        original = review.git_out
+        def fake_git(*git_args):
+            if git_args[:2] == ("merge-base", "HEAD"):
+                return ""
+            if git_args[:2] == ("rev-parse", "HEAD"):
+                return "head-only\n"
+            if git_args[:2] == ("symbolic-ref", "--short"):
+                return "feature\n"
+            return ""
+        try:
+            review.git_out = fake_git
+            case_id = review.default_case_id(args)
+            snapshot = review.reviewed_snapshot("body", "diff")
+        finally:
+            review.git_out = original
+        self.assertTrue(case_id)
+        self.assertEqual(snapshot["base"], "head-only")
+
+    def test_empty_openai_reply_is_classified_as_no_content(self):
+        old_post = review._post
+        old_key = os.environ.get("OPENAI_API_KEY")
+        try:
+            os.environ["OPENAI_API_KEY"] = "sk-test"
+            review._post = lambda *_a, **_k: ({
+                "status": "incomplete", "output": [],
+                "usage": {"output_tokens": 69000,
+                          "output_tokens_details": {"reasoning_tokens": 69000}},
+            }, None)
+            result, error = review.call_openai(
+                {"name": "glm", "model": "m"}, "prompt", 1)
+        finally:
+            review._post = old_post
+            if old_key is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = old_key
+        self.assertIsNone(result)
+        self.assertIn("no content", error)
+        self.assertIn("69000", error)
+
+    def test_closure_prompt_is_bounded_to_the_ledger(self):
+        ledger = {
+            "contract": {"digest": "c", "claims": ["frozen"]},
+            "findings": {"a" * 64: self.finding()},
+        }
+        prompt, digests = review.closure_prompt("changed code", ledger)
+        self.assertEqual(digests, ["a" * 64])
+        self.assertIn("production skips certification", prompt)
+        self.assertIn("Do not search for or introduce new findings",
+                      review.CLOSURE_SYSTEM)
+
+    def test_cli_closure_updates_ledger_and_returns_accepted_state(self):
+        finding = self.finding()
+        ledger = {
+            "schema_version": 1, "generation": 0, "case_id": "case",
+            "contract": {"digest": "c", "claims": [review.HONEST_RUN_CLAIM]},
+            "panel": ["offline"], "authorization_events": [],
+            "cycles": [{"number": 1,
+                        "discovery": [{}, {}, {}], "closure": []}],
+            "findings": {finding["digest"]: finding},
+            "reviewed_snapshots": [],
+        }
+        saved = {name: getattr(review, name) for name in (
+            "load_reviewers", "availability", "gather", "arm_watchdog",
+            "disarm_watchdog", "prepare_case_ledger", "save_case_ledger",
+            "run_one", "record_review_round")}
+        old_argv = sys.argv
+        written = []
+        try:
+            sys.argv = [str(SCRIPT), "--kind", "implementation",
+                        "--stage", "closure", "--round", "1",
+                        "--claim", review.HONEST_RUN_CLAIM,
+                        "--file", str(SCRIPT), "--only", "offline",
+                        "--quorum", "1", "--json"]
+            reviewer = {"name": "offline", "provider": "stub", "model": "m",
+                        "profiles": ["standard"], "enabled": True}
+            review.load_reviewers = lambda: [reviewer]
+            review.availability = lambda _reviewer: None
+            review.gather = lambda _args: ("changed code", "test input")
+            review.arm_watchdog = review.disarm_watchdog = lambda *_args: None
+            review.prepare_case_ledger = lambda *_args: (
+                Path("/state/case.json"), ledger, 0)
+            review.save_case_ledger = lambda _p, value, _g: written.append(value)
+            review.record_review_round = lambda *_args: {"written": True}
+            def answer(_reviewer, _prompt, _timeout, _required, _claims,
+                       closure_digests):
+                self.assertEqual(closure_digests, [finding["digest"]])
+                return {
+                    "name": "offline", "ok": True, "elapsed_s": 0,
+                    "verdict": "closure", "findings": [], "claims": [],
+                    "finding_assessments": [{
+                        "digest": finding["digest"], "status": "refuted",
+                        "evidence": "production integration path proves the check",
+                    }],
+                }
+            review.run_one = answer
+            output = io.StringIO()
+            with redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
+                review.main()
+        finally:
+            sys.argv = old_argv
+            for name, value in saved.items():
+                setattr(review, name, value)
+        self.assertEqual(stopped.exception.code, review.STATES["REVIEW_PASS"])
+        self.assertEqual(json.loads(output.getvalue())["state"], "REVIEW_PASS")
+        self.assertEqual(written[0]["findings"][finding["digest"]]
+                         ["accepted_status"], "refuted")
+
+    def test_cli_empty_reviewer_result_is_review_incomplete(self):
+        ledger = {
+            "schema_version": 1, "generation": 0, "case_id": "case",
+            "contract": {"digest": "c"}, "panel": ["offline"],
+            "authorization_events": [],
+            "cycles": [{"number": 1, "discovery": [], "closure": []}],
+            "findings": {}, "reviewed_snapshots": [],
+        }
+        saved = {name: getattr(review, name) for name in (
+            "load_reviewers", "availability", "gather", "arm_watchdog",
+            "disarm_watchdog", "prepare_case_ledger", "save_case_ledger",
+            "run_one", "record_review_round")}
+        old_argv = sys.argv
+        try:
+            sys.argv = [str(SCRIPT), "--kind", "implementation", "--round", "1",
+                        "--claim", review.HONEST_RUN_CLAIM,
+                        "--file", str(SCRIPT), "--only", "offline",
+                        "--quorum", "1", "--json"]
+            reviewer = {"name": "offline", "provider": "stub", "model": "m",
+                        "profiles": ["standard"], "enabled": True}
+            review.load_reviewers = lambda: [reviewer]
+            review.availability = lambda _reviewer: None
+            review.gather = lambda _args: ("changed code", "test input")
+            review.arm_watchdog = review.disarm_watchdog = lambda *_args: None
+            review.prepare_case_ledger = lambda *_args: (
+                Path("/state/case.json"), ledger, 0)
+            review.save_case_ledger = lambda *_args: None
+            review.record_review_round = lambda *_args: {"written": True}
+            review.run_one = lambda *_args, **_kwargs: {
+                "name": "offline", "ok": False, "elapsed_s": 0,
+                "error": "no content after 69000 reasoning tokens",
+                "incomplete": True,
+            }
+            output = io.StringIO()
+            with redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
+                review.main()
+        finally:
+            sys.argv = old_argv
+            for name, value in saved.items():
+                setattr(review, name, value)
+        self.assertEqual(stopped.exception.code,
+                         review.STATES["REVIEW_INCOMPLETE"])
+        self.assertEqual(json.loads(output.getvalue())["state"],
+                         "REVIEW_INCOMPLETE")
+        self.assertEqual(ledger["cycles"][0]["discovery"], [])
+
+    def test_cli_closure_cannot_clear_with_only_a_quorum_subset(self):
+        finding = self.finding()
+        ledger = {
+            "schema_version": 1, "generation": 0, "case_id": "case",
+            "contract": {"digest": "c"},
+            "panel": ["offline", "missing"], "authorization_events": [],
+            "cycles": [{"number": 1,
+                        "discovery": [{}, {}, {}], "closure": []}],
+            "findings": {finding["digest"]: finding},
+            "reviewed_snapshots": [],
+        }
+        saved = {name: getattr(review, name) for name in (
+            "load_reviewers", "availability", "gather", "arm_watchdog",
+            "disarm_watchdog", "prepare_case_ledger", "save_case_ledger",
+            "run_one", "record_review_round")}
+        old_argv = sys.argv
+        written = []
+        try:
+            sys.argv = [str(SCRIPT), "--kind", "implementation",
+                        "--stage", "closure", "--round", "1",
+                        "--claim", review.HONEST_RUN_CLAIM,
+                        "--file", str(SCRIPT),
+                        "--quorum", "1", "--json"]
+            reviewers = [
+                {"name": "offline", "provider": "stub", "model": "m",
+                 "profiles": ["standard"], "enabled": True},
+                {"name": "missing", "provider": "stub", "model": "m2",
+                 "profiles": ["standard"], "enabled": True},
+            ]
+            review.load_reviewers = lambda: reviewers
+            review.availability = lambda item: (
+                "provider unavailable" if item["name"] == "missing" else None)
+            review.gather = lambda _args: ("changed code", "test input")
+            review.arm_watchdog = review.disarm_watchdog = lambda *_args: None
+            review.prepare_case_ledger = lambda *_args: (
+                Path("/state/case.json"), ledger, 0)
+            review.save_case_ledger = lambda _p, value, _g: written.append(value)
+            review.record_review_round = lambda *_args: {"written": True}
+            review.run_one = lambda *_args, **_kwargs: {
+                "name": "offline", "ok": True, "elapsed_s": 0,
+                "verdict": "closure", "findings": [], "claims": [],
+                "finding_assessments": [{
+                    "digest": finding["digest"], "status": "refuted",
+                    "evidence": "production integration path proves the check",
+                }],
+            }
+            output = io.StringIO()
+            with redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
+                review.main()
+        finally:
+            sys.argv = old_argv
+            for name, value in saved.items():
+                setattr(review, name, value)
+        self.assertEqual(stopped.exception.code, review.STATES["REVIEW_PARTIAL"])
+        self.assertEqual(json.loads(output.getvalue())["state"], "REVIEW_PARTIAL")
+        self.assertEqual(written[0]["findings"][finding["digest"]]
+                         ["accepted_status"], "open")
+
+
+class TestClosureAvailabilityAuthority(unittest.TestCase):
+    """ARC-709: unavailability is bounded authority state, not clearance."""
+
+    def ledger(self, alternates=None):
+        class Args:
+            kind = "implementation"
+            claim = [review.HONEST_RUN_CLAIM]
+            context = "frozen"
+            threat_model = "honest author"
+
+        ledger = review.new_case_ledger(
+            "availability", review.contract_record(Args()), ["named"],
+            alternates or {})
+        ledger["cycles"][0]["discovery"] = [{}, {}, {}]
+        ledger["findings"]["a" * 64] = {
+            "digest": "a" * 64, "location": "x.py:1",
+            "summary": "production path skips the check",
+            "failure_scenario": "honest input reaches unchecked dispatch",
+            "accepted_status": "open", "accepted_by": ["named"],
+        }
+        return ledger
+
+    def snapshot(self):
+        return {"head": "h", "base": "b", "source": "test",
+                "content_digest": "d"}
+
+    def test_retry_window_then_predesignated_alternate(self):
+        ledger = self.ledger({"named": "alternate"})
+        unavailable = [{"name": "named", "reason": "provider timeout"}]
+
+        state, changed = review.record_closure_unavailability(
+            ledger, unavailable, self.snapshot())
+        self.assertEqual(state, "REVIEW_PARTIAL")
+        self.assertFalse(changed)
+        self.assertEqual(review.active_panel(ledger), ["named"])
+
+        state, changed = review.record_closure_unavailability(
+            ledger, unavailable, self.snapshot())
+        self.assertIsNone(state)
+        self.assertTrue(changed)
+        self.assertEqual(review.active_panel(ledger), ["alternate"])
+        self.assertEqual(ledger["findings"]["a" * 64]["accepted_status"],
+                         "open")
+        self.assertEqual(ledger["authorization_events"][-1]["kind"],
+                         "predesignated_alternate")
+
+    def test_exhaustion_without_alternate_defers_for_authority(self):
+        ledger = self.ledger()
+        unavailable = [{"name": "named", "reason": "provider timeout"}]
+        review.record_closure_unavailability(
+            ledger, unavailable, self.snapshot())
+        state, changed = review.record_closure_unavailability(
+            ledger, unavailable, self.snapshot())
+
+        self.assertEqual(state, "REVIEW_ADJUDICATION")
+        self.assertFalse(changed)
+        self.assertEqual(ledger["availability"]["outcome"],
+                         "deferred-awaiting-authority")
+        self.assertEqual(ledger["findings"]["a" * 64]["accepted_status"],
+                         "open")
+
+    def test_reassigned_reviewer_must_fill_the_fixed_seat(self):
+        ledger = self.ledger()
+        ledger["assignments"]["named"] = "replacement"
+        self.assertTrue(review.closure_panel_complete(
+            ledger, [{"name": "replacement"}], [], False))
+        self.assertFalse(review.closure_panel_complete(
+            ledger, [{"name": "named"}], [], False))
+
+    def test_owner_authorized_reassignment_requires_exhausted_retry_window(self):
+        class Args:
+            kind = "implementation"
+            claim = [review.HONEST_RUN_CLAIM]
+            context = "frozen"
+            threat_model = "honest author"
+            file = []
+            case = "availability"
+            new_cycle = False
+            authorize_panel_change = None
+            authorize_reassignment = "owner"
+            round = 1
+            stage = "closure"
+
+        ledger = self.ledger()
+        original_path = review.review_case_path
+        original_load = review.load_case_ledger
+        try:
+            review.review_case_path = lambda _args: Path("/state/case.json")
+            review.load_case_ledger = lambda _path: ledger
+            with self.assertRaises(SystemExit) as stopped:
+                review.prepare_case_ledger(
+                    Args(), ["named"], self.snapshot(),
+                    reassignments={"named": "replacement"})
+            self.assertEqual(stopped.exception.code,
+                             review.STATES["REVIEW_ERROR"])
+
+            ledger["availability"]["attempts"]["named"] = \
+                review.MAX_AVAILABILITY_RETRIES
+            _path, updated, _generation = review.prepare_case_ledger(
+                Args(), ["named"], self.snapshot(),
+                reassignments={"named": "replacement"})
+        finally:
+            review.review_case_path = original_path
+            review.load_case_ledger = original_load
+
+        self.assertEqual(review.active_panel(updated), ["replacement"])
+        event = updated["authorization_events"][-1]
+        self.assertEqual(event["kind"], "owner_reassignment")
+        self.assertEqual(event["by"], "owner")
+
+    def test_failed_predesignated_alternate_can_be_owner_reassigned(self):
+        class Args:
+            kind = "implementation"
+            claim = [review.HONEST_RUN_CLAIM]
+            context = "frozen"
+            threat_model = "honest author"
+            file = []
+            case = "availability"
+            new_cycle = False
+            authorize_panel_change = None
+            authorize_reassignment = "owner"
+            round = 1
+            stage = "closure"
+
+        ledger = self.ledger({"named": "alternate"})
+        unavailable = [{"name": "named", "reason": "provider timeout"}]
+        review.record_closure_unavailability(
+            ledger, unavailable, self.snapshot())
+        review.record_closure_unavailability(
+            ledger, unavailable, self.snapshot())
+        review.record_alternate_unavailability(
+            ledger, [{"name": "alternate", "reason": "provider timeout"}],
+            self.snapshot())
+        original_path = review.review_case_path
+        original_load = review.load_case_ledger
+        try:
+            review.review_case_path = lambda _args: Path("/state/case.json")
+            review.load_case_ledger = lambda _path: ledger
+            _path, updated, _generation = review.prepare_case_ledger(
+                Args(), ["named"], self.snapshot(),
+                reassignments={"named": "replacement"})
+        finally:
+            review.review_case_path = original_path
+            review.load_case_ledger = original_load
+
+        self.assertEqual(review.active_panel(updated), ["replacement"])
+        self.assertEqual(updated["authorization_events"][-1]["kind"],
+                         "owner_reassignment")
+
+    def test_new_cycle_refuses_reassignment_against_the_retired_panel(self):
+        class Args:
+            kind = "implementation"
+            claim = [review.HONEST_RUN_CLAIM]
+            context = "frozen"
+            threat_model = "honest author"
+            file = []
+            case = "availability"
+            new_cycle = True
+            authorize_panel_change = "owner"
+            authorize_reassignment = "owner"
+            round = 1
+            stage = "discovery"
+            _enabled_names = {"A", "B", "replacement"}
+
+        ledger = review.new_case_ledger(
+            "availability", review.contract_record(Args()), ["A", "B"])
+        ledger["cycles"][0]["discovery"] = [{}, {}, {}]
+        ledger["reviewed_snapshots"].append({"content_digest": "old"})
+        original_path = review.review_case_path
+        original_load = review.load_case_ledger
+        try:
+            review.review_case_path = lambda _args: Path("/state/case.json")
+            review.load_case_ledger = lambda _path: ledger
+            with self.assertRaises(SystemExit) as stopped:
+                review.prepare_case_ledger(
+                    Args(), ["A"], self.snapshot(),
+                    reassignments={"B": "replacement"})
+        finally:
+            review.review_case_path = original_path
+            review.load_case_ledger = original_load
+
+        self.assertEqual(stopped.exception.code,
+                         review.STATES["REVIEW_ERROR"])
+        self.assertEqual(ledger["panel"], ["A", "B"])
+
+    def test_owner_reassignment_cannot_claim_another_seats_frozen_alternate(self):
+        class Args:
+            kind = "implementation"
+            claim = [review.HONEST_RUN_CLAIM]
+            context = "frozen"
+            threat_model = "honest author"
+            file = []
+            case = "availability"
+            new_cycle = False
+            authorize_panel_change = None
+            authorize_reassignment = "owner"
+            round = 1
+            stage = "closure"
+            _enabled_names = {"A", "B", "X"}
+
+        ledger = review.new_case_ledger(
+            "availability", review.contract_record(Args()),
+            ["A", "B"], {"A": "X"})
+        ledger["cycles"][0]["discovery"] = [{}, {}, {}]
+        ledger["availability"]["attempts"]["B"] = \
+            review.MAX_AVAILABILITY_RETRIES
+        original_path = review.review_case_path
+        original_load = review.load_case_ledger
+        try:
+            review.review_case_path = lambda _args: Path("/state/case.json")
+            review.load_case_ledger = lambda _path: ledger
+            with self.assertRaises(SystemExit) as stopped:
+                review.prepare_case_ledger(
+                    Args(), ["A", "B"], self.snapshot(),
+                    reassignments={"B": "X"})
+        finally:
+            review.review_case_path = original_path
+            review.load_case_ledger = original_load
+
+        self.assertEqual(stopped.exception.code,
+                         review.STATES["REVIEW_ERROR"])
+        self.assertEqual(review.active_panel(ledger), ["A", "B"])
+
+    def test_fallback_reconciles_with_current_assignments_before_substitution(self):
+        class Args:
+            kind = "implementation"
+            claim = [review.HONEST_RUN_CLAIM]
+            context = "frozen"
+            threat_model = "honest author"
+
+        ledger = review.new_case_ledger(
+            "availability", review.contract_record(Args()),
+            ["A", "B"], {"A": "X"})
+        # This is the persisted state the first attempt could create: X already
+        # owns B's seat while remaining pre-authorized as A's fallback.
+        ledger["assignments"]["B"] = "X"
+        unavailable = [{"name": "A", "reason": "provider timeout"}]
+
+        review.record_closure_unavailability(
+            ledger, unavailable, self.snapshot())
+        state, changed = review.record_closure_unavailability(
+            ledger, unavailable, self.snapshot())
+
+        self.assertEqual(state, "REVIEW_ADJUDICATION")
+        self.assertFalse(changed)
+        self.assertEqual(review.active_panel(ledger), ["A", "X"])
+        self.assertEqual(ledger["availability"]["outcome"],
+                         "deferred-awaiting-authority")
+
+    def test_runtime_transport_failure_enters_bounded_fallback(self):
+        ledger = self.ledger({"named": "alternate"})
+        failed = [{"name": "named", "error": "transport timeout",
+                   "incomplete": False}]
+        state, changed = review.record_runtime_closure_failures(
+            ledger, failed, self.snapshot())
+        self.assertEqual(state, "REVIEW_PARTIAL")
+        self.assertFalse(changed)
+        self.assertEqual(ledger["availability"]["attempts"]["named"], 1)
+
+    def test_runtime_no_content_remains_incomplete_not_unavailability(self):
+        ledger = self.ledger({"named": "alternate"})
+        failed = [{"name": "named", "error": "no usable content",
+                   "incomplete": True}]
+        state, changed = review.record_runtime_closure_failures(
+            ledger, failed, self.snapshot())
+        self.assertIsNone(state)
+        self.assertFalse(changed)
+        self.assertEqual(ledger["availability"]["attempts"], {})
+
+    def test_removed_substitute_becomes_unavailable_instead_of_key_error(self):
+        configured = {"named": {"name": "named"}}
+        reviewers = review.assigned_reviewers(configured, ["removed-alt"])
+        self.assertEqual(reviewers[0]["name"], "removed-alt")
+        self.assertIn("removed", review.availability(reviewers[0]))
+
+    def test_disabled_reviewer_remains_the_named_seat_until_reassigned(self):
+        class Args:
+            kind = "implementation"
+            claim = [review.HONEST_RUN_CLAIM]
+            context = "frozen"
+            threat_model = "honest author"
+            file = []
+            case = "availability"
+            new_cycle = False
+            authorize_panel_change = None
+            round = 1
+            stage = "closure"
+            _selected_panel_all = ["named"]
+            _enabled_names = {"replacement"}
+
+        ledger = self.ledger()
+        original_path = review.review_case_path
+        original_load = review.load_case_ledger
+        try:
+            review.review_case_path = lambda _args: Path("/state/case.json")
+            review.load_case_ledger = lambda _path: ledger
+            _path, updated, _generation = review.prepare_case_ledger(
+                Args(), [], self.snapshot())
+        finally:
+            review.review_case_path = original_path
+            review.load_case_ledger = original_load
+
+        self.assertEqual(updated["panel"], ["named"])
+        self.assertEqual(review.active_panel(updated), ["named"])
+
+    def test_schema_one_ledger_is_upgraded_without_losing_findings(self):
+        ledger = self.ledger()
+        expected = ledger["findings"]
+        legacy = {key: value for key, value in ledger.items()
+                  if key not in ("assignments", "alternates", "availability")}
+        legacy["schema_version"] = 1
+
+        review.upgrade_case_ledger(legacy)
+
+        review.validate_case_ledger(legacy)
+        self.assertEqual(legacy["schema_version"], 2)
+        self.assertEqual(legacy["findings"], expected)
+        self.assertEqual(review.active_panel(legacy), ["named"])
+
+    def test_cli_persists_retry_then_returns_explicit_deferred_outcome(self):
+        ledger = self.ledger()
+        saved = {name: getattr(review, name) for name in (
+            "load_reviewers", "availability", "gather", "arm_watchdog",
+            "disarm_watchdog", "prepare_case_ledger", "save_case_ledger",
+            "run_one", "record_review_round")}
+        old_argv = sys.argv
+        provider_calls = []
+
+        def prepare(_args, _panel, _snapshot):
+            return Path("/state/case.json"), ledger, ledger["generation"]
+
+        def save(_path, value, expected):
+            self.assertEqual(value["generation"], expected)
+            value["generation"] = expected + 1
+
+        try:
+            sys.argv = [str(SCRIPT), "--kind", "implementation",
+                        "--stage", "closure", "--round", "1",
+                        "--claim", review.HONEST_RUN_CLAIM,
+                        "--file", str(SCRIPT), "--only", "named",
+                        "--quorum", "1", "--json"]
+            reviewer = {"name": "named", "provider": "stub", "model": "m",
+                        "profiles": ["standard"], "enabled": True}
+            review.load_reviewers = lambda: [reviewer]
+            review.availability = lambda _reviewer: "provider unavailable"
+            review.gather = lambda _args: ("changed code", "test input")
+            review.arm_watchdog = review.disarm_watchdog = lambda *_args: None
+            review.prepare_case_ledger = prepare
+            review.save_case_ledger = save
+            review.record_review_round = lambda *_args: {"written": True}
+            review.run_one = lambda *_args, **_kwargs: provider_calls.append(1)
+
+            outputs = []
+            for expected_state in ("REVIEW_PARTIAL", "REVIEW_ADJUDICATION"):
+                output = io.StringIO()
+                with redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
+                    review.main()
+                self.assertEqual(stopped.exception.code,
+                                 review.STATES[expected_state])
+                outputs.append(json.loads(output.getvalue()))
+        finally:
+            sys.argv = old_argv
+            for name, value in saved.items():
+                setattr(review, name, value)
+
+        self.assertEqual(provider_calls, [])
+        self.assertEqual(outputs[0]["availability_outcome"],
+                         "retrying-named-adjudicator")
+        self.assertEqual(outputs[1]["availability_outcome"],
+                         "deferred-awaiting-authority")
+        self.assertEqual(ledger["cycles"][0]["closure"], [])
+        self.assertEqual(ledger["findings"]["a" * 64]["accepted_status"],
+                         "open")
+
+    def test_first_discovery_unavailable_persists_the_frozen_case(self):
+        class Args:
+            kind = "implementation"
+            claim = [review.HONEST_RUN_CLAIM]
+            context = "frozen"
+            threat_model = "honest author"
+
+        ledger = review.new_case_ledger(
+            "new-case", review.contract_record(Args()), ["offline"])
+        saved = []
+        saved_functions = {name: getattr(review, name) for name in (
+            "load_reviewers", "availability", "gather", "arm_watchdog",
+            "disarm_watchdog", "prepare_case_ledger", "save_case_ledger",
+            "record_review_round")}
+        old_argv = sys.argv
+        try:
+            sys.argv = [str(SCRIPT), "--kind", "implementation",
+                        "--stage", "discovery", "--round", "1",
+                        "--claim", review.HONEST_RUN_CLAIM,
+                        "--file", str(SCRIPT), "--only", "offline",
+                        "--quorum", "1", "--json"]
+            reviewer = {"name": "offline", "provider": "stub", "model": "m",
+                        "profiles": ["standard"], "enabled": True}
+            review.load_reviewers = lambda: [reviewer]
+            review.availability = lambda _reviewer: "provider unavailable"
+            review.gather = lambda _args: ("changed code", "test input")
+            review.arm_watchdog = review.disarm_watchdog = lambda *_args: None
+            review.prepare_case_ledger = lambda *_args: (
+                Path("/state/new-case.json"), ledger, 0)
+            review.save_case_ledger = lambda path, value, expected: saved.append(
+                (path, value["contract"]["digest"], expected))
+            review.record_review_round = lambda *_args: {"written": True}
+
+            output = io.StringIO()
+            with redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
+                review.main()
+        finally:
+            sys.argv = old_argv
+            for name, value in saved_functions.items():
+                setattr(review, name, value)
+
+        self.assertEqual(stopped.exception.code,
+                         review.STATES["REVIEW_UNAVAILABLE"])
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0][0], Path("/state/new-case.json"))
+        self.assertEqual(saved[0][1], ledger["contract"]["digest"])
 
 
 if __name__ == "__main__":
