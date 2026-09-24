@@ -94,7 +94,55 @@ def save_session(name, data):
 MIN_MEMBERS, MAX_MEMBERS = 2, 3
 
 
-def pick_members(explicit):
+def author_argument(value):
+    """Retain committee's legacy bare models/aliases alongside PROVIDER/MODEL."""
+    value = value.strip()
+    if "/" in value:
+        return R.author_argument(value)
+    if not value or any(c.isspace() for c in value):
+        raise argparse.ArgumentTypeError("pass an author model or PROVIDER/MODEL")
+    return value
+
+
+def author_list(value):
+    """Read old singleton sessions and new repeated declarations alike."""
+    if not value:
+        return []
+    return [item.strip() for item in ([value] if isinstance(value, str) else value)
+            if item.strip()]
+
+
+def author_models(value):
+    return R.author_model_ids(author_list(value), R.load_reviewers(), legacy=True)
+
+
+def bind_authors(session, declared):
+    """Persist the declaration; an existing author set cannot be replaced."""
+    prior, declared = author_list(session.get("author")), author_list(declared)
+    if prior and declared and author_models(prior) != author_models(declared):
+        return "author conflicts with the session's persisted author"
+    chosen = prior or declared
+    session["author"] = chosen[0] if len(chosen) == 1 else chosen or None
+    return None
+
+
+def member_author_conflict(members, authors):
+    _kept, excluded = R.exclude_authors(members, author_models(authors))
+    if excluded:
+        return "; ".join(f"{r['name']} refused: authored this change"
+                         for r in excluded)
+    return None
+
+
+def session_author_conflict(session):
+    # Check saved model identities as well as today's routes. A roster change
+    # cannot erase a member's authorship from an already persisted session.
+    members = [dict(rec, name=name) for name, rec in session["members"].items()]
+    members += [r for r in R.load_reviewers() if r["name"] in session["members"]]
+    return member_author_conflict(members, session.get("author"))
+
+
+def pick_members(explicit, authors=()):
     """Two or three members from contrasting providers.
 
     Contrast is the point, so this refuses a panel that shares one provider
@@ -117,6 +165,9 @@ def pick_members(explicit):
         # should not be: a model can be wanted for planning and unwanted as a
         # review-gate reviewer, which is exactly the split in force here.
         chosen = [r for r in revs if "committee" in (r.get("profiles") or [])]
+    conflict = member_author_conflict(chosen, authors)
+    if conflict:
+        die(conflict + ". Name independent members with --member.")
     if not MIN_MEMBERS <= len(chosen) <= MAX_MEMBERS:
         die(f"a committee is {MIN_MEMBERS} or {MAX_MEMBERS} members; got "
             f"{len(chosen)} ({', '.join(r['name'] for r in chosen) or 'none'})"
@@ -310,7 +361,7 @@ def show_results(results, quiet=False):
 
 
 def cmd_open(args):
-    members = pick_members(args.member)
+    members = pick_members(args.member, args.author)
     problem = Path(args.problem_file).read_text() if args.problem_file \
         else args.problem
     if not problem or not problem.strip():
@@ -324,11 +375,11 @@ def cmd_open(args):
                "opened_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                "phase": "plan",
                "problem": problem,
-               "author": (getattr(args, "author", None) or "").strip() or None,
                "members": {m["name"]: {"provider": m["provider"],
                                        "model": m["model"],
                                        "history": []} for m in members},
                "turns": []}
+    bind_authors(session, args.author)
     names = ", ".join(f"{m['name']} ({m['provider']})" for m in members)
     print(f"committee {args.name!r}: {names}\nphase 1 (plan), waiting for "
           f"all members...\n")
@@ -356,6 +407,10 @@ def cmd_open(args):
 
 def cmd_ask(args):
     session = load_session(args.name)
+    error = (bind_authors(session, args.author)
+             or session_author_conflict(session))
+    if error:
+        return finish_decision(args, session, {"kind": "ask"}, "OWNER", error)
     members = [r for r in R.load_reviewers()
                if r["name"] in session["members"]]
     if len(members) != len(session["members"]):
@@ -376,6 +431,10 @@ def cmd_ask(args):
 def cmd_review(args):
     """Phase 3: the diff goes back to the SAME members, against THEIR plan."""
     session = load_session(args.name)
+    error = (bind_authors(session, args.author)
+             or session_author_conflict(session))
+    if error:
+        return finish_decision(args, session, {"kind": "review"}, "OWNER", error)
     members = [r for r in R.load_reviewers() if r["name"] in session["members"]]
     # review.py exposes git_out(*args) -> str, not run(argv) -> (rc, out, err).
     # This called a function that has never existed, so phase 3 died with an
@@ -442,15 +501,14 @@ def decision_inputs(args, session):
     # persists this session with its OWNER decision before allowing a retry.
     if getattr(args, "stop_and_ask", None):
         session["stop_and_ask"] = args.stop_and_ask
-    author = (getattr(args, "author", None) or "").strip()
-    prior = (session.get("author") or "").strip()
-    if prior and author and prior.casefold() != author.casefold():
-        return None, "author conflicts with the session's persisted author"
-    # Persist the same selected value that we validate and pass to consumers,
-    # including when it came from a legacy session rather than a new flag.
-    session["author"] = author or prior
-    if not (prior or author):
+    error = bind_authors(session, args.author)
+    if error:
+        return None, error
+    if not session["author"]:
         return None, "author unknown; declare --author before resolving a split"
+    conflict = session_author_conflict(session)
+    if conflict:
+        return None, conflict
     if session.get("stop_and_ask"):
         return None, "mandate stop-and-ask: " + session["stop_and_ask"]
     mandate, error = R.read_text_bounded(Path(args.mandate_file))
@@ -501,9 +559,10 @@ def substantive(value):
 
 def tiebreak(args, session, inputs):
     record = {"kind": "tiebreak", "inputs": inputs}
-    # Also recognize the configured aliases; the model ID is the primary bound.
-    author = inputs["author"].casefold()
-    if author in {"gpt-6-astra", "openai/gpt-6-astra", "astra", "astra-xhigh"}:
+    _kept, excluded = R.exclude_authors(
+        [{"name": "astra-xhigh", "model": "gpt-6-astra"}],
+        author_models(inputs["author"]))
+    if excluded:
         return finish_decision(args, session, record, "OWNER",
                                "tie-break refused: gpt-6-astra authored the "
                                "disputed work and cannot judge itself")
@@ -618,7 +677,8 @@ def main():
     o.add_argument("--member", action="append", default=[],
                    help="override the plan panel; name two, repeatable or "
                         "comma-separated")
-    o.add_argument("--author", help="model that authored the disputed work")
+    o.add_argument("--author", action="append", default=[], type=author_argument,
+                   metavar="PROVIDER/MODEL", help="author to exclude; repeatable")
     o.add_argument("--timeout", type=int, default=1800)
     o.add_argument("--force", action="store_true")
     o.set_defaults(fn=cmd_open)
@@ -628,6 +688,8 @@ def main():
     a.add_argument("--prompt")
     a.add_argument("--prompt-file")
     a.add_argument("--label")
+    a.add_argument("--author", action="append", default=[], type=author_argument,
+                   metavar="PROVIDER/MODEL", help="declare authors on a legacy session")
     a.add_argument("--timeout", type=int, default=1800)
     a.set_defaults(fn=cmd_ask)
 
@@ -635,6 +697,8 @@ def main():
     r.add_argument("name")
     r.add_argument("--range")
     r.add_argument("--staged", action="store_true")
+    r.add_argument("--author", action="append", default=[], type=author_argument,
+                   metavar="PROVIDER/MODEL", help="declare authors on a legacy session")
     r.add_argument("--max-chars", type=int, default=100_000)
     r.add_argument("--timeout", type=int, default=1800)
     r.set_defaults(fn=cmd_review)
@@ -642,7 +706,10 @@ def main():
     for command, fn in (("synthesize", cmd_synthesize), ("tiebreak", cmd_tiebreak)):
         t = sub.add_parser(command, help="resolve final positions within the mandate")
         t.add_argument("name")
-        t.add_argument("--author", help="disputed work's author model; persisted once")
+        t.add_argument("--author", action="append", default=[], type=author_argument,
+                       metavar="PROVIDER/MODEL",
+                       help="author models; repeatable, persisted once; legacy "
+                            "bare models and configured seat aliases accepted")
         t.add_argument("--mandate-file", default="docs/orchestrator-mandate.md",
                        help="current owner mandate, relative to the project")
         t.add_argument("--stop-and-ask", metavar="REASON",
