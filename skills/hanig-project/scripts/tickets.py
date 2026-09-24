@@ -109,7 +109,8 @@ RECONCILE_UNKNOWN = 4
 TERMINAL_ISSUE_STATES = frozenset(("done", "completed", "cancelled", "canceled"))
 
 
-def read_json(path):
+def read_json(path, expected_type=dict):
+    """Read an object by default; issue-list read-backs explicitly need a list."""
     try:
         text = Path(path).read_text()
     except FileNotFoundError:
@@ -117,11 +118,15 @@ def read_json(path):
     except (OSError, ValueError) as e:
         return None, str(e)
     try:
-        return json.loads(text), None
+        value = json.loads(text)
     except Exception as e:
         # Decoder failures include recursion/resource limits, not only syntax.
         # A message-less exception must still signal an unreadable input.
         return None, str(e) or type(e).__name__
+    if not isinstance(value, expected_type):
+        shape = "object" if expected_type is dict else "list"
+        return None, f"expected a JSON {shape}, got {type(value).__name__}"
+    return value, None
 
 
 # The fields whose change makes an existing issue body WRONG. Comparing ids
@@ -637,8 +642,12 @@ def report_edges(d):
 def cmd_draft(args):
     plan, err = read_json(args.plan)
     if err:
-        sys.exit(f"error: no readable plan at {args.plan}: {err}")
-    brief, _ = read_json(args.brief) if args.brief else (None, None)
+        print(f"error: no readable plan at {args.plan}: {err}", file=sys.stderr)
+        return 2
+    brief, err = read_json(args.brief) if args.brief else (None, None)
+    if err:
+        print(f"error: no readable brief at {args.brief}: {err}", file=sys.stderr)
+        return 2
     if args.name:
         brief = dict(brief or {})
         brief["name"] = args.name
@@ -718,7 +727,8 @@ def cmd_approve(args):
     """Record that a human saw the draft and accepted it."""
     d, err = read_json(args.tickets)
     if err:
-        sys.exit(f"error: no readable draft at {args.tickets}: {err}")
+        print(f"error: no readable draft at {args.tickets}: {err}", file=sys.stderr)
+        return 2
     d.setdefault("approval", {})
     d["approval"].update({"state": "granted", "granted_by": args.approver,
                           "at": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
@@ -731,11 +741,13 @@ def cmd_approve(args):
 def cmd_check(args):
     plan, err = read_json(args.plan)
     if err:
-        sys.exit(f"error: no readable plan at {args.plan}: {err}")
+        print(f"error: no readable plan at {args.plan}: {err}", file=sys.stderr)
+        return 2
     tickets, err = read_json(args.tickets)
     if err:
-        sys.exit(f"error: no readable draft at {args.tickets}: {err}. "
-                 f"Run `tickets.py draft` first.")
+        print(f"error: no readable draft at {args.tickets}: {err}. "
+              f"Run `tickets.py draft` first.", file=sys.stderr)
+        return 2
     problems = check(plan, tickets) + edge_problems(plan, tickets)
     if not problems:
         sync = tickets.get("blocked_by_sync") or {}
@@ -805,6 +817,25 @@ def reconcile(plan, issues):
             sorted(unit_ids - mapped))
 
 
+def render_reconciliation(result, as_json):
+    """Finish formatting before printing, so a failure cannot emit a partial report."""
+    if as_json:
+        return json.dumps(result, indent=2)
+    lines = [f"ATTESTED reconciliation for {result['project']!r}: {ATTESTED}",
+             result["scope"]]
+    if result["tracker_state"] == "unknown":
+        lines.append(f"Tracker side UNKNOWN: {result['reason']}")
+    else:
+        lines.append(f"Open issues with no plan unit: {len(result['unplanned_issues'])}")
+        for issue in result["unplanned_issues"]:
+            lines.append(f"  {issue['identifier']}: {issue['title']} "
+                         f"(unit: {issue['unit']!r}, state: {issue['state']})")
+        lines.append(f"Plan units absent from the read-back: {len(result['units_without_issues'])}")
+        for unit in result["units_without_issues"]:
+            lines.append(f"  {unit}")
+    return "\n".join(lines)
+
+
 def cmd_reconcile(args):
     result = {
         "project": None,
@@ -825,16 +856,22 @@ def cmd_reconcile(args):
             raise ValueError(f"no readable plan at {args.plan}: {err}")
         # Validate even without a read-back; do not turn a malformed plan
         # into a successful comparison against an accidentally empty set.
-        reconcile(plan, [])
+        try:
+            reconcile(plan, [])
+        except ValueError as exc:
+            raise ValueError(f"invalid plan at {args.plan}: {exc}") from exc
         result["project"] = plan.get("name") or "unnamed-swarm-project"
         if args.tracker_issues is None:
             result["reason"] = "no tracker read-back supplied; orphan sets are unknown"
             code = RECONCILE_UNKNOWN
         else:
-            issues, err = read_json(args.tracker_issues)
+            issues, err = read_json(args.tracker_issues, expected_type=list)
             if err:
-                raise ValueError(f"cannot read --tracker-issues: {err}")
-            unplanned, missing = reconcile(plan, issues)
+                raise ValueError(f"cannot read --tracker-issues {args.tracker_issues}: {err}")
+            try:
+                unplanned, missing = reconcile(plan, issues)
+            except ValueError as exc:
+                raise ValueError(f"invalid tracker issues at {args.tracker_issues}: {exc}") from exc
             result.update(tracker_state="read", unplanned_issues=unplanned,
                           units_without_issues=missing,
                           in_sync=not (unplanned or missing))
@@ -843,21 +880,19 @@ def cmd_reconcile(args):
         result["reason"] = str(exc)
         code = 2
 
-    if args.json:
-        print(json.dumps(result, indent=2))
-    else:
-        print(f"ATTESTED reconciliation for {result['project']!r}: {ATTESTED}")
-        print(result["scope"])
-        if result["tracker_state"] == "unknown":
-            print(f"Tracker side UNKNOWN: {result['reason']}")
-        else:
-            print(f"Open issues with no plan unit: {len(result['unplanned_issues'])}")
-            for issue in result["unplanned_issues"]:
-                print(f"  {issue['identifier']}: {issue['title']} "
-                      f"(unit: {issue['unit']!r}, state: {issue['state']})")
-            print(f"Plan units absent from the read-back: {len(result['units_without_issues'])}")
-            for unit in result["units_without_issues"]:
-                print(f"  {unit}")
+    try:
+        output = render_reconciliation(result, args.json)
+    except RecursionError:
+        # A decoder may accept deeper nesting than the encoder or repr can
+        # render. Discard the comparison rather than leak a partial verdict.
+        result.update(project=None, tracker_state="unknown", in_sync=None,
+                      unplanned_issues=None, units_without_issues=None,
+                      reason=(f"inputs from {args.plan} and --tracker-issues "
+                              f"{args.tracker_issues} are too deeply nested "
+                              "to render a reconciliation report"))
+        code = 2
+        output = render_reconciliation(result, args.json)
+    print(output)
     return code
 
 

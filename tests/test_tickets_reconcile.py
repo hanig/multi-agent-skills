@@ -175,8 +175,9 @@ class TestTicketsReconcile(unittest.TestCase):
             with self.subTest(raw=raw):
                 if raw is not None:
                     self.readback.write_text(raw)
-                self.assert_unknown_error(self.run_cli(
-                    "--tracker-issues", str(self.readback), "--json"))
+                result = self.run_cli("--tracker-issues", str(self.readback), "--json")
+                self.assert_unknown_error(result)
+                self.assertIn(str(self.readback), json.loads(result.stdout)["reason"])
         self.plan.unlink()
         self.assert_unknown_error(self.run_cli("--json"))
 
@@ -194,8 +195,9 @@ class TestTicketsReconcile(unittest.TestCase):
                 self.plan.write_text('{"units": []}')
                 self.readback.write_text('[]')
                 target.write_text('[' * 2000 + '0' + ']' * 2000)
-                self.assert_unknown_error(self.run_cli(
-                    "--tracker-issues", str(self.readback), "--json"))
+                result = self.run_cli("--tracker-issues", str(self.readback), "--json")
+                self.assert_unknown_error(result)
+                self.assertIn(str(target), json.loads(result.stdout)["reason"])
 
     def test_other_decoder_exceptions_report_invalid_input_even_without_message(self):
         self.readback.write_text('[]')
@@ -212,27 +214,106 @@ class TestTicketsReconcile(unittest.TestCase):
                     self.assert_unknown_error(subprocess.CompletedProcess(
                         [], code, output.getvalue(), ""))
 
-    def test_legacy_readers_handle_nested_json_without_overwriting_inputs(self):
-        bad = self.root / "nested.json"
-        bad.write_text('[' * 2000 + '0' + ']' * 2000)
-        for args, code, message in (
-                (["draft", str(bad)], 1, "no readable plan"),
-                (["draft", str(self.plan), "--out", str(bad)], 2, "cannot be read"),
-                (["draft", str(self.plan), "--tracker-edges", str(bad)], 2,
+    def test_deep_report_fields_fail_closed_without_partial_output_or_writes(self):
+        deep = '[' * 2000 + '0' + ']' * 2000
+        for target in (self.plan, self.readback):
+            with self.subTest(target=target.name):
+                self.plan.write_text('{"name": "p", "units": []}')
+                self.readback.write_text('[]')
+                if target == self.plan:
+                    target.write_text('{"name":' + deep + ',"units":[]}')
+                else:
+                    target.write_text(
+                        '[{"identifier":"ARC-C","title":"C","unit":null,'
+                        '"state":{"type":"Todo","metadata":' + deep + '}}]')
+                before = {p.name: p.read_bytes() for p in self.root.iterdir()}
+                result = self.run_cli("--tracker-issues", str(self.readback), "--json")
+                self.assert_unknown_error(result)
+                self.assertIn(str(target), json.loads(result.stdout)["reason"])
+                self.assertEqual({p.name: p.read_bytes() for p in self.root.iterdir()},
+                                 before)
+
+    def assert_legacy_readers_refuse_without_writes(self, raw):
+        bad = self.root / "invalid.json"
+        bad.write_text(raw)
+        for args, message in (
+                (["draft", str(bad)], "no readable plan"),
+                (["draft", str(self.plan), "--brief", str(bad)], "no readable brief"),
+                (["draft", str(self.plan), "--out", str(bad)], "cannot be read"),
+                (["draft", str(self.plan), "--tracker-edges", str(bad)],
                  "could not be read"),
-                (["check", str(bad), str(self.plan)], 1, "no readable plan"),
-                (["check", str(self.plan), str(bad)], 1, "no readable draft"),
-                (["approve", str(bad), "--approver", "test"], 1, "no readable draft")):
+                (["check", str(bad), str(self.plan)], "no readable plan"),
+                (["check", str(self.plan), str(bad)], "no readable draft"),
+                (["approve", str(bad), "--approver", "test"], "no readable draft")):
             with self.subTest(args=args):
                 before = {p.name: p.read_bytes() for p in self.root.iterdir()}
                 result = subprocess.run(
                     [sys.executable, str(SCRIPTS / "tickets.py"), *args],
                     capture_output=True, text=True, cwd=self.root, timeout=15)
-                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
                 self.assertIn(message, result.stdout + result.stderr)
+                self.assertIn(str(bad), result.stdout + result.stderr)
                 self.assertNotIn("Traceback", result.stderr)
                 self.assertEqual({p.name: p.read_bytes() for p in self.root.iterdir()},
                                  before)
+
+    def test_legacy_readers_handle_nested_json_without_overwriting_inputs(self):
+        self.assert_legacy_readers_refuse_without_writes('[' * 2000 + '0' + ']' * 2000)
+
+    def test_legacy_readers_reject_decoded_nonobjects_without_overwriting_inputs(self):
+        for value in ([], [0], None, False, True, 0, "", "text"):
+            with self.subTest(value=value):
+                self.assert_legacy_readers_refuse_without_writes(json.dumps(value))
+
+    def test_legacy_readers_reject_invalid_json_without_overwriting_inputs(self):
+        self.assert_legacy_readers_refuse_without_writes('{ broken')
+
+    def test_reconcile_names_invalid_input_files(self):
+        for target in (self.plan, self.readback):
+            for raw in ('null', 'false', '"text"', '0', '{ broken'):
+                with self.subTest(target=target.name, raw=raw):
+                    self.plan.write_text('{"units": []}')
+                    self.readback.write_text('[]')
+                    target.write_text(raw)
+                    result = self.run_cli("--tracker-issues", str(self.readback), "--json")
+                    self.assert_unknown_error(result)
+                    self.assertIn(str(target), json.loads(result.stdout)["reason"])
+
+    def test_valid_legacy_objects_keep_ids_and_approval_across_redrafts(self):
+        local = self.root / "tickets.json"
+        brief = self.root / "brief.json"
+        edges = self.root / "edges.json"
+        brief.write_text('{"name": "Project title"}')
+        edges.write_text(json.dumps({"read_at": "2026-09-24T00:00:00Z",
+                                     "edges": {"A": [], "B": []}}))
+
+        def run(*args):
+            result = subprocess.run(
+                [sys.executable, str(SCRIPTS / "tickets.py"), *args],
+                capture_output=True, text=True, cwd=self.root, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        run("draft", str(self.plan), "--brief", str(brief))
+        draft = json.loads(local.read_text())
+        self.assertEqual(draft["project"]["name"], "Project title")
+        draft["project"]["linear_id"] = "project-id"
+        for issue in draft["issues"]:
+            issue["linear_id"] = "issue-" + issue["unit"]
+            issue["identifier"] = "ARC-" + issue["unit"]
+        local.write_text(json.dumps(draft))
+        run("approve", str(local), "--approver", "test")
+        approved = json.loads(local.read_text())
+        for _ in range(2):
+            run("draft", str(self.plan), "--brief", str(brief),
+                "--tracker-edges", str(edges))
+            run("check", str(self.plan), str(local))
+            current = json.loads(local.read_text())
+            self.assertEqual(current["project"], approved["project"])
+            self.assertEqual(current["approval"], approved["approval"])
+            self.assertEqual([i["linear_id"] for i in current["issues"]],
+                             [i["linear_id"] for i in approved["issues"]])
+            self.assertEqual([i["identifier"] for i in current["issues"]],
+                             [i["identifier"] for i in approved["issues"]])
 
     def test_rerun_reads_changed_files_and_never_reuses_a_persisted_verdict(self):
         self.assertEqual(self.read([self.issue("A"), self.issue("B")]).returncode, 0)
