@@ -25,6 +25,8 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "skills" / "hanig-review-gate" / "scripts" / "review.py"
@@ -830,6 +832,135 @@ class TestGitDecoding(unittest.TestCase):
             self.assertEqual(review.git_out("diff", "HEAD"), "")
         finally:
             os.chdir(cwd)
+
+
+class TestRangeDivergence(unittest.TestCase):
+    """Exercise the actual diff collector against local Git history, offline."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name)
+        self.git("init", "-q")
+        self.git("config", "user.name", "Range Test")
+        self.git("config", "user.email", "range@example.invalid")
+        self.git("config", "commit.gpgsign", "false")
+        self.commit_file("shared.txt", "shared\n")
+        self.git("branch", "base")
+        self.git("checkout", "-qb", "branch")
+        self.commit_file("branch.txt", "branch change\n")
+        self.git("checkout", "-q", "base")
+        self.commit_file("base-one.txt", "first base addition\n")
+        self.commit_file("base-two.txt", "second base addition\n")
+        self.git("checkout", "-q", "branch")
+        previous = Path.cwd()
+        os.chdir(self.repo)
+        self.addCleanup(os.chdir, previous)
+
+    def git(self, *args):
+        return subprocess.run(
+            ["git", "-C", str(self.repo), *args], check=True,
+            capture_output=True, text=True).stdout
+
+    def commit_file(self, name, content):
+        (self.repo / name).write_text(content)
+        self.git("add", name)
+        self.git("commit", "-qm", name)
+
+    def gather(self, range_spec):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            body, label = review.gather(SimpleNamespace(
+                diff=False, staged=False, range=range_spec, file=[]))
+        return body, label, stderr.getvalue()
+
+    def test_diverged_two_dot_warns_with_base_only_count(self):
+        body, label, warning = self.gather("base..branch")
+        self.assertIn("WARNING", warning)
+        self.assertIn("2 commits on base are NOT in branch", warning)
+        self.assertIn("2 commits on base are NOT in branch", label)
+        self.assertIn("deletions", warning)
+        self.assertIn("base...branch", warning)
+        self.assertIn("merge-base", warning)
+        self.assertEqual(body, self.git("diff", "base..branch"))
+        self.assertIn("deleted file mode", body)
+        self.assertNotEqual(body, self.git("diff", "base...branch"))
+
+    def test_three_dot_has_no_warning(self):
+        body, label, warning = self.gather("base...branch")
+        self.assertEqual(warning, "")
+        self.assertEqual(label, "commit range base...branch")
+        self.assertEqual(body, self.git("diff", "base...branch"))
+        self.assertNotIn("deleted file mode", body)
+
+    def test_up_to_date_two_dot_has_no_warning(self):
+        self.git("merge", "-q", "--no-edit", "base")
+        body, label, warning = self.gather("base..branch")
+        self.assertEqual(warning, "")
+        self.assertEqual(label, "commit range base..branch")
+        self.assertEqual(body, self.git("diff", "base..branch"))
+        self.assertIn("branch change", body)
+
+    def test_merge_base_failure_is_unknown_and_keeps_diff(self):
+        git_out = review.git_out
+
+        def fail_merge_base(*args):
+            if args[0] == "merge-base":
+                return git_out("merge-base", "missing-ref", "branch")
+            return git_out(*args)
+
+        with patch.object(review, "git_out", side_effect=fail_merge_base):
+            body, label, warning = self.gather("base..branch")
+        self.assertIn("WARNING", warning)
+        self.assertIn("divergence is UNKNOWN", warning)
+        self.assertIn("divergence is UNKNOWN", label)
+        self.assertNotIn("2 commits", warning)
+        self.assertEqual(body, self.git("diff", "base..branch"))
+
+    def test_failed_resolution_or_count_is_unknown(self):
+        git_out = review.git_out
+        for command in ("rev-parse", "rev-list"):
+            with self.subTest(command=command):
+                def fail_check(*args):
+                    return "" if args[0] == command else git_out(*args)
+                with patch.object(review, "git_out", side_effect=fail_check):
+                    body, label, warning = self.gather("base..branch")
+                self.assertIn("divergence is UNKNOWN", warning)
+                self.assertIn("divergence is UNKNOWN", label)
+                self.assertEqual(body, self.git("diff", "base..branch"))
+
+    def test_omitted_endpoint_defaults_to_head(self):
+        for range_spec, head in (("base..", "branch"), ("..branch", "base")):
+            with self.subTest(range_spec=range_spec):
+                self.git("checkout", "-q", head)
+                body, _label, warning = self.gather(range_spec)
+                self.assertIn("2 commits on", warning)
+                self.assertIn("HEAD", warning)
+                self.assertEqual(body, self.git("diff", range_spec))
+
+    def test_header_displays_divergence_offline(self):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        reviewer = {"name": "offline", "profiles": ["standard"]}
+        result = {"name": "offline", "ok": True, "verdict": "upheld",
+                  "findings": [], "claims": [], "elapsed_s": 0}
+        argv = [str(SCRIPT), "--range", "base..branch", "--kind",
+                "implementation", "--round", "1", "--quorum", "1",
+                "--claim", review.HONEST_RUN_CLAIM]
+        with patch.object(sys, "argv", argv), \
+                patch.object(review, "load_reviewers", return_value=[reviewer]), \
+                patch.object(review, "availability", return_value=None), \
+                patch.object(review, "run_one", return_value=result), \
+                patch.object(review, "arm_watchdog"), \
+                patch.object(review, "disarm_watchdog"), \
+                patch.object(review, "record_review_round", return_value={}), \
+                redirect_stdout(stdout), redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as stopped:
+                review.main()
+        self.assertEqual(stopped.exception.code, review.STATES["REVIEW_PASS"])
+        header = next(line for line in stdout.getvalue().splitlines()
+                      if line.startswith("reviewing commit range"))
+        self.assertIn("base..branch", header)
+        self.assertIn("2 commits on base are NOT in branch", header)
 
 
 class TestGitTimeout(unittest.TestCase):
