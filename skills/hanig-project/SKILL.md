@@ -309,10 +309,18 @@ Verify the two never drift:
 
 ```sh
 python3 "$P/scripts/tickets.py" check plan.json tickets.json
+python3 "$P/scripts/tickets.py" reconcile plan.json --tracker-issues issues.json --json
 ```
 
-It reports both halves: the unit/issue mapping, and the blockedBy edges as
+`check` reports both halves: the unit/issue mapping, and the blockedBy edges as
 read at a stated time. It never says "in sync" without naming that time.
+`reconcile` compares the plan with an ATTESTED full project issue list:
+`[{"identifier": "ARC-123", "title": "Work", "state": "Todo", "unit": "unit-id"}]`.
+Use the draft's `unit` key (null/omitted for unmapped issues). Exit 3 names
+open issues without units and units absent from the read-back; no file exits 4
+with unknown orphan sets. Done/completed/cancelled/canceled are terminal
+(case-insensitive); state objects use `type`, falling back to `name` when
+`type` is absent. Other states count as open. See `reconcile --help` for bounds.
 
 ## 5. Dispatch.
 
