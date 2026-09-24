@@ -7681,6 +7681,138 @@ def _load_plan(path):
 CODE_TERMINAL_WATCH_LOG = "code-terminal-watch.log"
 
 
+def _code_terminal_outcome_path(state_dir, uid, attempt, agent):
+    # The record belongs to the coordinator, outside the worker's write root.
+    key = json.dumps([uid, attempt, str(agent)], separators=(",", ":"))
+    digest = hashlib.sha256(key.encode()).hexdigest()
+    return Path(state_dir) / ("code-terminal-outcome-" + digest + ".json")
+
+
+def _write_code_terminal_outcome(args, outcome):
+    """Retain diagnostics even while another controller holds the lock.
+
+    This per-watcher record is never judgment authority. Only its diagnostic
+    fields are imported into swarm-state.json under the project lock.
+    """
+    path = _code_terminal_outcome_path(
+        args.state_dir, args.unit, args.attempt, args.agent)
+    record = {"unit": args.unit, "attempt": args.attempt,
+              "agent_id": str(args.agent), "outcome": outcome}
+    err = U.write_json(path, record)
+    if err:
+        print(f"cannot record terminal-watch outcome: {err}", flush=True)
+
+
+def _code_terminal_log_tail(path):
+    """A bounded diagnostic tail; a replaced FIFO must not stall status."""
+    import stat
+    try:
+        fd = os.open(str(path), os.O_RDONLY | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as fh:
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                return "[log is not a regular file]"
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 4000))
+            return fh.read(4000).decode("utf-8", "replace")
+    except OSError as exc:
+        return f"[log unavailable: {exc}]"
+
+
+def _code_terminal_process(watch, attempt):
+    """Local diagnostic liveness, never a fact used to judge the unit."""
+    if watch.get("host") != os.uname().nodename:
+        return "unknown", "watcher host is different or unrecorded"
+    pid = watch.get("pid")
+    if type(pid) is not int or pid <= 0:
+        return "unknown", "watcher launch has no recorded pid"
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return "absent", "watcher process no longer exists"
+    except OSError as exc:
+        return "unknown", f"cannot inspect watcher process: {exc}"
+    rc, out, _err = U.run(
+        ["ps", "-ww", "-p", str(pid), "-o", "stat=", "-o", "command="],
+        timeout=5)
+    fields = out.split(None, 1)
+    if rc != 0 or len(fields) != 2:
+        return "unknown", "ps did not establish watcher liveness"
+    if fields[0].startswith("Z"):
+        return "absent", "watcher process is a zombie"
+    # ps renders argv without preserving argument boundaries. Never infer a
+    # mismatch from a value its display cannot represent unambiguously.
+    if any(char.isspace() for value in (attempt, str(watch.get("agent_id")))
+           for char in value):
+        return "unknown", "ps cannot distinguish watcher arguments containing whitespace"
+    # Check the complete ps output, not a shortened display, so an unrelated
+    # reused pid does not read as a live watcher just because kill succeeded.
+    tokens = fields[1].split()
+    pairs = list(zip(tokens, tokens[1:]))
+    if ("watch-code-terminal" not in tokens
+            or ("--attempt", attempt) not in pairs
+            or ("--agent", str(watch.get("agent_id"))) not in pairs):
+        return "absent", "recorded pid now names a different command"
+    return "present", "watcher process present; this is not work progress"
+
+
+def _read_code_terminal_outcome(state_dir, uid, attempt, agent):
+    record, _err = U.read_json(_code_terminal_outcome_path(
+        state_dir, uid, attempt, agent))
+    if (isinstance(record, dict) and record.get("unit") == uid
+            and record.get("attempt") == attempt
+            and record.get("agent_id") == str(agent)
+            and isinstance(record.get("outcome"), dict)):
+        # Deliberately no produced_head, job id, unit state or other authority.
+        keys = ("status", "observed_at", "wait_exit_code", "reason",
+                "log_tail", "checked_at")
+        return {key: record["outcome"][key] for key in keys
+                if key in record["outcome"]}
+    return {}
+
+
+def _observe_code_terminal_watch(state_dir, uid, attempt, watch):
+    """Merge exit diagnostics and repair old waiting records by observation."""
+    result = dict(watch)
+    if watch.get("status") not in ("starting", "waiting", "idle_observed"):
+        return result
+    result.update(_read_code_terminal_outcome(
+        state_dir, uid, attempt, watch.get("agent_id")))
+    if result.get("status") in ("starting", "waiting"):
+        liveness, reason = _code_terminal_process(watch, attempt)
+        result["process_state"] = liveness
+        result["process_reason"] = reason
+        result["process_observed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        if liveness == "absent":
+            # The watcher may have published and exited BETWEEN our first
+            # read and the process probe. Prefer that outcome to absence.
+            result.update(_read_code_terminal_outcome(
+                state_dir, uid, attempt, watch.get("agent_id")))
+            if result.get("status") not in ("starting", "waiting"):
+                return result
+            result.update({
+                "status": "exited_without_idle", "wait_exit_code": None,
+                "observed_at": result["process_observed_at"],
+                "reason": reason + "; no idle observation or exit code recorded",
+                "log_tail": _code_terminal_log_tail(watch.get("log")),
+            })
+    return result
+
+
+def _refresh_code_terminal_watches(state, state_dir):
+    """Caller holds the project lock before persisting the returned changes."""
+    changed = False
+    for uid, us in state.get("units", {}).items():
+        for attempt, watch in (us.get("code_terminal_watches") or {}).items():
+            if not isinstance(watch, dict):
+                continue
+            observed = _observe_code_terminal_watch(
+                state_dir, uid, attempt, watch)
+            if observed != watch:
+                watch.update(observed)
+                changed = True
+    return changed
+
+
 def _start_code_terminal_watchers(plan, state, args, report):
     """Start one best-effort event-driven checker for each live code attempt.
 
@@ -7721,7 +7853,8 @@ def _start_code_terminal_watchers(plan, state, args, report):
         try:
             log = open(log_path, "ab")
         except OSError as exc:
-            watches.pop(attempt, None)
+            watch.update({"status": "start_failed", "reason": str(exc),
+                          "observed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
             save_state(args.state_dir, state)
             report.append(f"{uid}: could not open terminal-watch log: {exc}. "
                           "Scheduled advance remains the fallback.")
@@ -7742,7 +7875,8 @@ def _start_code_terminal_watchers(plan, state, args, report):
                 start_new_session=True)
         except OSError as exc:
             log.close()
-            watches.pop(attempt, None)
+            watch.update({"status": "start_failed", "reason": str(exc),
+                          "observed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
             save_state(args.state_dir, state)
             report.append(f"{uid}: could not start terminal watcher: {exc}. "
                           "Scheduled advance remains the fallback.")
@@ -7780,23 +7914,33 @@ def _start_code_terminal_watchers(plan, state, args, report):
 # one caller that wants to block, and it runs as its own detached watcher
 # process rather than inside the coordinator.
 #
-# What this does NOT fix: nothing consumes the watcher's failure. See the
-# observability issue filed alongside this change.
+# Outcomes are now retained in coordinator state and consumed by status.
+# Scheduled advance still supplies the fallback if this process is killed.
 
 
 def cmd_watch_code_terminal(args):
-    """Wait for one agent, then immediately run the normal locked checker."""
-    rc, out, err = U.run(
-        ["paseo", "wait", str(args.agent), "--json"],
-        timeout=None)
+    """Wait for one agent, record the outcome, then use the locked checker."""
+    try:
+        rc, out, err = U.run(
+            ["paseo", "wait", str(args.agent), "--json"],
+            timeout=None)
+    except Exception as exc:
+        rc, out, err = None, "", f"{type(exc).__name__}: {exc}"
+    outcome = {
+        "status": "idle_observed" if rc == 0 else "exited_without_idle",
+        "observed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "wait_exit_code": rc,
+        "reason": ("paseo wait observed idle" if rc == 0 else
+                   f"paseo wait ended without an idle observation (exit {rc}): "
+                   f"{(err or out)[-400:]}"),
+        "log_tail": (out + "\n" + err)[-4000:].strip(),
+    }
+    _write_code_terminal_outcome(args, outcome)
     if rc != 0:
-        print(f"terminal watch ended without an idle observation: "
-              f"{(err or out or ('paseo wait exited %s' % rc))[:400]}")
-        return EXIT_HALTED
+        print(outcome["reason"], flush=True)
 
-    # Usually the dispatching controller releases this lock milliseconds
-    # after it starts us. Never steal it: wait briefly for the kernel-owned
-    # flock, then leave the scheduled advance as the durable fallback.
+    # Retain the observation BEFORE waiting for the project lock. Status can
+    # consume it even when this best-effort checker cannot acquire the lock.
     holder = None
     for _ in range(240):
         ok, holder = acquire_lease(args.state_dir)
@@ -7804,27 +7948,56 @@ def cmd_watch_code_terminal(args):
             break
         time.sleep(0.25)
     else:
-        print(f"terminal agent was observed, but the project lock remained "
-              f"busy for 60s ({holder}); scheduled advance will judge it")
+        outcome["reason"] += (
+            f"; project lock remained busy for 60s ({holder}); "
+            "scheduled advance remains the fallback")
+        _write_code_terminal_outcome(args, outcome)
+        print(outcome["reason"], flush=True)
         return EXIT_HALTED
 
     try:
-        plan = _load_plan(args.plan)
         state = load_state(args.state_dir)
-        us = _unit_state(state, args.unit)
+        us = state.get("units", {}).get(args.unit) or {}
+        watch = (us.get("code_terminal_watches") or {}).get(args.attempt)
+        if not isinstance(watch, dict) or watch.get("agent_id") != str(args.agent):
+            print("terminal watch has no matching coordinator start record")
+            return EXIT_OK
+        watch.update(outcome)
+        save_state(args.state_dir, state)
+        if rc != 0:
+            return EXIT_HALTED
         current_attempt = (Path(us.get("attempt_dir") or "").name
                            if us.get("attempt_dir") else None)
         if (current_attempt != args.attempt
                 or str(us.get("job_id") or "") != str(args.agent)):
-            print("terminal watch is obsolete: coordinator state now names "
-                  "a different attempt or agent")
+            outcome["reason"] += "; obsolete attempt or agent; no check run"
+            _write_code_terminal_outcome(args, outcome)
+            watch.update(outcome)
+            save_state(args.state_dir, state)
+            print(outcome["reason"])
             return EXIT_OK
-        report, _dispatched, halted = advance(
-            plan, state, args.state_dir, args.root, False, max_new=0)
-        watch = (us.setdefault("code_terminal_watches", {})
-                 .setdefault(args.attempt, {}))
-        watch["status"] = "checked"
-        watch["checked_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        try:
+            plan = _load_plan(args.plan)
+            report, _dispatched, halted = advance(
+                plan, state, args.state_dir, args.root, False, max_new=0)
+        except BaseException as exc:
+            outcome["reason"] += (
+                f"; immediate check ended with {type(exc).__name__}: {exc}")
+            _write_code_terminal_outcome(args, outcome)
+            # The checker may have mutated its in-memory state before it
+            # failed. Recording a diagnostic must not commit those changes.
+            persisted = load_state(args.state_dir)
+            recorded = ((persisted.get("units", {}).get(args.unit) or {})
+                        .get("code_terminal_watches") or {}).get(args.attempt)
+            if (isinstance(recorded, dict)
+                    and recorded.get("agent_id") == str(args.agent)):
+                recorded.update(outcome)
+                save_state(args.state_dir, persisted)
+            raise
+        outcome["status"] = "checked"
+        outcome["checked_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        _write_code_terminal_outcome(args, outcome)
+        watch.update(outcome)
         watch["produced_head"] = trusted_produced_head(
             state, args.unit, us.get("attempt_dir"))
         save_state(args.state_dir, state)
@@ -8833,6 +9006,9 @@ def _status_rows(plan, state, state_dir, observed_at=None):
                        in ("FAILED", "HELD", "FAILED_EVIDENCE")]
         rows.append({
             "id": uid, "kind": u.get("kind", "?"), "state": st,
+            "terminal_watch": ((us.get("code_terminal_watches") or {}).get(
+                Path(us["attempt_dir"]).name)
+                if u.get("kind") == "code" and us.get("attempt_dir") else None),
             "job_id": us.get("job_id"), "attempt_dir": us.get("attempt_dir"),
             "allocated_at": us.get("allocated_at"),
             "state_changed_at": us.get("state_changed_at"),
@@ -8898,6 +9074,25 @@ def cmd_status(args):
         sys.exit(f"error: no readable plan at {args.plan}: {err}")
     _prepare_command_paths(args, plan=plan)
     state = load_state(args.state_dir)
+    # Reconcile historical waiting records as well as new outcomes. Never
+    # steal the writer's lock or let watcher failure become a unit verdict.
+    if any(us.get("code_terminal_watches") for us in state.get("units", {}).values()):
+        already_locked = renew_lease(args.state_dir)
+        locked, _holder = acquire_lease(args.state_dir)
+        try:
+            if locked:
+                state = load_state(args.state_dir)
+            changed = _refresh_code_terminal_watches(state, args.state_dir)
+            if locked and changed:
+                error = U.write_json(Path(args.state_dir) / STATE_FILE, state)
+                if error:
+                    print(f"watcher diagnostics could not be persisted: {error}",
+                          file=sys.stderr)
+            # Without the lock, this is an observation only. The watcher's
+            # separate outcome remains available to the next locked reader.
+        finally:
+            if locked and not already_locked:
+                release_lease(args.state_dir)
     rep = status_report(plan, state, args.state_dir)
 
     if args.json:
@@ -8919,6 +9114,21 @@ def cmd_status(args):
             print(f"  {r['id'].ljust(w)}  {r['kind']:9} {r['state']:13} "
                   f"{job[:14]:14} {r['gpu_hours']:>5g} {r['attempts']} "
                   f"{age:>8} {state_age:>8}")
+            watch = r["terminal_watch"]
+            if watch:
+                process = (watch.get("process_state") if watch.get("status")
+                           in ("starting", "waiting") else None)
+                suffix = f" (process {process})" if process else ""
+                print(f"  {'':{w}}    terminal watcher: "
+                      f"{watch.get('status', 'unknown')}{suffix}; observed "
+                      f"{watch.get('observed_at') or watch.get('process_observed_at') or watch.get('started_at') or 'unknown'}")
+                if watch.get("reason") or watch.get("process_reason"):
+                    print(f"  {'':{w}}      "
+                          f"{watch.get('reason') or watch.get('process_reason')}")
+                if watch.get("log_tail"):
+                    print(f"  {'':{w}}      log tail: {watch['log_tail']!r}")
+                if watch.get("status") != "checked":
+                    print(f"  {'':{w}}      Scheduled advance remains the fallback.")
             if r["reason"]:
                 print(f"  {'':{w}}    reason: {r['reason']}")
             if r["deadline_evaluation"] == "not_evaluable_here":
