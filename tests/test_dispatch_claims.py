@@ -524,6 +524,154 @@ class TestTheProtocolReservesMergingForTheOrchestrator(unittest.TestCase):
                 self.assertIn(name, problem or "")
 
 
+# --- ARC-679 -------------------------------------------------------------
+
+GATE_CLAUSE = "Before opening a pull request, run this repository's review gate."
+PUSH_CLAUSE = "Push after every meaningful edit."
+
+
+class TestTheProtocolRequiresReviewAndPush(unittest.TestCase):
+    def test_author_comes_from_coordinator_intent(self):
+        cases = (
+            ({"provider": "codex", "model": "gpt-6-astra"},
+             "codex/gpt-6-astra"),
+            ({"provider": "codex/gpt-6-astra"}, "codex/gpt-6-astra"),
+            ({"provider": "codex/gpt-6-astra", "model": "gpt-5.6-luna"},
+             "codex/gpt-5.6-luna"),
+            ({"provider": "openrouter", "model": "moonshotai/kimi-k2.7-code"},
+             "openrouter/moonshotai/kimi-k2.7-code"),
+        )
+        for routing, author in cases:
+            with self.subTest(routing=routing):
+                intent = dict(INTENT, **routing)
+                unit = dict(routing, kind="code", prompt="work")
+                prompt = S._dispatch_prompt(unit, intent)
+                self.assertIn("--author " + author, prompt)
+                self.assertIsNone(S._code_protocol_problem(prompt, intent))
+
+    def test_missing_identity_is_explicit_and_never_filled_from_a_default(self):
+        for routing in ({}, {"provider": "codex"},
+                        {"model": "gpt-6-astra"},
+                        {"provider": None, "model": "gpt-6-astra"}):
+            with self.subTest(routing=routing):
+                intent = dict(INTENT, **routing)
+                prompt = S._dispatch_prompt({"kind": "code"}, intent)
+                self.assertIn("provider/model for this unit is UNKNOWN", prompt)
+                self.assertIn("do not invent an author or omit --author", prompt)
+                self.assertNotIn("Pass --author", prompt)
+                self.assertIsNone(S._code_protocol_problem(prompt, intent))
+
+    def test_review_covers_committed_delta_and_preserves_a_failed_review(self):
+        protocol = S._code_completion_protocol(INTENT)
+        for sentence in (
+                GATE_CLAUSE, "hanig-review-gate's review.py",
+                "--range " + INTENT["base_commit"] + "..HEAD",
+                "COMPLETE delta from the recorded base",
+                "Commit all intended edits first and leave the worktree clean",
+                "Only exit 0 (REVIEW_PASS) permits opening a pull request",
+                "Reproduce each confirmed finding before acting on it.",
+                "If a reproduced failure remains, do NOT open a pull request",
+                "RECOVERY, NOT READY:", "refs/heads/recovery/swarm-a1",
+                "without moving the anchored attempt ref",
+                "REVIEW_PASS means the panel failed to refute the claims, not proof."):
+            self.assertIn(sentence, protocol)
+
+    def test_push_requires_changed_content(self):
+        protocol = S._code_completion_protocol(INTENT)
+        self.assertIn(PUSH_CLAUSE, protocol)
+        self.assertIn("Commit and push the actual changed content", protocol)
+        self.assertIn("An empty or marker commit preserves no implementation", protocol)
+        self.assertIn("a tree identical to the recorded base is refused", protocol)
+
+    def test_plan_validation_refuses_either_missing_clause(self):
+        unit = {"id": "code", "kind": "code", "repo": "/src/project",
+                "target_branch": "main", "prompt": "work",
+                "mode": "full-access", "outputs": ["o"]}
+        real_protocol = S._code_completion_protocol
+        for name, clause in (("review gate", GATE_CLAUSE),
+                             ("push discipline", PUSH_CLAUSE)):
+            with self.subTest(clause=name):
+                def missing(intent):
+                    protocol = real_protocol(intent)
+                    self.assertIn(clause, protocol)
+                    return protocol.replace(clause, "")
+                with fake_bin(paseo="exit 99\n"), mock.patch.object(
+                        S, "_code_completion_protocol", side_effect=missing):
+                    with self.assertRaisesRegex(S.PlanError, name):
+                        S.validate_plan(plan_of(unit))
+
+
+class TestReviewAndPushBeforeAgentCreation(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="protocol-dispatch-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.repo = self.tmp / "repo"
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True,
+                       env=ENV)
+        (self.repo / "tracked.txt").write_text("base\n")
+        git(self.repo, "add", "tracked.txt")
+        git(self.repo, "commit", "-qm", "base")
+        self.remote = self.tmp / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(self.remote)],
+                       check=True, env=ENV)
+        git(self.repo, "remote", "add", "origin", str(self.remote))
+        git(self.repo, "branch", "-M", "main")
+        git(self.repo, "push", "-qu", "origin", "main")
+        self.attempt = self.tmp / "runs" / "code" / "a1"
+        self.attempt.mkdir(parents=True)
+        self.unit = {"id": "code", "kind": "code", "repo": str(self.repo),
+                     "target_branch": "main", "prompt": "work",
+                     "mode": "full-access", "outputs": ["o"]}
+        self.launches = []
+        real_run = S.U.run
+
+        def run(argv, **kwargs):
+            if argv[:2] == ["paseo", "run"]:
+                self.launches.append(argv)
+                return 1, "", "test stopped at agent creation"
+            return real_run(argv, **kwargs)
+
+        patch = mock.patch.object(S.U, "run", side_effect=run)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def submit(self):
+        return S._submit(self.unit, str(self.attempt), False,
+                         {"units": {}}, str(self.tmp / "state"))
+
+    def assert_missing_clause_refuses(self, clause, name):
+        real_protocol = S._code_completion_protocol
+
+        def missing(intent):
+            protocol = real_protocol(intent)
+            self.assertIn(clause, protocol)
+            return protocol.replace(clause, "")
+
+        # Patch the builder too, so suffix equality cannot mask a missing
+        # required-set check. The real _submit must refuse before U.run.
+        with mock.patch.object(S, "_code_completion_protocol", side_effect=missing):
+            job, error = self.submit()
+        self.assertEqual(self.launches, [], "missing clause reached agent creation")
+        self.assertIsNone(job)
+        self.assertIn("missing " + name, error or "")
+
+    def test_missing_gate_clause_refuses_before_agent_creation(self):
+        self.assert_missing_clause_refuses(GATE_CLAUSE, "review gate")
+
+    def test_missing_push_clause_refuses_before_agent_creation(self):
+        self.assert_missing_clause_refuses(PUSH_CLAUSE, "push discipline")
+
+    def test_intact_protocol_reaches_agent_creation(self):
+        _job, error = self.submit()
+        self.assertEqual(len(self.launches), 1, error)
+        prompt = self.launches[0][-1]
+        self.assertIn(GATE_CLAUSE, prompt)
+        self.assertIn(PUSH_CLAUSE, prompt)
+        # Existing intents have no routing fields. They must be explicit
+        # about that absence rather than assert today's default was recorded.
+        self.assertIn("provider/model for this unit is UNKNOWN", prompt)
+
+
 class TestTheCoordinatorRunsNoStashOfItsOwn(unittest.TestCase):
     """The refusal below must not fire on a stash the coordinator itself
     parked. It cannot, because the coordinator parks none -- which is a claim
