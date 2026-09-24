@@ -53,13 +53,14 @@ class TestInstalledSkillDrift(unittest.TestCase):
         marker.write_text(f"repo=multi-agent-skills\nsource_version={version}\n")
         return marker
 
-    def dispatch(self, name="attempt"):
+    def dispatch(self, name="attempt", dispatch_source=None):
         attempt = self.tmp / "runs" / "code" / name
         attempt.mkdir(parents=True)
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             agent, error = S._submit(self.unit, str(attempt), False,
-                                     self.state, str(self.state_dir))
+                                     self.state, str(self.state_dir),
+                                     dispatch_source=dispatch_source)
         self.assertIsNone(error)
         self.assertEqual(agent, "agent-" + name)
         facts = self.state["units"]["code"]["attempt_launch_facts"][name]
@@ -74,7 +75,7 @@ class TestInstalledSkillDrift(unittest.TestCase):
         self.base = git(self.repo, "rev-parse", "HEAD")
         return old
 
-    def test_dispatch_records_each_store_and_warns_only_on_drift(self):
+    def test_uncached_dispatch_records_each_store_and_warns_on_drift(self):
         stale = "f" * 40
         marker = self.install(".agents", "hanig-review-gate", stale)
         matching = self.install(".claude", "hanig-review-gate", self.base)
@@ -98,6 +99,67 @@ class TestInstalledSkillDrift(unittest.TestCase):
         audit = json.loads(W.launch_record_path(attempt).read_text())
         for record in (intent, saved, audit):
             self.assertEqual(record["installed_skills"], facts["installed_skills"])
+
+    def test_cached_source_dispatch_records_snapshot_and_warns(self):
+        stale = "f" * 40
+        marker = self.install(".agents", "hanig-swarm", stale)
+        target, error = S._resolve_dispatch_target(self.unit)
+        self.assertIsNone(error)
+        source, error = S._dispatch_source_identity(self.unit, target)
+        self.assertIsNone(error)
+        with mock.patch.object(S, "_resolve_dispatch_target",
+                               side_effect=AssertionError("must use cached source")):
+            attempt, facts, warning = self.dispatch(dispatch_source=source)
+        self.assertIn("installed skill drift", warning)
+        self.assertIn(str(marker.parent), warning)
+        self.assertIn(stale, warning)
+        self.assertIn(self.base, warning)
+        saved = S.load_state(self.state_dir)["units"]["code"]
+        self.assertEqual(saved["attempt_launch_facts"][attempt.name]
+                         ["installed_skills"], facts["installed_skills"])
+
+    def test_redispatch_warns_from_persisted_snapshot_without_resampling(self):
+        stale = "f" * 40
+        marker = self.install(".agents", "hanig-swarm", stale)
+        for cached in (False, True):
+            with self.subTest(cached=cached):
+                name = "redispatch-" + str(cached)
+                attempt = self.tmp / "runs" / "code" / name
+                error, anchor = S._capture_code_launch(str(attempt), self.unit)
+                self.assertIsNone(error)
+                self.state = {"units": {"code": {
+                    "attempt_launch_intents": {name: anchor["intent"]}}}}
+                S.save_state(self.state_dir, self.state)
+                self.state = S.load_state(self.state_dir)
+                marker.write_text("source_version=" + self.base + "\n")
+                source = None
+                if cached:
+                    target, error = S._resolve_dispatch_target(self.unit)
+                    self.assertIsNone(error)
+                    source, error = S._dispatch_source_identity(self.unit, target)
+                    self.assertIsNone(error)
+                with mock.patch.object(S, "_installed_skill_snapshot",
+                                       side_effect=AssertionError("must not resample")):
+                    _attempt, facts, warning = self.dispatch(name, source)
+                self.assertIn("installed skill drift", warning)
+                self.assertIn(stale, warning)
+                self.assertEqual(facts["installed_skills"],
+                                 anchor["intent"]["installed_skills"])
+                marker.write_text("source_version=" + stale + "\n")
+
+    def test_warning_names_scanned_stores_and_excludes_custom_stores(self):
+        self.install(".agents", "hanig-swarm", "f" * 40)
+        self.install("custom", "hanig-custom", "e" * 40)
+        project_skill = self.repo / ".agents" / "skills" / "hanig-project"
+        project_skill.mkdir(parents=True)
+        (project_skill / "SKILL.md").write_text("project fixture\n")
+        (project_skill / ".installed-by-multi-agent-skills").write_text(
+            "source_version=" + "d" * 40 + "\n")
+        _attempt, facts, warning = self.dispatch()
+        self.assertEqual([entry["skill"] for entry in facts["installed_skills"]["skills"]],
+                         ["hanig-swarm"])
+        self.assertIn("Only ~/.agents/skills and ~/.claude/skills are scanned", warning)
+        self.assertIn("project/custom stores are not scanned", warning)
 
     def test_equal_versions_dispatch_without_warning(self):
         for store in (".agents", ".claude"):
@@ -152,6 +214,7 @@ class TestInstalledSkillDrift(unittest.TestCase):
 
     def test_broken_or_closed_warning_stream_does_not_abort_dispatch(self):
         self.install(".agents", "hanig-swarm", "f" * 40)
+        self.install(".agents", "hanig-unknown", self.base).unlink()
         broken = mock.Mock()
         broken.write.side_effect = BrokenPipeError("fixture broken stderr")
         closed = io.StringIO()
@@ -276,12 +339,14 @@ class TestInstalledSkillDrift(unittest.TestCase):
             else:
                 marker.write_bytes(payload)
         _attempt, facts, warning = self.dispatch()
-        self.assertEqual(warning, "")
+        self.assertEqual(warning.count("installed skill audit incomplete"), 6)
         entries = facts["installed_skills"]["skills"]
         self.assertEqual(len(entries), 6)
         for entry in entries:
             self.assertIsNone(entry["source_version"])
             self.assertTrue(entry["error"])
+            self.assertIn(repr(entry["marker"]), warning)
+            self.assertIn(repr(entry["error"]), warning)
 
     def test_unreadable_root_is_recorded_and_does_not_refuse_dispatch(self):
         self.install(".claude", "hanig-swarm", self.base)
@@ -295,10 +360,30 @@ class TestInstalledSkillDrift(unittest.TestCase):
 
         with mock.patch.object(Path, "iterdir", denied):
             _attempt, facts, warning = self.dispatch()
-        self.assertEqual(warning, "")
+        self.assertIn("installed skill audit incomplete", warning)
+        self.assertIn(str(unreadable), warning)
+        self.assertIn("fixture denial", warning)
         self.assertEqual(facts["installed_skills"]["errors"],
                          [{"path": str(unreadable), "error": "fixture denial"}])
         self.assertEqual(len(facts["installed_skills"]["skills"]), 1)
+
+    def test_absent_stores_are_quiet_but_dangling_store_links_warn(self):
+        _attempt, facts, warning = self.dispatch("absent")
+        self.assertEqual(warning, "")
+        self.assertEqual(facts["installed_skills"], {"skills": [], "errors": []})
+        for store in (".agents", ".claude"):
+            with self.subTest(store=store):
+                root = self.home / store / "skills"
+                root.parent.mkdir(parents=True)
+                root.symlink_to(self.tmp / "missing-store", target_is_directory=True)
+                _attempt, facts, warning = self.dispatch("dangling-" + store[1:])
+                self.assertIn("installed skill audit incomplete", warning)
+                self.assertIn(str(root), warning)
+                errors = facts["installed_skills"]["errors"]
+                self.assertEqual(len(errors), 1)
+                self.assertEqual(errors[0]["path"], str(root))
+                self.assertIn("No such file or directory", errors[0]["error"])
+                root.unlink()
 
     def test_link_sidecar_takes_precedence_over_linked_copy_marker(self):
         sys.path.insert(0, str(ROOT / "lib"))
@@ -326,6 +411,39 @@ class TestInstalledSkillDrift(unittest.TestCase):
         self.assertEqual(source_marker.read_text(),
                          "source_version=" + "f" * 40 + "\n")
         self.assertTrue(destination.is_symlink())
+
+    def test_link_install_in_relocated_symlinked_store_has_visible_advisory(self):
+        sys.path.insert(0, str(ROOT / "lib"))
+        self.addCleanup(sys.path.remove, str(ROOT / "lib"))
+        import skill_lifecycle as lifecycle
+        source = self.tmp / "link-source"
+        source.mkdir()
+        (source / "SKILL.md").write_text("linked fixture\n")
+        store = self.home / ".agents" / "skills"
+        destination = store / "hanig-swarm"
+        target = lifecycle.LifecycleTarget(
+            "hanig-swarm", source, destination, "authored", mode="link",
+            consumers=("codex",), source_version=self.base)
+        self.assertEqual(lifecycle.install((target,))[0].status, "installed")
+        marker = lifecycle.provenance_path(destination)
+        original = marker.read_bytes()
+        moved_store = self.tmp / "moved-skills"
+        store.rename(moved_store)
+        store.symlink_to(moved_store, target_is_directory=True)
+
+        attempt, facts, warning = self.dispatch()
+
+        entry = facts["installed_skills"]["skills"][0]
+        self.assertIsNone(entry["source_version"])
+        self.assertIn("FileNotFoundError", entry["error"])
+        self.assertIn("installed skill audit incomplete", warning)
+        self.assertIn(repr(entry["marker"]), warning)
+        self.assertIn(repr(entry["error"]), warning)
+        self.assertIn("symlinked skill stores may hide link-install sidecars", warning)
+        self.assertEqual(marker.read_bytes(), original)
+        persisted = S.load_state(self.state_dir)["units"]["code"]
+        self.assertEqual(persisted["attempt_launch_facts"][attempt.name]
+                         ["installed_skills"], facts["installed_skills"])
 
     def test_snapshot_is_durable_before_paseo_and_survives_recovery(self):
         stale = "f" * 40

@@ -2760,6 +2760,8 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
                 unit_dir, u, dispatch_source=dispatch_source)
         if anchor_err:
             return None, anchor_err
+        # One warning point for cached/uncached sources and restored intents.
+        # Keep it outside their branches so every code snapshot is reported.
         _warn_installed_skill_drift(
             anchored_base["intent"].get("installed_skills"),
             anchored_base["base"], u.get("id"))
@@ -3841,11 +3843,14 @@ def _installed_skill_source_version(marker):
 
 
 def _installed_skill_snapshot(repo, base):
-    """Best-effort audit of the two local user skill stores at dispatch.
+    """Best-effort audit of ~/.agents/skills and ~/.claude/skills only.
 
     These are available candidates, not evidence of which skill a worker
     loads. Loader precedence, project/custom stores and later edits are not
     observed. Keep each path and raw marker claim, including duplicate names.
+    A symlinked skill store holding a link install can yield the wrong sidecar
+    path (for example after relocation); record an advisory error instead of
+    a version and report it at dispatch. This does not certify installed bytes.
     """
     snapshot = {"skills": [], "errors": []}
     resolved_versions = {}
@@ -3857,7 +3862,17 @@ def _installed_skill_snapshot(repo, base):
     for root in (home / ".agents" / "skills", home / ".claude" / "skills"):
         try:
             candidates = sorted(root.iterdir())
-        except FileNotFoundError:
+        except FileNotFoundError as exc:
+            # An absent optional store is quiet. A dangling store symlink
+            # still exists as an entry and needs a visible audit error.
+            error = exc
+            try:
+                root.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as probe_error:
+                error = probe_error
+            snapshot["errors"].append({"path": str(root), "error": str(error)})
             continue
         except OSError as exc:
             snapshot["errors"].append({"path": str(root), "error": str(exc)})
@@ -3908,20 +3923,34 @@ def _installed_skill_snapshot(repo, base):
 
 def _warn_installed_skill_drift(snapshot, base, uid):
     """Report audit observations; never return an admission decision."""
+    observations = []
     for entry in (snapshot or {}).get("skills", []):
         version = entry["source_version"]
-        if (version is not None and version != base
+        if entry.get("error"):
+            observations.append(
+                f"installed skill audit incomplete at {entry['path']!r}: "
+                f"marker={entry['marker']!r}; {entry['error']!r}.")
+        elif (version is not None and version != base
                 and entry.get("resolved_commit") != base):
-            try:
-                print(f"WARNING: unit {uid!r}: installed skill drift check at "
-                      f"{entry['path']!r}: source_version={version!r}; "
-                      f"attempt base={base!r}. Equality was not established; "
-                      "dispatch continues.",
-                      file=sys.stderr, flush=True)
-            except (OSError, ValueError):
-                # A closed/broken diagnostic stream must not turn this audit
-                # warning into a new dispatch refusal. The snapshot persists.
-                pass
+            observations.append(
+                f"installed skill drift check at {entry['path']!r}: "
+                f"source_version={version!r}; attempt base={base!r}. "
+                "Equality was not established.")
+    for error in (snapshot or {}).get("errors", []):
+        observations.append(
+            f"installed skill audit incomplete at {error['path']!r}: "
+            f"{error['error']!r}.")
+    for observation in observations:
+        try:
+            print(f"WARNING: unit {uid!r}: {observation} Only ~/.agents/skills "
+                  "and ~/.claude/skills are scanned; project/custom stores "
+                  "are not scanned; symlinked skill stores may hide "
+                  "link-install sidecars. Advisory only; dispatch continues.",
+                  file=sys.stderr, flush=True)
+        except (OSError, ValueError):
+            # A closed/broken diagnostic stream must not turn this audit
+            # warning into a new dispatch refusal. The snapshot persists.
+            pass
 
 
 def _capture_code_launch(unit_dir, u, dispatch_source=None):
