@@ -225,7 +225,12 @@ def _lifecycle_ids(data, known_ids, skill_name):
 
 
 def load_registry(skill_dir):
-    """Return validated declarations in source order."""
+    """Return validated declarations in source order.
+
+    The supplied directory basename selects CLOSED_DECLARATIONS, without
+    resolving symlinks. Use the real directory name for copies and symlinks;
+    a differently named alias does not inherit its target's inventory.
+    """
     skill_dir = Path(skill_dir)
     skill_name = skill_dir.name
     path = skill_dir / "declarations.json"
@@ -268,9 +273,12 @@ def load_registry(skill_dir):
         ))
     closed = CLOSED_DECLARATIONS.get(skill_name)
     if closed is None:
-        raise RegistryError("{} has no closed declaration inventory".format(
-            skill_name
-        ))
+        raise RegistryError(
+            "path-derived key {!r} has no closed declaration inventory; "
+            "known inventory keys: {}; use the real directory name".format(
+                skill_name, ", ".join(sorted(CLOSED_DECLARATIONS))
+            )
+        )
     for declaration_id in closed:
         if declaration_id not in known:
             raise RegistryError("{} missing known declaration: {}".format(

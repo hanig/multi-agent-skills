@@ -902,6 +902,38 @@ class TestAuthoredSkillShape(unittest.TestCase):
                 self.assertEqual(_declaration_completeness_problems(skill), [])
                 self.assertEqual(_reference_elaboration_problems(skill), [])
 
+    def test_registry_same_name_directory_symlink_loads(self):
+        for name in sorted(DECLARATION_INVENTORIES):
+            with self.subTest(skill=name):
+                with tempfile.TemporaryDirectory() as raw:
+                    source = SKILLS / name
+                    alias = Path(raw) / name
+                    alias.symlink_to(source, target_is_directory=True)
+                    direct = DECLARATION_REGISTRY.load_registry(source)
+                    self.assertTrue(direct)
+                    self.assertEqual(
+                        DECLARATION_REGISTRY.load_registry(alias), direct
+                    )
+
+    def test_registry_differently_named_directory_symlink_is_refused(self):
+        for name in sorted(DECLARATION_INVENTORIES):
+            with self.subTest(skill=name):
+                with tempfile.TemporaryDirectory() as raw:
+                    alias = Path(raw) / ("alias-" + name)
+                    alias.symlink_to(SKILLS / name, target_is_directory=True)
+                    with self.assertRaises(
+                            DECLARATION_REGISTRY.RegistryError) as caught:
+                        DECLARATION_REGISTRY.load_registry(alias)
+                    self.assertEqual(
+                        str(caught.exception),
+                        "path-derived key {!r} has no closed declaration "
+                        "inventory; known inventory keys: {}; use the real "
+                        "directory name".format(
+                            alias.name,
+                            ", ".join(sorted(DECLARATION_INVENTORIES)),
+                        ),
+                    )
+
     def test_orchestrate_reads_authority_from_the_current_mandate(self):
         skill = SKILLS / "hanig-orchestrate"
         mandate = (ROOT / "docs" / "orchestrator-mandate.md").read_text(
