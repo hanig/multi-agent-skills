@@ -3823,12 +3823,12 @@ def _dispatch_source_identity(u, target):
 def _dispatch_target_for_advance(u, cache):
     """Resolve a target once per advance and return the cached observation."""
     # A plan may spell its workspace as a subdirectory of the repository.
-    # Key by the same Git root that target resolution and launch will use.
+    # Key by the same resolved Git root that target resolution and launch use.
     repo, problem = _plan_workspace(u)
     if problem:
         return None, _dispatch_base_refusal(
             u.get("id"), _execution_workspace(u), problem)
-    key = (repo,
+    key = (str(Path(repo).resolve()),
            str(u.get("target_branch") or "").strip())
     if key not in cache:
         cache[key] = _resolve_dispatch_target(u)
