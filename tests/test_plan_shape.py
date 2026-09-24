@@ -451,7 +451,7 @@ class TestTheDefaultAgent(unittest.TestCase):
         return None
 
     def test_the_default_is_sol_at_high(self):
-        self.assertEqual(S.DEFAULT_AGENT_PROVIDER, "codex/gpt-5.6-sol")
+        self.assertEqual(S.DEFAULT_AGENT_PROVIDER, "codex/gpt-6-astra")
         self.assertEqual(S.DEFAULT_AGENT_THINKING, "high")
 
     def test_dispatch_passes_the_default_provider_and_thinking(self):

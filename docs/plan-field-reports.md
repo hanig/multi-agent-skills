@@ -265,6 +265,8 @@ an availability failure that fails closed, never a re-judgment.
 
 ### Model routing, set 2026-09-01
 
+> **Amended 2026-09-24, owner decision:** coding agents are now `codex/gpt-6-astra` at `high`, replacing `codex/gpt-5.6-sol`. Verified on a live agent before adoption (`paseo inspect`: Provider codex, Model gpt-6-astra, Thinking high). The sol rows below are the 2026-09-01 record and are kept as history. The author rule carries over: the impl model does not review what it wrote.
+
 Reasoning effort is per MODEL, revised 2026-09-04: `codex/gpt-5.6-sol`
 at **high**, `codex/gpt-5.6-luna` at **xhigh**, `claude/opus` at
 **high**. luna sits below the other two on `bus models`' measured

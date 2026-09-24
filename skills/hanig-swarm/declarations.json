@@ -12,7 +12,7 @@
     {"id": "capability.tracker", "normative_text": "Without a tracker connector, retain the idempotent outbox intent as pending synchronization for an authorized session.", "references": ["references/capability-fallbacks.md"]},
     {"id": "capability.worker-backend", "normative_text": "Never infer OpenCode or another worker backend merely because it loaded this skill.", "references": ["references/capability-fallbacks.md"]},
     {"id": "paths.skill-directory", "normative_text": "Use `HANIG_SWARM_DIR` only to locate bundled programs; keep project, plan, state, input, and output paths relative to the project directory."},
-    {"id": "code.default-agent", "normative_text": "A `code` unit defaults to `codex/gpt-5.6-sol` with `thinking: high`; provider overrides must be declared on the unit."},
+    {"id": "code.default-agent", "normative_text": "A `code` unit defaults to `codex/gpt-6-astra` with `thinking: high`; provider overrides must be declared on the unit."},
     {"id": "code.provider-mode", "normative_text": "Dispatch must refuse a mode unsupported by the selected provider; `mode` has no portable default."},
     {"id": "runtime.declaration", "normative_text": "Every `slurm` and `pipeline` unit must declare a runtime, using `runtime: none` as an explicit claim for a base-image-only unit."},
     {"id": "runtime.verification", "normative_text": "Runtime availability must be established where the job lands by the declared canary or allocation-local preflight, never inferred from submit-host paths."},

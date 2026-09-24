@@ -59,17 +59,18 @@ KINDS = U.KINDS
 
 # What a `code` unit runs unless it says otherwise.
 #
-# `codex/gpt-5.6-sol` at `high` is the strongest agent available here: `bus
-# models` puts it top of the local roster on measured intelligence, ahead of
-# claude/opus, and the pairing is the one already in use by hand. Provider,
-# model and thinking id were all read off live agents rather than guessed,
-# because paseo answers an unknown thinking id with an ERRORED agent, and a
-# default that fails at dispatch is worse than no default.
+# `codex/gpt-6-astra` at `high`, by owner decision on 2026-09-24, replacing
+# `codex/gpt-5.6-sol`. Provider, model and thinking id were read off a live
+# agent before this default changed, not guessed: a canary launched with
+# `paseo run --provider codex --model gpt-6-astra --thinking high` inspected as
+# Provider codex, Model gpt-6-astra, Thinking high, and answered. That check is
+# the bar, because paseo answers an unknown thinking id with an ERRORED agent,
+# and a default that fails at dispatch is worse than no default.
 #
 # A unit overrides any of it with `provider`, `model` or `thinking`. Setting
 # `thinking` to null or "" turns the flag off entirely for a provider that has
 # no such option.
-DEFAULT_AGENT_PROVIDER = "codex/gpt-5.6-sol"
+DEFAULT_AGENT_PROVIDER = "codex/gpt-6-astra"
 DEFAULT_AGENT_THINKING = "high"
 
 # Reasoning effort belongs to the MODEL, not to the project. One project-wide
@@ -85,6 +86,7 @@ DEFAULT_AGENT_THINKING = "high"
 # and `claude/opus` is an alias paseo expands to `claude-opus-5`, which is why
 # both spellings are keys.
 THINKING_BY_MODEL = {
+    "codex/gpt-6-astra": "high",
     "codex/gpt-5.6-sol": "high",
     "codex/gpt-5.6-luna": "xhigh",
     "claude/opus": "high",
@@ -8156,7 +8158,7 @@ SCHEMA_FIELDS = [
      "no default on purpose. Absent or empty means default permissions, so "
      "the agent stalls at its first write"),
     ("provider", "code", "optional",
-     "default codex/gpt-5.6-sol"),
+     "default codex/gpt-6-astra"),
     ("model", "code", "optional", "overrides the provider's default"),
     ("thinking", "code", "optional",
      "default high. JSON null or \"\" suppresses the flag; the STRING "
