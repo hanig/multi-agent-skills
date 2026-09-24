@@ -450,7 +450,7 @@ class TestTheDefaultAgent(unittest.TestCase):
         self.assertTrue(src.is_file())
         return None
 
-    def test_the_default_is_sol_at_high(self):
+    def test_the_default_is_astra_at_high(self):
         self.assertEqual(S.DEFAULT_AGENT_PROVIDER, "codex/gpt-6-astra")
         self.assertEqual(S.DEFAULT_AGENT_THINKING, "high")
 
