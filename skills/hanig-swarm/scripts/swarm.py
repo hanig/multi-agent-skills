@@ -1259,6 +1259,21 @@ def converge_verdict(u, attempt_dir):
                     bool(spec.get("sparse_metric")))
 
 
+def _units_with_canary(plan):
+    """Effective dependencies, without editing the plan or launch intents.
+
+    Use the ordinary needs readers for validation, dispatch and status. The
+    raw plan is still the digest input; plans without canary keep their bytes.
+    """
+    units = plan.get("units") or []
+    if "canary" not in plan:
+        return units
+    canary = plan["canary"]
+    return [dict(u, needs=[*(u.get("needs") or []), canary])
+            if isinstance(u, dict) and u.get("id") != canary
+            and canary not in (u.get("needs") or []) else u for u in units]
+
+
 def validate_plan(plan, survey=None):
     """Raise PlanError, or return a summary. Refuses BEFORE anything is
     dispatched: a plan that cannot be run should not half-run.
@@ -1332,6 +1347,19 @@ def validate_plan(plan, survey=None):
                     f"unit {u.get('id','?')!r} requires a clean Git workspace "
                     f"but declares no workspace_policy.path, "
                     f"execution_workspace, or repo")
+
+    if "canary" in plan:
+        canary = plan["canary"]
+        if not isinstance(canary, str):
+            raise PlanError("plan 'canary' must be a unit id string")
+        probe = next((u for u in units if isinstance(u, dict)
+                      and u.get("id") == canary), None)
+        if probe is None:
+            raise PlanError(f"plan 'canary' {canary!r} names no unit")
+        if probe.get("needs"):
+            raise PlanError(f"plan 'canary' {canary!r} must be a root "
+                            "with no 'needs'")
+        units = _units_with_canary(plan)
 
     # A convergence criterion is refused HERE, before anything is dispatched,
     # for the reason converge.py gives for requiring one at all: it has to be
@@ -2231,10 +2259,12 @@ def plan_digest(plan):
                 if k not in COSMETIC_FIELDS}
     units = sorted((unit_payload(u) for u in (plan.get("units") or [])),
                    key=lambda d: json.dumps(d, sort_keys=True))
-    payload = json.dumps(
-        {"units": units,
-         "budget": plan.get("budget"),
-         "root": plan.get("root")}, sort_keys=True, default=str)
+    content = {"units": units,
+               "budget": plan.get("budget"),
+               "root": plan.get("root")}
+    if "canary" in plan:
+        content["canary"] = plan["canary"]
+    payload = json.dumps(content, sort_keys=True, default=str)
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
@@ -7058,7 +7088,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     Safe to run from a Paseo schedule or cron every few minutes: it never
     re-submits a unit that has an attempt recorded, and it persists before it
     acts."""
-    units = {u["id"]: u for u in plan["units"]}
+    units = {u["id"]: u for u in _units_with_canary(plan)}
     report, dispatched, halted = [], 0, state.get("halted")
     advance_observed_at = time.time()
     dispatch_targets = {}
@@ -7846,6 +7876,10 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         if us["attempt_dir"] or us["state"] in ("DONE", "FAILED",
                                                 "FAILED_EVIDENCE"):
             continue
+        # A root has no dependency that could clear its persisted hold.
+        # Keep a held canary terminal for the ordinary upstream path below.
+        if uid == plan.get("canary") and us["state"] == "HELD":
+            continue
         # A failed upstream is checked FIRST. Ordered the other way round, the
         # HELD branch was dead code: a FAILED dependency is also not DONE, so
         # `unmet` was non-empty and the loop skipped past HELD every time. The
@@ -7864,6 +7898,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         unmet = [d for d in needs
                  if _unit_state(state, d)["state"] != "DONE"]
         if unmet:
+            if plan.get("canary") in unmet:
+                report.append(f"{uid}: waiting on canary {plan['canary']}")
             continue
         want = float(u.get("gpu_hours") or 0)
         if budget is not None and spent + want > float(budget):
@@ -9004,6 +9040,14 @@ def cmd_promote(args):
 # field that does not exist got invented along the way from guessing at shape.
 # Error messages teach one rule at a time by construction; a schema teaches the
 # shape at once.
+SCHEMA_PLAN_FIELDS = [
+    ("canary", "all", "optional",
+     "string id of one root unit (no needs). Every other unit implicitly "
+     "needs it: wait for DONE; FAILED, FAILED_EVIDENCE or HELD holds the "
+     "others through ordinary upstream-failure handling. Omit for normal "
+     "fan-out. This does not replace runtime verification."),
+]
+
 SCHEMA_FIELDS = [
     ("id", "all", "required", "unique; names the attempt directory and the "
      "env var SWARM_DEP_<ID>"),
@@ -9100,10 +9144,10 @@ SCHEMA_FIELDS = [
 # What couples to what, stated once. These are the rules that only announce
 # themselves as a refusal.
 SCHEMA_COUPLINGS = [
-    "A canary must match its unit's runtime identity, partition AND account, "
+    "A runtime canary must match runtime identity, partition AND account, "
     "and be a DAG ancestor of it. A plan spanning two partitions needs one "
     "canary per partition.",
-    "A canary must run the runtime's declared probe command verbatim; a "
+    "A runtime canary must run the runtime's declared probe command verbatim; a "
     "canary running `true` establishes nothing.",
     "Concurrent units must have disjoint write_scopes; order them with needs "
     "if they overlap.",
@@ -9128,13 +9172,21 @@ SCHEMA_COUPLINGS = [
 
 
 def cmd_schema(args):
-    """Print the unit schema: fields, when required, and what they couple to."""
+    """Print plan/unit fields, when required, and what they couple to."""
     if args.json:
         print(json.dumps(
             {"fields": [{"field": f, "kinds": k, "requirement": r,
                          "notes": n} for f, k, r, n in SCHEMA_FIELDS],
+             "plan_fields": [{"field": f, "kinds": k, "requirement": r,
+                              "notes": n} for f, k, r, n in SCHEMA_PLAN_FIELDS],
              "couplings": SCHEMA_COUPLINGS}, indent=2))
         return EXIT_OK
+    print("  PLAN FIELDS\n")
+    for field, kinds, req, note in SCHEMA_PLAN_FIELDS:
+        print(f"  {field}  {req}  {kinds}")
+        for line in _wrap(note, 66):
+            print(f"    {line}")
+        print()
     width = max(len(f) for f, _k, _r, _n in SCHEMA_FIELDS)
     print("  UNIT FIELDS\n")
     for field, kinds, req, note in SCHEMA_FIELDS:
@@ -9602,7 +9654,7 @@ def _status_rows(plan, state, state_dir, observed_at=None):
     only. Rendering never imports observations into coordinator state.
     """
     observed_at = time.time() if observed_at is None else float(observed_at)
-    units = {u["id"]: u for u in plan.get("units") or []}
+    units = {u["id"]: u for u in _units_with_canary(plan)}
     promoted = {}
     try:
         for line in (Path(state_dir) / PROMOTIONS).read_text().splitlines():
@@ -9669,6 +9721,8 @@ def _status_rows(plan, state, state_dir, observed_at=None):
             "promoted": promoted.get(uid, {}).get("promoted_to"),
             "promoted_by": promoted.get(uid, {}).get("approver"),
         })
+        if plan.get("canary") in rows[-1]["waiting_on"]:
+            rows[-1]["waiting_reason"] = f"waiting on canary {plan['canary']}"
     rows.sort(key=lambda r: r["id"])
     return rows
 
@@ -9768,8 +9822,10 @@ def cmd_status(args):
                       f"waits. Open the PR and close it by hand, or make "
                       f"this a kind=slurm or kind=pipeline unit.")
             if r["waiting_on"]:
+                waiting = [f"canary {d}" if d == plan.get("canary") else d
+                           for d in r["waiting_on"]]
                 print(f"  {'':{w}}    waiting on "
-                      f"{', '.join(r['waiting_on'])}")
+                      f"{', '.join(waiting)}")
             if r["promoted"]:
                 print(f"  {'':{w}}    promoted to {r['promoted']} "
                       f"(approved by {r['promoted_by']})")
