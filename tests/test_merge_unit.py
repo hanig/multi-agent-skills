@@ -575,6 +575,18 @@ class TestMergeUnit(unittest.TestCase):
     def abandonment_records(self):
         return list(self.state_dir.glob("merge-abandonment-*.json"))
 
+    def trace_coordinator_calls(self):
+        site = self.directory / "coordinator-probe"
+        site.mkdir()
+        log = self.directory / "coordinator-calls.jsonl"
+        (site / "sitecustomize.py").write_text(
+            "import json, sys\n"
+            "if len(sys.argv) > 1 and sys.argv[0].endswith('swarm.py'):\n"
+            "    with open(%r, 'a') as log:\n"
+            "        log.write(json.dumps(sys.argv[1]) + '\\n')\n" % str(log))
+        self.env["PYTHONPATH"] = str(site)
+        return log
+
     def assert_abandon_refused(self, result):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(len(self.calls(["pr", "merge"])), 1)
@@ -583,6 +595,7 @@ class TestMergeUnit(unittest.TestCase):
         self.assertEqual(self.intent()["phase"], "merge_requested")
 
     def test_abandon_open_retains_record_and_permits_exactly_one_new_operation(self):
+        coordinator_log = self.trace_coordinator_calls()
         intent = self.leave_transport_failure()
         result = self.abandon_intent(intent)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -600,7 +613,8 @@ class TestMergeUnit(unittest.TestCase):
         self.assertEqual(len(self.calls(["pr", "merge"])), 1)
         self.assertEqual(len(self.calls(["pr", "checks"])), 1)
         self.assertEqual(self.receipts(), [])
-        self.assertNotIn(" advance ", result.stdout)
+        self.assertEqual([json.loads(line) for line in coordinator_log.read_text().splitlines()],
+                         ["scope-check"])
         # A second transport failure consumes the one new operation. A further
         # ordinary call cannot silently reuse this abandonment to merge again.
         self.assertNotEqual(self.invoke().returncode, 0)
@@ -634,6 +648,7 @@ class TestMergeUnit(unittest.TestCase):
         self.assertEqual(len(self.calls(["pr", "merge"])), 2)
 
     def test_abandon_merged_at_judged_head_reconciles_instead(self):
+        coordinator_log = self.trace_coordinator_calls()
         intent = self.leave_transport_failure()
         self.forge["pr"].update(state="MERGED", mergeCommit={"oid": self.merged})
         self.forge["checks"] = [{"name": "rerun", "state": "FAILURE"}]
@@ -646,7 +661,8 @@ class TestMergeUnit(unittest.TestCase):
         self.assertEqual(self.abandonment_records(), [])
         self.assertEqual(self.intent()["phase"], "receipt_recorded")
         self.assertEqual(self.receipts()[0]["head"], self.head)
-        self.assertIn(" advance ", result.stdout)
+        self.assertEqual([json.loads(line) for line in coordinator_log.read_text().splitlines()],
+                         ["scope-check", "merge", "advance"])
         state = json.loads((self.state_dir / S.STATE_FILE).read_text())
         self.assertEqual(state["units"]["u"]["state"], "DONE")
 

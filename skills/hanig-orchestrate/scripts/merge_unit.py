@@ -417,7 +417,7 @@ def main(argv=None):
         print(result.stdout, end="")
         print("Merge receipt recorded and advance ran.")
         return 0
-    except (OSError, ValueError, TypeError, KeyError, AttributeError,
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, argparse.ArgumentTypeError,
             subprocess.SubprocessError, S.PlanError, S.OutboxError,
             CP.PathPolicyError) as exc:
         print("REFUSED: {}".format(exc), file=sys.stderr)
