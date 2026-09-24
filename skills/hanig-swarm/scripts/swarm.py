@@ -9144,7 +9144,7 @@ SCHEMA_FIELDS = [
 # What couples to what, stated once. These are the rules that only announce
 # themselves as a refusal.
 SCHEMA_COUPLINGS = [
-    "A runtime canary must match its unit's runtime identity, partition AND account, "
+    "A runtime canary must match runtime identity, partition AND account, "
     "and be a DAG ancestor of it. A plan spanning two partitions needs one "
     "canary per partition.",
     "A runtime canary must run the runtime's declared probe command verbatim; a "
