@@ -359,8 +359,67 @@ def _open_directory_chain(path):
         raise
 
 
+def review_journal_details(results):
+    """Classify the completed results before redacting audit text.
+
+    Keep the gate's classification even if a configured key collides
+    with a status token. The helper must not reclassify scrubbed text.
+    """
+    return {
+        "results": [{
+            **result,
+            "findings": [{
+                **finding,
+                "location": f"{finding.get('file', '?')}:{finding.get('line', '?')}",
+                "confirmed": is_confirmed(finding),
+            } for finding in result.get("findings", [])],
+        } for result in results],
+        "refuted_claims": [
+            {**claim, "reviewer": result["name"]}
+            for result in results for claim in result.get("claims", [])
+            if norm(claim.get("status")) == "refuted"
+        ],
+        "rejecting_reviewers": [
+            result["name"] for result in results
+            if norm(result.get("verdict")) == "refuted"
+        ],
+    }
+
+
+def prepare_review_journal(kind, round_no, effective_panel, verdict, claims,
+                           *, panel_policy=None, results=()):
+    """Finish record semantics, redaction and serialization before I/O."""
+    record = {
+        "type": "review_round",
+        "schema_version": 2,
+        "journal_header": JOURNAL_HEADER,
+        "date": journal_timestamp(),
+        "kind": kind,
+        "round": round_no,
+        "effective_panel": list(effective_panel),
+        "verdict": verdict,
+        # Hash the original text. Mandatory redaction
+        # can obscure a digest that contains a configured key value.
+        "claim_digests": claim_digests(claims),
+        "claims": list(claims),
+    }
+    record.update(review_journal_details(results))
+    if panel_policy is not None:
+        record["panel_policy"] = panel_policy
+    record = deep_redact(record)
+    return record, json.dumps(record, sort_keys=True) + "\n"
+
+
 def append_review_journal(path, kind, round_no, effective_panel, verdict,
-                          claims, *, panel_policy=None):
+                          claims, *, panel_policy=None, results=()):
+    """Prepare and atomically publish one immutable audit record."""
+    record, line = prepare_review_journal(
+        kind, round_no, effective_panel, verdict, claims,
+        panel_policy=panel_policy, results=results)
+    return record, _write_review_journal(path, line)
+
+
+def _write_review_journal(path, line):
     """Atomically publish one immutable audit record.
 
     State-directory topology and non-cooperating same-UID relinking are trusted
@@ -401,20 +460,10 @@ def append_review_journal(path, kind, round_no, effective_panel, verdict,
             raise OSError(
                 f"test-marked review journal {str(path)!r} resolves outside "
                 f"the isolated temporary root {str(allowed_root)!r}")
-    record = {
-        "type": "review_round",
-        "schema_version": 1,
-        "journal_header": JOURNAL_HEADER,
-        "date": journal_timestamp(),
-        "kind": kind,
-        "round": round_no,
-        "effective_panel": list(effective_panel),
-        "verdict": verdict,
-        "claim_digests": claim_digests(claims),
-    }
-    if panel_policy is not None:
-        record["panel_policy"] = panel_policy
-    line = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
+    if not isinstance(line, str) or not line.endswith("\n") or line.count("\n") != 1:
+        raise ValueError("prepared review journal record must be one "
+                         "newline-terminated JSON line")
+    line = line.encode("utf-8")
     collection_fd = event_fd = fd = None
     event_name = (f"{time.time_ns():020d}-{os.getpid()}-"
                   f"{os.urandom(12).hex()}")
@@ -457,30 +506,25 @@ def append_review_journal(path, kind, round_no, effective_panel, verdict,
             os.close(event_fd)
         if collection_fd is not None:
             os.close(collection_fd)
-    return record, path / event_name / final_name
+    return path / event_name / final_name
 
 
 def _journal_child(payload):
     """Perform one append in the bounded audit-only helper process."""
     path = review_journal_path(payload["files"])
-    _record, record_path = append_review_journal(
-        path, payload["kind"], payload["round"],
-        payload["effective_panel"], payload["verdict"], payload["claims"],
-        panel_policy=payload.get("panel_policy"))
+    record_path = _write_review_journal(path, payload["record_line"])
     return {"ok": True, "path": str(record_path)}
 
 
 def _run_journal_child(args, completed, verdict):
     """Run journal I/O out of process so stalled storage cannot gate review."""
-    payload = json.dumps({
-        "files": args.file,
-        "kind": args.kind,
-        "round": args.round,
-        "effective_panel": [result["name"] for result in completed],
-        "verdict": verdict,
-        "claims": args.claim,
-        "panel_policy": getattr(args, "panel_policy", None),
-    })
+    # Only the finished record is redacted. The non-persisted control envelope
+    # is wrapped afterwards, and the child never interprets record fields.
+    _record, line = prepare_review_journal(
+        args.kind, args.round, [result["name"] for result in completed],
+        verdict, args.claim, panel_policy=getattr(args, "panel_policy", None),
+        results=completed)
+    payload = json.dumps({"files": args.file, "record_line": line})
     env = os.environ.copy()
     for name in ("OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"):
         env.pop(name, None)
