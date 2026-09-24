@@ -29,7 +29,7 @@ These observations were checked against `skills/hanig-review-gate/reviewers.json
 
 `deep`: luna, kimi-k2.7-code, glm-5.3, sol.
 
-Astra left the `deep` tier on 2026-09-24, when it became the code driver, and sits in no gate tier, which keeps the code's author off its own panel.
+Astra left the `deep` tier on 2026-09-24, when it became the code driver, and sits in no gate tier, which keeps astra-authored code off astra's panel. It keeps nothing else off: sol drove code until that date and now sits in `deep`, so a change sol authored stops at `standard`. The roster is the sole enforcement of either arrangement; neither tool takes an author as input (ARC-755).
 
 `committee`: deepseek-v4-pro, luna, kimi-k2.7-code.
 
