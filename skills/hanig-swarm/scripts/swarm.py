@@ -7546,11 +7546,38 @@ def _start_code_terminal_watchers(plan, state, args, report):
     return started
 
 
+# This watcher waits with NO DEADLINE, and that is deliberate.
+#
+# It previously passed `timeout=30 * 24 * 60 * 60`. That reaches
+# `selectors.PollSelector.poll()`, whose timeout is milliseconds in a C int,
+# so 2592000000 ms exceeded 2147483647 and raised OverflowError before the
+# child was ever waited on. The terminal watch therefore never observed an
+# agent: a `code` unit was never judged the moment it went idle, and waited
+# for the next scheduled advance instead. It failed invisibly because the
+# traceback goes to a per-attempt log nothing reads.
+#
+# A smaller finite value merely moves the deadline. GPT-Astra, asked to
+# adjudicate a 20-day replacement: "'this agent has run suspiciously long'
+# supports escalation or an explicit workload-lifetime policy. It does not
+# naturally support abandoning observation while the agent continues running.
+# That is precisely when observation may be most valuable." No duration
+# requirement exists to justify any particular ceiling.
+#
+# `None` is the honest expression of "watch until the agent is idle". It is
+# also the only unbounded option: `poll()` blocks indefinitely on None, while
+# every finite value is capped at 24.855 days by that same C int. This is the
+# one caller that wants to block, and it runs as its own detached watcher
+# process rather than inside the coordinator.
+#
+# What this does NOT fix: nothing consumes the watcher's failure. See the
+# observability issue filed alongside this change.
+
+
 def cmd_watch_code_terminal(args):
     """Wait for one agent, then immediately run the normal locked checker."""
     rc, out, err = U.run(
         ["paseo", "wait", str(args.agent), "--json"],
-        timeout=30 * 24 * 60 * 60)
+        timeout=None)
     if rc != 0:
         print(f"terminal watch ended without an idle observation: "
               f"{(err or out or ('paseo wait exited %s' % rc))[:400]}")
