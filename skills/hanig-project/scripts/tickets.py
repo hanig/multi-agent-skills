@@ -36,6 +36,12 @@ saying what it saw. That is a much better basis than diffing against the last
 draft -- it is at least a claim about the tracker rather than about our own
 intentions -- but it is not proof, so every rendering says attested.
 
+`reconcile` compares a plan with a session-supplied project issue list, using
+the same `unit` key as the draft. It reports open issues with no plan unit and
+units whose issues are absent from that list. It writes nothing and cannot
+establish the list's project membership, completeness or freshness. Without
+the list, both orphan sets are unknown, not empty.
+
 Standard library only, no network.
 """
 import argparse
@@ -96,6 +102,11 @@ HOW_TO_SUPPLY = (
     "by tracker identifier (e.g. ARC-236) or by tracker uuid. An issue with "
     "no blockedBy relations must appear with an empty list -- omitting it is "
     "indistinguishable from not having looked.")
+
+# Reconciliation has distinct outcomes from existing exits 0, 1 and 2.
+RECONCILE_ORPHANS = 3
+RECONCILE_UNKNOWN = 4
+TERMINAL_ISSUE_STATES = frozenset(("done", "completed", "cancelled", "canceled"))
 
 
 def read_json(path):
@@ -736,6 +747,114 @@ def cmd_check(args):
     return 2
 
 
+def reconcile(plan, issues):
+    """Compare the existing unit mapping with an ATTESTED project issue list.
+
+    The caller supplies the whole project's issues, including terminal ones.
+    Terminal issues count as present for a unit, but do not close that unit.
+    State strings are trimmed and case-insensitive; done/completed and both
+    spellings of canceled are terminal. For state objects, `type` wins over
+    `name`, allowing custom names with canonical tracker state types. All
+    other nonempty states count as open, so unknown names cannot hide work.
+    """
+    if not isinstance(plan, dict) or not isinstance(plan.get("units"), list):
+        raise ValueError("plan.units must be a JSON list")
+    unit_ids = set()
+    for unit in plan["units"]:
+        uid = unit.get("id") if isinstance(unit, dict) else None
+        if not isinstance(uid, str) or not uid.strip():
+            raise ValueError("each plan unit must have a nonempty string id")
+        if uid in unit_ids:
+            raise ValueError(f"duplicate plan unit id: {uid!r}")
+        unit_ids.add(uid)
+    if not isinstance(issues, list):
+        raise ValueError("tracker issues must be a JSON list (including [])")
+
+    seen, mapped, unplanned = set(), set(), []
+    for row in issues:
+        if not isinstance(row, dict):
+            raise ValueError("each tracker issue must be an object")
+        for key in ("identifier", "title"):
+            if not isinstance(row.get(key), str) or not row[key].strip():
+                raise ValueError(f"each tracker issue needs a nonempty {key}")
+        identifier = row["identifier"].strip().upper()
+        if identifier in seen:
+            raise ValueError(f"duplicate tracker identifier: {identifier}")
+        seen.add(identifier)
+        unit = row.get("unit")
+        if unit is not None and (not isinstance(unit, str) or not unit.strip()):
+            raise ValueError(f"{identifier}: unit must be a nonempty string or null")
+        state = row.get("state")
+        if isinstance(state, dict):
+            state = state.get("type", state.get("name"))
+        if not isinstance(state, str) or not state.strip():
+            raise ValueError(f"{identifier}: state must be a nonempty string "
+                             "or an object with type or name")
+        if unit in unit_ids:
+            mapped.add(unit)
+        elif state.strip().casefold() not in TERMINAL_ISSUE_STATES:
+            unplanned.append({k: row.get(k)
+                              for k in ("identifier", "title", "state", "unit")})
+    return (sorted(unplanned, key=lambda row: row["identifier"]),
+            sorted(unit_ids - mapped))
+
+
+def cmd_reconcile(args):
+    result = {
+        "project": None,
+        "tracker_state": "unknown",
+        "evidence": "ATTESTED",
+        "basis": ATTESTED,
+        "scope": ("Supplied project issue list only; project membership, "
+                  "completeness and freshness are not checked here."),
+        "source": args.tracker_issues,
+        "in_sync": None,
+        "unplanned_issues": None,
+        "units_without_issues": None,
+        "reason": None,
+    }
+    try:
+        plan, err = read_json(args.plan)
+        if err:
+            raise ValueError(f"no readable plan at {args.plan}: {err}")
+        # Validate even without a read-back; do not turn a malformed plan
+        # into a successful comparison against an accidentally empty set.
+        reconcile(plan, [])
+        result["project"] = plan.get("name") or "unnamed-swarm-project"
+        if args.tracker_issues is None:
+            result["reason"] = "no tracker read-back supplied; orphan sets are unknown"
+            code = RECONCILE_UNKNOWN
+        else:
+            issues, err = read_json(args.tracker_issues)
+            if err:
+                raise ValueError(f"cannot read --tracker-issues: {err}")
+            unplanned, missing = reconcile(plan, issues)
+            result.update(tracker_state="read", unplanned_issues=unplanned,
+                          units_without_issues=missing,
+                          in_sync=not (unplanned or missing))
+            code = RECONCILE_ORPHANS if unplanned or missing else 0
+    except ValueError as exc:
+        result["reason"] = str(exc)
+        code = 2
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"ATTESTED reconciliation for {result['project']!r}: {ATTESTED}")
+        print(result["scope"])
+        if result["tracker_state"] == "unknown":
+            print(f"Tracker side UNKNOWN: {result['reason']}")
+        else:
+            print(f"Open issues with no plan unit: {len(result['unplanned_issues'])}")
+            for issue in result["unplanned_issues"]:
+                print(f"  {issue['identifier']}: {issue['title']} "
+                      f"(unit: {issue['unit']!r}, state: {issue['state']})")
+            print(f"Plan units absent from the read-back: {len(result['units_without_issues'])}")
+            for unit in result["units_without_issues"]:
+                print(f"  {unit}")
+    return code
+
+
 def main():
     ap = argparse.ArgumentParser(prog="tickets.py", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -773,6 +892,27 @@ def main():
     c.add_argument("plan")
     c.add_argument("tickets")
     c.set_defaults(fn=cmd_check)
+
+    r = sub.add_parser(
+        "reconcile", help="report ATTESTED tracker/plan orphans offline",
+        description=("Compare a plan with the session's full project issue list "
+                     "(including terminal issues), using draft issues[].unit "
+                     "against plan units[].id exactly. No tracker access or writes. "
+                     "Exit 0: agreement within the supplied list; 2: invalid input; "
+                     "3: either orphan set is nonempty; 4: no read-back, tracker "
+                     "side unknown. Completeness, project scope and freshness "
+                     "are ATTESTED, not checked. State strings are trimmed and "
+                     "case-insensitive: done/completed/cancelled/canceled are "
+                     "terminal, all other nonempty states are open. State objects "
+                     "use type if present, otherwise name. Terminal issues count "
+                     "as present but never close a plan unit."))
+    r.add_argument("plan")
+    r.add_argument("--tracker-issues", metavar="FILE",
+                   help="JSON list of {identifier, title, state, unit}; use the "
+                        "draft's unit key, or null/omit it for unmapped issues. "
+                        "No file means unknown; [] means an attested empty list.")
+    r.add_argument("--json", action="store_true", help="emit a JSON report")
+    r.set_defaults(fn=cmd_reconcile)
     args = ap.parse_args()
     return args.fn(args)
 
