@@ -11,6 +11,7 @@ Offline: no API calls.
     python3 tests/test_review.py
 """
 
+import errno
 import importlib.util
 import hashlib
 import io
@@ -32,6 +33,111 @@ SCRIPT = REPO / "skills" / "hanig-review-gate" / "scripts" / "review.py"
 spec = importlib.util.spec_from_file_location("review", SCRIPT)
 review = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(review)
+
+
+_MODULE_STATE_HOME = None
+_SAVED_MODULE_ENV = None
+_ORIGINAL_APPEND_REVIEW_JOURNAL = review.append_review_journal
+_ORIGINAL_RECORD_REVIEW_ROUND = review.record_review_round
+
+
+def _new_module_state_home(worktrees):
+    """Create an outside-worktree fixture only when journal I/O needs one."""
+    failures = []
+
+    def candidate_parents():
+        yield REPO.parent
+        try:
+            candidate = Path(tempfile.gettempdir()).resolve()
+        except OSError as exc:
+            failures.append("default temporary directory: %s" % exc)
+            return
+        if candidate != REPO.parent:
+            yield candidate
+
+    for parent in candidate_parents():
+        try:
+            temporary = tempfile.TemporaryDirectory(
+                prefix=review.JOURNAL_TEST_ROOT_PREFIX, dir=parent)
+        except OSError as exc:
+            failures.append("%s: %s" % (parent, exc))
+            continue
+        fixture_root = Path(temporary.name).resolve()
+        if any(review._inside(fixture_root, worktree)
+               for worktree in worktrees):
+            failures.append("%s: inside an operated worktree" % fixture_root)
+            temporary.cleanup()
+            continue
+        return temporary
+    raise RuntimeError("no outside-worktree directory is available for "
+                       "review-test state: %s" % "; ".join(failures))
+
+
+def _ensure_module_state_home():
+    """Lazily isolate the first in-process journal persistence attempt."""
+    global _MODULE_STATE_HOME, _SAVED_MODULE_ENV
+    if _MODULE_STATE_HOME is None:
+        temporary = _new_module_state_home(review.review_worktrees([SCRIPT]))
+        _SAVED_MODULE_ENV = {
+            "XDG_STATE_HOME": os.environ.get("XDG_STATE_HOME"),
+            review.JOURNAL_TEST_MARKER:
+                os.environ.get(review.JOURNAL_TEST_MARKER),
+        }
+        fixture_root = Path(temporary.name).resolve()
+        os.environ["XDG_STATE_HOME"] = str(fixture_root / "state")
+        os.environ[review.JOURNAL_TEST_MARKER] = str(fixture_root)
+        _MODULE_STATE_HOME = temporary
+    return Path(_MODULE_STATE_HOME.name).resolve()
+
+
+def _isolated_append_review_journal(*args, **kwargs):
+    _ensure_module_state_home()
+    return _ORIGINAL_APPEND_REVIEW_JOURNAL(*args, **kwargs)
+
+
+def _isolated_record_review_round(*args, **kwargs):
+    _ensure_module_state_home()
+    return _ORIGINAL_RECORD_REVIEW_ROUND(*args, **kwargs)
+
+
+def _hard_link_or_skip(test_case, source, destination):
+    """Construct the hard-link attack, or skip when the host forbids it."""
+    unsupported = {errno.EXDEV, errno.EPERM}
+    for name in ("ENOTSUP", "EOPNOTSUPP"):
+        value = getattr(errno, name, None)
+        if value is not None:
+            unsupported.add(value)
+    try:
+        os.link(source, destination)
+    except OSError as exc:
+        if exc.errno in unsupported:
+            test_case.skipTest(
+                "hard-link defence requires a filesystem that permits the "
+                "same-filesystem link: %s" % exc)
+        raise
+
+
+def tearDownModule():
+    global _MODULE_STATE_HOME, _SAVED_MODULE_ENV
+    if _SAVED_MODULE_ENV is not None:
+        for name, value in _SAVED_MODULE_ENV.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+    try:
+        if _MODULE_STATE_HOME is not None:
+            _MODULE_STATE_HOME.cleanup()
+    finally:
+        _MODULE_STATE_HOME = None
+        _SAVED_MODULE_ENV = None
+
+
+# Do not acquire a fixture at module setup: selected tests that cannot append a
+# journal need no temporary state root.  These wrappers move acquisition to the
+# two in-process paths that actually attempt journal persistence.
+review.append_review_journal = _isolated_append_review_journal
+review.record_review_round = _isolated_record_review_round
 
 
 class TestVerdictSchema(unittest.TestCase):
@@ -1820,6 +1926,267 @@ class TestFindingDispositions(unittest.TestCase):
                                  review.STATES["REVIEW_ERROR"])
 
 
+class TestReviewSuiteJournalIsolation(unittest.TestCase):
+    """Journal-capable tests cannot leak audit records into operator state."""
+
+    GUARD_CHILD = "HANIG_REVIEW_GATE_ISOLATION_GUARD_CHILD"
+
+    def test_unrelated_selected_test_needs_no_same_device_journal_root(self):
+        program = "\n".join((
+            "import importlib, sys, unittest",
+            "module = importlib.import_module('tests.test_review')",
+            "def cross_device(_worktrees):",
+            "    raise RuntimeError('repository and temporary roots are on different devices')",
+            "module._new_module_state_home = cross_device",
+            "suite = unittest.defaultTestLoader.loadTestsFromName(",
+            "    'tests.test_review.TestVerdictSchema.test_empty_object_is_not_a_review')",
+            "result = unittest.TextTestRunner(verbosity=0).run(suite)",
+            "sys.exit(0 if result.wasSuccessful() else 1)",
+        ))
+        result = subprocess.run(
+            [sys.executable, "-c", program], cwd=REPO,
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(
+            result.returncode, 0,
+            "an unrelated selected test acquired the simulated cross-device "
+            "journal fixture at module setup:\n%s%s" %
+            (result.stdout, result.stderr))
+
+    def test_module_fixture_can_be_reacquired_in_same_interpreter(self):
+        selected = (
+            "tests.test_review.TestReviewSuiteJournalIsolation."
+            "test_fixture_allows_a_real_isolated_append")
+        program = "\n".join((
+            "import sys, unittest",
+            "import tests.test_review",
+            "ok = True",
+            "for _attempt in (1, 2):",
+            "    suite = unittest.defaultTestLoader.loadTestsFromName(%r)" %
+            selected,
+            "    result = unittest.TextTestRunner(verbosity=0).run(suite)",
+            "    ok = ok and result.wasSuccessful()",
+            "sys.exit(0 if ok else 1)",
+        ))
+        result = subprocess.run(
+            [sys.executable, "-c", program], cwd=REPO,
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(
+            result.returncode, 0,
+            "a second suite run reused the cleaned module fixture:\n%s%s" %
+            (result.stdout, result.stderr))
+
+    def test_fixture_does_not_read_tempdir_after_first_candidate_succeeds(self):
+        fixture_root = _ensure_module_state_home()
+        original_gettempdir = tempfile.gettempdir
+        original_temporary_directory = tempfile.TemporaryDirectory
+        calls = []
+
+        def unavailable():
+            raise OSError("default temp directory unavailable")
+
+        def successful_first_candidate(*args, **kwargs):
+            calls.append(Path(kwargs["dir"]))
+            kwargs["dir"] = str(fixture_root)
+            return original_temporary_directory(*args, **kwargs)
+
+        tempfile.gettempdir = unavailable
+        tempfile.TemporaryDirectory = successful_first_candidate
+        temporary = None
+        try:
+            temporary = _new_module_state_home(
+                review.review_worktrees([SCRIPT]))
+            root = Path(temporary.name).resolve()
+            self.assertEqual(calls, [REPO.parent])
+            self.assertTrue(review._inside(root, fixture_root))
+        finally:
+            tempfile.gettempdir = original_gettempdir
+            tempfile.TemporaryDirectory = original_temporary_directory
+            if temporary is not None:
+                temporary.cleanup()
+
+    def test_module_suite_leaves_the_user_journal_untouched(self):
+        if os.environ.get(self.GUARD_CHILD) == "1":
+            return
+
+        for mode in ("default", "custom-xdg", "fallback"):
+            with self.subTest(mode=mode):
+                root = Path(tempfile.mkdtemp()).resolve()
+                self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+                home = root / "home"
+                temp_root = root / "tmp"
+                home.mkdir()
+                temp_root.mkdir()
+                custom_state = root / "custom-state"
+                candidates = [
+                    home / ".local" / "state" / review.JOURNAL_DIR,
+                    custom_state / review.JOURNAL_DIR,
+                    temp_root / "hanig-review-gate-state" /
+                    review.JOURNAL_DIR,
+                ]
+                env = dict(os.environ)
+                env["TMPDIR"] = str(temp_root)
+                if mode == "fallback":
+                    env["HOME"] = str(REPO)
+                    env["XDG_STATE_HOME"] = str(REPO / ".guard-state")
+                    candidates = [candidates[-1]]
+                elif mode == "custom-xdg":
+                    env["HOME"] = str(home)
+                    env["XDG_STATE_HOME"] = str(custom_state)
+                else:
+                    env["HOME"] = str(home)
+                    env.pop("XDG_STATE_HOME", None)
+                env.pop(review.JOURNAL_TEST_MARKER, None)
+                env.pop("OPENAI_API_KEY", None)
+                env.pop("OPENROUTER_API_KEY", None)
+                env[self.GUARD_CHILD] = "1"
+
+                result = subprocess.run(
+                    [sys.executable, "-m", "unittest", "discover", "-s",
+                     "tests", "-p", "test_review.py"],
+                    cwd=REPO, env=env, capture_output=True, text=True,
+                    timeout=180)
+
+                created = [path for path in candidates if path.exists()]
+                self.assertEqual(
+                    created, [],
+                    "the review test suite created journal state outside its "
+                    "module fixture: %s" % created)
+                self.assertEqual(
+                    result.returncode, 0,
+                    result.stdout[-2000:] + result.stderr[-2000:])
+
+    def test_fixture_allows_a_real_isolated_append(self):
+        fixture_root = _ensure_module_state_home()
+        path = (Path(os.environ["XDG_STATE_HOME"]) / review.JOURNAL_DIR /
+                review.JOURNAL_NAME)
+        _record, record_path = review.append_review_journal(
+            path, "implementation", 1, ["offline"], "REVIEW_PASS",
+            [review.HONEST_RUN_CLAIM])
+        self.assertTrue(record_path.is_file())
+        self.assertTrue(review._inside(record_path, fixture_root))
+
+    def test_test_marker_refuses_state_homes_outside_the_fixture(self):
+        _ensure_module_state_home()
+        root = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        saved_home = os.environ.get("HOME")
+        saved_xdg = os.environ.get("XDG_STATE_HOME")
+        try:
+            os.environ["HOME"] = str(root / "home")
+            os.environ["XDG_STATE_HOME"] = str(root / "custom-state")
+            paths = [
+                Path.home() / ".local" / "state" / review.JOURNAL_DIR /
+                review.JOURNAL_NAME,
+                Path(os.environ["XDG_STATE_HOME"]) / review.JOURNAL_DIR /
+                review.JOURNAL_NAME,
+            ]
+            for path in paths:
+                with self.subTest(path=path):
+                    with self.assertRaisesRegex(
+                            OSError, "test-marked review journal"):
+                        review.append_review_journal(
+                            path, "implementation", 1, ["offline"],
+                            "REVIEW_PASS", [review.HONEST_RUN_CLAIM])
+                    self.assertFalse(path.exists())
+        finally:
+            if saved_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = saved_home
+            if saved_xdg is None:
+                os.environ.pop("XDG_STATE_HOME", None)
+            else:
+                os.environ["XDG_STATE_HOME"] = saved_xdg
+
+    def test_test_marker_refuses_unconstrained_roots(self):
+        fixture_root = _ensure_module_state_home()
+        regular_file = fixture_root / "not-a-directory"
+        regular_file.write_text("not a directory\n")
+        symlink = fixture_root.parent / (fixture_root.name + "-link")
+        self.addCleanup(symlink.unlink, missing_ok=True)
+        symlink.symlink_to(fixture_root, target_is_directory=True)
+        saved = os.environ[review.JOURNAL_TEST_MARKER]
+        try:
+            for marker in ("", "relative", "/", str(regular_file),
+                           str(symlink), str(fixture_root / "missing"),
+                           str(fixture_root / ".." / fixture_root.name),
+                           str(fixture_root) + "/."):
+                with self.subTest(marker=marker):
+                    os.environ[review.JOURNAL_TEST_MARKER] = marker
+                    with self.assertRaises(OSError):
+                        review.append_review_journal(
+                            fixture_root / "state" / review.JOURNAL_DIR /
+                            review.JOURNAL_NAME,
+                            "implementation", 1, ["offline"],
+                            "REVIEW_PASS", [review.HONEST_RUN_CLAIM])
+        finally:
+            os.environ[review.JOURNAL_TEST_MARKER] = saved
+
+    def test_test_marker_refuses_fixture_root_inside_worktree(self):
+        fixture_root = _ensure_module_state_home()
+        inside = REPO / (review.JOURNAL_TEST_ROOT_PREFIX + fixture_root.name)
+        self.addCleanup(shutil.rmtree, inside, ignore_errors=True)
+        inside.mkdir()
+        path = inside / "state" / review.JOURNAL_DIR / review.JOURNAL_NAME
+        saved = os.environ[review.JOURNAL_TEST_MARKER]
+        try:
+            os.environ[review.JOURNAL_TEST_MARKER] = str(inside)
+            with self.assertRaisesRegex(OSError, "operated Git worktree"):
+                review.append_review_journal(
+                    path, "implementation", 1, ["offline"],
+                    "REVIEW_PASS", [review.HONEST_RUN_CLAIM])
+            self.assertFalse(path.exists())
+        finally:
+            os.environ[review.JOURNAL_TEST_MARKER] = saved
+
+    def test_test_marker_refuses_tilde_relative_fixture_root(self):
+        fixture_root = _ensure_module_state_home()
+        path = (fixture_root / "state" / review.JOURNAL_DIR /
+                review.JOURNAL_NAME)
+        saved_marker = os.environ[review.JOURNAL_TEST_MARKER]
+        saved_home = os.environ.get("HOME")
+        try:
+            os.environ["HOME"] = str(fixture_root.parent)
+            os.environ[review.JOURNAL_TEST_MARKER] = "~/" + fixture_root.name
+            with self.assertRaisesRegex(OSError, "must name the absolute"):
+                review.append_review_journal(
+                    path, "implementation", 1, ["offline"],
+                    "REVIEW_PASS", [review.HONEST_RUN_CLAIM])
+        finally:
+            os.environ[review.JOURNAL_TEST_MARKER] = saved_marker
+            if saved_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = saved_home
+
+    def test_hard_link_fixture_skips_when_filesystem_policy_forbids_link(self):
+        original_link = os.link
+
+        def denied(*_args, **_kwargs):
+            raise OSError(errno.EPERM,
+                          "hard links disabled by filesystem policy")
+
+        os.link = denied
+        try:
+            with self.assertRaises(unittest.SkipTest):
+                _hard_link_or_skip(self, "source", "destination")
+        finally:
+            os.link = original_link
+
+    def test_hard_link_fixture_does_not_hide_unexpected_io_errors(self):
+        original_link = os.link
+
+        def broken(*_args, **_kwargs):
+            raise OSError(errno.EIO, "injected I/O failure")
+
+        os.link = broken
+        try:
+            with self.assertRaisesRegex(OSError, "injected I/O failure"):
+                _hard_link_or_skip(self, "source", "destination")
+        finally:
+            os.link = original_link
+
+
 class TestQuorumGatesFailAsWellAsPass(unittest.TestCase):
     """Found by using the gate: a plan review returned REVIEW_FAIL on ONE
     verdict, because luna returned an empty response and the finding check sat
@@ -1910,12 +2277,13 @@ class TestReviewJournal(unittest.TestCase):
     CLAIM = "This change cannot make an honest run fail."
 
     def setUp(self):
+        fixture_root = _ensure_module_state_home()
         # macOS commonly returns a lexical /var/... temporary path even
         # though /var is a symlink to /private/var.  These success-path tests
         # must not accidentally exercise the deliberate symlink refusal in
         # _open_directory_chain; the dedicated symlink tests below construct
         # the component whose refusal they assert.
-        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.tmp = Path(tempfile.mkdtemp(dir=fixture_root)).resolve()
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.saved = {
             "argv": sys.argv,
@@ -2279,13 +2647,27 @@ class TestReviewJournal(unittest.TestCase):
         target.mkdir()
         path.parent.rename(parked)
         path.parent.symlink_to(target, target_is_directory=True)
+        saved_marker = os.environ.pop(review.JOURNAL_TEST_MARKER)
+        original_open_chain = review._open_directory_chain
+        opened = []
+
+        def traced_open_chain(candidate):
+            opened.append(Path(candidate))
+            return original_open_chain(candidate)
+
+        review._open_directory_chain = traced_open_chain
         try:
             with self.assertRaises(OSError):
                 review.append_review_journal(
                     path, "implementation", 1, ["answered"],
                     "REVIEW_PASS", [self.CLAIM])
+            self.assertEqual(opened, [path],
+                             "the test marker short-circuited the production "
+                             "descriptor-anchored no-follow guard")
             self.assertFalse((target / review.JOURNAL_NAME).exists())
         finally:
+            review._open_directory_chain = original_open_chain
+            os.environ[review.JOURNAL_TEST_MARKER] = saved_marker
             path.parent.unlink(missing_ok=True)
             shutil.rmtree(parked, ignore_errors=True)
             shutil.rmtree(target, ignore_errors=True)
@@ -2400,8 +2782,10 @@ class TestReviewJournal(unittest.TestCase):
         self.assertEqual(stderr, "")
 
     def test_hard_linked_journal_cannot_modify_a_worktree_file(self):
-        state = REPO.parent / (".review-journal-state-" + self.tmp.name)
-        self.addCleanup(shutil.rmtree, state, ignore_errors=True)
+        if self.tmp.stat().st_dev != REPO.stat().st_dev:
+            self.skipTest("hard-link defence requires a fixture on the "
+                          "repository filesystem")
+        state = self.tmp / "hardlink-state"
         os.environ["XDG_STATE_HOME"] = str(state)
         base = Path(os.environ["XDG_STATE_HOME"])
         journal = base / review.JOURNAL_DIR / review.JOURNAL_NAME
@@ -2410,7 +2794,11 @@ class TestReviewJournal(unittest.TestCase):
         self.addCleanup(target.unlink, missing_ok=True)
         target.write_text("repository bytes\n")
         before = target.read_bytes()
-        os.link(target, journal)
+        self.assertEqual(
+            target.stat().st_dev, journal.parent.stat().st_dev,
+            "hard-link journal test fixture and worktree target must share "
+            "one filesystem")
+        _hard_link_or_skip(self, target, journal)
 
         code, stdout, stderr = self.invoke()
 
