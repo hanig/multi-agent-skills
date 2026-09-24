@@ -965,6 +965,22 @@ def _code_completion_protocol(intent):
     target = str(intent["target_branch"])
     remote = intent.get("repository_remote")
     judgment_ref = intent.get("judgment_ref")
+    # Use only coordinator-supplied routing facts. Older intents contain
+    # neither field; the current default is not evidence of their author.
+    provider_spec = intent.get("provider")
+    provider, embedded_model = "", ""
+    if isinstance(provider_spec, str):
+        provider, _, embedded_model = provider_spec.partition("/")
+    model = intent.get("model") or embedded_model
+    if provider and isinstance(model, str) and model:
+        author_instruction = (
+            f"Pass --author {shlex.quote(provider + '/' + model)} on every "
+            "review.py run so the gate excludes this unit's own model.")
+    else:
+        author_instruction = (
+            "The coordinator-recorded provider/model for this unit is "
+            "UNKNOWN. Report the missing identity to the coordinator before "
+            "review; do not invent an author or omit --author.")
     if remote:
         remote_instruction = (
             f"Use Git remote 'origin', recorded by the coordinator as "
@@ -999,6 +1015,8 @@ Commit all intended work on {branch!r}. Uncommitted work is invisible to the tra
 {remote_instruction}
 After opening the pull request, STOP. NEVER merge, approve, or enable auto-merge. Merge decisions belong to the orchestrator. The merged-PR closure criterion describes how the orchestrator's merge is judged, not an instruction to the worker.
 {judgment_instruction}
+Push after every meaningful edit. Commit and push the actual changed content to the anchored attempt ref for normal progress; use the recovery ref below when preserving a failed review. An empty or marker commit preserves no implementation; a tree identical to the recorded base is refused.
+Before opening a pull request, run this repository's review gate. Use hanig-review-gate's review.py from the loaded skill directory with --kind implementation, the actual --round number, and --range {base}..HEAD to review the COMPLETE delta from the recorded base. Commit all intended edits first and leave the worktree clean so that range includes all intended work. Declare the change's claims and the counter-claim that it cannot make an honest run fail. {author_instruction} Only exit 0 (REVIEW_PASS) permits opening a pull request; unavailable, partial, incomplete, and failing reviews are not a pass. Reproduce each confirmed finding before acting on it. If a reproduced failure remains, do NOT open a pull request: commit the work with a message beginning RECOVERY, NOT READY: that lists every open reproduced finding and says the work must not be merged, push that commit to origin under refs/heads/recovery/{branch} without moving the anchored attempt ref, then STOP AND REPORT where it was preserved. REVIEW_PASS means the panel failed to refute the claims, not proof.
 NEVER run `git stash`, in any form. The stash stack is a SINGLE ref in the shared common Git directory, so every worktree of {repo!r} shares one stack and a pop takes whatever another agent parked. Do these instead: to read a file as it was at base, `git show {base}:<path>`; to set work aside, `git diff > /tmp/wip.patch` then `git checkout -- <path>`; and to answer "was this test already failing", add a separate worktree at {base} and run it there, rather than moving anything in this one. Note what such a comparison does and does not show: green at {base} and green here is a claim about your change alone, not about {target!r} after a merge.
 Before every commit, run `git status --porcelain` and read it. Stage only paths you changed yourself; if it lists a path you did not touch, STOP AND REPORT instead of committing it. The observed failure is a commit that carried another agent's files.
 If you cannot finish cleanly, STOP AND REPORT the problem instead of working around it.
@@ -1044,6 +1062,13 @@ def _code_protocol_problem(prompt, intent):
             "merge is judged, not an instruction to the worker."),
         "clean failure instruction": "STOP AND REPORT",
         "history instruction": "Do not force-push or rewrite history",
+        "review gate": "Before opening a pull request, run this repository's review gate.",
+        "push discipline": "Push after every meaningful edit.",
+        "complete review range": f"--range {intent['base_commit']}..HEAD",
+        "author exclusion": "--author",
+        "finding reproduction": "Reproduce each confirmed finding before acting on it.",
+        "failed review preservation": "RECOVERY, NOT READY:",
+        "review interpretation": "REVIEW_PASS means the panel failed to refute the claims, not proof.",
         # ARC-243. The prohibition and each substitute are required
         # SEPARATELY and by exact text, so an edit cannot leave the ban
         # standing with nothing to do instead -- which is the state in which
