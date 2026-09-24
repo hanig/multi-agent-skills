@@ -22,6 +22,10 @@ Affected instructions in the 2026-08-25 vendored snapshot:
 That is the complete inventory returned by searching every vendored
 `skills/*/SKILL.md` in this snapshot for the literal path. A correction must
 cover every occurrence, not only the first skill that exposed the problem.
+The snapshot's bytes are recorded in `docs/upstream-manifest.json` and checked
+offline. That manifest is repository-shipped data, not upstream provenance;
+this report remains the place to propose corrections without editing the
+vendored documents locally.
 
 ## Reproduction
 

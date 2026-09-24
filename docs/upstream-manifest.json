@@ -1,0 +1,38 @@
+{
+  "_notice": [
+    "DATA, NOT AUTHORITY: this manifest records the vendored bytes this repository shipped.",
+    "A matching digest is not evidence of upstream provenance or agreement with any moving upstream or origin/main ref.",
+    "The expected_exceptions section records deliberate repository-local differences that must not disappear silently."
+  ],
+  "schema_version": 1,
+  "algorithm": "sha256",
+  "vendored_skill_directories": [
+    "agent-bus",
+    "paseo",
+    "paseo-advisor",
+    "paseo-committee",
+    "paseo-handoff",
+    "paseo-loop",
+    "pi-fleet",
+    "start-a-sprint"
+  ],
+  "files": {
+    "skills/agent-bus/SKILL.md": "76a7ab2b669b664520e3ccd671b9888e7c54bd57a3283ffd85536b9bfe7e5791",
+    "skills/paseo/SKILL.md": "972934f0eb5fd118608aaac5b83d0fcb4153d556a1daee11183655c3bdc36865",
+    "skills/paseo-advisor/SKILL.md": "047203fc4c0564e5a69de5f3601b5710103a9b050e0ecbaf1fd440219b2131da",
+    "skills/paseo-committee/SKILL.md": "680c418f1c27b02ba6aedd003164ca2a7eea935f2219af9cc8d1371558056f8c",
+    "skills/paseo-handoff/SKILL.md": "e412eb6a55f9f556e6c572851ff72f1a0ae09489295abcff5e287bf26e338061",
+    "skills/paseo-loop/SKILL.md": "5376cf282cd5a1ed993be6e8dcbfb312aa261a95ee7c0bf68eefee45e1c70b53",
+    "skills/pi-fleet/SKILL.md": "f26b09b9e2e95f2a449f7179d22a8f02ea099ff038d3ddef968f768019fa519d",
+    "skills/start-a-sprint/SKILL.md": "f260759fe1a5d0e1f97dc831876fff9342f54535161301c53609b7e7cfa0dfda",
+    "skills/start-a-sprint/agents/openai.yaml": "e676fc318f452cf3f34d28701249cb7644d4d207c8cef7428871e8c6f4f37765",
+    "skills/start-a-sprint/scripts/validate_sprint_plan.py": "ee551663f5cc1bb031e8ff188aeadb986d0c53c55983d3dc24bc1cf372b9116c"
+  },
+  "expected_exceptions": {
+    "bin/bus": {
+      "sha256": "7767df015f4441a670a2669ee7f2b239d2297f464a7bd70b400d33f50e76eebc",
+      "upstream_sha256": "fc455d449fdfc8585bc1a86ba0b7668b7d1452e240956750d75dc451a57a4f1c",
+      "reason": "ARC-270 is the one tracked repository-local patch to bin/bus; matching upstream_sha256 means that patch was dropped and is a violation."
+    }
+  }
+}
