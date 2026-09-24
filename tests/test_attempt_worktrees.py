@@ -311,6 +311,12 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         self.assertIn(intent["base_commit"], prompt)
         self.assertIn("Commit all intended work", prompt)
         self.assertIn("Open a pull request", prompt)
+        self.assertIn("After opening the pull request, STOP.", prompt)
+        self.assertIn("NEVER merge, approve, or enable auto-merge.", prompt)
+        self.assertIn("Merge decisions belong to the orchestrator.", prompt)
+        self.assertIn(
+            "The merged-PR closure criterion describes how the orchestrator's "
+            "merge is judged, not an instruction to the worker.", prompt)
         self.assertIn("STOP AND REPORT", prompt)
         # FakePaseo captures the argv list handed to U.run. Both original
         # lines and the protocol arriving in this one final element pins the

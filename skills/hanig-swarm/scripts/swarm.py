@@ -938,7 +938,8 @@ def _code_completion_protocol(intent):
     C11 creates the branch and worktree. The agent's job is to leave durable
     evidence on that branch and open the pull request that the unit's closing
     predicate requires; asking it to choose either launch fact would put
-    authority back in prompt prose.
+    authority back in prompt prose. The worker stops after opening the pull
+    request; merge decisions belong to the orchestrator.
 
     Precedence is explicit rather than inferred from task text. Contradictions
     in arbitrary prose are not statically recognizable: matching phrases such
@@ -994,6 +995,7 @@ The required pull-request target is {target!r}.
 Do not create or switch branches, and do not choose a different base.
 Commit all intended work on {branch!r}. Uncommitted work is invisible to the transition predicate and will be judged as producing nothing.
 {remote_instruction}
+After opening the pull request, STOP. NEVER merge, approve, or enable auto-merge. Merge decisions belong to the orchestrator. The merged-PR closure criterion describes how the orchestrator's merge is judged, not an instruction to the worker.
 {judgment_instruction}
 NEVER run `git stash`, in any form. The stash stack is a SINGLE ref in the shared common Git directory, so every worktree of {repo!r} shares one stack and a pop takes whatever another agent parked. Do these instead: to read a file as it was at base, `git show {base}:<path>`; to set work aside, `git diff > /tmp/wip.patch` then `git checkout -- <path>`; and to answer "was this test already failing", add a separate worktree at {base} and run it there, rather than moving anything in this one. Note what such a comparison does and does not show: green at {base} and green here is a claim about your change alone, not about {target!r} after a merge.
 Before every commit, run `git status --porcelain` and read it. Stage only paths you changed yourself; if it lists a path you did not touch, STOP AND REPORT instead of committing it. The observed failure is a commit that carried another agent's files.
@@ -1032,6 +1034,12 @@ def _code_protocol_problem(prompt, intent):
         "commit instruction": "Commit all intended work",
         "remote action": ("Open a pull request" if intent.get(
             "repository_remote") else "no merge-evidence repository was recorded"),
+        "worker stop instruction": "After opening the pull request, STOP.",
+        "worker merge prohibition": "NEVER merge, approve, or enable auto-merge.",
+        "merge authority": "Merge decisions belong to the orchestrator.",
+        "closure interpretation": (
+            "The merged-PR closure criterion describes how the orchestrator's "
+            "merge is judged, not an instruction to the worker."),
         "clean failure instruction": "STOP AND REPORT",
         "history instruction": "Do not force-push or rewrite history",
         # ARC-243. The prohibition and each substitute are required
