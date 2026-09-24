@@ -68,6 +68,8 @@ SWARM_DECLARATIONS = (
     "closure.by-kind",
     "code.remote-ref",
     "code.merge-scope",
+    "code.merge-command",
+    "limit.merge-command",
     "compatibility.judgment-generation",
     "verifier.corpus",
     "verifier.integration",
@@ -317,6 +319,8 @@ REFERENCE_ELABORATION_INVENTORIES = {
         ("references/limits.md", "limit.worktree-inode", 1),
         ("references/limits.md", "placement.reference-elaboration", 3),
         ("references/protocol-details.md", "code.merge-scope", 1),
+        ("references/protocol-details.md", "code.merge-command", 2),
+        ("references/protocol-details.md", "limit.merge-command", 2),
         ("references/protocol-details.md", "placement.reference-elaboration", 1),
     ),
     "hanig-orchestrate": (
