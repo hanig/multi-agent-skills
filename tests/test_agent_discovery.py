@@ -4,6 +4,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,7 +43,7 @@ class TestAgentDiscovery(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             report = discovery.discover(fixture_env(raw), finder({"claude": "/fixtures/claude"}),
                                         probe_for({"claude": VERSIONS["claude"]}))
-        self.assertEqual(report["schema_version"], 1)
+        self.assertEqual(report["schema_version"], 2)
         self.assertEqual(report["agents"]["claude"]["state"], "executable_found")
         self.assertTrue(report["agents"]["claude"]["eligible_for_automatic_target"])
         self.assertEqual(discovery.select_target(report)["agent"], "claude")
@@ -110,15 +111,40 @@ class TestAgentDiscovery(unittest.TestCase):
         self.assertEqual(set(destinations[0]["logical_paths"]),
                          {os.path.join(raw, "alias/skills"), os.path.join(raw, "real/skills")})
 
-    def test_unknown_version_and_failed_probe_are_unverified(self):
+    def test_unknown_version_and_failed_probe_are_present_but_unverified(self):
         with tempfile.TemporaryDirectory() as raw:
             unknown = discovery.discover(fixture_env(raw), finder({"codex": "/fixtures/codex"}),
                                          probe_for({"codex": "9.9.9"}))
             failed = discovery.discover(fixture_env(raw), finder({"pi": "/fixtures/pi"}),
                                         lambda path, timeout: (False, "TimeoutExpired"))
         self.assertEqual(unknown["agents"]["codex"]["verification"], "unverified")
-        self.assertEqual(failed["agents"]["pi"]["state"], "undetermined")
+        self.assertEqual(failed["agents"]["pi"]["state"], "probe_failed")
+        self.assertTrue(unknown["agents"]["codex"]["eligible_for_automatic_target"])
+        self.assertEqual([item["agent"] for item in discovery.select_targets(unknown)["selected"]],
+                         ["codex"])
         self.assertEqual(discovery.select_target(unknown, "codex")["mode"], "explicit")
+
+    def test_adapter_certification_expiry_respects_review_deadlines(self):
+        for agent, spec in discovery.adapters().items():
+            with self.subTest(agent=agent):
+                deadline = discovery.verification_review_due(spec)
+                self.assertNotIn(agent, discovery.stale_adapter_certifications(deadline))
+                self.assertIn(agent, discovery.stale_adapter_certifications(
+                    deadline + timedelta(days=1)))
+
+    def test_stale_certification_changes_the_automatic_selection_result(self):
+        with tempfile.TemporaryDirectory() as raw:
+            report = discovery.discover(
+                fixture_env(raw), finder({"claude": "/fixtures/claude"}),
+                probe_for({"claude": VERSIONS["claude"]}))
+        plan = discovery.select_targets(report, as_of=date(2026, 10, 6))
+        selected = plan["selected"][0]
+        self.assertEqual(selected["agent"], "claude")
+        self.assertEqual(selected["certification"], "unverified")
+        self.assertTrue(any("expired after 2026-10-05" in warning
+                            for warning in selected["certification_warnings"]))
+        self.assertEqual(selected["certification_warnings"],
+                         plan["certification_warnings"])
 
     def test_supplied_path_not_the_process_path_controls_default_finder(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -143,7 +169,7 @@ class TestAgentDiscovery(unittest.TestCase):
         self.assertLessEqual(len(output.encode()), discovery.PROBE_OUTPUT_BYTES)
         self.assertTrue(output.endswith("2.1.261"))
 
-    def test_real_hung_cli_times_out_with_a_fixed_deadline(self):
+    def test_real_hung_cli_is_slow_not_probe_failed_or_undetermined(self):
         with tempfile.TemporaryDirectory() as raw:
             home, bin_dir = Path(raw) / "home", Path(raw) / "bin"
             home.mkdir()
@@ -153,8 +179,34 @@ class TestAgentDiscovery(unittest.TestCase):
             report = discovery.discover(fixture_env(home, PATH=str(bin_dir)), timeout=0.1)
             elapsed = time.monotonic() - start
         self.assertLess(elapsed, 1.5)
-        self.assertEqual(report["agents"]["claude"]["state"], "undetermined")
-        self.assertIn("timeout", report["agents"]["claude"]["evidence"]["executable"]["output"])
+        agent = report["agents"]["claude"]
+        self.assertEqual(agent["state"], "slow")
+        self.assertEqual(agent["evidence"]["executable"]["outcome"], "SLOW")
+        self.assertIn("timeout", agent["evidence"]["executable"]["output"])
+
+    def test_failed_probe_is_distinct_from_slow_probe(self):
+        with tempfile.TemporaryDirectory() as raw:
+            report = discovery.discover(
+                fixture_env(raw), finder({"pi": "/fixtures/pi"}),
+                lambda path, timeout: (False, "exit 9: broken"))
+        self.assertEqual(report["agents"]["pi"]["state"], "probe_failed")
+        self.assertEqual(report["agents"]["pi"]["evidence"]["executable"]["outcome"],
+                         "FAILED")
+        plan = discovery.select_targets(report)
+        self.assertEqual(plan["selected"], [])
+        self.assertEqual(plan["skipped"], [
+            {"agent": "claude", "reason": "absent", "certification": "unverified"},
+            {"agent": "codex", "reason": "absent", "certification": "unverified"},
+            {"agent": "opencode", "reason": "absent", "certification": "unverified"},
+            {"agent": "pi", "reason": "probe_failed", "certification": "unverified"},
+        ])
+
+    def test_default_deadlines_are_derived_from_each_adapter_measurement(self):
+        deadlines = {name: discovery.probe_deadline(spec)
+                     for name, spec in discovery.adapters().items()}
+        self.assertGreater(deadlines["opencode"], deadlines["pi"])
+        self.assertEqual(deadlines["opencode"], 4.92)
+        self.assertEqual(deadlines["claude"], discovery.PROBE_DEADLINE_FLOOR_SECONDS)
 
     def test_real_parent_exit_cannot_leave_inherited_output_writer(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -181,7 +233,10 @@ class TestAgentDiscovery(unittest.TestCase):
         plan = discovery.select_targets(report, agents=("claude", "opencode"), exclude_agents=("opencode",))
         self.assertEqual(plan["selected"][0]["agent"], "claude")
         self.assertEqual(plan["selected"][0]["mode"], "explicit")
-        self.assertEqual(plan["skipped"], [{"agent": "opencode", "reason": "excluded"}])
+        self.assertEqual(plan["skipped"], [{
+            "agent": "opencode", "reason": "excluded",
+            "certification": "unverified",
+        }])
 
     def test_flag_order_preserves_display_order_but_not_destination_topology(self):
         with tempfile.TemporaryDirectory() as raw:
