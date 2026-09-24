@@ -112,6 +112,8 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         subprocess.run(["git", "init", "-q", "--bare", str(self.remote)],
                        check=True, env=ENV)
         git(self.repo, "remote", "add", "origin", str(self.remote))
+        git(self.repo, "branch", "-M", "main")
+        git(self.repo, "push", "-qu", "origin", "main")
         self.real_run = S.U.run
         self.fake = FakePaseo(self, self.tmp / "managed", self.real_run)
         S.U.run = self.fake
@@ -288,6 +290,8 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         unit = code_unit(self.repo)
         unit["prompt"] = original
         unit["target_branch"] = "release/next"
+        git(self.repo, "push", "-q", "origin",
+            "HEAD:refs/heads/release/next")
         state = {"units": {}}
 
         job, err = self.submit(unit, attempt, False, state)
@@ -484,6 +488,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
                        check=True, env=ENV)
         git(self.repo, "remote", "set-url", "--push", "origin",
             str(push_remote))
+        git(self.repo, "push", "-q", "origin", "main")
         attempt = self.attempt("code", "pushurl")
         state = {"units": {}}
         unit = code_unit(self.repo)
@@ -525,6 +530,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         git(self.repo, "config", f"url.{primary_dir}/.insteadOf", "arc642:")
         git(self.repo, "config", f"url.{mirror_dir}/.insteadOf",
             f"{primary_dir}/")
+        git(self.repo, "push", "-q", "file://" + str(primary), "main")
         attempt = self.attempt("code", "url-rewrite")
         state = {"units": {}}
         unit = code_unit(self.repo)
@@ -575,6 +581,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
              "submodule", "add", "-q", str(subrepo), "vendor/lib"],
             check=True, env=ENV, capture_output=True, text=True)
         git(self.repo, "commit", "-qam", "add submodule")
+        git(self.repo, "push", "-q", "origin", "main")
         git(self.repo, "config", "fetch.recurseSubmodules", "true")
         git(self.repo, "config", "submodule.vendor/lib.url",
             str(self.tmp / "unavailable-submodule.git"))

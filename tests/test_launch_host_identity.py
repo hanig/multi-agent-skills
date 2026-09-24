@@ -118,6 +118,8 @@ class TestLaunchHostIdentity(unittest.TestCase):
         subprocess.run(["git", "init", "-q", "--bare", str(remote)],
                        check=True, env=ENV)
         git(repo, "remote", "add", "origin", str(remote))
+        git(repo, "branch", "-M", "main")
+        git(repo, "push", "-qu", "origin", "main")
         attempt = self.tmp / "attempt-b"
         attempt.mkdir()
         unit = {"id": "code", "kind": "code", "repo": str(repo),

@@ -112,6 +112,13 @@ ALLOWED = {
         "uses the coordinator-created snapshot for dispatch",
     ("swarm.py", "_allocate"):
         "passes repository identity from the trusted plan into allocation",
+    ("swarm.py", "_resolve_dispatch_target"):
+        "resolves only the plan's repository and target into transient "
+        "coordinator authority before dispatch",
+    ("swarm.py", "_dispatch_source_identity"):
+        "compares the checkout to the coordinator-resolved target",
+    ("swarm.py", "_capture_code_launch"):
+        "pins the coordinator-created source observation before launch",
     ("swarm.py", "admit_merge"):
         "compares the merge attestation's repository to trusted state",
     ("swarm.py", "advance"):
@@ -408,6 +415,10 @@ class TestTheSealActuallyTravels(unittest.TestCase):
         subprocess.run(
             ["git", "-C", str(self.repo), "remote", "add", "origin",
              str(self.remote)], check=True, env=env, capture_output=True)
+        for args in (["branch", "-M", "main"],
+                     ["push", "-qu", "origin", "main"]):
+            subprocess.run(["git", "-C", str(self.repo)] + args, check=True,
+                           env=env, capture_output=True)
         self.att = self.tmp / "runs" / "u1" / "att1"
         self.att.mkdir(parents=True)
 
