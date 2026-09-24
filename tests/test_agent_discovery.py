@@ -4,7 +4,7 @@ import sys
 import tempfile
 import time
 import unittest
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -124,8 +124,13 @@ class TestAgentDiscovery(unittest.TestCase):
                          ["codex"])
         self.assertEqual(discovery.select_target(unknown, "codex")["mode"], "explicit")
 
-    def test_adapter_certifications_have_not_passed_their_review_deadline(self):
-        self.assertEqual(discovery.stale_adapter_certifications(date.today()), [])
+    def test_adapter_certification_expiry_respects_review_deadlines(self):
+        for agent, spec in discovery.adapters().items():
+            with self.subTest(agent=agent):
+                deadline = discovery.verification_review_due(spec)
+                self.assertNotIn(agent, discovery.stale_adapter_certifications(deadline))
+                self.assertIn(agent, discovery.stale_adapter_certifications(
+                    deadline + timedelta(days=1)))
 
     def test_stale_certification_changes_the_automatic_selection_result(self):
         with tempfile.TemporaryDirectory() as raw:

@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -204,14 +205,39 @@ class TestPublicCli(unittest.TestCase):
         base = Path(temp.name)
         home = base / "home with spaces"
         binaries = self._fake_agents(base, *agents)
-        env = dict(os.environ, HOME=str(home),
-                   PATH=str(binaries) + os.pathsep + "/usr/bin:/bin",
-                   PYTHONDONTWRITEBYTECODE="1")
+        env = {"HOME": str(home),
+               "PATH": str(binaries) + os.pathsep + "/usr/bin:/bin",
+               "PYTHONDONTWRITEBYTECODE": "1"}
         if extra_env:
             env.update(extra_env)
         result = subprocess.run(["sh", str(ROOT / "install.sh"), *args], cwd=ROOT,
                                 env=env, text=True, capture_output=True)
         return result, home
+
+    def test_inherited_agent_roots_do_not_escape_disposable_home(self):
+        overrides = {
+            "CLAUDE_CONFIG_DIR": "claude",
+            "CODEX_HOME": "codex",
+            "XDG_CONFIG_HOME": "opencode",
+            "OPENCODE_CONFIG_DIR": "opencode",
+            "PI_CODING_AGENT_DIR": "pi",
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            for variable, agent in overrides.items():
+                with self.subTest(variable=variable):
+                    outside = Path(raw) / variable
+                    outside.mkdir()
+                    if variable == "XDG_CONFIG_HOME":
+                        (outside / "opencode").mkdir()
+                    with mock.patch.dict(os.environ, {variable: str(outside)}):
+                        result, home = self._run(
+                            "--agent", agent, "--dry-run", "--json")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    target = json.loads(result.stdout)["targets"][0]
+                    self.assertEqual(target["status"], "absent")
+                    self.assertTrue(
+                        Path(target["root"]).is_relative_to(home.resolve()))
+                    self.assertFalse(home.exists())
 
     def test_default_dry_run_selects_all_verified_agents_without_writes(self):
         result, home = self._run(
@@ -254,7 +280,9 @@ class TestPublicCli(unittest.TestCase):
         self.assertNotEqual(data["version"], "99.0.0")
         self.assertEqual(sum("not adapter-certified" in item
                              for item in data["diagnostics"]), 3)
-        self.assertEqual(result.stderr.count("warning:"), 3)
+        for diagnostic in data["diagnostics"]:
+            if "not adapter-certified" in diagnostic:
+                self.assertIn("warning: " + diagnostic + "\n", result.stderr)
         self.assertIn("selection is not a native-compatibility or invocation pass",
                       result.stderr)
 
