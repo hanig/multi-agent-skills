@@ -61,7 +61,7 @@ CLOSED_DECLARATIONS = {
         capability.python-git capability.slurm capability.paseo-bus
         capability.review capability.tracker capability.worker-backend
         paths.skill-directory code.default-agent code.provider-mode
-        runtime.declaration runtime.verification runtime.canary retry.boundary
+        runtime.declaration runtime.verification runtime.canary plan.canary retry.boundary
         retry.checkpoint retry.exposure retry.concurrency
         isolation.exclusive-root isolation.done-predicate
         isolation.artifact-basis isolation.container-profile

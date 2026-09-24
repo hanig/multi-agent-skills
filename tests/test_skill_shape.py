@@ -55,6 +55,7 @@ SWARM_DECLARATIONS = (
     "runtime.declaration",
     "runtime.verification",
     "runtime.canary",
+    "plan.canary",
     "retry.boundary",
     "retry.checkpoint",
     "retry.exposure",
