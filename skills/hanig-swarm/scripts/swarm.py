@@ -1665,6 +1665,29 @@ def validate_plan(plan, survey=None):
             raise PlanError(f"unit {uid!r} is kind {u['kind']} with no "
                             f"'command' to submit")
 
+    dispatch_canary = plan.get("dispatch_canary")
+    if dispatch_canary is not None:
+        if not isinstance(dispatch_canary, dict):
+            raise PlanError("'dispatch_canary' must be an object with unit "
+                            "and width")
+        canary_id = dispatch_canary.get("unit")
+        width = dispatch_canary.get("width")
+        if canary_id not in by_id:
+            raise PlanError(
+                f"dispatch_canary names unit {canary_id!r}, which is absent "
+                f"from the plan")
+        if (not isinstance(width, int) or isinstance(width, bool)
+                or width < 1):
+            raise PlanError(
+                f"dispatch_canary.width={width!r}; it must be an integer of "
+                f"at least 1")
+        if by_id[canary_id].get("needs"):
+            raise PlanError(
+                f"dispatch canary {canary_id!r} must have no dependencies. "
+                f"The coordinator withholds fan-out until this unit reaches "
+                f"DONE, so withholding an ancestor it needs would deadlock "
+                f"qualification.")
+
     # Dependencies must exist and must not cycle. Cycle detection lifted in
     # shape from start-a-sprint's validator.
     for uid, u in by_id.items():
@@ -2128,10 +2151,15 @@ def plan_digest(plan):
                 if k not in COSMETIC_FIELDS}
     units = sorted((unit_payload(u) for u in (plan.get("units") or [])),
                    key=lambda d: json.dumps(d, sort_keys=True))
-    payload = json.dumps(
-        {"units": units,
-         "budget": plan.get("budget"),
-         "root": plan.get("root")}, sort_keys=True, default=str)
+    payload = {"units": units,
+               "budget": plan.get("budget"),
+               "root": plan.get("root")}
+    # Compatibility is persisted state, not just the forward path. Adding a
+    # null key would change every old plan's digest after an upgrade and halt
+    # unchanged live runs. Only a declared canary changes dispatch semantics.
+    if plan.get("dispatch_canary") is not None:
+        payload["dispatch_canary"] = plan["dispatch_canary"]
+    payload = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
@@ -2489,8 +2517,13 @@ def _occupies_live_resources(u, us):
     Deadline protection depends on the declared attempt, never on whether a
     later phase has already rewritten the operator-facing state/reason.
     """
-    return (us.get("state") in LIVE_STATES
-            or _deadline_attempt_is_unresolved(u, us))
+    # A state word without an attempt identity is not an admission and cannot
+    # consume capacity. This is the one-to-one boundary: allocation writes the
+    # attempt before entering ALLOCATED, and every admission-clearing path
+    # clears both. Historical half-clears are normalized by advance.
+    return bool(us.get("attempt_dir")) and (
+        us.get("state") in LIVE_STATES
+        or _deadline_attempt_is_unresolved(u, us))
 
 
 # --- dispatch -------------------------------------------------------------
@@ -2687,7 +2720,8 @@ def _clear_isolation_marker(facts):
     return None
 
 
-def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
+def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
+            dispatch_source=None):
     """Submit, and return (job_id, error). Dispatch differs per kind; judging
     does not.
 
@@ -2706,8 +2740,28 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
         existing_intent = ((((state or {}).get("units") or {}).get(u["id"]) or {})
                            .get("attempt_launch_intents") or {}).get(attempt)
         if existing_intent:
-            anchor_err = _code_launch_intent_problem(
-                existing_intent, u, attempt)
+            anchor_err = None
+            if existing_intent.get("base_commit"):
+                if dispatch_source is None:
+                    dispatch_source, anchor_err = _resolve_dispatch_target(u)
+                if not anchor_err:
+                    anchor_err = _upgrade_legacy_code_launch_intent(
+                        existing_intent, u,
+                        dispatch_source=dispatch_source)
+            if (not anchor_err and dispatch_source is not None
+                    and existing_intent.get("target_commit") !=
+                    dispatch_source.get("target_commit")):
+                anchor_err = _dispatch_base_refusal(
+                    u.get("id"), dispatch_source.get("repo"),
+                    f"existing launch intent target "
+                    f"{existing_intent.get('target_commit')} is not the "
+                    f"once-resolved current target "
+                    f"{dispatch_source.get('target_commit')}; refusing to "
+                    f"reuse stale schema-{existing_intent.get('schema_version', 1)} "
+                    f"launch authority")
+            if not anchor_err:
+                anchor_err = _code_launch_intent_problem(
+                    existing_intent, u, attempt)
             # Re-run the stash preflight on a re-dispatch of the SAME
             # attempt, for the reason `_write_launch_record` re-runs the
             # dirty predicate on its own already-anchored path: retry and
@@ -2721,7 +2775,8 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
                 "intent": existing_intent,
             })
         else:
-            anchor_err, anchored_base = _capture_code_launch(unit_dir, u)
+            anchor_err, anchored_base = _capture_code_launch(
+                unit_dir, u, dispatch_source=dispatch_source)
         if anchor_err:
             return None, anchor_err
     elif _requires_clean_workspace(u):
@@ -3111,6 +3166,50 @@ def _git(repo, *args, timeout=60):
     return rc, (out or "").strip(), (err or "").strip()
 
 
+def _git_push_destination(repo, raw, resolved, remote_index, *args,
+                          timeout=60):
+    """Run a remote command against origin's once-expanded push route."""
+    routed_args = list(args)
+    if (remote_index < 0 or remote_index >= len(routed_args)
+            or routed_args[remote_index] != raw):
+        return 2, "", "internal error: push-route argument is not anchored"
+    alias = "hanig-swarm-route:" + os.urandom(16).hex()
+    routed_args[remote_index] = alias
+    handle = tempfile.NamedTemporaryFile(
+        prefix="hanig-swarm-push-route-", delete=False)
+    config_path = handle.name
+    handle.close()
+    try:
+        rc, out, err = U.run(
+            ["git", "config", "--file", config_path, "--add",
+             f"url.{resolved}.insteadOf", alias], timeout=timeout)
+        if rc != 0:
+            return rc, (out or "").strip(), (err or "").strip()
+        return _git(repo, "-c", f"include.path={config_path}", *routed_args,
+                    timeout=timeout)
+    finally:
+        try:
+            os.unlink(config_path)
+        except OSError:
+            pass
+
+
+def _exact_remote_ref_head(listing, ref):
+    """Return the sole valid object id reported for exactly ``ref``."""
+    matches = []
+    for line in listing.splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[1] == ref:
+            matches.append(fields[0])
+    if len(matches) != 1:
+        return None
+    head = matches[0]
+    if (len(head) not in (40, 64)
+            or any(c not in "0123456789abcdef" for c in head.lower())):
+        return None
+    return head
+
+
 def _unattended_mode_example(provider):
     """An unattended mode this provider actually accepts.
 
@@ -3162,6 +3261,15 @@ class PreflightRefusal(str):
     # paths, and the run report rendered a zero count as "uncommitted
     # changes", which misstates why nothing ran.
     reason = "dirty-worktree"
+
+
+def _dispatch_base_refusal(uid, repo, message):
+    """Carry a source-identity refusal to the command exit contract."""
+    refusal = PreflightRefusal(f"unit {uid!r}: {message}")
+    refusal.workspace = str(repo)
+    refusal.dirty_count = 0
+    refusal.reason = "dispatch-base"
+    return refusal
 
 
 def _plan_workspace(u):
@@ -3633,112 +3741,236 @@ def _repeat_stash_preflight(u):
     return _stash_preflight(u.get("id"), repo)
 
 
-def _capture_code_launch(unit_dir, u):
-    """Record the immutable input to Paseo's worktree creation.
+def _commit_relation(repo, head, target_head):
+    """Classify checkout HEAD against the pinned target for diagnostics."""
+    behind_rc, _out, behind_err = _git(
+        repo, "merge-base", "--is-ancestor", head, target_head)
+    if behind_rc == 0:
+        return "behind", ""
+    if behind_rc != 1:
+        return "unknown", behind_err
+    ahead_rc, _out, ahead_err = _git(
+        repo, "merge-base", "--is-ancestor", target_head, head)
+    if ahead_rc == 0:
+        return "ahead", ""
+    if ahead_rc == 1:
+        return "diverged", ""
+    return "unknown", ahead_err
 
-    The shared checkout is a SOURCE, not the execution tree. Its dirty index
-    and working files cannot enter a worktree made from an object id, so
-    checking them would both block unrelated human work and prove nothing
-    about the tree the agent receives. The clean-at-launch guarantee comes
-    from Paseo constructing a new branch-off worktree from ``base_commit``.
 
-    The stash stack is the exception, and `_stash_refusal` says why.
+def _resolve_dispatch_target(u):
+    """Resolve one code unit's target commit without deciding from a branch.
+
+    The caller caches this value for an entire advance. Both qualification
+    scope and launch use the same immutable commit, even if the remote target
+    moves after this function returns.
     """
+    repo, err = _plan_workspace(u)
+    if err:
+        return None, _dispatch_base_refusal(u.get("id"), u.get("repo"), err)
+    repo = str(Path(repo).resolve())
+    target = str(u.get("target_branch") or "").strip()
+    if not target:
+        return None, _dispatch_base_refusal(
+            u.get("id"), repo, "no target_branch was declared")
+    remote_raw, remote, problem = W.remote_push_transport(U.run, repo)
+    if problem:
+        return None, _dispatch_base_refusal(
+            u.get("id"), repo,
+            f"repository has no readable single origin push destination "
+            f"({problem}). Code attempts must push their generated branch "
+            f"to origin")
+    target_ref = f"refs/heads/{target}"
+    rc, listing, remote_err = _git_push_destination(
+        repo, remote_raw, remote, 2, "ls-remote", "--exit-code", remote_raw,
+        target_ref)
+    target_commit = _exact_remote_ref_head(listing, target_ref)
+    if rc != 0 or target_commit is None:
+        detail = remote_err or "no single valid exact-ref answer"
+        return None, _dispatch_base_refusal(
+            u.get("id"), repo,
+            f"cannot resolve origin/{target} before dispatch: {detail[:200]}")
+    return {
+        "repo": repo,
+        "repository_remote": remote,
+        "repository_remote_raw": remote_raw,
+        "target_branch": target,
+        "target_ref": target_ref,
+        "target_commit": target_commit,
+    }, None
+
+
+def _dispatch_source_identity(u, target):
+    """Bind actual launch source to the target commit, irrespective of ref."""
+    repo = target["repo"]
+    rc, head, head_err = _git(repo, "rev-parse", "HEAD")
+    if rc != 0:
+        return None, _dispatch_base_refusal(
+            u.get("id"), repo,
+            f"checkout has no readable HEAD: {head_err[:200]}")
+    rc, base_ref, _ = _git(repo, "symbolic-ref", "--quiet", "HEAD")
+    if rc != 0:
+        base_ref = None
+        base_branch = "(detached HEAD)"
+    elif base_ref.startswith("refs/heads/"):
+        base_branch = base_ref[len("refs/heads/"):]
+    else:
+        base_branch = base_ref
+    if head != target["target_commit"]:
+        relation, relation_err = _commit_relation(
+            repo, head, target["target_commit"])
+        detail = (f" is {relation}" if relation != "unknown" else
+                  f" cannot be compared ({relation_err[:120]})")
+        return None, _dispatch_base_refusal(
+            u.get("id"), repo,
+            f"checkout {base_branch!r} at {head}{detail} relative to "
+            f"origin/{target['target_branch']} at "
+            f"{target['target_commit']}; launch source must equal the "
+            f"pinned target commit")
+    rc, tree, tree_err = _git(repo, "rev-parse", head + "^{tree}")
+    if rc != 0:
+        return None, _dispatch_base_refusal(
+            u.get("id"), repo,
+            f"cannot read the tree of target {head}: {tree_err[:200]}")
+    source = dict(target)
+    source.update({"base_commit": target["target_commit"],
+                   "base_tree": tree,
+                   "base_ref": base_ref,
+                   "base_branch": base_branch})
+    return source, None
+
+
+def _capture_code_launch(unit_dir, u, dispatch_source=None):
+    """Record the immutable, target-bound input to Paseo worktree creation."""
     repo, err = _plan_workspace(u)
     if err:
         return err, None
     stash_problem = _stash_preflight(u.get("id"), repo)
     if stash_problem:
         return stash_problem, None
-    target = str(u.get("target_branch") or "").strip()
-    if not target:
-        return (f"unit {u.get('id')!r}: no target_branch was declared; "
-                f"refusing to create a source branch for a pull request with "
-                f"no named destination"), None
+    source = dispatch_source
+    if source is None:
+        target, problem = _resolve_dispatch_target(u)
+        if problem:
+            return problem, None
+        source, problem = _dispatch_source_identity(u, target)
+        if problem:
+            return problem, None
+    repo = str(Path(repo).resolve())
+    if source.get("repo") != repo:
+        return _dispatch_base_refusal(
+            u.get("id"), repo, "cached dispatch source names another repo"), None
+    target = source["target_branch"]
     slug, branch = _code_worktree_names(unit_dir)
-    # The generated source name depends on the attempt id, so plan validation
-    # cannot know this collision. Intent construction is the first point that
-    # can, and it is still before Paseo creates either an agent or worktree.
     if target == branch:
         return (f"unit {u.get('id')!r}: target_branch {target!r} is the same "
                 f"as generated attempt branch {branch!r}; a pull request "
                 f"cannot merge a branch into itself"), None
-    # Store the source identity in the same canonical form used for Paseo's
-    # returned cwd. This is an authority boundary, not a display path: a
-    # relative spelling or symlink must not make the source checkout compare
-    # unequal to itself later.
-    repo = str(Path(repo).resolve())
-    rc, head, _ = _git(repo, "rev-parse", "HEAD")
-    if rc != 0:
-        return (f"unit {u['id']!r}: {repo!r} has no HEAD to anchor to. "
-                f"An empty repository gives nothing to transition FROM."), None
-    rc, tree, _ = _git(repo, "rev-parse", head + "^{tree}")
-    if rc != 0:
-        return f"unit {u['id']!r}: cannot read the tree of {head[:12]}", None
-    # `git push origin` writes to pushurl when one is configured. Anchor both
-    # its raw spelling and its once-expanded destination. Reusing only the
-    # expanded spelling would let Git apply a second `insteadOf` rewrite when
-    # the judge passes it back to ls-remote or fetch.
-    remote_raw, remote, remote_problem = W.remote_push_transport(U.run, repo)
-    if remote_problem:
-        return (f"unit {u.get('id')!r}: repository {repo!r} has no readable "
-                f"single origin push destination ({remote_problem}). Code "
-                f"attempts must push their generated "
-                f"branch to origin so the coordinator can judge the exact "
-                f"ref it anchored before the agent existed"), None
     judgment_ref = f"refs/heads/{branch}"
-    # Query the PUSH destination, not the raw fetch spelling: with
-    # `url.*.pushInsteadOf` configured they are different repositories, and
-    # the attempt will push to the former. Checking the latter for collisions
-    # asks the wrong repository and later judges the wrong one too.
-    remote_rc, _remote_head, remote_err = _git(
-        repo, "ls-remote", "--exit-code", remote,
-        f"refs/heads/{branch}")
+    remote_rc, listing, remote_err = _git_push_destination(
+        repo, source["repository_remote_raw"], source["repository_remote"],
+        2, "ls-remote", "--exit-code", source["repository_remote_raw"],
+        judgment_ref)
+    existing_head = _exact_remote_ref_head(listing, judgment_ref)
     if remote_rc == 0:
-        return (f"unit {u.get('id')!r}: generated attempt branch {branch!r} "
-                f"already exists on origin. Allocate a new attempt rather "
-                f"than asking an agent to overwrite unrelated remote "
-                f"history"), None
-    if remote_rc != 2:
-        detail = (remote_err or "git ls-remote returned %s" % remote_rc).strip()
-        return (f"unit {u.get('id')!r}: cannot establish that generated "
-                f"attempt branch {branch!r} is absent on origin: "
-                f"{detail[:200]}. Refusing before agent creation"), None
-    # The remote branch and the local branch are separate collision domains.
-    # Paseo must create the latter, while the former is the exact durable ref
-    # the checker will query. A remote-tracking ref is deliberately irrelevant:
-    # whether Git writes one after push is controlled by remote.origin.fetch.
+        detail = ("no single valid exact-ref answer" if existing_head is None
+                  else f"it points at {existing_head}")
+        return _dispatch_base_refusal(
+            u.get("id"), repo,
+            f"generated attempt branch {branch!r} already exists on origin "
+            f"or is ambiguous there ({detail})"), None
+    if remote_rc == 2 and listing.strip():
+        return _dispatch_base_refusal(
+            u.get("id"), repo,
+            f"origin contradicted absence of generated branch {branch!r}"), None
+    if remote_rc not in (0, 2):
+        detail = remote_err or f"git ls-remote returned {remote_rc}"
+        return _dispatch_base_refusal(
+            u.get("id"), repo,
+            f"cannot establish generated branch {branch!r} is absent: "
+            f"{detail[:200]}"), None
     local_ref = f"refs/heads/{branch}"
     ref_rc, _out, _err = _git(
         repo, "show-ref", "--verify", "--quiet", local_ref)
     if ref_rc == 0:
-        return (f"unit {u.get('id')!r}: generated local attempt branch "
-                f"{branch!r} already exists. Allocate a new attempt rather "
-                f"than asking Paseo to reuse its history"), None
+        return _dispatch_base_refusal(
+            u.get("id"), repo,
+            f"generated local attempt branch {branch!r} already exists"), None
     intent = {
-        "schema_version": 5,
+        "schema_version": 8,
         "unit_id": u.get("id"),
         "attempt_id": Path(unit_dir).name,
         "launch_host": os.uname().nodename,
         "repo": repo,
-        "repository_remote": remote,
-        "repository_remote_raw": remote_raw,
-        "base_commit": head,
-        "base_tree": tree,
+        "repository_remote": source["repository_remote"],
+        "repository_remote_raw": source["repository_remote_raw"],
+        "base_commit": source["target_commit"],
+        "base_tree": source["base_tree"],
+        "base_branch": source["base_branch"],
+        "base_ref": source["base_ref"],
+        "target_commit": source["target_commit"],
         "worktree_slug": slug,
         "branch": branch,
-        # The exact durable observation the checker will make after Paseo's
-        # managed worktree may already be gone. This is the remote ref NAME;
-        # the agent controls its VALUE by pushing, and the checker derives and
-        # validates that value rather than accepting an agent assertion.
         "judgment_ref": judgment_ref,
         "target_branch": target,
-        # Makes the audit payload reproducible after a crash. Recovery can
-        # compare exact expected bytes and restore the original seal without
-        # trusting or laundering fields out of the file.
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }
-    return None, {"base": head, "intent": intent}
+    return None, {"base": source["target_commit"], "intent": intent}
+
+
+def _upgrade_legacy_code_launch_intent(intent, u, dispatch_source=None):
+    """Bind an old pre-launch intent to today's exact target or refuse it.
+
+    Schemas before 8 recorded a base but no evidence that the base was the
+    intended target commit. They may be resumed only when a fresh exact-ref
+    observation proves equality; after that the coordinator state carries the
+    same commit-identity contract as a newly captured intent.
+    """
+    if not isinstance(intent, dict):
+        return (f"unit {u.get('id')!r}: coordinator state has no valid "
+                f"worktree launch intent object to upgrade")
+    schema = intent.get("schema_version", 1)
+    if (not isinstance(schema, int) or isinstance(schema, bool)
+            or schema < 1):
+        return (f"unit {u.get('id')!r}: legacy worktree launch intent has "
+                f"invalid schema_version {schema!r}")
+    if isinstance(schema, int) and not isinstance(schema, bool) and schema >= 8:
+        return None
+    if schema >= 7:
+        legacy_target = intent.get("target_commit")
+        if (not isinstance(legacy_target, str)
+                or len(legacy_target) not in (40, 64)
+                or any(ch not in "0123456789abcdef"
+                       for ch in legacy_target.lower())
+                or legacy_target != intent.get("base_commit")):
+            return (f"unit {u.get('id')!r}: legacy schema-{schema} target "
+                    f"metadata does not bind base_commit to one valid exact "
+                    f"target_commit")
+    target = dispatch_source
+    if target is None:
+        target, problem = _resolve_dispatch_target(u)
+        if problem:
+            return problem
+    if intent.get("base_commit") != target["target_commit"]:
+        return _dispatch_base_refusal(
+            u.get("id"), target["repo"],
+            f"legacy launch intent base {intent.get('base_commit')} is not "
+            f"current target commit {target['target_commit']}; it cannot be "
+            f"upgraded to the commit-identity contract")
+    intent.update({
+        "schema_version": 8,
+        "repo": target["repo"],
+        "repository_remote": target["repository_remote"],
+        "repository_remote_raw": target["repository_remote_raw"],
+        "target_branch": target["target_branch"],
+        "target_commit": target["target_commit"],
+        "base_branch": (intent.get("base_branch") or
+                        "(legacy intent; commit identity revalidated)"),
+        "base_ref": intent.get("base_ref"),
+        "judgment_ref": (intent.get("judgment_ref") or
+                         f"refs/heads/{intent.get('branch')}"),
+    })
+    return None
 
 
 def _code_launch_intent_problem(intent, u, attempt):
@@ -3754,6 +3986,10 @@ def _code_launch_intent_problem(intent, u, attempt):
             or schema < 1):
         return (f"unit {u.get('id')!r}: worktree launch intent has invalid "
                 f"schema_version {schema!r}")
+    if schema < 8:
+        return (f"unit {u.get('id')!r}: legacy worktree launch intent schema "
+                f"{schema} has not been upgraded to exact target-commit "
+                f"identity")
     for key in ("repo", "base_commit", "base_tree", "worktree_slug", "branch",
                 "target_branch", "captured_at"):
         if not intent.get(key):
@@ -3772,7 +4008,25 @@ def _code_launch_intent_problem(intent, u, attempt):
                  or not intent["launch_host"])):
         return (f"unit {u.get('id')!r}: worktree launch intent is "
                 "incomplete (missing launch_host)")
-    for key in ("base_commit", "base_tree"):
+    if schema >= 7:
+        for key in ("base_branch", "target_commit"):
+            if not intent.get(key):
+                return (f"unit {u.get('id')!r}: worktree launch intent is "
+                        f"incomplete (missing {key})")
+        if schema == 7:
+            expected_base_ref = f"refs/heads/{intent['target_branch']}"
+            if intent.get("base_ref") != expected_base_ref:
+                return (f"unit {u.get('id')!r}: trusted launch base ref "
+                        f"{intent.get('base_ref')!r} is not target ref "
+                        f"{expected_base_ref!r}")
+        elif intent["base_commit"] != intent["target_commit"]:
+            return (f"unit {u.get('id')!r}: trusted launch commit "
+                    f"{intent['base_commit']} is not pinned target commit "
+                    f"{intent['target_commit']}")
+    digest_keys = ["base_commit", "base_tree"]
+    if schema >= 7:
+        digest_keys.append("target_commit")
+    for key in digest_keys:
         value = intent[key]
         if (not isinstance(value, str) or len(value) not in (40, 64)
                 or any(c not in "0123456789abcdef" for c in value.lower())):
@@ -6025,6 +6279,369 @@ WORKTREE_CLEANUP_STATES = frozenset(
 WORKTREE_ARCHIVE_MAX_ATTEMPTS = 3
 
 
+def _dispatch_target_for_advance(u, cache):
+    """Resolve a target once per advance and return the cached observation."""
+    declared = _execution_workspace(u)
+    try:
+        canonical = str(Path(str(declared)).resolve()) if declared else ""
+    except (OSError, TypeError):
+        canonical = str(declared or "")
+    key = (canonical,
+           str(u.get("target_branch") or "").strip())
+    if key not in cache:
+        cache[key] = _resolve_dispatch_target(u)
+    return cache[key]
+
+
+def _pin_ratified_canary_prior_scope(plan, state, units, prior_digest):
+    """Bind an already-existing attempt before a plan adds/changes canary.
+
+    Ratification may designate a unit whose attempt predates the new plan.
+    That attempt cannot qualify the edited plan, but its successful evidence
+    must remain a stale completion rather than becoming FAILED_EVIDENCE merely
+    because older admission had no canary-scope field to write.
+    """
+    canary_id = (plan.get("dispatch_canary") or {}).get("unit")
+    if canary_id not in units:
+        return None, None
+    unit = units[canary_id]
+    us = _unit_state(state, canary_id)
+    attempt = (Path(us["attempt_dir"]).name
+               if us.get("attempt_dir") else None)
+    if attempt is None:
+        for recorded in reversed(us.get("attempts") or []):
+            if str(recorded).startswith(DRY_PREFIX):
+                continue
+            attempt = Path(str(recorded)).name
+            break
+    if attempt is None:
+        return None, None
+    scopes = us.setdefault("attempt_dispatch_scopes", {})
+    if attempt in scopes:
+        return attempt, None
+    target_commit = None
+    if unit.get("kind") == "code":
+        intent = ((us.get("attempt_launch_intents") or {}).get(attempt))
+        if not isinstance(intent, dict):
+            return None, (f"cannot ratify dispatch canary {canary_id!r}: "
+                          f"attempt {attempt!r} has no coordinator launch "
+                          f"identity from which to pin its prior target")
+        target_commit = (intent.get("target_commit") or
+                         intent.get("base_commit"))
+        if (not isinstance(target_commit, str)
+                or len(target_commit) not in (40, 64)
+                or any(ch not in "0123456789abcdef"
+                       for ch in target_commit.lower())):
+            return None, (f"cannot ratify dispatch canary {canary_id!r}: "
+                          f"attempt {attempt!r} has no valid exact launch "
+                          f"commit for its prior admission scope")
+    scopes[attempt] = {
+        "unit": canary_id,
+        "plan_digest": prior_digest,
+        "target_commit": target_commit,
+    }
+    return attempt, None
+
+
+def _dispatch_canary_scope(plan, units, target_cache):
+    """The exact scope in which a canary DONE may authorize fan-out."""
+    canary_id = (plan.get("dispatch_canary") or {}).get("unit")
+    if not canary_id:
+        return None, None
+    canary = units[canary_id]
+    target_commit = None
+    if canary.get("kind") == "code":
+        target, problem = _dispatch_target_for_advance(canary, target_cache)
+        if problem:
+            return None, problem
+        target_commit = target["target_commit"]
+    return {"unit": canary_id,
+            "plan_digest": plan_digest(plan),
+            "target_commit": target_commit}, None
+
+
+def _dispatch_canary_is_qualified(state, scope):
+    """Qualification is an exact coordinator-state fact, never an inference."""
+    if scope is None:
+        return True
+    qualification = state.get("dispatch_canary_qualification")
+    return (isinstance(qualification, dict)
+            and _unit_state(state, scope["unit"]).get("state") == "DONE"
+            and all(qualification.get(key) == value
+                    for key, value in scope.items()))
+
+
+class DispatchCanaryScopeStale(str):
+    """An honest completed canary whose admission scope is no longer current."""
+
+
+def _record_dispatch_canary_qualification(plan, state, units, uid,
+                                           target_cache):
+    """Persist an authoritative DONE outcome in its plan/target scope."""
+    canary_id = (plan.get("dispatch_canary") or {}).get("unit")
+    if uid != canary_id:
+        return None
+    scope, problem = _dispatch_canary_scope(plan, units, target_cache)
+    if problem:
+        return problem
+    us = _unit_state(state, uid)
+    attempt_dir = us.get("attempt_dir")
+    attempt = Path(attempt_dir).name if attempt_dir else None
+    if not attempt:
+        scopes = us.get("attempt_dispatch_scopes") or {}
+        seals = us.get("attempt_receipt_seals") or {}
+        candidates = set(scopes).intersection(seals)
+        if closing_evidence_for(units[uid].get("kind")) == "merged_pr":
+            receipt = us.get("merge_receipt")
+            produced = us.get("attempt_produced_heads") or {}
+            candidates = {
+                name for name in candidates
+                if (isinstance(receipt, dict)
+                    and produced.get(name) == receipt.get("head")
+                    and receipt.get("unit") == uid
+                    and receipt.get("merged_as") == us.get("merged_as")
+                    and receipt.get("pr") == us.get("merge_pr")
+                    and receipt.get("merged") is True
+                    and receipt.get("attested") is True
+                    and _merge_shape_problem(receipt) is None)}
+        newest = None
+        for recorded_attempt in reversed(us.get("attempts") or []):
+            if str(recorded_attempt).startswith(DRY_PREFIX):
+                continue
+            name = Path(str(recorded_attempt)).name
+            if name in candidates:
+                newest = name
+                break
+        if newest is not None:
+            attempt = newest
+        elif len(candidates) == 1:
+            attempt = next(iter(candidates))
+    if not attempt:
+        return (f"dispatch canary {uid!r} has no attempt identity to bind "
+                f"its DONE qualification")
+    receipt_seal = ((us.get("attempt_receipt_seals") or {}).get(attempt))
+    if (not isinstance(receipt_seal, str) or len(receipt_seal) != 64
+            or any(ch not in "0123456789abcdef"
+                   for ch in receipt_seal.lower())):
+        return (f"dispatch canary {uid!r} attempt {attempt!r} has no "
+                f"coordinator-recorded authoritative DONE receipt seal")
+    pinned = ((us.get("attempt_dispatch_scopes") or {}).get(attempt))
+    if not isinstance(pinned, dict):
+        return (f"dispatch canary {uid!r} attempt {attempt!r} has no "
+                f"coordinator-pinned dispatch scope")
+    qualification_scope = dict(pinned)
+    plan_matches = pinned.get("plan_digest") == scope.get("plan_digest")
+    target_matches = pinned.get("target_commit") == scope.get(
+        "target_commit")
+    if plan_matches and not target_matches and units[uid].get("kind") == "code":
+        receipt = us.get("merge_receipt")
+        produced = (us.get("attempt_produced_heads") or {}).get(attempt)
+        merge_advances_to_current_target = (
+            isinstance(receipt, dict)
+            and receipt.get("unit") == uid
+            and receipt.get("head") == produced
+            and receipt.get("merged_as") == us.get("merged_as")
+            and receipt.get("merged_as") == scope.get("target_commit")
+            and receipt.get("pr") == us.get("merge_pr")
+            and receipt.get("merged") is True
+            and receipt.get("attested") is True
+            and _merge_shape_problem(receipt) is None)
+        if merge_advances_to_current_target:
+            qualification_scope["admission_target_commit"] = pinned.get(
+                "target_commit")
+            qualification_scope["target_commit"] = scope["target_commit"]
+            target_matches = True
+    if not plan_matches or not target_matches:
+        stale = DispatchCanaryScopeStale(
+            f"dispatch canary {uid!r} attempt {attempt!r} ran under "
+            f"plan {str(pinned.get('plan_digest'))[:12]} and target "
+            f"{pinned.get('target_commit')}, not current plan "
+            f"{scope['plan_digest'][:12]} and target "
+            f"{scope['target_commit']}")
+        stale.attempt = attempt
+        return stale
+    qualification = qualification_scope
+    qualification.update({
+        "attempt": attempt,
+        "qualified_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    })
+    state["dispatch_canary_qualification"] = qualification
+    return None
+
+
+def _requeue_stale_dispatch_canary(state, unit, problem, report, state_dir,
+                                    dry_run=False):
+    """Preserve a stale completion, then make a fresh canary admissible.
+
+    Scope invalidation says nothing adverse about the completed attempt. It
+    therefore cannot be rewritten as FAILED_EVIDENCE or charged as a retry.
+    The old per-attempt authority remains keyed by attempt id; only the
+    current-admission fields are cleared after the normal code-worktree
+    archive path has had its chance to preserve the checkout.
+    """
+    uid = unit["id"]
+    us = _unit_state(state, uid)
+    attempt_dir = us.get("attempt_dir")
+    qualification = state.get("dispatch_canary_qualification")
+    qualified_attempt = (qualification.get("attempt")
+                         if isinstance(qualification, dict) else
+                         getattr(problem, "attempt", None))
+    attempt = (Path(attempt_dir).name if attempt_dir else qualified_attempt)
+    stale = {
+        "attempt": attempt,
+        "prior_state": us.get("state"),
+        "reason": str(problem),
+        "invalidated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    for key in ("merged_as", "merge_pr", "merge_receipt", "merge_refusal"):
+        if us.get(key) is not None:
+            stale[key] = us[key]
+    us.setdefault("dispatch_canary_stale_completions", []).append(stale)
+    save_state(state_dir, state)
+    if not dry_run and unit.get("kind") == "code" and attempt_dir:
+        _archive_code_worktree(
+            state, unit, attempt_dir, report, state_dir)
+    for key in ("attempt_dir", "job_id", "allocated_at", "bind_pending",
+                "merged_as", "merge_pr", "merge_receipt", "merge_refusal"):
+        us.pop(key, None)
+    us["attempt_dir"] = None
+    us["job_id"] = None
+    _set_unit_state(us, None)
+    if (isinstance(qualification, dict)
+            and qualification.get("unit") == uid):
+        state.pop("dispatch_canary_qualification", None)
+    prefix = "DRY RUN -- " if dry_run else ""
+    report.append(
+        f"{uid}: {prefix}prior canary completion is outside the current "
+        f"dispatch scope; preserved attempt {attempt!r} and opened a fresh "
+        f"admission. {problem}")
+    save_state(state_dir, state)
+
+
+def _dispatch_admission(plan, state, units, candidate, target_cache):
+    """Evaluate the four independent terms of one dispatch admission.
+
+    Returns ``(allowed, source, wait_reason, refusal)``. Eligibility is
+    established by the caller before this chokepoint. This function then
+    requires source identity, capacity, and canary authorization together.
+    """
+    unit = units[candidate]
+    canary = plan.get("dispatch_canary") or {}
+    canary_id = canary.get("unit")
+    if canary_id:
+        occupancy = [uid for uid, declared in units.items()
+                     if _occupies_live_resources(
+                         declared, _unit_state(state, uid))]
+        width = canary["width"]
+        if candidate not in occupancy and len(occupancy) >= width:
+            return (False, None,
+                    f"capacity full ({len(occupancy)} of {width})", None)
+        if (candidate != canary_id
+                and _unit_state(state, canary_id).get("state") != "DONE"):
+            return (False, None,
+                    f"dispatch canary {canary_id!r} is still in progress",
+                    None)
+        scope, problem = _dispatch_canary_scope(plan, units, target_cache)
+        if problem:
+            return False, None, None, str(problem)
+        if (candidate != canary_id
+                and not _dispatch_canary_is_qualified(state, scope)):
+            return (False, None,
+                    f"dispatch canary {canary_id!r} has no authoritative "
+                    f"DONE qualification for plan "
+                    f"{scope['plan_digest'][:12]} and target "
+                    f"{scope['target_commit'] or 'none'}", None)
+
+    # Source inspection comes after the ordinary wait decisions. A code
+    # candidate that cannot yet be admitted has no relevant safety refusal;
+    # observing its checkout early turned a running-canary or full-width
+    # successful no-op into a command failure.
+    source = None
+    if unit.get("kind") == "code":
+        target, problem = _dispatch_target_for_advance(unit, target_cache)
+        if problem:
+            return False, None, None, str(problem)
+        source, problem = _dispatch_source_identity(unit, target)
+        if problem:
+            return False, None, None, str(problem)
+    return True, source, None, None
+
+
+def _dispatch_width_is_full(plan, state, units):
+    """Whether the canary contract currently leaves no admission capacity."""
+    canary = plan.get("dispatch_canary") or {}
+    if not canary.get("unit"):
+        return False
+    occupancy = [uid for uid, declared in units.items()
+                 if _occupies_live_resources(
+                     declared, _unit_state(state, uid))]
+    return len(occupancy) >= canary["width"]
+
+
+def _ordinary_dispatch_is_possible(plan, state, units, spent, budget,
+                                   dispatched, max_new):
+    """Whether any unit reaches the admission boundary without Git facts."""
+    if max_new is not None and dispatched >= max_new:
+        return False
+    live = [uid for uid, unit in units.items()
+            if _occupies_live_resources(unit, _unit_state(state, uid))]
+    cap_all = (plan.get("limits") or {}).get("max_running")
+    for uid, unit in units.items():
+        us = _unit_state(state, uid)
+        if (us.get("attempt_dir")
+                or us.get("state") in
+                ("DONE", "FAILED", "HELD", "FAILED_EVIDENCE")):
+            continue
+        needs = unit.get("needs") or []
+        if any(_unit_state(state, dep).get("state") != "DONE"
+               for dep in needs):
+            continue
+        want = float(unit.get("gpu_hours") or 0)
+        if budget is not None and spent + want > float(budget):
+            continue
+        if cap_all is not None and len(live) >= cap_all:
+            continue
+        pool = unit.get("pool")
+        if pool:
+            caps = ((plan.get("limits") or {}).get("pools") or {})
+            in_pool = [other for other in live
+                       if units[other].get("pool") == pool]
+            if len(in_pool) >= caps.get(pool, 10 ** 9):
+                continue
+        return True
+    return False
+
+
+def _blocking_canary_failure(plan, state, units, target_cache,
+                             admission_possible=True):
+    """Return a safety refusal that must become a nonzero command status."""
+    canary_id = (plan.get("dispatch_canary") or {}).get("unit")
+    if not canary_id:
+        return None
+    canary_state = _unit_state(state, canary_id).get("state")
+    if canary_state in ("FAILED", "FAILED_EVIDENCE", "HELD"):
+        return (f"dispatch canary {canary_id!r} is {canary_state}; "
+                f"authoritative DONE qualification is absent for the "
+                f"current plan and target")
+    if canary_state != "DONE":
+        return None
+    if not admission_possible:
+        return None
+    # With no capacity for a new commitment, target qualification is not yet
+    # a fact this invocation needs. A remote outage here is ordinary waiting,
+    # not an observed safety refusal; qualification is checked when capacity
+    # opens and an admission could actually follow.
+    if _dispatch_width_is_full(plan, state, units):
+        return None
+    scope, problem = _dispatch_canary_scope(plan, units, target_cache)
+    if problem:
+        return str(problem)
+    if _dispatch_canary_is_qualified(state, scope):
+        return None
+    return (f"dispatch canary {canary_id!r} is DONE but has no authoritative "
+            f"qualification for the current plan and target")
+
+
 def _paseo_json(out):
     """One implementation, in paseo_io. See that module for why."""
     return PIO.first_json_object(out)
@@ -6418,6 +7035,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     acts."""
     units = {u["id"]: u for u in plan["units"]}
     report, dispatched, halted = [], 0, state.get("halted")
+    transient_halt = None
+    dispatch_targets = {}
     advance_observed_at = time.time()
 
     # A DRY RUN MUST NOT CONTAMINATE A REAL PROJECT. Recording a fake
@@ -6468,8 +7087,27 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     # stored state alone.
     for uid, u in sorted(units.items()):
         us = _unit_state(state, uid)
+        if (us.get("state") == "ALLOCATED"
+                and not us.get("attempt_dir") and not us.get("job_id")):
+            _set_unit_state(us, None)
+            us.pop("allocated_at", None)
+            report.append(
+                f"{uid}: corrected a cleared ALLOCATED admission with no "
+                f"attempt identity; it consumes no concurrency capacity.")
+            save_state(state_dir, state)
+        elif (us.get("state") in LIVE_STATES
+              and not us.get("attempt_dir")):
+            refusal = (
+                f"unit {uid!r} is recorded {us.get('state')} with job "
+                f"{us.get('job_id')!r} but has no attempt identity. Capacity "
+                f"and judgment cannot be attributed, so no new dispatch is "
+                f"safe until coordinator state is repaired.")
+            report.append(f"REFUSING -- {refusal}")
+            save_state(state_dir, state)
+            return report, dispatched, refusal
         if (us.get("state") == "DONE"
-                and closing_evidence_for(u.get("kind")) != "predicate_receipt"):
+                and closing_evidence_for(u.get("kind")) != "predicate_receipt"
+                and not us.get("merged_as")):
             _set_unit_state(us, "READY_FOR_PR")
             report.append(
                 f"{uid}: recorded DONE, but a {u.get('kind')} unit is closed "
@@ -6513,10 +7151,17 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     # The plan must not change under a live run. A mid-flight edit silently
     # redefines what the recorded attempts were for.
     digest = plan_digest(plan)
+    admission_plan_digest = state.get("plan_digest") or digest
     if state.get("plan_digest") is None:
         state["plan_digest"] = digest
     elif state["plan_digest"] != digest and accept_plan_change:
         prior = state["plan_digest"]
+        pinned_attempt, pin_problem = _pin_ratified_canary_prior_scope(
+            plan, state, units, prior)
+        if pin_problem:
+            return ([f"REFUSING to ratify plan change: {pin_problem}. "
+                     f"The prior plan digest and recorded attempt are kept."],
+                    0, pin_problem)
         state["plan_digest"] = digest
         state.setdefault("ratified_edits", []).append(
             {"from": prior, "to": digest,
@@ -6524,6 +7169,11 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
              "by": os.environ.get("USER", "?")})
         report.append(f"plan change RATIFIED: {prior[:12]} -> {digest[:12]}. "
                       f"Recorded attempts are kept.")
+        if pinned_attempt is not None:
+            report.append(
+                f"dispatch canary prior attempt {pinned_attempt!r} remains "
+                f"scoped to pre-ratification plan {prior[:12]}; it cannot "
+                f"qualify the edited plan.")
         save_state(state_dir, state)
     elif state["plan_digest"] != digest:
         # The old remedy here was "start a new state directory", which
@@ -6721,8 +7371,14 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                         # recovery through the same durable bind protocol as
                         # every other dispatch; do not intercept it merely
                         # because the branch exists.
-                        recovered_job, problem = _submit(
-                            u, us["attempt_dir"], False, state, state_dir)
+                        recovery_source, source_problem = (
+                            _dispatch_target_for_advance(u, dispatch_targets))
+                        if source_problem:
+                            recovered_job, problem = None, source_problem
+                        else:
+                            recovered_job, problem = _submit(
+                                u, us["attempt_dir"], False, state, state_dir,
+                                recovery_source)
                         if problem:
                             _set_unit_state(us, "NEEDS_HUMAN")
                             us["launch_recovery_problem"] = problem
@@ -6757,6 +7413,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                           f"into a new directory. The stale one is left on disk "
                           f"rather than deleted.")
             us["attempt_dir"] = None
+            us.pop("allocated_at", None)
+            _set_unit_state(us, None)
             save_state(state_dir, state)
 
     # 1. Re-check anything with a live attempt. The coordinator does not judge;
@@ -6803,6 +7461,68 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             continue
         us.pop("host_judgment", None)
         if us["state"] == "DONE":
+            # Repair the persisted half of the transition too. A crash after
+            # the checker stored authoritative DONE and its receipt seal, but
+            # before qualification was stored, must not leave a successfully
+            # qualified run permanently unable to fan out. The coordinator's
+            # seal and per-attempt scope are both required; a DONE word alone
+            # remains incapable of minting qualification.
+            canary_id = (plan.get("dispatch_canary") or {}).get("unit")
+            if uid != canary_id:
+                continue
+            closure = closing_evidence_for(u.get("kind"))
+            has_closure = (closure == "predicate_receipt" or
+                           (closure == "merged_pr" and
+                            _has_bound_merge_evidence(
+                                uid, us, {"receipt": us.get(
+                                    "merge_receipt")})))
+            if (not dry_run and has_closure
+                    and not _dispatch_width_is_full(plan, state, units)
+                    and _ordinary_dispatch_is_possible(
+                        plan, state, units,
+                        sum(_unit_state(state, name)["gpu_hours"]
+                            for name in units),
+                        (plan.get("budget") or {}).get("gpu_hours"),
+                        dispatched, max_new)):
+                scope, scope_problem = _dispatch_canary_scope(
+                    plan, units, dispatch_targets)
+                if scope_problem:
+                    transient_halt = transient_halt or str(scope_problem)
+                    report.append(
+                        f"{uid}: CANARY QUALIFICATION WAIT -- "
+                        f"{scope_problem}")
+                elif not _dispatch_canary_is_qualified(state, scope):
+                    qualification = state.get(
+                        "dispatch_canary_qualification")
+                    if (not us.get("attempt_dir")
+                            and isinstance(qualification, dict)
+                            and qualification.get("unit") == uid):
+                        # Reconcile the stale, already-cleared completion at
+                        # the single pre-dispatch boundary below. The old
+                        # qualification carries its attempt identity; absence
+                        # of live fields is not failed execution evidence.
+                        continue
+                    qualification_problem = (
+                        _record_dispatch_canary_qualification(
+                            plan, state, units, uid, dispatch_targets))
+                    if isinstance(qualification_problem,
+                                  DispatchCanaryScopeStale):
+                        _requeue_stale_dispatch_canary(
+                            state, u, qualification_problem, report,
+                            state_dir, dry_run=dry_run)
+                    elif isinstance(qualification_problem,
+                                    PreflightRefusal):
+                        transient_halt = transient_halt or str(
+                            qualification_problem)
+                        report.append(
+                            f"{uid}: CANARY QUALIFICATION WAIT -- "
+                            f"{qualification_problem}")
+                    elif qualification_problem:
+                        _set_unit_state(us, "FAILED_EVIDENCE")
+                        report.append(
+                            f"{uid}: CANARY QUALIFICATION REFUSED -- "
+                            f"{qualification_problem}")
+                    save_state(state_dir, state)
             continue
         pinned_before = trusted_produced_head(state, uid, attempt)
         ran_check = not (u.get("kind") == "code" and pinned_before)
@@ -6875,6 +7595,51 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         checked_state = ("FAILED_EVIDENCE" if protocol_problem
                          else NAME.get(rc, f"rc={rc}"))
 
+        # A healthy running legacy attempt is ordinary waiting and needs no
+        # remote observation. Upgrade only when the checker reports DONE,
+        # immediately before coordinator judgment consumes launch authority.
+        # This preserves the pre-v8 completion path without turning every
+        # poll (or a transient origin outage) into a safety refusal.
+        if (not dry_run and u.get("kind") == "code"
+                and checked_state == "DONE"):
+            attempt_id = Path(attempt).name
+            intent = ((us.get("attempt_launch_intents") or {}).get(
+                attempt_id))
+            schema = (intent.get("schema_version", 1)
+                      if isinstance(intent, dict) else None)
+            if (isinstance(intent, dict) and intent.get("base_commit")
+                    and not (isinstance(schema, int)
+                             and not isinstance(schema, bool)
+                             and schema >= 8)):
+                source, source_problem = _dispatch_target_for_advance(
+                    u, dispatch_targets)
+                upgrade_problem = source_problem
+                if not upgrade_problem:
+                    upgrade_problem = _upgrade_legacy_code_launch_intent(
+                        intent, u, dispatch_source=source)
+                if upgrade_problem:
+                    refusal = (f"cannot upgrade completed legacy code "
+                               f"attempt {uid!r}/{attempt_id!r}: "
+                               f"{upgrade_problem}")
+                    transient_halt = transient_halt or refusal
+                    report.append(f"REFUSING -- {refusal}")
+                    save_state(state_dir, state)
+                    continue
+                canary_id = (plan.get("dispatch_canary") or {}).get("unit")
+                if uid == canary_id:
+                    us.setdefault(
+                        "attempt_dispatch_scopes", {}).setdefault(
+                            attempt_id, {
+                                "unit": uid,
+                                "plan_digest": admission_plan_digest,
+                                "target_commit": source["target_commit"],
+                            })
+                report.append(
+                    f"{uid}: upgraded completed legacy launch intent "
+                    f"{attempt_id!r} to exact target-commit schema 8 before "
+                    f"judgment.")
+                save_state(state_dir, state)
+
         # A deadline is a reason to inspect, never a reason to skip the only
         # checker. Apply terminal execution evidence first. For a non-terminal
         # result, re-evaluate after the check so PREEMPTED cannot mint a fresh
@@ -6924,6 +7689,25 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 _set_unit_state(us, "NEEDS_HUMAN")
             report.append(f"{uid}: convergence {verdict} -- " +
                           " ".join(str(w) for w in why))
+
+        # The checker is the authority for predicate-closed units. Persist the
+        # canary outcome as its own scoped fact; later admission never infers
+        # qualification merely from occupancy, attempts, or a state label.
+        if (not dry_run and us.get("state") == "DONE"
+                and closing_evidence_for(u.get("kind")) ==
+                "predicate_receipt"):
+            qualification_problem = _record_dispatch_canary_qualification(
+                plan, state, units, uid, dispatch_targets)
+            if isinstance(qualification_problem, DispatchCanaryScopeStale):
+                _requeue_stale_dispatch_canary(
+                    state, u, qualification_problem, report, state_dir,
+                    dry_run=dry_run)
+                continue
+            if qualification_problem:
+                _set_unit_state(us, "FAILED_EVIDENCE")
+                report.append(
+                    f"{uid}: CANARY QUALIFICATION REFUSED -- "
+                    f"{qualification_problem}")
 
         # A CODE UNIT IS NOT DONE WHEN ITS PREDICATE PASSES. The receipt says
         # an agent went idle and files exist; the accepted form of that work
@@ -7033,6 +7817,28 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                     f"{str(receipt.get('merged_as'))[:12]}). The merge itself "
                     f"is attested, not verified; the head it pins was "
                     f"produced by this attempt.")
+                if not dry_run:
+                    qualification_problem = (
+                        _record_dispatch_canary_qualification(
+                            plan, state, units, uid, dispatch_targets))
+                    if isinstance(qualification_problem,
+                                  DispatchCanaryScopeStale):
+                        _requeue_stale_dispatch_canary(
+                            state, u, qualification_problem, report, state_dir,
+                            dry_run=dry_run)
+                        continue
+                    if isinstance(qualification_problem, PreflightRefusal):
+                        transient_halt = transient_halt or str(
+                            qualification_problem)
+                        report.append(
+                            f"{uid}: CANARY QUALIFICATION WAIT -- "
+                            f"{qualification_problem}")
+                        continue
+                    if qualification_problem:
+                        _set_unit_state(us, "FAILED_EVIDENCE")
+                        report.append(
+                            f"{uid}: CANARY QUALIFICATION REFUSED -- "
+                            f"{qualification_problem}")
             else:
                 _set_unit_state(us, "READY_FOR_PR")
                 us["merge_refusal"] = refusal
@@ -7169,10 +7975,102 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     budget = (plan.get("budget") or {}).get("gpu_hours")
     spent = sum(_unit_state(state, uid)["gpu_hours"] for uid in units)
 
-    # 3. Dispatch every unit whose dependencies are DONE.
-    for uid, u in sorted(units.items()):
+    # 3. Dispatch every eligible unit through one admission chokepoint. The
+    # canary goes first while qualification is absent, but ordering is never
+    # authorization: _dispatch_admission independently enforces the invariant.
+    dispatch_order = sorted(units)
+    dispatch_canary = (plan.get("dispatch_canary") or {}).get("unit")
+    canary_waiting = bool(
+        dispatch_canary in units
+        and _unit_state(state, dispatch_canary).get("state") != "DONE"
+        and _unit_state(state, dispatch_canary).get("attempt_dir"))
+    width_full = _dispatch_width_is_full(plan, state, units)
+    admission_possible = _ordinary_dispatch_is_possible(
+        plan, state, units, spent, budget, dispatched, max_new)
+    if canary_waiting or width_full or not admission_possible:
+        scope, scope_problem = None, None
+    else:
+        scope, scope_problem = _dispatch_canary_scope(
+            plan, units, dispatch_targets)
+    qualification = state.get("dispatch_canary_qualification")
+    if (not canary_waiting and not width_full and admission_possible
+            and not dry_run
+            and not scope_problem
+            and dispatch_canary in units
+            and not _dispatch_canary_is_qualified(state, scope)):
+        canary_unit = units[dispatch_canary]
+        canary_state = _unit_state(state, dispatch_canary)
+        closure = closing_evidence_for(canary_unit.get("kind"))
+        receipt = canary_state.get("merge_receipt")
+        produced = canary_state.get("attempt_produced_heads") or {}
+        merge_closed = (
+            closure == "merged_pr"
+            and isinstance(receipt, dict)
+            and receipt.get("unit") == dispatch_canary
+            and receipt.get("head") in set(produced.values())
+            and receipt.get("merged_as") == canary_state.get("merged_as")
+            and receipt.get("pr") == canary_state.get("merge_pr")
+            and receipt.get("merged") is True
+            and receipt.get("attested") is True
+            and _merge_shape_problem(receipt) is None)
+        scopes = canary_state.get("attempt_dispatch_scopes") or {}
+        seals = canary_state.get("attempt_receipt_seals") or {}
+        has_attempt_basis = bool(set(scopes).intersection(seals))
+        if (canary_state.get("state") == "DONE" and has_attempt_basis
+                and (closure == "predicate_receipt" or merge_closed)):
+            repair_problem = _record_dispatch_canary_qualification(
+                plan, state, units, dispatch_canary, dispatch_targets)
+            if isinstance(repair_problem, DispatchCanaryScopeStale):
+                _requeue_stale_dispatch_canary(
+                    state, canary_unit, repair_problem, report, state_dir,
+                    dry_run=dry_run)
+            elif isinstance(repair_problem, PreflightRefusal):
+                transient_halt = transient_halt or str(repair_problem)
+                report.append(
+                    f"{dispatch_canary}: CANARY QUALIFICATION WAIT -- "
+                    f"{repair_problem}")
+            elif repair_problem:
+                _set_unit_state(canary_state, "FAILED_EVIDENCE")
+                transient_halt = transient_halt or str(repair_problem)
+                report.append(
+                    f"{dispatch_canary}: CANARY QUALIFICATION REFUSED -- "
+                    f"{repair_problem}")
+            else:
+                report.append(
+                    f"{dispatch_canary}: restored current-scope canary "
+                    f"qualification from coordinator-bound completion "
+                    f"evidence.")
+            save_state(state_dir, state)
+            qualification = state.get("dispatch_canary_qualification")
+    if (not canary_waiting and not width_full and admission_possible
+            and not scope_problem
+            and dispatch_canary in units
+            and isinstance(qualification, dict)
+            and qualification.get("unit") == dispatch_canary
+            and not _dispatch_canary_is_qualified(state, scope)
+            and _unit_state(state, dispatch_canary).get("state") == "DONE"):
+        stale_problem = DispatchCanaryScopeStale(
+            f"dispatch canary {dispatch_canary!r} completed under plan "
+            f"{str(qualification.get('plan_digest'))[:12]} and target "
+            f"{qualification.get('target_commit')}, not current plan "
+            f"{scope['plan_digest'][:12]} and target "
+            f"{scope['target_commit']}")
+        _requeue_stale_dispatch_canary(
+            state, units[dispatch_canary], stale_problem, report, state_dir,
+            dry_run=dry_run)
+    if scope_problem:
+        transient_halt = str(scope_problem)
+        report.append(f"REFUSING -- {transient_halt}")
+    if (dispatch_canary in units
+            and (canary_waiting
+                 or not _dispatch_canary_is_qualified(state, scope))):
+        dispatch_order.remove(dispatch_canary)
+        dispatch_order.insert(0, dispatch_canary)
+
+    for uid in dispatch_order:
+        u = units[uid]
         us = _unit_state(state, uid)
-        if us["attempt_dir"] or us["state"] in ("DONE", "FAILED",
+        if us["attempt_dir"] or us["state"] in ("DONE", "FAILED", "HELD",
                                                 "FAILED_EVIDENCE"):
             continue
         # A failed upstream is checked FIRST. Ordered the other way round, the
@@ -7227,6 +8125,19 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                               f"({len(in_pool)} of {caps[pool]})")
                 continue
 
+        # Every new dispatch commitment reaches this exact boundary. Ordinary
+        # eligibility was established above; source identity, capacity, and
+        # canary authorization must now all hold in the same decision.
+        allowed, dispatch_source, wait_reason, refusal = _dispatch_admission(
+            plan, state, units, uid, dispatch_targets)
+        if not allowed:
+            if refusal:
+                report.append(f"{uid}: REFUSED -- {refusal}")
+                transient_halt = transient_halt or refusal
+            else:
+                report.append(f"{uid}: waiting -- {wait_reason}")
+            continue
+
         unit_dir, err = _allocate(plan, u, root)
         if err:
             _set_unit_state(us, "FAILED")
@@ -7248,6 +8159,19 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         # three 4-hour attempts, 12 committed.
         us["gpu_hours"] = float(us.get("gpu_hours") or 0) + want
         spent += want
+        if uid == dispatch_canary:
+            canary_scope, canary_scope_problem = _dispatch_canary_scope(
+                plan, units, dispatch_targets)
+            if canary_scope_problem:
+                _set_unit_state(us, "FAILED_EVIDENCE")
+                transient_halt = transient_halt or str(canary_scope_problem)
+                report.append(
+                    f"{uid}: CANARY SCOPE REFUSED -- "
+                    f"{canary_scope_problem}")
+                save_state(state_dir, state)
+                continue
+            us.setdefault("attempt_dispatch_scopes", {})[
+                Path(unit_dir).name] = dict(canary_scope)
         # BEFORE `_submit`, and persisted by the save below it, because the
         # basis is only a basis if it predates everything that could write
         # into the write root. A digest taken after dispatch is a digest of
@@ -7266,8 +8190,15 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         if not dry_run:
             claim_refusal, held_claims = _take_output_claims(
                 u, root, state_dir, Path(unit_dir).name)
-        job_id, err = ((None, claim_refusal) if claim_refusal
-                       else _submit(u, unit_dir, dry_run, state, state_dir))
+        if claim_refusal:
+            job_id, err = None, claim_refusal
+        elif dispatch_source is None:
+            # Preserve the established call shape for non-code units and
+            # embedders; the sixth argument exists only to bind code launch.
+            job_id, err = _submit(u, unit_dir, dry_run, state, state_dir)
+        else:
+            job_id, err = _submit(
+                u, unit_dir, dry_run, state, state_dir, dispatch_source)
         if err:
             # Whatever we claimed for an attempt that never started must not
             # outlive it. `_release_output_claims` recomputes from the plan
@@ -7317,6 +8248,13 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 cited = us["preflight_refusals"][-1]["receipt"]
                 report.append(f"{uid}: {err}" +
                               (f"\n  receipt: {cited}" if cited else ""))
+                # This invocation observed a safety refusal. Retryability
+                # removes the admission and retry charge; it does not turn
+                # the refusal into a successful command. Ordinary waiting
+                # (running canary or genuinely full width) never enters this
+                # branch and remains a successful no-op.
+                transient_halt = transient_halt or (
+                    f"{err.reason} preflight refused for unit {uid!r}")
             else:
                 _set_unit_state(us, "FAILED")
                 report.append(f"{uid}: {err}")
@@ -7356,6 +8294,13 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         dispatched += 1
         report.append(f"{uid}: submitted {job_id} -> {unit_dir}")
         save_state(state_dir, state)
+
+    final_canary_failure = _blocking_canary_failure(
+        plan, state, units, dispatch_targets,
+        admission_possible=admission_possible)
+    if final_canary_failure and not transient_halt:
+        transient_halt = final_canary_failure
+        report.append(f"REFUSING -- {final_canary_failure}")
 
     state["halted"] = halted
     save_state(state_dir, state)
@@ -7446,7 +8391,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                         f"intent from durable state {now}")
             continue
         emit_intent(state_dir, project, uid, now, us, evidence, kind=kind)
-    return report, dispatched, halted
+    return report, dispatched, (halted or transient_halt)
 
 
 def _load_plan(path):
@@ -7728,16 +8673,35 @@ def cmd_run(args):
         print("  If nothing is really running, the lock is already free: "
               "check with `swarm.py status`.")
         return EXIT_HALTED
+    dry_state = None
     try:
         state = load_state(args.state_dir)
+        advance_state_dir = args.state_dir
+        if (args.dry_run
+                and (getattr(args, "accept_plan_change", False)
+                     or isinstance(
+                         state.get("dispatch_canary_qualification"), dict))
+                and (Path(args.state_dir) / STATE_FILE).exists()):
+            # A preview may simulate destructive coordinator transitions in
+            # memory (stale-canary requeue, plan ratification, dry attempts),
+            # but none of them are authority for the real run. Keep every
+            # save and outbox append in an isolated sibling directory so an
+            # abandoned preview cannot rewrite the durable state it read.
+            dry_state = tempfile.TemporaryDirectory(
+                prefix=".swarm-dry-state-",
+                dir=str(Path(args.state_dir).parent))
+            advance_state_dir = str(Path(dry_state.name) / "state")
+            save_state(advance_state_dir, state)
         report, dispatched, halted = advance(
-            plan, state, args.state_dir, args.root, args.dry_run,
+            plan, state, advance_state_dir, args.root, args.dry_run,
             args.max_new_dispatches,
             accept_plan_change=getattr(args, "accept_plan_change", False))
         if (not args.dry_run
                 and _start_code_terminal_watchers(plan, state, args, report)):
             save_state(args.state_dir, state)
     finally:
+        if dry_state is not None:
+            dry_state.cleanup()
         release_lease(args.state_dir)
     for line in report:
         print(f"  {line}")

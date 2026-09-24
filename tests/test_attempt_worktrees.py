@@ -112,6 +112,8 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         subprocess.run(["git", "init", "-q", "--bare", str(self.remote)],
                        check=True, env=ENV)
         git(self.repo, "remote", "add", "origin", str(self.remote))
+        git(self.repo, "branch", "-M", "main")
+        git(self.repo, "push", "-qu", "origin", "main")
         self.real_run = S.U.run
         self.fake = FakePaseo(self, self.tmp / "managed", self.real_run)
         S.U.run = self.fake
@@ -160,13 +162,18 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         workspace.parent.mkdir()
         git(self.repo, "worktree", "add", "-q", "-b", intent["branch"],
             str(workspace), intent["base_commit"])
+        source, problem = S._resolve_dispatch_target(unit)
+        self.assertIsNone(problem)
+        self.assertIsNone(S._upgrade_legacy_code_launch_intent(
+            intent, unit, dispatch_source=source))
 
         error = S._complete_code_launch(
             state, unit, str(attempt), workspace, "wks_legacy")
         self.assertIsNone(error)
         facts = state["units"]["code"]["attempt_launch_facts"][attempt.name]
-        self.assertEqual(facts["schema_version"], 2)
-        self.assertNotIn("judgment_ref", facts)
+        self.assertEqual(facts["schema_version"], 6)
+        self.assertEqual(
+            facts["judgment_ref"], f"refs/heads/{intent['branch']}")
         self.assertTrue(facts["clean_at_launch"])
 
     def test_schema3_tracking_ref_snapshot_uses_anchored_remote_after_cleanup(self):
@@ -288,6 +295,8 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         unit = code_unit(self.repo)
         unit["prompt"] = original
         unit["target_branch"] = "release/next"
+        git(self.repo, "push", "-q", "origin",
+            "HEAD:refs/heads/release/next")
         state = {"units": {}}
 
         job, err = self.submit(unit, attempt, False, state)
@@ -341,6 +350,8 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         attempt = self.attempt("code", "collision")
         unit = code_unit(self.repo)
         unit["target_branch"] = "swarm-collision"
+        git(self.repo, "push", "-q", "origin",
+            "HEAD:refs/heads/swarm-collision")
         state = {"units": {}}
 
         job, err = self.submit(unit, attempt, False, state)
@@ -478,6 +489,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
                        check=True, env=ENV)
         git(self.repo, "remote", "set-url", "--push", "origin",
             str(push_remote))
+        git(self.repo, "push", "-q", "origin", "main")
         attempt = self.attempt("code", "pushurl")
         state = {"units": {}}
         unit = code_unit(self.repo)
@@ -519,6 +531,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         git(self.repo, "config", f"url.{primary_dir}/.insteadOf", "arc642:")
         git(self.repo, "config", f"url.{mirror_dir}/.insteadOf",
             f"{primary_dir}/")
+        git(self.repo, "push", "-q", "file://" + str(primary), "main")
         attempt = self.attempt("code", "url-rewrite")
         state = {"units": {}}
         unit = code_unit(self.repo)
@@ -569,6 +582,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
              "submodule", "add", "-q", str(subrepo), "vendor/lib"],
             check=True, env=ENV, capture_output=True, text=True)
         git(self.repo, "commit", "-qam", "add submodule")
+        git(self.repo, "push", "-q", "origin", "main")
         git(self.repo, "config", "fetch.recurseSubmodules", "true")
         git(self.repo, "config", "submodule.vendor/lib.url",
             str(self.tmp / "unavailable-submodule.git"))

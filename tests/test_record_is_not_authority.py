@@ -112,6 +112,23 @@ ALLOWED = {
         "uses the coordinator-created snapshot for dispatch",
     ("swarm.py", "_allocate"):
         "passes repository identity from the trusted plan into allocation",
+    ("swarm.py", "_resolve_dispatch_target"):
+        "resolves the plan-named repository and target before any attempt "
+        "exists; its result is coordinator-owned transient authority",
+    ("swarm.py", "_dispatch_source_identity"):
+        "checks the live plan checkout against the coordinator-resolved "
+        "target and returns coordinator-owned transient authority",
+    ("swarm.py", "_capture_code_launch"):
+        "consumes only the plan and the coordinator-created dispatch source, "
+        "then persists that source before Paseo starts",
+    ("swarm.py", "_upgrade_legacy_code_launch_intent"):
+        "reads only the coordinator-state launch intent, then upgrades it "
+        "after an exact plan-target observation proves its persisted base "
+        "commit is the intended target commit",
+    ("swarm.py", "_pin_ratified_canary_prior_scope"):
+        "reads the coordinator-state launch intent to pin the admission "
+        "scope that existed before a ratified plan change; it never reads "
+        "the agent-writable launch record",
     ("swarm.py", "admit_merge"):
         "compares the merge attestation's repository to trusted state",
     ("swarm.py", "advance"):
@@ -408,6 +425,12 @@ class TestTheSealActuallyTravels(unittest.TestCase):
         subprocess.run(
             ["git", "-C", str(self.repo), "remote", "add", "origin",
              str(self.remote)], check=True, env=env, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(self.repo), "branch", "-M", "main"],
+            check=True, env=env, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(self.repo), "push", "-qu", "origin", "main"],
+            check=True, env=env, capture_output=True)
         self.att = self.tmp / "runs" / "u1" / "att1"
         self.att.mkdir(parents=True)
 
