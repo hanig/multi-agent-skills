@@ -68,7 +68,7 @@ CLOSED_DECLARATIONS = {
         isolation.container-attestation authority.coordinator-state
         closure.by-kind code.remote-ref compatibility.judgment-generation
         verifier.corpus verifier.integration code.write-scopes
-        code.worktree-identity code.adoption usage.outputs
+        code.worktree-identity code.adoption code.worktree-preservation usage.outputs
         scheduler.queued-job cluster.plan-specific cluster.access
         python.host-floor kind.pipeline-boundary drift.coordinator-size
         drift.lifted-module convergence.verdict convergence.plan

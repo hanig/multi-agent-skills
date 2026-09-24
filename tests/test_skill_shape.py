@@ -73,6 +73,7 @@ SWARM_DECLARATIONS = (
     "code.write-scopes",
     "code.worktree-identity",
     "code.adoption",
+    "code.worktree-preservation",
     "usage.outputs",
     "scheduler.queued-job",
     "cluster.plan-specific",

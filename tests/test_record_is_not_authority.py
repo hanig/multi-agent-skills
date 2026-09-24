@@ -56,6 +56,9 @@ ALLOWED = {
         "intent (or validate_plan's fixed canary intent)",
     ("swarm.py", "_register_code_workspace"):
         "records cleanup metadata from the coordinator-state intent",
+    ("swarm.py", "_create_code_worktree"):
+        "creates the coordinator-owned worktree from the coordinator-state "
+        "launch intent before Paseo starts",
     ("swarm.py", "_registered_attempt_workspace"):
         "matches Paseo's registry against the coordinator-state intent",
     ("swarm.py", "_recover_code_launch"):
@@ -435,12 +438,7 @@ class TestTheSealActuallyTravels(unittest.TestCase):
         def spy(argv, **kwargs):
             if argv and argv[0] == "paseo":
                 launched.append(argv)
-                workspace = self.tmp / "managed" / "att1"
-                subprocess.run(
-                    ["git", "-C", str(self.repo), "worktree", "add", "-q",
-                     "-b", argv[argv.index("--new-branch") + 1],
-                     str(workspace), argv[argv.index("--base") + 1]],
-                    check=True, env=env, capture_output=True, text=True)
+                workspace = Path(argv[argv.index("--cwd") + 1])
                 return 0, json.dumps({
                     "agentId": "11111111-2222-3333-4444-555555555555",
                     "cwd": str(workspace)}), ""
