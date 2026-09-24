@@ -533,10 +533,12 @@ a path.
 
 Only the exact coordinator-bound linked-worktree `.git` pointer is excluded as
 Git metadata; if that object is replaced, its bytes are preserved like any
-other worktree content. Persisted legacy state whose Paseo-owned checkout was
-already absent before this invariant records that recovery is unavailable and
-runs no further cleanup—it cannot manufacture bytes that an older lifecycle
-already deleted.
+other worktree content. Legacy records with an absent path, remaining cleanup
+retries, and identified Paseo ownership can be annotated as unrecoverable.
+Known legacy limits remain: exhausted cleanup skips annotation; ID-only records
+can be marked absent without lookup; path-only records without an owner or
+workspace ID lack migration. An annotation cannot restore previously deleted
+bytes.
 
 **`needs`, `inputs`, `outputs` and `sbatch` must be JSON lists.** A string is
 refused, because the code that reads them iterates character by character: for

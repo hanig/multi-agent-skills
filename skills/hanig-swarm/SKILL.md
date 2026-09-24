@@ -343,10 +343,12 @@ authority, and no judging path consumes them.
 
 The only excluded worktree object is the exact `.git` pointer whose bytes
 match the coordinator-recorded launch digest. A replaced `.git` file,
-directory, or symlink is preserved as worktree content. When migrated legacy
-state names a Paseo-owned checkout that was already absent before this rule,
-the coordinator records recovery as unavailable and performs no cleanup; that
-bounded migration is not a snapshot and confers no authority.
+directory, or symlink is preserved as worktree content. Legacy records with an
+absent path, remaining cleanup retries, and identified Paseo ownership can be
+annotated as unrecoverable. Known legacy limits remain: exhausted cleanup skips
+annotation; ID-only records can be marked absent without lookup; path-only
+records without an owner or workspace ID lack migration. An annotation is not
+a snapshot, restores no lost bytes, and confers no authority.
 
 ## Usage
 

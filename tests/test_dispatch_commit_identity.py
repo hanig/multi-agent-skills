@@ -116,9 +116,10 @@ class CommitIdentityTests(unittest.TestCase):
         self.assertEqual(intent["base_commit"], self.target)
         self.assertEqual(intent["target_commit"], self.target)
         argv = self.fake.launches[0]
-        self.assertEqual(argv[argv.index("--base") + 1], self.target)
-        self.assertEqual(git(self.tmp / "managed" / "attempt-1",
-                             "rev-parse", "HEAD"), self.target)
+        workspace = Path(argv[argv.index("--cwd") + 1])
+        self.assertEqual(git(workspace, "rev-parse", "HEAD"), self.target)
+        self.assertEqual(str(workspace), state["units"]["code"][
+            "attempt_launch_facts"]["attempt-1"]["execution_workspace"])
 
     def test_target_is_resolved_once_per_advance_and_bound_to_each_launch(self):
         second = dict(self.plan["units"][0])
