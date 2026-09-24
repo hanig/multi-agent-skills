@@ -1132,7 +1132,10 @@ def _code_state(unit_dir, spec, present, missing, notes, launch_facts=None):
     head = (f"agent {agent} is {status or 'idle'} and all {len(present)} "
             f"declared output(s) are present")
     if produced is False:
-        notes.append(f"REASON={W.code_failure_reason(spec.get('production_state'))}")
+        reason = W.code_failure_reason(spec.get("production_state"))
+        # Outputs are present here. Preserve specific Git failure reasons,
+        # but do not let the legacy fallback mislabel a refused transition.
+        notes.append(f"REASON={REASON_NO_PRODUCED_CHANGE if reason == REASON_NO_OUTPUTS else reason}")
         notes.append(f"{head}, but the repository shows no produced "
                      f"change: {why}")
         return "INCOMPLETE"
@@ -1146,7 +1149,8 @@ def _code_state(unit_dir, spec, present, missing, notes, launch_facts=None):
 # because they call for OPPOSITE actions from an operator, and grepping the
 # prose notes to find out would be a stringly-typed contract.
 REASON_NO_EVIDENCE = "no-accounting-row"   # nothing shows whether it ran
-REASON_NO_OUTPUTS = "outputs-absent"       # it ran cleanly and produced nothing
+REASON_NO_OUTPUTS = "outputs-absent"       # declared output(s) are missing
+REASON_NO_PRODUCED_CHANGE = "no-produced-change"  # outputs present, no admitted change
 
 
 def check_unit(unit_dir, spec, notes, launch_facts=None, artifact_basis=None):

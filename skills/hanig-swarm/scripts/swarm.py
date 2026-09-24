@@ -7265,6 +7265,21 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                         f"FAILED unit, not missing evidence: the scheduler "
                         f"will tell you it succeeded. Read the job's own log "
                         f"in {us['attempt_dir']}.")
+                elif reason == U.REASON_NO_PRODUCED_CHANGE:
+                    # A refused repository transition is not a planning-only
+                    # turn: do not turn continuation into a correction loop.
+                    _set_unit_state(us, "FAILED")
+                    receipt, why = attested_receipt(
+                        state, uid, us["attempt_dir"])
+                    details = " ".join(
+                        W.render_for_record(note, 2048)
+                        for note in ((receipt or {}).get("notes") or [])
+                        if not str(note).startswith("REASON="))
+                    report.append(
+                        f"{uid}: declared outputs are present, but no produced "
+                        f"repository change was established, {waited}s on. "
+                        f"This is a FAILED unit. "
+                        f"{details or why or 'See the check receipt.'}")
                 else:
                     _set_unit_state(us, "FAILED_EVIDENCE")
                     report.append(
