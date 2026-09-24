@@ -176,7 +176,13 @@ child_env = CE.child_env
 
 
 def run(argv, cwd=None, timeout=30, pass_fds=()):
-    """Run a command, returning (rc, stdout, stderr). Never raises, never hangs.
+    """Run a command, returning (rc, stdout, stderr). Never raises.
+
+    Never hangs EXCEPT on an explicit ``timeout=None``, which blocks until
+    the child exits. Only a caller whose whole job is to wait should pass
+    it, and only from its own process: inside the coordinator it would
+    block the locked advance. `cmd_watch_code_terminal` is the one such
+    caller, and a finite value there is a deadline nothing justifies.
 
     Resource containment is construction, not convention: child_env applies
     the shared credential denylist; stdin is

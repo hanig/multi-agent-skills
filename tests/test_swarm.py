@@ -5,6 +5,7 @@ Acceptance criteria from docs/plan-swarm.md steps 1 and 2, written by the
 committee that planned them. Python 3.8+, stdlib only.
 """
 
+import ast
 import importlib.util
 import json
 import os
@@ -1101,6 +1102,53 @@ class TestSafeUnattendedAdvance(Base):
         body = ast.dump(fn)
         self.assertIn("squeue", body)
         self.assertIn("sacct", body)
+
+
+class TestTerminalWatchWaitsWithoutADeadline(unittest.TestCase):
+    """The terminal watcher must wait with no deadline, and be able to.
+
+    It once passed 30 days, which reaches `selectors.PollSelector.poll()`
+    where the timeout is milliseconds in a C int, so it raised OverflowError
+    before the child was waited on and no agent was ever observed. Asserting a
+    constant would not have caught that: the ceiling belongs to the call this
+    value is handed to, so these drive the real `unit.run` path.
+    """
+
+    def _call_site_timeout(self):
+        """The timeout argument of the `paseo wait` call, read structurally."""
+        tree = ast.parse(SWARM.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.FunctionDef)
+                    and node.name == "cmd_watch_code_terminal"):
+                continue
+            for call in ast.walk(node):
+                if not isinstance(call, ast.Call):
+                    continue
+                for kw in call.keywords:
+                    if kw.arg == "timeout":
+                        return kw.value
+        self.fail("cmd_watch_code_terminal has no timeout= keyword")
+
+    def test_the_watcher_declares_no_deadline(self):
+        value = self._call_site_timeout()
+        self.assertIsInstance(
+            value, ast.Constant,
+            "the watch timeout is computed; a deadline needs a stated reason")
+        self.assertIsNone(
+            value.value,
+            "a finite watch timeout abandons observation while the agent may "
+            "still be running, which is when observation is most valuable")
+
+    def test_an_unbounded_wait_is_actually_accepted_by_the_real_path(self):
+        rc, out, _err = unit.run(["/bin/echo", "terminal-watch-probe"],
+                                 timeout=None)
+        self.assertEqual(rc, 0)
+        self.assertIn("terminal-watch-probe", out)
+
+    def test_the_old_thirty_day_value_would_still_overflow(self):
+        """The mutation, executed rather than described."""
+        with self.assertRaises(OverflowError):
+            unit.run(["/bin/echo", "x"], timeout=30 * 24 * 60 * 60)
 
 
 if __name__ == "__main__":
