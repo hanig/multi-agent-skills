@@ -3900,6 +3900,8 @@ def _installed_skill_snapshot(repo, base):
                 continue
             try:
                 if not (skill / "SKILL.md").is_file():
+                    snapshot["errors"].append({
+                        "path": str(skill), "error": "no loadable SKILL.md"})
                     continue
                 marker = skill / ".installed-by-multi-agent-skills"
                 # Link installs keep provenance beside the destination. This

@@ -168,6 +168,68 @@ class TestInstalledSkillDrift(unittest.TestCase):
         self.assertEqual(warning, "")
         self.assertEqual(len(facts["installed_skills"]["skills"]), 2)
 
+    def test_dangling_skill_entry_warns_and_persists_one_advisory_error(self):
+        marker = self.install(".agents", "hanig-swarm", self.base)
+        for store in (".agents", ".claude"):
+            with self.subTest(store=store):
+                skill = self.home / store / "skills" / "hanig-x"
+                skill.parent.mkdir(parents=True, exist_ok=True)
+                skill.symlink_to(self.tmp / "missing-skill", target_is_directory=True)
+                skill.lstat()
+                expected = {
+                    "skills": [{"skill": "hanig-swarm", "path": str(marker.parent),
+                                "marker": str(marker), "source_version": self.base}],
+                    "errors": [{"path": str(skill), "error": "no loadable SKILL.md"}],
+                }
+
+                attempt, facts, warning = self.dispatch("broken-" + store[1:])
+
+                self.assertEqual(facts["installed_skills"], expected)
+                self.assertEqual(warning.count("installed skill audit incomplete"), 1)
+                self.assertIn(repr(str(skill)), warning)
+                self.assertIn("no loadable SKILL.md", warning)
+                self.assertIn("Advisory only; dispatch continues.", warning)
+                self.assertNotIn(str(marker.parent), warning)
+                persisted = S.load_state(self.state_dir)["units"]["code"]
+                audit = json.loads(W.launch_record_path(attempt).read_text())
+                for record in (persisted["attempt_launch_intents"][attempt.name],
+                               persisted["attempt_launch_facts"][attempt.name], audit):
+                    self.assertEqual(record["installed_skills"], expected)
+                skill.unlink()
+
+    def test_partial_skill_entries_warn_without_refusing_dispatch(self):
+        for kind in ("missing", "directory", "dangling-document", "file-entry"):
+            with self.subTest(kind=kind):
+                skill = self.home / ".agents" / "skills" / ("hanig-" + kind)
+                skill.parent.mkdir(parents=True, exist_ok=True)
+                if kind == "file-entry":
+                    skill.write_text("incomplete install\n")
+                else:
+                    skill.mkdir()
+                    if kind == "directory":
+                        (skill / "SKILL.md").mkdir()
+                    elif kind == "dangling-document":
+                        (skill / "SKILL.md").symlink_to(self.tmp / "missing-document")
+
+                _attempt, facts, warning = self.dispatch(kind)
+
+                self.assertEqual(facts["installed_skills"], {
+                    "skills": [],
+                    "errors": [{"path": str(skill), "error": "no loadable SKILL.md"}],
+                })
+                self.assertEqual(warning.count("installed skill audit incomplete"), 1)
+                self.assertIn(repr(str(skill)), warning)
+                self.assertIn("no loadable SKILL.md", warning)
+                if kind == "file-entry":
+                    skill.unlink()
+                else:
+                    document = skill / "SKILL.md"
+                    if kind == "directory":
+                        document.rmdir()
+                    elif kind == "dangling-document":
+                        document.unlink()
+                    skill.rmdir()
+
     def test_installer_abbreviation_is_resolved_without_changing_raw_claim(self):
         short = git(self.repo, "rev-parse", "--short", "HEAD")
         self.install(".agents", "hanig-swarm", short)
@@ -503,6 +565,8 @@ class TestInstalledSkillDrift(unittest.TestCase):
         git(workspace, "commit", "-qm", "work")
         git(workspace, "push", "origin", "HEAD:" + facts["judgment_ref"])
         for inventory in (None, {"skills": "nonsense"},
+                          {"skills": [], "errors": [
+                              {"path": "hanig-x", "error": "no loadable SKILL.md"}]},
                           {"skills": [{"source_version": "unknown"}]}):
             with self.subTest(inventory=inventory):
                 facts["installed_skills"] = inventory
