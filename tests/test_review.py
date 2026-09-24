@@ -11,6 +11,7 @@ Offline: no API calls.
     python3 tests/test_review.py
 """
 
+import ast
 import importlib.util
 import hashlib
 import io
@@ -1240,6 +1241,192 @@ class TestScopeDiscipline(unittest.TestCase):
     def test_the_system_prompt_states_the_scope_rule(self):
         self.assertIn("in_scope", review.SYSTEM)
         self.assertIn("preconditions", review.SYSTEM)
+
+
+class TestHonestRunCounterClaimSemantics(unittest.TestCase):
+    """The prompt's decision boundary, exercised without paid model calls.
+
+    The three real refutations that exposed the ambiguity are supplemented by
+    two constructed statements supplying only one required fact each. The
+    fixtures identify the evidence each statement actually supplies, while the
+    classification itself is evaluated from SYSTEM's decision rule. This does
+    not build a second natural-language reviewer in the test suite.
+    """
+
+    RULE_FACTS = frozenset((
+        "DEFECT_FREE_WORK_NAMED",
+        "WRONGFUL_REJECTION_EXPLAINED",
+    ))
+
+    CASES = (
+        {
+            "reviewer": "luna",
+            "statement": (
+                "The new rule can reject an otherwise honest green run whose "
+                "selected panel returns REVIEW_PASS when the required full-tier "
+                "rerun finds a defect."
+            ),
+            "evidence": {},
+            "refutes": False,
+        },
+        {
+            "reviewer": "kimi",
+            "statement": (
+                "the declaration withholds merge authorization from any change "
+                "that lacks a declared-tier pass"
+            ),
+            "evidence": {},
+            "refutes": False,
+        },
+        {
+            "reviewer": "glm-5.3",
+            "statement": (
+                "a false tier finding recorded 'unresolved' continues to block "
+                "the merge; the merge stays blocked indefinitely and the "
+                "correct work never ships."
+            ),
+            "evidence": {
+                "DEFECT_FREE_WORK_NAMED": "correct work",
+                "WRONGFUL_REJECTION_EXPLAINED": (
+                    "false tier finding recorded 'unresolved' continues to "
+                    "block the merge"
+                ),
+            },
+            "refutes": True,
+        },
+        {
+            "reviewer": "fixture: defect-free work only",
+            "statement": (
+                "The two-row UTC CSV export meets every acceptance criterion "
+                "and is defect-free."
+            ),
+            "evidence": {
+                "DEFECT_FREE_WORK_NAMED": (
+                    "two-row UTC CSV export meets every acceptance criterion "
+                    "and is defect-free"
+                ),
+            },
+            "refutes": False,
+        },
+        {
+            "reviewer": "fixture: wrongful rejection only",
+            "statement": (
+                "The new timestamp check wrongly rejects a submission solely "
+                "for using UTC, although the acceptance criteria permit UTC. "
+                "Other acceptance criteria remain unchecked."
+            ),
+            "evidence": {
+                "WRONGFUL_REJECTION_EXPLAINED": (
+                    "wrongly rejects a submission solely for using UTC, "
+                    "although the acceptance criteria permit UTC"
+                ),
+            },
+            "refutes": False,
+        },
+    )
+
+    def honest_run_policy(self):
+        claim = review.HONEST_RUN_CLAIM
+        start = review.SYSTEM.rfind("\n", 0, review.SYSTEM.index(claim)) + 1
+        end = review.SYSTEM.index("\n\nReply with ONLY", start)
+        return review.SYSTEM[start:end]
+
+    def assert_policy_concepts(self, policy):
+        # Deliberately pin the owner-approved policy vocabulary, including its
+        # anti-circularity terms; this is not a general equivalence checker.
+        normalized = policy.casefold().replace("-", " ")
+        for concept in ("admissible", "defect", "free", "independent",
+                        "wrong", "reject", "refut", "nam", "circular",
+                        "false finding"):
+            self.assertIn(concept, normalized,
+                          f"honest-run policy lost the {concept!r} concept")
+
+    def honest_run_rule(self):
+        marker = "HONEST_RUN_REFUTED :="
+        lines = [line for line in self.honest_run_policy().splitlines()
+                 if line.startswith(marker)]
+        self.assertEqual(len(lines), 1,
+                         "SYSTEM must contain one honest-run decision rule")
+        return lines[0][len(marker):].strip()
+
+    def evaluate_rule(self, expression, facts):
+        """Evaluate SYSTEM's small boolean grammar, rejecting other syntax."""
+        tree = ast.parse(expression, mode="eval")
+
+        def evaluate(node):
+            if isinstance(node, ast.Expression):
+                return evaluate(node.body)
+            if isinstance(node, ast.Name):
+                self.assertIn(node.id, self.RULE_FACTS,
+                              f"unknown honest-run fact {node.id!r}")
+                return facts[node.id]
+            if isinstance(node, ast.BoolOp):
+                values = [evaluate(value) for value in node.values]
+                if isinstance(node.op, ast.And):
+                    return all(values)
+                if isinstance(node.op, ast.Or):
+                    return any(values)
+            if (isinstance(node, ast.UnaryOp)
+                    and isinstance(node.op, ast.Not)):
+                return not evaluate(node.operand)
+            self.fail(f"unsupported honest-run rule syntax: {ast.dump(node)}")
+
+        return evaluate(tree)
+
+    def counter_claim_refuted(self, case):
+        policy = self.honest_run_policy()
+        self.assert_policy_concepts(policy)
+        self.assertEqual(set(case["evidence"]),
+                         set(case["evidence"]) & self.RULE_FACTS)
+        statement = case["statement"].casefold()
+        for excerpt in case["evidence"].values():
+            self.assertIn(excerpt.casefold(), statement)
+        facts = {name: name in case["evidence"] for name in self.RULE_FACTS}
+        return self.evaluate_rule(self.honest_run_rule(), facts)
+
+    def test_system_defines_a_falsifiable_non_circular_boundary(self):
+        self.assert_policy_concepts(self.honest_run_policy())
+
+    def test_specific_equivalent_rewording_preserves_policy_concepts(self):
+        policy = self.honest_run_policy().replace(
+            "otherwise admissible, defect-free work",
+            "work that is otherwise admissible and free of defects")
+        self.assertNotEqual(policy, self.honest_run_policy())
+        self.assert_policy_concepts(policy)
+
+        facts = {"DEFECT_FREE_WORK_NAMED": True,
+                 "WRONGFUL_REJECTION_EXPLAINED": True}
+        reordered = ("WRONGFUL_REJECTION_EXPLAINED and "
+                     "DEFECT_FREE_WORK_NAMED")
+        self.assertEqual(self.evaluate_rule(reordered, facts),
+                         self.evaluate_rule(self.honest_run_rule(), facts))
+
+    def test_claim_quote_style_does_not_change_classification(self):
+        original = review.SYSTEM
+        self.addCleanup(setattr, review, "SYSTEM", original)
+        policy = self.honest_run_policy()
+        unquoted = policy.replace('"', "").replace("'", "")
+        for quote in ("'", "", '"'):
+            with self.subTest(quote=quote):
+                restyled = unquoted.replace(
+                    review.HONEST_RUN_CLAIM,
+                    quote + review.HONEST_RUN_CLAIM + quote)
+                review.SYSTEM = original.replace(policy, restyled)
+                for case in self.CASES:
+                    self.assertEqual(self.counter_claim_refuted(case),
+                                     case["refutes"])
+
+    def test_refutations_discriminate_in_both_directions(self):
+        results = []
+        for case in self.CASES:
+            with self.subTest(reviewer=case["reviewer"],
+                              statement=case["statement"]):
+                actual = self.counter_claim_refuted(case)
+                self.assertEqual(actual, case["refutes"])
+                results.append(actual)
+
+        self.assertIn(False, results, "correct rejection became a refutation")
+        self.assertIn(True, results, "wrongful rejection became unrefutable")
 
 
 class TestThreatModelActuallyReachesReviewers(unittest.TestCase):
