@@ -5,7 +5,7 @@
   "plan": "TWO contrasting models, never escalated. For acceptance criteria and designs, BEFORE code exists. A third reviewer adds agreement, not insight.",
   "fast": "cheapest implementation panel; the first tier of --escalate",
   "standard": "fast + mid-cost; the usual implementation panel",
-  "deep": "standard + astra. Final --escalate tier, or a fixed --profile deep panel. sol is NOT here: it writes the code now, and an author does not review itself.",
+  "deep": "standard + sol. Final --escalate tier, or a fixed --profile deep panel. astra is NOT here since 2026-09-24: it writes the code now, and an author does not review itself. sol returned to this seat because it had been excluded only for being the driver.",
   "committee": "committee.py members. SEPARATE from the gate profiles on purpose: deepseek plans and concedes well but over-claims as a refuter, so it sits here and in no gate profile."
  },
  "reviewers": [
@@ -98,9 +98,8 @@
    "provider": "openai",
    "model": "gpt-6-astra",
    "effort": "high",
-   "profiles": [
-    "deep"
-   ],
+   "profiles": [],
+   "_profiles_note": "In NO gate tier since 2026-09-24: astra drives code units now, and an author does not review itself. Still enabled because committee.py reaches it with --member and it is the concurrence party in docs/orchestrator-mandate.md. The owner chose it as the committee tie-breaker at xhigh; that seat is not built yet (ARC-753). Do not seat it with --member on a change it authored: nothing refuses that today (ARC-755).",
    "enabled": true,
    "max_output_tokens": 128000,
    "_max_output_tokens": "PRE-EMPTIVE, not measured as starving. Raised with the sibling sweep for ARC-689 rather than after its own incident, because the shared 64000 default is what starved glm-5.3 and kimi-k2.7-code and leaving a reviewer on it is what let the defect recur. That the provider ACCEPTS 128000 is measured; see _max_output_tokens_accepted.",
@@ -122,12 +121,23 @@
    "profiles": [
     "deep"
    ],
-   "enabled": false,
+   "enabled": true,
+   "max_output_tokens": 128000,
+   "_max_output_tokens": "MEASURED before re-enabling, as _output_budget_rule requires: acceptance is per model, so astra completing at 128000 said nothing about sol. Re-enabled 2026-09-24 when sol took astra's deep-tier seat.",
+   "_max_output_tokens_accepted": {
+    "date": "2026-09-24",
+    "max_output_tokens": 128000,
+    "provider": "openai",
+    "model": "gpt-5.6-sol",
+    "outcome": "completed",
+    "output_tokens": 4172,
+    "observed_in": "gate run, routing/astra-drives measurement pass, --only sol --quorum 1, 61.0s, 5844 in"
+   },
    "_cost": {
     "in": 2.0,
     "out": 10.0
    },
-   "_note": "deep-tier reviewer AND tie-breaker: the ladder reaches deep both when the cheaper tiers came up clean and when they could not fill quorum, and skips it only when a finding already has quorum behind it."
+   "_note": "deep-tier reviewer since 2026-09-24. Owner decision: astra became the code driver, so it left the deep tier (an author does not review itself) and sol, which had been disabled only because IT was the driver, took the seat. The ladder reaches deep both when the cheaper tiers came up clean and when they could not fill quorum, and skips it only when a finding already has quorum behind it."
   },
   {
    "name": "kimi-k3",

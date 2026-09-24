@@ -190,11 +190,13 @@ fast      luna + kimi-k2.7-code
   ↓ pass
 standard  + glm-5.3
   ↓ pass
-deep      + astra @ high
+deep      + sol @ xhigh
 ```
 
 A failing change costs one cheap tier, not the whole panel. Only code that
-already survived the cheap readers pays for Sol. This matters more than it
+already survived the cheap readers pays for Sol. A change Sol itself
+authored (Sol drove code units until 2026-09-24) stops at `standard`: `deep`
+would seat its author, and nothing but this sentence prevents it (ARC-755). This matters more than it
 sounds: across six review rounds on this repo, **every single one failed**, and
 running the full panel each time paid the slowest, dearest reviewer to re-find
 defects a cheap one had already caught.

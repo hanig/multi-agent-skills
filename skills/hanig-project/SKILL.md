@@ -307,8 +307,8 @@ argument to the agent runner, so a flag written into it is not configuration,
 it is a sentence the agent is asked to read. `provider`, `mode`, `model`,
 `thinking` and `env` are fields on the unit.
 
-The default agent is **`codex/gpt-5.6-sol` at `thinking: high`**, the strongest
-one available locally. Override per unit with `provider`, `model` or
+The default agent is **`codex/gpt-6-astra` at `thinking: high`**, by owner
+decision on 2026-09-24, verified on a live agent before it became the default. Override per unit with `provider`, `model` or
 `thinking`; set `thinking` to null for a provider that has no such option.
 `mode` has no default and `validate` REFUSES a code unit without one, because
 an absent default is otherwise a decision nobody made: unattended, an agent on

@@ -27,11 +27,13 @@ These observations were checked against `skills/hanig-review-gate/reviewers.json
 
 `standard`: luna, kimi-k2.7-code, glm-5.3.
 
-`deep`: luna, kimi-k2.7-code, astra, glm-5.3.
+`deep`: luna, kimi-k2.7-code, glm-5.3, sol.
+
+Astra left the `deep` tier on 2026-09-24, when it became the code driver, and sits in no gate tier, which keeps astra-authored code off astra's panel. It keeps nothing else off: sol drove code until that date and now sits in `deep`, so a change sol authored stops at `standard`. The roster is the sole enforcement of either arrangement; neither tool takes an author as input (ARC-755).
 
 `committee`: deepseek-v4-pro, luna, kimi-k2.7-code.
 
-Enabled price hints recorded per million tokens are luna input $0.2 and output $1.2; kimi-k2.7-code input $0.67 and output $3.4; glm-5.3 input $1.4 and output $4.4; and deepseek-v4-pro input $0.87 and output $1.74. Astra has no `_cost` record, so the checked configuration does not support a fixed deep-round total. <!-- declaration: review.cost -->
+Enabled price hints recorded per million tokens are luna input $0.2 and output $1.2; kimi-k2.7-code input $0.67 and output $3.4; glm-5.3 input $1.4 and output $4.4; deepseek-v4-pro input $0.87 and output $1.74; and sol input $2.0 and output $10.0. Astra has no `_cost` record; it no longer sits in a gate tier, and the committee and tie-breaker seats it holds carry no fixed total either. <!-- declaration: review.cost -->
 
 Panel reporting names actual answers and absences instead of describing configured membership as completed review. <!-- declaration: review.honesty -->
 
