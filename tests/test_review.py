@@ -1003,6 +1003,9 @@ class TestRangeDivergence(unittest.TestCase):
         return body, label, stderr.getvalue()
 
     def range_cli(self, range_spec):
+        # A nonempty diff reaches journal persistence in the child, where the
+        # in-process wrappers cannot initialize the lazy module fixture.
+        _ensure_module_state_home()
         env = dict(os.environ)
         env.pop("OPENAI_API_KEY", None)
         env.pop("OPENROUTER_API_KEY", None)
@@ -1093,18 +1096,64 @@ class TestRangeDivergence(unittest.TestCase):
                     self.assertEqual(result.stderr, "")
 
     def test_dotted_left_search_accepts_omitted_and_braced_right_endpoints(self):
-        self.git("commit", "--allow-empty", "-qm", "needle{..dots")
-        left = "HEAD^{/needle{..dots}"
-        for operator in ("..", "..."):
-            for right in ("", left):
-                expression = left + operator + right
-                with self.subTest(expression=expression):
-                    result = self.range_cli(expression)
-                    self.assertIn("nothing to review (commit range " +
-                                  expression + " is empty)", result.stdout)
-                    self.assertEqual(result.returncode,
-                                     review.STATES["REVIEW_ERROR"])
-                    self.assertEqual(result.stderr, "")
+        self.git("commit", "--allow-empty", "-qm", "needle{..dots needle{...dots")
+        for dots in ("..", "..."):
+            # A bracket expression makes { literal in both GNU and BSD regex.
+            # It still must not nest the revision suffix's closing brace.
+            left = "HEAD^{/needle[{]" + dots + "dots}"
+            for operator in ("..", "..."):
+                for right in ("", left):
+                    expression = left + operator + right
+                    with self.subTest(expression=expression):
+                        self.assertEqual(self.git("rev-parse", "--verify", left),
+                                         self.git("rev-parse", "HEAD"))
+                        result = self.range_cli(expression)
+                        self.assertIn("nothing to review (commit range " +
+                                      expression + " is empty)", result.stdout)
+                        self.assertEqual(result.returncode,
+                                         review.STATES["REVIEW_ERROR"])
+                        self.assertEqual(result.stderr, "")
+
+    def test_range_cli_isolates_journal_before_first_in_process_write(self):
+        # A fresh interpreter prevents earlier journal tests from masking a
+        # missing initialization in range_cli. Use a real nonempty diff and
+        # the real journal child; no provider credentials reach the CLI.
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary).resolve() / "operator-state"
+            seed = state / review.JOURNAL_DIR / "seed" / "record.jsonl"
+            seed.parent.mkdir(parents=True)
+            seed.write_bytes(b"operator history\n")
+            env = dict(os.environ, XDG_STATE_HOME=str(state))
+            env.pop(review.JOURNAL_TEST_MARKER, None)
+            program = "\n".join((
+                "import json, os",
+                "from pathlib import Path",
+                "import tests.test_review as module",
+                "assert module._MODULE_STATE_HOME is None",
+                "module.setUpModule()",
+                "case = module.TestRangeDivergence()",
+                "try:",
+                "    case.setUp()",
+                "    result = case.range_cli('HEAD~1..HEAD')",
+                "    state = Path(os.environ['XDG_STATE_HOME'])",
+                "    records = [json.loads(p.read_text()) for p in state.glob('hanig-review-gate/review-rounds/*/record.jsonl')]",
+                "    print(json.dumps({'code': result.returncode, 'stderr': result.stderr, 'records': records}))",
+                "finally:",
+                "    case.doCleanups()",
+                "    module.tearDownModule()",
+            ))
+            result = subprocess.run(
+                [sys.executable, "-c", program], cwd=REPO, env=env,
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["code"], review.STATES["REVIEW_UNAVAILABLE"])
+            self.assertEqual(report["stderr"], "")
+            self.assertEqual([r["verdict"] for r in report["records"]],
+                             ["REVIEW_UNAVAILABLE"])
+            self.assertEqual(sorted(p for p in state.rglob("*") if p.is_file()),
+                             [seed])
+            self.assertEqual(seed.read_bytes(), b"operator history\n")
 
     def test_dotted_left_search_reports_the_complete_bad_endpoint(self):
         self.git("commit", "--allow-empty", "-qm", "needle..dots")
