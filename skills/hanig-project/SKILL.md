@@ -305,7 +305,7 @@ state leaves `remove_blocked_by` as `null`; after filing, `check` treats that as
 drift. The connector's read-back is attested, not independently verified.
 See [tracker synchronization details](references/tracker-sync.md).
 
-Verify the two never drift:
+Verify the two never drift. For ATTESTED tracker/plan orphans, run `python3 "$P/scripts/tickets.py" reconcile plan.json --tracker-issues issues.json --json`; see `reconcile --help` for the input shape, states and exit codes.
 
 ```sh
 python3 "$P/scripts/tickets.py" check plan.json tickets.json
