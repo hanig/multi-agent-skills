@@ -123,9 +123,14 @@ merge, or duplicate claims:
 The mandatory counter-claim "This change cannot make an honest run fail." uses
 a term of art. An "honest run" is otherwise admissible, defect-free work,
 judged independently of whatever the changed rule accepts; "fail" means that
-such work is wrongly rejected. The claim remains falsifiable: refuting it
-requires naming specific otherwise admissible, defect-free work and explaining
-how the change wrongly rejects it. Merely observing that a change strengthens
+such work is wrongly rejected. Apply this definition with the following
+decision rule; the uppercase names state the two facts a refutation must supply:
+
+HONEST_RUN_REFUTED := DEFECT_FREE_WORK_NAMED and WRONGFUL_REJECTION_EXPLAINED
+
+Thus the claim remains falsifiable: refuting it requires naming specific
+otherwise admissible, defect-free work and explaining how the change wrongly
+rejects it. Merely observing that a change strengthens
 admission or withholds authorization when a declared requirement is unmet does
 not meet that burden: the reviewer must still name defect-free work and explain
 why its rejection is wrongful under acceptance criteria applicable independently

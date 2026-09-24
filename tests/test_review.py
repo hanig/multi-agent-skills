@@ -11,6 +11,7 @@ Offline: no API calls.
     python3 tests/test_review.py
 """
 
+import ast
 import importlib.util
 import hashlib
 import io
@@ -1114,11 +1115,16 @@ class TestScopeDiscipline(unittest.TestCase):
 class TestHonestRunCounterClaimSemantics(unittest.TestCase):
     """The prompt's decision boundary, exercised without paid model calls.
 
-    These are the three real refutations that exposed the ambiguity.  The test
-    records the evidence each statement actually supplies, then applies the
-    two necessary conditions defined by SYSTEM.  It deliberately does not try
-    to build a second natural-language reviewer in the test suite.
+    These are the three real refutations that exposed the ambiguity. The
+    fixtures identify the evidence each statement actually supplies, while the
+    classification itself is evaluated from SYSTEM's decision rule. This does
+    not build a second natural-language reviewer in the test suite.
     """
+
+    RULE_FACTS = frozenset((
+        "DEFECT_FREE_WORK_NAMED",
+        "WRONGFUL_REJECTION_EXPLAINED",
+    ))
 
     CASES = (
         {
@@ -1128,6 +1134,7 @@ class TestHonestRunCounterClaimSemantics(unittest.TestCase):
                 "selected panel returns REVIEW_PASS when the required full-tier "
                 "rerun finds a defect."
             ),
+            "evidence": {},
             "refutes": False,
         },
         {
@@ -1136,6 +1143,7 @@ class TestHonestRunCounterClaimSemantics(unittest.TestCase):
                 "the declaration withholds merge authorization from any change "
                 "that lacks a declared-tier pass"
             ),
+            "evidence": {},
             "refutes": False,
         },
         {
@@ -1145,6 +1153,13 @@ class TestHonestRunCounterClaimSemantics(unittest.TestCase):
                 "the merge; the merge stays blocked indefinitely and the "
                 "correct work never ships."
             ),
+            "evidence": {
+                "DEFECT_FREE_WORK_NAMED": "correct work",
+                "WRONGFUL_REJECTION_EXPLAINED": (
+                    "false tier finding recorded 'unresolved' continues to "
+                    "block the merge"
+                ),
+            },
             "refutes": True,
         },
     )
@@ -1163,23 +1178,48 @@ class TestHonestRunCounterClaimSemantics(unittest.TestCase):
             self.assertIn(concept, normalized,
                           f"honest-run policy lost the {concept!r} concept")
 
+    def honest_run_rule(self):
+        marker = "HONEST_RUN_REFUTED :="
+        lines = [line for line in self.honest_run_policy().splitlines()
+                 if line.startswith(marker)]
+        self.assertEqual(len(lines), 1,
+                         "SYSTEM must contain one honest-run decision rule")
+        return lines[0][len(marker):].strip()
+
+    def evaluate_rule(self, expression, facts):
+        """Evaluate SYSTEM's small boolean grammar, rejecting other syntax."""
+        tree = ast.parse(expression, mode="eval")
+
+        def evaluate(node):
+            if isinstance(node, ast.Expression):
+                return evaluate(node.body)
+            if isinstance(node, ast.Name):
+                self.assertIn(node.id, self.RULE_FACTS,
+                              f"unknown honest-run fact {node.id!r}")
+                return facts[node.id]
+            if isinstance(node, ast.BoolOp):
+                values = [evaluate(value) for value in node.values]
+                if isinstance(node.op, ast.And):
+                    return all(values)
+                if isinstance(node.op, ast.Or):
+                    return any(values)
+            if (isinstance(node, ast.UnaryOp)
+                    and isinstance(node.op, ast.Not)):
+                return not evaluate(node.operand)
+            self.fail(f"unsupported honest-run rule syntax: {ast.dump(node)}")
+
+        return evaluate(tree)
+
     def counter_claim_refuted(self, case):
         policy = self.honest_run_policy()
         self.assert_policy_concepts(policy)
-
+        self.assertEqual(set(case["evidence"]),
+                         set(case["evidence"]) & self.RULE_FACTS)
         statement = case["statement"].casefold()
-        names_defect_free_work = (
-            "defect-free work" in statement
-            or "correct work" in statement
-            or ("otherwise honest" in statement
-                and "finds a defect" not in statement)
-        )
-        names_wrongful_rejection = (
-            "wrongly reject" in statement
-            or ("false" in statement and "finding" in statement
-                and ("block" in statement or "reject" in statement))
-        )
-        return names_defect_free_work and names_wrongful_rejection
+        for excerpt in case["evidence"].values():
+            self.assertIn(excerpt.casefold(), statement)
+        facts = {name: name in case["evidence"] for name in self.RULE_FACTS}
+        return self.evaluate_rule(self.honest_run_rule(), facts)
 
     def test_system_defines_a_falsifiable_non_circular_boundary(self):
         self.assert_policy_concepts(self.honest_run_policy())
@@ -1190,6 +1230,13 @@ class TestHonestRunCounterClaimSemantics(unittest.TestCase):
             "work that is otherwise admissible and free of defects")
         self.assertNotEqual(policy, self.honest_run_policy())
         self.assert_policy_concepts(policy)
+
+        facts = {"DEFECT_FREE_WORK_NAMED": True,
+                 "WRONGFUL_REJECTION_EXPLAINED": True}
+        reordered = ("WRONGFUL_REJECTION_EXPLAINED and "
+                     "DEFECT_FREE_WORK_NAMED")
+        self.assertEqual(self.evaluate_rule(reordered, facts),
+                         self.evaluate_rule(self.honest_run_rule(), facts))
 
     def test_real_refutations_discriminate_in_both_directions(self):
         results = []
