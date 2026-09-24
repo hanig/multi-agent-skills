@@ -2696,7 +2696,8 @@ def _clear_isolation_marker(facts):
     return None
 
 
-def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
+def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
+            dispatch_source=None):
     """Submit, and return (job_id, error). Dispatch differs per kind; judging
     does not.
 
@@ -2717,6 +2718,22 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
         if existing_intent:
             anchor_err = _code_launch_intent_problem(
                 existing_intent, u, attempt)
+            # This path may create an agent after an interrupted submission.
+            # Recheck admission, but never migrate an existing intent or ask
+            # this question while judging an already-launched attempt.
+            if not anchor_err and dispatch_source is None:
+                target, anchor_err = _resolve_dispatch_target(u)
+                if not anchor_err:
+                    dispatch_source, anchor_err = _dispatch_source_identity(
+                        u, target)
+            if (not anchor_err and existing_intent["base_commit"] !=
+                    dispatch_source["target_commit"]):
+                anchor_err = _dispatch_base_refusal(
+                    u.get("id"), dispatch_source["repo"],
+                    f"recorded launch base {existing_intent['base_commit']} "
+                    f"differs from resolved target "
+                    f"{dispatch_source['target_commit']}; allocate a fresh "
+                    f"attempt rather than replacing its launch authority")
             # Re-run the stash preflight on a re-dispatch of the SAME
             # attempt, for the reason `_write_launch_record` re-runs the
             # dirty predicate on its own already-anchored path: retry and
@@ -2730,7 +2747,8 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None):
                 "intent": existing_intent,
             })
         else:
-            anchor_err, anchored_base = _capture_code_launch(unit_dir, u)
+            anchor_err, anchored_base = _capture_code_launch(
+                unit_dir, u, dispatch_source=dispatch_source)
         if anchor_err:
             return None, anchor_err
     elif _requires_clean_workspace(u):
@@ -3642,7 +3660,150 @@ def _repeat_stash_preflight(u):
     return _stash_preflight(u.get("id"), repo)
 
 
-def _capture_code_launch(unit_dir, u):
+def _git_push_destination(repo, raw, resolved, remote_index, *args,
+                          timeout=60):
+    """Run a remote command against origin's once-expanded push route."""
+    routed_args = list(args)
+    if (remote_index < 0 or remote_index >= len(routed_args)
+            or routed_args[remote_index] != raw):
+        return 2, "", "internal error: push-route argument is not anchored"
+    alias = "hanig-swarm-route:" + os.urandom(16).hex()
+    routed_args[remote_index] = alias
+    handle = tempfile.NamedTemporaryFile(
+        prefix="hanig-swarm-push-route-", delete=False)
+    config_path = handle.name
+    handle.close()
+    try:
+        rc, out, err = U.run(
+            ["git", "config", "--file", config_path, "--add",
+             f"url.{resolved}.insteadOf", alias], timeout=timeout)
+        if rc != 0:
+            return rc, (out or "").strip(), (err or "").strip()
+        return _git(repo, "-c", f"include.path={config_path}", *routed_args,
+                    timeout=timeout)
+    finally:
+        try:
+            os.unlink(config_path)
+        except OSError:
+            pass
+
+
+def _exact_remote_ref_head(listing, ref):
+    """Return the sole valid object id reported for exactly ``ref``."""
+    matches = []
+    for line in listing.splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[1] == ref:
+            matches.append(fields[0])
+    if len(matches) != 1:
+        return None
+    head = matches[0]
+    if (len(head) not in (40, 64)
+            or any(c not in "0123456789abcdef" for c in head.lower())):
+        return None
+    return head
+
+
+def _dispatch_base_refusal(uid, repo, message):
+    """Carry a source-identity refusal to the command exit contract."""
+    refusal = PreflightRefusal(f"unit {uid!r}: {message}")
+    refusal.workspace = str(repo)
+    refusal.dirty_count = 0
+    refusal.reason = "dispatch-base"
+    return refusal
+
+
+def _resolve_dispatch_target(u):
+    """Resolve one code unit's target commit without deciding from a branch.
+
+    The caller caches this value for an entire advance. Every launch uses
+    the same immutable commit, even if the remote target moves afterwards.
+    """
+    repo, err = _plan_workspace(u)
+    if err:
+        return None, _dispatch_base_refusal(u.get("id"), u.get("repo"), err)
+    repo = str(Path(repo).resolve())
+    target = str(u.get("target_branch") or "").strip()
+    if not target:
+        return None, _dispatch_base_refusal(
+            u.get("id"), repo, "no target_branch was declared")
+    remote_raw, remote, problem = W.remote_push_transport(U.run, repo)
+    if problem:
+        return None, _dispatch_base_refusal(
+            u.get("id"), repo,
+            f"repository has no readable single origin push destination "
+            f"({problem}). Code attempts must push their generated branch "
+            f"to origin")
+    target_ref = f"refs/heads/{target}"
+    rc, listing, remote_err = _git_push_destination(
+        repo, remote_raw, remote, 2, "ls-remote", "--exit-code", remote_raw,
+        target_ref)
+    target_commit = _exact_remote_ref_head(listing, target_ref)
+    if rc != 0 or target_commit is None:
+        detail = remote_err or "no single valid exact-ref answer"
+        return None, _dispatch_base_refusal(
+            u.get("id"), repo,
+            f"cannot resolve origin/{target} before dispatch: {detail[:200]}")
+    return {
+        "repo": repo,
+        "repository_remote": remote,
+        "repository_remote_raw": remote_raw,
+        "target_branch": target,
+        "target_ref": target_ref,
+        "target_commit": target_commit,
+    }, None
+
+
+def _dispatch_source_identity(u, target):
+    """Bind actual launch source to the target commit, irrespective of ref."""
+    repo = target["repo"]
+    rc, head, head_err = _git(repo, "rev-parse", "HEAD")
+    if rc != 0:
+        return None, _dispatch_base_refusal(
+            u.get("id"), repo,
+            f"checkout has no readable HEAD: {head_err[:200]}")
+    rc, base_ref, _ = _git(repo, "symbolic-ref", "--quiet", "HEAD")
+    if rc != 0:
+        base_ref = None
+        base_branch = "(detached HEAD)"
+    elif base_ref.startswith("refs/heads/"):
+        base_branch = base_ref[len("refs/heads/"):]
+    else:
+        base_branch = base_ref
+    if head != target["target_commit"]:
+        return None, _dispatch_base_refusal(
+            u.get("id"), repo,
+            f"checkout {base_branch!r} at {head} differs from "
+            f"origin/{target['target_branch']} at "
+            f"{target['target_commit']}; launch source must equal the "
+            f"pinned target commit")
+    rc, tree, tree_err = _git(repo, "rev-parse", head + "^{tree}")
+    if rc != 0:
+        return None, _dispatch_base_refusal(
+            u.get("id"), repo,
+            f"cannot read the tree of target {head}: {tree_err[:200]}")
+    source = dict(target)
+    source.update({"base_commit": target["target_commit"],
+                   "base_tree": tree})
+    return source, None
+
+
+def _dispatch_target_for_advance(u, cache):
+    """Resolve a target once per advance and return the cached observation."""
+    # A plan may spell its workspace as a subdirectory of the repository.
+    # Key by the same Git root that target resolution and launch will use.
+    repo, problem = _plan_workspace(u)
+    if problem:
+        return None, _dispatch_base_refusal(
+            u.get("id"), _execution_workspace(u), problem)
+    key = (repo,
+           str(u.get("target_branch") or "").strip())
+    if key not in cache:
+        cache[key] = _resolve_dispatch_target(u)
+    return cache[key]
+
+
+def _capture_code_launch(unit_dir, u, dispatch_source=None):
     """Record the immutable input to Paseo's worktree creation.
 
     The shared checkout is a SOURCE, not the execution tree. Its dirty index
@@ -3677,31 +3838,27 @@ def _capture_code_launch(unit_dir, u):
     # relative spelling or symlink must not make the source checkout compare
     # unequal to itself later.
     repo = str(Path(repo).resolve())
-    rc, head, _ = _git(repo, "rev-parse", "HEAD")
-    if rc != 0:
-        return (f"unit {u['id']!r}: {repo!r} has no HEAD to anchor to. "
-                f"An empty repository gives nothing to transition FROM."), None
-    rc, tree, _ = _git(repo, "rev-parse", head + "^{tree}")
-    if rc != 0:
-        return f"unit {u['id']!r}: cannot read the tree of {head[:12]}", None
-    # `git push origin` writes to pushurl when one is configured. Anchor both
-    # its raw spelling and its once-expanded destination. Reusing only the
-    # expanded spelling would let Git apply a second `insteadOf` rewrite when
-    # the judge passes it back to ls-remote or fetch.
-    remote_raw, remote, remote_problem = W.remote_push_transport(U.run, repo)
-    if remote_problem:
-        return (f"unit {u.get('id')!r}: repository {repo!r} has no readable "
-                f"single origin push destination ({remote_problem}). Code "
-                f"attempts must push their generated "
-                f"branch to origin so the coordinator can judge the exact "
-                f"ref it anchored before the agent existed"), None
+    source = dispatch_source
+    if source is None:
+        resolved, problem = _resolve_dispatch_target(u)
+        if problem:
+            return problem, None
+        source, problem = _dispatch_source_identity(u, resolved)
+        if problem:
+            return problem, None
+    if source.get("repo") != repo or source.get("target_branch") != target:
+        return _dispatch_base_refusal(
+            u.get("id"), repo, "cached dispatch source names another target"), None
+    head, tree = source["base_commit"], source["base_tree"]
+    remote_raw = source["repository_remote_raw"]
+    remote = source["repository_remote"]
     judgment_ref = f"refs/heads/{branch}"
     # Query the PUSH destination, not the raw fetch spelling: with
     # `url.*.pushInsteadOf` configured they are different repositories, and
     # the attempt will push to the former. Checking the latter for collisions
     # asks the wrong repository and later judges the wrong one too.
-    remote_rc, _remote_head, remote_err = _git(
-        repo, "ls-remote", "--exit-code", remote,
+    remote_rc, _remote_head, remote_err = _git_push_destination(
+        repo, remote_raw, remote, 2, "ls-remote", "--exit-code", remote_raw,
         f"refs/heads/{branch}")
     if remote_rc == 0:
         return (f"unit {u.get('id')!r}: generated attempt branch {branch!r} "
@@ -3733,6 +3890,7 @@ def _capture_code_launch(unit_dir, u):
         "repository_remote": remote,
         "repository_remote_raw": remote_raw,
         "base_commit": head,
+        "target_commit": source["target_commit"],
         "base_tree": tree,
         "worktree_slug": slug,
         "branch": branch,
@@ -6428,6 +6586,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     units = {u["id"]: u for u in plan["units"]}
     report, dispatched, halted = [], 0, state.get("halted")
     advance_observed_at = time.time()
+    dispatch_targets = {}
+    dispatch_refusal = None
 
     # A DRY RUN MUST NOT CONTAMINATE A REAL PROJECT. Recording a fake
     # `dry-...` job id into a live state directory wedges that unit forever:
@@ -6730,8 +6890,14 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                         # recovery through the same durable bind protocol as
                         # every other dispatch; do not intercept it merely
                         # because the branch exists.
-                        recovered_job, problem = _submit(
-                            u, us["attempt_dir"], False, state, state_dir)
+                        target, problem = _dispatch_target_for_advance(
+                            u, dispatch_targets)
+                        if not problem:
+                            source, problem = _dispatch_source_identity(u, target)
+                        if not problem:
+                            recovered_job, problem = _submit(
+                                u, us["attempt_dir"], False, state, state_dir,
+                                dispatch_source=source)
                         if problem:
                             _set_unit_state(us, "NEEDS_HUMAN")
                             us["launch_recovery_problem"] = problem
@@ -7236,6 +7402,16 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                               f"({len(in_pool)} of {caps[pool]})")
                 continue
 
+        dispatch_source = None
+        if u.get("kind") == "code":
+            target, problem = _dispatch_target_for_advance(u, dispatch_targets)
+            if not problem:
+                dispatch_source, problem = _dispatch_source_identity(u, target)
+            if problem:
+                report.append(f"{uid}: REFUSING dispatch -- {problem}")
+                dispatch_refusal = str(problem)
+                continue
+
         unit_dir, err = _allocate(plan, u, root)
         if err:
             _set_unit_state(us, "FAILED")
@@ -7275,8 +7451,11 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         if not dry_run:
             claim_refusal, held_claims = _take_output_claims(
                 u, root, state_dir, Path(unit_dir).name)
+        submit_args = ({"dispatch_source": dispatch_source}
+                       if dispatch_source is not None else {})
         job_id, err = ((None, claim_refusal) if claim_refusal
-                       else _submit(u, unit_dir, dry_run, state, state_dir))
+                       else _submit(u, unit_dir, dry_run, state, state_dir,
+                                    **submit_args))
         if err:
             # Whatever we claimed for an attempt that never started must not
             # outlive it. `_release_output_claims` recomputes from the plan
@@ -7455,7 +7634,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                         f"intent from durable state {now}")
             continue
         emit_intent(state_dir, project, uid, now, us, evidence, kind=kind)
-    return report, dispatched, halted
+    return report, dispatched, halted or dispatch_refusal
 
 
 def _load_plan(path):

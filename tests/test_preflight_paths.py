@@ -39,6 +39,8 @@ def repo_at(path):
     subprocess.run(["git", "init", "-q", "--bare", str(remote)],
                    check=True, env=ENV, capture_output=True, text=True)
     git(path, "remote", "add", "origin", str(remote))
+    git(path, "branch", "-M", "main")
+    git(path, "push", "-qu", "origin", "main")
     return path
 
 
@@ -124,6 +126,7 @@ class TestExternalPathPolicy(Base):
             "command": "true", "outputs": ["out"]}]}))
         git(repo, "add", "plan.json")
         git(repo, "commit", "-qm", "plan")
+        git(repo, "push", "-q", "origin", "main")
         outside = self.tmp / "outside-runs"
         inside_state = repo / "state"
         result = subprocess.run(
@@ -225,6 +228,7 @@ class TestExternalPathPolicy(Base):
             code_unit(repo)]}))
         git(repo, "add", "plan.json")
         git(repo, "commit", "-qm", "plan")
+        git(repo, "push", "-q", "origin", "main")
         before = subprocess.check_output(
             ["git", "-C", str(repo), "status", "--porcelain", "-z"])
         env = paseo_stub_path(
@@ -525,7 +529,8 @@ class TestRefusalIsCarriedNotRederived(unittest.TestCase):
     def test_advance_believes_the_observation_over_the_record(self):
         # No launch record on disk at all: the old classifier read nothing,
         # found no "refused", and charged the unit as a plain failure.
-        def stub(u, unit_dir, dry_run, state=None, state_dir=None):
+        def stub(u, unit_dir, dry_run, state=None, state_dir=None,
+                 dispatch_source=None):
             refusal = S.PreflightRefusal("dirty at dispatch")
             refusal.workspace = "/checkout"
             refusal.dirty_count = 3
@@ -547,7 +552,8 @@ class TestRefusalIsCarriedNotRederived(unittest.TestCase):
     def test_a_record_saying_refused_does_not_make_a_failure_a_refusal(self):
         # The mutation in the other direction: authority is the observation,
         # so a launch record alone must not restore a retry budget.
-        def stub(u, unit_dir, dry_run, state=None, state_dir=None):
+        def stub(u, unit_dir, dry_run, state=None, state_dir=None,
+                 dispatch_source=None):
             anchor = Path(unit_dir).parent / f"launch-{Path(unit_dir).name}.json"
             anchor.write_text(json.dumps(
                 {"preflight": {"status": "refused"},
