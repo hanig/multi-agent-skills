@@ -6,7 +6,8 @@
   "fast": "cheapest implementation panel; the first tier of --escalate",
   "standard": "fast + mid-cost; the usual implementation panel",
   "deep": "standard + sol. Final --escalate tier, or a fixed --profile deep panel. astra is NOT here since 2026-09-24: it writes the code now, and an author does not review itself. sol returned to this seat because it had been excluded only for being the driver.",
-  "committee": "committee.py members. SEPARATE from the gate profiles on purpose: deepseek plans and concedes well but over-claims as a refuter, so it sits here and in no gate profile."
+  "committee": "committee.py members. SEPARATE from the gate profiles on purpose: deepseek plans and concedes well but over-claims as a refuter, so it sits here and in no gate profile.",
+  "tiebreak": "Committee divergence only: astra-xhigh rules on existing positions. Not a gate tier or a committee membership profile."
  },
  "reviewers": [
   {
@@ -181,6 +182,27 @@
     "outcome": "completed",
     "output_tokens": 34267,
     "observed_in": "gate run, PR #41 round 1"
+   }
+  },
+  {
+   "name": "astra-xhigh",
+   "provider": "openai",
+   "model": "gpt-6-astra",
+   "effort": "xhigh",
+   "profiles": [
+    "tiebreak"
+   ],
+   "enabled": true,
+   "max_output_tokens": 128000,
+   "_max_output_tokens": "MEASURED at xhigh in an ARC-753 numeric-ordering ruling probe; provider returned completed status and usable content. This measures budget acceptance, not capacity for every question.",
+   "_max_output_tokens_accepted": {
+    "date": "2026-09-24",
+    "max_output_tokens": 128000,
+    "provider": "openai",
+    "model": "gpt-6-astra",
+    "outcome": "completed",
+    "output_tokens": 373,
+    "observed_in": "ARC-753 real committee.ask_member numeric-ordering probe at xhigh; 288 input tokens; response retained in attempt evidence"
    }
   }
  ],

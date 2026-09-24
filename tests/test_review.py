@@ -619,7 +619,8 @@ class TestRound13Regressions(unittest.TestCase):
         # model sit on the committee while being barred from the gate --
         # deepseek plans well and over-claims as a refuter, and that split is
         # only expressible because these two lists are separate.
-        tiers -= {"plan", "committee"}
+        # tiebreak rules on a split; it must never enter the gate ladder.
+        tiers -= {"plan", "committee", "tiebreak"}
         self.assertTrue(tiers.issubset(set(review.LADDER)),
                         f"reviewers.json uses tiers outside LADDER: "
                         f"{tiers - set(review.LADDER)}")
