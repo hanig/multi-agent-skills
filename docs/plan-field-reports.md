@@ -266,6 +266,8 @@ an availability failure that fails closed, never a re-judgment.
 ### Model routing, set 2026-09-01
 
 > **Amended 2026-09-24, owner decision:** coding agents are now `codex/gpt-6-astra` at `high`, replacing `codex/gpt-5.6-sol`. Verified on a live agent before adoption (`paseo inspect`: Provider codex, Model gpt-6-astra, Thinking high). The sol rows below are the 2026-09-01 record and are kept as history. The author rule carries over: the impl model does not review what it wrote.
+>
+> **Dispatch domain, measured 2026-09-24 04:10Z.** `swarm.py` calls `paseo run` with no `--host`, so a code unit lands on the coordinator host's own paseo daemon; nothing routes it elsewhere. Paseo and codex are installed on this Mac, chimera, lambda and andromeda. On the Mac, a code unit declaring no provider, model or thinking, dispatched through `swarm.py run` from this branch, inspected as Provider codex, Model gpt-6-astra, Thinking high and answered. On all three clusters the paseo daemon was not running (`stale_pid`, connection refused or closed), so no code unit could dispatch there under either default, sol included. Whether astra is served on a cluster is **unverified** and has to be checked there before a cluster daemon coordinates code units. The swap has no fallback: the model a plan declares, or this default, is the only one it runs.
 
 Reasoning effort is per MODEL, revised 2026-09-04: `codex/gpt-5.6-sol`
 at **high**, `codex/gpt-5.6-luna` at **xhigh**, `claude/opus` at
