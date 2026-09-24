@@ -1074,13 +1074,24 @@ def git_out(*args):
 
 
 def range_endpoints(range_spec):
-    """Split at the first dotted operator, as Git's range parser does."""
-    index = range_spec.find("..")
-    if index < 0:
-        return None
-    separator = "..." if range_spec.startswith("...", index) else ".."
-    return (separator, range_spec[:index] or "HEAD",
-            range_spec[index + len(separator):] or "HEAD")
+    """Split at the first dotted operator outside braced revision suffixes."""
+    index = 0
+    while index < len(range_spec):
+        if range_spec.startswith(("^{", "@{"), index):
+            # Git ends these suffixes at the first }, even when a search
+            # contains a literal {. Ordinary ref names may also contain {
+            # without opening a revision suffix.
+            end = range_spec.find("}", index + 2)
+            if end < 0:
+                return None
+            index = end + 1
+        elif range_spec.startswith("..", index):
+            separator = "..." if range_spec.startswith("...", index) else ".."
+            return (separator, range_spec[:index] or "HEAD",
+                    range_spec[index + len(separator):] or "HEAD")
+        else:
+            index += 1
+    return None
 
 
 def resolve_range_ref(ref):
