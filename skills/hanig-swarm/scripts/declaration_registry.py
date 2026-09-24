@@ -61,7 +61,7 @@ CLOSED_DECLARATIONS = {
         capability.python-git capability.slurm capability.paseo-bus
         capability.review capability.tracker capability.worker-backend
         paths.skill-directory code.default-agent code.provider-mode
-        runtime.declaration runtime.verification runtime.canary plan.canary retry.boundary
+        runtime.declaration runtime.verification runtime.canary plan.canary plan.tracker retry.boundary
         retry.checkpoint retry.exposure retry.concurrency
         isolation.exclusive-root isolation.done-predicate
         isolation.artifact-basis isolation.container-profile
@@ -100,7 +100,7 @@ CLOSED_DECLARATIONS = {
         watch.source watch.proof loop.quiescence loop.advance loop.yield
         preservation.before-cleanup dispatch.mechanics merge.requirements
         code.merge-command limit.merge-command
-        tracker.authority tracker.reconcile tracker.dag report.three-parts
+        tracker.authority tracker.reconcile tracker.drain tracker.dag report.three-parts
         handoff.contents handoff.transfer takeover.verify
         limit.session-liveness
     """),

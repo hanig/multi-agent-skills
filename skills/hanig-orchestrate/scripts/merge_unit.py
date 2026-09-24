@@ -378,6 +378,35 @@ def reconcile(args, plan):
     return cmd["advance"]
 
 
+def print_pending_close(args, plan):
+    """Display the durable obligation; neither apply it nor acknowledge it."""
+    try:
+        state = read_object(Path(args.state_dir) / S.STATE_FILE)
+        attempt = state["units"][args.unit].get("attempt_dir")
+        intents = S.load_outbox_contract(args.state_dir)
+        status, _ = S.acknowledgment_status(args.state_dir)
+    except (OSError, ValueError, KeyError, S.OutboxError) as exc:
+        print("WARNING: pending tracker close could not be read: {}".format(exc))
+        return
+    pending = [i for i in intents
+               if i["project"] == (plan.get("name") or "swarm")
+               and i["unit"] == args.unit and i["verb"] == "close"
+               and i.get("attempt_dir") == attempt
+               and status.get(i["key"], (S.UNACKNOWLEDGED, []))[0] == S.UNACKNOWLEDGED]
+    if not pending:
+        print("No unacknowledged close intent for unit {} in its current attempt; "
+              "inspect outbox if synchronization is unresolved.".format(args.unit))
+    for intent in pending:
+        tracker = ("tracker={!r}".format(intent["tracker"]) if "tracker" in intent
+                   else "no tracker declared")
+        print("Pending tracker close: key={} {}; unit={}".format(
+            intent["key"], tracker, args.unit))
+        print("After the session applies this intent, replace ID with the tracker "
+              "reference and record its attested acknowledgment:")
+        print(shlex.join([sys.executable, SWARM, "outbox", "--state-dir", args.state_dir,
+                          "--record-receipt", intent["key"], "--ref", "ID"]))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("plan")
@@ -417,6 +446,7 @@ def main(argv=None):
         result = run(advance)
         print(result.stdout, end="")
         print("Merge receipt recorded and advance ran.")
+        print_pending_close(args, plan)
         return 0
     except (OSError, ValueError, TypeError, KeyError, AttributeError, argparse.ArgumentTypeError,
             subprocess.SubprocessError, S.PlanError, S.OutboxError,

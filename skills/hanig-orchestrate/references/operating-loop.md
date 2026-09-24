@@ -38,6 +38,20 @@ Forge routing supports standard HTTP(S) and SSH remotes without explicit ports a
 
 The command never resubmits an unresolved merge request: a queued request, a lost response, or a crash between intent persistence and transmission leaves a durable operation for inspection. Rerun after GitHub reports MERGED to record and advance, or explicitly abandon the investigated OPEN request using the recorded path above. Neither action deletes the intent. Abandonment attests an OPEN observation; it cannot prove an earlier queued request will never execute, so the named operator retains responsibility for investigating that uncertainty. The intent and abandonment journals retain the same-node trusted-writer boundary. The local coordinator lease is released before advance acquires it; advancement can still halt or retain a unit for its existing verification policy. A successful advance does not assert that every unit closed. <!-- declaration: limit.merge-command -->
 
+## Drain the post-merge close intent
+
+After receipt recording and successful advancement, `merge_unit.py` displays the current attempt's pending close intent with its key and `tracker` issue, or `no tracker declared`, followed by the acknowledgment command. It performs no tracker call. If no unacknowledged close intent exists, it says so; that message establishes neither tracker delivery nor unit closure. <!-- declaration: tracker.drain -->
+
+The authorized session applies each pending intent to the named issue using its connector. Before retrying an ambiguous operation, resolve it by receiver read-back or deduplication. Once the operation has landed, replace `KEY` with the displayed key and `ID` with the returned tracker reference: <!-- declaration: tracker.drain -->
+
+```bash
+python3 "$HANIG_SWARM_DIR/scripts/swarm.py" outbox --state-dir "$STATE"
+python3 "$HANIG_SWARM_DIR/scripts/swarm.py" outbox --state-dir "$STATE" \
+  --record-receipt KEY --ref ID
+```
+
+The receipt is an attestation, not independently verified tracker state. Without a connector or a known issue, keep the intent unacknowledged and report pending synchronization; never guess the issue or acknowledge an unapplied operation. The tracker label supplies no authority for admission, closure, or DONE. <!-- declaration: tracker.drain, tracker.authority -->
+
 ## Tracker and the hourly report
 
 The tracker mirrors coordinator state, and GitHub's pull-request attachment does not perform the issue transition. <!-- declaration: tracker.authority -->
