@@ -236,8 +236,9 @@ python3 "$R" --escalate --diff \
 ```
 
 **Use `--escalate` for a ladder review.** It starts at the selected tier and
-walks toward `deep`, stopping at the first failure with quorum and adding only
-the reviewers the previous tier did not run:
+walks toward `deep`, stopping at the first `REVIEW_FAIL` or
+`REVIEW_CLAIMS_REFUTED` with quorum and adding only the reviewers the previous
+tier did not run:
 
 ```
 fast      luna + kimi-k2.7-code
@@ -324,17 +325,24 @@ actual assertions, verbatim — the ones that would go in the summary.
 
 Each reviewer marks every claim `supported`, `refuted`, or `unverifiable`.
 **Any refuted claim fails the gate**, regardless of findings.
+With quorum and no confirmed findings, that is `REVIEW_CLAIMS_REFUTED`;
+confirmed findings take precedence as `REVIEW_FAIL`. Correct the claim (or
+the code), then re-run the gate; do not argue a refuted claim into a pass.
+These rounds count toward the same round bound.
 
 ## Exit codes
 
 | Exit | State | Meaning |
 |---|---|---|
 | 0 | `REVIEW_PASS` | Quorum reviewed; no confirmed defect, no refuted claim |
-| 1 | `REVIEW_FAIL` | A confirmed defect, or a refuted claim |
+| 1 | `REVIEW_FAIL` | Quorum reviewed; a confirmed defect, with or without refuted claims |
 | 2 | `REVIEW_UNAVAILABLE` | No reviewer ran — **not a pass** |
 | 3 | `REVIEW_PARTIAL` | Some ran, quorum unmet — degraded, caller decides |
 | 4 | `REVIEW_ERROR` | Usage or configuration error |
 | 6 | `REVIEW_INCOMPLETE` | A required reviewer returned no usable content |
+| 7 | `REVIEW_CLAIMS_REFUTED` | Quorum reviewed; refuted claims and zero confirmed findings — **not a pass** |
+
+Exit 5 remains reserved for ARC-709's `REVIEW_ADJUDICATION` recovery work.
 
 Every nonzero state is non-success. Incomplete review is not an implementation
 failure, but it supplies no judgment and cannot satisfy required coverage.
@@ -423,7 +431,7 @@ those are reported and marked rather than counted. Absent it, everything gates.
 
 **Asserting claims about taste.** "The three scripts agree on shared concepts"
 is a design judgment; two tools solving different problems will always differ
-somewhere, and any refuted claim is a `REVIEW_FAIL`. Reserve claims for
+somewhere, and any refuted claim still blocks a pass. Reserve claims for
 behaviour.
 
 Ultimately the process was modelled on a committee that plans, implements, then

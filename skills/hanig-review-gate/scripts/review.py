@@ -21,11 +21,12 @@ Usage:
 
 Exit codes:
     0  REVIEW_PASS          quorum reviewed; no confirmed defect, no refuted claim
-    1  REVIEW_FAIL          a confirmed defect or a refuted claim
+    1  REVIEW_FAIL          quorum reviewed; a confirmed defect
     2  REVIEW_UNAVAILABLE   no reviewer could run -- NOT a pass
     3  REVIEW_PARTIAL       some ran, quorum unmet -- caller decides
     4  REVIEW_ERROR         usage or configuration error
     6  REVIEW_INCOMPLETE    required reviewer returned no usable content
+    7  REVIEW_CLAIMS_REFUTED quorum reviewed; refuted claims, no confirmed defect
 
 Never treat a nonzero state as success. An unreviewed change is unreviewed.
 
@@ -49,9 +50,11 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+# Exit 5 belongs to ARC-709's REVIEW_ADJUDICATION recovery implementation;
+# leave it reserved even while that state is absent from this branch.
 STATES = {"REVIEW_PASS": 0, "REVIEW_FAIL": 1, "REVIEW_UNAVAILABLE": 2,
           "REVIEW_PARTIAL": 3, "REVIEW_ERROR": 4,
-          "REVIEW_INCOMPLETE": 6}
+          "REVIEW_INCOMPLETE": 6, "REVIEW_CLAIMS_REFUTED": 7}
 
 HERE = Path(__file__).resolve().parent
 CONFIG = HERE.parent / "reviewers.json"
@@ -1819,7 +1822,8 @@ def escalate(all_reviewers, prompt, args, truncated, label, body_len):
 
     Running the full panel every time means paying for the slowest, dearest
     reviewer to re-find what a cheap one already caught. Each tier adds only
-    the reviewers the previous tier did not run; the first failing tier ends it.
+    the reviewers the previous tier did not run; the first failing tier with
+    quorum ends it, including a claims-only REVIEW_CLAIMS_REFUTED result.
     """
     seen, completed, failed, unavailable = set(), [], [], []
     tiers_run = []
@@ -1961,8 +1965,11 @@ def decide_state(n_completed, n_failed, confirmed, refuted_claims,
     # The finding is NOT discarded: it is still printed, and REVIEW_PARTIAL is
     # not a pass (the caller is told never to treat it as one). What changes is
     # that one opinion is not dignified as a committee verdict.
-    if n_completed >= quorum and (confirmed or refuted_claims):
-        return "REVIEW_FAIL"
+    if n_completed >= quorum:
+        if confirmed:
+            return "REVIEW_FAIL"
+        if refuted_claims:
+            return "REVIEW_CLAIMS_REFUTED"
     if n_incomplete:
         return "REVIEW_INCOMPLETE"
     if n_completed < quorum:
@@ -2348,6 +2355,11 @@ def main():
         "journal": journal,
         "results": completed,
     }
+    if state == "REVIEW_CLAIMS_REFUTED":
+        report["next_action"] = (
+            "No confirmed defect, but refuted claims are not a pass. "
+            "Correct the claim (or the code), then re-run the gate. "
+            "Do not argue a refuted claim into a pass.")
 
     if args.json:
         # Reviewer-authored text is untrusted and may quote a key found in the
@@ -2401,7 +2413,9 @@ def main():
                     print(redact(f"      requires: {f.get('preconditions')}"))
 
         print(f"\n{state}{policy_text} [{tier_text}]")
-        if state == "REVIEW_PARTIAL":
+        if state == "REVIEW_CLAIMS_REFUTED":
+            print("  " + report["next_action"])
+        elif state == "REVIEW_PARTIAL":
             if rejecting:
                 print(f"  Rejected by {', '.join(rejecting)} with no finding or "
                       f"claim that met the confirmation filter. Not a pass and "
