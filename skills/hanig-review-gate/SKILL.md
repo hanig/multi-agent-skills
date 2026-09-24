@@ -123,6 +123,27 @@ reviewers from contrasting providers with one question:
 The purpose is to step back, not double down. The committee may well say the
 design is wrong, which is the point of asking.
 
+After challenging the members, run
+`python3 "$HANIG_REVIEW_GATE_DIR/scripts/committee.py" synthesize SESSION --author MODEL`.
+Convergence produces a unified plan; divergence automatically calls the
+`astra-xhigh` seat (`gpt-6-astra`, effort `xhigh`, profile `tiebreak` only).
+For an already identified split, use `tiebreak SESSION --author MODEL` directly.
+It receives the question and every member's final position verbatim and saves
+a RULING adopting a named position with the deciding evidence, not a fresh plan.
+
+Both commands read the current `docs/orchestrator-mandate.md` from the project;
+use `--mandate-file PATH` when it lives elsewhere. The mandate's stop-and-ask
+list and bounds go to the model. A known owner-only question must be declared
+with `--stop-and-ask REASON`, which refuses without calling a provider and is
+retained in the session. Semantic classification otherwise rests on the model
+and an honest caller; a ruling supplies analysis, never additional authority.
+An unavailable, empty, truncated or malformed answer routes to OWNER (exit 1)
+with a persisted reason. An Astra author (`--author gpt-6-astra`, also recognized
+by its configured aliases) refuses the tie-break. Missing or conflicting author
+declarations also route to the owner; existing sessions can declare their author
+on first use. `show SESSION` displays the current resolution, and a later member
+turn invalidates it while retaining the earlier decision's audit record.
+
 ## Argue with findings; do not silently filter them
 
 Reviewers produce findings that do not reproduce — one model here retracted its
