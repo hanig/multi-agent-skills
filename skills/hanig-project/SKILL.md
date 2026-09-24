@@ -482,22 +482,14 @@ missing read-back as drift and exits 2. That is deliberate -- the loop is
 apply, re-read, re-draft, check -- and it is what makes this a verification of
 the write rather than trust in it.
 
-Verify the two never drift:
+Verify the two never drift. For ATTESTED tracker/plan orphans, run `python3 "$P/scripts/tickets.py" reconcile plan.json --tracker-issues issues.json --json`; see `reconcile --help` for the input shape, states and exit codes.
 
 ```sh
 python3 "$P/scripts/tickets.py" check plan.json tickets.json
-python3 "$P/scripts/tickets.py" reconcile plan.json --tracker-issues issues.json --json
 ```
 
-`check` reports both halves: the unit/issue mapping, and the blockedBy edges as
+It reports both halves: the unit/issue mapping, and the blockedBy edges as
 read at a stated time. It never says "in sync" without naming that time.
-`reconcile` compares the plan with an ATTESTED full project issue list:
-`[{"identifier": "ARC-123", "title": "Work", "state": "Todo", "unit": "unit-id"}]`.
-Use the draft's `unit` key (null/omitted for unmapped issues). Exit 3 names
-open issues without units and units absent from the read-back; no file exits 4
-with unknown orphan sets. Done/completed/cancelled/canceled are terminal
-(case-insensitive); state objects use `type`, falling back to `name` when
-`type` is absent. Other states count as open. See `reconcile --help` for bounds.
 
 ## 5. Dispatch.
 
