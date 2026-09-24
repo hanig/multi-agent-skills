@@ -106,7 +106,9 @@ GitHub’s merge queue tests a PR against the current target plus preceding queu
 
 Keep separate identities for the judged PR head, tested integration candidate, and observed merge. A queue need not change your source head or closure rule.
 
-I did not establish that this private repository has access to GitHub’s native queue; its documented availability depends on repository ownership and plan. If unavailable, serializing the authorized merge path and validating the exact candidate is a narrower alternative, provided target movement is prevented or detected before acceptance. A local read-then-merge sequence alone does not close that race.
+I did not establish that this public repository has access to GitHub’s native queue; its documented availability depends on repository ownership and plan. If unavailable, serializing the authorized merge path and validating the exact candidate is a narrower alternative, provided target movement is prevented or detected before acceptance. A local read-then-merge sequence alone does not close that race.
+
+Visibility correction (2026-09-24): this repository is public by owner decision. The credential and publication rules in [CLAUDE.md](../../CLAUDE.md) apply.
 
 **What the evidence does not establish.**
 

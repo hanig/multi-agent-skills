@@ -4,8 +4,10 @@ Portable coding-agent skills for dispatching autonomous work onto HPC clusters
 and refusing to call it done without evidence. Installable across laptops and
 login nodes with one script.
 
-**Private.** Contains cluster hostnames, partitions, account names, storage
-layouts, and measured environment probes.
+This repository is public by owner decision (2026-09-24). It carries cluster
+hostnames, partition and account names, storage layouts and measured host
+probes; never commit credentials, tokens or secrets. Pull-request titles,
+bodies and comments must not add further cluster detail.
 
 ---
 
