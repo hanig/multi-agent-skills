@@ -1,10 +1,14 @@
 """ARC-690: exercise offline tracker/plan reconciliation through its CLI."""
+import contextlib
+import io
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "hanig-project" / "scripts"
@@ -183,6 +187,52 @@ class TestTicketsReconcile(unittest.TestCase):
             with self.subTest(plan=plan):
                 self.plan.write_text(json.dumps(plan))
                 self.assert_unknown_error(self.read([]))
+
+    def test_deeply_nested_json_is_invalid_for_plan_and_readback(self):
+        for target in (self.plan, self.readback):
+            with self.subTest(target=target.name):
+                self.plan.write_text('{"units": []}')
+                self.readback.write_text('[]')
+                target.write_text('[' * 2000 + '0' + ']' * 2000)
+                self.assert_unknown_error(self.run_cli(
+                    "--tracker-issues", str(self.readback), "--json"))
+
+    def test_other_decoder_exceptions_report_invalid_input_even_without_message(self):
+        self.readback.write_text('[]')
+        args = SimpleNamespace(plan=str(self.plan),
+                               tracker_issues=str(self.readback), json=True)
+        for error in (MemoryError(), RuntimeError("decoder failed")):
+            for target in (self.plan, self.readback):
+                with self.subTest(error=type(error).__name__, target=target.name):
+                    effects = [error] if target == self.plan else [{"units": []}, error]
+                    output = io.StringIO()
+                    with mock.patch.object(T.json, "loads", side_effect=effects):
+                        with contextlib.redirect_stdout(output):
+                            code = T.cmd_reconcile(args)
+                    self.assert_unknown_error(subprocess.CompletedProcess(
+                        [], code, output.getvalue(), ""))
+
+    def test_legacy_readers_handle_nested_json_without_overwriting_inputs(self):
+        bad = self.root / "nested.json"
+        bad.write_text('[' * 2000 + '0' + ']' * 2000)
+        for args, code, message in (
+                (["draft", str(bad)], 1, "no readable plan"),
+                (["draft", str(self.plan), "--out", str(bad)], 2, "cannot be read"),
+                (["draft", str(self.plan), "--tracker-edges", str(bad)], 2,
+                 "could not be read"),
+                (["check", str(bad), str(self.plan)], 1, "no readable plan"),
+                (["check", str(self.plan), str(bad)], 1, "no readable draft"),
+                (["approve", str(bad), "--approver", "test"], 1, "no readable draft")):
+            with self.subTest(args=args):
+                before = {p.name: p.read_bytes() for p in self.root.iterdir()}
+                result = subprocess.run(
+                    [sys.executable, str(SCRIPTS / "tickets.py"), *args],
+                    capture_output=True, text=True, cwd=self.root, timeout=15)
+                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                self.assertIn(message, result.stdout + result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual({p.name: p.read_bytes() for p in self.root.iterdir()},
+                                 before)
 
     def test_rerun_reads_changed_files_and_never_reuses_a_persisted_verdict(self):
         self.assertEqual(self.read([self.issue("A"), self.issue("B")]).returncode, 0)

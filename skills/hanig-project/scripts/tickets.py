@@ -111,11 +111,17 @@ TERMINAL_ISSUE_STATES = frozenset(("done", "completed", "cancelled", "canceled")
 
 def read_json(path):
     try:
-        return json.loads(Path(path).read_text()), None
+        text = Path(path).read_text()
     except FileNotFoundError:
         return None, "missing"
     except (OSError, ValueError) as e:
         return None, str(e)
+    try:
+        return json.loads(text), None
+    except Exception as e:
+        # Decoder failures include recursion/resource limits, not only syntax.
+        # A message-less exception must still signal an unreadable input.
+        return None, str(e) or type(e).__name__
 
 
 # The fields whose change makes an existing issue body WRONG. Comparing ids
