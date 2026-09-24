@@ -51,6 +51,12 @@ VENDORED_FILES = {
     "skills/start-a-sprint/scripts/validate_sprint_plan.py",
 }
 BUS_EXCEPTION = "bin/bus"
+VENDORED_MANIFEST_GUARD_BOUND = (
+    "observed inventory and byte equality apply to a stable vendored tree at "
+    "the checker's observation points; this check does not provide OS "
+    "isolation or detect a same-UID writer that adds a file after its one-shot "
+    "inventory walk"
+)
 
 
 def _frontmatter(path):
@@ -238,8 +244,20 @@ class TestSkillCapabilities(unittest.TestCase):
             "a changed skill bundle must be listed in AUTHORED or VENDORED",
         )
 
+    def test_vendored_manifest_guard_states_stable_tree_limit(self):
+        bound = VENDORED_MANIFEST_GUARD_BOUND
+        self.assertIn("stable vendored tree", bound)
+        self.assertIn("does not provide OS isolation", bound)
+        self.assertIn("same-UID writer", bound)
+        self.assertIn("after its one-shot inventory walk", bound)
+
     def test_vendored_payload_matches_offline_manifest(self):
-        """Hash the shipped vendored inventory without Git or a subprocess."""
+        """Hash one stable vendored tree without Git or a subprocess.
+
+        This checker establishes inventory and byte equality at its observation
+        points. It does not provide OS isolation or detect a same-UID writer
+        that adds a file after its one-shot inventory walk.
+        """
         manifest = json.loads(
             _read_regular("docs/upstream-manifest.json").decode("utf-8"),
             object_pairs_hook=_unique_object,
@@ -265,7 +283,7 @@ class TestSkillCapabilities(unittest.TestCase):
         )
         self.assertEqual(
             _vendored_regular_files(), set(files),
-            "observed vendored regular-file inventory must match the manifest",
+            VENDORED_MANIFEST_GUARD_BOUND,
         )
         self.assertEqual(
             set(exceptions), {BUS_EXCEPTION},
