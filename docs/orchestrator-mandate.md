@@ -93,7 +93,10 @@ This list is complete. Nothing outside it is a reason to stop a confirmed run.
 
 A `REVIEW_FAIL` is not an instruction to abandon work, and it is not an
 instruction to defer to the orchestrator's judgement. It requires a recorded
-disposition before merge.
+disposition before merge. The same holds for `REVIEW_CLAIMS_REFUTED` (exit 7):
+the panel refuted the author's description of the change rather than
+confirming a defect in it. The remedy is to correct the claim or the code;
+it is not a pass.
 
 | Finding status | Permitted disposition |
 |---|---|
@@ -138,10 +141,10 @@ later decisions. Failure of a required check on the actual candidate merge.
 
 ### Honesty in the record
 
-`REVIEW_FAIL` is never relabelled as a pass. A candidate becomes eligible
-*after recorded adjudication*, and the record says so. An irrelevant defect may
-be deferred; a false delivered claim must be corrected or explicitly withdrawn,
-never silently endorsed.
+`REVIEW_FAIL` and `REVIEW_CLAIMS_REFUTED` are never relabelled as a pass. A
+candidate becomes eligible *after recorded adjudication*, and the record says
+so. An irrelevant defect may be deferred; a false delivered claim must be
+corrected or explicitly withdrawn, never silently endorsed.
 
 ## How the orchestrator runs
 
