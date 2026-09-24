@@ -12,8 +12,10 @@ import unittest
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills/hanig-swarm/scripts"
+OPERATOR = SCRIPTS.parents[1] / "hanig-orchestrate/scripts/merge_unit.py"
 sys.path.insert(0, str(SCRIPTS))
 import swarm as S
+import child_environment as CE
 
 
 GH_STUB = r'''
@@ -21,6 +23,8 @@ import json, os, pathlib, sys
 p = pathlib.Path(os.environ["FORGE_STATE"])
 data = json.loads(p.read_text())
 args = sys.argv[1:]
+if os.environ.get("FORGE_EXPECT_TOKEN"):
+    assert os.environ.get("GH_TOKEN") == os.environ["FORGE_EXPECT_TOKEN"]
 with open(os.environ["FORGE_LOG"], "a") as log:
     log.write(json.dumps(args) + "\n")
 if args[:2] == ["pr", "view"]:
@@ -58,6 +62,7 @@ class TestMergeUnit(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.directory = Path(self.tmp.name).resolve()
+        self.operator = OPERATOR
         self.repo = self.directory / "repo"
         self.repo.mkdir()
         self.bin = self.directory / "bin"
@@ -136,7 +141,7 @@ class TestMergeUnit(unittest.TestCase):
         Path(self.env["FORGE_STATE"]).write_text(json.dumps(self.forge))
 
     def invoke(self, *extra, approver=True):
-        command = [sys.executable, str(SCRIPTS / "merge_unit.py"), str(self.plan_path),
+        command = [sys.executable, str(self.operator), str(self.plan_path),
                    "--state-dir", str(self.state_dir), "--unit", "u", "--pr", "7"]
         if approver:
             command += ["--approver", "Operator"]
@@ -173,6 +178,98 @@ class TestMergeUnit(unittest.TestCase):
         self.assertEqual(state["units"]["u"]["state"], "DONE", result.stdout)
         self.assertIn("--root " + str(self.root), result.stdout)
         self.assertEqual(self.intent()["phase"], "receipt_recorded")
+
+    def test_forge_auth_survives_but_all_coordinator_children_are_contained(self):
+        names = sorted(CE.DENIED_ENV_NAMES | {"SWARM_UNIT_TEST", "SWARM_DEP_TEST"})
+        self.env.update({name: "synthetic-operator-secret" for name in names})
+        self.env["FORGE_EXPECT_TOKEN"] = "synthetic-operator-secret"
+        site = self.directory / "environment-probe"
+        site.mkdir()
+        log = self.directory / "coordinator-environments.jsonl"
+        # Observe real scope-check, merge recording, and advance processes at
+        # Python startup. The forge stub separately requires its fake token.
+        (site / "sitecustomize.py").write_text(
+            "import json, os, sys\n"
+            "if len(sys.argv) > 1 and sys.argv[0].endswith('swarm.py'):\n"
+            "    with open(%r, 'a') as log:\n"
+            "        log.write(json.dumps([sys.argv[1], "
+            "[n for n in %r if n in os.environ]]) + '\\n')\n" % (str(log), names))
+        self.env["PYTHONPATH"] = str(site)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        rows = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual(rows, [["scope-check", []], ["merge", []], ["advance", []]])
+        self.assertEqual(len(self.calls(["pr", "merge"])), 1)
+
+    def test_copied_operator_uses_its_installed_sibling_from_project_cwd(self):
+        prefix = self.directory / "installed"
+        operator = prefix / "hanig-orchestrate"
+        swarm = prefix / "hanig-swarm"
+        shutil.copytree(OPERATOR.parents[1], operator)
+        shutil.copytree(SCRIPTS.parent, swarm)
+        self.operator = operator / "scripts/merge_unit.py"
+        self.env["HANIG_ORCHESTRATE_DIR"] = str(operator)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(str(swarm / "scripts/swarm.py"), result.stdout)
+        self.assertNotIn(str(SCRIPTS / "swarm.py"), result.stdout)
+
+    def test_linked_operator_uses_explicit_dependency_parent(self):
+        prefix = self.directory / "links"
+        prefix.mkdir()
+        operator = prefix / "hanig-orchestrate"
+        operator.symlink_to(OPERATOR.parents[1], target_is_directory=True)
+        dependencies = self.directory / "dependencies"
+        swarm = dependencies / "hanig-swarm"
+        shutil.copytree(SCRIPTS.parent, swarm)
+        self.operator = operator / "scripts/merge_unit.py"
+        self.env["HANIG_ORCHESTRATE_DIR"] = str(operator)
+        self.env["HANIG_SKILL_DEP_ROOTS"] = str(dependencies)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(str(swarm / "scripts/swarm.py"), result.stdout)
+
+    def test_relative_dependency_parent_is_relative_to_loaded_skill(self):
+        prefix = self.directory / "relative-install"
+        operator = prefix / "hanig-orchestrate"
+        dependencies = prefix / "deps"
+        swarm = dependencies / "hanig-swarm"
+        shutil.copytree(OPERATOR.parents[1], operator)
+        shutil.copytree(SCRIPTS.parent, swarm)
+        self.operator = operator / "scripts/merge_unit.py"
+        self.env["HANIG_ORCHESTRATE_DIR"] = str(operator)
+        self.env["HANIG_SKILL_DEP_ROOTS"] = "../deps"
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(str(swarm / "scripts/swarm.py"), result.stdout)
+
+    def test_relative_dependency_parent_keeps_the_logical_link_parent(self):
+        prefix = self.directory / "relative-link-install"
+        prefix.mkdir()
+        operator = prefix / "hanig-orchestrate"
+        operator.symlink_to(OPERATOR.parents[1], target_is_directory=True)
+        swarm = prefix / "deps/hanig-swarm"
+        shutil.copytree(SCRIPTS.parent, swarm)
+        self.operator = operator / "scripts/merge_unit.py"
+        self.env["HANIG_ORCHESTRATE_DIR"] = str(operator)
+        self.env["HANIG_SKILL_DEP_ROOTS"] = "../deps"
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(str(swarm / "scripts/swarm.py"), result.stdout)
+
+    def test_missing_installed_sibling_refuses_before_forge_or_writes(self):
+        operator = self.directory / "isolated" / "hanig-orchestrate"
+        shutil.copytree(OPERATOR.parents[1], operator)
+        self.operator = operator / "scripts/merge_unit.py"
+        self.env["HANIG_ORCHESTRATE_DIR"] = str(operator)
+        # A matching bundle in the project cwd is not a declared dependency.
+        (self.repo / "hanig-swarm").symlink_to(SCRIPTS.parent, target_is_directory=True)
+        before = {p.name: p.read_bytes() for p in self.state_dir.iterdir()}
+        result = self.invoke()
+        self.assert_refused(result)
+        self.assertIn("missing declared installed dependency", result.stderr)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(before, {p.name: p.read_bytes() for p in self.state_dir.iterdir()})
 
     def test_head_mismatch_refuses_before_merge(self):
         self.forge["pr"]["headRefOid"] = "f" * 40
@@ -298,9 +395,72 @@ class TestMergeUnit(unittest.TestCase):
         self.assertEqual(observed["scope_exit"], 1)
         self.assertIn("scope startup diagnostic", observed["scope"]["unparsed_stdout"])
 
+    def test_scope_exception_retains_schema_invalid_json_verbatim(self):
+        site = self.directory / "scope-exception-output"
+        site.mkdir()
+        (site / "sitecustomize.py").write_text(
+            "import atexit, io, os, sys\n"
+            "if len(sys.argv) > 1 and sys.argv[0].endswith('swarm.py') "
+            "and sys.argv[1] == 'scope-check':\n"
+            "    original = sys.stdout\n"
+            "    sys.stdout = io.StringIO()\n"
+            "    atexit.register(lambda: original.write(os.environ['SCOPE_OUTPUT']))\n"
+            "    sys.stderr.write('scope diagnostic\\n')\n")
+        self.env["PYTHONPATH"] = str(site)
+        self.env["SCOPE_OUTPUT"] = ' [ "scope diagnostic" ] \n'
+        self.unit["scope"] = []
+        self.state["plan_digest"] = S.plan_digest(self.plan)
+        self.save()
+        result = self.invoke("--allow-unchecked-scope", "Accept failed observation")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        observed = self.intent()["preconditions"]
+        self.assertEqual(observed["scope_exit"], 1)
+        self.assertEqual(observed.get("scope_stdout"), self.env["SCOPE_OUTPUT"])
+        self.assertEqual(observed.get("scope_stderr"), "scope diagnostic\n")
+
     def test_malformed_successful_scope_output_is_not_an_exception(self):
         self.scope_startup_notice()
         self.assert_refused(self.invoke("--allow-unchecked-scope", "Not applicable"))
+
+    def test_schema_invalid_successful_scope_output_refuses(self):
+        # Run the real scope-check to completion but corrupt its output
+        # channel. This simulates a broken producer, not an authority grant.
+        observed = subprocess.run(
+            [sys.executable, str(SCRIPTS / "swarm.py"), "scope-check",
+             str(self.plan_path), "--state-dir", str(self.state_dir),
+             "--unit", "u", "--json"], env=self.env, cwd=self.repo,
+            capture_output=True, text=True, check=True)
+        valid = json.loads(observed.stdout)
+        payloads = [None, [], {}, {"status": "in_scope"}]
+        for key, value in (("status", "unchecked"), ("unit", "other"),
+                           ("attempt", "older"), ("head", "f" * 40),
+                           ("base", None), ("scope", "**"), ("scope", [None]),
+                           ("out_of_scope", ["outside"]),
+                           ("deletions_out_of_scope", ["removed"])):
+            payloads.append(dict(valid, **{key: value}))
+        site = self.directory / "scope-output-probe"
+        site.mkdir()
+        (site / "sitecustomize.py").write_text(
+            "import atexit, io, os, sys\n"
+            "if len(sys.argv) > 1 and sys.argv[0].endswith('swarm.py') "
+            "and sys.argv[1] == 'scope-check':\n"
+            "    original = sys.stdout\n"
+            "    sys.stdout = io.StringIO()\n"
+            "    atexit.register(lambda: original.write(os.environ['SCOPE_OUTPUT']))\n")
+        self.env["PYTHONPATH"] = str(site)
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                # Keep each corrupted-result trial independent, including
+                # when a mutation incorrectly merged an earlier trial.
+                self.save()
+                for path in self.state_dir.glob("merge-unit-*.json"):
+                    path.unlink()
+                for path in (self.state_dir / S.MERGE_RECEIPTS,
+                             Path(self.env["FORGE_LOG"])):
+                    if path.exists():
+                        path.unlink()
+                self.env["SCOPE_OUTPUT"] = json.dumps(payload)
+                self.assert_refused(self.invoke("--allow-unchecked-scope", "Not applicable"))
 
     def test_forge_pr_url_cannot_change_repository(self):
         self.forge["pr"]["url"] = "https://other.example/example/project/pull/7"

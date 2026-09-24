@@ -66,8 +66,7 @@ CLOSED_DECLARATIONS = {
         isolation.exclusive-root isolation.done-predicate
         isolation.artifact-basis isolation.container-profile
         isolation.container-attestation authority.coordinator-state
-        closure.by-kind code.remote-ref code.merge-scope code.merge-command
-        limit.merge-command compatibility.judgment-generation
+        closure.by-kind code.remote-ref code.merge-scope compatibility.judgment-generation
         verifier.corpus verifier.integration code.write-scopes
         code.worktree-identity code.adoption code.worktree-preservation usage.outputs
         scheduler.queued-job cluster.plan-specific cluster.access
@@ -100,6 +99,7 @@ CLOSED_DECLARATIONS = {
         adjudication.nonoverridable adjudication.honesty watch.facts
         watch.source watch.proof loop.quiescence loop.advance loop.yield
         preservation.before-cleanup dispatch.mechanics merge.requirements
+        code.merge-command limit.merge-command
         tracker.authority tracker.reconcile tracker.dag report.three-parts
         handoff.contents handoff.transfer takeover.verify
         limit.session-liveness

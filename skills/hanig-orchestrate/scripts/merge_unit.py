@@ -3,6 +3,8 @@
 
 Never imported by the coordinator. Local authority readers/locking are shared
 with swarm; scope checking, receipt recording and advancement use its CLI.
+The operator's gh calls inherit its environment for authentication; swarm.py
+children use hanig-swarm's child_environment.child_env containment instead.
 Forge observations remain attestations. Same-node, trusted-writer convention;
 GitHub's head compare protects the merge, not a concurrent CI rerun/retarget.
 """
@@ -19,11 +21,18 @@ import sys
 import tempfile
 from urllib.parse import urlsplit
 
+import skill_paths
+
+_ORCHESTRATE_DIR = os.environ.get("HANIG_ORCHESTRATE_DIR") or Path(__file__).parents[1]
+_SWARM_DIR = skill_paths.sibling_skill_root(
+    _ORCHESTRATE_DIR, "hanig-orchestrate", "hanig-swarm")
+sys.path.insert(0, str(_SWARM_DIR / "scripts"))
+import child_environment as CE
 import coordinator_paths as CP
 import swarm as S
 
 
-SWARM = str(Path(__file__).with_name("swarm.py"))
+SWARM = str(_SWARM_DIR / "scripts" / "swarm.py")
 PR_FIELDS = "number,url,state,headRefOid,baseRefName,baseRefOid,mergeCommit"
 
 
@@ -74,7 +83,8 @@ def run(command, allowed=(0,)):
     print("+ " + shlex.join(command), flush=True)
     result = subprocess.run(command, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, timeout=300)
+                            text=True, timeout=300,
+                            env=CE.child_env() if command[:2] == [sys.executable, SWARM] else None)
     if result.returncode not in allowed:
         raise Refusal("command exited {}: {}{}".format(
             result.returncode, result.stdout, result.stderr))
@@ -246,7 +256,20 @@ def reconcile(args, plan):
             # The named exception authorizes the nonzero exit, not a guessed
             # report. Preserve the exact failed observation for the operator.
             scope_report = {"unparsed_stdout": scope.stdout, "stderr": scope.stderr}
+        if scope.returncode == 0:
+            if (not isinstance(scope_report, dict)
+                    or scope_report.get("status") != "in_scope"
+                    or scope_report.get("unit") != binding["unit"]
+                    or scope_report.get("attempt") != binding["attempt"]
+                    or scope_report.get("head") != binding["head"]
+                    or not isinstance(scope_report.get("scope"), list)
+                    or any(not isinstance(p, str) for p in scope_report["scope"])
+                    or scope_report.get("out_of_scope") != []
+                    or scope_report.get("deletions_out_of_scope") != []):
+                raise Refusal("successful scope-check returned an invalid scope report")
+            oid(scope_report.get("base"))
         observation.update({"scope_exit": scope.returncode, "scope": scope_report,
+                            "scope_stdout": scope.stdout, "scope_stderr": scope.stderr,
                             "allow_unchecked_scope": args.allow_unchecked_scope, "checks": checks})
         intent = {"schema_version": 1, "operation_id": operation_id,
                   "binding": binding, "root": root, "phase": "merge_requested",

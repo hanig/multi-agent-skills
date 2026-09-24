@@ -68,8 +68,6 @@ SWARM_DECLARATIONS = (
     "closure.by-kind",
     "code.remote-ref",
     "code.merge-scope",
-    "code.merge-command",
-    "limit.merge-command",
     "compatibility.judgment-generation",
     "verifier.corpus",
     "verifier.integration",
@@ -158,6 +156,8 @@ ORCHESTRATE_DECLARATIONS = (
     "preservation.before-cleanup",
     "dispatch.mechanics",
     "merge.requirements",
+    "code.merge-command",
+    "limit.merge-command",
     "tracker.authority",
     "tracker.reconcile",
     "tracker.dag",
@@ -319,8 +319,6 @@ REFERENCE_ELABORATION_INVENTORIES = {
         ("references/limits.md", "limit.worktree-inode", 1),
         ("references/limits.md", "placement.reference-elaboration", 3),
         ("references/protocol-details.md", "code.merge-scope", 1),
-        ("references/protocol-details.md", "code.merge-command", 2),
-        ("references/protocol-details.md", "limit.merge-command", 2),
         ("references/protocol-details.md", "placement.reference-elaboration", 1),
     ),
     "hanig-orchestrate": (
@@ -352,6 +350,8 @@ REFERENCE_ELABORATION_INVENTORIES = {
         ("references/operating-loop.md", "loop.advance", 1),
         ("references/operating-loop.md", "loop.quiescence", 1),
         ("references/operating-loop.md", "merge.requirements", 1),
+        ("references/operating-loop.md", "code.merge-command", 2),
+        ("references/operating-loop.md", "limit.merge-command", 2),
         ("references/operating-loop.md", "preservation.before-cleanup", 1),
         ("references/operating-loop.md", "report.three-parts", 1),
         ("references/operating-loop.md", "tracker.authority", 1),
@@ -1031,7 +1031,7 @@ class TestAuthoredSkillShape(unittest.TestCase):
             )
             self.assertEqual(doctor.returncode, 0, doctor.stdout)
             authored = [line for line in doctor.stdout.splitlines()
-                        if "hanig-orchestrate" in line]
+                        if line.split()[:1] == ["hanig-orchestrate"]]
             self.assertEqual(len(authored), 1, doctor.stdout)
             self.assertIn("ours (version", authored[0])
 
