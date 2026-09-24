@@ -171,6 +171,90 @@ class CommitIdentityTests(unittest.TestCase):
             self.assertEqual(intent["base_commit"], self.target)
             self.assertEqual(intent["target_commit"], self.target)
 
+    def test_symlink_and_real_workspace_share_target_within_advance(self):
+        self.check_alias_target_observation(raw_workspace=False)
+
+    def test_raw_workspace_aliases_share_target_within_advance(self):
+        self.check_alias_target_observation(raw_workspace=True)
+
+    def check_alias_target_observation(self, raw_workspace):
+        alias = self.tmp / "repo-link"
+        alias.symlink_to(self.repo, target_is_directory=True)
+        first = dict(self.plan["units"][0], repo=str(alias))
+        second = dict(self.plan["units"][0], id="code-two")
+        plan = {"name": "alias-resolution", "units": [first, second]}
+        state = {"units": {}}
+        state_dir = str(self.tmp / "alias-state")
+        newer = git(self.repo, "commit-tree", "HEAD^{tree}",
+                    "-p", self.target, "-m", "newer target")
+        observations = []
+        remote_query = S._git_push_destination
+        workspace = S._plan_workspace
+
+        def moving_target(repo, raw, resolved, remote_index, *args, **kwargs):
+            if args == ("ls-remote", "--exit-code", raw, "refs/heads/main"):
+                observations.append(repo)
+                commit = self.target if len(observations) == 1 else newer
+                return 0, commit + "\trefs/heads/main\n", ""
+            return remote_query(repo, raw, resolved, remote_index,
+                                *args, **kwargs)
+
+        def workspace_spelling(unit):
+            repo, problem = workspace(unit)
+            # The current helper already resolves aliases. Inject raw spellings
+            # to exercise the cache's own boundary without relying on that.
+            if raw_workspace and not problem:
+                repo = unit["repo"]
+            return repo, problem
+
+        def allocate(_plan, unit, root):
+            path = Path(root) / unit["id"] / ("alias-" + unit["id"])
+            path.mkdir(parents=True)
+            return str(path), None
+
+        with mock.patch.object(S, "_plan_workspace",
+                               side_effect=workspace_spelling), \
+                mock.patch.object(S, "_git_push_destination",
+                                  side_effect=moving_target), \
+                mock.patch.object(S, "_allocate", side_effect=allocate), \
+                mock.patch.object(S, "renew_lease", return_value=True), \
+                mock.patch.object(S, "_bind", return_value=None):
+            result = S.advance(plan, state, state_dir,
+                               str(self.tmp / "alias-runs"), False)
+
+        self.assertEqual(result[1], 2, result[0])
+        self.assertIsNone(result[2], result[0])
+        self.assertEqual(observations, [str(self.repo.resolve())])
+        durable = S.load_state(state_dir)
+        for uid in ("code", "code-two"):
+            intents = durable["units"][uid]["attempt_launch_intents"]
+            self.assertEqual(len(intents), 1)
+            intent = next(iter(intents.values()))
+            self.assertEqual(intent["repo"], str(self.repo.resolve()))
+            self.assertEqual(intent["base_commit"], self.target)
+            self.assertEqual(intent["target_commit"], self.target)
+        self.assertEqual([argv[argv.index("--base") + 1]
+                          for argv in self.fake.launches],
+                         [self.target, self.target])
+
+    def test_cache_keeps_distinct_repositories_and_target_branches_separate(self):
+        other = self.tmp / "other-repo"
+        subprocess.run(["git", "clone", "-q", "--branch", "main",
+                        str(self.remote), str(other)], check=True, env=GIT_ENV)
+        git(self.repo, "push", "-q", "origin", "HEAD:refs/heads/release")
+        units = [dict(self.plan["units"][0]),
+                 dict(self.plan["units"][0], repo=str(other)),
+                 dict(self.plan["units"][0], target_branch="release")]
+        cache = {}
+        with mock.patch.object(S, "_resolve_dispatch_target",
+                               wraps=S._resolve_dispatch_target) as resolve:
+            for unit in units:
+                target, problem = S._dispatch_target_for_advance(unit, cache)
+                self.assertIsNone(problem)
+                self.assertEqual(target["repo"], str(Path(unit["repo"]).resolve()))
+                self.assertEqual(target["target_branch"], unit["target_branch"])
+            self.assertEqual(resolve.call_count, 3)
+
     def test_other_branch_at_target_is_admitted(self):
         git(self.repo, "checkout", "-qb", "same-commit")
         result, _state = self.run_advance()
