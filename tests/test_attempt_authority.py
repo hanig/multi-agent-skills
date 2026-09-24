@@ -631,7 +631,26 @@ def _is_rendered(node, allowed_bare):
 
 
 RENDERED_REFUSAL_FUNCTIONS = (
-    "judge_detail", "validate_pinned_head", "workspace_identity_problem")
+    "_anchored_remote_transport",
+    "_judge_anchored_ref",
+    "_refuse",
+    "artifact_basis_problem",
+    "artifact_transition_problem",
+    "judge_artifacts",
+    "launch_record_path",
+    "launch_facts_problem",
+    "read_sealed_launch_record",
+    "read_launch_record",
+    "remote_push_transport",
+    "refused_launch",
+    "decode_artifact_basis",
+    "decode_launch_facts",
+    "effective_remote_ref",
+    "judge_detail",
+    "stray_untracked",
+    "validate_pinned_head",
+    "workspace_identity_problem",
+)
 
 
 class TestPinnedCommitIsNotAMovingRef(RepoCase):
@@ -819,6 +838,87 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
         # A short one is not padded or mangled.
         self.assertEqual(W.render_git_diagnostic(2, "fatal: nope"),
                          "git exited 2 and said: fatal: nope")
+
+    def test_remote_push_transport_renders_git_failure(self):
+        def runner(argv, **kwargs):
+            joined = " ".join(argv)
+            if "remote.origin.pushurl" in joined:
+                return 1, "", ""
+            if "remote.origin.url" in joined:
+                return 0, "https://example.invalid/repo.git\0", ""
+            if "remote get-url --push origin" in joined:
+                return 128, "", "fatal: line one\n" + "x" * 5000
+            self.fail("unexpected git invocation: %r" % (argv,))
+
+        raw, resolved, problem = W.remote_push_transport(runner, "/repo")
+        self.assertIsNone(raw)
+        self.assertIsNone(resolved)
+        self.assertLessEqual(len(problem), W._DIAGNOSTIC_LIMIT)
+        self.assertNotIn("\n", problem)
+        self.assertIn("[truncated]", problem)
+
+    def test_launch_record_paths_do_not_alias_overlong_attempt_names(self):
+        with tempfile.TemporaryDirectory() as root:
+            first = Path(root) / ("a" * 243 + "1")
+            second = Path(root) / ("a" * 243 + "2")
+            first_path = W.launch_record_path(first)
+            second_path = W.launch_record_path(second)
+        self.assertNotEqual(first_path, second_path)
+        self.assertTrue(first_path.name.endswith("1.json"))
+        self.assertTrue(second_path.name.endswith("2.json"))
+
+    def test_effective_remote_ref_preserves_an_overlong_branch(self):
+        branch = "b" * 5000
+        self.assertEqual(
+            W.effective_remote_ref({"schema_version": 3, "branch": branch}),
+            "refs/heads/" + branch)
+
+    def test_launch_facts_problem_preserves_an_overlong_comparison_ref(self):
+        attempt = self.tmp / "runs" / "u1" / "att1"
+        attempt.mkdir(parents=True)
+        branch = "b" * 5000
+        facts = dict(self.facts(attempt), schema_version=4,
+                     branch=branch,
+                     judgment_ref="refs/heads/" + branch,
+                     repository_remote="https://example.invalid/repo.git")
+        self.assertIsNone(W.launch_facts_problem(facts))
+
+    def test_anchored_ref_fetch_preserves_an_overlong_source_ref(self):
+        branch = "b" * 5000
+        selected_ref = "refs/heads/" + branch
+        facts = {
+            "schema_version": 4,
+            "attempt_id": "att1",
+            "repo": "/repo",
+            "execution_workspace": "/workspace",
+            "base_commit": "a" * 40,
+            "base_tree": "b" * 40,
+            "judgment_ref": selected_ref,
+            "repository_remote": "https://example.invalid/repo.git",
+        }
+        seen = {}
+
+        def runner(argv, **kwargs):
+            joined = " ".join(argv)
+            if "remote.origin.pushurl" in joined:
+                return 1, "", ""
+            if "remote.origin.url" in joined:
+                return 0, facts["repository_remote"] + "\0", ""
+            if "remote get-url --push origin" in joined:
+                return 0, facts["repository_remote"], ""
+            if "ls-remote --exit-code" in joined:
+                return 0, "c" * 40 + "\t" + selected_ref, ""
+            if "fetch" in argv:
+                seen["refspec"] = argv[-1]
+                return 1, "", "fetch stopped after refspec capture"
+            self.fail("unexpected git invocation: %r" % (argv,))
+
+        produced, head, _detail = W._judge_anchored_ref(runner, facts)
+        self.assertFalse(produced)
+        self.assertIsNone(head)
+        self.assertEqual(
+            seen["refspec"],
+            "+%s:refs/hanig-swarm/judgments/att1" % selected_ref)
 
     def test_the_whole_refusal_is_bounded_not_just_the_diagnostic(self):
         """kimi-k2.7-code: the recorded path went in verbatim.
