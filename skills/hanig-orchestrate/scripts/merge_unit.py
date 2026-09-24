@@ -10,6 +10,7 @@ GitHub's head compare protects the merge, not a concurrent CI rerun/retarget.
 """
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -60,7 +61,7 @@ def read_object(path):
 
 
 def durable_write(path, value):
-    """Publish a complete intent and fsync its directory before a forge write."""
+    """Atomically publish a journal record and fsync it and its directory."""
     fd, temporary = tempfile.mkstemp(prefix=".merge-unit-", dir=str(path.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -208,20 +209,85 @@ def observed_pr_url(pr, host, repo_path, number):
     return url
 
 
+def current_intent(state_dir, binding, root, repair=True):
+    """Follow durable abandonments from the legacy binding-derived operation.
+
+    The sidecar is the abandonment commit point. If a crash leaves the original
+    intent unmarked, finish that local update before permitting a successor.
+    No worker file or filesystem timestamp selects the current operation.
+    """
+    operation_id = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
+    while True:
+        path = state_dir / ("merge-unit-" + operation_id + ".json")
+        abandonment_path = state_dir / ("merge-abandonment-" + operation_id + ".json")
+        intent = read_object(path) if path.exists() else None
+        if intent is not None and (
+                intent.get("binding") != binding or intent.get("root") != root):
+            raise Refusal("durable merge intent conflicts with current authority/root")
+        if not abandonment_path.exists():
+            # Legacy metadata never gated ordinary MERGED reconciliation.
+            # Only our new resolution marker requires a companion record.
+            if intent is not None and intent.get("phase") == "resolved_by_abandonment":
+                raise Refusal("merge intent has no valid resolution record")
+            return operation_id, path, intent
+        record = read_object(abandonment_path)
+        original = record.get("intent")
+        if (not isinstance(original, dict) or original.get("phase") != "merge_requested"
+                or record.get("operation_id") != operation_id
+                or record.get("schema_version") != 1):
+            raise Refusal("invalid abandonment record")
+        resolved = dict(original, phase="resolved_by_abandonment",
+                        abandonment=abandonment_path.name)
+        if intent not in (original, resolved):
+            raise Refusal("abandonment record does not match its retained intent")
+        for key in ("approver", "reason", "observed_at"):
+            nonempty(record.get(key, ""))
+        datetime.fromisoformat(record["observed_at"])
+        observed = record.get("observed_pr", {})
+        check_pr(observed, binding)
+        if observed.get("state") != "OPEN":
+            raise Refusal("abandonment record did not observe an OPEN PR")
+        if repair and intent != resolved:
+            durable_write(path, resolved)
+        operation_id = hashlib.sha256(
+            (operation_id + ":after-abandonment").encode()).hexdigest()
+
+
+def abandon(args, intent_path, intent, pr, operation_id):
+    record_path = intent_path.with_name(
+        "merge-abandonment-" + operation_id + ".json")
+    record = {"schema_version": 1, "operation_id": operation_id,
+              "intent": intent, "approver": args.approver, "reason": args.reason,
+              "observed_at": datetime.now(timezone.utc).isoformat(), "observed_pr": pr}
+    durable_write(record_path, record)
+    resolved = dict(intent, phase="resolved_by_abandonment", abandonment=record_path.name)
+    durable_write(intent_path, resolved)
+    print("Abandoned merge intent {}; record: {}. No merge or advance ran.".format(
+        operation_id, record_path))
+
+
 def reconcile(args, plan):
     state_dir, root, binding, host, repo_path = authority(args, plan)
     cmd = commands(args, root, binding, host, repo_path)
-    operation_id = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
-    intent_path = state_dir / ("merge-unit-" + operation_id + ".json")
+    operation_id, intent_path, intent = current_intent(
+        state_dir, binding, root, repair=not args.dry_run)
+    if args.abandon_intent and (
+            args.abandon_intent != operation_id or intent is None
+            or intent.get("phase") not in ("merge_requested", "merged")):
+        raise Refusal("named operation is not the unit's current unresolved intent")
     if args.dry_run:
         print("DRY RUN: no forge calls, writes, receipt or advancement; exit 2.")
         print("+ " + shlex.join(cmd["view"]))
-        print("if OPEN with no prior merge request:")
-        for key in ("scope", "checks"):
-            print("+ " + shlex.join(cmd[key]))
-        print("persist intent {} before the conditional merge".format(intent_path))
-        print("+ " + shlex.join(cmd["merge"]))
-        print("+ " + shlex.join(cmd["view"]))
+        if args.abandon_intent:
+            print("if OPEN at judged head: persist abandonment record and resolve {}; "
+                  "no merge or advance".format(intent_path))
+        else:
+            print("if OPEN with no prior merge request:")
+            for key in ("scope", "checks"):
+                print("+ " + shlex.join(cmd[key]))
+            print("persist intent {} before the conditional merge".format(intent_path))
+            print("+ " + shlex.join(cmd["merge"]))
+            print("+ " + shlex.join(cmd["view"]))
         print("if MERGED at judged head (including reconciliation):")
         print("+ " + shlex.join(parent_command(host, repo_path, "<merged-sha>")))
         print("+ " + shlex.join(receipt_command(
@@ -231,13 +297,15 @@ def reconcile(args, plan):
 
     # Refuse an unreadable receipt journal before any merge request.
     receipts, _ = S.load_merge_receipts(state_dir)
-    intent = read_object(intent_path) if intent_path.exists() else None
-    if intent and (intent.get("binding") != binding or intent.get("root") != root):
-        raise Refusal("durable merge intent conflicts with current authority/root")
     pr = json.loads(run(cmd["view"]).stdout)
     check_pr(pr, binding)
     url = observed_pr_url(pr, host, repo_path, args.pr)
     observation = {"approver": args.approver, "already_merged": pr["state"] == "MERGED"}
+    if args.abandon_intent and pr["state"] == "OPEN":
+        if intent["phase"] != "merge_requested":
+            raise Refusal("cannot abandon an intent that already observed a merge")
+        abandon(args, intent_path, intent, pr, operation_id)
+        return None
     if pr["state"] == "OPEN":
         if intent:
             raise Refusal("earlier merge request has an unresolved outcome; refusing a second merge call")
@@ -292,7 +360,8 @@ def reconcile(args, plan):
     if intent is None:
         intent = {"schema_version": 1, "operation_id": operation_id,
                   "binding": binding, "root": root}
-    intent.update({"phase": "merged", "merged_as": merged, "target_commit": target,
+    intent.update({"operation_id": operation_id,
+                   "phase": "merged", "merged_as": merged, "target_commit": target,
                    "reconciliation": observation})
     durable_write(intent_path, intent)
     expected = {"unit": args.unit, "repo": binding["repo"], "pr": url,
@@ -319,9 +388,15 @@ def main(argv=None):
     parser.add_argument("--root")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--allow-unchecked-scope", type=nonempty, metavar="REASON")
+    parser.add_argument("--abandon-intent", type=nonempty, metavar="OPERATION_ID")
+    parser.add_argument("--reason", type=nonempty)
     args = parser.parse_args(argv)
     if args.pr <= 0:
         parser.error("--pr must be a positive PR number")
+    if args.abandon_intent and not args.reason:
+        parser.error("--abandon-intent requires --reason")
+    if args.reason and not args.abandon_intent:
+        parser.error("--reason requires --abandon-intent")
     try:
         plan = read_object(args.plan)
         # Validate external paths BEFORE even opening a coordinator lock.
@@ -336,12 +411,14 @@ def main(argv=None):
             advance = reconcile(args, plan)
         finally:
             S.release_lease(args.state_dir)
+        if advance is None:
+            return 0
         # advance owns the same lease itself; never hold it across this child.
         result = run(advance)
         print(result.stdout, end="")
         print("Merge receipt recorded and advance ran.")
         return 0
-    except (OSError, ValueError, TypeError, KeyError, AttributeError,
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, argparse.ArgumentTypeError,
             subprocess.SubprocessError, S.PlanError, S.OutboxError,
             CP.PathPolicyError) as exc:
         print("REFUSED: {}".format(exc), file=sys.stderr)
