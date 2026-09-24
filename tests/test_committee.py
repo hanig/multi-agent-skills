@@ -306,6 +306,39 @@ class TestCommitteeTiebreak(unittest.TestCase):
         self.assertEqual(self.invoke()[0], 1)
         self.assertEqual(self.calls, [])
 
+    def assert_veto_survives_author_error(self, prior, declared, error):
+        reason = "Changing the owner's goal"
+        for command in ("synthesize", "tiebreak"):
+            for retry in ("synthesize", "tiebreak"):
+                with self.subTest(command=command, retry=retry):
+                    self.calls.clear()
+                    committee.save_session("split", dict(self.session, author=prior))
+                    code, output, refused = self.invoke(
+                        command, "--stop-and-ask", reason, author=declared)
+                    self.assertEqual(code, 1, output)
+                    self.assertIn(error, refused["resolution"]["reason"])
+                    self.assertEqual(refused["resolution"]["status"], "OWNER")
+                    self.assertEqual(self.calls, [])
+
+                    # invoke reloads the saved session; no flag is repeated.
+                    code, output, retried = self.invoke(
+                        retry, author=None if prior else "gpt-5.6-sol")
+                    self.assertEqual(code, 1, output)
+                    self.assertEqual(refused.get("stop_and_ask"), reason)
+                    self.assertEqual(retried.get("stop_and_ask"), reason)
+                    self.assertEqual(retried["resolution"]["status"], "OWNER")
+                    self.assertIn(reason, retried["resolution"]["reason"])
+                    self.assertEqual(self.calls, [])
+                    self.assertEqual([d["status"] for d in retried["decisions"]],
+                                     ["OWNER", "OWNER"])
+
+    def test_stop_and_ask_survives_unknown_author_retry(self):
+        self.assert_veto_survives_author_error(None, None, "author unknown")
+
+    def test_stop_and_ask_survives_conflicting_author_retry(self):
+        self.assert_veto_survives_author_error(
+            "gpt-5.6-sol", "luna", "author conflicts")
+
     def test_model_identified_stop_and_ask_routes_owner(self):
         for command in ("synthesize", "tiebreak"):
             with self.subTest(command=command):

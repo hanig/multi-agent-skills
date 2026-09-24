@@ -438,6 +438,10 @@ def finish_decision(args, session, record, status, reason=None):
 
 def decision_inputs(args, session):
     """Caller declarations and session files are trusted, not authority grants."""
+    # Retain the veto even when author validation returns early; the caller
+    # persists this session with its OWNER decision before allowing a retry.
+    if getattr(args, "stop_and_ask", None):
+        session["stop_and_ask"] = args.stop_and_ask
     author = (getattr(args, "author", None) or "").strip()
     prior = (session.get("author") or "").strip()
     if prior and author and prior.casefold() != author.casefold():
@@ -447,8 +451,6 @@ def decision_inputs(args, session):
     session["author"] = author or prior
     if not (prior or author):
         return None, "author unknown; declare --author before resolving a split"
-    if getattr(args, "stop_and_ask", None):
-        session["stop_and_ask"] = args.stop_and_ask
     if session.get("stop_and_ask"):
         return None, "mandate stop-and-ask: " + session["stop_and_ask"]
     mandate, error = R.read_text_bounded(Path(args.mandate_file))
