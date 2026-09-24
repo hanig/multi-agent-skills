@@ -439,9 +439,9 @@ class TestTheProtocolForbidsGitStash(unittest.TestCase):
 
     def test_it_requires_porcelain_before_committing(self):
         text = self.protocol()
-        line = [l for l in text.splitlines() if "git status --porcelain" in l]
+        line = [l for l in text.splitlines() if "Before every commit" in l]
         self.assertEqual(len(line), 1, text)
-        self.assertIn("Before every commit", line[0])
+        self.assertIn("git status --porcelain", line[0])
         self.assertIn("STOP AND REPORT", line[0])
         self.assertIn("another agent's files", line[0])
 
@@ -667,9 +667,105 @@ class TestReviewAndPushBeforeAgentCreation(unittest.TestCase):
         prompt = self.launches[0][-1]
         self.assertIn(GATE_CLAUSE, prompt)
         self.assertIn(PUSH_CLAUSE, prompt)
-        # Existing intents have no routing fields. They must be explicit
-        # about that absence rather than assert today's default was recorded.
-        self.assertIn("provider/model for this unit is UNKNOWN", prompt)
+        # This is a NEW launch: its default is recorded before agent creation.
+        self.assertIn("--author " + S.DEFAULT_AGENT_PROVIDER, prompt)
+
+
+class TestRecoveryCommandsPreserveContent(unittest.TestCase):
+    """Execute the recovery block delivered to workers, against a real remote."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="protocol-recovery-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.repo = self.tmp / "repo"
+        self.remote = self.tmp / "origin.git"
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True,
+                       env=ENV)
+        subprocess.run(["git", "init", "-q", "--bare", str(self.remote)],
+                       check=True, env=ENV)
+        git(self.remote, "config", "core.logAllRefUpdates", "true")
+        (self.repo / "tracked.txt").write_text("base\n")
+        git(self.repo, "add", "tracked.txt")
+        git(self.repo, "commit", "-qm", "base")
+        git(self.repo, "branch", "-M", "swarm-a1")
+        git(self.repo, "remote", "add", "origin", str(self.remote))
+        self.base = git(self.repo, "rev-parse", "HEAD").strip()
+        self.anchored_ref = "refs/heads/swarm-a1"
+        git(self.repo, "push", "-q", "origin",
+            self.base + ":" + self.anchored_ref)
+        self.recovery_ref = "refs/heads/recovery/swarm-a1"
+        self.message = ("RECOVERY, NOT READY: not reviewed; must not be merged; "
+                        "open reproduced finding: sample failure")
+        self.protocol = S._code_completion_protocol(dict(
+            INTENT, repo=str(self.repo), repository_remote=str(self.remote),
+            base_commit=self.base, judgment_ref=self.anchored_ref))
+
+    def run_recovery(self):
+        # Nothing restates the shell commands: mutations to the delivered
+        # block are executed by the consumer, /bin/sh, in this real repo.
+        block = self.protocol.split("```sh\n", 1)[1].split("\n```", 1)[0]
+        return subprocess.run(
+            ["sh", "-c", block], cwd=self.repo, capture_output=True, text=True,
+            env=dict(ENV, SWARM_RECOVERY_MESSAGE=self.message))
+
+    def make_work(self, committed):
+        (self.repo / "tracked.txt").write_text("changed\n")
+        (self.repo / "new.txt").write_text("new content\n")
+        # Stage exactly the work the caller inspected and owns, per protocol.
+        git(self.repo, "add", "tracked.txt", "new.txt")
+        if committed:
+            git(self.repo, "commit", "-qm", "implementation")
+
+    def check_recovered(self, committed):
+        self.make_work(committed)
+        content_head = git(self.repo, "rev-parse", "HEAD").strip()
+        result = self.run_recovery()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(git(self.repo, "status", "--porcelain"), "")
+        head = git(self.repo, "rev-parse", "HEAD").strip()
+        self.assertEqual(git(self.remote, "rev-parse", self.recovery_ref).strip(), head)
+        self.assertEqual(git(self.remote, "rev-parse", self.anchored_ref).strip(),
+                         self.base, "recovery moved the attempt's anchored ref")
+        self.assertEqual(git(self.remote, "show", head + ":tracked.txt"), "changed\n")
+        self.assertEqual(git(self.remote, "show", head + ":new.txt"), "new content\n")
+        self.assertEqual(git(self.remote, "log", "-1", "--format=%s", head).strip(),
+                         self.message)
+        pushed = git(self.remote, "reflog", "show", "--format=%H",
+                     self.recovery_ref).splitlines()
+        self.assertEqual(len(pushed), 2 if committed else 1)
+        if committed:
+            self.assertEqual(pushed[-1], content_head,
+                             "the first push must preserve the existing content")
+            self.assertEqual(git(self.remote, "rev-parse", head + "^1").strip(),
+                             content_head)
+            self.assertEqual(git(self.remote, "rev-parse", head + "^{tree}"),
+                             git(self.remote, "rev-parse", content_head + "^{tree}"))
+
+    def test_dirty_tree_is_committed_and_pushed(self):
+        self.check_recovered(committed=False)
+
+    def test_clean_tree_pushes_content_before_empty_recovery_label(self):
+        self.check_recovered(committed=True)
+
+    def test_empty_label_alone_is_not_preservation(self):
+        git(self.repo, "commit", "--allow-empty", "-qm", self.message)
+        before = git(self.repo, "rev-parse", "HEAD")
+        result = self.run_recovery()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires real content", result.stderr)
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), before)
+        self.assertEqual(git(self.remote, "for-each-ref", self.recovery_ref), "")
+
+    def test_failed_content_push_does_not_create_a_label(self):
+        self.make_work(committed=True)
+        before = git(self.repo, "rev-parse", "HEAD")
+        hook = self.remote / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+        result = self.run_recovery()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), before)
+        self.assertEqual(git(self.remote, "for-each-ref", self.recovery_ref), "")
 
 
 class TestTheCoordinatorRunsNoStashOfItsOwn(unittest.TestCase):

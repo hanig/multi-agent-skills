@@ -1000,7 +1000,7 @@ def _code_completion_protocol(intent):
     if provider and isinstance(model, str) and model:
         author_instruction = (
             f"Pass --author {shlex.quote(provider + '/' + model)} on every "
-            "review.py run so the gate excludes this unit's own model.")
+            "review.py or committee.py run so the gate excludes this unit's own model.")
     else:
         author_instruction = (
             "The coordinator-recorded provider/model for this unit is "
@@ -1041,7 +1041,38 @@ Commit all intended work on {branch!r}. Uncommitted work is invisible to the tra
 After opening the pull request, STOP. NEVER merge, approve, or enable auto-merge. Merge decisions belong to the orchestrator. The merged-PR closure criterion describes how the orchestrator's merge is judged, not an instruction to the worker.
 {judgment_instruction}
 Push after every meaningful edit. Commit and push the actual changed content to the anchored attempt ref for normal progress; use the recovery ref below when preserving a failed review. An empty or marker commit preserves no implementation; a tree identical to the recorded base is refused.
-Before opening a pull request, run this repository's review gate. Use hanig-review-gate's review.py from the loaded skill directory with --kind implementation, the actual --round number, and --range {base}..HEAD to review the COMPLETE delta from the recorded base. Commit all intended edits first and leave the worktree clean so that range includes all intended work. Declare the change's claims and the counter-claim that it cannot make an honest run fail. {author_instruction} Only exit 0 (REVIEW_PASS) permits opening a pull request; unavailable, partial, incomplete, and failing reviews are not a pass. Reproduce each confirmed finding before acting on it. If a reproduced failure remains, do NOT open a pull request: commit the work with a message beginning RECOVERY, NOT READY: that lists every open reproduced finding and says the work must not be merged, push that commit to origin under refs/heads/recovery/{branch} without moving the anchored attempt ref, then STOP AND REPORT where it was preserved. REVIEW_PASS means the panel failed to refute the claims, not proof.
+Before opening a pull request, run this repository's review gate. Use hanig-review-gate's review.py from the loaded skill directory with --kind implementation, the actual --round number, and --range {base}..HEAD to review the COMPLETE delta from the recorded base. Commit all intended edits first and leave the worktree clean so that range includes all intended work. Declare the change's claims and the standalone counter-claim "This change cannot make an honest run fail." {author_instruction} Only exit 0 (REVIEW_PASS) permits opening a pull request; unavailable, partial, incomplete, and failing reviews are not a pass. Reproduce each confirmed finding before acting on it. If a reproduced failure remains, do NOT open a pull request: follow the recovery procedure below without moving the anchored attempt ref, then STOP AND REPORT where it was preserved. REVIEW_PASS means the panel failed to refute the claims, not proof.
+Recovery procedure: first inspect status as required below and stage only your own uncommitted work. Set and export SWARM_RECOVERY_MESSAGE to a message beginning RECOVERY, NOT READY: that says the work has not passed review, must not be merged, and lists every open reproduced finding. Run the following in the current attempt worktree. It commits UNCOMMITTED work if present; on an already clean tree it pushes existing content first, then adds an empty recovery label and pushes it. A label commit alone preserves nothing and must never be the only thing pushed. If any step fails, retain the worktree and report the failure; do not clean up or claim preservation succeeded.
+```sh
+(
+set -eu
+: "${{SWARM_RECOVERY_MESSAGE:?set the recovery message with every open reproduced finding}}"
+case "$SWARM_RECOVERY_MESSAGE" in
+    'RECOVERY, NOT READY:'?*) ;;
+    *) echo 'Recovery message must begin RECOVERY, NOT READY:' >&2; exit 1 ;;
+esac
+swarm_recovery_dirty=$(git status --porcelain --untracked-files=all)
+if test -n "$swarm_recovery_dirty"; then
+    git commit -m "$SWARM_RECOVERY_MESSAGE"
+fi
+test -z "$(git status --porcelain --untracked-files=all)" || exit 1
+swarm_recovery_head=$(git rev-parse HEAD)
+swarm_recovery_ref={shlex.quote('refs/heads/recovery/' + branch)}
+swarm_recovery_diff=0
+git diff --quiet {shlex.quote(base)} "$swarm_recovery_head" -- || swarm_recovery_diff=$?
+if test "$swarm_recovery_diff" -ne 1; then
+    echo 'Recovery requires real content different from the recorded base' >&2
+    exit 1
+fi
+git push origin "$swarm_recovery_head:$swarm_recovery_ref"
+if test -z "$swarm_recovery_dirty"; then
+    git status --porcelain
+    git commit --allow-empty -m "$SWARM_RECOVERY_MESSAGE"
+    swarm_recovery_head=$(git rev-parse HEAD)
+    git push origin "$swarm_recovery_head:$swarm_recovery_ref"
+fi
+)
+```
 NEVER run `git stash`, in any form. The stash stack is a SINGLE ref in the shared common Git directory, so every worktree of {repo!r} shares one stack and a pop takes whatever another agent parked. Do these instead: to read a file as it was at base, `git show {base}:<path>`; to set work aside, `git diff > /tmp/wip.patch` then `git checkout -- <path>`; and to answer "was this test already failing", add a separate worktree at {base} and run it there, rather than moving anything in this one. Note what such a comparison does and does not show: green at {base} and green here is a claim about your change alone, not about {target!r} after a merge.
 Before every commit, run `git status --porcelain` and read it. Stage only paths you changed yourself; if it lists a path you did not touch, STOP AND REPORT instead of committing it. The observed failure is a commit that carried another agent's files.
 If you cannot finish cleanly, STOP AND REPORT the problem instead of working around it.
@@ -1093,6 +1124,7 @@ def _code_protocol_problem(prompt, intent):
         "author exclusion": "--author",
         "finding reproduction": "Reproduce each confirmed finding before acting on it.",
         "failed review preservation": "RECOVERY, NOT READY:",
+        "clean-tree recovery label": "git commit --allow-empty",
         "review interpretation": "REVIEW_PASS means the panel failed to refute the claims, not proof.",
         # ARC-243. The prohibition and each substitute are required
         # SEPARATELY and by exact text, so an edit cannot leave the ban
@@ -4128,6 +4160,11 @@ def _capture_code_launch(unit_dir, u, dispatch_source=None):
         # Audit-only, captured before Paseo runs and persisted with the intent
         # so recovery retains this observation instead of sampling a new one.
         "installed_skills": _installed_skill_snapshot(repo, head),
+        # Prompt metadata only, using the same defaults/overrides as _submit.
+        # Do not copy into launch facts or use for admission/closure. Missing
+        # fields in legacy intents remain unknown; never backfill them.
+        "provider": u.get("provider") or DEFAULT_AGENT_PROVIDER,
+        "model": u.get("model"),
     }
     return None, {"base": head, "intent": intent}
 
