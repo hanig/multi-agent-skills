@@ -27,7 +27,7 @@ These observations were checked against `skills/hanig-review-gate/reviewers.json
 
 `standard`: luna, kimi-k2.7-code, glm-5.3.
 
-`deep`: luna, kimi-k2.7-code, astra, glm-5.3.
+`deep`: luna, kimi-k2.7-code, glm-5.3, sol. Astra left this tier on 2026-09-24 when it became the code driver.
 
 `committee`: deepseek-v4-pro, luna, kimi-k2.7-code.
 

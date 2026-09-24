@@ -67,6 +67,13 @@ KINDS = U.KINDS
 # the bar, because paseo answers an unknown thinking id with an ERRORED agent,
 # and a default that fails at dispatch is worse than no default.
 #
+# There is deliberately no fallback to another model. A silent fallback would
+# dispatch a model the plan never declared, and a host that cannot serve this
+# one fails loudly instead: paseo returns an ERRORED agent at dispatch. The
+# live check above ran on the coordinator's host; a host that has not run it
+# should, and on 2026-09-24 chimera could not run ANY codex model, sol included,
+# because its codex login token had expired.
+#
 # A unit overrides any of it with `provider`, `model` or `thinking`. Setting
 # `thinking` to null or "" turns the flag off entirely for a provider that has
 # no such option.

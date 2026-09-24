@@ -190,7 +190,7 @@ fast      luna + kimi-k2.7-code
   ↓ pass
 standard  + glm-5.3
   ↓ pass
-deep      + astra @ high
+deep      + sol @ xhigh
 ```
 
 A failing change costs one cheap tier, not the whole panel. Only code that
