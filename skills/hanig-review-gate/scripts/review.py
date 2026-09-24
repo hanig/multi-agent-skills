@@ -360,7 +360,7 @@ def _open_directory_chain(path):
 
 
 def append_review_journal(path, kind, round_no, effective_panel, verdict,
-                          claims):
+                          claims, *, panel_policy=None):
     """Atomically publish one immutable audit record.
 
     State-directory topology and non-cooperating same-UID relinking are trusted
@@ -412,6 +412,8 @@ def append_review_journal(path, kind, round_no, effective_panel, verdict,
         "verdict": verdict,
         "claim_digests": claim_digests(claims),
     }
+    if panel_policy is not None:
+        record["panel_policy"] = panel_policy
     line = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
     collection_fd = event_fd = fd = None
     event_name = (f"{time.time_ns():020d}-{os.getpid()}-"
@@ -463,7 +465,8 @@ def _journal_child(payload):
     path = review_journal_path(payload["files"])
     _record, record_path = append_review_journal(
         path, payload["kind"], payload["round"],
-        payload["effective_panel"], payload["verdict"], payload["claims"])
+        payload["effective_panel"], payload["verdict"], payload["claims"],
+        panel_policy=payload.get("panel_policy"))
     return {"ok": True, "path": str(record_path)}
 
 
@@ -476,6 +479,7 @@ def _run_journal_child(args, completed, verdict):
         "effective_panel": [result["name"] for result in completed],
         "verdict": verdict,
         "claims": args.claim,
+        "panel_policy": getattr(args, "panel_policy", None),
     })
     env = os.environ.copy()
     for name in ("OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"):
@@ -1489,6 +1493,82 @@ def in_profile(rev, profile):
     return profile in (rev.get("profiles") or [])
 
 
+def implementation_panel_policy(args, roster, selected):
+    """Validate the declared cycle, without turning audit history into authority.
+
+    The journal has no change identity or historical profile membership. A
+    fresh cycle therefore declares its predecessor profile explicitly, just
+    as --round is caller-declared. Count enabled, distinct reviewers from the
+    current routing config, never only those whose credentials are available.
+    """
+    override = args.allow_single_reviewer
+    if override is not None and (
+            not override.strip() or override.splitlines() != [override]):
+        config_error("--allow-single-reviewer needs a non-empty one-line "
+                     "reason. Pass the reason for the exceptional quorum.")
+    if args.kind != "implementation":
+        if override is not None or args.fresh_cycle_from is not None:
+            config_error("--allow-single-reviewer and --fresh-cycle-from are "
+                         "implementation-only. Drop them for a plan review.")
+        return {"single_reviewer_override": None, "fresh_cycle": None}
+    if override is not None and args.quorum != 1:
+        config_error("--allow-single-reviewer is only for --quorum 1. Drop "
+                     "the override when requesting a larger quorum.")
+
+    fresh = None
+    if args.fresh_cycle_from is not None:
+        previous = {r["name"] for r in roster
+                    if r.get("enabled", True)
+                    and in_profile(r, args.fresh_cycle_from)}
+        if not previous:
+            config_error("the replaced profile has no enabled reviewers. "
+                         "Pass --fresh-cycle-from with a populated profile.")
+        floor = max(2, len(previous))
+        selected_names = [r["name"] for r in selected if r.get("enabled", True)
+                          and (not args.escalate
+                               or any(in_profile(r, tier) for tier in LADDER))]
+        panel = set(selected_names)
+        if len(panel) != len(selected_names):
+            config_error("a fresh cycle cannot count duplicate reviewer "
+                         "names as independent verdicts. Pass a routing "
+                         "configuration with distinct enabled reviewer names.")
+        if len(panel) < floor:
+            config_error(
+                f"fresh cycle from {args.fresh_cycle_from} requires at least "
+                f"{floor} reviewers; the selected panel has {len(panel)}. "
+                "Drop --only or select a profile with enough reviewers; "
+                "a single-reviewer override cannot lower this floor.")
+        fresh = {"replaces_profile": args.fresh_cycle_from,
+                 "profile_reviewers": sorted(previous),
+                 "minimum_reviewers": floor,
+                 "provenance": "caller-declared; current enabled profile"}
+
+    if args.quorum == 1 and override is None:
+        config_error(
+            "an implementation review needs at least two verdicts. Pass "
+            "--quorum 2 or, for an explicit exception, "
+            "--allow-single-reviewer REASON; the override will be recorded.")
+    # Use the same floor in decide_state and the ladder's early-stop test.
+    # Availability cannot silently shrink a declared replacement panel.
+    if fresh is not None:
+        args.quorum = max(args.quorum, fresh["minimum_reviewers"])
+    return {"single_reviewer_override": override, "fresh_cycle": fresh}
+
+
+def panel_policy_text(policy):
+    """Provenance belongs on the verdict line, including non-pass outcomes."""
+    parts = []
+    fresh = policy["fresh_cycle"]
+    if fresh is not None:
+        parts.append(f"FRESH_CYCLE from {fresh['replaces_profile']}; "
+                     f"minimum {fresh['minimum_reviewers']} reviewers; "
+                     f"{fresh['provenance']}")
+    if policy["single_reviewer_override"] is not None:
+        parts.append("SINGLE_REVIEWER_OVERRIDE: "
+                     + redact(policy["single_reviewer_override"]))
+    return "" if not parts else " — " + "; ".join(parts)
+
+
 def escalate(all_reviewers, prompt, args, truncated, label, body_len):
     """Cheapest-first with early exit.
 
@@ -1684,6 +1764,13 @@ def main():
                          "reported but does not decide the verdict")
     ap.add_argument("--quorum", type=int, default=2,
                     help="reviewers that must complete for a verdict (default 2)")
+    ap.add_argument("--allow-single-reviewer", metavar="REASON",
+                    help="explicit implementation quorum-1 exception; reason "
+                         "is recorded in the verdict and audit journal")
+    ap.add_argument("--fresh-cycle-from", choices=LADDER, metavar="PROFILE",
+                    help="declare the profile replaced after an exhausted "
+                         "cycle; repeat on each round of the fresh cycle. "
+                         "Its enabled panel size floors selection and quorum")
     ap.add_argument("--timeout", type=int, default=1200,
                     help="per reviewer seconds (default 1200: at 64000 output "
                          "tokens a reasoning model can still be streaming at "
@@ -1733,6 +1820,7 @@ def main():
                  else max(1800, args.timeout * 3))
 
     reviewers = load_reviewers()
+    roster = reviewers
     # --- the protocol, enforced rather than remembered ---------------------
     # Every rule below was already written down, and drifted from anyway,
     # because prose in a memory file is not a constraint. See PROTOCOL.md.
@@ -1859,6 +1947,8 @@ def main():
                      "--escalate to review with exactly the named reviewers.")
     if args.quorum < 1:
         config_error(f"--quorum must be at least 1, got {args.quorum}")
+    args.panel_policy = implementation_panel_policy(args, roster, reviewers)
+    policy_text = panel_policy_text(args.panel_policy)
     if not (args.diff or args.staged or args.range or args.file):
         args.diff = True  # reviewing the current change is the common case
 
@@ -1886,11 +1976,13 @@ def main():
         journal = record_review_round(args, [], "REVIEW_UNAVAILABLE")
         report = {"state": "REVIEW_UNAVAILABLE", "checked_at": now(),
                   "reviewed": label, "unavailable": unavailable, "results": [],
+                  "panel_policy": args.panel_policy,
                   "journal": journal}
         if args.json:
-            print(json.dumps(report, indent=2))
+            print(redact(json.dumps(report, indent=2)))
         else:
-            print("REVIEW_UNAVAILABLE — no reviewer could run:")
+            print("REVIEW_UNAVAILABLE" + policy_text
+                  + " — no reviewer could run:")
             for u in unavailable:
                 print(f"  - {u['name']}: {u['reason']}")
             print("\nThis is NOT a pass. The change is unreviewed.")
@@ -1908,7 +2000,8 @@ def main():
         if not completed and not failed:
             disarm_watchdog()
             record_review_round(args, [], "REVIEW_UNAVAILABLE")
-            print("no reviewer could run in any tier", file=sys.stderr)
+            print("REVIEW_UNAVAILABLE" + policy_text
+                  + " — no reviewer could run in any tier", file=sys.stderr)
             sys.exit(STATES["REVIEW_UNAVAILABLE"])
     else:
         with concurrent.futures.ThreadPoolExecutor(
@@ -1952,6 +2045,7 @@ def main():
         "state": state, "checked_at": now(), "reviewed": label,
         "profile": profile, "escalated": bool(args.escalate),
         "tiers_run": tiers_run,
+        "panel_policy": args.panel_policy,
         "truncated": truncated, "quorum": args.quorum,
         "completed": len(completed), "unavailable": unavailable,
         "failed": [{"name": r["name"], "error": r["error"],
@@ -2015,7 +2109,7 @@ def main():
                 if f.get("preconditions"):
                     print(redact(f"      requires: {f.get('preconditions')}"))
 
-        print(f"\n{state}")
+        print(f"\n{state}{policy_text}")
         if state == "REVIEW_PARTIAL":
             if rejecting:
                 print(f"  Rejected by {', '.join(rejecting)} with no finding or "
