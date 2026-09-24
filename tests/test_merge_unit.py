@@ -1,6 +1,7 @@
-"""ARC-810: real CLI/coordinator/Git, with the forge replaced on an isolated PATH."""
+"""Merge/recovery CLI with real coordinator/Git and forge on a replaced PATH."""
 
 import ast
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -37,13 +38,19 @@ elif args[:2] == ["pr", "checks"]:
     print(json.dumps(data["checks"]))
     sys.exit(data.get("checks_exit", 0))
 elif args[:2] == ["pr", "merge"]:
-    intents = list(pathlib.Path(os.environ["COORDINATOR_STATE"]).glob("merge-unit-*.json"))
+    intents = [json.loads(path.read_text()) for path in
+               pathlib.Path(os.environ["COORDINATOR_STATE"]).glob("merge-unit-*.json")]
+    intents = [intent for intent in intents if intent["phase"] == "merge_requested"]
     assert len(intents) == 1, "merge called without durable intent"
-    intent = json.loads(intents[0].read_text())
+    intent = intents[0]
     assert intent["phase"] == "merge_requested"
     assert intent["preconditions"]["approver"] == "Operator"
     assert args[args.index("--match-head-commit") + 1] == intent["binding"]["head"]
     assert "--squash" in args
+    data.setdefault("merge_operations", []).append(intent["operation_id"])
+    p.write_text(json.dumps(data))
+    if data.get("fail_merge"):
+        sys.exit("transport failure before forge mutation")
     if not data.get("queued"):
         data["pr"]["state"] = "MERGED"
         data["pr"]["mergeCommit"] = {"oid": data["commit"]["sha"]}
@@ -549,6 +556,216 @@ class TestMergeUnit(unittest.TestCase):
         self.assertNotEqual(self.invoke().returncode, 0)
         self.assertEqual(len(self.calls(["pr", "merge"])), 1)
         self.assertEqual(self.receipts(), [])
+
+    def leave_transport_failure(self):
+        self.forge["fail_merge"] = True
+        self.save()
+        result = self.invoke()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("transport failure", result.stderr)
+        self.assertEqual(len(self.calls(["pr", "merge"])), 1)
+        self.assertEqual(self.receipts(), [])
+        return self.intent()
+
+    def abandon_intent(self, intent, *extra, approver=True):
+        return self.invoke("--abandon-intent", intent["operation_id"],
+                           "--reason", "Confirmed request did not reach forge",
+                           *extra, approver=approver)
+
+    def abandonment_records(self):
+        return list(self.state_dir.glob("merge-abandonment-*.json"))
+
+    def assert_abandon_refused(self, result):
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.calls(["pr", "merge"])), 1)
+        self.assertEqual(self.receipts(), [])
+        self.assertEqual(self.abandonment_records(), [])
+        self.assertEqual(self.intent()["phase"], "merge_requested")
+
+    def test_abandon_open_retains_record_and_permits_exactly_one_new_operation(self):
+        intent = self.leave_transport_failure()
+        result = self.abandon_intent(intent)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        record_path, = self.abandonment_records()
+        record_bytes = record_path.read_bytes()
+        record = json.loads(record_bytes)
+        self.assertEqual(record["intent"], intent)
+        self.assertEqual(record["operation_id"], intent["operation_id"])
+        self.assertEqual(record["approver"], "Operator")
+        self.assertEqual(record["reason"], "Confirmed request did not reach forge")
+        self.assertEqual(record["observed_pr"], self.forge["pr"])
+        self.assertIsNotNone(datetime.fromisoformat(record["observed_at"]).tzinfo)
+        self.assertEqual(self.intent(), dict(intent, phase="resolved_by_abandonment",
+                                             abandonment=record_path.name))
+        self.assertEqual(len(self.calls(["pr", "merge"])), 1)
+        self.assertEqual(len(self.calls(["pr", "checks"])), 1)
+        self.assertEqual(self.receipts(), [])
+        self.assertNotIn(" advance ", result.stdout)
+        # A second transport failure consumes the one new operation. A further
+        # ordinary call cannot silently reuse this abandonment to merge again.
+        self.assertNotEqual(self.invoke().returncode, 0)
+        self.assertNotEqual(self.invoke().returncode, 0)
+        self.assertEqual(len(self.calls(["pr", "merge"])), 2)
+        forge = json.loads(Path(self.env["FORGE_STATE"]).read_text())
+        self.assertEqual(len(set(forge["merge_operations"])), 2)
+        self.assertEqual(len(list(self.state_dir.glob("merge-unit-*.json"))), 2)
+        self.assertEqual(record_path.read_bytes(), record_bytes)
+        # Naming the old operation cannot resolve the new pending request.
+        self.assertNotEqual(self.abandon_intent(intent).returncode, 0)
+        self.assertEqual(len(self.calls(["pr", "merge"])), 2)
+
+    def test_abandon_then_successful_merge_rechecks_and_records_new_operation(self):
+        intent = self.leave_transport_failure()
+        self.assertEqual(self.abandon_intent(intent).returncode, 0)
+        forge_path = Path(self.env["FORGE_STATE"])
+        forge = json.loads(forge_path.read_text())
+        forge["fail_merge"] = False
+        forge_path.write_text(json.dumps(forge))
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(" scope-check ", result.stdout)
+        self.assertEqual(len(self.calls(["pr", "checks"])), 2)
+        self.assertEqual(len(self.calls(["pr", "merge"])), 2)
+        self.assertEqual(len(set(json.loads(forge_path.read_text())["merge_operations"])), 2)
+        self.assertEqual(len(self.receipts()), 1)
+        state = json.loads((self.state_dir / S.STATE_FILE).read_text())
+        self.assertEqual(state["units"]["u"]["state"], "DONE")
+        self.assertEqual(self.invoke().returncode, 0)
+        self.assertEqual(len(self.calls(["pr", "merge"])), 2)
+
+    def test_abandon_merged_at_judged_head_reconciles_instead(self):
+        intent = self.leave_transport_failure()
+        self.forge["pr"].update(state="MERGED", mergeCommit={"oid": self.merged})
+        self.forge["checks"] = [{"name": "rerun", "state": "FAILURE"}]
+        self.save()
+        prior_calls = len(self.calls())
+        result = self.abandon_intent(intent)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([call[:2] for call in self.calls()[prior_calls:]],
+                         [["pr", "view"], ["api", "--hostname"]])
+        self.assertEqual(self.abandonment_records(), [])
+        self.assertEqual(self.intent()["phase"], "receipt_recorded")
+        self.assertEqual(self.receipts()[0]["head"], self.head)
+        self.assertIn(" advance ", result.stdout)
+        state = json.loads((self.state_dir / S.STATE_FILE).read_text())
+        self.assertEqual(state["units"]["u"]["state"], "DONE")
+
+    def test_abandon_merged_elsewhere_refuses(self):
+        intent = self.leave_transport_failure()
+        self.forge["pr"].update(state="MERGED", headRefOid="f" * 40,
+                                 mergeCommit={"oid": self.merged})
+        self.save()
+        result = self.abandon_intent(intent)
+        self.assert_abandon_refused(result)
+        self.assertIn("PR head does not equal coordinator-judged head", result.stderr)
+
+    def test_abandon_closed_moved_head_or_retargeted_pr_refuses(self):
+        intent = self.leave_transport_failure()
+        original_pr = dict(self.forge["pr"])
+        for changed in ({"state": "CLOSED"}, {"headRefOid": "f" * 40},
+                        {"baseRefName": "elsewhere"}):
+            with self.subTest(changed=changed):
+                self.forge["pr"] = dict(original_pr, **changed)
+                self.save()
+                self.assert_abandon_refused(self.abandon_intent(intent))
+
+    def test_abandon_missing_or_blank_approver_and_reason_refuses(self):
+        intent = self.leave_transport_failure()
+        calls = self.calls()
+        for extra in ([], ["--reason", "valid"], ["--approver", "Operator"],
+                      ["--approver", " ", "--reason", "valid"],
+                      ["--approver", "Operator", "--reason", " "],
+                      ["--approver", "Operator", "--reason", "line\nbreak"]):
+            with self.subTest(extra=extra):
+                self.assert_abandon_refused(self.invoke(
+                    "--abandon-intent", intent["operation_id"], *extra, approver=False))
+                self.assertEqual(self.calls(), calls)
+
+    def test_abandon_missing_wrong_binding_or_resolved_operation_refuses(self):
+        result = self.invoke("--abandon-intent", "a" * 64, "--reason", "checked")
+        self.assert_refused(result)
+        self.assertEqual(self.calls(), [])
+        intent = self.leave_transport_failure()
+        calls = self.calls()
+        self.assert_abandon_refused(self.invoke(
+            "--abandon-intent", "a" * 64, "--reason", "checked"))
+        self.assert_abandon_refused(self.abandon_intent(intent, "--pr", "8"))
+        self.assertEqual(self.calls(), calls)
+        self.assertEqual(self.abandon_intent(intent).returncode, 0)
+        before = {p.name: p.read_bytes() for p in self.state_dir.glob("merge-*.json")}
+        result = self.abandon_intent(intent)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("current unresolved intent", result.stderr)
+        self.assertEqual(before, {p.name: p.read_bytes()
+                                 for p in self.state_dir.glob("merge-*.json")})
+
+    def test_abandon_dry_run_does_not_call_forge_or_change_state(self):
+        intent = self.leave_transport_failure()
+        before = {p.name: p.read_bytes() for p in self.state_dir.iterdir()}
+        calls = self.calls()
+        result = self.abandon_intent(intent, "--dry-run")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertNotIn("gh pr merge", result.stdout)
+        self.assertEqual(self.calls(), calls)
+        self.assertEqual(before, {p.name: p.read_bytes() for p in self.state_dir.iterdir()})
+
+    def interrupt_abandonment_write(self, sidecar=False):
+        site = self.directory / "write-interruption"
+        site.mkdir()
+        (site / "sitecustomize.py").write_text(
+            "import json, os, pathlib\n"
+            "replace = os.replace\n"
+            "def interrupted(src, dst):\n"
+            "    name = pathlib.Path(dst).name\n"
+            "    if %r:\n"
+            "        if name.startswith('merge-abandonment-'):\n"
+            "            raise OSError('injected abandonment publication failure')\n"
+            "    elif name.startswith('merge-unit-'):\n"
+            "        if json.loads(pathlib.Path(src).read_text()).get('phase') == "
+            "'resolved_by_abandonment':\n"
+            "            raise OSError('injected resolution marker failure')\n"
+            "    return replace(src, dst)\n"
+            "os.replace = interrupted\n" % sidecar)
+        self.env["PYTHONPATH"] = str(site)
+
+    def test_abandonment_commit_survives_interrupted_intent_marker(self):
+        intent = self.leave_transport_failure()
+        self.interrupt_abandonment_write()
+        result = self.abandon_intent(intent)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("injected resolution marker failure", result.stderr)
+        record_path, = self.abandonment_records()
+        record_bytes = record_path.read_bytes()
+        self.assertEqual(self.intent(), intent)
+        del self.env["PYTHONPATH"]
+        # The ordinary consumer repairs persisted state, then attempts only
+        # one successor; the still-active transport stub leaves that uncertain.
+        self.assertNotEqual(self.invoke().returncode, 0)
+        retained = self.state_dir / ("merge-unit-" + intent["operation_id"] + ".json")
+        self.assertEqual(json.loads(retained.read_text())["phase"], "resolved_by_abandonment")
+        self.assertEqual(record_path.read_bytes(), record_bytes)
+        self.assertEqual(len(self.calls(["pr", "merge"])), 2)
+        self.assertNotEqual(self.invoke().returncode, 0)
+        self.assertEqual(len(self.calls(["pr", "merge"])), 2)
+
+    def test_failed_abandonment_publication_keeps_original_request_unresolved(self):
+        intent = self.leave_transport_failure()
+        self.interrupt_abandonment_write(sidecar=True)
+        result = self.abandon_intent(intent)
+        self.assert_abandon_refused(result)
+        self.assertIn("injected abandonment publication failure", result.stderr)
+        del self.env["PYTHONPATH"]
+        self.assert_abandon_refused(self.invoke())
+
+    def test_resolved_intent_without_its_abandonment_record_refuses(self):
+        intent = self.leave_transport_failure()
+        self.assertEqual(self.abandon_intent(intent).returncode, 0)
+        record_path, = self.abandonment_records()
+        record_path.unlink()
+        result = self.invoke()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no valid resolution record", result.stderr)
+        self.assertEqual(len(self.calls(["pr", "merge"])), 1)
 
     def test_advance_failure_preserves_receipt_for_retry(self):
         self.state["halted"] = "test hold"
