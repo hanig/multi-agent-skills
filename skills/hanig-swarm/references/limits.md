@@ -132,8 +132,8 @@ quality matters.
 
 The advisory state lock has no TTL: the kernel releases it on process death.
 On NFS, server reboot or lost client lock state can drop a live lock without
-notifying the process. Trials exercised only same-node concurrency. Cross-node <!-- declaration: limit.coordinator-lock-topology -->
-exclusion remains uncertified. One coordinator node per plan is the supported
+notifying the process. Trials exercised only same-node concurrency. An epoch fence in the separate coordinator-owned `state-epoch.json` halts a pinned writer that observes a successor's published acquisition before saving; it adds no custody authority or timing rule, does not close the read/replace race or stale-filesystem-read limit, and unleased helpers pin only on their first save. <!-- declaration: limit.coordinator-lock-topology -->
+Cross-node exclusion remains uncertified. One coordinator node per plan is the supported
 topology; node-local state trades the NFS failure away by also removing shared
 visibility.
 

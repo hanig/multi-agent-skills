@@ -58,6 +58,7 @@ import coordinator_paths as CP  # noqa: E402
 import recovery as R  # noqa: E402  audit-only worktree preservation
 
 STATE_FILE = "swarm-state.json"
+STATE_EPOCH_FILE = "state-epoch.json"
 KINDS = U.KINDS
 
 # What a `code` unit runs unless it says otherwise.
@@ -2185,6 +2186,10 @@ def plan_digest(plan):
 # acquired, so a second project in the same process was never actually
 # locked. Caught by the new tests, which is what they are for.
 _LOCK_FDS = {}
+# Pinned on actual acquisition, not refreshed from a later state read. Keep
+# the pin after release so a stale process cannot save over a successor.
+# Legacy unleased helpers pin on their first save instead (see save_state).
+_LOCK_EPOCHS = {}
 # The pid that owns the entries above. flock is held per OPEN FILE
 # DESCRIPTION, which a fork shares, so a forked child would inherit this dict
 # and be told it already holds a lock it never took. Reviewers found that; the
@@ -2235,9 +2240,9 @@ def acquire_lease(state_dir):
     KNOWN LIMIT, not fixed: NFS lock recovery. If the server reboots, or
     evicts this client's lock state after a partition, the lock can be dropped
     while this process is still alive and another controller can then acquire
-    it. Nothing in local state can notice, because the kernel does not tell us.
-    A lock cannot be made stronger than the lock manager underneath it, so
-    this is recorded rather than papered over."""
+    it. The kernel does not tell us; the epoch fence can detect a successor's
+    published acquisition on the next save, but is not an atomic compare-and-
+    swap and cannot certify cross-node exclusion."""
     global _LOCK_OWNER_PID
     Path(state_dir).mkdir(parents=True, exist_ok=True)
     key = str(Path(state_dir).resolve())
@@ -2310,6 +2315,23 @@ def acquire_lease(state_dir):
                        f"directory underneath the coordinator.")
     _LOCK_FDS[key] = fd
     _LOCK_OWNER_PID = os.getpid()
+    # Detection only: no heartbeat, TTL, expiry, mtime aging or timer. Nothing
+    # reads this epoch to grant, steal or release custody; flock still decides
+    # acquisition. The separate file keeps a no-op acquisition from rewriting
+    # swarm-state.json. Concurrent reads/replaces and stale filesystem reads
+    # remain outside this guarantee; this is not a distributed lock or a CAS.
+    try:
+        epoch, err = _read_state_epoch(state_dir)
+        if err:
+            sys.exit(f"HALTED: {err}")
+        err = U.write_json(Path(state_dir) / STATE_EPOCH_FILE,
+                           {"epoch": epoch + 1})
+        if err:
+            sys.exit(f"HALTED: cannot persist coordinator state epoch: {err}")
+        _LOCK_EPOCHS[key] = (os.getpid(), epoch + 1)
+    except BaseException:
+        release_lease(state_dir)
+        raise
     # Descriptive only. Nothing decides anything from this file; it exists so a
     # human blocked by the lock can see who has it.
     U.write_json(Path(state_dir) / LEASE,
@@ -2380,6 +2402,20 @@ def release_lease(state_dir):
 
 
 # --- durable state --------------------------------------------------------
+def _read_state_epoch(state_dir):
+    """Read only the fence file; absent legacy directories start at zero."""
+    try:
+        record = json.loads((Path(state_dir) / STATE_EPOCH_FILE).read_text())
+    except FileNotFoundError:
+        return 0, None
+    except (OSError, ValueError) as exc:
+        return None, f"unreadable coordinator state epoch: {exc}"
+    if (not isinstance(record, dict) or type(record.get("epoch")) is not int
+            or record["epoch"] < 0):
+        return None, "invalid coordinator state epoch"
+    return record["epoch"], None
+
+
 def load_state(state_dir):
     """Load the durable side of the coordinator's lifecycle invariant.
 
@@ -2399,6 +2435,21 @@ def load_state(state_dir):
 
 
 def save_state(state_dir, state):
+    key = str(Path(state_dir).resolve())
+    epoch, err = _read_state_epoch(state_dir)
+    # A lease holder always uses its process pin, even after reloading state.
+    # Legacy direct helpers (including promotion) do not acquire a lease:
+    # their first save pins the observed epoch without bumping it or granting
+    # custody. This cannot detect stale snapshots before that first save.
+    owner, expected = _LOCK_EPOCHS.get(key, (os.getpid(), epoch))
+    if err or owner != os.getpid() or epoch != expected:
+        # Do not persist the halt into the successor's state.
+        reason = err or "state epoch changed or process pin was inherited"
+        sys.exit("HALTED: another coordinator has written state under us "
+                 f"({reason}); refusing to save")
+    _LOCK_EPOCHS.setdefault(key, (owner, expected))
+    # Retire the old inline field on a normal save, never on acquisition.
+    state.pop("epoch", None)
     Path(state_dir).mkdir(parents=True, exist_ok=True)
     err = U.write_json(Path(state_dir) / STATE_FILE, state)
     if err:
