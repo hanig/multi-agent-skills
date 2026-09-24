@@ -475,6 +475,55 @@ class TestTheProtocolForbidsGitStash(unittest.TestCase):
         self.assertIsNone(S._code_protocol_problem(prompt, INTENT))
 
 
+class TestTheProtocolReservesMergingForTheOrchestrator(unittest.TestCase):
+    RULES = {
+        "worker stop instruction": "After opening the pull request, STOP.",
+        "worker merge prohibition": "NEVER merge, approve, or enable auto-merge.",
+        "merge authority": "Merge decisions belong to the orchestrator.",
+        "closure interpretation": (
+            "The merged-PR closure criterion describes how the orchestrator's "
+            "merge is judged, not an instruction to the worker."),
+    }
+
+    def test_generated_protocol_reserves_merging_for_the_orchestrator(self):
+        for remote in (INTENT["repository_remote"], None):
+            for ref in (None, "refs/remotes/origin/swarm-a1",
+                        "refs/heads/swarm-a1"):
+                with self.subTest(remote=remote, judgment_ref=ref):
+                    intent = dict(INTENT, repository_remote=remote,
+                                  judgment_ref=ref)
+                    protocol = S._code_completion_protocol(intent)
+                    for sentence in self.RULES.values():
+                        self.assertIn(sentence, protocol)
+                    prompt = S._dispatch_prompt(
+                        {"kind": "code", "prompt": "work"}, intent)
+                    self.assertIsNone(S._code_protocol_problem(prompt, intent))
+
+    def test_closure_still_requires_a_pr_merged_into_the_recorded_target(self):
+        for target in ("main", "release/next"):
+            with self.subTest(target=target):
+                protocol = S._code_completion_protocol(
+                    dict(INTENT, target_branch=target))
+                self.assertIn(
+                    "only a pull request merged into %r in that recorded "
+                    "repository closes this code unit." % target, protocol)
+
+    def test_a_protocol_missing_any_merge_boundary_instruction_is_refused(self):
+        for name, sentence in self.RULES.items():
+            with self.subTest(instruction=name):
+                protocol = S._code_completion_protocol(INTENT)
+                stripped = protocol.replace(sentence, "")
+                self.assertNotEqual(protocol, stripped)
+                # Patch the builder too: suffix equality alone must not let
+                # a future builder omission pass the structural check.
+                with mock.patch.object(S, "_code_completion_protocol",
+                                       return_value=stripped):
+                    prompt = S._dispatch_prompt(
+                        {"kind": "code", "prompt": "work"}, INTENT)
+                    problem = S._code_protocol_problem(prompt, INTENT)
+                self.assertIn(name, problem or "")
+
+
 class TestTheCoordinatorRunsNoStashOfItsOwn(unittest.TestCase):
     """The refusal below must not fire on a stash the coordinator itself
     parked. It cannot, because the coordinator parks none -- which is a claim
