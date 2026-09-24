@@ -53,19 +53,29 @@ mandate; do not generalise a tool's gate into a standing obligation to consult.
 - Merge pull requests that satisfy the adjudication policy below.
 - Record merge receipts, advance the DAG, drain tracker intents.
 - File, update and close issues in this project.
-- Spend on review and committee models, within the ceiling.
+- Spend on review and committee models.
 
 ## Bounded by
 
 - The non-overridable finding classes below. No relevance exception reaches them.
-- A spend ceiling, declared per run, with the orchestrator stopping rather than
-  exceeding it. Default is $50/day.
 - No force-push and no history rewriting, ever.
 - No edits to vendored skills (`paseo*`, `pi-fleet`, `agent-bus`,
   `start-a-sprint`).
 - No weakening of a test, guard or assertion to make something pass. Fix the
   subject or report the failure.
 - No action outside this repository and this project.
+
+**There is no spend ceiling, and its absence is deliberate.** The owner removed
+it on 2026-09-24: "I'm okay with the spend being whatever it is." Do not treat
+cost as a reason to stop, to narrow a review panel, to skip a committee, or to
+prefer a cheaper reviewer over the right one. This is recorded rather than left
+as a silent gap because a reader who finds no bound here would otherwise be
+right to wonder whether one was lost, and might restore it.
+
+It also was never enforced. ARC-691 measured that the previous `$50/day` line
+was honoured by no program: `budget.gpu_hours` is the only ceiling any code
+applies, and it is unaffected by this. What changed is the standing
+instruction, not a control — so nothing that used to stop will now fail to.
 
 ## Always stop and ask
 
