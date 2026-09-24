@@ -50,6 +50,62 @@ PROSE_START = frozenset(string.ascii_letters + string.digits + "`|\"'(")
 ORDERED_AT_CONTENT = re.compile(r"^[0-9]{1,9}[.)](?: |$)")
 
 
+def _closed_ids(value):
+    return tuple(value.split())
+
+
+CLOSED_DECLARATIONS = {
+    "hanig-swarm": _closed_ids("""
+        placement.behavior-deciding placement.reference-elaboration
+        placement.reference-dialect capability.shell-filesystem
+        capability.python-git capability.slurm capability.paseo-bus
+        capability.review capability.tracker capability.worker-backend
+        paths.skill-directory code.default-agent code.provider-mode
+        runtime.declaration runtime.verification runtime.canary retry.boundary
+        retry.checkpoint retry.exposure retry.concurrency
+        isolation.exclusive-root isolation.done-predicate
+        isolation.artifact-basis isolation.container-profile
+        isolation.container-attestation authority.coordinator-state
+        closure.by-kind code.remote-ref compatibility.judgment-generation
+        verifier.corpus verifier.integration code.write-scopes
+        code.worktree-identity code.adoption usage.outputs
+        scheduler.queued-job cluster.plan-specific cluster.access
+        python.host-floor kind.pipeline-boundary drift.coordinator-size
+        drift.lifted-module convergence.verdict convergence.plan
+        unattended.scheduler unattended.lock unattended.orphan
+        unattended.incomplete unattended.plan-digest unattended.output-claims
+        unattended.stash credential.boundary credential.worker
+        limit.runtime-canary-scope limit.trusted-writer-isolation
+        limit.container-isolation-scope limit.pre-dispatch-artifact-basis
+        limit.same-uid-authority limit.process-tree-quiescence
+        limit.remote-ref-durability limit.verifier-corpus-boundary
+        limit.integration-topology limit.write-scopes limit.worktree-inode
+        limit.child-credentials limit.worktree-adoption limit.workspace-id
+        limit.pipeline-interior limit.convergence-plateau
+        limit.coordinator-lock-topology limit.output-claim-registry
+        limit.base-branch-comparison compatibility.python
+    """),
+    "hanig-orchestrate": _closed_ids("""
+        placement.behavior-deciding placement.reference-elaboration
+        placement.reference-dialect capability.host-policy
+        capability.dependencies paths.skill-directory authority.source
+        authority.confirmation authority.narrow-mode authority.revocation
+        role.supervision delegation.whole-loop delegation.prompt
+        delegation.configuration delegation.continuation retry.boundary
+        evidence.checkable evidence.authority review.panel-source
+        review.author-exclusion review.claims review.honesty review.cost
+        review.effort review.rounds adjudication.matrix
+        adjudication.concurrence adjudication.record
+        adjudication.nonoverridable adjudication.honesty watch.facts
+        watch.source watch.proof loop.quiescence loop.advance loop.yield
+        preservation.before-cleanup dispatch.mechanics merge.requirements
+        tracker.authority tracker.reconcile tracker.dag report.three-parts
+        handoff.contents handoff.transfer takeover.verify
+        limit.session-liveness
+    """),
+}
+
+
 class RegistryError(ValueError):
     """The registry or generated block violates its data contract."""
 
@@ -58,19 +114,158 @@ def _skill_dir_from_script():
     return Path(__file__).resolve().parents[1]
 
 
+def _one_line(value):
+    return (isinstance(value, str) and bool(value.strip())
+            and "\n" not in value and "\r" not in value)
+
+
+def _lifecycle_ids(data, known_ids, skill_name):
+    """Return retired/replaced ids after validating durable reasons."""
+    retired = data.get("retired_declarations")
+    replacements = data.get("replacement_declarations")
+    if not isinstance(retired, list):
+        raise RegistryError("{} retired_declarations must be a JSON list".format(
+            skill_name
+        ))
+    if not isinstance(replacements, list):
+        raise RegistryError(
+            "{} replacement_declarations must be a JSON list".format(skill_name)
+        )
+
+    lifecycle = {}
+    for index, item in enumerate(retired):
+        where = "retired_declarations[{}]".format(index)
+        if not isinstance(item, dict) or set(item) != {"id", "reason"}:
+            raise RegistryError(
+                "{} {} requires exactly id and reason".format(skill_name, where)
+            )
+        declaration_id = item.get("id")
+        if (not isinstance(declaration_id, str)
+                or not ID_PATTERN.fullmatch(declaration_id)):
+            raise RegistryError("{} {} has an invalid id".format(
+                skill_name, where
+            ))
+        if declaration_id not in known_ids:
+            raise RegistryError("{} {} names an unknown id: {}".format(
+                skill_name, where, declaration_id
+            ))
+        if not _one_line(item.get("reason")):
+            raise RegistryError("{} {} reason must be one non-empty line".format(
+                skill_name, where
+            ))
+        if declaration_id in lifecycle:
+            raise RegistryError("{} repeats lifecycle id: {}".format(
+                skill_name, declaration_id
+            ))
+        lifecycle[declaration_id] = ("retired", None)
+
+    for index, item in enumerate(replacements):
+        where = "replacement_declarations[{}]".format(index)
+        if (not isinstance(item, dict)
+                or set(item) != {"id", "replacement", "reason"}):
+            raise RegistryError(
+                "{} {} requires exactly id, replacement, and reason".format(
+                    skill_name, where
+                )
+            )
+        declaration_id = item.get("id")
+        replacement = item.get("replacement")
+        if (not isinstance(declaration_id, str)
+                or not ID_PATTERN.fullmatch(declaration_id)):
+            raise RegistryError("{} {} has an invalid id".format(
+                skill_name, where
+            ))
+        if (not isinstance(replacement, str)
+                or not ID_PATTERN.fullmatch(replacement)):
+            raise RegistryError("{} {} has an invalid replacement".format(
+                skill_name, where
+            ))
+        if declaration_id not in known_ids:
+            raise RegistryError("{} {} names an unknown id: {}".format(
+                skill_name, where, declaration_id
+            ))
+        if replacement not in known_ids or replacement == declaration_id:
+            raise RegistryError("{} {} has an invalid replacement: {}".format(
+                skill_name, where, replacement
+            ))
+        if not _one_line(item.get("reason")):
+            raise RegistryError("{} {} reason must be one non-empty line".format(
+                skill_name, where
+            ))
+        if declaration_id in lifecycle:
+            raise RegistryError("{} repeats lifecycle id: {}".format(
+                skill_name, declaration_id
+            ))
+        lifecycle[declaration_id] = ("replaced", replacement)
+    return lifecycle
+
+
 def load_registry(skill_dir):
     """Return validated declarations in source order."""
-    path = Path(skill_dir) / "declarations.json"
+    skill_dir = Path(skill_dir)
+    skill_name = skill_dir.name
+    path = skill_dir / "declarations.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise RegistryError("cannot read declarations.json: {}".format(exc))
-    if not isinstance(data, dict) or data.get("schema_version") != 1:
-        raise RegistryError("declarations.json requires schema_version 1")
+        raise RegistryError("{} cannot read declarations.json: {}".format(
+            skill_name, exc
+        ))
+    required_fields = {
+        "schema_version", "known_declarations", "retired_declarations",
+        "replacement_declarations", "declarations",
+    }
+    if not isinstance(data, dict) or data.get("schema_version") != 2:
+        raise RegistryError(
+            "{} declarations.json requires schema_version 2".format(skill_name)
+        )
+    if set(data) != required_fields:
+        raise RegistryError(
+            "{} declarations.json requires exactly {}".format(
+                skill_name, ", ".join(sorted(required_fields))
+            )
+        )
+    known = data.get("known_declarations")
+    if (not isinstance(known, list) or not known
+            or any(not isinstance(value, str) for value in known)):
+        raise RegistryError(
+            "{} known_declarations must be a non-empty JSON list of strings".format(
+                skill_name
+            )
+        )
+    invalid_known = [value for value in known if not ID_PATTERN.fullmatch(value)]
+    if invalid_known:
+        raise RegistryError("{} known_declarations has an invalid id: {}".format(
+            skill_name, invalid_known[0]
+        ))
+    if len(set(known)) != len(known):
+        raise RegistryError("{} known_declarations repeats an id".format(
+            skill_name
+        ))
+    closed = CLOSED_DECLARATIONS.get(skill_name)
+    if closed is None:
+        raise RegistryError("{} has no closed declaration inventory".format(
+            skill_name
+        ))
+    for declaration_id in closed:
+        if declaration_id not in known:
+            raise RegistryError("{} missing known declaration: {}".format(
+                skill_name, declaration_id
+            ))
+    for declaration_id in known:
+        if declaration_id not in closed:
+            raise RegistryError("{} has an unexpected known declaration: {}".format(
+                skill_name, declaration_id
+            ))
+    if tuple(known) != closed:
+        raise RegistryError("{} known declaration order differs".format(skill_name))
+    lifecycle = _lifecycle_ids(data, set(known), skill_name)
     declarations = data.get("declarations")
     if not isinstance(declarations, list) or not declarations:
-        raise RegistryError("declarations must be a non-empty JSON list")
-    references_dir = Path(skill_dir) / "references"
+        raise RegistryError(
+            "{} declarations must be a non-empty JSON list".format(skill_name)
+        )
+    references_dir = skill_dir / "references"
     try:
         reference_names = set(os.listdir(str(references_dir)))
     except OSError as exc:
@@ -128,6 +323,32 @@ def load_registry(skill_dir):
             "normative_text": text,
             "references": tuple(normalized),
         })
+    actual_ids = [item["id"] for item in result]
+    expected_ids = [value for value in known if value not in lifecycle]
+    for declaration_id in expected_ids:
+        if declaration_id not in seen:
+            raise RegistryError(
+                "{} declaration {} left the registry without a retired or "
+                "replacement record".format(skill_name, declaration_id)
+            )
+    for declaration_id in actual_ids:
+        if declaration_id not in expected_ids:
+            raise RegistryError(
+                "{} declaration {} is active despite its lifecycle record".format(
+                    skill_name, declaration_id
+                )
+            )
+    if actual_ids != expected_ids:
+        raise RegistryError("{} active declaration order differs from the "
+                            "known_declarations ledger".format(skill_name))
+    active = set(actual_ids)
+    for declaration_id, (status, replacement) in lifecycle.items():
+        if status == "replaced" and replacement not in active:
+            raise RegistryError(
+                "{} replacement for {} is not active: {}".format(
+                    skill_name, declaration_id, replacement
+                )
+            )
     return tuple(result)
 
 
@@ -265,12 +486,13 @@ def _outside_fence_syntax_problem(line):
     return None
 
 
-def reference_problems(skill_dir):
-    """Validate the strict reference dialect and modal-to-declaration ties."""
+def _scan_references(skill_dir):
+    """Return dialect problems and valid elaboration-marker occurrences."""
     declarations = load_registry(skill_dir)
     by_id = {item["id"]: item for item in declarations}
     root = Path(skill_dir) / "references"
     problems = []
+    elaborations = {}
     for path in sorted(root.rglob("*.md")):
         relative = path.relative_to(Path(skill_dir)).as_posix()
         fence = None
@@ -343,6 +565,9 @@ def reference_problems(skill_dir):
                             relative, number, declaration_id
                         )
                     )
+                else:
+                    key = (relative, declaration_id)
+                    elaborations[key] = elaborations.get(key, 0) + 1
             normalized_payload = payload.replace("\u2019", "'")
             if IMPERATIVE_MODAL.search(normalized_payload) and not marker_ids:
                 problems.append(
@@ -356,7 +581,21 @@ def reference_problems(skill_dir):
                     relative, opener_line
                 )
             )
-    return problems
+    return problems, elaborations
+
+
+def reference_problems(skill_dir):
+    """Validate the strict reference dialect and modal-to-declaration ties."""
+    return _scan_references(skill_dir)[0]
+
+
+def reference_elaborations(skill_dir):
+    """Return the parsed occurrence count for each valid elaboration tie."""
+    elaborations = _scan_references(skill_dir)[1]
+    return tuple(
+        (reference, declaration_id, count)
+        for (reference, declaration_id), count in sorted(elaborations.items())
+    )
 
 
 def main(argv=None):
