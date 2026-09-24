@@ -233,9 +233,13 @@ class CommitIdentityTests(unittest.TestCase):
             self.assertEqual(intent["repo"], str(self.repo.resolve()))
             self.assertEqual(intent["base_commit"], self.target)
             self.assertEqual(intent["target_commit"], self.target)
-        self.assertEqual([argv[argv.index("--base") + 1]
-                          for argv in self.fake.launches],
-                         [self.target, self.target])
+        self.assertEqual(len(self.fake.launches), 2)
+        for uid, argv in zip(("code", "code-two"), self.fake.launches):
+            workspace = Path(argv[argv.index("--cwd") + 1])
+            self.assertEqual(git(workspace, "rev-parse", "HEAD"), self.target)
+            facts = durable["units"][uid]["attempt_launch_facts"]
+            self.assertEqual(str(workspace), next(iter(facts.values()))[
+                "execution_workspace"])
 
     def test_cache_keeps_distinct_repositories_and_target_branches_separate(self):
         other = self.tmp / "other-repo"
