@@ -1163,7 +1163,7 @@ class TestValidateFindsTheSurveyItself(SurveyCase):
     def test_it_reads_the_survey_beside_the_plan(self):
         with tempfile.TemporaryDirectory() as d:
             p = self._project(d, survey_doc(mem_flag_required=True))
-            found, note = S.discover_survey(p)
+            found, note = S.discover_survey(p, cwd=d)
             self.assertEqual(found["scheduler"]["mem_flag_required"], True)
             self.assertIn(".swarm", note)
 
@@ -1174,7 +1174,7 @@ class TestValidateFindsTheSurveyItself(SurveyCase):
         with tempfile.TemporaryDirectory() as d:
             doc = survey_doc(mem_flag_required=True)
             doc["machine"]["hostname"] = "some-other-login-node"
-            found, note = S.discover_survey(self._project(d, doc))
+            found, note = S.discover_survey(self._project(d, doc), cwd=d)
             self.assertIsNone(found)
             self.assertIn("some-other-login-node", note)
             self.assertIn("--survey", note)
@@ -1183,27 +1183,47 @@ class TestValidateFindsTheSurveyItself(SurveyCase):
         with tempfile.TemporaryDirectory() as d:
             p = self._project(d, survey_doc())
             (Path(d) / ".swarm" / "survey.json").write_text("{not json")
-            found, note = S.discover_survey(p)
+            found, note = S.discover_survey(p, cwd=d)
             self.assertIsNone(found)
             self.assertIn("could not be read", note)
 
     def test_no_survey_names_the_path_it_looked_for(self):
         with tempfile.TemporaryDirectory() as d:
-            found, note = S.discover_survey(self._project(d))
+            found, note = S.discover_survey(self._project(d), cwd=d)
             self.assertIsNone(found)
             self.assertIn(os.path.join(".swarm", "survey.json"), note)
             self.assertIn("survey.py", note)
 
-    def _validate(self, plan_path, *args):
+    def _validate(self, plan_path, *args, cwd=None):
         import subprocess
         return subprocess.run(
             [sys.executable, str(SWARM), "validate", plan_path, *args],
-            capture_output=True, text=True)
+            capture_output=True, text=True, cwd=cwd)
+
+    def test_a_cwd_survey_from_another_host_is_not_applied(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._project(Path(d) / "project")
+            self.assertFalse((Path(p).parent / ".swarm" / "survey.json").exists())
+            doc = survey_doc(mem_flag_required=True)
+            other_host = os.uname().nodename + "-fixture-other-host"
+            doc["machine"]["hostname"] = other_host
+            survey = Path(d) / ".swarm" / "survey.json"
+            survey.parent.mkdir()
+            survey.write_text(json.dumps(doc))
+
+            found, note = S.discover_survey(p, cwd=d)
+            self.assertIsNone(found)
+            r = self._validate(p, cwd=d)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("NOT CHECKED", r.stdout)
+            for message in (note, r.stdout):
+                self.assertIn("was taken on " + other_host, message)
+                self.assertIn("--survey", message)
 
     def test_the_discovered_survey_refuses_the_plan_end_to_end(self):
         with tempfile.TemporaryDirectory() as d:
             p = self._project(d, survey_doc(mem_flag_required=True))
-            r = self._validate(p)
+            r = self._validate(p, cwd=d)
             self.assertNotEqual(r.returncode, 0, r.stdout)
             self.assertIn("mem_flag_required", r.stderr)
 
@@ -1212,7 +1232,7 @@ class TestValidateFindsTheSurveyItself(SurveyCase):
         means the memory policy and the account rules were not examined at
         all, and the reader has to be told which."""
         with tempfile.TemporaryDirectory() as d:
-            r = self._validate(self._project(d))
+            r = self._validate(self._project(d), cwd=d)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("NOT CHECKED", r.stdout)
             self.assertIn("no survey was read", r.stdout)
@@ -1220,7 +1240,7 @@ class TestValidateFindsTheSurveyItself(SurveyCase):
     def test_a_pass_against_a_survey_carries_the_qos_caveat(self):
         with tempfile.TemporaryDirectory() as d:
             p = self._project(d, survey_doc(mem_flag_required=False))
-            r = self._validate(p)
+            r = self._validate(p, cwd=d)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("PARTITION QOS only", r.stdout)
 
@@ -1230,7 +1250,7 @@ class TestValidateFindsTheSurveyItself(SurveyCase):
             elsewhere = Path(d) / "recorded.json"
             elsewhere.write_text(json.dumps(survey_doc(
                 mem_flag_required=True)))
-            r = self._validate(p, "--survey", str(elsewhere))
+            r = self._validate(p, "--survey", str(elsewhere), cwd=d)
             self.assertNotEqual(r.returncode, 0, r.stdout)
             self.assertIn("mem_flag_required", r.stderr)
 
@@ -1239,7 +1259,7 @@ class TestValidateFindsTheSurveyItself(SurveyCase):
         `unknown` would silently drop every check they asked for."""
         with tempfile.TemporaryDirectory() as d:
             r = self._validate(self._project(d), "--survey",
-                               os.path.join(d, "nope.json"))
+                               os.path.join(d, "nope.json"), cwd=d)
             self.assertNotEqual(r.returncode, 0)
             self.assertIn("no readable survey", r.stderr)
 
@@ -1253,7 +1273,7 @@ class TestValidateFindsTheSurveyItself(SurveyCase):
                 [sys.executable, str(SWARM), "run", p, "--dry-run",
                  "--state-dir", os.path.join(d, "state"),
                  "--root", os.path.join(d, "runs")],
-                capture_output=True, text=True)
+                capture_output=True, text=True, cwd=d)
             self.assertNotEqual(r.returncode, 0, r.stdout)
             self.assertIn("mem_flag_required", r.stderr)
 
