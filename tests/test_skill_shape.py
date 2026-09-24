@@ -58,6 +58,82 @@ DECLARATION_SPEC = importlib.util.spec_from_file_location(
 DECLARATION_REGISTRY = importlib.util.module_from_spec(DECLARATION_SPEC)
 DECLARATION_SPEC.loader.exec_module(DECLARATION_REGISTRY)
 
+SWARM_DECLARATIONS = (
+    "placement.behavior-deciding",
+    "placement.reference-elaboration",
+    "placement.reference-dialect",
+    "capability.shell-filesystem",
+    "capability.python-git",
+    "capability.slurm",
+    "capability.paseo-bus",
+    "capability.review",
+    "capability.tracker",
+    "capability.worker-backend",
+    "paths.skill-directory",
+    "code.default-agent",
+    "code.provider-mode",
+    "runtime.declaration",
+    "runtime.verification",
+    "runtime.canary",
+    "retry.boundary",
+    "retry.checkpoint",
+    "retry.exposure",
+    "retry.concurrency",
+    "isolation.exclusive-root",
+    "isolation.done-predicate",
+    "isolation.artifact-basis",
+    "isolation.container-profile",
+    "isolation.container-attestation",
+    "authority.coordinator-state",
+    "closure.by-kind",
+    "code.remote-ref",
+    "compatibility.judgment-generation",
+    "verifier.corpus",
+    "verifier.integration",
+    "code.write-scopes",
+    "code.worktree-identity",
+    "code.adoption",
+    "usage.outputs",
+    "scheduler.queued-job",
+    "cluster.plan-specific",
+    "cluster.access",
+    "python.host-floor",
+    "kind.pipeline-boundary",
+    "drift.coordinator-size",
+    "drift.lifted-module",
+    "convergence.verdict",
+    "convergence.plan",
+    "unattended.scheduler",
+    "unattended.lock",
+    "unattended.orphan",
+    "unattended.incomplete",
+    "unattended.plan-digest",
+    "unattended.output-claims",
+    "unattended.stash",
+    "credential.boundary",
+    "credential.worker",
+    "limit.runtime-canary-scope",
+    "limit.trusted-writer-isolation",
+    "limit.container-isolation-scope",
+    "limit.pre-dispatch-artifact-basis",
+    "limit.same-uid-authority",
+    "limit.process-tree-quiescence",
+    "limit.remote-ref-durability",
+    "limit.verifier-corpus-boundary",
+    "limit.integration-topology",
+    "limit.write-scopes",
+    "limit.worktree-inode",
+    "limit.child-credentials",
+    "limit.worktree-adoption",
+    "limit.workspace-id",
+    "limit.pipeline-interior",
+    "limit.convergence-plateau",
+    "limit.coordinator-lock-topology",
+    "limit.output-claim-registry",
+    "limit.base-branch-comparison",
+    "compatibility.python",
+)
+
 ORCHESTRATE_DECLARATIONS = (
     "placement.behavior-deciding",
     "placement.reference-elaboration",
@@ -108,22 +184,137 @@ ORCHESTRATE_DECLARATIONS = (
     "limit.session-liveness",
 )
 
+DECLARATION_INVENTORIES = {
+    "hanig-orchestrate": ORCHESTRATE_DECLARATIONS,
+    "hanig-swarm": SWARM_DECLARATIONS,
+}
 
-def _orchestrate_completeness_problems(skill):
-    actual = tuple(item["id"] for item in
-                   DECLARATION_REGISTRY.load_registry(skill))
+REFERENCE_ELABORATION_INVENTORIES = {
+    "hanig-swarm": (
+        ("references/capability-fallbacks.md", "capability.paseo-bus", 1),
+        ("references/capability-fallbacks.md", "capability.python-git", 1),
+        ("references/capability-fallbacks.md", "capability.review", 1),
+        ("references/capability-fallbacks.md", "capability.shell-filesystem", 1),
+        ("references/capability-fallbacks.md", "capability.slurm", 1),
+        ("references/capability-fallbacks.md",
+         "placement.reference-elaboration", 2),
+        ("references/field-evidence.md", "cluster.access", 1),
+        ("references/field-evidence.md", "cluster.plan-specific", 3),
+        ("references/field-evidence.md", "drift.lifted-module", 1),
+        ("references/field-evidence.md", "python.host-floor", 1),
+        ("references/field-evidence.md", "scheduler.queued-job", 1),
+        ("references/field-evidence.md", "unattended.lock", 1),
+        ("references/limits.md", "limit.base-branch-comparison", 2),
+        ("references/limits.md", "limit.container-isolation-scope", 2),
+        ("references/limits.md", "limit.coordinator-lock-topology", 1),
+        ("references/limits.md", "limit.integration-topology", 3),
+        ("references/limits.md", "limit.output-claim-registry", 3),
+        ("references/limits.md", "limit.pipeline-interior", 2),
+        ("references/limits.md", "limit.pre-dispatch-artifact-basis", 2),
+        ("references/limits.md", "limit.process-tree-quiescence", 1),
+        ("references/limits.md", "limit.runtime-canary-scope", 1),
+        ("references/limits.md", "limit.same-uid-authority", 2),
+        ("references/limits.md", "limit.verifier-corpus-boundary", 1),
+        ("references/limits.md", "limit.workspace-id", 1),
+        ("references/limits.md", "limit.worktree-adoption", 1),
+        ("references/limits.md", "limit.worktree-inode", 1),
+        ("references/limits.md", "placement.reference-elaboration", 3),
+        ("references/protocol-details.md", "placement.reference-elaboration", 1),
+    ),
+    "hanig-orchestrate": (
+        ("references/authority-adjudication.md",
+         "adjudication.concurrence", 1),
+        ("references/authority-adjudication.md", "adjudication.matrix", 1),
+        ("references/authority-adjudication.md",
+         "adjudication.nonoverridable", 1),
+        ("references/authority-adjudication.md", "adjudication.record", 1),
+        ("references/authority-adjudication.md", "authority.confirmation", 1),
+        ("references/authority-adjudication.md", "authority.narrow-mode", 1),
+        ("references/authority-adjudication.md", "authority.source", 1),
+        ("references/authority-adjudication.md", "review.rounds", 1),
+        ("references/delegation-evidence.md", "delegation.configuration", 1),
+        ("references/delegation-evidence.md", "delegation.continuation", 1),
+        ("references/delegation-evidence.md", "delegation.prompt", 6),
+        ("references/delegation-evidence.md", "delegation.whole-loop", 1),
+        ("references/delegation-evidence.md", "evidence.checkable", 1),
+        ("references/delegation-evidence.md", "retry.boundary", 1),
+        ("references/delegation-evidence.md", "review.cost", 1),
+        ("references/delegation-evidence.md", "review.effort", 1),
+        ("references/delegation-evidence.md", "review.honesty", 1),
+        ("references/delegation-evidence.md", "review.panel-source", 1),
+        ("references/handoff-takeover.md", "handoff.contents", 2),
+        ("references/handoff-takeover.md", "handoff.transfer", 1),
+        ("references/handoff-takeover.md", "limit.session-liveness", 1),
+        ("references/handoff-takeover.md", "takeover.verify", 2),
+        ("references/operating-loop.md", "dispatch.mechanics", 1),
+        ("references/operating-loop.md", "loop.advance", 1),
+        ("references/operating-loop.md", "loop.quiescence", 1),
+        ("references/operating-loop.md", "merge.requirements", 1),
+        ("references/operating-loop.md", "preservation.before-cleanup", 1),
+        ("references/operating-loop.md", "report.three-parts", 1),
+        ("references/operating-loop.md", "tracker.authority", 1),
+        ("references/operating-loop.md", "tracker.dag", 1),
+        ("references/operating-loop.md", "tracker.reconcile", 1),
+        ("references/operating-loop.md", "watch.facts", 1),
+        ("references/operating-loop.md", "watch.proof", 1),
+        ("references/operating-loop.md", "watch.source", 1),
+    ),
+}
+
+
+def _declaration_completeness_problems(skill):
+    expected = DECLARATION_INVENTORIES.get(skill.name)
+    if expected is None:
+        return ["{}: declaration inventory is not closed".format(skill.name)]
+    data = json.loads((skill / "declarations.json").read_text(encoding="utf-8"))
+    actual = tuple(data.get("known_declarations", ()))
     problems = [
-        "missing declaration: " + declaration_id
-        for declaration_id in ORCHESTRATE_DECLARATIONS
+        "{}: missing declaration: {}".format(skill.name, declaration_id)
+        for declaration_id in expected
         if declaration_id not in actual
     ]
     problems.extend(
-        "unexpected declaration: " + declaration_id
+        "{}: unexpected declaration: {}".format(skill.name, declaration_id)
         for declaration_id in actual
-        if declaration_id not in ORCHESTRATE_DECLARATIONS
+        if declaration_id not in expected
     )
-    if not problems and actual != ORCHESTRATE_DECLARATIONS:
-        problems.append("declaration order differs")
+    if not problems and actual != expected:
+        problems.append("{}: declaration order differs".format(skill.name))
+    return problems
+
+
+def _reference_elaboration_problems(skill):
+    expected = REFERENCE_ELABORATION_INVENTORIES.get(skill.name)
+    if expected is None:
+        return ["{}: reference elaboration inventory is not closed".format(
+            skill.name
+        )]
+    data = json.loads((skill / "declarations.json").read_text(encoding="utf-8"))
+    inactive = {
+        item["id"]
+        for field in ("retired_declarations", "replacement_declarations")
+        for item in data.get(field, ())
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    expected = tuple(
+        item for item in expected if item[1] not in inactive
+    )
+    actual = DECLARATION_REGISTRY.reference_elaborations(skill)
+    expected_counts = {(reference, declaration_id): count
+                       for reference, declaration_id, count in expected}
+    actual_counts = {(reference, declaration_id): count
+                     for reference, declaration_id, count in actual}
+    problems = []
+    for key in sorted(set(expected_counts) | set(actual_counts)):
+        wanted = expected_counts.get(key, 0)
+        found = actual_counts.get(key, 0)
+        if wanted != found:
+            reference, declaration_id = key
+            problems.append(
+                "{}: elaboration {} in {} expected {} occurrence(s), found {}".format(
+                    skill.name, declaration_id, reference, wanted, found
+                )
+            )
     return problems
 
 
@@ -587,19 +778,35 @@ class TestAuthoredSkillShape(unittest.TestCase):
     def test_swarm_declaration_block_matches_the_canonical_registry(self):
         skill = SKILLS / "hanig-swarm"
         self.assertEqual(DECLARATION_REGISTRY.body_diff(skill), "")
+        self.assertEqual(_declaration_completeness_problems(skill), [])
 
     def test_swarm_reference_modals_are_tied_to_registered_declarations(self):
         skill = SKILLS / "hanig-swarm"
         self.assertEqual(DECLARATION_REGISTRY.reference_problems(skill), [])
+        self.assertEqual(_reference_elaboration_problems(skill), [])
 
     def test_orchestrate_declaration_block_matches_the_canonical_registry(self):
         skill = SKILLS / "hanig-orchestrate"
         self.assertEqual(DECLARATION_REGISTRY.body_diff(skill), "")
-        self.assertEqual(_orchestrate_completeness_problems(skill), [])
+        self.assertEqual(_declaration_completeness_problems(skill), [])
 
     def test_orchestrate_reference_modals_are_tied_to_registered_declarations(self):
         skill = SKILLS / "hanig-orchestrate"
         self.assertEqual(DECLARATION_REGISTRY.reference_problems(skill), [])
+        self.assertEqual(_reference_elaboration_problems(skill), [])
+
+    def test_every_declaration_registry_has_a_closed_inventory(self):
+        registry_skills = sorted(
+            path.parent for path in SKILLS.glob("hanig-*/declarations.json")
+        )
+        self.assertEqual(
+            [skill.name for skill in registry_skills],
+            sorted(DECLARATION_INVENTORIES),
+        )
+        for skill in registry_skills:
+            with self.subTest(skill=skill.name):
+                self.assertEqual(_declaration_completeness_problems(skill), [])
+                self.assertEqual(_reference_elaboration_problems(skill), [])
 
     def test_orchestrate_reads_authority_from_the_current_mandate(self):
         skill = SKILLS / "hanig-orchestrate"
@@ -787,32 +994,176 @@ class TestAuthoredSkillShape(unittest.TestCase):
         self.assertIn("calls `advance` once under the state lock", loop_reference)
         self.assertIn("prints that the coordinator is exiting", loop_reference)
 
-    def test_moving_an_orchestrate_rule_to_a_reference_fails_completeness(self):
+    def test_deleting_any_active_declaration_requires_a_lifecycle_record(self):
+        sources = sorted(
+            path.parent for path in SKILLS.glob("hanig-*/declarations.json")
+        )
+        for source in sources:
+            with self.subTest(skill=source.name):
+                with tempfile.TemporaryDirectory() as raw:
+                    skill = Path(raw) / source.name
+                    shutil.copytree(source, skill)
+                    registry = skill / "declarations.json"
+                    data = json.loads(registry.read_text(encoding="utf-8"))
+                    removed = data["declarations"].pop(
+                        len(data["declarations"]) // 2
+                    )
+                    registry.write_text(
+                        json.dumps(data, indent=2) + "\n", encoding="utf-8"
+                    )
+                    message = "{} declaration {} left the registry".format(
+                        source.name, removed["id"]
+                    )
+                    with self.assertRaisesRegex(
+                            DECLARATION_REGISTRY.RegistryError,
+                            re.escape(message)):
+                        DECLARATION_REGISTRY.write_body(skill)
+
+    def test_retirement_reason_survives_removal_from_the_active_registry(self):
         with tempfile.TemporaryDirectory() as raw:
-            skill = Path(raw) / "hanig-orchestrate"
-            shutil.copytree(SKILLS / "hanig-orchestrate", skill)
+            source = SKILLS / "hanig-swarm"
+            skill = Path(raw) / source.name
+            shutil.copytree(source, skill)
             registry = skill / "declarations.json"
             data = json.loads(registry.read_text(encoding="utf-8"))
-            data["declarations"] = [
+            removed = next(
                 item for item in data["declarations"]
-                if item["id"] != "delegation.prompt"
-            ]
-            registry.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-            reference = skill / "references" / "delegation-evidence.md"
-            reference.write_text(
-                reference.read_text(encoding="utf-8").replace(
-                    "declaration: delegation.prompt",
-                    "declaration: placement.reference-elaboration") +
-                "\nA delegated prompt must still carry the complete rule here. "
-                "<!-- declaration: placement.reference-elaboration -->\n",
-                encoding="utf-8",
+                if not item.get("references")
+            )
+            data["declarations"].remove(removed)
+            reason = "The behavior is no longer part of this skill."
+            data["retired_declarations"].append({
+                "id": removed["id"],
+                "reason": reason,
+            })
+            registry.write_text(
+                json.dumps(data, indent=2) + "\n", encoding="utf-8"
             )
             DECLARATION_REGISTRY.write_body(skill)
             self.assertEqual(DECLARATION_REGISTRY.body_diff(skill), "")
+            persisted = json.loads(registry.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["retired_declarations"][0]["reason"],
+                             reason)
+
+    def test_retiring_a_referenced_declaration_retires_its_elaboration(self):
+        with tempfile.TemporaryDirectory() as raw:
+            source = SKILLS / "hanig-orchestrate"
+            skill = Path(raw) / source.name
+            shutil.copytree(source, skill)
+            registry = skill / "declarations.json"
+            data = json.loads(registry.read_text(encoding="utf-8"))
+            declaration_id = "tracker.dag"
+            removed = next(
+                item for item in data["declarations"]
+                if item["id"] == declaration_id
+            )
+            data["declarations"].remove(removed)
+            data["retired_declarations"].append({
+                "id": declaration_id,
+                "reason": "The tracker graph rule no longer applies.",
+            })
+            registry.write_text(
+                json.dumps(data, indent=2) + "\n", encoding="utf-8"
+            )
+            reference = skill / "references" / "operating-loop.md"
+            kept = []
+            for line in reference.read_text(encoding="utf-8").splitlines(True):
+                _, marker_ids, problem = (
+                    DECLARATION_REGISTRY._split_declaration_suffix(
+                        line.rstrip("\n")
+                    )
+                )
+                if problem or declaration_id not in marker_ids:
+                    kept.append(line)
+            reference.write_text("".join(kept), encoding="utf-8")
+            DECLARATION_REGISTRY.write_body(skill)
+            self.assertEqual(DECLARATION_REGISTRY.body_diff(skill), "")
             self.assertEqual(DECLARATION_REGISTRY.reference_problems(skill), [])
+            self.assertEqual(_reference_elaboration_problems(skill), [])
+
+    def test_replacement_record_survives_removal_from_the_active_registry(self):
+        with tempfile.TemporaryDirectory() as raw:
+            source = SKILLS / "hanig-swarm"
+            skill = Path(raw) / source.name
+            shutil.copytree(source, skill)
+            registry = skill / "declarations.json"
+            data = json.loads(registry.read_text(encoding="utf-8"))
+            removed = next(
+                item for item in data["declarations"]
+                if not item.get("references")
+            )
+            replacement = next(
+                item for item in data["declarations"]
+                if item["id"] != removed["id"]
+            )
+            data["declarations"].remove(removed)
+            reason = "A current declaration now carries the behavior."
+            data["replacement_declarations"].append({
+                "id": removed["id"],
+                "replacement": replacement["id"],
+                "reason": reason,
+            })
+            registry.write_text(
+                json.dumps(data, indent=2) + "\n", encoding="utf-8"
+            )
+            DECLARATION_REGISTRY.write_body(skill)
+            self.assertEqual(DECLARATION_REGISTRY.body_diff(skill), "")
+            persisted = json.loads(registry.read_text(encoding="utf-8"))
+            record = persisted["replacement_declarations"][0]
+            self.assertEqual(record["replacement"], replacement["id"])
+            self.assertEqual(record["reason"], reason)
+
+    def test_closed_inventory_rejects_deleting_both_active_and_ledger_entries(self):
+        with tempfile.TemporaryDirectory() as raw:
+            source = SKILLS / "hanig-orchestrate"
+            skill = Path(raw) / source.name
+            shutil.copytree(source, skill)
+            registry = skill / "declarations.json"
+            data = json.loads(registry.read_text(encoding="utf-8"))
+            removed = next(
+                item for item in data["declarations"]
+                if not item.get("references")
+            )
+            data["declarations"].remove(removed)
+            data["known_declarations"].remove(removed["id"])
+            registry.write_text(
+                json.dumps(data, indent=2) + "\n", encoding="utf-8"
+            )
+            message = "hanig-orchestrate missing known declaration: {}".format(
+                removed["id"]
+            )
+            with self.assertRaisesRegex(
+                    DECLARATION_REGISTRY.RegistryError,
+                    re.escape(message)):
+                DECLARATION_REGISTRY.write_body(skill)
+
+    def test_deleting_a_registered_reference_elaboration_is_detected(self):
+        with tempfile.TemporaryDirectory() as raw:
+            source = SKILLS / "hanig-orchestrate"
+            skill = Path(raw) / source.name
+            shutil.copytree(source, skill)
+            reference_name = "references/operating-loop.md"
+            declaration_id = "tracker.dag"
+            reference = skill / reference_name
+            kept = []
+            removed = 0
+            for line in reference.read_text(encoding="utf-8").splitlines(True):
+                _, marker_ids, problem = (
+                    DECLARATION_REGISTRY._split_declaration_suffix(
+                        line.rstrip("\n")
+                    )
+                )
+                if not problem and declaration_id in marker_ids:
+                    removed += 1
+                else:
+                    kept.append(line)
+            self.assertEqual(removed, 1)
+            reference.write_text("".join(kept), encoding="utf-8")
             self.assertEqual(
-                _orchestrate_completeness_problems(skill),
-                ["missing declaration: delegation.prompt"],
+                _reference_elaboration_problems(skill),
+                ["hanig-orchestrate: elaboration tracker.dag in "
+                 "references/operating-loop.md expected 1 occurrence(s), "
+                 "found 0"],
             )
 
     def test_an_unregistered_reference_imperative_is_rejected(self):
