@@ -65,7 +65,7 @@ classes match raw Git paths, and slashes are ordinary characters. For example,
 Python files. An explicit empty list allows no changed paths; an absent field
 is unchecked. Paths use repository-relative `/` spelling.
 
-The orchestrator requires exit 0 before merging; exit 1 reports `out_of_scope`, and exit 2 reports `unchecked`, including missing scope, launch intent, judged head, or local objects. Neither nonzero result is a pass. <!-- declaration: code.merge-scope -->
+The orchestrator requires exit 0 before merging unless it records an explicit scope exception with `hanig-orchestrate/scripts/merge_unit.py` as documented in the operator skill; exit 1 reports `out_of_scope`, and exit 2 reports `unchecked`, including missing scope, launch intent, judged head, or local objects. Neither nonzero result is a pass. <!-- declaration: code.merge-scope -->
 
 The command compares immutable commits from the current attempt's coordinator
 state using local `git diff --name-status -M` with NUL-delimited paths. Both

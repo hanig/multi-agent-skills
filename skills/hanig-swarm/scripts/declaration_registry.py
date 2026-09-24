@@ -99,6 +99,7 @@ CLOSED_DECLARATIONS = {
         adjudication.nonoverridable adjudication.honesty watch.facts
         watch.source watch.proof loop.quiescence loop.advance loop.yield
         preservation.before-cleanup dispatch.mechanics merge.requirements
+        code.merge-command limit.merge-command
         tracker.authority tracker.reconcile tracker.dag report.three-parts
         handoff.contents handoff.transfer takeover.verify
         limit.session-liveness

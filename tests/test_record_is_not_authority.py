@@ -29,6 +29,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "hanig-swarm" / "scripts"
+MERGE_OPERATOR = ROOT / "skills/hanig-orchestrate/scripts/merge_unit.py"
+
+
+def authority_scripts():
+    # The connected operator shares coordinator-state authority readers even
+    # though its forge credentials exclude it from coordinator containment.
+    return sorted(SCRIPTS.glob("*.py")) + [MERGE_OPERATOR]
 
 # Imported, NOT restated. A second copy of this list is the same duplication
 # that produced the defects in the first place.
@@ -39,6 +46,15 @@ AUTHORITY_KEYS = set(_W.AUTHORITY_KEYS)
 # Functions permitted to name an authority key, each with the reason. A
 # function absent from here may not touch one at all.
 ALLOWED = {
+    ("merge_unit.py", "authority"):
+        "reads repo and repository_remote from coordinator-state launch "
+        "anchors to build the receipt binding, never from worker files",
+    ("merge_unit.py", "receipt_command"):
+        "renders the repository binding derived from coordinator-state "
+        "launch anchors into the receipt CLI, never reading worker files",
+    ("merge_unit.py", "reconcile"):
+        "compares receipts against the repository binding derived from "
+        "coordinator-state launch anchors, never trusting worker files",
     ("swarm.py", "_write_launch_record"):
         "writes the record from the coordinator's own git observation",
     ("swarm.py", "_code_launch_record_payload"):
@@ -247,7 +263,7 @@ class TestNoOneReadsAuthorityOutOfTheRecord(unittest.TestCase):
 
     def test_every_use_of_an_authority_key_is_declared(self):
         offenders = []
-        for path in sorted(SCRIPTS.glob("*.py")):
+        for path in authority_scripts():
             for func, key, line in _key_uses(path):
                 if (path.name, func) not in ALLOWED:
                     offenders.append(f"{path.name}:{line} {func}() uses "
@@ -260,7 +276,7 @@ class TestNoOneReadsAuthorityOutOfTheRecord(unittest.TestCase):
 
     def test_the_unsealed_reader_is_called_only_where_declared(self):
         offenders = []
-        for path in sorted(SCRIPTS.glob("*.py")):
+        for path in authority_scripts():
             for func, line in _raw_reader_calls(path):
                 if (path.name, func) not in RAW_ALLOWED:
                     offenders.append(f"{path.name}:{line} {func}()")
@@ -289,7 +305,7 @@ class TestNoOneReadsAuthorityOutOfTheRecord(unittest.TestCase):
 
     def test_record_claim_is_called_only_where_declared(self):
         offenders = []
-        for path in sorted(SCRIPTS.glob("*.py")):
+        for path in authority_scripts():
             for func, line in _named_calls(path, "record_claim"):
                 if (path.name, func) not in CLAIM_ALLOWED:
                     offenders.append(f"{path.name}:{line} {func}()")
@@ -303,14 +319,14 @@ class TestNoOneReadsAuthorityOutOfTheRecord(unittest.TestCase):
         # An allowlist that outlives its call sites stops describing the code
         # and starts excusing it.
         seen = set()
-        for path in sorted(SCRIPTS.glob("*.py")):
+        for path in authority_scripts():
             for func, _key, _line in _key_uses(path):
                 seen.add((path.name, func))
         dead = sorted(set(ALLOWED) - seen)
         self.assertEqual(dead, [], f"ALLOWED entries with no call site: {dead}")
 
         raw_seen = set()
-        for path in sorted(SCRIPTS.glob("*.py")):
+        for path in authority_scripts():
             for func, _line in _raw_reader_calls(path):
                 raw_seen.add((path.name, func))
         dead_raw = sorted(set(RAW_ALLOWED) - raw_seen)
@@ -318,7 +334,7 @@ class TestNoOneReadsAuthorityOutOfTheRecord(unittest.TestCase):
                          f"RAW_ALLOWED entries with no call site: {dead_raw}")
 
         claim_seen = set()
-        for path in sorted(SCRIPTS.glob("*.py")):
+        for path in authority_scripts():
             for func, _line in _named_calls(path, "record_claim"):
                 claim_seen.add((path.name, func))
         dead_claim = sorted(set(CLAIM_ALLOWED) - claim_seen)
@@ -774,7 +790,7 @@ class TestNothingReadsAReceiptWithoutAttestation(unittest.TestCase):
 
     def test_no_module_opens_a_receipt_outside_the_accessor(self):
         offenders = []
-        for path in sorted(SCRIPTS.glob("*.py")):
+        for path in authority_scripts():
             tree = ast.parse(path.read_text())
             stack = []
 
@@ -805,7 +821,7 @@ class TestNothingReadsAReceiptWithoutAttestation(unittest.TestCase):
     def test_the_receipt_constant_is_not_a_way_around_the_literal(self):
         # U.RECEIPT is the same string wearing a name.
         offenders = []
-        for path in sorted(SCRIPTS.glob("*.py")):
+        for path in authority_scripts():
             tree = ast.parse(path.read_text())
             stack = []
 
@@ -842,7 +858,7 @@ class TestNothingReadsAReceiptWithoutAttestation(unittest.TestCase):
 
     def test_the_allowlist_describes_the_code(self):
         seen = set()
-        for path in sorted(SCRIPTS.glob("*.py")):
+        for path in authority_scripts():
             tree = ast.parse(path.read_text())
             stack = []
 
