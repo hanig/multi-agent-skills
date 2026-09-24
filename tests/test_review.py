@@ -1072,6 +1072,7 @@ class TestRangeDivergence(unittest.TestCase):
                   "findings": [], "claims": [], "elapsed_s": 0}
         argv = [str(SCRIPT), "--range", "base..branch", "--kind",
                 "implementation", "--round", "1", "--quorum", "1",
+                "--allow-single-reviewer", "offline singleton fixture",
                 "--claim", review.HONEST_RUN_CLAIM]
         with patch.object(sys, "argv", argv), \
                 patch.object(review, "load_reviewers", return_value=[reviewer]), \
@@ -2078,6 +2079,186 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
             self.run_cli("--kind", "plan", "--only", one, "--quorum", "1"),
             because="one reviewer is not a committee")
 
+    def cycle_cli(self, *flags, failing=False, unavailable=(), roster=None):
+        """Drive argparse, selection, verdict and real persistence offline."""
+        if not hasattr(self, "cycle_root"):
+            self.cycle_root = Path(tempfile.mkdtemp(
+                dir=_ensure_module_state_home())).resolve()
+            self.addCleanup(shutil.rmtree, self.cycle_root)
+            (self.cycle_root / "dispositions.json").write_text("{}")
+        roster = roster if roster is not None else [
+            {"name": "a", "profiles": ["fast", "standard", "deep"]},
+            {"name": "b", "profiles": ["fast", "standard", "deep"]},
+            {"name": "c", "profiles": ["standard", "deep"]},
+            {"name": "d", "profiles": ["deep"]},
+        ]
+        called = []
+
+        def answer(reviewer, *_args):
+            called.append(reviewer["name"])
+            return {"name": reviewer["name"], "ok": True, "elapsed_s": 0,
+                    "verdict": "refuted" if failing else "upheld",
+                    "findings": [], "claims": [{
+                        "claim": review.HONEST_RUN_CLAIM,
+                        "status": "refuted" if failing else "supported",
+                        "why": "offline assessment for the panel regression"}]}
+
+        argv = [str(SCRIPT), "--file", str(SCRIPT), "--kind", "implementation",
+                "--round", "1", "--claim", review.HONEST_RUN_CLAIM,
+                "--dispositions", str(self.cycle_root / "dispositions.json"),
+                *flags]
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(sys, "argv", argv), \
+                patch.object(review, "load_reviewers", return_value=roster), \
+                patch.object(review, "DEFAULT_PROFILE", "standard"), \
+                patch.object(review, "availability", side_effect=lambda r:
+                             "offline" if r["name"] in unavailable else None), \
+                patch.object(review, "run_one", side_effect=answer), \
+                patch.object(review, "arm_watchdog"), \
+                patch.dict(os.environ, {"XDG_STATE_HOME": str(self.cycle_root)}), \
+                redirect_stdout(stdout), redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as stopped:
+                review.main()
+        return SimpleNamespace(returncode=stopped.exception.code,
+                               stdout=stdout.getvalue(),
+                               stderr=stderr.getvalue(), called=called)
+
+    def cycle_records(self):
+        return [json.loads(path.read_text()) for path in sorted(
+            (self.cycle_root / review.JOURNAL_DIR / review.JOURNAL_NAME)
+            .glob("*/record.jsonl"))]
+
+    def test_three_failed_rounds_cannot_restart_with_one_reviewer(self):
+        for round_no in (1, 2, 3):
+            result = self.cycle_cli("--round", str(round_no), "--quorum", "3",
+                                    failing=True)
+            self.assertEqual(result.returncode, review.STATES["REVIEW_FAIL"])
+        history = self.cycle_records()
+        self.assertEqual([r["round"] for r in history], [1, 2, 3])
+        self.assertEqual([r["verdict"] for r in history], ["REVIEW_FAIL"] * 3)
+        # Even the ordinary singleton exception cannot relax a fresh cycle.
+        # Removing the fresh-cycle floor makes the override case PASS.
+        for override in ([], ["--allow-single-reviewer", "diagnostic exception"]):
+            with self.subTest(override=override):
+                result = self.cycle_cli(
+                    "--fresh-cycle-from", "standard", "--only", "d",
+                    "--quorum", "1", *override)
+                self.assert_refused(result, because="fresh cycle shrank to one")
+                self.assertIn("fresh cycle from standard", result.stderr)
+                self.assertEqual(result.called, [])
+        self.assertEqual(self.cycle_records(), history)
+
+    def test_implementation_quorum_one_needs_explicit_override(self):
+        for flags in ([], ["--only", "a"], ["--escalate"]):
+            with self.subTest(flags=flags):
+                result = self.cycle_cli("--quorum", "1", *flags)
+                self.assert_refused(result, because="quorum one has no override")
+                self.assertEqual(result.called, [])
+                self.assertIn("--allow-single-reviewer", result.stderr)
+
+    def test_single_reviewer_override_is_visible_and_persisted(self):
+        for rendering in ([], ["--json"]):
+            with self.subTest(rendering=rendering):
+                result = self.cycle_cli(
+                    "--only", "a", "--quorum", "1",
+                    "--allow-single-reviewer", "owner requested diagnostic",
+                    *rendering)
+                self.assertEqual(result.returncode, review.STATES["REVIEW_PASS"])
+                policy = self.cycle_records()[-1]["panel_policy"]
+                self.assertEqual(policy["single_reviewer_override"],
+                                 "owner requested diagnostic")
+                if rendering:
+                    self.assertEqual(json.loads(result.stdout)["panel_policy"],
+                                     policy)
+                else:
+                    self.assertIn("REVIEW_PASS — SINGLE_REVIEWER_OVERRIDE: "
+                                  "owner requested diagnostic", result.stdout)
+
+    def test_override_requires_a_reason_and_quorum_one(self):
+        for reason, quorum in (("", "1"), ("  ", "1"), ("a\nb", "1"),
+                               ("a\u2028b", "1"), ("diagnostic", "2")):
+            with self.subTest(reason=reason, quorum=quorum):
+                self.assert_refused(self.cycle_cli(
+                    "--quorum", quorum, "--allow-single-reviewer", reason),
+                    because="override is not an explicit singleton reason")
+
+    def test_fresh_cycle_checks_selected_panel_against_replaced_profile(self):
+        for flags in (["--profile", "fast"], ["--only", "a,b"],
+                      ["--only", "a,a,b"]):
+            with self.subTest(flags=flags):
+                result = self.cycle_cli("--fresh-cycle-from", "standard", *flags)
+                self.assert_refused(result, because="replacement shrank the panel")
+                self.assertEqual(result.called, [])
+        result = self.cycle_cli("--fresh-cycle-from", "deep")
+        self.assert_refused(result, because="standard is smaller than deep")
+        self.assertIn("at least 4", result.stderr)
+
+    def test_fresh_cycle_cannot_count_disabled_selected_reviewers(self):
+        roster = [{"name": n, "profiles": ["standard"]} for n in ("a", "b", "c")]
+        roster.append({"name": "d", "profiles": [], "enabled": False})
+        result = self.cycle_cli("--fresh-cycle-from", "standard",
+                                "--only", "a,b,d", roster=roster)
+        self.assert_refused(result, because="disabled reviewer cannot fill floor")
+        self.assertEqual(result.called, [])
+
+    def test_fresh_cycle_cannot_count_duplicate_routing_entries(self):
+        roster = [{"name": n, "profiles": ["fast", "standard"]}
+                  for n in ("a", "a", "b", "c")]
+        for flags in ([], ["--escalate"]):
+            with self.subTest(flags=flags):
+                result = self.cycle_cli(
+                    "--fresh-cycle-from", "standard", "--json", *flags,
+                    roster=roster, unavailable=("c",))
+                self.assert_refused(result, because="two names would fill quorum 3")
+                self.assertIn("duplicate reviewer names", result.stderr)
+                self.assertEqual(result.called, [])
+
+    def test_fresh_cycle_raises_quorum_for_fixed_panel_and_ladder(self):
+        for flags, absent in (([], ("c",)), (["--escalate"], ("c", "d"))):
+            with self.subTest(flags=flags):
+                result = self.cycle_cli("--fresh-cycle-from", "standard",
+                                        "--json", *flags, unavailable=absent)
+                self.assertEqual(result.returncode, review.STATES["REVIEW_PARTIAL"])
+                report = json.loads(result.stdout)
+                self.assertEqual(report["quorum"], 3)
+                self.assertEqual(report["completed"], 2)
+
+    def test_fresh_cycle_ladder_does_not_stop_below_replacement_floor(self):
+        result = self.cycle_cli("--fresh-cycle-from", "standard", "--escalate",
+                                "--json", failing=True)
+        self.assertEqual(result.returncode, review.STATES["REVIEW_FAIL"])
+        self.assertEqual(set(result.called), {"a", "b", "c"})
+        self.assertEqual(json.loads(result.stdout)["quorum"], 3)
+
+    def test_fresh_cycle_provenance_reaches_verdict_and_journal(self):
+        for rendering in ([], ["--json"]):
+            with self.subTest(rendering=rendering):
+                result = self.cycle_cli("--fresh-cycle-from", "standard", *rendering)
+                self.assertEqual(result.returncode, review.STATES["REVIEW_PASS"])
+                fresh = self.cycle_records()[-1]["panel_policy"]["fresh_cycle"]
+                self.assertEqual(fresh["replaces_profile"], "standard")
+                self.assertEqual(fresh["minimum_reviewers"], 3)
+                self.assertEqual(fresh["profile_reviewers"], ["a", "b", "c"])
+                self.assertIn("caller-declared", fresh["provenance"])
+                if rendering:
+                    self.assertEqual(json.loads(result.stdout)["panel_policy"]
+                                     ["fresh_cycle"], fresh)
+                else:
+                    self.assertIn("REVIEW_PASS — FRESH_CYCLE from standard; "
+                                  "minimum 3 reviewers", result.stdout)
+
+    def test_unavailable_fresh_cycle_keeps_provenance(self):
+        result = self.cycle_cli("--fresh-cycle-from", "standard",
+                                unavailable=("a", "b", "c"))
+        self.assertEqual(result.returncode, review.STATES["REVIEW_UNAVAILABLE"])
+        self.assertIn("REVIEW_UNAVAILABLE — FRESH_CYCLE from standard", result.stdout)
+
+    def test_implementation_flags_do_not_relax_a_plan_panel(self):
+        for flags in (["--fresh-cycle-from", "standard"],
+                      ["--quorum", "1", "--allow-single-reviewer", "diagnostic"]):
+            self.assert_refused(self.run_cli("--kind", "plan", *flags),
+                                because="implementation exception used for a plan")
+
     def test_the_two_plan_reviewers_cannot_share_a_provider(self):
         by_prov = {}
         for r in review.load_reviewers():
@@ -2176,6 +2357,7 @@ class TestFindingDispositions(unittest.TestCase):
                         "--kind", "implementation", "--round", "2",
                         "--claim", review.HONEST_RUN_CLAIM,
                         "--dispositions", str(path), "--quorum", "1",
+                        "--allow-single-reviewer", "offline singleton fixture",
                         "--json"]
             review.load_reviewers = lambda: [reviewer]
             review.availability = lambda _reviewer: None
@@ -2873,6 +3055,7 @@ class TestReviewJournal(unittest.TestCase):
     def invoke(self, only="answered"):
         sys.argv = [str(SCRIPT), "--kind", "implementation", "--round", "1",
                     "--profile", "standard", "--quorum", "1",
+                    "--allow-single-reviewer", "offline singleton fixture",
                     "--claim", self.CLAIM, "--file", str(SCRIPT), "--json"]
         if only is not None:
             sys.argv.extend(["--only", only])
@@ -3042,6 +3225,7 @@ class TestReviewJournal(unittest.TestCase):
 
         sys.argv = [str(SCRIPT), "--kind", "implementation", "--round", "1",
                     "--profile", "standard", "--quorum", "1",
+                    "--allow-single-reviewer", "offline singleton fixture",
                     "--claim", self.CLAIM, "--file", str(SCRIPT), "--json",
                     "--only", "answered"]
         stdout = io.StringIO()

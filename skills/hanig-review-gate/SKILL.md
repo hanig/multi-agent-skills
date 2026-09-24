@@ -108,7 +108,18 @@ Open-ended loops are how runaways happen, so every review cycle is bounded:
   signal that the problem is upstream of the symptom. Convene a step-back
   committee (below) with the full history rather than shipping another patch.
 - **After 3 rounds without convergence, start fresh** — new reviewers, full
-  history of what was tried. The current context has drifted too far to help.
+  history of what was tried. Declare the replaced profile with
+  `--round 1 --fresh-cycle-from fast|standard|deep`, and repeat
+  `--fresh-cycle-from` on each round of that cycle. The replacement must select
+  at least that profile's current enabled reviewer count (minimum two); the
+  gate raises quorum to that floor, including on the escalation ladder.
+  The verdict and audit journal label this caller-declared provenance. The
+  journal has no change identity or historical profile membership, so it is
+  not used to infer exhaustion from unrelated runs. Declaring the correct
+  predecessor and carrying the history remain the caller's responsibility.
+  An implementation `--quorum 1` requires `--allow-single-reviewer REASON`, a
+  non-empty one-line reason printed on the verdict and recorded in the journal.
+  This explicit exception cannot lower a declared fresh cycle's floor.
 
 ## The step-back committee
 
