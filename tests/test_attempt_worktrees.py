@@ -696,7 +696,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
              "--unit", "code", "--attempt", attempt.name, "--agent", agent]])
         observed = [json.loads(line) for line in events.read_text().splitlines()]
         self.assertEqual([event["argv"][0] for event in observed],
-                         ["wait", "inspect", "workspace"])
+                         ["wait", "inspect"])
         self.assertTrue(all(event["pid"] != os.getpid() for event in observed))
         state = S.load_state(args.state_dir)
         self.assertEqual(
