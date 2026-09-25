@@ -465,6 +465,78 @@ class TestFixtureQuiescence(unittest.TestCase):
         self.assertEqual(injected, [1])
         self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
 
+    def test_quiescence_includes_the_running_direct_child(self):
+        scope = self._scope()
+        release = scope.root / 'release'
+        proc = self._launch(scope,
+            'import time\nfrom pathlib import Path\n'
+            'print("ready", flush=True)\n'
+            'while not Path(%r).exists(): time.sleep(0.01)\n' % str(release))
+        wait_for(lambda: proc.stdout_path.read_text() == 'ready\n')
+        self.assertEqual(proc.wait_quiescent(0.05).state, fixtures.QuiescenceState.TIMED_OUT)
+        release.touch()
+        self.assertEqual(proc.wait_quiescent(10).state, fixtures.QuiescenceState.QUIESCENT)
+        self.assertEqual(proc.join(10).returncode, 0)
+
+    def test_quiescence_inspection_failures_are_typed_and_never_signal(self):
+        scope = self._scope()
+        proc = self._launch(scope, 'pass')
+        self.assertEqual(proc.join(10).state, JoinState.EXITED)
+        cases = (
+            ('', fixtures.QuiescenceState.INDETERMINATE),
+            ('malformed census\n', fixtures.QuiescenceState.INDETERMINATE),
+            (PermissionError('census denied'), fixtures.QuiescenceState.ERROR),
+            (subprocess.TimeoutExpired('ps', 1), fixtures.QuiescenceState.TIMED_OUT),
+        )
+        for observation, expected in cases:
+            with self.subTest(observation=observation):
+                result = ({'side_effect': observation} if isinstance(observation, Exception)
+                          else {'return_value': observation})
+                with mock.patch.object(fixtures.subprocess, 'check_output', **result), mock.patch.object(
+                        fixtures.os, 'kill', side_effect=AssertionError('wait signalled')), mock.patch.object(
+                        fixtures.os, 'killpg', side_effect=AssertionError('wait signalled')):
+                    quiet = proc.wait_quiescent(1)
+                self.assertEqual(quiet.state, expected, quiet)
+                self.assertTrue(quiet.detail)
+                self.assertIsNone(proc._cleaned)
+                self.assertFalse(proc._reaped)
+        self.assertEqual(proc.wait_quiescent(10).state, fixtures.QuiescenceState.QUIESCENT)
+
+    def test_censuses_share_one_deadline_and_late_absence_is_not_success(self):
+        scope = self._scope()
+        proc = self._launch(scope, 'pass')
+        self.assertEqual(proc.join(10).state, JoinState.EXITED)
+        clock, budgets = [0.0], []
+        output = '%d %d\n%d %d\n' % (
+            os.getpid(), os.getpgrp(), proc.supervisor_pid, proc.supervisor_pid)
+
+        def census(*args, **kwargs):
+            budgets.append(kwargs['timeout'])
+            clock[0] += 1.0
+            return output
+
+        def pause(seconds):
+            clock[0] += seconds
+
+        with mock.patch.object(fixtures.time, 'monotonic', side_effect=lambda: clock[0]), mock.patch.object(
+                fixtures.subprocess, 'check_output', census), mock.patch.object(fixtures, '_pause', pause):
+            quiet = proc.wait_quiescent(1.5)
+        self.assertEqual(quiet.state, fixtures.QuiescenceState.TIMED_OUT, quiet)
+        self.assertEqual(len(budgets), 2)
+        self.assertAlmostEqual(budgets[0], 1.5)
+        self.assertAlmostEqual(budgets[1], 0.48)
+
+    def test_invalid_quiescence_timeouts_do_not_start_an_observation(self):
+        scope = self._scope()
+        proc = self._launch(scope, 'pass')
+        self.assertEqual(proc.join(10).state, JoinState.EXITED)
+        with mock.patch.object(proc, '_snapshot') as scan:
+            for timeout in (None, True, -1, float('inf'), float('nan'), '1'):
+                with self.subTest(timeout=timeout), self.assertRaises(ValueError):
+                    proc.wait_quiescent(timeout)
+            self.assertEqual(proc.wait_quiescent(0).state, fixtures.QuiescenceState.TIMED_OUT)
+            scan.assert_not_called()
+
 
 class TestTypedFixtureContract(unittest.TestCase):
     _scope = TestFixtureProcessGuard._scope
