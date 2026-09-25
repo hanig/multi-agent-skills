@@ -170,6 +170,13 @@ class TestSharedGuard(unittest.TestCase):
         self.assert_module_refused("no tests")
         self.assertEqual(self.counter.read_text(), "3")
 
+    def test_same_named_package_cannot_replace_selected_file(self):
+        self.install_policy()
+        self.candidate({"tests/__init__.py": "",
+                        "tests/test_guard.py": "# selected file has no cases\n",
+                        "tests/test_guard/__init__.py": self.package_tests()})
+        self.assert_module_refused("imported from a different file")
+
     def test_module_own_hook_delegates_and_counts_each_worker_run(self):
         self.install_policy(repetitions=3)
         worker = self.counter_test() + "\nif __name__ == '__main__':\n    unittest.main()\n"
@@ -243,7 +250,7 @@ class TestSharedGuard(unittest.TestCase):
         result = self.verify()
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.shared_receipt()["result"], "fail")
-        self.assertIn("discovered no tests", self.shared_receipt()["stderr_tail"])
+        self.assertIn("executed no tests", self.shared_receipt()["stderr_tail"])
         self.f.assert_refused(self.f.invoke())
 
     def test_default_five_runs_and_same_candidate_binding(self):
