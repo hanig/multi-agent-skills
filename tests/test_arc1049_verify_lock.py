@@ -2,11 +2,14 @@
 
 import hashlib
 import json
+import os
+import signal
 from pathlib import Path
 import subprocess
 import sys
 import time
 import unittest
+from unittest import mock
 
 from tests import test_arc683_merge_precondition as preconditions
 
@@ -14,6 +17,10 @@ S, V = preconditions.S, preconditions.V
 
 
 class TestVerificationLock(unittest.TestCase):
+    # One budget covers startup, concurrent work and publication; scheduling
+    # delays must not race several independent, much tighter fixture timers.
+    WATCHDOG_SECONDS = 300
+
     def setUp(self):
         self.precondition = preconditions.TestMergePrecondition()
         self.precondition.setUp()
@@ -26,10 +33,12 @@ class TestVerificationLock(unittest.TestCase):
 import os, time
 from pathlib import Path
 Path(os.environ['ARC1049_STARTED']).write_text(str(Path.cwd()))
-deadline = time.monotonic() + 45
+# The parent normally releases this barrier within its 300s budget. Keep a
+# longer independent backstop if that supervisor dies before cleanup.
+deadline = time.monotonic() + 600
 while not Path(os.environ['ARC1049_FINISH']).exists():
     if time.monotonic() >= deadline:
-        raise SystemExit('verifier barrier timed out')
+        raise SystemExit('verifier barrier watchdog expired')
     time.sleep(0.02)
 raise SystemExit(int(Path('target.fail').exists()))
 ''')
@@ -45,30 +54,56 @@ raise SystemExit(int(Path('target.fail').exists()))
         command = [sys.executable, str(f.operator), str(f.plan_path),
                    "--state-dir", str(f.state_dir), "--unit", "u", "--pr", "7",
                    "--approver", "Operator", "--verify-integration"]
-        self.process = subprocess.Popen(command, cwd=f.repo, env=f.env,
-                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                        text=True)
+        self.deadline = time.monotonic() + self.WATCHDOG_SECONDS
+        self.stdout = f.directory / "operator.stdout"
+        self.stderr = f.directory / "operator.stderr"
+        # Files let us diagnose an exited operator without waiting for an
+        # inherited pipe in a stuck descendant to close.
+        with self.stdout.open("w") as stdout, self.stderr.open("w") as stderr:
+            self.process = subprocess.Popen(command, cwd=f.repo, env=f.env,
+                                            stdout=stdout, stderr=stderr,
+                                            start_new_session=True)
         self.addCleanup(self.stop)
-        deadline = time.monotonic() + 30
         while not self.started.exists():
             if self.process.poll() is not None:
-                self.fail("operator exited before verifier barrier: " + repr(self.process.communicate()))
-            if time.monotonic() >= deadline:
-                self.fail("verifier did not reach barrier")
+                self.fail("operator exited before verifier barrier (exit %s): %r" %
+                          (self.process.returncode, self.output()))
+            if not self.remaining():
+                self.fail("verifier did not reach barrier within %ss watchdog: %r" %
+                          (self.WATCHDOG_SECONDS, self.output()))
             time.sleep(0.02)
         self.assertNotEqual(Path(self.started.read_text()), f.repo)
 
+    def remaining(self):
+        return max(0.0, self.deadline - time.monotonic())
+
+    def output(self):
+        return self.stdout.read_text(), self.stderr.read_text()
+
     def stop(self):
+        if getattr(self, "_stopped", False):
+            return
         self.finish.touch()
         try:
-            self.process.communicate(timeout=60)
+            self.process.wait(timeout=self.remaining())
         except subprocess.TimeoutExpired:
-            self.process.kill()
-            self.process.communicate()
+            # wait timed out without reaping: the child still owns this PID.
+            # Never signal a group after a successful wait/poll freed its ID.
+            try:
+                os.killpg(self.process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            self.process.wait(timeout=10)
+        self._stopped = True
 
     def complete(self):
         self.finish.touch()
-        stdout, stderr = self.process.communicate(timeout=60)
+        try:
+            self.process.wait(timeout=self.remaining())
+        except subprocess.TimeoutExpired:
+            self.fail("operator did not complete within %ss watchdog: %r" %
+                      (self.WATCHDOG_SECONDS, self.output()))
+        stdout, stderr = self.output()
         self.assertEqual(self.f.calls(["pr", "merge"]), [])
         self.assertEqual(self.f.receipts(), [])
         return subprocess.CompletedProcess(self.process.args, self.process.returncode, stdout, stderr)
@@ -80,23 +115,16 @@ raise SystemExit(int(Path('target.fail').exists()))
         separate coordinator-acquisition test exercises the real epoch writer.
         """
         code = '''
-import fcntl, json, os, pathlib, time
+import fcntl, json, os, pathlib
 state = pathlib.Path(os.environ['COORDINATOR_STATE'])
 forge_path = pathlib.Path(os.environ['FORGE_STATE'])
 with (state / %r).open('r+') as lock:
-    deadline = time.monotonic() + 3
-    while True:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            break
-        except BlockingIOError:
-            if time.monotonic() >= deadline:
-                raise SystemExit('timed out acquiring plan lock while verifier runs')
-            time.sleep(0.02)
+    # The parent's shared watchdog bounds a genuinely held lock.
+    fcntl.flock(lock, fcntl.LOCK_EX)
     exec(%r)
 ''' % (S.LOCK, action)
         result = subprocess.run([sys.executable, "-c", code], env=self.f.env,
-                                capture_output=True, text=True, timeout=15)
+                                capture_output=True, text=True, timeout=self.remaining())
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIsNone(self.process.poll(), "verifier ended before concurrent lock attempt")
 
@@ -126,6 +154,48 @@ with (state / %r).open('r+') as lock:
         self.assertEqual(S._read_state_epoch(self.f.state_dir), (22, None))
         self.assertEqual(self.f.calls(["api"]), [self.f.forge["ref_command"]] * 2)
 
+    def test_operator_exit_before_barrier_is_diagnosed(self):
+        operator = self.f.directory / "early-exit.py"
+        operator.write_text("import sys; sys.stderr.write('fixture exit diagnostic'); sys.exit(7)\n")
+        self.f.operator = operator
+        with self.assertRaisesRegex(AssertionError,
+                                    "operator exited before verifier barrier.*7.*fixture exit diagnostic"):
+            self.start()
+        with mock.patch.object(os, "killpg") as signal_group:
+            self.stop()
+        signal_group.assert_not_called()
+
+    def test_watchdog_bounds_a_stuck_operator(self):
+        operator = self.f.directory / "stuck.py"
+        operator.write_text("import time; time.sleep(3600)\n")
+        self.f.operator = operator
+        self.WATCHDOG_SECONDS = 0.2
+        with self.assertRaisesRegex(AssertionError, "verifier did not reach barrier.*watchdog"):
+            self.start()
+        self.stop()
+        self.assertIsNotNone(self.process.poll(), "watchdog cleanup left the operator running")
+
+    def test_verifier_has_an_independent_watchdog(self):
+        program = self.f.git("show", self.target + ":" + V.MERGE_VERIFIER_PATH)
+        # Execute the actual committed fixture without an operator supervising
+        # it. Advance its clock beyond the deadline without waiting ten minutes.
+        wrapper = '''
+import time
+ticks = iter((0.0, 601.0))
+time.monotonic = lambda: next(ticks)
+def unexpected_sleep(seconds):
+    raise AssertionError('expired verifier polled again')
+time.sleep = unexpected_sleep
+exec(%r)
+''' % program
+        result = subprocess.run([sys.executable, "-c", wrapper], cwd=self.f.repo,
+                                env=self.f.env, capture_output=True, text=True,
+                                timeout=self.WATCHDOG_SECONDS)
+        self.assertTrue(self.started.exists())
+        self.assertFalse(self.finish.exists())
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("verifier barrier watchdog expired", result.stderr)
+
     def test_epoch_change_refuses_stale_evidence(self):
         self.start()
         self.locked_change('''
@@ -142,7 +212,7 @@ path.write_text(json.dumps(record))
                 "ok, reason = S.acquire_lease(%r); assert ok, reason; S.release_lease(%r)" %
                 (str(preconditions.fixtures.SCRIPTS), str(self.f.state_dir), str(self.f.state_dir)))
         result = subprocess.run([sys.executable, "-c", code], env=self.f.env,
-                                capture_output=True, text=True, timeout=15)
+                                capture_output=True, text=True, timeout=self.remaining())
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assert_stale("state_epoch")
 
