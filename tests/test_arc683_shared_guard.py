@@ -230,6 +230,16 @@ class TestSharedGuard(unittest.TestCase):
                         "tests/test_guard.py": module})
         self.assert_module_refused("no tests")
 
+    def test_module_hook_early_zero_exit_cannot_admit_a_merge(self):
+        self.use_real_integration()
+        self.candidate({"tests/test_guard.py":
+                        "def load_tests(loader, tests, pattern):\n"
+                        "    raise SystemExit(0)\n"})
+        verified = self.verify()
+        self.f.assert_refused(self.f.invoke())
+        self.assertNotEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+        self.assertEqual(self.shared_receipt()["result"], "fail")
+
     def test_suite_declared_count_cannot_replace_executed_count(self):
         self.install_policy()
         module = ("import unittest\nclass EmptySuite(unittest.TestSuite):\n"
