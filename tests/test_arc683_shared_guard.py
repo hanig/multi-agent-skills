@@ -298,6 +298,14 @@ class TestSharedGuard(unittest.TestCase):
         self.assertEqual(state["units"]["u"]["merge_receipt"]["integration_status"],
                          "integration-unverified")
         self.assertEqual(len(self.f.calls(["pr", "merge"])), 1)
+        # Losing only the declared verifier blob must not erase the target's
+        # still-readable requirement or resurrect the incorrect persisted label.
+        blob = self.f.git("rev-parse", self.target + ":" + PROGRAM)
+        (self.f.repo / ".git/objects" / blob[:2] / blob[2:]).unlink()
+        result = self.f.invoke()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.f.intent()["integration_status"], "integration-unverified")
+        self.assertEqual(self.f.receipts()[-1]["integration_status"], "integration-unverified")
 
 
 class TestSharedGuardPublication(unittest.TestCase):
