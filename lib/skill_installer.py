@@ -259,6 +259,7 @@ def normalize_agents(records: Iterable[Any]) -> tuple[AgentTarget, ...]:
             destinations=destinations,
             consumers=consumers,
             version=_field(record, "version", None),
+            certification=_field(_field(record, "evidence", {}), "certification", None),
         ))
     return tuple(result)
 
