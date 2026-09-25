@@ -80,6 +80,20 @@ class _SupervisedFixture:
     def kill(self):
         self.send_signal(signal.SIGKILL)
 
+    def _finish_cleanup(self):
+        """Cache status before cleanup closes the transport.
+
+        Keep an already reported child status. If group KILL terminated the
+        supervisor before it could report, expose cleanup's SIGKILL status;
+        the child's exact exit status is then unavailable. This runs only
+        after the group has been observed dead and the supervisor reaped.
+        """
+        if self.returncode is None:
+            try:
+                self.wait(timeout=0)
+            except (subprocess.TimeoutExpired, AssertionError):
+                self.returncode = -signal.SIGKILL
+
     def __enter__(self):
         return self
 
@@ -118,6 +132,7 @@ class FixtureProcesses:
         self.root = Path(root)
         self.kill_group = kill_group
         self.children = []
+        self._handles = []
         self._channels = []
         self.pidfiles = [self.root / 'fixture-groups.pid']
         self._sleep_wrapper = None
@@ -184,7 +199,8 @@ class FixtureProcesses:
         if kwargs.get('preexec_fn') is not None or kwargs.get('close_fds') is False:
             raise ValueError('use run_python for preexec_fn or close_fds=False fixtures')
         child_options = {key: kwargs.pop(key) for key in
-                         ('shell', 'executable', 'restore_signals') if key in kwargs}
+                         ('shell', 'executable', 'restore_signals', 'process_group')
+                         if key in kwargs}
         if child_options.get('executable') is not None:
             child_options['executable'] = os.fsdecode(child_options['executable'])
         child_options['args'] = (os.fsdecode(args) if isinstance(args, (str, bytes, os.PathLike))
@@ -227,7 +243,12 @@ class FixtureProcesses:
         finally:
             os.close(report_write)
             os.close(control_read)
-        return _SupervisedFixture(proc, args, report_read, control_write)
+        handle = _SupervisedFixture(proc, args, report_read, control_write)
+        self._handles.append(handle)
+        if child_options.get('process_group') == 0:
+            with self.pidfiles[0].open('a') as record:
+                record.write('%s\n' % handle.pid)
+        return handle
 
     def run_python(self, source, timeout=60):
         """Return JSON-valued `result` while retaining the session supervisor.
@@ -288,6 +309,7 @@ class FixtureProcesses:
         targets = self._root_rows(table)
         groups = {row[1] for pid, row in targets.items()
                   if pid in recorded or row[1] in recorded}
+        sessions = set()
         for proc, pgid in self.children:
             # Do not poll: an unreaped direct child reserves its PID. A saved
             # PGID after wait() is only a hint, requiring a fresh root anchor.
@@ -295,8 +317,28 @@ class FixtureProcesses:
                 targets[proc.pid] = table[proc.pid]
                 if pgid is not None:
                     groups.add(pgid)
+                    sessions.add(pgid)
             elif pgid is not None and any(row[1] == pgid for row in targets.values()):
                 groups.add(pgid)
+        # A child may request its own group (or call setpgid later). Its
+        # caller may reap it while root-free descendants remain. The retained
+        # session leader reserves the SID, so membership still establishes
+        # ownership without trusting a possibly reused numeric child PGID.
+        # setsid escapes continue to require the explicit root/PID convention.
+        for pid, row in table.items():
+            if row[1] in groups or not sessions:
+                continue
+            try:
+                sid = os.getsid(pid)
+            except ProcessLookupError:
+                continue
+            if sid in sessions:
+                groups.add(row[1])
+        new_groups = groups - recorded
+        if new_groups:
+            with self.pidfiles[0].open('a') as record:
+                for pgid in sorted(new_groups):
+                    record.write('%s\n' % pgid)
         groups.discard(os.getpgrp())
         targets.update((pid, row) for pid, row in table.items() if row[1] in groups)
         # Include ordinary descendants while an owned ancestor is observable.
@@ -332,6 +374,8 @@ class FixtureProcesses:
                         stream.close()
         if failure is not None:
             raise failure
+        for handle in self._handles:
+            handle._finish_cleanup()
         while self._channels:
             os.close(self._channels.pop())
 
