@@ -1065,6 +1065,37 @@ class TestSessionContainment(unittest.TestCase):
         self.assertTrue(proc._reaped)
         self.assertEqual(proc.cleanup().state, CleanupState.CLEAN)
 
+    def test_survivor_guard_retries_a_contradicted_clean_cache_through_unittest(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+
+        class Probe(unittest.TestCase):
+            def runTest(case):
+                pass
+
+        case = Probe()
+        scope = FixtureProcesses(case, directory.name)
+        proc, pid = TestTypedFixtureContract._orphan(self, scope, 'ordinary')
+        # Independent containment if the guard regresses. Keep the directory
+        # until it finishes so the test does not erase its own teardown data.
+        self.addCleanup(proc._perform_cleanup)
+        with mock.patch.object(proc, '_survivor_scan', side_effect=[
+                ({proc.supervisor_pid: proc._anchor}, True), ({}, True)]):
+            self.assertEqual(proc.cleanup().state, CleanupState.CLEAN)
+        # Simulate a census miss, then consume the guard through unittest's
+        # registered cleanups with real scans and the real live descendant.
+        self.assertIn(pid, fixtures._session_rows(proc.supervisor_pid, set()))
+        result = unittest.TestResult()
+        with mock.patch.object(proc, '_perform_cleanup', wraps=proc._perform_cleanup) as retry:
+            case.run(result)
+        self.assertEqual(len(result.failures), 1, result.failures)
+        self.assertEqual(result.errors, [])
+        self.assertIn('fixture processes survived cleanup', result.failures[0][1])
+        self.assertEqual(fixtures._session_rows(proc.supervisor_pid, set()), {})
+        self.assertNotIn(pid, process_table())
+        retry.assert_called_once_with()
+        self.assertEqual(proc._cleaned.state, CleanupState.CLEAN)
+
     def test_cwd_validation_precedes_all_launch_side_effects(self):
         scope = self._scope()
         root = scope.root / 'root'

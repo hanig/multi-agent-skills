@@ -765,7 +765,10 @@ class FixtureProcesses:
         if failures:
             # Preserve the failed observation before emergency containment.
             for proc in self.children:
-                proc.cleanup()
+                # This observation can contradict an earlier CLEAN cache.
+                # Retry containment now and replace that stale cache; still
+                # report the guard failure even if the retry removes the leak.
+                proc._cleaned = proc._perform_cleanup()
             raise AssertionError('fixture processes survived cleanup or absence is unknown: %r' % failures)
 
     def shell_script(self, source):
