@@ -173,6 +173,80 @@ class TestJournalWriterRegistry(unittest.TestCase):
         self.assertEqual(len(report['failures']), 1)
         self.assertIn('NewWriter.test_unmarked', report['failures'][0])
 
+    def test_borrowed_selected_method_does_not_authorize_its_unmarked_caller(self):
+        report = self.child('''
+            outcomes = []
+            for marked in (False, True):
+                seen = {}
+                class Caller(unittest.TestCase):
+                    def test_caller(self):
+                        borrowed = module.TestReviewJournal(
+                            'test_two_invocations_append_two_records_with_monotonic_timestamps')
+                        borrowed.setUp()
+                        try:
+                            borrowed.test_two_invocations_append_two_records_with_monotonic_timestamps()
+                            seen['records'] = len(borrowed.records())
+                        finally:
+                            borrowed.doCleanups()
+                if marked:
+                    Caller.test_caller = journal_writer(Caller.test_caller)
+                result = unittest.TestResult()
+                Caller('test_caller').run(result)
+                outcomes.append({'marked': marked, 'ok': result.wasSuccessful(),
+                                 'records': seen.get('records'),
+                                 'failures': [message for _, message in result.failures],
+                                 'errors': [message for _, message in result.errors]})
+            print(json.dumps(outcomes))
+        ''')
+        self.assertFalse(report[0]['ok'], report[0])
+        self.assertEqual(report[0]['errors'], [])
+        self.assertEqual(len(report[0]['failures']), 1)
+        self.assertIn('Caller.test_caller', report[0]['failures'][0])
+        self.assertTrue(report[1]['ok'], report[1])
+        self.assertEqual(report[1]['records'], 2)
+
+    def test_static_and_class_methods_register_in_either_decorator_order(self):
+        report = self.child('''
+            from types import ModuleType
+            paths = []
+            def append():
+                root = module._ensure_module_state_home()
+                _, path = module.review.append_review_journal(
+                    root / 'descriptor-journal', 'implementation', 1, [], 'REVIEW_PASS', [])
+                paths.append(path)
+            class Writers(unittest.TestCase):
+                @journal_writer
+                @staticmethod
+                def test_static_outer():
+                    append()
+                @staticmethod
+                @journal_writer
+                def test_static_inner():
+                    append()
+                @journal_writer
+                @classmethod
+                def test_class_outer(cls):
+                    append()
+                @classmethod
+                @journal_writer
+                def test_class_inner(cls):
+                    append()
+            discovered = ModuleType('descriptor_fixture')
+            discovered.Writers = Writers
+            names = registered_writer_names(discovered)
+            result = unittest.TestResult()
+            unittest.defaultTestLoader.loadTestsFromModule(discovered).run(result)
+            print(json.dumps({'ok': result.wasSuccessful(), 'names': names,
+                              'count': result.testsRun,
+                              'records': sum(path.is_file() for path in paths),
+                              'failures': [message for _, message in result.failures],
+                              'errors': [message for _, message in result.errors]}))
+        ''')
+        self.assertTrue(report['ok'], report)
+        self.assertEqual(report['count'], 4)
+        self.assertEqual(len(report['names']), 4)
+        self.assertEqual(report['records'], 4)
+
     def test_guard_discovers_every_registered_writer_including_new_method(self):
         report = self.child('''
             executed = []

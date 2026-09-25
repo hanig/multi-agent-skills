@@ -16,7 +16,7 @@ _WRITERS = weakref.WeakSet()
 
 def journal_writer(method):
     """Declare a test method for inclusion in the journal isolation guard."""
-    _WRITERS.add(method)
+    _WRITERS.add(getattr(method, "__func__", method))
     return method
 
 
@@ -31,34 +31,38 @@ def _test_method(case):
 def require_registered_writer():
     """Refuse an unmarked running test, even when it borrows a marked helper.
 
-    Prefer the innermost selected test method or unittest run frame over
-    helper-instance locals. Direct fixture calls outside a runner use the
-    nearest selected TestCase.
+    Every active selected-test/run frame must be registered: a registered
+    borrowed test method cannot grant permission to an unmarked outer caller.
+    Helper-instance locals alone are not active tests. Direct fixture calls
+    outside a runner use the nearest selected TestCase.
     A cached isolation fixture is not permission to write from an unmarked test.
     """
     frame = inspect.currentframe()
-    caller = None
+    nearest = None
+    callers = []
     try:
         frame = frame.f_back
         while frame is not None:
             case = frame.f_locals.get("self")
             if isinstance(case, unittest.TestCase):
-                if caller is None:
-                    caller = case
+                if nearest is None:
+                    nearest = case
                 selected = getattr(case, case._testMethodName)
                 test_codes = (getattr(selected, "__code__", None),
                               getattr(inspect.unwrap(selected), "__code__", None))
                 if (any(frame.f_code is code for code in test_codes)
                         or frame.f_code is unittest.TestCase.run.__code__):
-                    caller = case
-                    break
+                    callers.append(case)
             frame = frame.f_back
-        if caller is None:
+        if not callers and nearest is not None:
+            callers.append(nearest)
+        if not callers:
             raise AssertionError("journal helper called without a registered test")
-        if _test_method(caller) not in _WRITERS:
-            raise AssertionError(
-                "unregistered journal writer: %s; mark the test with "
-                "@journal_writer so the isolation guard covers it" % caller.id())
+        for caller in callers:
+            if _test_method(caller) not in _WRITERS:
+                raise AssertionError(
+                    "unregistered journal writer: %s; mark the test with "
+                    "@journal_writer so the isolation guard covers it" % caller.id())
     finally:
         del frame
 
