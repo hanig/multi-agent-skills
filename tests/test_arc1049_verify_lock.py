@@ -11,6 +11,7 @@ import time
 import unittest
 from unittest import mock
 
+from tests import review_sandbox_worker as sandbox
 from tests import test_arc683_merge_precondition as preconditions
 
 S, V = preconditions.S, preconditions.V
@@ -50,6 +51,10 @@ raise SystemExit(int(Path('target.fail').exists()))
         self.before = (self.f.state_dir / S.VERIFY_RECEIPTS).read_bytes()
 
     def start(self):
+        # Resolve a nonreaping API before launching anything. This also uses
+        # Darwin's native waitid on Python builds without os.waitid; missing
+        # support fails closed rather than falling back to poll()/wait().
+        self.observe = sandbox.nonreaping_waiter()
         f = self.f
         command = [sys.executable, str(f.operator), str(f.plan_path),
                    "--state-dir", str(f.state_dir), "--unit", "u", "--pr", "7",
@@ -65,7 +70,9 @@ raise SystemExit(int(Path('target.fail').exists()))
                                             start_new_session=True)
         self.addCleanup(self.stop)
         while not self.started.exists():
-            if self.process.poll() is not None:
+            if self.operator_exited():
+                # Obtain the exit code only after containing descendants.
+                self.stop()
                 self.fail("operator exited before verifier barrier (exit %s): %r" %
                           (self.process.returncode, self.output()))
             if not self.remaining():
@@ -80,29 +87,49 @@ raise SystemExit(int(Path('target.fail').exists()))
     def output(self):
         return self.stdout.read_text(), self.stderr.read_text()
 
+    def operator_exited(self):
+        self.assertIsNone(self.process.returncode,
+                          "operator reaped before process-group cleanup")
+        return self.observe(self.process.pid)
+
+    def await_operator_exit(self):
+        while not self.operator_exited():
+            if not self.remaining():
+                raise subprocess.TimeoutExpired(self.process.args, self.WATCHDOG_SECONDS)
+            time.sleep(0.02)
+
     def stop(self):
         if getattr(self, "_stopped", False):
             return
         self.finish.touch()
         try:
-            self.process.wait(timeout=self.remaining())
+            self.await_operator_exit()
         except subprocess.TimeoutExpired:
-            # wait timed out without reaping: the child still owns this PID.
-            # Never signal a group after a successful wait/poll freed its ID.
-            try:
-                os.killpg(self.process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            self.process.wait(timeout=10)
+            pass
+        # Exit observation never reaps: even a zombie reserves the leader's
+        # PID/group ID. Kill descendants before the sole wait releases it.
+        # Observation errors (including ECHILD) propagate without a signal.
+        try:
+            os.killpg(self.process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            # Darwin reports EPERM for a zombie-only group. Suppress it only
+            # after observing no live members of this still-reserved group.
+            if any(group == self.process.pid for _pid, group in
+                   sandbox.session_members(self.process.pid)):
+                raise
+        self.process.wait(timeout=10)
         self._stopped = True
 
     def complete(self):
         self.finish.touch()
         try:
-            self.process.wait(timeout=self.remaining())
+            self.await_operator_exit()
         except subprocess.TimeoutExpired:
             self.fail("operator did not complete within %ss watchdog: %r" %
                       (self.WATCHDOG_SECONDS, self.output()))
+        self.stop()
         stdout, stderr = self.output()
         self.assertEqual(self.f.calls(["pr", "merge"]), [])
         self.assertEqual(self.f.receipts(), [])
@@ -126,7 +153,7 @@ with (state / %r).open('r+') as lock:
         result = subprocess.run([sys.executable, "-c", code], env=self.f.env,
                                 capture_output=True, text=True, timeout=self.remaining())
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIsNone(self.process.poll(), "verifier ended before concurrent lock attempt")
+        self.assertFalse(self.operator_exited(), "verifier ended before concurrent lock attempt")
 
     def assert_stale(self, expected):
         result = self.complete()
@@ -164,6 +191,147 @@ with (state / %r).open('r+') as lock:
         with mock.patch.object(os, "killpg") as signal_group:
             self.stop()
         signal_group.assert_not_called()
+
+    def test_early_exit_descendant_is_killed_before_leader_reap(self):
+        pidfile = self.f.directory / "descendant-pid"
+        release = self.f.directory / "descendant-release"
+        child = '''
+import os, time
+from pathlib import Path
+Path(%r).write_text(str(os.getpid()))
+deadline = time.monotonic() + 600
+while not Path(%r).exists() and time.monotonic() < deadline:
+    time.sleep(0.02)
+''' % (str(pidfile), str(release))
+        operator = self.f.directory / "descendant-operator.py"
+        operator.write_text('''
+import subprocess, sys, time
+from pathlib import Path
+subprocess.Popen([sys.executable, '-c', %r])
+deadline = time.monotonic() + 600
+while not Path(%r).exists():
+    if time.monotonic() >= deadline:
+        raise SystemExit('descendant did not start')
+    time.sleep(0.02)
+raise SystemExit(7)
+''' % (child, str(pidfile)))
+        self.f.operator = operator
+
+        def await_descendant_exit():
+            if not pidfile.exists():
+                return
+            # Orphan zombies belong to the OS reaper and cannot run. Never
+            # signal a remembered descendant PID to clean up a failing test.
+            deadline = time.monotonic() + 10
+            while True:
+                result = subprocess.run(
+                    ["ps", "-p", pidfile.read_text(), "-o", "stat="],
+                    capture_output=True, text=True, timeout=10)
+                self.assertIn(result.returncode, (0, 1), result.stderr)
+                state = result.stdout.strip()
+                if not state or state.startswith("Z"):
+                    return
+                self.assertLess(time.monotonic(), deadline,
+                                "barrier-ignoring descendant survived stop()")
+                time.sleep(0.02)
+
+        def release_descendant():
+            release.touch()
+            await_descendant_exit()
+
+        # This second barrier is only the regression's emergency cleanup;
+        # the descendant deliberately never reads the verifier finish barrier.
+        self.addCleanup(release_descendant)
+        observe = sandbox.nonreaping_waiter()
+        signal_group = os.killpg
+        signals = []
+
+        def recorded_signal(pid, sig):
+            self.assertEqual(pid, self.process.pid)
+            self.assertTrue(self.finish.exists())
+            self.assertIsNone(self.process.returncode, "signal after leader reap")
+            self.assertTrue(observe(pid), "exited leader is no longer waitable")
+            signals.append((pid, sig))
+            signal_group(pid, sig)
+
+        with mock.patch.object(os, "killpg", side_effect=recorded_signal):
+            with self.assertRaisesRegex(AssertionError,
+                                        "operator exited before verifier barrier.*7"):
+                self.start()
+            self.stop()
+        self.assertTrue(pidfile.exists(), "operator never spawned its descendant")
+        await_descendant_exit()
+        self.assertEqual(signals, [(self.process.pid, signal.SIGKILL)])
+        self.assertEqual(self.process.returncode, 7)
+        with mock.patch.object(os, "killpg") as signal_again:
+            self.stop()
+        signal_again.assert_not_called()
+
+    def test_complete_signals_group_before_reaping_leader(self):
+        self.start()
+        observe = sandbox.nonreaping_waiter()
+        signal_group = os.killpg
+        signals = []
+
+        def recorded_signal(pid, sig):
+            self.assertEqual(pid, self.process.pid)
+            self.assertIsNone(self.process.returncode, "signal after leader reap")
+            self.assertTrue(observe(pid), "completed leader is no longer waitable")
+            self.assertTrue(self.finish.exists())
+            signals.append((pid, sig))
+            signal_group(pid, sig)
+
+        with mock.patch.object(os, "killpg", side_effect=recorded_signal):
+            result = self.complete()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(signals, [(self.process.pid, signal.SIGKILL)])
+
+    def test_concurrent_lock_exit_check_does_not_reap_leader(self):
+        operator = self.f.directory / "exit-after-barrier.py"
+        operator.write_text(
+            "import os, time\nfrom pathlib import Path\n"
+            "Path(os.environ['ARC1049_STARTED']).write_text(%r)\n"
+            "deadline = time.monotonic() + 600\n"
+            "while not Path(os.environ['ARC1049_FINISH']).exists():\n"
+            "    if time.monotonic() >= deadline: raise SystemExit(8)\n"
+            "    time.sleep(0.02)\n"
+            "raise SystemExit(7)\n" % str(self.f.directory))
+        self.f.operator = operator
+        # This synthetic operator does not initialize the real lock file.
+        (self.f.state_dir / S.LOCK).touch()
+        self.start()
+        self.finish.touch()
+        self.await_operator_exit()
+        with self.assertRaisesRegex(AssertionError,
+                                    "verifier ended before concurrent lock attempt"):
+            self.locked_change()
+        self.assertIsNone(self.process.returncode)
+        self.assertTrue(sandbox.nonreaping_waiter()(self.process.pid))
+        self.stop()
+        self.assertEqual(self.process.returncode, 7)
+
+    def test_missing_nonreaping_wait_refuses_before_operator_launch(self):
+        with mock.patch.object(sandbox.os, "waitid", None, create=True), \
+                mock.patch.object(sandbox.sys, "platform", "unsupported"), \
+                mock.patch.object(subprocess, "Popen") as launch:
+            with self.assertRaisesRegex(sandbox.SandboxFailure, "waitid.*WNOWAIT"):
+                self.start()
+        launch.assert_not_called()
+
+    def test_cleanup_does_not_hide_permission_error_for_live_group(self):
+        operator = self.f.directory / "denied-signal.py"
+        operator.write_text("import time; time.sleep(3600)\n")
+        self.f.operator = operator
+        self.WATCHDOG_SECONDS = 0.2
+        with self.assertRaisesRegex(AssertionError, "verifier did not reach barrier.*watchdog"):
+            self.start()
+        with mock.patch.object(os, "killpg", side_effect=PermissionError("signal denied")):
+            with self.assertRaisesRegex(PermissionError, "signal denied"):
+                self.stop()
+        self.assertIsNone(self.process.returncode)
+        self.assertFalse(self.observe(self.process.pid))
+        self.stop()
+        self.assertIsNotNone(self.process.returncode)
 
     def test_watchdog_bounds_a_stuck_operator(self):
         operator = self.f.directory / "stuck.py"
