@@ -51,6 +51,25 @@ def _registered_code_is_active(function, frames):
     return any(frame.f_code is code for frame in frames)
 
 
+def _method_is_active(method, frame):
+    """Match wrappers as well as bodies, distinguishing shared wrapper code."""
+    function = getattr(method, "__func__", method)
+    while True:
+        if frame.f_code is getattr(function, "__code__", None):
+            # Decorator factories share code objects across different methods.
+            # Their closure bindings identify which wrapper is actually running.
+            try:
+                if all(frame.f_locals.get(name) is cell.cell_contents
+                       for name, cell in zip(function.__code__.co_freevars,
+                                             function.__closure__ or ())):
+                    return True
+            except ValueError:  # An empty closure cell has no live binding.
+                pass
+        if not hasattr(function, "__wrapped__"):
+            return False
+        function = function.__wrapped__
+
+
 def require_registered_writer():
     """Authorize actual registered execution beneath every active unittest run.
 
@@ -73,7 +92,6 @@ def require_registered_writer():
                 and isinstance(_frame_receiver(frame), unittest.TestCase)}
         if not runs:
             raise AssertionError("journal helper called without a registered test")
-        running_cases = {id(case) for case in runs.values()}
         callers = []
         for index, frame in enumerate(frames):
             case = _frame_receiver(frame)
@@ -85,17 +103,22 @@ def require_registered_writer():
                     raise AssertionError(
                         "journal helper called without active registered test code")
                 callers.append((case, function))
-            elif isinstance(case, unittest.TestCase) and id(case) not in running_cases:
-                # A borrowed helper instance grants nothing. A directly called
-                # test body on it must still be registered, including after a rename.
-                names = unittest.defaultTestLoader.getTestCaseNames(type(case))
-                if hasattr(type(case), "runTest"):
-                    names.append("runTest")
-                for name in names:
-                    candidate = getattr(case, name)
-                    leaf = inspect.unwrap(getattr(candidate, "__func__", candidate))
-                    if frame.f_code is getattr(leaf, "__code__", None):
-                        callers.append((case, _registered_function(candidate)))
+            else:
+                # Every nested test body constrains the write, including one on
+                # the running instance. Runner-owned cases also let us inspect
+                # bodies that have rebound or deleted their receiver local.
+                owners = {id(owner): owner for run_index, owner in runs.items()
+                          if run_index > index}
+                if isinstance(case, unittest.TestCase):
+                    owners[id(case)] = case
+                for owner in owners.values():
+                    names = unittest.defaultTestLoader.getTestCaseNames(type(owner))
+                    if hasattr(type(owner), "runTest"):
+                        names.append("runTest")
+                    for name in names:
+                        candidate = getattr(owner, name)
+                        if _method_is_active(candidate, frame):
+                            callers.append((owner, _registered_function(candidate)))
         for caller, function in callers:
             if function not in _WRITERS:
                 raise AssertionError(
