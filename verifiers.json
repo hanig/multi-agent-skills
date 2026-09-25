@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "verifiers": [
+    {
+      "name": "merge-precondition",
+      "sha256": "25651a2aa6e810316275267671403aada5692263bef5b652ab27b862f18c7a5c",
+      "claims": [
+        "integration-tests"
+      ]
+    }
+  ]
+}

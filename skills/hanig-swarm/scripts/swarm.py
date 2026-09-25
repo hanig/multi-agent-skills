@@ -9602,6 +9602,11 @@ def cmd_merge(args):
     target_commit = getattr(args, "target_commit", None)
     if target_commit:
         rec["target_commit"] = target_commit
+    integration_status = getattr(args, "integration_status", None)
+    if integration_status:
+        # Audit label supplied by the connected merge operator, never new
+        # verification authority. Claim admission still reads verify receipts.
+        rec["integration_status"] = integration_status
     bad = _merge_shape_problem(rec)
     if bad:
         sys.stderr.write(f"error: this would not be admissible: {bad}\n")
@@ -10098,6 +10103,9 @@ def main():
     m.add_argument("--merged-as", required=True,
                    help="the resulting commit on the target")
     m.add_argument("--method", required=True, choices=MERGE_METHODS)
+    m.add_argument("--integration-status",
+                   choices=("candidate-verified", "integration-unverified"),
+                   help="connected operator's audit label; not verification authority")
     # REQUIRED, because _merge_shape_problem requires it: an optional flag
     # feeding a mandatory field is a command that can only fail, and only the
     # smoke test found it. Every unit test passed a repo.
