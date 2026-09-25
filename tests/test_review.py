@@ -1474,7 +1474,7 @@ class TestFailClosed(unittest.TestCase):
 
 class TestPortability(unittest.TestCase):
     def test_stdlib_only(self):
-        allowed = {"argparse", "concurrent", "errno", "hashlib", "json", "os", "re", "signal", "stat",
+        allowed = {"argparse", "concurrent", "datetime", "errno", "hashlib", "json", "os", "re", "signal", "stat",
                    "subprocess", "sys", "tempfile", "time", "urllib", "pathlib"}
         for line in SCRIPT.read_text().splitlines():
             s = line.strip()
@@ -3664,7 +3664,7 @@ class TestReviewJournal(unittest.TestCase):
         self.assertEqual(record["results"][0]["verdict"],
                          "<OPENAI_API_KEY redacted>")
 
-    def test_digest_collisions_obey_mandatory_redaction(self):
+    def test_valid_claim_digest_survives_secret_substring_collision(self):
         digest = hashlib.sha256(b"abc").hexdigest()
         self.assertIn("4141", digest)
         with patch.dict(os.environ, {"OPENAI_API_KEY": "4141"}):
@@ -3673,9 +3673,7 @@ class TestReviewJournal(unittest.TestCase):
         self.assertEqual(stderr, "")
         record = self.records()[0]
         self.assertEqual(record["claims"], [self.CLAIM, "abc"])
-        self.assertEqual(record["claim_digests"][1],
-                         digest.replace("4141", "<OPENAI_API_KEY redacted>"))
-        self.assertNotIn("4141", json.dumps(record))
+        self.assertEqual(record["claim_digests"][1], digest)
 
     def test_transport_key_collisions_cannot_drop_or_rehash_record_data(self):
         for secret in ("files", "record_line", "details", "claims", "claim",
@@ -3699,15 +3697,15 @@ class TestReviewJournal(unittest.TestCase):
                 self.assertTrue(json.loads(stdout)["journal"]["written"])
                 record = self.records()[-1]
                 tag = "<OPENAI_API_KEY redacted>"
-                saved = record["results".replace(secret, tag)][0]
+                saved = record["results"][0]
                 self.assertEqual(saved["findings"][0]["summary"], "required row lost")
                 self.assertEqual(saved["findings"][0]["location"], "sample.py:7")
                 self.assertIs(saved["findings"][0]["confirmed"], True)
                 self.assertEqual(record["rejecting_reviewers"], ["answered"])
-                self.assertEqual(record["refuted_claims".replace(secret, tag)][0]
+                self.assertEqual(record["refuted_claims"][0]
                                  ["why"], "the input loses a required row")
-                self.assertEqual(record["claims".replace(secret, tag)][1], tag)
-                self.assertEqual(record["claim_digests".replace(secret, tag)][1],
+                self.assertEqual(record["claims"][1], tag)
+                self.assertEqual(record["claim_digests"][1],
                                  hashlib.sha256(secret.encode()).hexdigest())
                 self.assertNotIn("record_line", record)
 

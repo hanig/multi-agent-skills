@@ -35,6 +35,7 @@ Python 3.8+, standard library only.
 
 import argparse
 import concurrent.futures
+import datetime
 import errno
 import hashlib
 import json
@@ -50,8 +51,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-# Exit 5 belongs to ARC-709's REVIEW_ADJUDICATION recovery implementation;
-# leave it reserved even while that state is absent from this branch.
+# Exit 5 remains reserved. The adjudication ledger introduces no review verdict.
 STATES = {"REVIEW_PASS": 0, "REVIEW_FAIL": 1, "REVIEW_UNAVAILABLE": 2,
           "REVIEW_PARTIAL": 3, "REVIEW_ERROR": 4,
           "REVIEW_INCOMPLETE": 6, "REVIEW_CLAIMS_REFUTED": 7}
@@ -66,6 +66,7 @@ MAX_ROUNDS = 3
 
 HONEST_RUN_CLAIM = "This change cannot make an honest run fail."
 DISPOSITIONS = {"reproduced", "not-reproduced", "deferred"}
+ADJUDICATION_DECISIONS = ("overruled", "accepted", "refuted_by_reproduction")
 
 # Keep payloads bounded; an oversized diff silently truncated is a lie about
 # what was reviewed, so truncation is always reported in the output.
@@ -86,7 +87,7 @@ JOURNAL_NAME = "review-rounds"
 JOURNAL_TEST_MARKER = "HANIG_REVIEW_GATE_TESTING"
 JOURNAL_TEST_ROOT_PREFIX = ".hanig-review-gate-tests-"
 JOURNAL_HEADER = (
-    "Append-only logical collection of immutable per-round JSON lines; "
+    "Append-only logical collection of immutable review and adjudication JSON lines; "
     "audit-only attested review history. This is not the rejected "
     "mandatory per-change receipt: that receipt could lock honest authors out "
     "of the gate, while this non-gating record cannot decide or block a verdict."
@@ -375,6 +376,9 @@ def review_journal_details(results):
                 **finding,
                 "location": f"{finding.get('file', '?')}:{finding.get('line', '?')}",
                 "confirmed": is_confirmed(finding),
+                "finding_digest": finding_digest(
+                    f"{finding.get('file', '?')}:{finding.get('line', '?')}",
+                    finding.get("summary", "")),
             } for finding in result.get("findings", [])],
         } for result in results],
         "refuted_claims": [
@@ -390,7 +394,7 @@ def review_journal_details(results):
 
 
 def prepare_review_journal(kind, round_no, effective_panel, verdict, claims,
-                           *, panel_policy=None, results=()):
+                           *, panel_policy=None, results=(), reviewed_head=None):
     """Finish record semantics, redaction and serialization before I/O."""
     record = {
         "type": "review_round",
@@ -399,26 +403,28 @@ def prepare_review_journal(kind, round_no, effective_panel, verdict, claims,
         "date": journal_timestamp(),
         "kind": kind,
         "round": round_no,
+        "reviewed_head": reviewed_head,
         "effective_panel": list(effective_panel),
         "verdict": verdict,
-        # Hash the original text. Mandatory redaction
-        # can obscure a digest that contains a configured key value.
+        # Hash the original text; validated identifiers survive redaction.
         "claim_digests": claim_digests(claims),
         "claims": list(claims),
     }
     record.update(review_journal_details(results))
     if panel_policy is not None:
         record["panel_policy"] = panel_policy
-    record = deep_redact(record)
+    validate_journal_record(record, allow_unbound=True)
+    record = redact_ledger(record)
     return record, json.dumps(record, sort_keys=True) + "\n"
 
 
 def append_review_journal(path, kind, round_no, effective_panel, verdict,
-                          claims, *, panel_policy=None, results=()):
+                          claims, *, panel_policy=None, results=(),
+                          reviewed_head=None):
     """Prepare and atomically publish one immutable audit record."""
     record, line = prepare_review_journal(
         kind, round_no, effective_panel, verdict, claims,
-        panel_policy=panel_policy, results=results)
+        panel_policy=panel_policy, results=results, reviewed_head=reviewed_head)
     return record, _write_review_journal(path, line)
 
 
@@ -526,8 +532,13 @@ def _run_journal_child(args, completed, verdict):
     _record, line = prepare_review_journal(
         args.kind, args.round, [result["name"] for result in completed],
         verdict, args.claim, panel_policy=getattr(args, "panel_policy", None),
-        results=completed)
-    payload = json.dumps({"files": args.file, "record_line": line})
+        results=completed, reviewed_head=getattr(args, "reviewed_head", None))
+    return _run_journal_append(args.file, line)
+
+
+def _run_journal_append(files, line):
+    """Shared bounded transport for already-redacted immutable records."""
+    payload = json.dumps({"files": files, "record_line": line})
     env = os.environ.copy()
     for name in ("OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"):
         env.pop(name, None)
@@ -606,8 +617,13 @@ def _emit_journal_failure(message):
 
 def record_review_round(args, completed, verdict):
     """Write bounded, non-gating audit history; report failure if possible."""
+    return _record_journal(lambda: _run_journal_child(args, completed, verdict))
+
+
+def _record_journal(write):
+    """Persistence status is separate from the caller's command outcome."""
     try:
-        path = _run_journal_child(args, completed, verdict)
+        path = write()
         return {"path": path, "written": True, "status": "confirmed",
                 "error": None}
     except Exception as exc:
@@ -637,6 +653,118 @@ def deep_redact(obj):
         return {redact(k) if isinstance(k, str) else k: deep_redact(v)
                 for k, v in obj.items()}
     return obj
+
+
+def valid_head(value):
+    """A complete canonical Git object ID, without trimming or case folding."""
+    return (isinstance(value, str)
+            and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value) is not None)
+
+
+def valid_digest(value):
+    """Finding and claim identities use lowercase SHA-256 hex."""
+    return (isinstance(value, str)
+            and re.fullmatch(r"[0-9a-f]{64}", value) is not None)
+
+
+def valid_identity(value):
+    """A bounded ASCII token, optionally slash-separated; never normalized."""
+    return (isinstance(value, str) and 1 <= len(value) <= 256
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:@+-]*"
+                             r"(?:/[A-Za-z0-9][A-Za-z0-9_.:@+-]*)*", value)
+            is not None)
+
+
+def valid_author(value):
+    return valid_identity(value) and "/" in value
+
+
+def valid_round(value):
+    return value is None or (type(value) is int and value >= 1)
+
+
+def valid_timestamp(value):
+    if (not isinstance(value, str) or re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+            r"\.[0-9]{9}Z", value) is None):
+        return False
+    try:
+        datetime.datetime.strptime(value[:19], "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return False
+    return True
+
+
+def valid_ledger_field(field, value):
+    """Shared writer, reader and redaction rules for typed ledger values."""
+    validators = {
+        "reviewed_head": valid_head, "finding_digest": valid_digest,
+        "claim_digest": valid_digest, "author": valid_author,
+        "accepted_by": valid_identity, "round": valid_round,
+        "timestamp": valid_timestamp, "date": valid_timestamp,
+        "schema_version": lambda v: type(v) is int and v in (1, 2),
+        "type": lambda v: isinstance(v, str) and v in ("review_round", "adjudication"),
+        "kind": lambda v: isinstance(v, str) and v in ("plan", "implementation"),
+        "decision": lambda v: isinstance(v, str) and v in ADJUDICATION_DECISIONS,
+        "verdict": lambda v: isinstance(v, str) and v in STATES,
+        "confirmed": lambda v: type(v) is bool,
+    }
+    return validators[field](value)
+
+
+def redact_ledger(obj, path=()):
+    """Preserve the ledger schema and validated identities; scrub free text.
+
+    Only schema-owned identifier paths are exempt, not arbitrary hex text or
+    lookalike keys in reviewer extras. Validate the original value before
+    exempting it, including when rendering an offline query's identifiers.
+    Known envelope keys and discriminator tokens are program vocabulary, not
+    caller secrets. Scrubbing them would destroy the path to a valid identity.
+    """
+    typed_paths = {(field,): field for field in (
+        "reviewed_head", "finding_digest", "accepted_by", "round",
+        "timestamp", "date", "schema_version", "type", "kind", "decision", "verdict")}
+    typed_paths[("author", "[]")] = "author"
+    typed_paths[("claim_digests", "[]")] = "claim_digest"
+    for prefix in (("results", "[]", "findings", "[]"), ("open_findings", "[]")):
+        for field in ("finding_digest", "confirmed"):
+            typed_paths[prefix + (field,)] = field
+    for prefix in (("open_findings", "[]"), ("unattributable_records", "[]")):
+        for field in ("reviewed_head", "round"):
+            typed_paths[prefix + (field,)] = field
+    field = typed_paths.get(path)
+    if field is not None and valid_ledger_field(field, obj):
+        return obj
+    schema_keys = {
+        (): {"type", "schema_version", "journal_header", "date", "kind",
+             "round", "reviewed_head", "effective_panel", "verdict",
+             "claim_digests", "claims", "results", "refuted_claims",
+             "rejecting_reviewers", "panel_policy", "finding_digest",
+             "decision", "accepted_by", "reason", "author", "timestamp",
+             "state", "open_findings", "unattributable_records", "journal",
+             "review_verdict_changed"},
+        ("results", "[]"): {"findings"},
+        ("results", "[]", "findings", "[]"): {"finding_digest", "confirmed"},
+        ("open_findings", "[]"): {"finding_digest", "reviewed_head", "round",
+                                   "confirmed"},
+        ("unattributable_records", "[]"): {"record_path", "problems",
+                                           "reviewed_head", "type", "round"},
+        ("journal",): {"path", "written", "status", "error"},
+    }
+    schema_tokens = {
+        ("state",): {"OPEN_FINDINGS", "NO_OPEN_FINDINGS", "UNATTRIBUTABLE",
+                     "ADJUDICATION_RECORDED", "ADJUDICATION_UNCONFIRMED"},
+    }
+    if isinstance(obj, str) and obj in schema_tokens.get(path, ()):
+        return obj
+    if isinstance(obj, list):
+        return [redact_ledger(value, path + ("[]",)) for value in obj]
+    if isinstance(obj, dict):
+        return {key if key in schema_keys.get(path, ()) else
+                redact(key) if isinstance(key, str) else key:
+                redact_ledger(value, path + (key,))
+                for key, value in obj.items()}
+    return deep_redact(obj)
 
 
 def redact(text):
@@ -1164,7 +1292,7 @@ def resolve_range_ref(ref):
                      "Pass a resolvable commit ref in --range.")
 
 
-def validate_range_endpoints(range_spec):
+def validate_range_endpoints(range_spec, resolved=None):
     """Reject bad refs before diff collection; return whether this is two-dot.
 
     Give Git the whole expression first: dots can be commit-search text.
@@ -1185,11 +1313,16 @@ def validate_range_endpoints(range_spec):
             if parent_range:
                 ref, parent = parent_range.groups()
                 refs = [ref, f"{ref}^{parent or '1'}"]
+    commits = []
     for ref in refs:
         result = whole if ref == range_spec else resolve_range_ref(ref)
         if result.returncode != 0:
             config_error(f"unresolvable ref {ref!r}: {result.stderr.strip()} "
                          "Pass a resolvable commit ref in --range.")
+        commits.append(result.stdout.strip())
+    if endpoints and resolved is not None:
+        resolved.update(range=commits[0] + endpoints[0] + commits[1],
+                        head=commits[1])
     return bool(endpoints and endpoints[0] == "..")
 
 
@@ -1228,6 +1361,7 @@ def range_divergence_warning(range_spec):
 
 def gather(args):
     parts, label = [], ""
+    args.reviewed_head = None
     if args.diff:
         label = "working tree vs HEAD"
         parts.append(git_out("diff", "HEAD"))
@@ -1236,8 +1370,13 @@ def gather(args):
         parts.append(git_out("diff", "--cached"))
     elif args.range:
         label = f"commit range {args.range}"
-        two_dot = validate_range_endpoints(args.range)
-        parts.append(git_out("diff", args.range))
+        resolved = {}
+        two_dot = validate_range_endpoints(args.range, resolved)
+        # Bind metadata to the very commits passed to diff, even if a named
+        # ref moves while reviewers run. Single-revision/working-tree inputs
+        # deliberately have no reviewed commit head.
+        args.reviewed_head = resolved.get("head")
+        parts.append(git_out("diff", resolved.get("range", args.range)))
         warning = range_divergence_warning(args.range) if two_dot else ""
         if warning:
             print(f"WARNING: two-dot range {args.range} -- {warning}",
@@ -1261,6 +1400,223 @@ def finding_digest(location, summary):
     identity = json.dumps([location, summary], ensure_ascii=False,
                           separators=(",", ":"))
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def read_review_journal(path):
+    """Read canonical records only; damaged/unreadable history is not empty.
+
+    This is an audit query over trusted local storage, not an authentication
+    boundary. Never create state or modify legacy records during a query.
+    """
+    try:
+        events = sorted(Path(path).iterdir())
+    except FileNotFoundError:
+        return []
+    records = []
+    for event in events:
+        record_path = event / "record.jsonl"
+        try:
+            record_path.lstat()
+        except FileNotFoundError:
+            continue  # an interrupted or not-yet-published private write
+        raw, error = read_text_bounded(record_path)
+        if error:
+            raise ValueError(f"cannot read {record_path}: {error}")
+        if not raw.endswith("\n") or raw.count("\n") != 1:
+            raise ValueError(f"{record_path} is not one JSON line")
+        record = json.loads(raw, object_pairs_hook=reject_duplicate_keys)
+        if not isinstance(record, dict):
+            raise ValueError(f"{record_path} is not a JSON object")
+        records.append((record_path, record))
+    return records
+
+
+def adjudicator_is_author(accepted_by, authors):
+    """Use ARC-755's exact model identity, with no case/substring folding.
+
+    An acceptor may be a human name or a model ID with an optional transport
+    prefix. Identity and authority are declared, not authenticated here.
+    """
+    model = (next(iter(author_model_ids([accepted_by])))
+             if "/" in accepted_by else accepted_by)
+    models = author_model_ids(authors)
+    return accepted_by in models or model in models
+
+
+def journal_identity_problems(record, allow_unbound=False):
+    """Check every persisted identity before filtering history by head.
+
+    Old redaction is irreversible here. Missing or damaged identities stay
+    unattributable; neither another head nor an adjudication can hide them.
+    """
+    problems = []
+
+    def check(field):
+        if field not in record or not valid_ledger_field(field, record[field]):
+            problems.append(field + " is missing or invalid")
+
+    for field in ("type", "schema_version", "round"):
+        check(field)
+    if not (allow_unbound and record.get("reviewed_head") is None
+            and "reviewed_head" in record and record.get("type") == "review_round"):
+        check("reviewed_head")
+    if record.get("type") == "adjudication":
+        for field in ("finding_digest", "decision", "accepted_by", "timestamp"):
+            check(field)
+        authors = record.get("author")
+        if (not isinstance(authors, list) or not authors
+                or any(not valid_author(author) for author in authors)):
+            problems.append("author must be a nonempty list of PROVIDER/MODEL tokens")
+        elif valid_identity(record.get("accepted_by")) and adjudicator_is_author(
+                record["accepted_by"], authors):
+            problems.append("self-accepted adjudication record")
+        if not isinstance(record.get("reason"), str) or not record["reason"].strip():
+            problems.append("reason must be nonempty text")
+        if "notes" in record and not isinstance(record["notes"], str):
+            problems.append("notes must be text")
+    elif record.get("type") == "review_round":
+        for field in ("kind", "date", "verdict"):
+            check(field)
+        digests = record.get("claim_digests")
+        if not isinstance(digests, list) or any(not valid_digest(d) for d in digests):
+            problems.append("claim_digests is missing or contains an invalid digest")
+        results = record.get("results")
+        if not isinstance(results, list):
+            problems.append("results is missing or not a list")
+        else:
+            for i, result in enumerate(results):
+                if (not isinstance(result, dict)
+                        or not isinstance(result.get("findings"), list)):
+                    problems.append(f"results[{i}].findings is missing or not a list")
+                    continue
+                for j, finding in enumerate(result["findings"]):
+                    if (not isinstance(finding, dict)
+                            or not valid_digest(finding.get("finding_digest"))):
+                        problems.append(f"results[{i}].findings[{j}].finding_digest "
+                                        "is missing or not a SHA-256 digest")
+                    if (not isinstance(finding, dict)
+                            or not valid_ledger_field("confirmed", finding.get("confirmed"))):
+                        problems.append(f"results[{i}].findings[{j}].confirmed "
+                                        "is missing or not a boolean")
+    else:
+        problems.append("record type is missing or unknown")
+    return problems
+
+
+def validate_journal_record(record, allow_unbound=False):
+    """Refuse invalid decision data before redaction or publication."""
+    problems = journal_identity_problems(record, allow_unbound=allow_unbound)
+    if problems:
+        raise ValueError("invalid ledger record: " + "; ".join(problems))
+
+
+def journal_findings(records, head):
+    """Return head-bound findings/dispositions and all unattributable records."""
+    findings, adjudicated, unattributable = {}, set(), []
+    for record_path, record in records:
+        problems = journal_identity_problems(record)
+        if problems:
+            unattributable.append({
+                "record_path": str(record_path), "problems": problems,
+                "reviewed_head": record.get("reviewed_head"),
+                "type": record.get("type"), "round": record.get("round"),
+            })
+            continue
+        if record.get("reviewed_head") != head:
+            continue
+        round_no = record["round"]
+        if record["type"] == "adjudication":
+            adjudicated.add((round_no, record["finding_digest"]))
+            continue
+        for result in record["results"]:
+            for finding in result["findings"]:
+                if not finding["confirmed"]:
+                    continue
+                digest = finding.get("finding_digest")
+                findings[(round_no, digest)] = {
+                    **finding, "round": round_no, "reviewed_head": head,
+                    "reviewer": result.get("name"),
+                }
+    return findings, adjudicated, unattributable
+
+
+def record_adjudication(args, round_no):
+    """Append the external decision without revising any review verdict."""
+    record = {
+        "type": "adjudication", "schema_version": 2,
+        "finding_digest": args.adjudicate, "round": round_no,
+        "reviewed_head": args.head, "decision": args.decision,
+        "accepted_by": args.accepted_by, "reason": args.reason,
+        "author": list(args.author), "timestamp": journal_timestamp(),
+    }
+    validate_journal_record(record)
+
+    def write():
+        line = json.dumps(redact_ledger(record), sort_keys=True) + "\n"
+        return _run_journal_append(args.file, line)
+    return _record_journal(write)
+
+
+def cmd_ledger(args):
+    """Offline command outcomes are ledger status, never a review pass."""
+    if not valid_head(args.head):
+        config_error("--head must be a full lowercase commit SHA. Pass the "
+                     "reviewed range head, not a moving ref or abbreviation.")
+    if args.adjudicate is not None:
+        if not valid_digest(args.adjudicate):
+            config_error("--adjudicate must be a full lowercase SHA-256 digest. "
+                         "Pass a validated finding digest from --open-findings.")
+        if (not args.author or any(not valid_author(a) for a in args.author)
+                or not valid_identity(args.accepted_by)):
+            config_error("Pass --author PROVIDER/MODEL and --accepted-by NAME "
+                         "as ASCII tokens of at most 256 characters: letters, "
+                         "digits, _ . : @ + - and nonempty / components; "
+                         "each component starts with a letter or digit.")
+        if adjudicator_is_author(args.accepted_by, args.author):
+            config_error("the author cannot accept its own rebuttal. Pass the "
+                         "independent owner or mandated orchestrator in --accepted-by.")
+        if not args.reason or not args.reason.strip():
+            config_error("Pass a non-empty --reason for the external decision.")
+    elif any(value is not None for value in
+             (args.accepted_by, args.reason, args.decision, args.round)):
+        config_error("Drop adjudication fields when querying --open-findings.")
+    try:
+        records = read_review_journal(review_journal_path(args.file))
+        findings, adjudicated, unattributable = journal_findings(records, args.head)
+    except (OSError, ValueError, argparse.ArgumentTypeError) as exc:
+        config_error(redact(f"cannot read adjudication history: {exc}. "
+                            "Pass the original state home after repairing its journal."))
+    if args.open_findings:
+        opened = [finding for key, finding in findings.items()
+                  if key not in adjudicated]
+        print(json.dumps(redact_ledger({
+            "state": ("UNATTRIBUTABLE" if unattributable else
+                      "OPEN_FINDINGS" if opened else "NO_OPEN_FINDINGS"),
+            "reviewed_head": args.head, "open_findings": opened,
+            "unattributable_records": unattributable,
+        }), indent=2))
+        return 1 if opened or unattributable else 0
+    selected_round = None if args.round == "plan" else args.round
+    matches = [key for key in findings if key[1] == args.adjudicate
+               and (args.round is None or key[0] == selected_round)]
+    if not matches:
+        config_error("no confirmed finding matches this digest, head and round. "
+                     "Pass a finding listed by --open-findings --head SHA.")
+    if len(matches) != 1:
+        selectors = sorted({"--round plan" if key[0] is None
+                            else f"--round {key[0]}" for key in matches})
+        config_error("the finding occurs in multiple rounds. Available selectors: "
+                     + ", ".join(selectors) + ". Pass one to identify the occurrence.")
+    args.decision = args.decision or "overruled"
+    journal = record_adjudication(args, matches[0][0])
+    print(json.dumps(redact_ledger({
+        "state": ("ADJUDICATION_RECORDED" if journal["written"]
+                  else "ADJUDICATION_UNCONFIRMED"),
+        "reviewed_head": args.head, "round": matches[0][0],
+        "finding_digest": args.adjudicate, "decision": args.decision,
+        "journal": journal, "review_verdict_changed": False,
+    }), indent=2))
+    return 0  # valid request; persistence is separately confirmed or unconfirmed
 
 
 def reject_duplicate_keys(pairs):
@@ -1678,13 +2034,22 @@ def escalation_tiers(args):
 
 def author_argument(value):
     """Keep the complete model ID after the first provider separator."""
-    provider, separator, model = value.partition("/")
-    if (not separator or not provider or not model
-            or any(c.isspace() for c in value)):
+    if not valid_author(value):
         raise argparse.ArgumentTypeError(
-            "author must be PROVIDER/MODEL without whitespace; "
+            "author must be PROVIDER/MODEL without whitespace or control "
+            "characters, using ASCII token components (at most 256 characters); "
             "pass e.g. codex/gpt-5.6-sol")
     return value
+
+
+def round_argument(value):
+    """Keep an explicit plan selector distinct from an omitted selector."""
+    if value == "plan":
+        return value
+    try:
+        return int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("round must be an integer or plan")
 
 
 def author_model_ids(authors, roster=(), legacy=False):
@@ -2062,17 +2427,42 @@ def main():
                          "escalated. For acceptance criteria and designs, "
                          "before code exists. A third reviewer adds agreement, "
                          "not insight.")
-    ap.add_argument("--round", type=int, default=None, metavar="N",
+    ap.add_argument("--round", type=round_argument, default=None, metavar="N|plan",
                     help="which round this is for the change under review. "
                          "Past MAX_ROUNDS the gate refuses: more rounds on one "
-                         "change means the framing is wrong, not the code.")
+                         "change means the framing is wrong, not the code. "
+                         "With --adjudicate, plan selects a round-less occurrence.")
     ap.add_argument("--dispositions", metavar="FILE",
                     help="round 2 and later: digest-keyed JSON mapping every "
                          "prior confirmed finding to reproduced, "
                          "not-reproduced, or deferred with a one-line reason")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--list", action="store_true", help="show reviewers and availability")
+    ledger = ap.add_mutually_exclusive_group()
+    ledger.add_argument("--adjudicate", metavar="FINDING_DIGEST",
+                        help="record an independent external decision; never a review pass")
+    ledger.add_argument("--open-findings", action="store_true",
+                        help="query unadjudicated confirmed findings as JSON; exit 1 if any")
+    ap.add_argument("--head", metavar="SHA", help="exact reviewed head for ledger commands")
+    ap.add_argument("--accepted-by", metavar="NAME", help="independent acceptor's declared identity")
+    ap.add_argument("--reason", help="reason for the external adjudication")
+    ap.add_argument("--decision", choices=ADJUDICATION_DECISIONS,
+                    help="external decision (default overruled)")
     args = ap.parse_args()
+    if args.adjudicate is not None or args.open_findings:
+        if (args.diff or args.staged or args.range or args.file or args.list or args.kind
+                or args.plan or args.claim or args.escalate or args.only
+                or args.profile or args.dispositions or args.fresh_cycle_from
+                or args.allow_single_reviewer or args.context or args.threat_model):
+            config_error("Drop review options when using a ledger command; "
+                         "adjudication never runs or replaces a review.")
+        sys.exit(cmd_ledger(args))
+    if args.round == "plan":
+        config_error("--round plan is only an adjudication selector. "
+                     "Pass --kind plan without --round for a plan review.")
+    if any(value is not None for value in
+           (args.head, args.accepted_by, args.reason, args.decision)):
+        config_error("Pass --adjudicate or --open-findings with ledger fields.")
     # A total bound on top of every per-reviewer timeout.
     arm_watchdog(args.watchdog if args.watchdog is not None
                  else max(1800, args.timeout * 3))

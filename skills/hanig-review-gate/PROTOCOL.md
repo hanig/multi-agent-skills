@@ -186,6 +186,45 @@ prior finding; completeness of the supplied map remains caller-attested.
 
 ## Convergence
 
+### Audit ledger identity and external adjudication
+
+`--adjudicate` records an independent acceptor's declared disposition for a
+confirmed finding, round and full reviewed head. Declared authors cannot accept
+their own rebuttals. This is caller-attested audit history, not authentication or
+merge authority; an adjudication never changes the original review verdict.
+
+Decision-bearing identity fields are validated before redaction exemption:
+canonical lowercase 40-/64-hex Git object IDs and lowercase 64-hex SHA-256
+finding/claim digests retain their exact bytes. Rounds are null or positive
+integers (never booleans); confirmed classifications are booleans. Schema
+versions and type/kind/decision/root-verdict labels use exact enumerations. Timestamps use
+the emitted UTC nanosecond format with a valid calendar date. Author lists
+are nonempty and require PROVIDER/MODEL tokens; accepted_by permits a name or
+slash-separated identity. Both use 1–256 ASCII characters, nonempty components
+starting with a letter or digit and continuing with letters, digits, `_ . : @ + -`.
+Invalid fields are refused before recording, not stored redacted. Reasons must
+be nonempty text and remain redacted, as do notes and arbitrary reviewer extras.
+No trimming, case-folding or reconstruction supplies a decision identity.
+Recognized schema keys and fixed ledger type, decision and output-state tokens
+are program vocabulary and retain their spelling; an API-key collision cannot
+rename the field that holds a validated identity. This exemption is restricted
+to known paths: lookalike keys in arbitrary reviewer extras remain redacted.
+
+`--open-findings --head SHA` validates identities across all canonical history
+before selecting that head. A missing or damaged decision field, including earlier
+redaction damage, is listed by record path as `UNATTRIBUTABLE` and exits 1.
+This takes precedence over `NO_OPEN_FINDINGS`, even if all attributable findings
+have dispositions. The query is read-only: damaged history is neither silently
+skipped nor rebound to a guessed identity. Existing headless records also block
+a clean query; they do not block new review verdicts. Adjudication can still
+record a disposition for a separate valid finding but cannot clear the damage.
+
+A digest appearing at several rounds requires an explicit occurrence selector.
+The refusal names all available selectors: `--round N` for each numbered round
+and `--round plan` for a null round. Disposing a numbered occurrence does not
+select or dispose the null occurrence. `plan` is an adjudication selector only;
+ordinary implementation reviews still require an integer round within the bound.
+
 Convergence is when arriving findings are **out of scope, minor, or taste**.
 Never an empty findings list: that will not happen, because reviewers are told
 to refute when uncertain.
