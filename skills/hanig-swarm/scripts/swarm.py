@@ -1020,11 +1020,11 @@ git config --file "$swarm_seed_config" --add {route_key} {shlex.quote(alias)}
 {fetch}
 swarm_seed_commits=$(git rev-list --max-count=1 {seed['base']}..{seed['head']})
 if test -n "$swarm_seed_commits"; then
-    git cherry-pick -x {seed['base']}..{seed['head']}
+    git cherry-pick -x -m 1 {seed['base']}..{seed['head']}
 fi
 )
 ```
-An empty range carries no commits and is a successful no-op. Skip empty commits: when cherry-pick stops because a commit is empty or already applied, confirm that it is empty and run `git cherry-pick --skip`, repeating as needed. Resolve real conflicts explicitly; never skip a non-empty conflicting change just to finish. Never port by whole-file checkout.
+An empty range carries no commits and is a successful no-op. Merge commits replay relative to their first parent (`-m 1`); ordinary commits use their sole parent. Skip empty commits: when cherry-pick stops because a commit is empty or already applied, confirm that it is empty and run `git cherry-pick --skip`, repeating as needed. Resolve real conflicts explicitly; never skip a non-empty conflicting change just to finish. Never port by whole-file checkout.
 If fetching or replay cannot be completed, STOP AND REPORT; do not substitute another ref or range.{evidence}
 The coordinator checked reachability at launch, not whether replay will be conflict-free. It does not cherry-pick or alter the worktree for you. Seed history does not change judging, scope-check, review, or merged-PR closure; the produced head is judged against this fresh attempt's recorded base."""
 

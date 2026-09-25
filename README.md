@@ -379,7 +379,7 @@ work as `{"ref":"refs/heads/previous-attempt","base":"<full commit ID>",
 Both IDs must be 40 or 64 hex characters. Dispatch checks that `base` is an
 ancestor of `head` and `head` is reachable from the exact ref on origin's push
 destination, then persists the raw seed in coordinator launch intent. The
-worker receives instructions to fetch, cherry-pick `-x base..head`, skip empty
+worker receives instructions to fetch, cherry-pick `-x -m 1 base..head` (first-parent mainline), skip empty
 commits, and read the optional evidence; whole-file checkout is forbidden.
 Relative evidence paths use the source repository directory. The coordinator
 does not replay the seed, and reachability does not promise conflict-free

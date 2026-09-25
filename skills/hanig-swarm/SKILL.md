@@ -151,7 +151,7 @@ Before agent creation, fetch from origin's push destination and require base
 ancestry to head and head reachability from ref. Persist the seed in coordinator
 launch intent; redispatch rechecks reachability and refuses changed provenance.
 Never backfill historical attempts. The worker fetches, cherry-picks
-`-x base..head`, skips empty commits with `git cherry-pick --skip`, and reads
+`-x -m 1 base..head` (first-parent mainline), skips empties with `git cherry-pick --skip`, and reads
 prior evidence. Empty ranges are no-ops; never port by whole-file checkout.
 The coordinator does not replay or alter worktrees. Temporary-ref cleanup
 failure warns without changing admission; refs are never reused. Reachability

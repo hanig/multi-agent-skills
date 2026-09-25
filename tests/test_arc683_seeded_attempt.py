@@ -226,6 +226,48 @@ class SeedDispatchTests(unittest.TestCase):
         self.assertEqual(git(workspace, "status", "--porcelain"), "")
         self.assertEqual((Path(workspace) / "repair.txt").read_text(), "carried forward\n")
 
+    def _assert_merge_seed_replay(self, redundant):
+        git(self.repo, "checkout", "-qb", "seed-side", self.base)
+        (self.repo / "side.txt").write_text("side change\n")
+        git(self.repo, "add", "side.txt")
+        git(self.repo, "commit", "-qm", "side implementation")
+        git(self.repo, "checkout", "-q", "previous")
+        git(self.repo, "merge", "--no-ff", "--no-commit", "seed-side")
+        if not redundant:
+            (self.repo / "merge-resolution.txt").write_text("merge-only work\n")
+            git(self.repo, "add", "merge-resolution.txt")
+        git(self.repo, "commit", "-qm", "merge prior work")
+        self.seed["head"] = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "push", "-q", "origin", "HEAD:refs/heads/previous")
+        git(self.repo, "checkout", "-q", "main")
+        job, error = self.submit()
+        self.assertIsNone(error)
+        self.assertTrue(job)
+        argv = self.fake.launches[0]
+        workspace = argv[argv.index("--cwd") + 1]
+        carry = argv[-1].split("CARRY FORWARD", 1)[1]
+        commands = carry.split("```sh\n", 1)[1].split("\n```", 1)[0]
+        result = subprocess.run(["sh", "-c", commands], cwd=workspace,
+                                env=dict(ENV, SWARM_UNIT_DIR=str(self.attempt)),
+                                capture_output=True, text=True)
+        if redundant:
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("empty", result.stderr)
+            git(workspace, "cherry-pick", "--skip")
+        else:
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("cherry picked from commit " + self.seed["head"],
+                          git(workspace, "log", "-1", "--format=%B"))
+        self.assertEqual(git(workspace, "status", "--porcelain"), "")
+        self.assertEqual(git(workspace, "rev-parse", "HEAD^{tree}"),
+                         git(self.repo, "rev-parse", self.seed["head"] + "^{tree}"))
+
+    def test_delivered_commands_replay_merge_only_changes(self):
+        self._assert_merge_seed_replay(redundant=False)
+
+    def test_delivered_commands_allow_skipping_redundant_merge(self):
+        self._assert_merge_seed_replay(redundant=True)
+
     def test_empty_seed_range_is_a_successful_noop_in_delivered_commands(self):
         self.seed["head"] = self.base
         job, error = self.submit()
