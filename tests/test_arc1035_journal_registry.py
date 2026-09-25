@@ -403,5 +403,137 @@ class TestJournalWriterRegistry(unittest.TestCase):
         self.assertEqual(report[1]['records'], 1)
 
 
+    def test_direct_marked_method_without_runner_cannot_persist(self):
+        report = self.child('''
+            path = module._ensure_module_state_home() / 'direct-marked'
+            class Writer(unittest.TestCase):
+                @journal_writer
+                def test_writer(self):
+                    module.review.append_review_journal(
+                        path, 'implementation', 1, [], 'REVIEW_PASS', [])
+            refusal = None
+            try:
+                Writer('test_writer').test_writer()
+            except AssertionError as error:
+                refusal = str(error)
+            print(json.dumps({'refusal': refusal,
+                              'records': len(list(path.glob('*/record.jsonl')))}))
+        ''')
+        self.assertIsNotNone(report['refusal'], report)
+        self.assertIn('without a registered test', report['refusal'])
+        self.assertEqual(report['records'], 0)
+
+    def test_renaming_unmarked_running_test_cannot_authorize_persistence(self):
+        report = self.child('''
+            outcomes = []
+            for rename in (False, True):
+                path = module._ensure_module_state_home() / ('rename-' + str(rename))
+                class Writer(unittest.TestCase):
+                    @journal_writer
+                    def test_marked(self):
+                        self.append()
+                    def test_unmarked(self):
+                        if rename:
+                            self._testMethodName = 'test_marked'
+                        self.append()
+                    def append(self):
+                        module.review.append_review_journal(
+                            path, 'implementation', 1, [], 'REVIEW_PASS', [])
+                result = unittest.TestResult()
+                Writer('test_unmarked').run(result)
+                outcomes.append({'rename': rename, 'ok': result.wasSuccessful(),
+                                 'failures': [message for _, message in result.failures],
+                                 'errors': [message for _, message in result.errors],
+                                 'records': len(list(path.glob('*/record.jsonl')))})
+            print(json.dumps(outcomes))
+        ''')
+        self.assertEqual(len(report), 2)
+        for outcome in report:
+            with self.subTest(rename=outcome['rename']):
+                self.assertFalse(outcome['ok'], outcome)
+                self.assertEqual(outcome['errors'], [])
+                self.assertEqual(len(outcome['failures']), 1)
+                self.assertIn('unregistered journal writer', outcome['failures'][0])
+                self.assertEqual(outcome['records'], 0)
+
+    def test_marked_running_code_keeps_authority_when_selected_name_changes(self):
+        report = self.child('''
+            outcomes = []
+            for rename in (False, True):
+                path = module._ensure_module_state_home() / ('marked-' + str(rename))
+                class Writer(unittest.TestCase):
+                    @journal_writer
+                    def test_marked(self):
+                        if rename:
+                            self._testMethodName = 'test_unmarked'
+                        module.review.append_review_journal(
+                            path, 'implementation', 1, [], 'REVIEW_PASS', [])
+                    def test_unmarked(self):
+                        self.fail('the unmarked body must not execute')
+                result = unittest.TestResult()
+                Writer('test_marked').run(result)
+                outcomes.append({'rename': rename, 'ok': result.wasSuccessful(),
+                                 'failures': [message for _, message in result.failures],
+                                 'errors': [message for _, message in result.errors],
+                                 'records': len(list(path.glob('*/record.jsonl')))})
+            print(json.dumps(outcomes))
+        ''')
+        for outcome in report:
+            with self.subTest(rename=outcome['rename']):
+                self.assertTrue(outcome['ok'], outcome)
+                self.assertEqual(outcome['records'], 1)
+
+    def test_runner_without_active_registered_code_cannot_persist_from_setup(self):
+        report = self.child('''
+            path = module._ensure_module_state_home() / 'setup-writer'
+            class Writer(unittest.TestCase):
+                def setUp(self):
+                    module.review.append_review_journal(
+                        path, 'implementation', 1, [], 'REVIEW_PASS', [])
+                @journal_writer
+                def test_marked(self):
+                    pass
+            result = unittest.TestResult()
+            Writer('test_marked').run(result)
+            print(json.dumps({'ok': result.wasSuccessful(),
+                              'failures': [message for _, message in result.failures],
+                              'errors': [message for _, message in result.errors],
+                              'records': len(list(path.glob('*/record.jsonl')))}))
+        ''')
+        self.assertFalse(report['ok'], report)
+        self.assertEqual(report['errors'], [])
+        self.assertEqual(len(report['failures']), 1)
+        self.assertIn('active registered test code', report['failures'][0])
+        self.assertEqual(report['records'], 0)
+
+    def test_renamed_direct_nested_case_cannot_borrow_outer_runner(self):
+        report = self.child('''
+            path = module._ensure_module_state_home() / 'renamed-nested'
+            class Inner(unittest.TestCase):
+                @journal_writer
+                def test_marked(self):
+                    pass
+                def test_unmarked(case):
+                    case._testMethodName = 'test_marked'
+                    module.review.append_review_journal(
+                        path, 'implementation', 1, [], 'REVIEW_PASS', [])
+            class Outer(unittest.TestCase):
+                @journal_writer
+                def test_marked(self):
+                    Inner('test_unmarked').test_unmarked()
+            result = unittest.TestResult()
+            Outer('test_marked').run(result)
+            print(json.dumps({'ok': result.wasSuccessful(),
+                              'failures': [message for _, message in result.failures],
+                              'errors': [message for _, message in result.errors],
+                              'records': len(list(path.glob('*/record.jsonl')))}))
+        ''')
+        self.assertFalse(report['ok'], report)
+        self.assertEqual(report['errors'], [])
+        self.assertEqual(len(report['failures']), 1)
+        self.assertIn('unregistered journal writer', report['failures'][0])
+        self.assertEqual(report['records'], 0)
+
+
 if __name__ == '__main__':
     unittest.main()
