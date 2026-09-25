@@ -178,7 +178,7 @@ class TestMergeUnit(unittest.TestCase):
         # Keep the real scope consumer and producer, changing only the report
         # channel or the epoch between the operator and scope state reads.
         site = self.directory / "scope-binding-probe"
-        site.mkdir()
+        site.mkdir(exist_ok=True)
         (site / "sitecustomize.py").write_text(
             "import atexit, io, json, os, pathlib, sys\n"
             "if len(sys.argv) > 1 and sys.argv[0].endswith('swarm.py') "
@@ -371,6 +371,22 @@ class TestMergeUnit(unittest.TestCase):
         self.assertEqual(current["reconciliation"]["scope"]["base"], self.base)
         self.assertEqual(current["reconciliation"]["scope"]["repository"], self.remote)
         self.assertEqual(len(self.calls(["pr", "merge"])), 1)
+
+    def test_missing_scope_binding_fields_refuse_before_forge(self):
+        for key in ("unit", "attempt", "head", "base", "repository", "target", "state_epoch"):
+            with self.subTest(key=key):
+                self.intercept_scope_binding({key: None})
+                self.assert_binding_refused(self.invoke())
+
+    def test_missing_launch_facts_fields_refuse_before_forge(self):
+        facts = self.us["attempt_launch_facts"]["a1"]
+        for key in ("unit_id", "attempt_id", "repository_remote", "repo",
+                    "base_commit", "base_tree", "branch"):
+            with self.subTest(key=key):
+                original = facts.pop(key)
+                self.save()
+                self.assert_binding_refused(self.invoke())
+                facts[key] = original
 
     def test_success_records_exact_anchor_and_advances_once(self):
         result = self.invoke()

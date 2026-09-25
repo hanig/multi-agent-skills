@@ -294,14 +294,15 @@ def reconcile(args, plan):
         raise Refusal("named operation is not the unit's current unresolved intent")
     if args.dry_run:
         print("DRY RUN: no forge calls, writes, receipt or advancement; exit 2.")
+        print("+ " + shlex.join(cmd["scope"]))
+        print("require exact coordinator binding and state epoch before forge access")
         print("+ " + shlex.join(cmd["view"]))
         if args.abandon_intent:
             print("if OPEN at judged head: persist abandonment record and resolve {}; "
                   "no merge or advance".format(intent_path))
         else:
             print("if OPEN with no prior merge request:")
-            for key in ("scope", "checks"):
-                print("+ " + shlex.join(cmd[key]))
+            print("+ " + shlex.join(cmd["checks"]))
             print("persist intent {} before the conditional merge".format(intent_path))
             print("+ " + shlex.join(cmd["merge"]))
             print("+ " + shlex.join(cmd["view"]))
