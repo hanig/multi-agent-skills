@@ -673,6 +673,14 @@ def run_in_candidate_merge(runner, repo, produced_head, target_commit, path,
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def stability_declarations(policy):
+    """Find declarations without granting authority from malformed claims."""
+    return [v for v in policy["verifiers"] if isinstance(v, dict)
+            and (v.get("name") == STABILITY_CLAIM
+                 or (isinstance(v.get("claims"), (list, str))
+                     and STABILITY_CLAIM in v["claims"]))]
+
+
 def merge_precondition_policy(runner, repo, target_commit,
                               claim=INTEGRATION_CLAIM):
     """Authorize a designated merge verifier from the observed target.
@@ -689,9 +697,7 @@ def merge_precondition_policy(runner, repo, target_commit,
     name, path = MERGE_VERIFIER, MERGE_VERIFIER_PATH
     if claim == STABILITY_CLAIM:
         name, path = STABILITY_CLAIM, STABILITY_VERIFIER_PATH
-        declarations = [v for v in policy["verifiers"] if isinstance(v, dict)
-                        and (v.get("name") == name
-                             or claim in (v.get("claims") or []))]
+        declarations = stability_declarations(policy)
         if not declarations:
             return dict(policy, verifiers=[]), policy_digest, None, None
         if len(declarations) != 1:
