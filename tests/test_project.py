@@ -30,7 +30,7 @@ sys.path.insert(0, str(SCRIPTS))
 import tickets as T  # noqa: E402
 sys.path.insert(0, str(ROOT / "tests"))
 from fixture_processes import (FixtureProcesses, FixtureSpec, JoinState,
-                               FixtureSignal, wait_readable)  # noqa: E402
+                               wait_readable)  # noqa: E402
 
 PLAN = {"name": "p", "units": [
     {"id": "a", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o.txt"],
@@ -1235,7 +1235,7 @@ class TestRound2ProjectFindings(_FixtureTestCase):
         import survey as S2
         t0 = _t.time()
         with self._fixture_directory() as d:
-            rc, out, err = self._fixture_python(d, 
+            rc, out, err = self._fixture_python(d,
                 'import sys\n'
                 'sys.path.insert(0, %r)\n'
                 'import survey\n'
@@ -2155,7 +2155,7 @@ class TestVendoredAgentBusLayoutIsExplicit(_FixtureTestCase):
                 "trap 'exit 143' HUP INT TERM\n"
                 "while :; do sleep 1; done\n"))
             fake_bus.chmod(0o700)
-            proc = self._fixture_scope(d).launch(FixtureSpec(tuple(["sh", "-c", documented]) , directory=str(outside), environment=tuple(env.items())))
+            proc = self._fixture_scope(d).launch(FixtureSpec(tuple(["sh", "-c", documented]), directory=str(outside), environment=tuple(env.items())))
             deadline = time.monotonic() + 15
             while True:
                 line = proc.stderr_path.read_text()
@@ -2775,7 +2775,7 @@ class TestTheWalkCannotBeHeldOpenByASyscall(_FixtureTestCase):
             # under test is that the walk returns when the deadline passes,
             # not the particular number of seconds in it.
             t0 = _t.time()
-            out = self._fixture_python(d, 
+            out = self._fixture_python(d,
                 'import os, sys\n'
                 'sys.path.insert(0, %r)\n'
                 'import survey\n'
@@ -2813,7 +2813,7 @@ class TestTheWalkCannotBeHeldOpenByASyscall(_FixtureTestCase):
             env = dict(os.environ)
             env["PYTHONPATH"] = str(site)
             t0 = _t.time()
-            proc = self._fixture_scope(d).launch(FixtureSpec(tuple([sys.executable, str(SURVEY), "--repo", str(root)]) , environment=tuple(env.items())))
+            proc = self._fixture_scope(d).launch(FixtureSpec(tuple([sys.executable, str(SURVEY), "--repo", str(root)]), environment=tuple(env.items())))
             try:
                 joined = self._fixture_answer(proc, timeout=S2.WALK_KILL_SECONDS + 90)
                 out, err = joined.stdout, joined.stderr
@@ -3436,7 +3436,7 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(_FixtureTestCase):
         argv = ["sh", str(DOCTOR)]
         if prefix:
             argv.extend(["--prefix", str(prefix)])
-        proc = self._fixture_scope(d).launch(FixtureSpec(tuple(argv) , directory=str(ROOT), environment=tuple(env.items())))
+        proc = self._fixture_scope(d).launch(FixtureSpec(tuple(argv), environment=tuple(env.items())))
         joined = self._fixture_answer(proc, timeout=120)
         out, err = joined.stdout, joined.stderr
         r = subprocess.CompletedProcess(argv, joined.returncode, out, err)
@@ -4013,7 +4013,6 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(_FixtureTestCase):
             read_fd = os.open(witness_pipe, os.O_RDONLY | os.O_NONBLOCK)
             os.set_blocking(read_fd, True)
             barrier_write = os.open(barrier_pipe, os.O_RDWR)
-            write_fd = barrier_read = None
             leader = None
             proc = None
             try:
@@ -4024,9 +4023,9 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(_FixtureTestCase):
                     # This alone exceeded the rejected readiness precondition.
                     shlex.quote(str(witness)) + " 3.2\n"
                     "(trap '' HUP INT TERM; "
-                    "printf 'W\\n' >&" + "3" + "; "
+                    "printf 'W\\n' >&3; "
                     "exec " + shlex.quote(str(witness)) + " 600) &\n"
-                    "printf 'L %s\\n' \"$$\" >&" + "3" + "\n"
+                    "printf 'L %s\\n' \"$$\" >&3\n"
                     "exec " + shlex.quote(str(witness)) + " 600\n")
                 script.write_text(self._fixture_scope(d).shell_script(
                     script.read_text()))
@@ -4051,7 +4050,7 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(_FixtureTestCase):
                 env = os.environ.copy()
                 env["HANIG_TEST_BARRIER_PATH"] = str(barrier_pipe)
                 proc = self._fixture_scope(d).launch(FixtureSpec(tuple([shutil.which("perl"), "-e", source,
-                     "3", "2", str(script)]) , environment=tuple(env.items())))
+                     "3", "2", str(script)]), environment=tuple(env.items())))
 
                 ready = b""
                 match = None
@@ -4084,10 +4083,6 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(_FixtureTestCase):
                     "negative-PGID KILL did not terminate the group witness")
             finally:
                 os.close(read_fd)
-                if write_fd is not None:
-                    os.close(write_fd)
-                if barrier_read is not None:
-                    os.close(barrier_read)
                 if barrier_write is not None:
                     os.close(barrier_write)
 
