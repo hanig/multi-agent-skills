@@ -60,8 +60,17 @@ elif args[:2] == ["pr", "merge"]:
         data["pr"]["baseRefOid"] = data["commit"]["sha"]
     p.write_text(json.dumps(data))
 elif args[:1] == ["api"]:
-    assert args[-1].endswith("/git/commits/" + data["commit"]["sha"])
-    print(json.dumps(data["commit"]))
+    if "/git/ref/heads/" in args[-1]:
+        assert args == data["ref_command"], "target read used the wrong forge route"
+        if data.get("ref_exit"):
+            sys.exit("target ref unavailable")
+        print(json.dumps(data["ref"]))
+        if "ref_after_read" in data:
+            data["ref"] = data.pop("ref_after_read")
+            p.write_text(json.dumps(data))
+    else:
+        assert args[-1].endswith("/git/commits/" + data["commit"]["sha"])
+        print(json.dumps(data["commit"]))
 else:
     sys.exit("unexpected forge call: " + repr(args))
 '''
@@ -146,6 +155,10 @@ class TestMergeUnit(unittest.TestCase):
         self.forge = {"pr": {"number": 7, "url": self.remote + "/pull/7", "state": "OPEN",
                              "headRefOid": self.head, "baseRefName": "main",
                              "baseRefOid": self.base, "mergeCommit": None},
+                      "ref_command": ["api", "--hostname", "github.com",
+                                      "repos/example/project/git/ref/heads/main"],
+                      "ref": {"ref": "refs/heads/main",
+                              "object": {"type": "commit", "sha": self.base}},
                       "checks": [{"name": "test", "state": "SUCCESS"}],
                       "commit": {"sha": self.merged, "parents": [{"sha": self.base}]}}
         self.plan_path = self.directory / "plan.json"
@@ -674,6 +687,7 @@ class TestMergeUnit(unittest.TestCase):
         self.launch["repository_remote"] = "http://forge.example/example/project"
         self.us["attempt_launch_facts"]["a1"]["repository_remote"] = self.launch["repository_remote"]
         self.forge["pr"]["url"] = "http://forge.example/example/project/pull/7"
+        self.forge["ref_command"][2] = "forge.example"
         self.save()
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -779,6 +793,7 @@ class TestMergeUnit(unittest.TestCase):
     def test_already_merged_reconciles_without_merge_call(self):
         self.forge["pr"].update(state="MERGED", mergeCommit={"oid": self.merged},
                                  baseRefOid="e" * 40)
+        self.forge["ref_exit"] = 1  # Historical parent does not need today's ref.
         self.save()
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
