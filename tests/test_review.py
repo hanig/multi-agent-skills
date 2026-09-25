@@ -3697,15 +3697,15 @@ class TestReviewJournal(unittest.TestCase):
                 self.assertTrue(json.loads(stdout)["journal"]["written"])
                 record = self.records()[-1]
                 tag = "<OPENAI_API_KEY redacted>"
-                saved = record["results".replace(secret, tag)][0]
+                saved = record["results"][0]
                 self.assertEqual(saved["findings"][0]["summary"], "required row lost")
                 self.assertEqual(saved["findings"][0]["location"], "sample.py:7")
                 self.assertIs(saved["findings"][0]["confirmed"], True)
                 self.assertEqual(record["rejecting_reviewers"], ["answered"])
-                self.assertEqual(record["refuted_claims".replace(secret, tag)][0]
+                self.assertEqual(record["refuted_claims"][0]
                                  ["why"], "the input loses a required row")
-                self.assertEqual(record["claims".replace(secret, tag)][1], tag)
-                self.assertEqual(record["claim_digests".replace(secret, tag)][1],
+                self.assertEqual(record["claims"][1], tag)
+                self.assertEqual(record["claim_digests"][1],
                                  hashlib.sha256(secret.encode()).hexdigest())
                 self.assertNotIn("record_line", record)
 

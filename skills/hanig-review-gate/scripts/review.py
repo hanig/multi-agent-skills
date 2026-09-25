@@ -666,11 +666,13 @@ def valid_digest(value):
 
 
 def redact_ledger(obj, path=()):
-    """Preserve validated identity slots; redact all other strings and keys.
+    """Preserve the ledger schema and validated identities; scrub free text.
 
     Only schema-owned identifier paths are exempt, not arbitrary hex text or
     lookalike keys in reviewer extras. Validate the original value before
     exempting it, including when rendering an offline query's identifiers.
+    Known envelope keys and discriminator tokens are program vocabulary, not
+    caller secrets. Scrubbing them would destroy the path to a valid identity.
     """
     head_paths = {("reviewed_head",),
                   ("open_findings", "[]", "reviewed_head"),
@@ -681,10 +683,35 @@ def redact_ledger(obj, path=()):
     if ((path in head_paths and valid_head(obj))
             or (path in digest_paths and valid_digest(obj))):
         return obj
+    schema_keys = {
+        (): {"type", "schema_version", "journal_header", "date", "kind",
+             "round", "reviewed_head", "effective_panel", "verdict",
+             "claim_digests", "claims", "results", "refuted_claims",
+             "rejecting_reviewers", "panel_policy", "finding_digest",
+             "decision", "accepted_by", "reason", "author", "timestamp",
+             "state", "open_findings", "unattributable_records", "journal",
+             "review_verdict_changed"},
+        ("results", "[]"): {"findings"},
+        ("results", "[]", "findings", "[]"): {"finding_digest", "confirmed"},
+        ("open_findings", "[]"): {"finding_digest", "reviewed_head", "round",
+                                   "confirmed"},
+        ("unattributable_records", "[]"): {"record_path", "problems",
+                                           "reviewed_head", "type", "round"},
+        ("journal",): {"path", "written", "status", "error"},
+    }
+    schema_tokens = {
+        ("type",): {"review_round", "adjudication"},
+        ("decision",): set(ADJUDICATION_DECISIONS),
+        ("state",): {"OPEN_FINDINGS", "NO_OPEN_FINDINGS", "UNATTRIBUTABLE",
+                     "ADJUDICATION_RECORDED", "ADJUDICATION_UNCONFIRMED"},
+    }
+    if isinstance(obj, str) and obj in schema_tokens.get(path, ()):
+        return obj
     if isinstance(obj, list):
         return [redact_ledger(value, path + ("[]",)) for value in obj]
     if isinstance(obj, dict):
-        return {redact(key) if isinstance(key, str) else key:
+        return {key if key in schema_keys.get(path, ()) else
+                redact(key) if isinstance(key, str) else key:
                 redact_ledger(value, path + (key,))
                 for key, value in obj.items()}
     return deep_redact(obj)

@@ -265,6 +265,34 @@ class TestAdjudication(unittest.TestCase):
         self.assertEqual(self.adjudicate(head=record["reviewed_head"]).returncode, 4)
         self.assertEqual(path.read_bytes(), before)
 
+    def test_schema_label_secrets_preserve_query_and_adjudication(self):
+        labels = ("reviewed_head", "finding_digest", "claim_digests", "results",
+                  "findings", "type", "review_round", "round", "confirmed",
+                  "decision", "adjudication", "overruled", "author", "accepted_by",
+                  "reason", "state", "OPEN_FINDINGS", "NO_OPEN_FINDINGS",
+                  "ADJUDICATION_RECORDED", "journal", "written")
+        for index, secret in enumerate(labels, 1):
+            with self.subTest(secret=secret):
+                head = format(index, "040x")
+                with patch.dict(os.environ, {"OPENAI_API_KEY": secret}):
+                    path = self.seed(head=head)
+                    before = path.read_bytes()
+                    query = self.query(head)
+                    self.assertEqual(query.returncode, 1, query.stderr)
+                    report = json.loads(query.stdout)
+                    self.assertEqual(report["state"], "OPEN_FINDINGS")
+                    self.assertEqual(report["open_findings"][0]["finding_digest"], self.digest)
+                    recorded = self.adjudicate(head=head)
+                    self.assertEqual(recorded.returncode, 0, recorded.stderr)
+                    saved = json.loads(recorded.stdout)
+                    self.assertEqual(saved["state"], "ADJUDICATION_RECORDED")
+                    self.assertIs(saved["journal"]["written"], True)
+                    after = self.query(head)
+                    self.assertEqual(after.returncode, 0, after.stderr)
+                    self.assertEqual(json.loads(after.stdout)["state"], "NO_OPEN_FINDINGS")
+                self.assertEqual(self.query(head).returncode, 0)
+                self.assertEqual(path.read_bytes(), before)
+
     def test_bad_digests_cannot_hide_behind_another_head_or_a_disposition(self):
         original = self.seed()
         self.assertEqual(self.adjudicate().returncode, 0)
@@ -311,6 +339,12 @@ class TestAdjudication(unittest.TestCase):
         finding = record["results"][0]["findings"][0]
         self.assertIn("<OPENAI_API_KEY redacted>", finding["summary"])
         self.assertIn("<OPENAI_API_KEY redacted>", finding["extra"]["reviewed_head"])
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "reviewed_head"}):
+            path = self.seed(finding={**self.finding, "extra": {"reviewed_head": HEAD}})
+        record = json.loads(path.read_text())
+        self.assertEqual(record["reviewed_head"], HEAD)
+        self.assertEqual(record["results"][0]["findings"][0]["extra"],
+                         {"<OPENAI_API_KEY redacted>": HEAD})
 
     def test_redaction_and_one_line_atomic_records(self):
         self.seed()
