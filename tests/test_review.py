@@ -31,6 +31,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parent.parent
+# Direct script execution starts sys.path at tests/, unlike unittest discovery.
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+from tests.journal_writers import (
+    journal_writer, registered_writer_names, require_registered_writer,
+)
+
 SCRIPT = REPO / "skills" / "hanig-review-gate" / "scripts" / "review.py"
 
 spec = importlib.util.spec_from_file_location("review", SCRIPT)
@@ -111,11 +118,13 @@ def _ensure_module_state_home():
 
 
 def _isolated_append_review_journal(*args, **kwargs):
+    require_registered_writer()
     _ensure_module_state_home()
     return _ORIGINAL_APPEND_REVIEW_JOURNAL(*args, **kwargs)
 
 
 def _isolated_record_review_round(*args, **kwargs):
+    require_registered_writer()
     _ensure_module_state_home()
     return _ORIGINAL_RECORD_REVIEW_ROUND(*args, **kwargs)
 
@@ -1003,6 +1012,7 @@ class TestRangeDivergence(unittest.TestCase):
         return body, label, stderr.getvalue()
 
     def range_cli(self, range_spec):
+        require_registered_writer()
         # A nonempty diff reaches journal persistence in the child, where the
         # in-process wrappers cannot initialize the lazy module fixture.
         _ensure_module_state_home()
@@ -1015,6 +1025,7 @@ class TestRangeDivergence(unittest.TestCase):
              "--claim", review.HONEST_RUN_CLAIM],
             capture_output=True, text=True, env=env, timeout=30)
 
+    @journal_writer
     def test_unresolvable_three_dot_base_names_ref_instead_of_empty(self):
         result = self.range_cli("deadbeef...HEAD")
         self.assertIn("unresolvable ref 'deadbeef'", result.stderr)
@@ -1028,6 +1039,7 @@ class TestRangeDivergence(unittest.TestCase):
         self.assertIn(git_error.stderr.strip(), result.stderr)
         self.assertNotIn("empty", result.stdout + result.stderr)
 
+    @journal_writer
     def test_unresolvable_endpoint_is_rejected_in_every_range_form(self):
         for range_spec in ("deadbeef..HEAD", "HEAD..deadbeef",
                            "HEAD...deadbeef", "deadbeef",
@@ -1040,6 +1052,7 @@ class TestRangeDivergence(unittest.TestCase):
                 self.assertEqual(result.returncode, review.STATES["REVIEW_ERROR"])
                 self.assertNotIn("empty", result.stdout + result.stderr)
 
+    @journal_writer
     def test_resolvable_empty_ranges_still_report_empty(self):
         for range_spec in ("HEAD..HEAD", "HEAD...HEAD", "HEAD",
                            "HEAD..", "..HEAD", "HEAD...", "...HEAD"):
@@ -1079,6 +1092,7 @@ class TestRangeDivergence(unittest.TestCase):
                 self.assertEqual(label, "commit range " + expression)
                 self.assertEqual(warning, "")
 
+    @journal_writer
     def test_dotted_search_in_left_endpoint_cli_reports_empty(self):
         self.git("commit", "--allow-empty", "-qm", "needle..dots needle...dots")
         for operator in ("..", "..."):
@@ -1095,6 +1109,7 @@ class TestRangeDivergence(unittest.TestCase):
                                   expression + " is empty)", result.stdout)
                     self.assertEqual(result.stderr, "")
 
+    @journal_writer
     def test_dotted_left_search_accepts_omitted_and_braced_right_endpoints(self):
         self.git("commit", "--allow-empty", "-qm", "needle{..dots needle{...dots")
         for dots in ("..", "..."):
@@ -1114,6 +1129,7 @@ class TestRangeDivergence(unittest.TestCase):
                                          review.STATES["REVIEW_ERROR"])
                         self.assertEqual(result.stderr, "")
 
+    @journal_writer
     def test_range_cli_isolates_journal_before_first_in_process_write(self):
         # A fresh interpreter prevents earlier journal tests from masking a
         # missing initialization in range_cli. Use a real nonempty diff and
@@ -1131,7 +1147,7 @@ class TestRangeDivergence(unittest.TestCase):
                 "import tests.test_review as module",
                 "assert module._MODULE_STATE_HOME is None",
                 "module.setUpModule()",
-                "case = module.TestRangeDivergence()",
+                "case = module.TestRangeDivergence('test_range_cli_isolates_journal_before_first_in_process_write')",
                 "try:",
                 "    case.setUp()",
                 "    result = case.range_cli('HEAD~1..HEAD')",
@@ -1155,6 +1171,7 @@ class TestRangeDivergence(unittest.TestCase):
                              [seed])
             self.assertEqual(seed.read_bytes(), b"operator history\n")
 
+    @journal_writer
     def test_dotted_left_search_reports_the_complete_bad_endpoint(self):
         self.git("commit", "--allow-empty", "-qm", "needle..dots")
         left = "HEAD^{/needle..dots}"
@@ -1203,6 +1220,7 @@ class TestRangeDivergence(unittest.TestCase):
                     else:
                         self.assertEqual(warning, "")
 
+    @journal_writer
     def test_single_commit_shorthands_still_reject_unresolvable_refs(self):
         for range_spec, bad_ref in (("deadbeef^!", "deadbeef"),
                                     ("deadbeef^@", "deadbeef"),
@@ -1224,6 +1242,7 @@ class TestRangeDivergence(unittest.TestCase):
                 self.assertEqual(body, self.git("diff", range_spec))
                 self.assertEqual(warning, "")
 
+    @journal_writer
     def test_existing_tree_object_is_not_a_commit_endpoint(self):
         result = self.range_cli("HEAD^{tree}")
         self.assertEqual(result.returncode, review.STATES["REVIEW_ERROR"])
@@ -1301,6 +1320,7 @@ class TestRangeDivergence(unittest.TestCase):
                 self.assertIn("HEAD", warning)
                 self.assertEqual(body, self.git("diff", range_spec))
 
+    @journal_writer
     def test_header_displays_divergence_offline(self):
         stdout, stderr = io.StringIO(), io.StringIO()
         reviewer = {"name": "offline", "profiles": ["standard"]}
@@ -1559,6 +1579,7 @@ class TestClaimsRefuted(unittest.TestCase):
                 self.assertEqual(review.decide_state(**{**self.BASE, **overrides}),
                                  expected)
 
+    @journal_writer
     def test_cli_exit_text_json_escalation_and_persisted_verdict(self):
         claim = "The reader preserves café rows:\n" + "row detail; " * 50
         reason = "The reader drops the last row:\n" + "missing café row; " * 50
@@ -2425,6 +2446,7 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
 
     def cycle_cli(self, *flags, failing=False, unavailable=(), roster=None):
         """Drive argparse, selection, verdict and real persistence offline."""
+        require_registered_writer()
         if not hasattr(self, "cycle_root"):
             self.cycle_root = Path(tempfile.mkdtemp(
                 dir=_ensure_module_state_home())).resolve()
@@ -2472,6 +2494,7 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
             (self.cycle_root / review.JOURNAL_DIR / review.JOURNAL_NAME)
             .glob("*/record.jsonl"))]
 
+    @journal_writer
     def test_three_failed_rounds_cannot_restart_with_one_reviewer(self):
         for round_no in (1, 2, 3):
             result = self.cycle_cli("--round", str(round_no), "--quorum", "3",
@@ -2492,6 +2515,7 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
                 self.assertEqual(result.called, [])
         self.assertEqual(self.cycle_records(), history)
 
+    @journal_writer
     def test_implementation_quorum_one_needs_explicit_override(self):
         for flags in ([], ["--only", "a"], ["--escalate"]):
             with self.subTest(flags=flags):
@@ -2500,6 +2524,7 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
                 self.assertEqual(result.called, [])
                 self.assertIn("--allow-single-reviewer", result.stderr)
 
+    @journal_writer
     def test_single_reviewer_override_is_visible_and_persisted(self):
         for rendering in ([], ["--json"]):
             with self.subTest(rendering=rendering):
@@ -2518,6 +2543,7 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
                     self.assertIn("REVIEW_PASS — SINGLE_REVIEWER_OVERRIDE: "
                                   "owner requested diagnostic", result.stdout)
 
+    @journal_writer
     def test_override_requires_a_reason_and_quorum_one(self):
         for reason, quorum in (("", "1"), ("  ", "1"), ("a\nb", "1"),
                                ("a\u2028b", "1"), ("diagnostic", "2")):
@@ -2526,6 +2552,7 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
                     "--quorum", quorum, "--allow-single-reviewer", reason),
                     because="override is not an explicit singleton reason")
 
+    @journal_writer
     def test_fresh_cycle_checks_selected_panel_against_replaced_profile(self):
         for flags in (["--profile", "fast"], ["--only", "a,b"],
                       ["--only", "a,a,b"]):
@@ -2537,6 +2564,7 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
         self.assert_refused(result, because="standard is smaller than deep")
         self.assertIn("at least 4", result.stderr)
 
+    @journal_writer
     def test_fresh_cycle_cannot_count_disabled_selected_reviewers(self):
         roster = [{"name": n, "profiles": ["standard"]} for n in ("a", "b", "c")]
         roster.append({"name": "d", "profiles": [], "enabled": False})
@@ -2545,6 +2573,7 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
         self.assert_refused(result, because="disabled reviewer cannot fill floor")
         self.assertEqual(result.called, [])
 
+    @journal_writer
     def test_fresh_cycle_cannot_count_duplicate_routing_entries(self):
         roster = [{"name": n, "profiles": ["fast", "standard"]}
                   for n in ("a", "a", "b", "c")]
@@ -2557,6 +2586,7 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
                 self.assertIn("duplicate reviewer names", result.stderr)
                 self.assertEqual(result.called, [])
 
+    @journal_writer
     def test_fresh_cycle_raises_quorum_for_fixed_panel_and_ladder(self):
         for flags, absent in (([], ("c",)), (["--escalate"], ("c", "d"))):
             with self.subTest(flags=flags):
@@ -2567,6 +2597,7 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
                 self.assertEqual(report["quorum"], 3)
                 self.assertEqual(report["completed"], 2)
 
+    @journal_writer
     def test_fresh_cycle_ladder_does_not_stop_below_replacement_floor(self):
         result = self.cycle_cli("--fresh-cycle-from", "standard", "--escalate",
                                 "--json", failing=True)
@@ -2574,6 +2605,7 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
         self.assertEqual(set(result.called), {"a", "b", "c"})
         self.assertEqual(json.loads(result.stdout)["quorum"], 3)
 
+    @journal_writer
     def test_fresh_cycle_provenance_reaches_verdict_and_journal(self):
         for rendering in ([], ["--json"]):
             with self.subTest(rendering=rendering):
@@ -2591,6 +2623,7 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
                     self.assertIn("REVIEW_PASS — FRESH_CYCLE from standard; "
                                   "minimum 3 reviewers", result.stdout)
 
+    @journal_writer
     def test_unavailable_fresh_cycle_keeps_provenance(self):
         result = self.cycle_cli("--fresh-cycle-from", "standard",
                                 unavailable=("a", "b", "c"))
@@ -2683,6 +2716,7 @@ class TestFindingDispositions(unittest.TestCase):
         self.assertIn(entry["summary"], prompt)
         self.assertIn(entry["reason"], prompt)
 
+    @journal_writer
     def test_cli_wires_not_reproduced_finding_into_reviewer_prompt(self):
         digest, entry = self.entry()
         path = self.write_dispositions({digest: entry})
@@ -2792,18 +2826,6 @@ class TestFindingDispositions(unittest.TestCase):
 
 class TestReviewSuiteJournalIsolation(unittest.TestCase):
     """Journal-capable tests cannot leak audit records into operator state."""
-
-    # Exercise the lazy record wrapper first, before tests that explicitly
-    # acquire the module fixture. These cover review.main -> journal child,
-    # repeated child writes, and direct append, with no live providers.
-    JOURNAL_WRITING_TESTS = (
-        "tests.test_review.TestFindingDispositions."
-        "test_cli_wires_not_reproduced_finding_into_reviewer_prompt",
-        "tests.test_review.TestReviewJournal."
-        "test_two_invocations_append_two_records_with_monotonic_timestamps",
-        "tests.test_review.TestReviewSuiteJournalIsolation."
-        "test_fixture_allows_a_real_isolated_append",
-    )
 
     def test_unrelated_selected_test_needs_no_same_device_journal_root(self):
         program = "\n".join((
@@ -3041,6 +3063,12 @@ class TestReviewSuiteJournalIsolation(unittest.TestCase):
                 temporary.cleanup()
 
     def test_module_suite_leaves_the_user_journal_untouched(self):
+        # Normalize only the import prefix for discovery/direct-script modes;
+        # registration is decided by the actual selected method object.
+        writers = tuple(
+            "tests.test_review" + name[len(__name__):]
+            for name in registered_writer_names(sys.modules[__name__]))
+        self.assertTrue(writers, "no journal writers registered")
         fixture_root = _ensure_module_state_home()
         for mode in ("default", "custom-xdg", "fallback"):
             with self.subTest(mode=mode):
@@ -3092,11 +3120,11 @@ class TestReviewSuiteJournalIsolation(unittest.TestCase):
 
                 result = subprocess.run(
                     [sys.executable, "-m", "unittest",
-                     *self.JOURNAL_WRITING_TESTS],
+                     *writers],
                     cwd=REPO, env=env, capture_output=True, text=True,
-                    # A hang bound for three fixed writers, independent of
-                    # the growing module's runtime. TimeoutExpired is an
-                    # error, never evidence that the journal stayed intact.
+                    # ARC-785: keep a finite bound for the registered writers.
+                    # TimeoutExpired is an error, never evidence that the
+                    # journal stayed intact.
                     timeout=600)
 
                 self.assertEqual(
@@ -3119,6 +3147,7 @@ class TestReviewSuiteJournalIsolation(unittest.TestCase):
         for _case, error in result.errors:
             self.assertIn("TimeoutExpired", error)
 
+    @journal_writer
     def test_fixture_allows_a_real_isolated_append(self):
         fixture_root = _ensure_module_state_home()
         path = (Path(os.environ["XDG_STATE_HOME"]) / review.JOURNAL_DIR /
@@ -3129,6 +3158,7 @@ class TestReviewSuiteJournalIsolation(unittest.TestCase):
         self.assertTrue(record_path.is_file())
         self.assertTrue(review._inside(record_path, fixture_root))
 
+    @journal_writer
     def test_marker_absent_keeps_production_append_behavior(self):
         fixture_root = _ensure_module_state_home()
         path = fixture_root / "marker-absent" / review.JOURNAL_NAME
@@ -3142,6 +3172,7 @@ class TestReviewSuiteJournalIsolation(unittest.TestCase):
         finally:
             os.environ[review.JOURNAL_TEST_MARKER] = saved
 
+    @journal_writer
     def test_test_marker_refuses_state_homes_outside_the_fixture(self):
         fixture_root = _ensure_module_state_home()
         root = Path(tempfile.mkdtemp(dir=fixture_root.parent)).resolve()
@@ -3175,6 +3206,7 @@ class TestReviewSuiteJournalIsolation(unittest.TestCase):
             else:
                 os.environ["XDG_STATE_HOME"] = saved_xdg
 
+    @journal_writer
     def test_test_marker_refuses_unconstrained_roots(self):
         fixture_root = _ensure_module_state_home()
         regular_file = fixture_root / "not-a-directory"
@@ -3199,6 +3231,7 @@ class TestReviewSuiteJournalIsolation(unittest.TestCase):
         finally:
             os.environ[review.JOURNAL_TEST_MARKER] = saved
 
+    @journal_writer
     def test_test_marker_refuses_fixture_root_inside_worktree(self):
         fixture_root = _ensure_module_state_home()
         repository = fixture_root / "marker-refusal-repository"
@@ -3219,6 +3252,7 @@ class TestReviewSuiteJournalIsolation(unittest.TestCase):
         finally:
             os.environ[review.JOURNAL_TEST_MARKER] = saved
 
+    @journal_writer
     def test_test_marker_refuses_tilde_relative_fixture_root(self):
         fixture_root = _ensure_module_state_home()
         path = (fixture_root / "state" / review.JOURNAL_DIR /
@@ -3418,6 +3452,7 @@ class TestReviewJournal(unittest.TestCase):
         }
 
     def invoke(self, only="answered", extra_args=()):
+        require_registered_writer()
         sys.argv = [str(SCRIPT), "--kind", "implementation", "--round", "1",
                     "--profile", "standard", "--quorum", "1",
                     "--allow-single-reviewer", "offline singleton fixture",
@@ -3440,12 +3475,14 @@ class TestReviewJournal(unittest.TestCase):
                 for path in sorted(self.journal_path().glob("*/record.jsonl"))]
 
     def seed_record(self, name, record, filename="record.jsonl"):
+        require_registered_writer()
         event = self.journal_path() / name
         event.mkdir(parents=True)
         path = event / filename
         path.write_text(json.dumps(record) + "\n")
         return path
 
+    @journal_writer
     def test_finding_location_and_summary_are_readable_and_redacted(self):
         secret = 'sk-"journal\\secret\nvalue'
         finding = {
@@ -3478,6 +3515,7 @@ class TestReviewJournal(unittest.TestCase):
         self.assertNotIn("journal\\secret", str(record))
         self.assertFalse(list(self.journal_path().glob("*/record.pending")))
 
+    @journal_writer
     def test_every_reviewer_finding_and_refuted_claim_survives_the_round(self):
         findings = [
             {"file": "sample.py", "line": 10, "severity": "Major",
@@ -3536,6 +3574,7 @@ class TestReviewJournal(unittest.TestCase):
         self.assertEqual(record["rejecting_reviewers"],
                          report["rejecting_reviewers"])
 
+    @journal_writer
     def test_claim_text_is_redacted_without_changing_original_digests(self):
         secret = 'sk-"claim\\secret\nvalue'
         claim = "The reader preserves this exact claim: " + secret
@@ -3555,6 +3594,7 @@ class TestReviewJournal(unittest.TestCase):
         self.assertNotEqual(record["claim_digests"][1], hashlib.sha256(
             record["claims"][1].encode("utf-8")).hexdigest())
 
+    @journal_writer
     def test_direct_append_redacts_all_persisted_text(self):
         secrets = {"OPENAI_API_KEY": "sk-direct-openai-secret",
                    "OPENROUTER_API_KEY": 'sk-direct-"router\\secret',
@@ -3590,6 +3630,7 @@ class TestReviewJournal(unittest.TestCase):
         self.assertEqual(persisted["refuted_claims"][0]["why"],
                          "<ANTHROPIC_API_KEY redacted>")
 
+    @journal_writer
     def test_version_one_history_is_readable_and_unchanged_after_append(self):
         legacy = {
             "type": "review_round", "schema_version": 1,
@@ -3611,6 +3652,7 @@ class TestReviewJournal(unittest.TestCase):
                     "claim_digests"):
             self.assertEqual([record[key] for record in records], [legacy[key]] * 2)
 
+    @journal_writer
     def test_journal_payload_failure_cannot_change_a_review_verdict(self):
         with patch.object(review, "claim_digests",
                           side_effect=ValueError("injected digest failure")):
@@ -3622,6 +3664,7 @@ class TestReviewJournal(unittest.TestCase):
         self.assertIn("injected digest failure", stderr)
         self.assertEqual(self.records(), [])
 
+    @journal_writer
     def test_round_metadata_and_rejection_reasons_are_redacted(self):
         secret = "sk-round-metadata-secret"
         result = self.answer({"name": secret})
@@ -3646,6 +3689,7 @@ class TestReviewJournal(unittest.TestCase):
                          "exception: " + tag)
         self.assertNotIn(secret, json.dumps(record))
 
+    @journal_writer
     def test_redaction_cannot_reclassify_completed_reviewer_results(self):
         result = self.answer({"name": "answered"})
         result["verdict"] = "REFUTED"
@@ -3664,6 +3708,7 @@ class TestReviewJournal(unittest.TestCase):
         self.assertEqual(record["results"][0]["verdict"],
                          "<OPENAI_API_KEY redacted>")
 
+    @journal_writer
     def test_valid_claim_digest_survives_secret_substring_collision(self):
         digest = hashlib.sha256(b"abc").hexdigest()
         self.assertIn("4141", digest)
@@ -3675,6 +3720,7 @@ class TestReviewJournal(unittest.TestCase):
         self.assertEqual(record["claims"], [self.CLAIM, "abc"])
         self.assertEqual(record["claim_digests"][1], digest)
 
+    @journal_writer
     def test_transport_key_collisions_cannot_drop_or_rehash_record_data(self):
         for secret in ("files", "record_line", "details", "claims", "claim",
                        "claim_digests", "kind", "round", "effective_panel",
@@ -3721,6 +3767,7 @@ class TestReviewJournal(unittest.TestCase):
                               json.loads(result.stdout)["error"])
                 self.assertEqual(self.records(), [])
 
+    @journal_writer
     def test_two_invocations_append_two_records_with_monotonic_timestamps(self):
         self.assertEqual(self.invoke()[0], review.STATES["REVIEW_PASS"])
         self.assertEqual(self.invoke()[0], review.STATES["REVIEW_PASS"])
@@ -3745,6 +3792,7 @@ class TestReviewJournal(unittest.TestCase):
                 record["claim_digests"],
                 [hashlib.sha256(self.CLAIM.encode("utf-8")).hexdigest()])
 
+    @journal_writer
     def test_effective_panel_contains_only_reviewers_that_answered(self):
         def one_answer(reviewer, *_args, **_kwargs):
             if reviewer["name"] == "errored":
@@ -3758,6 +3806,7 @@ class TestReviewJournal(unittest.TestCase):
         self.assertEqual(json.loads(stdout)["state"], "REVIEW_PARTIAL")
         self.assertEqual(self.records()[-1]["effective_panel"], ["answered"])
 
+    @journal_writer
     def test_silent_single_reviewer_is_review_incomplete(self):
         original_post = review._post
         original_key = os.environ.get("OPENAI_API_KEY")
@@ -3789,6 +3838,7 @@ class TestReviewJournal(unittest.TestCase):
         self.assertEqual(report["completed"], 0)
         self.assertTrue(report["failed"][0]["incomplete"])
 
+    @journal_writer
     def test_existing_journal_cannot_decide_the_verdict(self):
         self.seed_record("000-seed", {
             "type": "review_round", "verdict": "REVIEW_FAIL",
@@ -3800,6 +3850,7 @@ class TestReviewJournal(unittest.TestCase):
         self.assertEqual([record["verdict"] for record in self.records()],
                          ["REVIEW_FAIL", "REVIEW_PASS"])
 
+    @journal_writer
     def test_journal_code_runs_only_after_the_verdict_is_decided(self):
         original_decide = review.decide_state
         original_record = review.record_review_round
@@ -3828,6 +3879,7 @@ class TestReviewJournal(unittest.TestCase):
         self.assertEqual(events, [("verdict", "REVIEW_PASS"),
                                   ("journal", "REVIEW_PASS")])
 
+    @journal_writer
     def test_partial_pending_record_cannot_decide_or_block_the_verdict(self):
         pending = self.journal_path() / "000-interrupted" / "record.pending"
         pending.parent.mkdir(parents=True)
@@ -3840,6 +3892,7 @@ class TestReviewJournal(unittest.TestCase):
         self.assertEqual(pending.read_text(),
                          '{"type":"hostile seed","verdict":"REVIEW_FAIL"')
 
+    @journal_writer
     def test_read_only_journal_failure_is_loud_but_non_gating(self):
         path = self.journal_path()
         path.mkdir(parents=True)
@@ -3856,6 +3909,7 @@ class TestReviewJournal(unittest.TestCase):
         self.assertNotIn("invalid success", report["journal"]["error"])
         self.assertIn("JOURNAL_WRITE_FAILED", stderr)
 
+    @journal_writer
     def test_broken_stderr_cannot_turn_journal_failure_into_review_failure(self):
         class BrokenStderr:
             def write(self, _text):
@@ -3958,6 +4012,7 @@ class TestReviewJournal(unittest.TestCase):
         with self.assertRaises(ValueError):
             path.relative_to(REPO.resolve())
 
+    @journal_writer
     def test_symlinked_journal_directory_cannot_escape_into_worktree(self):
         base = Path(os.environ["XDG_STATE_HOME"])
         base.mkdir(parents=True)
@@ -3970,6 +4025,7 @@ class TestReviewJournal(unittest.TestCase):
         self.assertIn("operated Git worktree", stderr)
         self.assertFalse(target.exists())
 
+    @journal_writer
     def test_preexisting_symlink_inside_state_home_is_refused(self):
         base = Path(os.environ["XDG_STATE_HOME"])
         base.mkdir(parents=True)
@@ -3984,6 +4040,7 @@ class TestReviewJournal(unittest.TestCase):
         self.assertIn("JOURNAL_WRITE_FAILED", stderr)
         self.assertFalse((target / review.JOURNAL_NAME).exists())
 
+    @journal_writer
     def test_symlinked_configured_state_home_is_refused(self):
         target = self.tmp / "actual-state"
         target.mkdir()
@@ -3998,6 +4055,7 @@ class TestReviewJournal(unittest.TestCase):
         self.assertIn("JOURNAL_WRITE_FAILED", stderr)
         self.assertFalse((target / review.JOURNAL_DIR).exists())
 
+    @journal_writer
     def test_intermediate_symlink_swap_after_validation_is_refused(self):
         path = review.review_journal_path([SCRIPT])
         path.parent.mkdir(parents=True)
@@ -4031,6 +4089,7 @@ class TestReviewJournal(unittest.TestCase):
             shutil.rmtree(parked, ignore_errors=True)
             shutil.rmtree(target, ignore_errors=True)
 
+    @journal_writer
     def test_interrupted_private_write_cannot_corrupt_canonical_history(self):
         path = self.journal_path()
         original_write = review.os.write
@@ -4065,6 +4124,7 @@ class TestReviewJournal(unittest.TestCase):
         self.assertEqual(pending[0].read_bytes(), before)
         self.assertEqual(len(self.records()), 1)
 
+    @journal_writer
     def test_stalled_journal_helper_is_killed_without_gating_verdict(self):
         class HungProcess:
             def __init__(self):
@@ -4094,6 +4154,7 @@ class TestReviewJournal(unittest.TestCase):
         self.assertIn("JOURNAL_WRITE_FAILED", stderr)
         self.assertIn("append exceeded", stderr)
 
+    @journal_writer
     def test_short_writes_are_completed_before_success(self):
         path = self.journal_path()
         original_write = review.os.write
@@ -4114,6 +4175,7 @@ class TestReviewJournal(unittest.TestCase):
         self.assertGreater(len(calls), 1)
         self.assertEqual(len(self.records()), 1)
 
+    @journal_writer
     def test_private_modes_remain_private_under_common_umask(self):
         previous = os.umask(0o022)
         try:
@@ -4126,6 +4188,7 @@ class TestReviewJournal(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(record_path.parent.stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(record_path.stat().st_mode), 0o600)
 
+    @journal_writer
     def test_watchdog_is_disarmed_before_journal_persistence(self):
         events = []
         review.disarm_watchdog = lambda: events.append("disarmed")
@@ -4140,6 +4203,7 @@ class TestReviewJournal(unittest.TestCase):
         self.assertEqual(json.loads(stdout)["state"], "REVIEW_PASS")
         self.assertEqual(stderr, "")
 
+    @journal_writer
     def test_hard_linked_journal_cannot_modify_a_worktree_file(self):
         if self.tmp.stat().st_dev != REPO.stat().st_dev:
             self.skipTest("hard-link defence requires a fixture on the "
