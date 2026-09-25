@@ -94,7 +94,7 @@ if sys.argv[0].endswith('merge_unit.py'):
         original = json.loads(pending.read_text())
         self.assertFalse(pending.with_suffix('.cancellation-committed').exists())
         del self.f.env['PYTHONPATH']
-        for extra in ((), ('--verify-integration',)):
+        for extra in (('--verify-integration',), ()):
             result = self.f.invoke(*extra)
             self.f.assert_refused(result)
             self.assertIn('unresolved', result.stderr)
@@ -168,6 +168,34 @@ if sys.argv[0].endswith('merge_unit.py'):
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertEqual(before, {p.name: p.read_bytes() for p in self.f.state_dir.iterdir()})
         self.assertEqual(self.f.calls(), calls)
+
+    def test_reappearing_pending_cleanup_remains_resolved(self):
+        _, cancelled, pending = self.leave_committed_crash()
+        original = pending.read_bytes()
+        for _ in range(2):
+            # Model a cleanup unlink lost across a restart. The commit marker
+            # must survive and make the same repair repeatable.
+            pending.write_bytes(original)
+            result = self.f.invoke('--verify-integration')
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(pending.exists())
+            self.assertEqual(self.f.intent(), cancelled)
+        self.assertEqual(self.f.calls(['pr', 'merge']), [])
+
+    def test_legacy_completed_cancellation_without_marker_remains_resolved(self):
+        self.precondition.move_after_publication()
+        result = self.f.invoke()
+        self.f.assert_refused(result)
+        cancelled = self.f.intent()
+        self.assertEqual(cancelled['phase'], 'cancelled_before_request')
+        self.assertEqual(list(self.f.state_dir.glob('*.cancellation-pending')), [])
+        marker, = self.f.state_dir.glob('*.cancellation-committed')
+        marker.unlink()  # The ARC-1045 completed format has no marker or pending file.
+        del self.f.env['PYTHONPATH']
+        result = self.f.invoke('--verify-integration')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.f.intent(), cancelled)
+        self.assertEqual(self.f.calls(['pr', 'merge']), [])
 
     def test_mismatched_commit_cannot_resolve_pending_record(self):
         _, cancelled, pending = self.leave_committed_crash()
