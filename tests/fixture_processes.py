@@ -6,7 +6,8 @@ processes may survive cleanup and are never advertised as contained. Tests
 creating an escape must arrange independent, out-of-band teardown. This helper
 is for trusted repository fixtures on unprivileged macOS/Linux, not a sandbox.
 
-All launch fields and the directory are validated before spawning, opening
+All launch strings must be filesystem-encodable and are validated before
+creating output files, spawning, opening
 fixture pipes, creating the private session or mutating the ledger. Root and
 cwd resolve strictly to existing directories; component-aware containment
 rejects symlinks resolving outside the root. Only the canonical cwd is launched.
@@ -23,7 +24,11 @@ handles; fixtures must not change uid or delegate to pre-existing services.
 
 ESRCH after an observation triggers a scoped rescan. Already-reaped or absent
 processes can yield STATUS_UNAVAILABLE; no signal exit status is invented.
-EPERM, failed/malformed scoped scans, unresolved in-session identity ambiguity
+EPERM remains an error except for a census row freshly confirmed in the live
+caller's own group, with that group outside the fixture session and ledger.
+An unknown group is not evidence of exclusion: descendants may create groups
+before the ledger observes them. Direct identity reads never suppress EPERM.
+Other failed/malformed scoped scans, unresolved in-session identity ambiguity
 and genuine signal/wait failures remain ERROR or INDETERMINATE. Every failed
 cleanup runs emergency containment in a finally path: retry scoped enumeration,
 signal ledger/last-observed fixture groups, escalate to KILL and reap the direct
@@ -162,6 +167,17 @@ class FixtureSpec:
                 if not key or '=' in key or key in keys:
                     raise ValueError('invalid, duplicate or reserved environment key')
                 keys.add(key)
+        # Popen encodes argv, cwd and environment at different launch stages.
+        # Check all explicit strings here, before any fixture side effect;
+        # fsencode preserves supported surrogateescape bytes as Popen does.
+        for value in self.command:
+            os.fsencode(value)
+        if self.directory is not None:
+            os.fsencode(self.directory)
+        if self.environment is not None:
+            for key, value in self.environment:
+                os.fsencode(key)
+                os.fsencode(value)
 
 
 class FixtureRefused(ValueError):
@@ -205,6 +221,11 @@ def _session_rows(sid, groups, timeout=5):
 
     macOS ps has no numeric sid column, so getsid supplies that field. ESRCH
     on any departing row is absence; unrelated rows need no second observation.
+    A denied SID is excluded only with positive foreign-group evidence: the
+    row still belongs to the live caller's group, whose SID differs, and that
+    group is not in the fixture ledger. Cross-session group joins are forbidden
+    by POSIX and the caller keeps its group alive throughout this observation.
+    Every other denial propagates, including unknown groups and the anchor.
     No command, environment, directory, uid or birth field is requested.
     """
     output = subprocess.check_output(
@@ -226,6 +247,16 @@ def _session_rows(sid, groups, timeout=5):
             observed_sid = os.getsid(pid)
         except ProcessLookupError:
             continue
+        except PermissionError:
+            if pid != sid and (sid, pgid) not in groups:
+                caller = _identity(os.getpid())
+                if caller is not None and caller.sid != sid and caller.pgid == pgid:
+                    try:
+                        if os.getpgid(pid) == caller.pgid:
+                            continue
+                    except ProcessLookupError:
+                        continue
+            raise
         if observed_sid == sid or (sid, pgid) in groups:
             # A ledger hit alone has no authority: retain its foreign sid so
             # the consumer can explicitly discard a reused group.
@@ -268,7 +299,15 @@ def wait_readable(fd, timeout):
         return bool(readiness.select(timeout))
 
 def process_table():
-    """Enumerate this unprivileged uid with untruncated diagnostic commands."""
+    """Enumerate this uid with untruncated, possibly multiline commands.
+
+    ps records start with a numeric PID. A nonnumeric physical line can only
+    extend an already started command; preserve it instead of dropping it.
+    Numeric row candidates (a digit, optionally preceded by a sign) must parse
+    completely, and duplicate PIDs refuse ambiguous command text. Signs alone
+    or followed by nondigits remain command continuations. Orphan continuations
+    also refuse. This text never supplies membership or signal authority.
+    """
     with subprocess.Popen(
             [_ps_command(), '-ww', '-U', str(os.getuid()), '-o',
              'pid=,ppid=,pgid=,uid=,stat=,command='],
@@ -281,12 +320,33 @@ def process_table():
             raise
         if reader.returncode != 0:
             raise OSError('process enumeration failed: ' + error)
-    rows = {}
-    for line in output.splitlines():
+    rows, seen = {}, set()
+    previous = None
+    # Only LF delimits ps records; splitlines also splits control characters
+    # that may belong to a command. Remove only ps's final record terminator.
+    for line in (output[:-1] if output.endswith('\n') else output).split('\n'):
         parts = line.strip().split(None, 5)
+        numeric = bool(parts) and (
+            parts[0][0] in '0123456789' or
+            (len(parts[0]) > 1 and parts[0][0] in '+-' and
+             parts[0][1] in '0123456789'))
+        if not numeric:
+            if previous is None:
+                raise _Indeterminate('orphan process command continuation')
+            if previous in rows:
+                row = rows[previous]
+                rows[previous] = (*row[:3], row[3] + '\n' + line)
+            continue
         if len(parts) != 6:
             raise _Indeterminate('malformed process enumeration')
-        pid, ppid, pgid, uid = map(int, parts[:4])
+        try:
+            pid, ppid, pgid, uid = map(int, parts[:4])
+        except ValueError as error:
+            raise _Indeterminate('malformed process enumeration') from error
+        if pid <= 0 or ppid < 0 or pgid <= 0 or uid < 0 or pid in seen:
+            raise _Indeterminate('invalid or duplicate process enumeration')
+        seen.add(pid)
+        previous = pid
         if uid == os.geteuid() and pid != reader.pid:
             rows[pid] = (ppid, pgid, parts[4], parts[5])
     if os.getpid() not in rows:

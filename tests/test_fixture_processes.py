@@ -636,6 +636,65 @@ class TestTypedFixtureContract(unittest.TestCase):
     _scope = TestFixtureProcessGuard._scope
     _launch = TestFixtureProcessGuard._launch
 
+    def test_unencodable_strings_refuse_before_files_pipes_sessions_or_ledger(self):
+        def open_descriptors():
+            result = set()
+            for name in os.listdir('/dev/fd'):
+                fd = int(name)
+                try:
+                    os.fstat(fd)
+                except OSError as error:
+                    if error.errno != errno.EBADF:
+                        raise
+                else:
+                    result.add(fd)
+            return result
+
+        bad = '\ud800'
+        cases = (
+            ('command', (bad,)),
+            ('command', (sys.executable, '-c', 'pass', bad)),
+            ('environment', ((bad, 'value'),)),
+            ('environment', (('KEY', bad),)),
+            ('directory', '/' + bad),
+        )
+        for field, value in cases:
+            with self.subTest(field=field, value=value):
+                scope = self._scope()
+                spec = FixtureSpec((sys.executable, '-c', 'pass'))
+                # Launch revalidates even a frozen spec changed after creation.
+                object.__setattr__(spec, field, value)
+                before = open_descriptors()
+                with mock.patch.object(fixtures, '_private_pipe', wraps=fixtures._private_pipe) as pipe, mock.patch.object(
+                        fixtures.subprocess, 'Popen', wraps=subprocess.Popen) as spawn, mock.patch.object(
+                        fixtures, '_identity', wraps=fixtures._identity) as identity:
+                    with self.assertRaises(ValueError):
+                        scope.launch(spec)
+                self.assertEqual(open_descriptors(), before, 'refused launch leaked descriptors')
+                self.assertEqual(list(scope.root.iterdir()), [], 'refused launch created files')
+                self.assertEqual(scope.children, [])
+                self.assertFalse(scope.ledger_path.exists())
+                pipe.assert_not_called()
+                spawn.assert_not_called()
+                identity.assert_not_called()
+                with self.assertRaises(UnicodeEncodeError):
+                    FixtureSpec(**dict(vars(spec)))
+
+    def test_encodable_unicode_and_surrogateescape_strings_still_launch(self):
+        scope = self._scope()
+        directory = scope.root / 'caf\u00e9'
+        directory.mkdir()
+        value = 'caf\u00e9\n' + os.fsdecode(b'\xff')
+        proc = scope.launch(FixtureSpec(
+            (sys.executable, '-c',
+             'import json,os,sys; print(json.dumps([sys.argv[1],os.environ["KEY"]]))', value),
+            environment=(('KEY', value),), directory=str(directory)))
+        joined = proc.join(10)
+        self.assertEqual(joined.state, JoinState.EXITED, joined)
+        self.assertEqual(joined.returncode, 0, joined)
+        self.assertEqual(json.loads(joined.stdout), [value, value])
+        self.assertEqual(proc.cleanup().state, CleanupState.CLEAN)
+
     def test_every_unsupported_launch_field_is_refused_before_side_effects(self):
         import inspect
         scope = self._scope()
@@ -955,6 +1014,58 @@ class TestSessionContainment(unittest.TestCase):
     _scope = TestFixtureProcessGuard._scope
     _launch = TestFixtureProcessGuard._launch
 
+    def _diagnostic_output(self, output):
+        reader = mock.MagicMock()
+        reader.__enter__.return_value = reader
+        reader.returncode, reader.pid = 0, 1000000001
+        reader.communicate.return_value = (output, '')
+        with mock.patch.object(fixtures.subprocess, 'Popen', return_value=reader):
+            return process_table()
+
+    def test_multiline_unrelated_command_preserves_real_fixture_member(self):
+        scope = self._scope()
+        proc = self._launch(scope, 'import time; print("ready",flush=True); time.sleep(600)')
+        wait_for(lambda: proc.stdout_path.read_text() == 'ready\n')
+        caller = '%d %d %d %d S caller\n' % (
+            os.getpid(), os.getppid(), os.getpgrp(), os.geteuid())
+        foreign = '1000000000 1 1000000000 %d S unrelated\nargument continuation\n' % os.geteuid()
+        member = '%d %d %d %d S %s\n' % (
+            proc.child_pid, proc.supervisor_pid, proc.child_pid, os.geteuid(),
+            ' '.join(proc.spec.command))
+        for tail in (foreign + member, member + foreign):
+            with self.subTest(tail=tail):
+                rows = self._diagnostic_output(caller + tail)
+                self.assertEqual(rows[1000000000][3], 'unrelated\nargument continuation')
+                self.assertEqual(rows[proc.child_pid][0:2],
+                                 (proc.supervisor_pid, proc.child_pid))
+                self.assertIn(proc.child_pid, scope._root_rows(rows))
+                self.assertIn(proc.child_pid, proc._snapshot())
+
+    def test_multiline_fixture_command_and_blank_continuations_are_retained(self):
+        caller = '%d %d %d %d S caller\n' % (
+            os.getpid(), os.getppid(), os.getpgrp(), os.geteuid())
+        for continuation in ('\ncontinued\rargument\vtext', '-x', '+option', '-', '+'):
+            with self.subTest(continuation=continuation):
+                command = 'fixture\n' + continuation
+                output = caller + '1000000000 1 1000000000 %d S %s\n' % (os.geteuid(), command)
+                self.assertEqual(self._diagnostic_output(output)[1000000000][3], command)
+
+    def test_ambiguous_diagnostic_rows_refuse_instead_of_dropping_members(self):
+        caller = '%d %d %d %d S caller\n' % (
+            os.getpid(), os.getppid(), os.getpgrp(), os.geteuid())
+        bad = (
+            '123 broken\n', '123x broken\n', '-1 1 1 501 S broken\n',
+            '+123 broken\n', '-123 broken\n', '0 1 1 501 S broken\n',
+            '123 bad-parent 123 501 S broken\n', caller,
+        )
+        for row in bad:
+            with self.subTest(row=row), self.assertRaises(fixtures._Indeterminate):
+                self._diagnostic_output(caller + row)
+        for output in ('', 'orphan continuation\n' + caller,
+                       '1000000000 1 1000000000 %d S no-caller\n' % os.geteuid()):
+            with self.subTest(output=output), self.assertRaises(fixtures._Indeterminate):
+                self._diagnostic_output(output)
+
     def test_path_resolvable_ps_serves_both_readers_when_bin_ps_is_absent(self):
         scope = self._scope()
         proc = self._launch(scope, 'pass')
@@ -987,10 +1098,10 @@ class TestSessionContainment(unittest.TestCase):
         self.assertTrue(launched)
         self.assertEqual(set(launched), {str(alias)})
 
-    def _foreign(self, cwd=None):
+    def _foreign(self, cwd=None, new_session=True):
         proc = subprocess.Popen(
             [sys.executable, '-c', 'import time; print("ready",flush=True); time.sleep(600)'],
-            cwd=cwd, start_new_session=True, stdout=subprocess.PIPE,
+            cwd=cwd, start_new_session=new_session, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL)
         def contain():
             if proc.poll() is None:
@@ -1001,6 +1112,113 @@ class TestSessionContainment(unittest.TestCase):
         self.assertTrue(wait_readable(proc.stdout, 10))
         self.assertEqual(proc.stdout.readline(), b'ready\n')
         return proc
+
+    def test_denied_sid_in_live_callers_group_is_excluded_without_signalling(self):
+        scope = self._scope()
+        foreign = self._foreign(new_session=False)
+        self.assertEqual(os.getpgid(foreign.pid), os.getpgrp())
+        proc = self._launch(scope, 'import time; print("ready",flush=True); time.sleep(600)')
+        wait_for(lambda: proc.stdout_path.read_text() == 'ready\n')
+        real_sid = os.getsid
+
+        def denied(pid):
+            if pid == foreign.pid:
+                raise PermissionError(errno.EPERM, 'unrelated SID denied')
+            return real_sid(pid)
+
+        with mock.patch.object(fixtures.os, 'getsid', denied), mock.patch.object(
+                fixtures.os, 'kill', wraps=os.kill) as kill, mock.patch.object(
+                fixtures.os, 'killpg', wraps=os.killpg) as killpg:
+            rows = proc._snapshot()
+            self.assertIn(proc.child_pid, rows)
+            self.assertNotIn(foreign.pid, rows)
+            result = proc.cleanup()
+        self.assertEqual(result.state, CleanupState.CLEAN, result)
+        self.assertIsNone(foreign.poll())
+        self.assertNotIn(foreign.pid, [call.args[0] for call in kill.call_args_list])
+        self.assertNotIn(os.getpgrp(), [call.args[0] for call in killpg.call_args_list])
+
+    def test_denied_fixture_anchor_child_and_unrecorded_group_never_disappear(self):
+        for member in ('anchor', 'child', 'unrecorded-group'):
+            with self.subTest(member=member):
+                scope = self._scope()
+                ready = scope.root / 'member.pid'
+                proc = self._launch(scope,
+                    'import os,time\n'
+                    'if os.fork():\n'
+                    '    while True: time.sleep(600)\n'
+                    'os.setpgid(0,0)\n'
+                    'with open(%r,"w") as f: f.write(str(os.getpid()))\n'
+                    'while True: time.sleep(600)\n' % str(ready))
+                wait_for(lambda: ready.exists() and bool(ready.read_text()))
+                extra = int(ready.read_text())
+                self.assertNotIn((proc.supervisor_pid, extra), proc._groups)
+                ledger_before = scope.ledger_path.read_bytes()
+                denied_pid = {'anchor': proc.supervisor_pid, 'child': proc.child_pid,
+                              'unrecorded-group': extra}[member]
+                real_sid = os.getsid
+
+                def denied(pid):
+                    if pid == denied_pid:
+                        raise PermissionError(errno.EPERM, 'fixture SID denied')
+                    return real_sid(pid)
+
+                with mock.patch.object(fixtures.os, 'getsid', denied):
+                    with self.assertRaises(PermissionError):
+                        proc._snapshot()
+                    with self.assertRaises(PermissionError):
+                        fixtures._identity(denied_pid)
+                    self.assertEqual(proc.wait_quiescent(1).state, fixtures.QuiescenceState.ERROR)
+                    # A sustained denied scan must not certify CLEAN; prevent
+                    # emergency reap delay here, then exercise real teardown
+                    # after restoring permission below.
+                    with mock.patch.object(proc, '_emergency_containment') as emergency:
+                        result = proc.cleanup()
+                    self.assertEqual(result.state, CleanupState.ERROR, result)
+                    emergency.assert_called_once_with()
+                self.assertEqual(scope.ledger_path.read_bytes(), ledger_before)
+                self.assertEqual(proc.cleanup().state, CleanupState.CLEAN)
+                self.assertNotIn(extra, fixtures._session_rows(proc.supervisor_pid, set()))
+
+    def test_denied_unrelated_group_and_ledger_collision_remain_errors(self):
+        scope = self._scope()
+        proc = self._launch(scope, 'pass')
+        self.assertEqual(proc.join(10).returncode, 0)
+        real_sid = os.getsid
+        for new_session in (True, False):
+            with self.subTest(new_session=new_session):
+                foreign = self._foreign(new_session=new_session)
+                group = (proc.supervisor_pid, os.getpgid(foreign.pid))
+                groups = set() if new_session else {group}
+
+                def denied(pid):
+                    if pid == foreign.pid:
+                        raise PermissionError(errno.EPERM, 'unproven exclusion')
+                    return real_sid(pid)
+
+                with mock.patch.object(fixtures.os, 'getsid', denied):
+                    with self.assertRaises(PermissionError):
+                        fixtures._session_rows(proc.supervisor_pid, groups)
+                self.assertIsNone(foreign.poll())
+
+    def test_denied_row_with_stale_caller_group_cannot_be_excluded(self):
+        scope = self._scope()
+        proc = self._launch(scope, 'import time; time.sleep(600)')
+        real_sid, real_group = os.getsid, os.getpgid
+        output = '%d %d\n%d %d\n%d %d\n' % (
+            os.getpid(), os.getpgrp(), proc.supervisor_pid, proc.supervisor_pid,
+            proc.child_pid, os.getpgrp())
+
+        def denied(pid):
+            if pid == proc.child_pid:
+                raise PermissionError(errno.EPERM, 'fixture SID denied')
+            return real_sid(pid)
+
+        with mock.patch.object(fixtures.subprocess, 'check_output', return_value=output), mock.patch.object(
+                fixtures.os, 'getsid', denied):
+            with self.assertRaises(PermissionError):
+                fixtures._session_rows(proc.supervisor_pid, set())
+        self.assertEqual(real_group(proc.child_pid), proc.child_pid)
 
     def test_unrelated_churn_deleted_cwd_and_denied_metadata_do_not_affect_clean(self):
         scope = self._scope()
