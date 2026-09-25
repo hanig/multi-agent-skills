@@ -513,7 +513,7 @@ class TestTypedFixtureContract(unittest.TestCase):
                         proc = scope.launch(FixtureSpec((sys.executable, '-c', 'import time; time.sleep(600)')))
                         observed['proc'] = proc
                         target, name = {
-                            'scan': (fixtures, 'process_table'),
+                            'scan': (fixtures, '_enumerate_pids'),
                             'signal': (proc, '_signal_owned'),
                             'reap': (proc, '_reap'),
                             'marker': (fixtures, '_environment'),
@@ -630,7 +630,7 @@ class TestTypedFixtureContract(unittest.TestCase):
         scope = self._scope()
         proc = self._launch(scope, 'pass\n')
         self.assertEqual(proc.join(10).state, JoinState.EXITED)
-        with mock.patch.object(fixtures, 'process_table', return_value={}):
+        with mock.patch.object(fixtures, '_enumerate_pids', return_value=set()):
             self.assertEqual(proc._perform_cleanup().state, CleanupState.INDETERMINATE)
 
     def test_injected_cwd_marker_failure_prevents_clean(self):
