@@ -564,5 +564,75 @@ class TestJournalWriterRegistry(unittest.TestCase):
                 self.assertEqual(outcome['records'], 1)
 
 
+    def test_same_instance_unmarked_nested_method_cannot_persist(self):
+        report = self.child('''
+            outcomes = []
+            for receiver in ('ordinary', 'deleted'):
+                path = module._ensure_module_state_home() / receiver
+                class Writer(unittest.TestCase):
+                    @journal_writer
+                    def test_marked(self):
+                        self.test_unmarked()
+                    def test_unmarked(self):
+                        if receiver == 'deleted':
+                            del self
+                        module.review.append_review_journal(
+                            path, 'implementation', 1, [], 'REVIEW_PASS', [])
+                result = unittest.TestResult()
+                Writer('test_marked').run(result)
+                outcomes.append({'receiver': receiver, 'ok': result.wasSuccessful(),
+                                 'failures': [message for _, message in result.failures],
+                                 'errors': [message for _, message in result.errors],
+                                 'records': len(list(path.glob('*/record.jsonl')))})
+            print(json.dumps(outcomes))
+        ''')
+        for outcome in report:
+            with self.subTest(receiver=outcome['receiver']):
+                self.assertFalse(outcome['ok'], outcome)
+                self.assertEqual(outcome['errors'], [])
+                self.assertEqual(len(outcome['failures']), 1)
+                self.assertIn('unregistered journal writer', outcome['failures'][0])
+                self.assertEqual(outcome['records'], 0)
+
+    def test_opaque_siblings_keep_distinct_nested_registration(self):
+        report = self.child('''
+            outcomes = []
+            def opaque(method):
+                def call(self):
+                    return method(self)
+                return call
+            for nested in (False, True):
+                path = module._ensure_module_state_home() / ('opaque-' + str(nested))
+                class Writer(unittest.TestCase):
+                    @journal_writer
+                    @opaque
+                    def test_marked(self):
+                        if nested:
+                            self.test_unmarked()
+                        else:
+                            self.append()
+                    @opaque
+                    def test_unmarked(self):
+                        self.append()
+                    def append(self):
+                        module.review.append_review_journal(
+                            path, 'implementation', 1, [], 'REVIEW_PASS', [])
+                result = unittest.TestResult()
+                Writer('test_marked').run(result)
+                outcomes.append({'nested': nested, 'ok': result.wasSuccessful(),
+                                 'failures': [message for _, message in result.failures],
+                                 'errors': [message for _, message in result.errors],
+                                 'records': len(list(path.glob('*/record.jsonl')))})
+            print(json.dumps(outcomes))
+        ''')
+        self.assertTrue(report[0]['ok'], report[0])
+        self.assertEqual(report[0]['records'], 1)
+        self.assertFalse(report[1]['ok'], report[1])
+        self.assertEqual(report[1]['errors'], [])
+        self.assertEqual(len(report[1]['failures']), 1)
+        self.assertIn('unregistered journal writer', report[1]['failures'][0])
+        self.assertEqual(report[1]['records'], 0)
+
+
 if __name__ == '__main__':
     unittest.main()
