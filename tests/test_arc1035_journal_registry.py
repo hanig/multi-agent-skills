@@ -535,5 +535,34 @@ class TestJournalWriterRegistry(unittest.TestCase):
         self.assertEqual(report['records'], 0)
 
 
+    def test_marked_code_keeps_authority_after_receiver_local_rebinding(self):
+        report = self.child('''
+            outcomes = []
+            for mode in ('delete', 'replace'):
+                path = module._ensure_module_state_home() / ('receiver-' + mode)
+                class Writer(unittest.TestCase):
+                    @journal_writer
+                    def test_writer(self):
+                        if mode == 'delete':
+                            del self
+                        else:
+                            self = object()
+                        module.review.append_review_journal(
+                            path, 'implementation', 1, [], 'REVIEW_PASS', [])
+                result = unittest.TestResult()
+                Writer('test_writer').run(result)
+                outcomes.append({'mode': mode, 'ok': result.wasSuccessful(),
+                                 'failures': [message for _, message in result.failures],
+                                 'errors': [message for _, message in result.errors],
+                                 'records': len(list(path.glob('*/record.jsonl')))})
+            print(json.dumps(outcomes))
+        ''')
+        self.assertEqual(len(report), 2)
+        for outcome in report:
+            with self.subTest(mode=outcome['mode']):
+                self.assertTrue(outcome['ok'], outcome)
+                self.assertEqual(outcome['records'], 1)
+
+
 if __name__ == '__main__':
     unittest.main()
