@@ -1,39 +1,43 @@
-"""Fixture-specific process API; never evidence about the product's behavior.
+"""Typed test fixtures contained within a fresh private POSIX session.
 
-The helper accepts only repository-defined FixtureSpec values and returns a
-FixtureProcess whose join, terminate and cleanup semantics are defined
-independently of subprocess.Popen; arbitrary Popen keywords, descriptor
-passing, preexec hooks, identity changes, and caller-controlled session or
-process-group behavior are REFUSED before launch. For every accepted launch,
-cleanup may return CLEAN only after owned processes are reaped and it has
-positively established, using the private-session/group ledger and an
-inherited launch marker, that no descendant remains; failed scans, kills,
-reaps, or ambiguous identities return ERROR or INDETERMINATE. Child status
-is returned only when reported by the supervisor, so an externally killed
-supervisor or group yields STATUS_UNAVAILABLE rather than a fabricated -9,
-while cleanup independently proves absence or fails closed.
+Boundary: any descendant that invokes setsid or otherwise moves into another
+session, including a daemonizing double fork, is OUTSIDE this contract. Such
+processes may survive cleanup and are never advertised as contained. Tests
+creating an escape must arrange independent, out-of-band teardown. This helper
+is for trusted repository fixtures on unprivileged macOS/Linux, not a sandbox.
 
-Only trusted repository fixtures on macOS/Linux are supported. Fixtures must
-inherit their launch environment, retain the marker across exec, keep any
-long-lived descendant cwd inside their exclusive fixture root, stay at the
-same uid, and not delegate work to pre-existing services. This is a convention
-for authored tests, not a sandbox for hostile commands. A fixture that cannot
-obey that convention is unsupported. The scanner uses kernel birth identities and inherited environment/cwd
-markers, never argv substring matching as ownership authority. macOS can hide
-system-binary environments; the inherited cwd supplies a second marker. Each
-scope accepts one launch and caller-selected directories outside it are refused.
-Only our supervisor is waitable by this process; it reaps its child. Orphaned
-descendants must disappear through their parent/OS reaper before CLEAN.
+All launch fields and the directory are validated before spawning, opening
+fixture pipes, creating the private session or mutating the ledger. Root and
+cwd resolve strictly to existing directories; component-aware containment
+rejects symlinks resolving outside the root. Only the canonical cwd is launched.
+The supervisor enters its private session before any fixture code runs.
 
-The private pipes, selectors waits, retained private-session supervisor and
-session/group ledger are ported from attempt 3 (99d9853b). No Popen interface
-or synthetic return-code fallback is retained. Stdio is fixed: empty stdin,
-separate UTF-8-replacement-decoded output files. join waits for a supervisor
-report, not pipe EOF; output is a snapshot at that report. Cleanup is a separate
-operation. Terminal results are cached, including failures (no silent retry).
+Containment enumerates ONLY pid, pgid and sid, scoped to the fixture session
+or ledger groups. It never reads process environments, cwd, executable or birth
+metadata, and unrelated row churn never enters the stability condition. Ledger
+groups are keyed by (sid, pgid); current session membership is checked before
+every group signal. A stale group containing only another sid is absent, never
+a signal target. The directly owned supervisor reserves the sid until final
+containment where practicable. These are POSIX observations, not atomic process
+handles; fixtures must not change uid or delegate to pre-existing services.
+
+ESRCH after an observation triggers a scoped rescan. Already-reaped or absent
+processes can yield STATUS_UNAVAILABLE; no signal exit status is invented.
+EPERM, failed/malformed scoped scans, unresolved in-session identity ambiguity
+and genuine signal/wait failures remain ERROR or INDETERMINATE. Every failed
+cleanup runs emergency containment in a finally path: retry scoped enumeration,
+signal ledger/last-observed fixture groups, escalate to KILL and reap the direct
+supervisor. Failure caches never suppress that work or a later cleanup retry.
+Only established scoped absence and required reaping permit CLEAN and a no-op.
+Orphan descendants rely on their parent or the OS reaper to disappear.
+
+The API accepts FixtureSpec only, with fixed empty stdin and separate captured
+UTF-8-replacement-decoded output files. Unsupported Popen fields are refused.
+All readiness and reap waits use selectors. join waits for a supervisor report,
+not pipe EOF; output is a snapshot at that report. Cleanup is independent of the
+availability of child status. Product assertions remain the consumers' concern;
+process_table is a diagnostic helper and never containment authority.
 """
-import ctypes
-import ctypes.util
 from dataclasses import dataclass
 from enum import Enum
 import errno
@@ -44,12 +48,10 @@ from pathlib import Path
 import selectors
 import shlex
 import signal
-import struct
 import subprocess
 import sys
 import time
 from typing import Optional, Tuple
-import uuid
 
 
 class JoinState(Enum):
@@ -101,9 +103,6 @@ class SignalResult:
     detail: str = ''
 
 
-_MARKER = 'HANIG_FIXTURE_LAUNCH_MARKER'
-
-
 @dataclass(frozen=True)
 class FixtureSpec:
     """An authored command with fixed I/O and supervision, no Popen options.
@@ -141,7 +140,7 @@ class FixtureSpec:
                         any(type(x) is not str or '\0' in x for x in pair)):
                     raise ValueError('environment must be a tuple of string pairs')
                 key = pair[0]
-                if not key or '=' in key or key == _MARKER or key in keys:
+                if not key or '=' in key or key in keys:
                     raise ValueError('invalid, duplicate or reserved environment key')
                 keys.add(key)
 
@@ -156,167 +155,57 @@ class _Indeterminate(RuntimeError):
 
 @dataclass(frozen=True)
 class _Identity:
-    birth: tuple
-    uid: int
     pgid: int
     sid: int
-    zombie: bool
-
-
-_DARWIN_LIB = None
 
 
 def _identity(pid):
-    """Kernel birth identity, without reaping; missing is distinct from error."""
-    global _DARWIN_LIB
+    """Read membership only; an exit race is absence, other errors propagate."""
     try:
-        if sys.platform == 'darwin':
-            if _DARWIN_LIB is None:
-                _DARWIN_LIB = ctypes.CDLL(ctypes.util.find_library('proc'), use_errno=True)
-            # Darwin proc_bsdinfo, PROC_PIDTBSDINFO=3 (bsd/sys/proc_info.h).
-            data = ctypes.create_string_buffer(136)
-            ctypes.set_errno(0)
-            count = _DARWIN_LIB.proc_pidinfo(pid, 3, 0, data, len(data))
-            if count != len(data):
-                number = ctypes.get_errno()
-                if number == errno.ESRCH:
-                    return None
-                # Darwin may refuse proc info during exit. Confirm disappearance
-                # independently; a still-present unreadable process is an error.
-                os.kill(pid, 0)
-                raise OSError(number, 'cannot read process birth identity for PID %s' % pid)
-            fields = struct.unpack('=12I48s6I2Q', data.raw)
-            if fields[3] != pid:
-                raise _Indeterminate('process identity changed during inspection')
-            zombie = fields[1] == 5
-            # getsid can report ESRCH for a zombie whose birth record still
-            # exists. Keep that record so old zombies cannot look like a
-            # disappearing, possibly newly forked descendant.
-            sid = 0 if zombie else os.getsid(pid)
-            return _Identity(fields[-2:], fields[5], fields[14], sid, zombie)
-        if sys.platform.startswith('linux'):
-            path = Path('/proc') / str(pid)
-            fields = (path / 'stat').read_text().rsplit(')', 1)[1].split()
-            uid = (path / 'status').read_text().split('Uid:', 1)[1].split()[1]
-            return _Identity((int(fields[19]),), int(uid), int(fields[2]),
-                             int(fields[3]), fields[0] == 'Z')
-        raise FixtureRefused('fixture absence inspection requires macOS or Linux')
-    except (ProcessLookupError, FileNotFoundError):
+        sid = os.getsid(pid)
+        pgid = os.getpgid(pid)
+        if os.getsid(pid) != sid:
+            raise _Indeterminate('session changed during membership inspection')
+        return _Identity(pgid, sid)
+    except ProcessLookupError:
         return None
 
 
-def _enumerate_pids():
-    """Use the kernel census for judging; ps is diagnostic-only.
+def _session_rows(sid, groups):
+    """Census membership, retaining only the session or its ledger groups.
 
-    ps formats command lines after collecting its rows, widening the window in
-    which short-lived processes disappear. The kernel census avoids that extra
-    latency; a changing or truncated census still cannot certify absence.
+    macOS ps has no numeric sid column, so getsid supplies that field. ESRCH
+    on any departing row is absence; unrelated rows need no second observation.
+    No command, environment, directory, uid or birth field is requested.
     """
-    if sys.platform == 'darwin':
-        _identity(os.getpid())  # Initialize and validate the libproc ABI.
-        needed = _DARWIN_LIB.proc_listpids(4, os.geteuid(), None, 0)
-        if needed <= 0:
-            raise OSError('cannot size process enumeration')
-        array = (ctypes.c_int * (needed // 4 + 1024))()
-        size = ctypes.sizeof(array)
-        used = _DARWIN_LIB.proc_listpids(4, os.geteuid(), array, size)
-        if used <= 0 or used >= size or used % 4:
-            raise _Indeterminate('failed or truncated process enumeration')
-        pids = {p for p in array[:used // 4] if p > 0}
-    else:
-        with os.scandir('/proc') as entries:
-            pids = {int(p.name) for p in entries if p.name.isdigit()}
-    if os.getpid() not in pids:
-        raise _Indeterminate('process enumeration omitted its caller')
-    return pids
+    output = subprocess.check_output(
+        ['/bin/ps', '-U', str(os.geteuid()), '-o', 'pid=,pgid='],
+        text=True, timeout=5)
+    rows = {}
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            raise _Indeterminate('malformed membership enumeration')
+        try:
+            pid, pgid = map(int, parts)
+        except ValueError as error:
+            raise _Indeterminate('malformed membership enumeration') from error
+        if pid <= 0 or pgid <= 0 or pid in rows:
+            raise _Indeterminate('invalid membership enumeration')
+        try:
+            observed_sid = os.getsid(pid)
+        except ProcessLookupError:
+            continue
+        if observed_sid == sid or (sid, pgid) in groups:
+            # A ledger hit alone has no authority: retain its foreign sid so
+            # the consumer can explicitly discard a reused group.
+            rows[pid] = _Identity(pgid, observed_sid)
+    return rows
 
 
-def _environment(pid):
-    """Read kernel launch environment as NUL-delimited fields; never log it."""
-    if sys.platform.startswith('linux'):
-        return (Path('/proc') / str(pid) / 'environ').read_bytes().split(b'\0')
-    if sys.platform != 'darwin':
-        raise FixtureRefused('unsupported marker inspection platform')
-    libc = ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True)
-    # KERN_PROCARGS2 includes argc, executable path, padding, argv, then env.
-    mib = (ctypes.c_int * 3)(1, 49, pid)
-    size = ctypes.c_size_t(os.sysconf('SC_ARG_MAX'))
-    data = ctypes.create_string_buffer(size.value)
-    if libc.sysctl(mib, 3, data, ctypes.byref(size), None, 0) != 0:
-        number = ctypes.get_errno()
-        raise OSError(number, 'cannot inspect fixture launch marker')
-    raw = data.raw[:size.value]
-    if len(raw) < 4:
-        raise _Indeterminate('incomplete marker inspection')
-    argc = struct.unpack('=i', raw[:4])[0]
-    if argc < 1:
-        raise _Indeterminate('missing launch argument boundary')
-    end = raw.find(b'\0', 4)
-    if end < 0:
-        raise _Indeterminate('missing executable boundary')
-    pos = end + 1
-    while pos < len(raw) and raw[pos] == 0:
-        pos += 1
-    for _ in range(argc):
-        end = raw.find(b'\0', pos)
-        if end < 0:
-            raise _Indeterminate('incomplete launch arguments')
-        pos = end + 1
-    return raw[pos:].split(b'\0')
-
-
-def _cwd_marker(pid, identity, root_identity):
-    """Inspect the inherited directory marker, including restricted macOS execs.
-
-    Compare filesystem identities up the observed cwd, not normalized strings.
-    A removed/unreadable cwd or a PID change is indeterminate, never absence.
-    """
-    try:
-        if sys.platform == 'darwin':
-            # PROC_PIDVNODEPATHINFO=9: two 1176-byte vnode_info_path records;
-            # each has 152 bytes of vnode_info followed by MAXPATHLEN bytes.
-            data = ctypes.create_string_buffer(2352)
-            ctypes.set_errno(0)
-            count = _DARWIN_LIB.proc_pidinfo(pid, 9, 0, data, len(data))
-            if count != len(data):
-                raise OSError(ctypes.get_errno(), 'cannot inspect inherited cwd marker')
-            raw = data.raw[152:1176]
-            if b'\0' not in raw or not raw.split(b'\0', 1)[0]:
-                raise _Indeterminate('incomplete cwd marker inspection')
-            path = Path(os.fsdecode(raw.split(b'\0', 1)[0]))
-        else:
-            path = Path(os.readlink('/proc/%d/cwd' % pid))
-        after = _identity(pid)
-        if after is None:
-            return False
-        if after.birth != identity.birth:
-            raise _Indeterminate('PID reused during cwd marker inspection')
-        for candidate in (path,) + tuple(path.parents):
-            observed = candidate.stat()
-            if (observed.st_dev, observed.st_ino) == root_identity:
-                return True
-        return False
-    except OSError:
-        after = _identity(pid)
-        if after is None or (after.birth == identity.birth and after.zombie):
-            return False
-        raise
-
-
-def _has_marker(pid, identity, marker):
-    try:
-        fields = _environment(pid)
-    except OSError:
-        after = _identity(pid)
-        if after is None or (after.birth == identity.birth and after.zombie):
-            return False
-        raise
-    after = _identity(pid)
-    if after is None:
-        return False
-    if after.birth != identity.birth:
-        raise _Indeterminate('PID reused during marker inspection')
-    return marker in fields
+def _pause(seconds):
+    with selectors.DefaultSelector() as readiness:
+        readiness.select(seconds)
 
 
 def _private_pipe():
@@ -383,6 +272,10 @@ def send(value):
 with open(config_path) as stream:
     config = json.load(stream)
 send({'ready': True})
+with selectors.DefaultSelector() as readiness:
+    readiness.register(control, selectors.EVENT_READ)
+    if not readiness.select(60):
+        sys.exit(2)
 if os.read(control, 1) != b'G':
     sys.exit(2)
 try:
@@ -416,7 +309,8 @@ else:
                             pass
     send({'returncode': child.returncode})
 while True:
-    time.sleep(600)
+    with selectors.DefaultSelector() as readiness:
+        readiness.select(600)
 '''
 
 
@@ -426,12 +320,11 @@ class FixtureProcess:
     join(timeout) returns TIMED_OUT without changing terminal status. terminate
     asks the sole reaper to signal the direct child (TERM_GROUP is the fixed
     child group). It never signals a saved child PID from the caller. cleanup
-    kills remaining marked/session descendants, waits for their disappearance,
-    then kills and reaps its retained supervisor. Failed cleanup is sticky.
+    contains remaining same-session groups, then kills and reaps its retained
+    supervisor. Failed cleanup is retried and always attempts emergency work.
     """
-    def __init__(self, scope, spec, marker, supervisor, report, control, stem):
+    def __init__(self, scope, spec, supervisor, report, control, stem):
         self.scope, self.spec = scope, spec
-        self.marker = (_MARKER + '=' + marker).encode()
         self._supervisor = supervisor
         self.supervisor_pid = supervisor.pid
         self._report, self._control = report, control
@@ -441,9 +334,10 @@ class FixtureProcess:
         self._joined = None
         self._cleaned = None
         self._signals = {}
-        self._known = {}
+        self._last_observed = set()
+        self._reaped = False
         self._groups = set()
-        self._anchor = None
+        self._anchor = _Identity(supervisor.pid, supervisor.pid)
         self.child_pid = None
 
     def _read(self, timeout):
@@ -500,136 +394,179 @@ class FixtureProcess:
         return self._signals[requested]
 
     def _record(self, pid, identity):
-        prior = self._known.get(pid)
-        if prior is not None and prior.birth != identity.birth:
-            raise _Indeterminate('recorded fixture PID was reused')
-        self._known[pid] = identity
-        if identity.pgid not in self._groups:
-            self._groups.add(identity.pgid)
-            # Persist the actual newly discovered group as well as memory.
-            with self.scope.pidfiles[0].open('a') as record:
-                record.write('%s\n' % identity.pgid)
+        if identity.sid != self.supervisor_pid:
+            return
+        group = (identity.sid, identity.pgid)
+        self._last_observed.add(group)
+        if group not in self._groups:
+            # Persist both identity components; PID files remain diagnostics.
+            with self.scope.ledger_path.open('a') as record:
+                record.write(json.dumps({'sid': group[0], 'pgid': group[1]}) + '\n')
+            self._groups.add(group)
 
     def _snapshot(self):
-        """Independent whole-host enumeration plus exact inherited marker.
-
-        The retained leader reserves the SID until the final reap. Numeric
-        ledger entries alone never authorize a signal after their anchor dies.
-        Processes predating this launch cannot descend from it. Identity/marker
-        errors for any eligible same-uid process are unknown, never absence.
-        """
-        targets, inspected, complete = {}, set(), True
-        table = _enumerate_pids()
-        anchor = _identity(self.supervisor_pid)
-        if anchor is not None:
-            if anchor.birth != self._anchor.birth:
-                raise _Indeterminate('supervisor identity changed')
-            if self.supervisor_pid not in table:
-                raise _Indeterminate('process enumeration omitted the supervisor')
-        for pid in table:
-            identity = _identity(pid)
-            if identity is None:
-                complete = False
-                continue
-            if identity.uid != self._anchor.uid or identity.birth < self._anchor.birth:
-                continue
-            inspected.add((pid, identity.birth))
-            known = self._known.get(pid)
-            if known is not None and known.birth != identity.birth:
-                raise _Indeterminate('known descendant identity changed')
-            in_session = anchor is not None and identity.sid == self.supervisor_pid
-            marked = False
-            if not identity.zombie:
-                marked = _has_marker(pid, identity, self.marker)
-                if not marked:
-                    marked = _cwd_marker(pid, identity, self.scope._root_identity)
-            after = _identity(pid)
-            if after is None:
-                complete = False
-                continue
-            if after.birth != identity.birth:
-                raise _Indeterminate('PID changed during survivor scan')
-            if identity.zombie and not in_session and known is None:
-                complete = False  # Its marker cannot be inspected until reap.
-            if marked or in_session or known is not None:
-                self._record(pid, identity)
-                targets[pid] = identity
-        return targets, inspected, complete
+        rows = _session_rows(self.supervisor_pid, self._groups)
+        targets = {pid: row for pid, row in rows.items()
+                   if row.sid == self.supervisor_pid}
+        if not self._reaped:
+            anchor = _identity(self.supervisor_pid)
+            if anchor is not None:
+                if anchor != self._anchor:
+                    raise _Indeterminate('supervisor session identity changed')
+                if targets.get(self.supervisor_pid) != anchor:
+                    raise _Indeterminate('membership census omitted the supervisor')
+        for pid, row in targets.items():
+            self._record(pid, row)
+        return targets
 
     def _survivor_scan(self):
-        deadline = time.monotonic() + 5
-        _first, before, _complete = self._snapshot()
-        while True:
-            started = time.monotonic()
-            second, after, complete = self._snapshot()
-            if second or (complete and not (after - before)):
-                return second, complete and not (after - before)
-            if started >= deadline:
-                return second, False
-            before = after
+        first = self._snapshot()
+        second = self._snapshot()
+        return second, first == second
 
+    def _signal_group(self, group, signum):
+        sid, pgid = group
+        if sid != self.supervisor_pid:
+            return
+        rows = _session_rows(sid, {group})
+        members = {pid: row for pid, row in rows.items() if row.pgid == pgid}
+        members = {pid: row for pid, row in members.items() if row.sid == sid}
+        if pgid == self.supervisor_pid and set(members) <= {self.supervisor_pid}:
+            return  # Keep the directly owned leader until final containment.
+        if not members:
+            return  # A pgid reused in another session is absent for us.
+        for pid in members:
+            current = _identity(pid)
+            if current is None or current != members[pid]:
+                # Includes ESRCH and setpgid/setsid races. Re-enumerate rather
+                # than signalling stale membership; the caller retries groups.
+                self._snapshot()
+                return
+        try:
+            os.killpg(pgid, signum)
+        except ProcessLookupError:
+            self._snapshot()
 
     def _signal_owned(self, pid, identity, signum):
+        """Only the directly owned, unreaped leader may receive a PID signal."""
+        if pid != self.supervisor_pid:
+            raise _Indeterminate('PID signal requires the owned session leader')
+        if self._reaped:
+            return
         current = _identity(pid)
         if current is None:
+            self._snapshot()
             return
-        if current.birth != identity.birth:
+        if current != identity:
             raise _Indeterminate('PID changed before fixture signal')
-        if current.zombie:
-            return
         try:
             os.kill(pid, signum)
         except ProcessLookupError:
-            # ESRCH positively reports that this target no longer exists.
-            return
+            self._snapshot()
 
     def _reap(self):
-        self._supervisor.wait(timeout=5)
+        if self._reaped:
+            return
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                got, status = os.waitpid(self.supervisor_pid, os.WNOHANG)
+            except ChildProcessError:
+                # Another caller already reaped it; check absence before
+                # accepting loss of status. Never manufacture child status.
+                if _identity(self.supervisor_pid) is not None:
+                    raise _Indeterminate('leader is no longer waitable but still present')
+                self._reaped = True
+                # Popen bookkeeping only, not an advertised fixture status.
+                self._supervisor.returncode = 0
+                return
+            except InterruptedError:
+                got = 0
+            if got:
+                self._supervisor.returncode = os.waitstatus_to_exitcode(status)
+                self._reaped = True
+                return
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired('fixture supervisor reap', 5)
+            _pause(0.01)
+
+    def _contain(self, grace=0.2, budget=8):
+        started = time.monotonic()
+        deadline = started + budget
+        while True:
+            observed_after = time.monotonic()
+            targets, stable = self._survivor_scan()
+            descendants = {pid: row for pid, row in targets.items()
+                           if pid != self.supervisor_pid}
+            if not descendants and stable:
+                break
+            signum = signal.SIGTERM if observed_after < started + grace else signal.SIGKILL
+            for group in {(row.sid, row.pgid) for row in descendants.values()}:
+                self._signal_group(group, signum)
+            if observed_after >= deadline:
+                raise _Indeterminate('fixture session did not reach scoped absence')
+            _pause(0.02)
+        self.join(0)
+        self._signal_owned(self.supervisor_pid, self._anchor, signal.SIGKILL)
+        self._reap()
+        targets, stable = self._survivor_scan()
+        if targets or not stable:
+            raise _Indeterminate('scoped absence not established after leader reap')
+        self.join(0)
+        if self._joined is None:
+            self._joined = self._output(JoinState.STATUS_UNAVAILABLE,
+                                       detail='cleanup closed supervisor transport')
+        for name in ('_report', '_control'):
+            fd = getattr(self, name)
+            if fd is not None:
+                os.close(fd)
+                setattr(self, name, None)
+
+    def _emergency_containment(self):
+        """Best effort on every unsuccessful cleanup, preserving its verdict.
+
+        A failed scan does not bypass the ledger or direct-child reap. Signals
+        still require fresh session membership; repeated inspection failure
+        cannot justify signalling an unverified numeric group.
+        """
+        errors = []
+        for signum in (signal.SIGTERM, signal.SIGKILL, signal.SIGKILL):
+            try:
+                self._snapshot()
+            except (OSError, ValueError, _Indeterminate, subprocess.SubprocessError) as error:
+                errors.append(str(error))
+            for group in self._groups | self._last_observed:
+                try:
+                    self._signal_group(group, signum)
+                except (OSError, ValueError, _Indeterminate, subprocess.SubprocessError) as error:
+                    errors.append(str(error))
+            _pause(0.02)
+        try:
+            self._signal_owned(self.supervisor_pid, self._anchor, signal.SIGKILL)
+        except (OSError, ValueError, _Indeterminate, subprocess.SubprocessError) as error:
+            errors.append(str(error))
+        try:
+            self._reap()
+        except (OSError, ValueError, _Indeterminate, subprocess.SubprocessError) as error:
+            errors.append(str(error))
+        return errors
 
     def _perform_cleanup(self):
+        result = None
         try:
-            deadline = time.monotonic() + 8
-            while True:
-                observed_after = time.monotonic()
-                targets, stable = self._survivor_scan()
-                descendants = {p: row for p, row in targets.items()
-                               if p != self.supervisor_pid}
-                if not descendants and stable:
-                    break
-                for pid, identity in descendants.items():
-                    self._signal_owned(pid, identity, signal.SIGKILL)
-                if observed_after >= deadline:
-                    return CleanupResult(CleanupState.INDETERMINATE,
-                                         'descendants or a moving process population remain')
-                time.sleep(0.05)
-            # Keep child status if it was already delivered. Never invent one
-            # when an external kill or cleanup ends reporting first.
-            self.join(0)
-            self._signal_owned(self.supervisor_pid, self._anchor, signal.SIGKILL)
-            self._reap()
-            # Recheck independently after reap; cached ledger hints are not
-            # proof, and externally killed supervisors have no live SID anchor.
-            targets, stable = self._survivor_scan()
-            if targets or not stable:
-                return CleanupResult(CleanupState.INDETERMINATE,
-                                     'absence not established after supervisor reap')
-            self.join(0)
-            if self._joined is None:
-                self._joined = self._output(JoinState.STATUS_UNAVAILABLE,
-                                           detail='cleanup closed supervisor transport')
-            for name in ('_report', '_control'):
-                fd = getattr(self, name)
-                if fd is not None:
-                    os.close(fd)
-                    setattr(self, name, None)
-            return CleanupResult(CleanupState.CLEAN)
+            self._contain()
+            result = CleanupResult(CleanupState.CLEAN)
         except _Indeterminate as error:
-            return CleanupResult(CleanupState.INDETERMINATE, str(error))
+            result = CleanupResult(CleanupState.INDETERMINATE, str(error))
         except (OSError, ValueError, subprocess.SubprocessError) as error:
-            return CleanupResult(CleanupState.ERROR, str(error))
+            result = CleanupResult(CleanupState.ERROR, str(error))
+        finally:
+            if result is None or result.state is not CleanupState.CLEAN:
+                self._emergency_containment()
+        return result
 
     def cleanup(self):
-        if self._cleaned is None:
+        if self._cleaned is None or self._cleaned.state is not CleanupState.CLEAN:
             self._cleaned = self._perform_cleanup()
         return self._cleaned
 
@@ -642,9 +579,10 @@ class FixtureProcesses:
     omitted cleanup through unittest even if it can subsequently contain it.
     """
     def __init__(self, case, root):
-        self.root = Path(root).absolute()
-        root_stat = self.root.stat()
-        self._root_identity = (root_stat.st_dev, root_stat.st_ino)
+        self.root = Path(root).resolve(strict=True)
+        if not self.root.is_dir():
+            raise FixtureRefused('fixture root must be a directory')
+        self.ledger_path = self.root / 'fixture-session-groups.jsonl'
         self.children = []
         self.pidfiles = [self.root / 'fixture-groups.pid']
         self._sleep_wrapper = None
@@ -657,17 +595,17 @@ class FixtureProcesses:
         spec.validate()
         if self.children:
             raise FixtureRefused('one launch per exclusive fixture scope')
-        directory = self.root if spec.directory is None else Path(spec.directory)
-        if not any((p.stat().st_dev, p.stat().st_ino) == self._root_identity
-                   for p in (directory,) + tuple(directory.parents)):
-            raise FixtureRefused('fixture directory must retain the scope cwd marker')
+        directory = (self.root if spec.directory is None else
+                     Path(spec.directory)).resolve(strict=True)
+        root = self.root.resolve(strict=True)
+        if (not root.is_dir() or not directory.is_dir() or
+                os.path.commonpath((str(root), str(directory))) != str(root)):
+            raise FixtureRefused('fixture cwd must resolve to a directory beneath its root')
         if sys.platform not in ('darwin', 'linux') or os.geteuid() == 0:
             raise FixtureRefused('requires unprivileged macOS/Linux fixture inspection')
-        # Refuse missing inspection capability before creating the supervisor.
+        # Check membership capability without spawning or touching the ledger.
         if _identity(os.getpid()) is None:
-            raise FixtureRefused('cannot inspect current process identity')
-        _environment(os.getpid())
-        marker = uuid.uuid4().hex
+            raise FixtureRefused('cannot inspect current session membership')
         stem = self.root / ('fixture-launch-%d' % len(self.children))
         script, config_path = stem.with_suffix('.py'), stem.with_suffix('.json')
         out_path, err_path = stem.with_suffix('.stdout'), stem.with_suffix('.stderr')
@@ -678,7 +616,6 @@ class FixtureProcesses:
             'command': spec.command, 'directory': str(directory),
             'stdout': str(out_path), 'stderr': str(err_path)}))
         env = dict(os.environ if spec.environment is None else spec.environment)
-        env[_MARKER] = marker
         report_read, report_write = _private_pipe()
         try:
             control_read, control_write = _private_pipe()
@@ -694,7 +631,7 @@ class FixtureProcesses:
                 env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL, start_new_session=True,
                 pass_fds=(report_write, control_read))
-            proc = FixtureProcess(self, spec, marker, supervisor,
+            proc = FixtureProcess(self, spec, supervisor,
                                   report_read, control_write, stem)
             self.children.append(proc)
         except BaseException:
@@ -707,10 +644,8 @@ class FixtureProcesses:
         try:
             if proc._read(60) != {'ready': True}:
                 raise FixtureRefused('supervisor did not reach launch barrier')
-            proc._anchor = _identity(supervisor.pid)
-            if (proc._anchor is None or proc._anchor.sid != supervisor.pid or
-                    not _has_marker(supervisor.pid, proc._anchor, proc.marker)):
-                raise FixtureRefused('private-session launch marker not inspectable')
+            if _identity(supervisor.pid) != proc._anchor:
+                raise FixtureRefused('private session was not established')
             proc._record(supervisor.pid, proc._anchor)
             os.write(proc._control, b'G')
             started = proc._read(60)
@@ -719,20 +654,13 @@ class FixtureProcesses:
             proc.child_pid = started['pid']
             # The supervisor fixes the child's group before exec. The child
             # may exit before this observation; the retained SID still anchors
-            # any same-session descendants and the marker covers setsid escapes.
+            # any same-session descendants; setsid escapes are outside this contract.
             child = _identity(proc.child_pid)
             if child is not None:
                 proc._record(proc.child_pid, child)
             return proc
         except BaseException:
-            if proc._anchor is not None:
-                proc.cleanup()
-            else:
-                supervisor.kill()
-                supervisor.wait(timeout=5)
-                for fd in (report_read, control_write):
-                    os.close(fd)
-                self.children.remove(proc)
+            proc.cleanup()
             raise
 
     def _root_rows(self, table):
@@ -762,8 +690,7 @@ class FixtureProcesses:
         if failures:
             # Preserve the failed observation before emergency containment.
             for proc in self.children:
-                if proc._cleaned is None:
-                    proc.cleanup()
+                proc.cleanup()
             raise AssertionError('fixture processes survived cleanup or absence is unknown: %r' % failures)
 
     def shell_script(self, source):
