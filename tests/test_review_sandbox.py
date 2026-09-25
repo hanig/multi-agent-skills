@@ -1,9 +1,11 @@
 """Exercise the process sandbox through its real worker and parent audit."""
+import contextlib
 import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -118,15 +120,100 @@ def delayed():
         with self.assertRaisesRegex(sandbox.SandboxFailure, "surviving worker threads"):
             self.run_module(source)
 
+    @contextlib.contextmanager
+    def recorded_session_scans(self):
+        scans = []
+        original = sandbox.session_members
+
+        def record(sid):
+            members = original(sid)
+            scans.append((sid, members))
+            return members
+
+        with patch.object(sandbox, "session_members", side_effect=record):
+            yield scans
+
+    def child_with_exit_channel(self, new_group=False):
+        # This connection belongs to the exact child, unlike a numeric PID
+        # queried after that child has exited. The fixture keeps it open until
+        # exit, so EOF independently checks containment even under mutations.
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.settimeout(10)
+        address = str(self.root / "exit.sock")
+        listener.bind(address)
+        listener.listen(1)
+        identity = self.root / "child.json"
+        accepted = []
+
+        def connection():
+            if not accepted:
+                channel, _ = listener.accept()
+                accepted.append(channel)
+                channel.settimeout(10)
+                self.assertEqual(channel.recv(1), b"R")
+            return accepted[0]
+
+        def cleanup():
+            try:
+                if identity.exists():
+                    channel = connection()
+                    try:
+                        channel.sendall(b"Q")
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                    self.assertEqual(channel.recv(1), b"")
+            finally:
+                for channel in accepted:
+                    channel.close()
+                listener.close()
+
+        self.addCleanup(cleanup)
+
+        def assert_stopped():
+            self.assertEqual(connection().recv(1), b"",
+                             "fixture child still holds its exit connection")
+
+        child = """import json, os, signal, socket
+from pathlib import Path
+if %r:
+    os.setpgid(0, os.getpid())
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+channel = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+channel.settimeout(60)
+channel.connect(%r)
+channel.sendall(b'R')
+identity = Path(%r)
+ready = identity.with_suffix('.pending')
+ready.write_text(json.dumps([os.getpid(), os.getpgrp(), os.getsid(0)]))
+ready.replace(identity)
+# The mutation cleanup closes this exact connection; it never signals a PID
+# that may have been freed by the supervisor. Normal containment kills us.
+channel.recv(1)
+""" % (new_group, address, str(identity))
+        body = (
+            "subprocess.Popen([sys.executable, '-c', %r]); "
+            "deadline = time.monotonic() + 10\n"
+            "        while not Path(%r).exists() and time.monotonic() < deadline:\n"
+            "            time.sleep(0.01)\n"
+            "        self.assertTrue(Path(%r).exists(), 'child did not become ready')\n"
+            "        pid, pgid, sid = json.loads(Path(%r).read_text())\n"
+            "        self.assertEqual(sid, os.getsid(0))\n"
+            "        if %r:\n"
+            "            self.assertEqual(pid, pgid)\n"
+            "            self.assertNotEqual(pgid, os.getpgrp())" % (
+                child, str(identity), str(identity), str(identity), new_group))
+        worker = (self.preamble() + "import json, subprocess, sys, time\n"
+                  + self.simple_suite(body))
+        return worker, identity, assert_stopped
+
     def test_delayed_subprocess_is_failed_and_group_quiescent(self):
-        group_file = self.root / "group"
-        source = self.preamble() + "import subprocess, sys\n" + self.simple_suite(
-            "Path(%r).write_text(str(os.getpgrp())); "
-            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])"
-            % str(group_file))
-        with self.assertRaisesRegex(sandbox.SandboxFailure, "surviving worker descendants"):
-            self.run_module(source)
-        self.assertEqual(sandbox.session_members(int(group_file.read_text())), [])
+        source, identity, assert_stopped = self.child_with_exit_channel()
+        with self.recorded_session_scans() as scans:
+            with self.assertRaisesRegex(sandbox.SandboxFailure, "surviving worker descendants"):
+                self.run_module(source)
+        _pid, _pgid, sid = json.loads(identity.read_text())
+        self.assertEqual(scans[-1], (sid, []))
+        assert_stopped()
 
     def test_import_failure_requires_completion_handshake(self):
         with self.assertRaisesRegex(sandbox.SandboxFailure, "ImportError: delegated import failed"):
@@ -384,49 +471,44 @@ assert suite.countTestCases() == 0, suite.countTestCases()
         killpg.assert_not_called()
 
     def test_new_process_group_in_worker_session_is_failed_and_killed(self):
-        identity_file = self.root / "escaped-group.json"
-        child = """import json, os, signal, sys, time
-from pathlib import Path
-os.setpgid(0, os.getpid())
-signal.signal(signal.SIGTERM, signal.SIG_IGN)
-identity = Path(sys.argv[1])
-ready = identity.with_suffix('.pending')
-ready.write_text(json.dumps([os.getpid(), os.getpgrp(), os.getsid(0)]))
-ready.replace(identity)
-time.sleep(60)
-"""
-        source = "import json, os, subprocess, sys, time\nfrom pathlib import Path\n" + self.simple_suite(
-            "child = subprocess.Popen([sys.executable, '-c', %r, %r]); "
-            "deadline = time.monotonic() + 10\n"
-            "        while not Path(%r).exists() and time.monotonic() < deadline:\n"
-            "            time.sleep(0.01)\n"
-            "        self.assertTrue(Path(%r).exists(), 'child did not become ready')\n"
-            "        pid, pgid, sid = json.loads(Path(%r).read_text())\n"
-            "        self.assertEqual(pid, pgid)\n"
-            "        self.assertNotEqual(pgid, os.getpgrp())\n"
-            "        self.assertEqual(sid, os.getsid(0))" % (
-                child, str(identity_file), str(identity_file),
-                str(identity_file), str(identity_file)))
-        try:
+        source, identity, assert_stopped = self.child_with_exit_channel(new_group=True)
+        with self.recorded_session_scans() as scans:
             with self.assertRaisesRegex(sandbox.SandboxFailure, "surviving worker descendants"):
                 self.run_module(source)
-            pid, pgid, sid = json.loads(identity_file.read_text())
-            self.assertEqual(sandbox.session_members(sid), [])
-            # Check the particular child independently of the supervisor's
-            # session filter, so reverting that filter cannot hide a survivor.
-            result = subprocess.run(["ps", "-p", str(pid), "-o", "stat="],
-                                    capture_output=True, text=True, timeout=10)
-            self.assertTrue(not result.stdout.strip() or result.stdout.strip().startswith("Z"),
-                            "new-group child is still alive: " + result.stdout)
-        finally:
-            # Also contain the intentionally broken implementation during the
-            # mutation run, where the supervisor misses this group entirely.
-            if identity_file.exists():
-                pid, pgid, sid = json.loads(identity_file.read_text())
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+        _pid, _pgid, sid = json.loads(identity.read_text())
+        self.assertEqual(scans[-1], (sid, []))
+        assert_stopped()
+
+    def test_fixture_assertions_ignore_identities_reused_after_reap(self):
+        for name in ("test_delayed_subprocess_is_failed_and_group_quiescent",
+                     "test_new_process_group_in_worker_session_is_failed_and_killed"):
+            with self.subTest(name=name):
+                returned = [False]
+                original_run = sandbox.run_sandbox
+                original_scan = sandbox.session_members
+                original_kill = sandbox.os.kill
+
+                def run(*args, **kwargs):
+                    try:
+                        return original_run(*args, **kwargs)
+                    finally:
+                        returned[0] = True
+
+                def scan(sid):
+                    if returned[0]:
+                        return [(987654, 987654)]
+                    return original_scan(sid)
+
+                def kill(pid, sig):
+                    self.assertFalse(returned[0], "post-return PID signal")
+                    return original_kill(pid, sig)
+
+                with patch.object(sandbox, "run_sandbox", side_effect=run), \
+                        patch.object(sandbox, "session_members", side_effect=scan), \
+                        patch.object(sandbox.os, "kill", side_effect=kill):
+                    result = unittest.TestResult()
+                    type(self)(name).run(result)
+                self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
 
     def test_unrelated_same_uid_process_churn_does_not_fail_a_worker(self):
         ready = self.root / "churn"
@@ -454,10 +536,9 @@ for count in itertools.count():
             self.assertGreater(int(ready.read_text()), before)
             self.assertIsNone(process.poll(), "unrelated process was killed")
         finally:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            # Popen owns this direct child and checks its returncode before
+            # signalling; do not reuse a raw group number after poll reaps it.
+            process.kill()
             process.wait(timeout=10)
 
     def discovery_probe(self):
