@@ -20,7 +20,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import skill_paths
 
@@ -35,7 +35,7 @@ import verify as V
 
 
 SWARM = str(_SWARM_DIR / "scripts" / "swarm.py")
-PR_FIELDS = "number,url,state,headRefOid,baseRefName,baseRefOid,mergeCommit"
+PR_FIELDS = "number,url,state,headRefOid,baseRefName,mergeCommit"
 
 
 class Refusal(ValueError):
@@ -181,6 +181,8 @@ def commands(args, root, binding, host, repo_path):
     pr = str(args.pr)
     return {
         "view": ["gh", "pr", "view", pr, "--repo", route, "--json", PR_FIELDS],
+        "target": ["gh", "api", "--hostname", host,
+                   "repos/{}/git/ref/heads/{}".format(repo_path, quote(binding["target"], safe="/"))],
         "scope": [sys.executable, SWARM, "scope-check", args.plan,
                   "--state-dir", args.state_dir, "--unit", args.unit, "--json"],
         "checks": ["gh", "pr", "checks", pr, "--repo", route,
@@ -190,6 +192,18 @@ def commands(args, root, binding, host, repo_path):
         "advance": [sys.executable, SWARM, "advance", args.plan,
                     "--state-dir", args.state_dir, "--root", root],
     }
+
+
+def observed_target(command, target):
+    """Read the anchored branch ref; PR base metadata can remain stale."""
+    ref = json.loads(run(command).stdout)
+    if not isinstance(ref, dict) or ref.get("ref") != "refs/heads/" + target:
+        raise Refusal("forge returned a different or invalid target branch ref")
+    obj = ref.get("object")
+    if not isinstance(obj, dict) or obj.get("type") != "commit":
+        raise Refusal("target branch ref does not identify a commit")
+    # oid validates without trimming, case-folding or shortening the value.
+    return oid(obj.get("sha"))
 
 
 def check_pr(pr, binding):
@@ -360,6 +374,7 @@ def reconcile(args, plan):
         print("+ " + shlex.join(cmd["scope"]))
         print("require exact coordinator binding and state epoch before forge access")
         print("+ " + shlex.join(cmd["view"]))
+        print("+ " + shlex.join(cmd["target"]))
         print("require target-authorized integration-tests at exact head, target, "
               "merge base and candidate tree; no override")
         if args.verify_integration:
@@ -372,6 +387,8 @@ def reconcile(args, plan):
         else:
             print("if OPEN with no prior merge request:")
             print("+ " + shlex.join(cmd["checks"]))
+            print("re-observe the exact target branch ref immediately before persisting the intent")
+            print("+ " + shlex.join(cmd["target"]))
             print("persist intent {} before the conditional merge".format(intent_path))
             print("+ " + shlex.join(cmd["merge"]))
             print("+ " + shlex.join(cmd["view"]))
@@ -401,8 +418,9 @@ def reconcile(args, plan):
         if pr["state"] != "OPEN" or intent:
             raise Refusal("verification requires an OPEN PR with no unresolved merge intent")
         S.load_verifications(state_dir)
+        target = observed_target(cmd["target"], binding["target"])
         evidence, error = V.run_merge_precondition(
-            S.U.run, repo, binding["head"], oid(pr.get("baseRefOid")),
+            S.U.run, repo, binding["head"], target,
             timeout=args.verification_timeout)
         if error:
             raise Refusal(error + ". " + verification_hint(args))
@@ -436,20 +454,25 @@ def reconcile(args, plan):
         if not isinstance(checks, list) or not checks or any(
                 not isinstance(c, dict) or c.get("state") != "SUCCESS" for c in checks):
             raise Refusal("at least one CI check is required and every check must be SUCCESS")
-        target = oid(pr.get("baseRefOid"))
+        target = observed_target(cmd["target"], binding["target"])
         evidence, error = integration_evidence(state_dir, binding, repo, target)
         if error:
             raise Refusal("integration-tests precondition: " + error + ". " + verification_hint(args))
         latest = json.loads(run(cmd["view"]).stdout)
         check_pr(latest, binding)
-        if latest["state"] != "OPEN" or latest.get("baseRefOid") != target:
+        if latest["state"] != "OPEN":
             raise Refusal("PR or target moved during preflight; rerun against the current target. "
                           + verification_hint(args))
         observation.update({"allow_unchecked_scope": args.allow_unchecked_scope,
                             "checks": checks, "integration": evidence})
         intent = {"schema_version": 1, "operation_id": operation_id,
                   "binding": binding, "root": root, "phase": "merge_requested",
-                  "preconditions": observation, "target_before_request": oid(pr.get("baseRefOid"))}
+                  "preconditions": observation, "target_before_request": target}
+        # Final forge read before durable intent publication and the merge call.
+        # A detected move creates no unresolved request; verification can rerun.
+        if observed_target(cmd["target"], binding["target"]) != target:
+            raise Refusal("target moved during preflight; rerun against the current target. "
+                          + verification_hint(args))
         durable_write(intent_path, intent)
         run(cmd["merge"])
         pr = json.loads(run(cmd["view"]).stdout)
@@ -464,7 +487,7 @@ def reconcile(args, plan):
         raise Refusal("squash reconciliation requires the observed single-parent merge commit")
     target = oid(parents[0].get("sha"))
     # An already-admitted precondition survives crashes and local Git cleanup.
-    # Its target must be the actual parent, not baseRefOid after the merge.
+    # Its target must be the actual parent, not PR metadata or today's ref tip.
     evidence = (intent or {}).get("preconditions", {}).get("integration")
     integration_problem = None
     if evidence is not None:
@@ -476,8 +499,8 @@ def reconcile(args, plan):
     else:
         evidence, integration_problem = integration_evidence(state_dir, binding, repo, target)
     integration_status = ("integration-unverified" if integration_problem else "candidate-verified")
-    # The actual merge parent survives crashes and target movement. baseRefOid
-    # after merging is NOT the pre-merge target and must never be recorded as it.
+    # The actual merge parent survives crashes and target movement. Neither PR
+    # metadata nor the current branch ref can reconstruct that historical parent.
     if intent is None:
         intent = {"schema_version": 1, "operation_id": operation_id,
                   "binding": binding, "root": root}

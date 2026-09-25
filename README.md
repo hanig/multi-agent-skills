@@ -279,7 +279,9 @@ merge, tracker, and reporting work around those passes.
 
 The connected `merge_unit.py` operator requires passing `integration-tests`
 evidence for the exact judged head and observed target commit, including the
-rederived merge base and candidate tree. CI must also be green. There is no
+rederived merge base and candidate tree. The target comes from the anchored
+remote's `refs/heads/<target>` through the forge ref API; a PR's `baseRefOid`
+or `base.sha` can be stale and supplies no current-tip evidence. CI must also be green. There is no
 integration override. `--allow-unchecked-scope REASON` permits only a complete,
 schema-valid `unchecked` report with exit 2; exit 1 is never waivable. Every
 report must carry the exact coordinator binding and state epoch.
@@ -296,7 +298,10 @@ bytes in the existing disposable candidate-merge checkout, and records the
 result in the external coordinator verification journal. Supply both Git
 objects locally first; the verifier never fetches. Ordinary invocation then
 admits that evidence before issuing one guarded merge. A changed head or
-target needs fresh evidence. A red run for the same exact binding cannot be
+target needs fresh evidence. The operator re-observes the branch ref as its
+last forge read before publishing the durable intent and requesting the merge;
+a moved ref refuses with the verification command and leaves no merge request.
+A red run for the same exact binding cannot be
 hidden by an earlier pass.
 
 The designated `merge-precondition` verifier runs
@@ -311,7 +316,8 @@ this policy does not promise an immutable test corpus.
 After a merge, the operator compares its actual parent with the checked
 target. A race is recorded as `integration-unverified` in the intent and merge
 receipt, reported with a warning, and withholds advancement. It never retries
-the merge call. Historical merges without a retained precondition can still
+the merge call. The ref read and merge are not atomic; this parent check remains
+the backstop for movement after the final read. Historical merges without a retained precondition can still
 be reconciled as attestations; unavailable integration evidence is explicitly
 labelled `integration-unverified`. Forge observations remain attestations,
 and the local lock and journals retain their same-node, trusted-writer limit.
