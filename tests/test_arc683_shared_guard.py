@@ -554,6 +554,47 @@ class TestSharedGuard(unittest.TestCase):
         self.assertEqual(self.f.intent()["integration_status"], "integration-unverified")
         self.assertEqual(self.f.receipts()[-1]["integration_status"], "integration-unverified")
 
+    def test_legacy_policy_read_error_cannot_keep_verified_label(self):
+        """Preserved failing regression for the unresolved round-3 finding."""
+        self.install_policy()
+        self.assertEqual(self.verify().returncode, 0)
+        self.f.forge["queued"] = True
+        self.f.save()
+        self.assertNotEqual(self.f.invoke().returncode, 0)
+        # Model the legacy shape emitted by the original single-claim operator.
+        # The external reproduction also creates it using the exact base CLI.
+        intent = self.f.intent()
+        intent["preconditions"].pop("required_merge_claims")
+        intent["preconditions"]["integration"].pop(CLAIM)
+        path = self.f.state_dir / ("merge-unit-" + intent["operation_id"] + ".json")
+        path.write_text(json.dumps(intent))
+        rows = [r for r in S.load_verifications(self.f.state_dir)[0] if r["claim"] != CLAIM]
+        (self.f.state_dir / S.VERIFY_RECEIPTS).write_text(
+            "".join(json.dumps(r) + "\n" for r in rows))
+        self.f.forge["pr"].update(state="MERGED", mergeCommit={"oid": self.f.merged})
+        self.f.save()
+        # The target objects remain available. Break only the policy reader's
+        # stdout, reaching its malformed-policy branch through the real CLI.
+        git = self.f.bin / "git"
+        actual_git = str(git.resolve())
+        git.unlink()
+        git.write_text(
+            "#!" + sys.executable + "\nimport subprocess, sys\n"
+            "args = sys.argv[1:]\n"
+            "result = subprocess.run([%r] + args, stdout=subprocess.PIPE)\n"
+            "if 'show' in args and args[-1] == %r:\n"
+            "    sys.stdout.write('broken policy output\\n')\n"
+            "sys.stdout.flush()\nsys.stdout.buffer.write(result.stdout)\n"
+            "raise SystemExit(result.returncode)\n"
+            % (actual_git, self.target + ":" + V.POLICY_FILE))
+        git.chmod(0o755)
+        result = self.f.invoke()
+        self.assertEqual(self.f.intent()["integration_status"], "integration-unverified",
+                         result.stdout + result.stderr)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.f.receipts()[-1]["integration_status"], "integration-unverified")
+        self.assertEqual(len(self.f.calls(["pr", "merge"])), 1)
+
 
 class TestCompletionProtocol(unittest.TestCase):
     """Fault the child channel; exercise the actual external parent reader."""
