@@ -37,6 +37,9 @@ All readiness and reap waits use selectors. join waits for a supervisor report,
 not pipe EOF; output is a snapshot at that report. Cleanup is independent of the
 availability of child status. Product assertions remain the consumers' concern;
 process_table is a diagnostic helper and never containment authority.
+Consumers needing descendant effects can wait_quiescent without signalling:
+it observes absence of every session member except the retained supervisor,
+then reads fresh output. It neither cleans up nor changes the join result.
 """
 from dataclasses import dataclass
 from enum import Enum
@@ -63,6 +66,13 @@ class JoinState(Enum):
 
 class CleanupState(Enum):
     CLEAN = 'CLEAN'
+    ERROR = 'ERROR'
+    INDETERMINATE = 'INDETERMINATE'
+
+
+class QuiescenceState(Enum):
+    QUIESCENT = 'QUIESCENT'
+    TIMED_OUT = 'TIMED_OUT'
     ERROR = 'ERROR'
     INDETERMINATE = 'INDETERMINATE'
 
@@ -94,6 +104,14 @@ class JoinResult:
 @dataclass(frozen=True)
 class CleanupResult:
     state: CleanupState
+    detail: str = ''
+
+
+@dataclass(frozen=True)
+class QuiescenceResult:
+    state: QuiescenceState
+    stdout: str = ''
+    stderr: str = ''
     detail: str = ''
 
 
@@ -171,7 +189,7 @@ def _identity(pid):
         return None
 
 
-def _session_rows(sid, groups):
+def _session_rows(sid, groups, timeout=5):
     """Census membership, retaining only the session or its ledger groups.
 
     macOS ps has no numeric sid column, so getsid supplies that field. ESRCH
@@ -180,7 +198,7 @@ def _session_rows(sid, groups):
     """
     output = subprocess.check_output(
         ['/bin/ps', '-U', str(os.geteuid()), '-o', 'pid=,pgid='],
-        text=True, timeout=5)
+        text=True, timeout=timeout)
     rows, seen = {}, set()
     for line in output.splitlines():
         parts = line.split()
@@ -380,6 +398,44 @@ class FixtureProcess:
             self._joined = JoinResult(JoinState.ERROR, detail=str(error))
         return self._joined
 
+    def wait_quiescent(self, timeout=60):
+        """Observe session quiescence without signalling or reaping anything.
+
+        The retained supervisor is an idle identity anchor, not fixture work.
+        Two scoped observations must contain no other member before the one
+        monotonic deadline. Each census and selector wait uses the remaining
+        budget; late observations and scan timeouts cannot report QUIESCENT.
+        An inspection failure is typed and never invokes emergency cleanup.
+        Callers can retry; join's cached child status/output remain unchanged.
+        Escaped sessions and hostile same-uid writers remain outside scope.
+        """
+        if type(timeout) not in (int, float) or not 0 <= timeout < float('inf'):
+            raise ValueError('quiescence timeout must be finite and nonnegative')
+        deadline = time.monotonic() + timeout
+        empty_before = False
+        try:
+            while time.monotonic() < deadline:
+                targets = self._snapshot(deadline=deadline)
+                empty = not any(pid != self.supervisor_pid for pid in targets)
+                if time.monotonic() >= deadline:
+                    break
+                if empty and empty_before:
+                    stdout = self.stdout_path.read_text(encoding='utf-8', errors='replace')
+                    stderr = self.stderr_path.read_text(encoding='utf-8', errors='replace')
+                    if time.monotonic() >= deadline:
+                        break
+                    return QuiescenceResult(QuiescenceState.QUIESCENT, stdout, stderr)
+                empty_before = empty
+                _pause(min(0.02, max(0, deadline - time.monotonic())))
+        except subprocess.TimeoutExpired as error:
+            return QuiescenceResult(QuiescenceState.TIMED_OUT, detail=str(error))
+        except _Indeterminate as error:
+            return QuiescenceResult(QuiescenceState.INDETERMINATE, detail=str(error))
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            return QuiescenceResult(QuiescenceState.ERROR, detail=str(error))
+        return QuiescenceResult(QuiescenceState.TIMED_OUT,
+                                detail='session quiescence deadline expired')
+
     def terminate(self, requested=FixtureSignal.TERM):
         if type(requested) is not FixtureSignal:
             raise ValueError('terminate requires FixtureSignal')
@@ -409,8 +465,15 @@ class FixtureProcess:
                 record.write(json.dumps({'sid': group[0], 'pgid': group[1]}) + '\n')
             self._groups.add(group)
 
-    def _snapshot(self):
-        rows = _session_rows(self.supervisor_pid, self._groups)
+    def _snapshot(self, deadline=None):
+        if deadline is None:
+            rows = _session_rows(self.supervisor_pid, self._groups)
+        else:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired('fixture session census', 0)
+            rows = _session_rows(self.supervisor_pid, self._groups,
+                                 timeout=min(5, remaining))
         targets = {pid: row for pid, row in rows.items()
                    if row.sid == self.supervisor_pid}
         if not self._reaped:

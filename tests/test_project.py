@@ -6,6 +6,7 @@ back". These test the rules, not the plumbing.
 """
 import ast
 import contextlib
+from dataclasses import replace
 import hashlib
 import http.server
 import json
@@ -29,7 +30,7 @@ SURVEY, TICKETS = SCRIPTS / "survey.py", SCRIPTS / "tickets.py"
 sys.path.insert(0, str(SCRIPTS))
 import tickets as T  # noqa: E402
 sys.path.insert(0, str(ROOT / "tests"))
-from fixture_processes import (FixtureProcesses, FixtureSpec, JoinState,
+from fixture_processes import (FixtureProcesses, FixtureSpec, JoinState, QuiescenceState,
                                wait_readable)  # noqa: E402
 
 PLAN = {"name": "p", "units": [
@@ -100,13 +101,20 @@ class _FixtureTestCase(unittest.TestCase):
         self.assertEqual(joined.returncode, 0, joined.stderr)
         return json.loads(joined.stdout)
 
-    def _fixture_answer(self, proc, timeout=60):
+    def _fixture_answer(self, proc, timeout=60, quiescent=False):
+        deadline = time.monotonic() + timeout
         joined = proc.join(timeout)
         # This adapter belongs to the test, not the typed process API. Preserve
         # the tests' existing timeout assertions while consuming the typed state.
         if joined.state is JoinState.TIMED_OUT:
             raise subprocess.TimeoutExpired(proc.spec.command, timeout)
         self.assertEqual(joined.state, JoinState.EXITED, joined)
+        if quiescent:
+            quiet = proc.wait_quiescent(max(0, deadline - time.monotonic()))
+            if quiet.state is QuiescenceState.TIMED_OUT:
+                raise subprocess.TimeoutExpired(proc.spec.command, timeout)
+            self.assertEqual(quiet.state, QuiescenceState.QUIESCENT, quiet)
+            return replace(joined, stdout=quiet.stdout, stderr=quiet.stderr)
         return joined
 
 
@@ -2152,7 +2160,10 @@ class TestVendoredAgentBusLayoutIsExplicit(_FixtureTestCase):
             active_state = printed_path(line)
             self.assertTrue(active_state.is_dir(), line)
             os.killpg(os.getpgid(proc.child_pid), 15)
-            joined = self._fixture_answer(proc, timeout=15)
+            # The old communicate() waited for the subshell's inherited pipes
+            # to close. A direct-child report alone races its EXIT trap; wait
+            # observationally so fixture cleanup cannot kill the trap early.
+            joined = self._fixture_answer(proc, timeout=15, quiescent=True)
             _out, err = joined.stdout, joined.stderr
             # The wrapper `sh -c` may itself die from the group signal before
             # the documented subshell exits 143; cleanup is the contract.
