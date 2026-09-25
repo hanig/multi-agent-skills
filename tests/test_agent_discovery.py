@@ -281,3 +281,72 @@ class TestAgentDiscovery(unittest.TestCase):
                       if item["destination"]["id"] == "claude-user")
         self.assertEqual(claude["consumers"], ["claude"])
         self.assertEqual(claude["selected_agents"], ["claude"])
+
+
+class TestDatedLiveCertifications(unittest.TestCase):
+    LIVE = {"claude": "2.1.282", "codex": "0.154.0",
+            "opencode": "1.18.29", "pi": "0.86.1"}
+
+    def report(self, versions):
+        with tempfile.TemporaryDirectory() as raw:
+            return discovery.discover(
+                fixture_env(raw), finder({name: "/fixtures/" + name for name in versions}),
+                probe_for(versions))
+
+    def test_live_exact_versions_select_their_own_dated_record(self):
+        report = self.report(self.LIVE)
+        plan = discovery.select_targets(report, as_of=date(2026, 10, 6))
+        for item in plan["selected"]:
+            with self.subTest(agent=item["agent"]):
+                self.assertEqual(item["certification"], "verified")
+                record = item["certification_record"]
+                self.assertEqual(record["version"], self.LIVE[item["agent"]])
+                self.assertEqual(record["verified_on"], "2026-09-25")
+                self.assertEqual(record["evidence"], "ARC-281 live run")
+                self.assertEqual(record["checks"], ["native_discovery",
+                    "authenticated_skill_invocation", "cross_agent_handoff"])
+                observed = report["agents"][item["agent"]]
+                self.assertEqual(observed["verification_review_due"], "2026-10-25")
+                self.assertEqual(observed["source_verification"]["native_discovery"], "live_verified")
+                self.assertEqual(observed["source_verification"]["invocation"], "live_verified")
+        self.assertEqual(plan["certification_warnings"], [])
+
+    def test_one_patch_newer_has_no_certification_record(self):
+        versions = {"claude": "2.1.283", "codex": "0.154.1",
+                    "opencode": "1.18.30", "pi": "0.86.2"}
+        plan = discovery.select_targets(self.report(versions), as_of=date(2026, 10, 6))
+        self.assertEqual(len(plan["selected"]), 4)
+        for item in plan["selected"]:
+            with self.subTest(agent=item["agent"]):
+                self.assertEqual(item["certification"], "unverified")
+                self.assertIsNone(item["certification_record"])
+                self.assertTrue(item["certification_warnings"])
+
+    def test_new_live_records_expire_without_blocking_selection(self):
+        report = self.report(self.LIVE)
+        current = discovery.select_targets(report, as_of=date(2026, 10, 25))
+        expired = discovery.select_targets(report, as_of=date(2026, 10, 26))
+        self.assertEqual([item["certification"] for item in current["selected"]],
+                         ["verified"] * 4)
+        self.assertEqual([item["certification"] for item in expired["selected"]],
+                         ["unverified"] * 4)
+        self.assertEqual(len(expired["certification_warnings"]), 4)
+        self.assertTrue(all("expired after 2026-10-25" in warning
+                            for warning in expired["certification_warnings"]))
+
+    def test_old_releases_keep_their_original_date_and_expiry(self):
+        old = {"claude": "2.1.261", "codex": "0.153.4", "pi": "0.73.1"}
+        report = self.report(old)
+        current = discovery.select_targets(report, as_of=date(2026, 10, 5))
+        expired = discovery.select_targets(report, as_of=date(2026, 10, 6))
+        self.assertEqual([item["certification"] for item in current["selected"]],
+                         ["verified"] * 3)
+        self.assertEqual([item["certification"] for item in expired["selected"]],
+                         ["unverified"] * 3)
+        for item in expired["selected"]:
+            self.assertEqual(item["certification_record"]["verified_on"], "2026-09-05")
+            self.assertEqual(report["agents"][item["agent"]]["source_verification"]["invocation"],
+                             "unverified")
+        self.assertEqual([record["verified_on"] for record in
+                          discovery.adapters()["opencode"]["certifications"]],
+                         ["2026-09-05", "2026-09-25"])

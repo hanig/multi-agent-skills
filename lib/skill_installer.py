@@ -85,6 +85,7 @@ class AgentTarget:
     destinations: tuple[Path, ...]
     consumers: tuple[str, ...] = ()
     version: str | None = None
+    certification: Mapping[str, Any] | None = None
 
     @property
     def detected(self) -> bool:
@@ -364,6 +365,7 @@ def build_discovery_plan(report: Mapping[str, Any], selection: Mapping[str, Any]
             discovery_verified=item["certification"] == "verified",
             automatic=item["mode"] == "automatic", destinations=(path,),
             consumers=tuple(item["consumers"]), version=record.get("version"),
+            certification=item.get("certification_record"),
         ))
     skipped = tuple(AgentTarget(
         name=item["agent"], state=report["agents"][item["agent"]]["state"],
@@ -412,6 +414,9 @@ def render_plan(plan: InstallPlan, options: InstallOptions, version: str) -> str
             verified = ("unverified (automatic executable detection; native "
                         "compatibility is not certified)")
         lines.append(f"  {target.name}: {verified}")
+        if target.certification:
+            record = target.certification
+            lines.append(f"    evidence: {record['verified_on']} — {record['evidence']}")
     if plan.skipped:
         lines.append("Skipped agents:")
         lines.extend(f"  {target.name}" for target in plan.skipped)
@@ -680,6 +685,7 @@ def _document(*, operation: str, dry_run: bool, plan: InstallPlan,
             targets.append({"agent": target.name, "root": str(destination),
                             "status": target.state,
                             "version": target.version,
+                            "certification": target.certification,
                             "verification": ("adapter-version-verified" if target.discovery_verified
                                              else "unverified"),
                             "selection": "automatic" if target.automatic else "explicit",
