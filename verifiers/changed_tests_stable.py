@@ -6,11 +6,23 @@ policy, never from candidate configuration. Tests remain candidate bytes and
 run as the operator's user; this is a stability check, not a hostile-code sandbox.
 """
 import argparse
+import glob
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
+
+
+# Use unittest's normal discovery and load_tests hook (including the supervised
+# review module), but a selected file that discovers zero cases is not evidence.
+RUN_MODULE = """import sys, unittest
+program = unittest.main(module=None, argv=[sys.argv[0], 'discover', '-s',
+                         sys.argv[1], '-p', sys.argv[2]], exit=False)
+if not program.result.testsRun:
+    raise SystemExit('changed test module discovered no tests')
+raise SystemExit(0 if program.result.wasSuccessful() else 1)
+"""
 
 
 def main():
@@ -52,8 +64,8 @@ def main():
             print("{}: repetition {}/{}".format(
                 module, repetition + 1, args.repetitions), flush=True)
             result = subprocess.run(
-                ["python3", "-m", "unittest", "discover", "-s", str(path.parent),
-                 "-p", path.name], check=False)
+                ["python3", "-c", RUN_MODULE, str(path.parent), glob.escape(path.name)],
+                check=False)
             if result.returncode:
                 return 1
     return 0

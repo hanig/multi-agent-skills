@@ -94,6 +94,15 @@ class TestSharedGuard(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(len(self.f.calls(["pr", "merge"])), 1)
 
+    def test_selected_module_with_no_tests_is_not_a_pass(self):
+        self.install_policy()
+        self.candidate({"tests/test_empty.py": "# no actual guard\n"})
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.shared_receipt()["result"], "fail")
+        self.assertIn("discovered no tests", self.shared_receipt()["stderr_tail"])
+        self.f.assert_refused(self.f.invoke())
+
     def test_default_five_runs_and_same_candidate_binding(self):
         self.install_policy()
         self.candidate({"tests/test_guard.py": self.counter_test()})
