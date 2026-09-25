@@ -350,3 +350,20 @@ class TestDatedLiveCertifications(unittest.TestCase):
         self.assertEqual([record["verified_on"] for record in
                           discovery.adapters()["opencode"]["certifications"]],
                          ["2026-09-05", "2026-09-25"])
+
+
+    def test_adapter_staleness_includes_expired_distinct_versions(self):
+        # A renewed OpenCode record supersedes the old record for that SAME
+        # version. A newer Claude/Codex/Pi version cannot renew an older one.
+        for observed, expected in (
+                (date(2026, 10, 5), []),
+                (date(2026, 10, 6), ["claude", "codex", "pi"]),
+                (date(2026, 10, 25), ["claude", "codex", "pi"]),
+                (date(2026, 10, 26), ["claude", "codex", "opencode", "pi"])):
+            with self.subTest(observed=observed):
+                self.assertEqual(discovery.stale_adapter_certifications(observed), expected)
+        for agent, spec in discovery.adapters().items():
+            with self.subTest(agent=agent):
+                self.assertEqual(discovery.verification_review_due(spec),
+                                 date(2026, 10, 25) if agent == "opencode"
+                                 else date(2026, 10, 5))
