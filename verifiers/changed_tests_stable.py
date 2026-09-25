@@ -21,8 +21,9 @@ RUN_MODULE = """import importlib, os, sys, unittest
 # and the package root needed for the selected dotted module's relative imports.
 sys.path.insert(0, os.path.abspath(sys.argv[3]))
 sys.path.insert(0, os.path.abspath('tests'))
+expected_file = os.path.abspath(sys.argv[2])
 module = importlib.import_module(sys.argv[1])
-if module.__file__ != os.path.abspath(sys.argv[2]):
+if module.__file__ != expected_file:
     raise SystemExit('changed test module imported from a different file')
 program = unittest.main(module=module, argv=[sys.argv[0]], exit=False)
 if not program.result.testsRun:
