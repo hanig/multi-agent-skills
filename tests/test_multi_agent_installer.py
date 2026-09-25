@@ -610,8 +610,18 @@ class TestLiveCertificationPlan(unittest.TestCase):
                 executable = bindir / name
                 executable.write_text('#!/bin/sh\nprintf "%s\\n" "' + version + '"\n')
                 executable.chmod(0o755)
+            # Keep real discovery and installer planning, but make version
+            # observations independent of subprocess scheduling. These tests
+            # judge dated certification records, not probe deadlines.
+            discover = discovery.discover
+
+            def discover_versions(*args, **kwargs):
+                return discover(*args, **kwargs, probe=lambda path, timeout:
+                                (True, versions[Path(path).name]))
+
             stdout, stderr = io.StringIO(), io.StringIO()
             with mock.patch.object(discovery, "date", wraps=date) as clock, \
+                    mock.patch.object(discovery, "discover", side_effect=discover_versions), \
                     mock.patch.object(installer, "_load_discovery", return_value=discovery), \
                     contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                 clock.today.return_value = observed
