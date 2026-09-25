@@ -21,7 +21,6 @@ import os
 import shutil
 import sys
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from unittest import mock

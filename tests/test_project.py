@@ -3652,9 +3652,9 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(_FixtureTestCase):
             completed = Path(d) / "noisy.completed"
             source = self._supervisor_source()
             loop = "while (1) {\n    drain();"
-            answer = "    my ($state, $rc, $line) = @_;"
+            answer_end = "    exit 0;"
             self.assertEqual(source.count(loop), 1)
-            self.assertEqual(source.count(answer), 1)
+            self.assertEqual(source.count(answer_end), 1)
             # Only the extracted fixture gains a startup barrier. Execute the
             # shipped drain, deadline transitions, signals and answer unchanged.
             prime = '''
@@ -3667,12 +3667,12 @@ print $ready "$started\\n";
 close $ready or die $!;
 '''
             source = source.replace(loop, prime + loop)
-            source = source.replace(answer, answer + '''
+            source = source.replace(answer_end, '''
     my $completed = clock_gettime(CLOCK_MONOTONIC);
     open(my $stamp, ">", $ENV{HANIG_NOISY_COMPLETED}) or die $!;
     print $stamp "$completed\\n";
     close $stamp or die $!;
-''')
+''' + answer_end)
             env = dict(os.environ, HANIG_NOISY_READY=str(ready),
                        HANIG_NOISY_COMPLETED=str(completed))
             run_seconds, reap_seconds = 1, 1
