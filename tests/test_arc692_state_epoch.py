@@ -90,8 +90,12 @@ class TestStateEpoch(unittest.TestCase):
         self.first.save_state(self.state_dir, state)
         self.first.release_lease(self.state_dir)
         self.acquire(self.first)
-        # The new acquisition pins the process without stamping the snapshot.
-        self.first.save_state(self.state_dir, state)
+        intact = self.path.read_bytes()
+        with self.assertRaisesRegex(SystemExit, HALT):
+            self.first.save_state(self.state_dir, state)
+        self.assertEqual(self.path.read_bytes(), intact)
+        self.first.save_state(self.state_dir,
+                              self.first.load_state(self.state_dir))
         self.assertNotIn("epoch", state)
         self.assertEqual(self.read_epoch(), 2)
 

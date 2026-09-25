@@ -2493,6 +2493,21 @@ def release_lease(state_dir):
 
 
 # --- durable state --------------------------------------------------------
+class _StateSnapshot(dict):
+    """Loaded state with an in-memory directory/process/epoch binding.
+
+    Attributes are not JSON fields. Keep ordinary copies bound to the same
+    load; neither a save nor a later acquisition may refresh this binding.
+    This is a trusted-caller guard, not protection against deliberately
+    rebuilding a snapshot as an untagged dict or editing private attributes.
+    """
+
+    def copy(self):
+        snapshot = type(self)(self)
+        snapshot._snapshot_epoch = self._snapshot_epoch
+        return snapshot
+
+
 def _read_state_epoch(state_dir):
     """Read only the fence file; absent legacy directories start at zero."""
     try:
@@ -2514,14 +2529,26 @@ def load_state(state_dir):
     before starting an agent, and record conclusions plus cleanup charges
     before destroying their worktree. A crash may repeat observation, never
     creation or destruction whose governing state existed only in memory.
+
+    Capture the binding BEFORE reading state. Unleased readers observe the
+    fence without pinning the process or writing anything; an unreadable
+    fence still allows status but cannot authorize a later save.
     """
+    key = str(Path(state_dir).resolve())
+    pin = _LOCK_EPOCHS.get(key)
+    if pin is None:
+        epoch, _error = _read_state_epoch(state_dir)
+        pin = (os.getpid(), epoch)
     obj, err = U.read_json(Path(state_dir) / STATE_FILE)
     if err == "missing":
-        return {"schema_version": 1, "units": {}, "halted": None}
-    if err:
+        obj = {"schema_version": 1, "units": {}, "halted": None}
+    elif err:
         sys.exit(f"error: state at {Path(state_dir) / STATE_FILE} is unreadable "
                  f"({err}). Fix or remove it; removing it will re-dispatch "
                  f"units whose attempts are not recorded elsewhere.")
+    if isinstance(obj, dict):
+        obj = _StateSnapshot(obj)
+        obj._snapshot_epoch = (key, *pin)
     return obj
 
 
@@ -2531,13 +2558,23 @@ def save_state(state_dir, state):
     # A lease holder always uses its process pin, even after reloading state.
     # Legacy direct helpers (including promotion) do not acquire a lease:
     # their first save pins the observed epoch without bumping it or granting
-    # custody. This cannot detect stale snapshots before that first save.
+    # custody. Loaded snapshots also carry their own earlier observation.
     owner, expected = _LOCK_EPOCHS.get(key, (os.getpid(), epoch))
     if err or owner != os.getpid() or epoch != expected:
         # Do not persist the halt into the successor's state.
         reason = err or "state epoch changed or process pin was inherited"
         sys.exit("HALTED: another coordinator has written state under us "
                  f"({reason}); refusing to save")
+    # Re-acquisition moves the process pin, never the snapshot's load epoch.
+    # Check before changing the snapshot, pinning a helper or touching disk.
+    # Plain, caller-built dictionaries retain the legacy direct-helper API;
+    # every dictionary returned by load_state is a tagged snapshot.
+    if (isinstance(state, _StateSnapshot)
+            and getattr(state, "_snapshot_epoch", None)
+            != (key, owner, expected)):
+        sys.exit("HALTED: another coordinator has written state under us "
+                 "(snapshot belongs to a different lease epoch or state "
+                 "directory); reload state before saving")
     _LOCK_EPOCHS.setdefault(key, (owner, expected))
     # Retire the old inline field on a normal save, never on acquisition.
     state.pop("epoch", None)
