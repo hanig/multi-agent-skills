@@ -90,7 +90,8 @@ certification without changing which packages CI installs and checks.
 
 The installer retains the 2026-09-05 records with their original dates. Each
 exact version uses its newest matching record and the existing 30-day review
-window: the new evidence is current through 2026-10-25, then selection reports
+window: the new evidence is current through 2026-10-25, then discovery reports
+`unverified` with `stale` freshness, including in doctor and survey. Selection reports
 `unverified` and warns on stderr, including with `--json`. Older distinct
 versions expire after 2026-10-05; refreshing a different version cannot renew
 them. OpenCode retains both observations of 1.18.29 and uses the newer one.
