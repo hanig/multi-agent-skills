@@ -2143,9 +2143,11 @@ class TestVendoredAgentBusLayoutIsExplicit(_FixtureTestCase):
             self.assertFalse(printed_path(failed.stderr).exists())
             self.assertEqual(list(scratch.iterdir()), [])
 
+            bus_ready = sandbox / "bus-ready"
             fake_bus.write_text(self._fixture_scope(d).shell_script(
                 "#!/bin/sh\n"
                 "trap 'exit 143' HUP INT TERM\n"
+                "printf ready > " + shlex.quote(str(bus_ready)) + "\n"
                 "while :; do sleep 1; done\n"))
             fake_bus.chmod(0o700)
             proc = self._fixture_scope(d).launch(FixtureSpec(tuple(["sh", "-c", documented]), directory=str(outside), environment=tuple(env.items())))
@@ -2159,6 +2161,13 @@ class TestVendoredAgentBusLayoutIsExplicit(_FixtureTestCase):
                 time.sleep(0.01)
             active_state = printed_path(line)
             self.assertTrue(active_state.is_dir(), line)
+            # The printed state path precedes launching bus. Sending TERM in
+            # that fork/exec window can leave a newly started bus unsignalled
+            # while the documented shell defers its trap waiting for it.
+            deadline = time.monotonic() + 15
+            while not bus_ready.exists():
+                self.assertLess(time.monotonic(), deadline, "bus did not install its signal trap")
+                time.sleep(0.01)
             os.killpg(os.getpgid(proc.child_pid), 15)
             # The old communicate() waited for the subshell's inherited pipes
             # to close. A direct-child report alone races its EXIT trap; wait

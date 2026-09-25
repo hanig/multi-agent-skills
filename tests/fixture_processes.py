@@ -399,7 +399,7 @@ class FixtureProcess:
         return self._joined
 
     def wait_quiescent(self, timeout=60):
-        """Observe session quiescence without signalling or reaping anything.
+        """Observe quiescence without signalling fixtures or reaping their supervisor.
 
         The retained supervisor is an idle identity anchor, not fixture work.
         Two scoped observations must contain no other member before the one
