@@ -6,30 +6,101 @@ policy, never from candidate configuration. Tests remain candidate bytes and
 run as the operator's user; this is a stability check, not a hostile-code sandbox.
 """
 import argparse
+import json
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
+import tempfile
 
 
 # Load the selected module itself: package discovery can supply package tests
 # or let a package hook hide this module. Its OWN load_tests stays authoritative
 # (including the supervised review module). Count execution, not suite size.
-RUN_MODULE = """import importlib, os, sys, unittest
+RUN_MODULE = """import importlib, json, os, sys, unittest
+def run():
+    # An anonymous external channel, removed from argv before candidate import.
+    # Do not leak it across exec into a delegated unittest worker.
+    completion_fd = int(sys.argv.pop())
+    os.set_inheritable(completion_fd, False)
+    getpid, write, dumps = os.getpid, os.write, json.dumps
+    runner_pid = getpid()
 # Keep the helper import path supplied by the integration runner's -s tests,
 # and the package root needed for the selected dotted module's relative imports.
-sys.path.insert(0, os.path.abspath(sys.argv[3]))
-sys.path.insert(0, os.path.abspath('tests'))
-expected_file = os.path.abspath(sys.argv[2])
-module = importlib.import_module(sys.argv[1])
-if module.__file__ != expected_file:
-    raise SystemExit('changed test module imported from a different file')
-program = unittest.main(module=module, argv=[sys.argv[0]], exit=False)
-if not program.result.testsRun:
-    raise SystemExit('changed test module executed no tests')
-raise SystemExit(0 if program.result.wasSuccessful() else 1)
+    sys.path.insert(0, os.path.abspath(sys.argv[3]))
+    sys.path.insert(0, os.path.abspath('tests'))
+    expected_file = os.path.abspath(sys.argv[2])
+    module = importlib.import_module(sys.argv[1])
+    if module.__file__ != expected_file:
+        raise SystemExit('changed test module imported from a different file')
+    program = unittest.main(module=module, argv=[sys.argv[0]], exit=False)
+    result = program.result
+    # A forked descendant returning through this frame cannot finish the
+    # original process's invocation after that process has exited early.
+    if getpid() != runner_pid:
+        raise SystemExit('changed test runner continued in a forked descendant')
+    record = {'schema': 1, 'complete': True, 'pid': runner_pid,
+              'tests_run': result.testsRun, 'failures': len(result.failures),
+              'errors': len(result.errors), 'skips': len(result.skipped),
+              'expected_failures': len(result.expectedFailures),
+              'unexpected_successes': len(result.unexpectedSuccesses),
+              'successful': result.wasSuccessful(), 'stopped': result.shouldStop}
+    payload = dumps(record).encode('utf-8')
+    if write(completion_fd, payload) != len(payload):
+        raise SystemExit('incomplete changed test completion write')
+    if not result.testsRun:
+        raise SystemExit('changed test module executed no tests')
+    raise SystemExit(0 if result.wasSuccessful() and not result.shouldStop else 1)
+run()
 """
+
+
+def completion_problem(raw, pid):
+    """Validate one finished invocation independently of the child's exit code.
+
+    The descriptor has no pathname advertised to candidate code. This is an
+    accidental-termination guard under the existing trusted-writer convention,
+    not secrecy from hostile same-process introspection or same-UID writers.
+    """
+    counts = ('tests_run', 'failures', 'errors', 'skips', 'expected_failures',
+              'unexpected_successes')
+    try:
+        record = json.loads(raw)
+    except (ValueError, UnicodeError):
+        return 'missing or malformed changed test completion handshake'
+    if (not isinstance(record, dict)
+            or set(record) != set(counts) | {'schema', 'complete', 'pid', 'successful', 'stopped'}
+            or type(record['schema']) is not int or record['schema'] != 1
+            or record['complete'] is not True
+            or type(record['pid']) is not int or record['pid'] != pid
+            or any(type(record[key]) is not int or record[key] < 0 for key in counts)
+            or type(record['successful']) is not bool or type(record['stopped']) is not bool):
+        return 'invalid changed test completion handshake'
+    if not record['tests_run']:
+        return 'changed test module executed no tests'
+    if (record['failures'] or record['errors'] or record['unexpected_successes']
+            or not record['successful'] or record['stopped']):
+        return 'changed test completion reports an unsuccessful or stopped run'
+    return None
+
+
+def run_repetition(name, module, top):
+    # Each repetition owns a new unlinked file, outside the candidate tree.
+    # Read it only after waiting for the exact child; stdout is never evidence.
+    with tempfile.TemporaryFile() as completion:
+        child = subprocess.Popen(
+            ['python3', '-c', RUN_MODULE, name, module, top, str(completion.fileno())],
+            pass_fds=(completion.fileno(),))
+        code = child.wait()
+        completion.seek(0)
+        raw = completion.read(4097)
+        problem = ('oversized changed test completion handshake' if len(raw) > 4096
+                   else completion_problem(raw, child.pid))
+        if problem:
+            print(problem, file=sys.stderr, flush=True)
+        return code == 0 and problem is None
 
 
 def main():
@@ -72,10 +143,7 @@ def main():
         for repetition in range(args.repetitions):
             print("{}: repetition {}/{}".format(
                 module, repetition + 1, args.repetitions), flush=True)
-            result = subprocess.run(
-                ["python3", "-c", RUN_MODULE, name, module, top],
-                check=False)
-            if result.returncode:
+            if not run_repetition(name, module, top):
                 return 1
     return 0
 

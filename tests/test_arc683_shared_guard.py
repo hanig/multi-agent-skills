@@ -1,9 +1,14 @@
 """Shared-guard admission through the real operator with a replaced forge PATH."""
 import hashlib
+import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
+import sys
+import tempfile
 import unittest
+from unittest import mock
 
 from tests import test_arc683_merge_precondition as fixtures
 from tests import test_arc1049_verify_lock as lock_fixtures
@@ -239,6 +244,68 @@ class TestSharedGuard(unittest.TestCase):
         self.f.assert_refused(self.f.invoke())
         self.assertNotEqual(verified.returncode, 0, verified.stdout + verified.stderr)
         self.assertEqual(self.shared_receipt()["result"], "fail")
+
+    def assert_early_exit_refused(self, module):
+        # The integration stub passes independently, so only the stability
+        # consumer can prevent admission. No real forge is on this PATH.
+        self.install_policy(repetitions=2)
+        self.candidate({"tests/test_guard.py": module})
+        verified = self.verify()
+        self.f.assert_refused(self.f.invoke())
+        self.assertNotEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+        self.assertEqual(self.shared_receipt()["result"], "fail")
+
+    def test_import_system_exit_zero_refuses_merge(self):
+        self.assert_early_exit_refused("raise SystemExit(0)\n")
+
+    def test_import_os_exit_zero_refuses_merge(self):
+        self.assert_early_exit_refused("import os\nos._exit(0)\n")
+
+    def test_test_body_system_exit_zero_refuses_merge(self):
+        self.assert_early_exit_refused(
+            "import unittest\nclass Guard(unittest.TestCase):\n"
+            "    def test_exit(self): raise SystemExit(0)\n")
+
+    def test_partial_test_body_os_exit_zero_refuses_merge(self):
+        self.assert_early_exit_refused(
+            "import os, unittest\nclass Guard(unittest.TestCase):\n"
+            "    def test_a_pass(self): pass\n"
+            "    def test_b_exit(self): os._exit(0)\n")
+
+    def test_atexit_cannot_turn_unittest_error_into_pass(self):
+        self.assert_early_exit_refused(
+            "import atexit, os, unittest\natexit.register(os._exit, 0)\n"
+            "class Guard(unittest.TestCase):\n"
+            "    def test_exit(self): raise SystemExit(0)\n")
+
+    def test_atexit_zero_exit_cannot_finish_interrupted_hook(self):
+        self.assert_early_exit_refused(
+            "import atexit, os\natexit.register(os._exit, 0)\n"
+            "def load_tests(loader, tests, pattern): raise KeyboardInterrupt()\n")
+
+    @unittest.skipUnless(hasattr(os, 'fork'), 'requires fork')
+    def test_forked_child_cannot_finish_exited_parent_runner(self):
+        self.assert_early_exit_refused(
+            "import os, unittest\n"
+            "def load_tests(loader, tests, pattern):\n"
+            "    child = os.fork()\n"
+            "    if child:\n"
+            "        os.waitpid(child, 0)\n"
+            "        os._exit(0)\n"
+            "    return unittest.TestSuite([unittest.FunctionTestCase(lambda: None)])\n")
+
+    def test_signal_termination_refuses_merge(self):
+        self.assert_early_exit_refused(
+            "import os, signal\nos.kill(os.getpid(), signal.SIGTERM)\n")
+
+    def test_result_stop_cannot_pass_partial_suite(self):
+        self.assert_early_exit_refused(
+            "import unittest\nclass Stopped(unittest.TestSuite):\n"
+            "    def run(self, result, debug=False):\n"
+            "        unittest.FunctionTestCase(lambda: None).run(result)\n"
+            "        result.stop()\n"
+            "        return result\n"
+            "def load_tests(loader, tests, pattern): return Stopped()\n")
 
     def test_suite_declared_count_cannot_replace_executed_count(self):
         self.install_policy()
@@ -486,6 +553,64 @@ class TestSharedGuard(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.f.intent()["integration_status"], "integration-unverified")
         self.assertEqual(self.f.receipts()[-1]["integration_status"], "integration-unverified")
+
+
+class TestCompletionProtocol(unittest.TestCase):
+    """Fault the child channel; exercise the actual external parent reader."""
+
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location('stability_verifier', ROOT / PROGRAM)
+        self.verifier = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.verifier)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.bin = Path(self.tmp.name)
+        (self.bin / 'python3').symlink_to(sys.executable)
+        self.environment = mock.patch.dict(os.environ, {'PATH': str(self.bin)})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+
+    def invoke(self, payload, exit_code=0):
+        runner = ("import os, sys\nfd = int(sys.argv[-1])\n"
+                  "record = " + payload + "\n"
+                  "os.write(fd, record)\n"
+                  "raise SystemExit(%r)\n" % exit_code)
+        with mock.patch.object(self.verifier, 'RUN_MODULE', runner):
+            return self.verifier.run_repetition('unused', 'unused', '.')
+
+    def valid_record(self, **updates):
+        record = dict(schema=1, complete=True, pid='CHILD_PID', tests_run=1,
+                      failures=0, errors=0, skips=0, expected_failures=0,
+                      unexpected_successes=0, successful=True, stopped=False)
+        record.update(updates)
+        # Substitute the actual process identity inside the child, not a
+        # copied parent PID that could never exercise successful admission.
+        return ("__import__('json').dumps(" + repr(record).replace("'CHILD_PID'", 'os.getpid()')
+                + ").encode()")
+
+    def test_complete_record_and_zero_exit_are_both_required(self):
+        self.assertTrue(self.invoke(self.valid_record()))
+        self.assertFalse(self.invoke(self.valid_record(), exit_code=1))
+
+    def test_missing_malformed_partial_and_oversized_records_refuse(self):
+        for payload in ("b''", "b'not json'", "b'{\"schema\":1}'",
+                        "b'{\"complete\":true'", "b'null'", "b'[]'", "b' ' * 4097",
+                        self.valid_record() + " + b'garbage'"):
+            with self.subTest(payload=payload):
+                self.assertFalse(self.invoke(payload))
+
+    def test_complete_but_invalid_or_unsuccessful_records_refuse(self):
+        for fields in (dict(schema=True), dict(complete=False), dict(pid=-1),
+                       dict(tests_run=0), dict(tests_run=True), dict(skips=-1),
+                       dict(errors=1), dict(failures=1), dict(unexpected_successes=1),
+                       dict(stopped=True), dict(successful=False), dict(extra=1)):
+            with self.subTest(fields=fields):
+                self.assertFalse(self.invoke(self.valid_record(**fields)))
+
+    def test_valid_skips_expected_failures_and_subtest_counts_pass(self):
+        # Several subtest skips can exceed testsRun; they are still honest
+        # unittest results, so do not impose a sum-of-counts invariant.
+        self.assertTrue(self.invoke(self.valid_record(skips=3, expected_failures=1)))
 
 
 class TestSharedGuardPublication(unittest.TestCase):

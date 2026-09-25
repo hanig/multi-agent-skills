@@ -346,7 +346,17 @@ import path. Package-level `load_tests` hooks cannot replace the module's
 suite; the module's own hook, including supervised delegation, is honored.
 Any failure, error, or unexpected success fails the claim; a selected module
 that executes zero tests also fails, even if its suite reports a positive size
-or another module ran tests. No changed test modules is a successful no-op. The target's
+or another module ran tests. Every repetition must exit zero AND deliver a
+complete result through a fresh anonymous file descriptor outside the candidate
+tree. The verifier's runner writes counts only after unittest returns; the
+parent checks those counts, completion, and the original child PID independently
+of stdout and exit status. Missing, malformed, partial, zero-test, stopped, or
+unsuccessful results fail, including early successful exits and a forked
+descendant returning after its parent exits. No result pathname is supplied to
+candidate code, and the descriptor is closed across exec into delegates. This
+guards accidental termination within the existing trusted-writer model; it is
+not protection from hostile in-process introspection or same-UID writes.
+No changed test modules is a successful no-op. The target's
 verifier entry can set a positive integer `repetitions`; candidate policy and
 program edits cannot change that count or the pinned program used for this PR.
 Repeated passes sample stability; they do not prove a test cannot flake later.
