@@ -381,6 +381,21 @@ Existing `.swarm/state` and `.swarm/runs` trees are copied to the external
 default on first use; the legacy files are retained and historical attempt
 paths are not rewritten.
 
+For a fresh code repair attempt, optional unit `seed` records the previous
+work as `{"ref":"refs/heads/previous-attempt","base":"<full commit ID>",
+"head":"<full commit ID>","evidence":"/previous/attempt/evidence.md"}`.
+Both IDs must be 40 or 64 hex characters. Dispatch checks that `base` is an
+ancestor of `head` and `head` is reachable from the exact ref on origin's push
+destination, then persists the raw seed in coordinator launch intent. The
+worker receives instructions to fetch, cherry-pick `-x -m 1 base..head` (first-parent mainline), skip empty
+commits, and read the optional evidence; whole-file checkout is forbidden.
+Relative evidence paths use the source repository directory. The coordinator
+does not replay the seed, and reachability does not promise conflict-free
+replay. Judging, scope-check and merged-PR closure still use the fresh
+attempt's recorded base and produced head. Omission preserves existing intent,
+prompt and plan digests; a persisted attempt's seed is never replaced from a
+changed plan. See the [skill](skills/hanig-swarm/SKILL.md#seed-a-fresh-code-repair-attempt).
+
 ### hanig-verified-workflow
 
 ```sh

@@ -142,6 +142,22 @@ suppresses the flag. `mode` is provider-specific and has no portable default:
 codex accepts `auto`, `auto-review`, or `full-access`; claude accepts `bypass`
 or `default`. Dispatch refuses a mode the selected provider does not support.
 
+## Seed a fresh code repair attempt
+
+Optional code-unit `seed` is an object: `ref` (valid `refs/heads/...`),
+`base` and `head` (full 40/64-hex commit IDs), and optional non-empty `evidence`
+path, relative to the source repository if not absolute. Preserve values raw.
+Before agent creation, fetch from origin's push destination and require base
+ancestry to head and head reachability from ref. Persist the seed in coordinator
+launch intent; redispatch rechecks reachability and refuses changed provenance.
+Never backfill historical attempts. The worker fetches, cherry-picks
+`-x -m 1 base..head` (first-parent mainline), skips empties with `git cherry-pick --skip`, and reads
+prior evidence. Empty ranges are no-ops; never port by whole-file checkout.
+The coordinator does not replay or alter worktrees. Temporary-ref cleanup
+failure warns without changing admission; refs are never reused. Reachability
+certifies neither conflict-free replay nor prior evidence. Seed changes no launch
+base, judging, scope, review or closure; omission preserves intent, prompt and plan digests.
+
 ## Declare the runtime; prove it where the job lands
 
 Every `slurm` and `pipeline` unit declares a runtime. A base-image-only unit
