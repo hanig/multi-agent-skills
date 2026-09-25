@@ -104,6 +104,97 @@ class TestMergePrecondition(unittest.TestCase):
         self.assertEqual(f.invoke().returncode, 0)
         self.assertEqual(len(f.calls(["pr", "merge"])), 1)
 
+    def move_after_publication(self, fail_resolution=False):
+        f = self.f
+        target = self.stale_pr_base()
+        moved_ref = dict(f.forge["ref"], object=dict(f.forge["ref"]["object"]))
+        f.forge["ref"]["object"]["sha"] = f.base
+        f.save()
+        log = f.intercept_intent_publication({"ref": moved_ref}, fail_resolution)
+        return target, log
+
+    def assert_cancelled(self, result, log, observed_target):
+        f = self.f
+        f.assert_refused(result)
+        self.assertIn("--verify-integration", result.stderr)
+        intent = f.intent()
+        self.assertEqual(intent["phase"], "cancelled_before_request")
+        self.assertEqual(intent["target_before_request"], f.base)
+        self.assertEqual(intent["cancellation"]["observed_target"], observed_target)
+        self.assertTrue(intent["cancellation"]["reason"])
+        # A complete record was visible after the real directory fsync.
+        self.assertEqual(json.loads(log.read_text().splitlines()[-1]), intent)
+        state = json.loads((f.state_dir / S.STATE_FILE).read_text())
+        self.assertEqual(state["units"]["u"]["state"], "READY_FOR_PR")
+        return intent
+
+    def test_ref_move_after_intent_publication_cancels_before_merge(self):
+        f = self.f
+        target, log = self.move_after_publication()
+        cancelled = self.assert_cancelled(f.invoke(), log, target)
+        self.assertEqual(f.calls(["api"]), [f.forge["ref_command"]] * 3)
+        del f.env["PYTHONPATH"]
+        # Persisted cancellation is consumed by the real rerun. Stale evidence
+        # still refuses, then fresh verification permits one distinct operation.
+        stale = f.invoke()
+        f.assert_refused(stale)
+        self.assertIn("target moved", stale.stderr)
+        self.assertNotIn("unresolved outcome", stale.stderr)
+        verified = f.invoke("--verify-integration")
+        self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+        self.assertEqual(S.load_verifications(f.state_dir)[0][-1]["target_commit"], target)
+        self.assertEqual(f.intent(), cancelled)
+        result = f.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(f.invoke().returncode, 0)
+        self.assertEqual(len(f.calls(["pr", "merge"])), 1)
+        intents = [json.loads(p.read_text()) for p in f.state_dir.glob("merge-unit-*.json")]
+        self.assertIn(cancelled, intents)
+        self.assertEqual(len(intents), 2)
+        successor, = [i for i in intents if i["phase"] == "receipt_recorded"]
+        self.assertNotEqual(successor["operation_id"], cancelled["operation_id"])
+        self.assertEqual(successor["target_before_request"], target)
+
+    def test_ref_read_failure_after_intent_publication_cancels_before_merge(self):
+        f = self.f
+        log = f.intercept_intent_publication({"ref_exit": 1})
+        cancelled = self.assert_cancelled(f.invoke(), log, None)
+        self.assertIn("target ref unavailable", cancelled["cancellation"]["reason"])
+        del f.env["PYTHONPATH"]
+        f.save()  # restore the readable ref, leaving the persisted intent alone
+        result = f.invoke("--verify-integration")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(f.intent(), cancelled)
+        self.assertEqual(f.calls(["pr", "merge"]), [])
+
+    def test_cancellation_write_failure_leaves_unresolved_intent(self):
+        f = self.f
+        self.move_after_publication(fail_resolution=True)
+        result = f.invoke()
+        f.assert_refused(result)
+        self.assertIn("injected cancellation publication failure", result.stderr)
+        unresolved = f.intent()
+        self.assertEqual(unresolved["phase"], "merge_requested")
+        del f.env["PYTHONPATH"]
+        for extra in ((), ("--verify-integration",)):
+            result = f.invoke(*extra)
+            f.assert_refused(result)
+            self.assertIn("unresolved", result.stderr)
+            self.assertEqual(f.intent(), unresolved)
+
+    def test_stable_ref_is_read_after_durable_intent_and_merges_once(self):
+        f = self.f
+        log = f.intercept_intent_publication()
+        result = f.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(log.read_text().splitlines()[0])["phase"], "merge_requested")
+        calls = f.calls()
+        merge_index = next(i for i, call in enumerate(calls) if call[:2] == ["pr", "merge"])
+        self.assertEqual(calls[merge_index - 1], f.forge["ref_command"])
+        self.assertEqual(calls[:merge_index].count(f.forge["ref_command"]), 3)
+        self.assertEqual(f.invoke().returncode, 0)
+        self.assertEqual(len(f.calls(["pr", "merge"])), 1)
+
     def test_invalid_target_ref_never_falls_back_to_pr_base(self):
         f = self.f
         payloads = [None, [], {},

@@ -240,6 +240,44 @@ class TestMergeUnit(unittest.TestCase):
             "    atexit.register(emit)\n" % (advance_epoch, fields or {}, remove))
         self.env["PYTHONPATH"] = str(site)
 
+    def intercept_intent_publication(self, forge_update=None, fail_resolution=False):
+        # Inject only after the real intent file and directory have been fsynced.
+        # Exercise the CLI consumer, not an in-process replacement of reconcile.
+        site = self.directory / "intent-publication-probe"
+        site.mkdir()
+        log = self.directory / "intent-syncs.jsonl"
+        (site / "sitecustomize.py").write_text(
+            "import json, os, pathlib, stat, sys\n"
+            "if sys.argv[0].endswith('merge_unit.py'):\n"
+            "    original_sync, original_replace = os.fsync, os.replace\n"
+            "    fired = False\n"
+            "    def sync(fd):\n"
+            "        global fired\n"
+            "        original_sync(fd)\n"
+            "        if not stat.S_ISDIR(os.fstat(fd).st_mode):\n"
+            "            return\n"
+            "        state = pathlib.Path(os.environ['COORDINATOR_STATE'])\n"
+            "        for path in state.glob('merge-unit-*.json'):\n"
+            "            intent = json.loads(path.read_text())\n"
+            "            with open(%r, 'a') as log:\n"
+            "                log.write(json.dumps(intent) + '\\n')\n"
+            "            if intent['phase'] == 'merge_requested' and not fired:\n"
+            "                fired = True\n"
+            "                forge = pathlib.Path(os.environ['FORGE_STATE'])\n"
+            "                data = json.loads(forge.read_text())\n"
+            "                data.update(%r)\n"
+            "                forge.write_text(json.dumps(data))\n"
+            "    def replace(src, dst):\n"
+            "        if pathlib.Path(dst).name.startswith('merge-unit-') and %r:\n"
+            "            if json.loads(pathlib.Path(src).read_text()).get('phase') == "
+            "'cancelled_before_request':\n"
+            "                raise OSError('injected cancellation publication failure')\n"
+            "        return original_replace(src, dst)\n"
+            "    os.fsync, os.replace = sync, replace\n"
+            % (str(log), forge_update or {}, fail_resolution))
+        self.env["PYTHONPATH"] = str(site)
+        return log
+
     def test_000_scope_base_mismatch_refuses_before_forge(self):
         self.intercept_scope_binding({"base": "f" * 40})
         result = self.invoke()
