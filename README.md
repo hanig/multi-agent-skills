@@ -899,6 +899,8 @@ Fully qualified class or method names (for example,
 `python3 -m unittest tests.test_review.TestVerdictSchema.test_empty_object_is_not_a_review`)
 bypass the module hook and run in-process under the existing per-test
 fixtures, without the worker's session and journal-manifest audit.
+A named class whose filter matches no methods fails with a delegation
+diagnostic instead of reporting success with zero tests.
 
 Standard library only; no network or cluster required. Green on macOS 3.10.16
 and on all three clusters (3.10.12, 3.12.3, 3.10.12).

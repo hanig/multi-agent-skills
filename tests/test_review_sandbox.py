@@ -756,6 +756,16 @@ assert not [t for t in cases if type(t).__module__ in ('test_review', 'tests.tes
         self.assertEqual(records[0]["method"], "test_a")
         self.assertFalse(records[0]["worker"])
 
+    def test_named_class_with_empty_filter_fails_loudly(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "unittest",
+             "tests.test_review.TestReviewJournal", "-k", "NoSuchReviewMethod"],
+            cwd=ROOT, capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Ran 1 test", result.stderr)
+        self.assertIn("test_review is delegated", result.stderr)
+        self.assertIn("class selection matched no tests", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

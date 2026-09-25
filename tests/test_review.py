@@ -4080,6 +4080,22 @@ class TestReviewJournal(unittest.TestCase):
         self.assertEqual(target.read_bytes(), before)
 
 
+def _empty_class_selection(self):
+    self.fail("test_review is delegated; this class selection matched no tests. "
+              "Run python3 -m unittest tests.test_review for the supervised "
+              "module, or name an existing test method.")
+
+
+# unittest bypasses load_tests for an explicitly named class. Its
+# runTest fallback runs only when the loader finds no matching test methods.
+# Preserve any class's own fallback; never replace an existing test body.
+for _case in tuple(globals().values()):
+    if (isinstance(_case, type) and issubclass(_case, unittest.TestCase)
+            and _case.__module__ == __name__ and not hasattr(_case, "runTest")):
+        _case.runTest = _empty_class_selection
+del _case
+
+
 def load_tests(loader, tests, pattern):
     """Return one supervised test for every parent-side module selection.
 

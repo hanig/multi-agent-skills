@@ -39,6 +39,8 @@ Fully qualified class or method names (for example,
 `python3 -m unittest tests.test_review.TestVerdictSchema.test_empty_object_is_not_a_review`)
 bypass the module hook and run in-process under the existing per-test
 fixtures, without the worker's session and journal-manifest audit.
+A named class whose filter matches no methods fails with a delegation
+diagnostic instead of reporting success with zero tests.
 
 Automatic install selection uses executable presence and reports adapter certification separately: an installed but uncertified version is planned and visibly `unverified`, never claimed supported. Selection itself produces certification warnings, and the installer emits them to stderr even with `--json`; stale dated evidence downgrades an exact version to unverified without blocking routine destination planning. Explicit `--agent` remains the offline/bootstrap route. Copy is the default deliberately; `--mode link` is for developing a skill.
 
