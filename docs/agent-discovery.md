@@ -25,6 +25,12 @@ and older distinct versions after 2026-10-05. Unknown or stale versions remain
 `unverified` and emit selection warnings; refreshing one version cannot extend
 another's date. No record is deleted just because it ages out.
 
+For recertification queries, `verification_review_due(adapter)` returns the
+earliest deadline among the newest records for each distinct version.
+`stale_adapter_certifications(as_of)` names an adapter when any such version
+is expired. Renewing OpenCode 1.18.29 supersedes its older observation; renewing
+a different Claude, Codex, or Pi version does not hide its older expired release.
+
 ## Consumer API
 
 The module uses only Python's standard library. Its public functions return

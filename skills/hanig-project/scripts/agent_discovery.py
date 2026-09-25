@@ -230,13 +230,21 @@ def certification_for(spec: Mapping[str, Any], version: Optional[str]) -> Option
 
 
 def verification_review_due(spec: Mapping[str, Any]) -> date:
-    """Date by which an exact-version certification must be reviewed again."""
+    """One record's deadline, or an adapter's earliest exact-version deadline.
+
+    A newer observation supersedes older evidence only for the same version.
+    An adapter still needs review when any distinct version's evidence expires.
+    """
+    if "certifications" in spec:
+        versions = {record["version"] for record in spec["certifications"]}
+        return min(verification_review_due(certification_for(spec, version))
+                   for version in versions)
     verified = datetime.strptime(spec["verified_on"], "%Y-%m-%d").date()
     return verified + timedelta(days=VERIFICATION_MAX_AGE_DAYS)
 
 
 def stale_adapter_certifications(as_of: Optional[date] = None) -> list[str]:
-    """Adapter IDs whose newest retained evidence has passed its deadline."""
+    """Adapter IDs with an expired exact version's newest retained evidence."""
     observed = as_of or date.today()
     return [name for name, spec in ADAPTERS.items()
             if observed > verification_review_due(spec)]
