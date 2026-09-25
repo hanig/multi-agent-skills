@@ -110,6 +110,183 @@ class TestAdjudication(unittest.TestCase):
         self.assertIsNone(self.records()[-1]["round"])
         self.assertEqual(self.query().returncode, 0)
 
+    def test_explicit_plan_selector_disambiguates_from_numbered_round(self):
+        plan = self.seed(round_no=None)
+        numbered = self.seed(round_no=1)
+        before = {p: p.read_bytes() for p in (plan, numbered)}
+        ambiguous = self.adjudicate()
+        self.assertEqual(ambiguous.returncode, 4)
+        self.assertIn("--round plan", ambiguous.stderr)
+        self.assertIn("--round 1", ambiguous.stderr)
+        recorded = self.adjudicate("--round", "plan")
+        self.assertEqual(recorded.returncode, 0, recorded.stderr)
+        self.assertIsNone(self.records()[-1]["round"])
+        self.assertIsNone(json.loads(recorded.stdout)["round"])
+        query = self.query()
+        self.assertEqual(query.returncode, 1, query.stderr)
+        self.assertEqual([f["round"] for f in json.loads(query.stdout)["open_findings"]], [1])
+        self.assertEqual(self.adjudicate("--round", "1").returncode, 0)
+        self.assertEqual(self.query().returncode, 0)
+        self.assertEqual(before, {p: p.read_bytes() for p in before})
+
+    def test_plan_selector_requires_plan_occurrence_and_adjudication_mode(self):
+        self.seed()
+        for result in (self.adjudicate("--round", "plan"),
+                       self.invoke("--open-findings", "--head", HEAD, "--round", "plan"),
+                       self.invoke("--kind", "implementation", "--round", "plan"),
+                       self.invoke("--kind", "plan", "--round", "plan")):
+            self.assertEqual(result.returncode, 4, result.stderr)
+        self.assertEqual(len(self.records()), 1)
+
+    def collision_round_trip(self, secret, round_no=1):
+        """Exercise persisted values through the CLI's real query consumer."""
+        stamp = "2026-09-24T12:34:56.123456789Z"
+        with patch.dict(os.environ, {"OPENAI_API_KEY": secret}), \
+                patch.object(review, "journal_timestamp", return_value=stamp):
+            path = self.seed(round_no=round_no)
+            record = json.loads(path.read_text())
+            expected = {"reviewed_head": HEAD, "round": round_no,
+                        "claim_digests": review.claim_digests([review.HONEST_RUN_CLAIM]),
+                        "type": "review_round", "schema_version": 2,
+                        "date": stamp, "kind": "implementation"}
+            for field, value in expected.items():
+                self.assertEqual(record[field], value, field)
+            self.assertEqual(record["results"][0]["findings"][0]["finding_digest"], self.digest)
+            self.assertIs(record["results"][0]["findings"][0]["confirmed"], True)
+            opened = self.query()
+            self.assertEqual(opened.returncode, 1, opened.stderr)
+            finding = json.loads(opened.stdout)["open_findings"][0]
+            self.assertEqual((finding["reviewed_head"], finding["finding_digest"], finding["round"]),
+                             (HEAD, self.digest, round_no))
+            recorded = self.adjudicate(reason="Reason containing " + secret)
+            self.assertEqual(recorded.returncode, 0, recorded.stderr)
+            self.assertTrue(json.loads(recorded.stdout)["journal"]["written"])
+            adjudication = self.records()[-1]
+            expected = {"reviewed_head": HEAD, "finding_digest": self.digest,
+                        "round": round_no, "type": "adjudication", "schema_version": 2,
+                        "timestamp": stamp, "author": [AUTHOR], "accepted_by": "owner",
+                        "decision": "overruled"}
+            for field, value in expected.items():
+                self.assertEqual(adjudication[field], value, field)
+            if len(secret) >= 4:
+                self.assertIn("<OPENAI_API_KEY redacted>", adjudication["reason"])
+            closed = self.query()
+            self.assertEqual(closed.returncode, 0, closed.stderr)
+            self.assertEqual(json.loads(closed.stdout)["state"], "NO_OPEN_FINDINGS")
+        self.assertEqual(self.query().returncode, 0)
+
+    def test_author_secret_collision_is_exact_and_queryable(self):
+        self.collision_round_trip("codex")
+
+    def test_accepted_by_secret_collision_is_exact_and_queryable(self):
+        self.collision_round_trip("owner")
+
+    def test_head_secret_collision_is_exact_and_queryable(self):
+        self.collision_round_trip(HEAD[:4])
+
+    def test_finding_digest_secret_collision_is_exact_and_queryable(self):
+        self.collision_round_trip(self.digest[:4])
+
+    def test_claim_digest_secret_collision_is_exact_and_queryable(self):
+        self.collision_round_trip(review.claim_digests([review.HONEST_RUN_CLAIM])[0][:4])
+
+    def test_round_secret_collision_is_exact_and_queryable(self):
+        self.collision_round_trip("1234", round_no=1234)
+
+    def test_decision_secret_collision_is_exact_and_queryable(self):
+        self.collision_round_trip("overruled")
+
+    def test_type_secret_collision_is_exact_and_queryable(self):
+        self.collision_round_trip("adjudication")
+
+    def test_review_type_secret_collision_is_exact_and_queryable(self):
+        self.collision_round_trip("review_round")
+
+    def test_schema_version_secret_collision_is_exact_and_queryable(self):
+        # The typed integer has no string-redaction path, even for short keys.
+        self.collision_round_trip("2")
+
+    def test_schema_label_secret_collision_is_exact_and_queryable(self):
+        self.collision_round_trip("schema_version")
+
+    def test_timestamp_secret_collision_is_exact_and_queryable(self):
+        self.collision_round_trip("123456789")
+
+    def test_review_date_secret_collision_is_exact_and_queryable(self):
+        self.collision_round_trip("2026-09-24")
+
+    def test_kind_secret_collision_is_exact_and_queryable(self):
+        self.collision_round_trip("implementation")
+
+    def test_confirmed_secret_collision_is_exact_and_queryable(self):
+        self.collision_round_trip("true")
+
+    def test_invalid_identity_tokens_are_refused_before_recording(self):
+        self.seed()
+        for token in ("white space", "newline\n", "nul\x00", "esc\x1b", "del\x7f",
+                      "nonascii\u200b", "a" * 257, "<redacted>", "local//model", "local/"):
+            with self.subTest(token=token):
+                self.assertEqual(self.adjudicate(acceptor=token).returncode, 4)
+                author = "codex/" + token
+                # argparse rejects the same restricted token before ledger I/O.
+                self.assertEqual(self.adjudicate("--author", author).returncode, 2)
+        self.assertEqual(len(self.records()), 1)
+        self.assertEqual(self.query().returncode, 1)
+
+    def test_invalid_decision_fields_are_refused_at_record_time(self):
+        args = SimpleNamespace(adjudicate=self.digest, head=HEAD, decision="overruled",
+                               accepted_by="owner", author=[AUTHOR], reason="reason", file=[])
+        for field, value in (("head", "bad-head"), ("adjudicate", "bad-digest"),
+                             ("decision", "over ruled"), ("accepted_by", "own\x00er"),
+                             ("author", ["codex/gpt\x1b"]), ("author", []), ("reason", 1)):
+            with self.subTest(field=field), patch.object(args, field, value), \
+                    patch.object(review, "_run_journal_append") as writer:
+                with self.assertRaises(ValueError):
+                    review.record_adjudication(args, 1)
+                writer.assert_not_called()
+        for round_no in (True, 0, -1, "1", "plan"):
+            with self.subTest(round=round_no), self.assertRaises(ValueError):
+                review.record_adjudication(args, round_no)
+        for stamp in ("2026-02-30T12:34:56.123456789Z", "2026-09-24", "secret\n"):
+            with patch.object(review, "journal_timestamp", return_value=stamp), \
+                    self.assertRaises(ValueError):
+                review.record_adjudication(args, 1)
+        self.assertEqual(self.records(), [])
+
+    def test_damaged_decision_fields_cannot_hide_on_another_head(self):
+        original = self.seed()
+        self.assertEqual(self.adjudicate().returncode, 0)
+        adjudication = sorted(self.journal.glob("*/record.jsonl"))[-1]
+        baseline = {p: p.read_bytes() for p in (original, adjudication)}
+        cases = (("author", ["<OPENAI_API_KEY redacted>/gpt-6-astra"]),
+                 ("accepted_by", "<OPENAI_API_KEY redacted>"),
+                 ("decision", "<OPENAI_API_KEY redacted>"),
+                 ("round", "1"), ("round", True), ("schema_version", True),
+                 ("schema_version", 999), ("type", "<OPENAI_API_KEY redacted>"),
+                 ("timestamp", "<OPENAI_API_KEY redacted>"), ("reason", None))
+        for field, value in cases:
+            for head in (HEAD, "2" * 40):
+                with self.subTest(field=field, head=head):
+                    record = json.loads(baseline[adjudication])
+                    record.update({field: value, "reviewed_head": head})
+                    adjudication.write_text(json.dumps(record) + "\n")
+                    before = adjudication.read_bytes()
+                    result = self.query()
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    output = json.loads(result.stdout)
+                    self.assertEqual(output["state"], "UNATTRIBUTABLE")
+                    self.assertEqual(output["unattributable_records"][0]["record_path"], str(adjudication))
+                    self.assertEqual(adjudication.read_bytes(), before)
+        adjudication.write_bytes(baseline[adjudication])
+        for field, value in (("confirmed", "true"), ("confirmed", 1)):
+            record = json.loads(baseline[original])
+            record["reviewed_head"] = "2" * 40
+            record["results"][0]["findings"][0][field] = value
+            original.write_text(json.dumps(record) + "\n")
+            result = self.query()
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["state"], "UNATTRIBUTABLE")
+
     def test_author_self_acceptance_refused(self):
         self.seed()
         for acceptor in (AUTHOR, "openai/gpt-6-astra", "gpt-6-astra"):
@@ -323,14 +500,12 @@ class TestAdjudication(unittest.TestCase):
                     self.assertEqual(report["unattributable_records"][0]["record_path"], str(path))
                     self.assertEqual(path.read_bytes(), before)
 
-    def test_non_hex_head_and_hex_free_text_are_still_redacted(self):
+    def test_non_hex_head_is_refused_and_hex_free_text_is_redacted(self):
         secret = "secret-test-key"
         with patch.dict(os.environ, {"OPENAI_API_KEY": secret}):
-            path = self.seed(head="not-a-head/" + secret)
-        self.assertNotIn(secret, path.read_text())
-        self.assertEqual(json.loads(path.read_text())["reviewed_head"],
-                         "not-a-head/<OPENAI_API_KEY redacted>")
-        self.assertEqual(json.loads(self.query().stdout)["state"], "UNATTRIBUTABLE")
+            with self.assertRaises(ValueError):
+                self.seed(head="not-a-head/" + secret)
+        self.assertEqual(self.records(), [])
         with patch.dict(os.environ, {"OPENAI_API_KEY": HEAD[:4]}):
             path = self.seed(finding={**self.finding, "summary": HEAD,
                                      "extra": {"reviewed_head": HEAD}})

@@ -209,7 +209,9 @@ Use the effective state home from the original `journal.path` and the original
 project directory; the configured state home may have fallen back during review.
 
 Recording requires a matching confirmed finding on that head and a non-empty
-reason. If the digest occurs in multiple rounds, add `--round N`. Decisions are
+reason. If the digest occurs in multiple rounds, use the reported selectors:
+`--round N` for a numbered occurrence or `--round plan` for the null round.
+An omitted selector refuses ambiguity even after another occurrence is disposed. Decisions are
 `overruled`, `accepted` or `refuted_by_reproduction`; each records a disposition,
 not a fix or a pass. Declare all authors with repeatable `--author`; the record's
 `author` field is that list. Acceptor models use ARC-755's exact model-ID comparison
@@ -217,19 +219,21 @@ after the outer provider prefix; names are not case-folded or substring-matched.
 
 The read-only query exits 1 when confirmed findings lack an adjudication for
 that head, round and digest, or when any canonical record has a missing/invalid
-head or digest. It lists damaged records by path as `UNATTRIBUTABLE`, including
+decision field. It lists damaged records by path as `UNATTRIBUTABLE`, including
 already-redacted history and records otherwise associated with another head.
 It exits 0 only when neither open findings nor unattributable records exist,
 and 4 on invalid input or unreadable canonical history. Zero certifies neither
 review coverage nor complete historical capture. Unpublished pending files are ignored.
 
-Full lowercase 40-/64-hex heads and 64-hex finding/claim digests are validated
-before exemption from redaction and retained exactly in their schema fields.
-Recognized envelope keys and ledger type/decision tokens also retain their
-schema spelling. Unknown keys, free text and invalid identifiers stay redacted.
-Adjudication binds only
-validated identities; it cannot repair or conceal damaged historical identities.
-The query preserves old bytes rather than guessing an obscured head or digest.
+Decision fields validate before recording and redaction exemption: full lowercase
+40-/64-hex heads, 64-hex finding/claim digests, positive integer or null rounds,
+boolean classifications, schema/type/decision labels, timestamps, and identities.
+Authors require PROVIDER/MODEL; acceptors may be names. Both are ASCII tokens of
+1–256 characters, slash-separated nonempty components starting with a letter or
+digit and continuing with letters, digits, `_ . : @ + -`. They retain exact bytes;
+invalid fields are refused before recording. Recognized schema keys retain their
+spelling; reason, notes and arbitrary reviewer text/extras remain redacted.
+The query preserves old bytes and reports obscured identities without guessing.
 
 Adjudications append redacted, immutable JSON lines through the same atomic,
 bounded, non-gating writer as reviews. A valid recording request exits 0 even
