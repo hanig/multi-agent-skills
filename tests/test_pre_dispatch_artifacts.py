@@ -24,6 +24,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "hanig-swarm" / "scripts"
@@ -53,29 +54,39 @@ class Base(unittest.TestCase):
         self.state_dir = self.tmp / "state"
         self.state_dir.mkdir()
         self.root = self.tmp / "runs"
+        self.accounting_submits = {}
 
     def attempt(self, outputs=("o.txt",), task="u", attempt_id="att1",
                 job="4242", kind="slurm"):
         d = self.root / task / attempt_id
         d.mkdir(parents=True)
+        submitted = U.now_iso()
+        self.accounting_submits[str(job)] = submitted
         (d / U.UNIT).write_text(json.dumps({
             "schema_version": 1, "task_id": task, "attempt_id": attempt_id,
-            "kind": kind, "job_id": job, "bound_at": U.now_iso(),
+            "kind": kind, "job_id": job, "bound_at": submitted,
             "declared_outputs": list(outputs),
-            "created_at": U.now_iso(), "created_at_epoch": time.time()}))
+            "created_at": submitted,
+            "created_at_epoch": U.parse_iso_ts(submitted)}))
         return d
 
     def sacct_on_path(self):
-        """A COMPLETED row for any job, owned by an attempt declared just now.
+        """A COMPLETED row for each fabricated job, at its submission time.
 
-        Submit and End come from `date` inside the stub, which is the
-        ownership window `sacct_row_is_ours` enforces.
+        Query latency must not move Submit beyond the persisted bind window.
+        End is the observation time; the production ownership check still
+        consumes the real stub through PATH and compares both interval bounds.
         """
         b = self.tmp / "bin"
         b.mkdir(exist_ok=True)
         (b / "sacct").write_text(
-            "#!/bin/sh\nnow=$(date +%Y-%m-%dT%H:%M:%S)\n"
-            'echo "COMPLETED|0:0|$now|$now"\n')
+            "#!" + sys.executable + "\n"
+            "import sys, time\n"
+            "submits = %r\n" % self.accounting_submits +
+            "job = sys.argv[sys.argv.index('-j') + 1]\n"
+            "if job in submits:\n"
+            "    print('COMPLETED|0:0|' + submits[job] + '|' + "
+            "time.strftime('%Y-%m-%dT%H:%M:%S%z'))\n")
         (b / "sacct").chmod(0o755)
         old = os.environ["PATH"]
         os.environ["PATH"] = f"{b}{os.pathsep}{old}"
@@ -390,6 +401,13 @@ class TestTheAgentCannotReachTheBaseline(Base):
         basis = S._capture_artifact_basis(
             {}, "u", str(attempt), {"outputs": ["plan-said-this"]})
         self.assertEqual(basis["declared"], ["plan-said-this"])
+
+    def test_delayed_accounting_still_reaches_the_declaration_guard(self):
+        # Model arbitrary descheduling between binding and querying without
+        # a sleep: the fabricated attempt was bound long before this query.
+        # Run the same consumer assertions, including the persisted receipt.
+        with mock.patch.object(U, "now_iso", return_value="2000-01-01T00:00:00+0000"):
+            self.test_rewriting_the_specs_declared_outputs_is_refused()
 
 
 class TestWhatCountsAsAChange(unittest.TestCase):
