@@ -7,6 +7,14 @@
       "claims": [
         "integration-tests"
       ]
+    },
+    {
+      "name": "changed-tests-stable",
+      "sha256": "433526c042a03effdba3aabe68eb9477d76f25773dab512fb0a60eeae340fa32",
+      "claims": [
+        "changed-tests-stable"
+      ],
+      "repetitions": 5
     }
   ]
 }
