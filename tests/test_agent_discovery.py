@@ -8,6 +8,7 @@ import socket
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from concurrent.futures import Future
 from contextlib import contextmanager
@@ -25,6 +26,11 @@ VERSIONS = {name: spec["verified_versions"][0] for name, spec in discovery.adapt
 # shared host; short production deadlines are covered separately below.
 REAL_PROBE_SECONDS = 60
 REAL_REAP_SECONDS = 5
+# Measure only after observed readiness/forced expiry, excluding interpreter
+# startup. Three seconds of scheduling/exit slack on top of the 5s drain window
+# gives an 8s bound: generous under load, but rejects an extra 10s wait or the
+# full 60s probe budget. The 120s watchdog separately detects deadlock.
+REAL_COMPLETION_SLACK_SECONDS = 3
 WATCHDOG_SECONDS = 120
 
 
@@ -242,8 +248,10 @@ class TestAgentDiscovery(unittest.TestCase):
                 "peer.recv(1)",
             ]))
             peers = []
+            expired_at = None
 
             def expire_after_cli_started(readers, writers, errors, timeout):
+                nonlocal expired_at
                 peer, _ = listener.accept()
                 peers.append(peer)
                 peer.settimeout(WATCHDOG_SECONDS)
@@ -251,6 +259,7 @@ class TestAgentDiscovery(unittest.TestCase):
                 # Exercise the real timeout branch only after the CLI is
                 # blocked. Zero readiness comes from the OS, not a fake report.
                 self.assertGreater(timeout, 0)
+                expired_at = time.monotonic()
                 return select.select(readers, writers, errors, 0)
 
             try:
@@ -258,6 +267,11 @@ class TestAgentDiscovery(unittest.TestCase):
                     polling.select.side_effect = expire_after_cli_started
                     with real_discovery(fixture_env(home, PATH=str(bin_dir))) as answer:
                         report = answer.result(timeout=WATCHDOG_SECONDS)
+                        self.assertIsNotNone(expired_at)
+                        self.assertLess(
+                            time.monotonic() - expired_at,
+                            REAL_REAP_SECONDS + REAL_COMPLETION_SLACK_SECONDS,
+                            "discovery exceeded the post-expiry completion bound")
                         # Observe termination before the fixture's fallback
                         # cleanup can kill a survivor and mask a probe defect.
                         self.assertEqual(len(peers), 1)
@@ -307,6 +321,7 @@ class TestAgentDiscovery(unittest.TestCase):
                 "peer = socket.create_connection(%r, timeout=%r)" % (
                     listener.getsockname(), WATCHDOG_SECONDS * 2),
                 "peer.sendall(b'R')",
+                "assert peer.recv(1) == b'A'",
                 "os.write(int(sys.argv[1]), b'R')",
                 "os.close(int(sys.argv[1]))",
                 "if peer.recv(1) == b'W':",
@@ -326,13 +341,22 @@ class TestAgentDiscovery(unittest.TestCase):
             peer = None
             with real_discovery(fixture_env(home, PATH=str(bin_dir))) as answer:
                 try:
-                    # No release is sent until discovery returns. Waiting for
-                    # inherited stdout EOF would therefore trip this watchdog.
-                    report = answer.result(timeout=WATCHDOG_SECONDS)
-                    self.assertEqual(report["agents"]["claude"]["state"], "executable_found")
                     peer, _ = listener.accept()
                     peer.settimeout(WATCHDOG_SECONDS)
                     self.assertEqual(peer.recv(1), b"R", "writer never reached its barrier")
+                    ready_at = time.monotonic()
+                    # Only this acknowledgment lets the writer notify the CLI
+                    # to print/exit. The drain cannot precede our timestamp,
+                    # even if this test thread was starved during startup.
+                    peer.sendall(b"A")
+                    # No release is sent until discovery returns. Waiting for
+                    # inherited stdout EOF would therefore trip this watchdog.
+                    report = answer.result(timeout=WATCHDOG_SECONDS)
+                    self.assertLess(
+                        time.monotonic() - ready_at,
+                        REAL_REAP_SECONDS + REAL_COMPLETION_SLACK_SECONDS,
+                        "discovery exceeded the post-readiness drain bound")
+                    self.assertEqual(report["agents"]["claude"]["state"], "executable_found")
                     try:
                         peer.sendall(b"W")
                     except (BrokenPipeError, ConnectionResetError):
