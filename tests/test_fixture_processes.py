@@ -848,6 +848,30 @@ class TestSessionContainment(unittest.TestCase):
         self.assertNotIn(foreign.pid, [call.args[0] for call in sent.call_args_list])
         self.assertIsNone(foreign.poll())
 
+    def test_scheduling_delay_before_first_scan_cannot_skip_term(self):
+        scope = self._scope()
+        proc = self._launch(scope,
+            'import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); '
+            'print("ready",flush=True); time.sleep(600)')
+        wait_for(lambda: proc.stdout_path.read_text() == 'ready\n')
+        clock = time.monotonic
+        first = [True]
+        def deschedule_after_start():
+            observed = clock()
+            if first[0]:
+                first[0] = False
+                time.sleep(0.35)  # Pause after the cleanup start timestamp.
+            return observed
+        with mock.patch.object(fixtures.time, 'monotonic', deschedule_after_start), mock.patch.object(
+                fixtures.os, 'killpg', wraps=os.killpg) as sent:
+            result = proc.cleanup()
+        self.assertEqual(result.state, CleanupState.CLEAN, result)
+        delivered = [call.args[1] for call in sent.call_args_list]
+        self.assertTrue(delivered)
+        self.assertEqual(delivered[0], signal.SIGTERM)
+        self.assertIn(signal.SIGKILL, delivered)
+        self.assertEqual(fixtures._session_rows(proc.supervisor_pid, set()), {})
+
     def test_failed_cache_cannot_skip_emergency_containment_or_retry(self):
         scope = self._scope()
         proc = self._launch(scope, 'import time; print("ready",flush=True); time.sleep(600)')
