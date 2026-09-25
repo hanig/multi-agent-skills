@@ -6,7 +6,6 @@ policy, never from candidate configuration. Tests remain candidate bytes and
 run as the operator's user; this is a stability check, not a hostile-code sandbox.
 """
 import argparse
-import glob
 import os
 from pathlib import Path
 import re
@@ -14,16 +13,20 @@ import shutil
 import subprocess
 
 
-# Use unittest's normal discovery and load_tests hook (including the supervised
-# review module), but a selected file that discovers zero cases is not evidence.
-RUN_MODULE = """import os, sys, unittest
+# Load the selected module itself: package discovery can supply package tests
+# or let a package hook hide this module. Its OWN load_tests stays authoritative
+# (including the supervised review module). Count execution, not suite size.
+RUN_MODULE = """import importlib, os, sys, unittest
 # Keep the helper import path supplied by the integration runner's -s tests,
-# while allowing discovery to retain package identities for relative imports.
+# and the package root needed for the selected dotted module's relative imports.
 sys.path.insert(0, os.path.abspath('tests'))
-program = unittest.main(module=None, argv=[sys.argv[0], 'discover', '-s',
-                         sys.argv[1], '-p', sys.argv[2], '-t', sys.argv[3]], exit=False)
+sys.path.insert(0, os.path.abspath(sys.argv[3]))
+module = importlib.import_module(sys.argv[1])
+if module.__file__ != os.path.abspath(sys.argv[2]):
+    raise SystemExit('changed test module imported from a different file')
+program = unittest.main(module=module, argv=[sys.argv[0]], exit=False)
 if not program.result.testsRun:
-    raise SystemExit('changed test module discovered no tests')
+    raise SystemExit('changed test module executed no tests')
 raise SystemExit(0 if program.result.wasSuccessful() else 1)
 """
 
@@ -64,11 +67,12 @@ def main():
         path = Path(module)
         if path.is_symlink() or not path.is_file():
             raise SystemExit("changed test module is not a regular candidate file: " + module)
+        name = ".".join(path.relative_to(top).with_suffix("").parts)
         for repetition in range(args.repetitions):
             print("{}: repetition {}/{}".format(
                 module, repetition + 1, args.repetitions), flush=True)
             result = subprocess.run(
-                ["python3", "-c", RUN_MODULE, str(path.parent), glob.escape(path.name), top],
+                ["python3", "-c", RUN_MODULE, name, module, top],
                 check=False)
             if result.returncode:
                 return 1

@@ -340,10 +340,13 @@ The second designated verifier, `changed-tests-stable`, runs
 `verifiers/changed_tests_stable.py`. It selects added or modified `test_*.py`
 files under `tests/` from the PR's merge-base-to-head diff (renames count as
 delete/add), then runs each module in a fresh host `python3` process five times.
-Discovery retains package identities for relative imports and the integration
-runner's `tests/` helper import path.
-Any failed repetition fails the claim; a selected module that discovers zero
-tests also fails. No changed test modules is a successful no-op. The target's
+Each invocation loads that module by its dotted name, retaining package
+identities for relative imports and the integration runner's `tests/` helper
+import path. Package-level `load_tests` hooks cannot replace the module's
+suite; the module's own hook, including supervised delegation, is honored.
+Any failure, error, or unexpected success fails the claim; a selected module
+that executes zero tests also fails, even if its suite reports a positive size
+or another module ran tests. No changed test modules is a successful no-op. The target's
 verifier entry can set a positive integer `repetitions`; candidate policy and
 program edits cannot change that count or the pinned program used for this PR.
 Repeated passes sample stability; they do not prove a test cannot flake later.
