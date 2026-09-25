@@ -415,7 +415,9 @@ class TestTheAgentCannotReachTheBaseline(Base):
 
     def test_accounting_stub_accepts_a_long_interpreter_path(self):
         interpreter = self.tmp
-        for _ in range(6):
+        # Extend only short temporary roots; a deep TMPDIR already supplies
+        # the long path and must not be pushed past the filesystem path limit.
+        while len(os.fsencode(str(interpreter))) < 600:
             interpreter /= "python-environment-" + "x" * 80
         interpreter.mkdir(parents=True)
         interpreter /= "python3"
