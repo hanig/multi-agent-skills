@@ -552,6 +552,35 @@ class TestTypedFixtureContract(unittest.TestCase):
             result = proc._perform_cleanup()
         self.assertEqual(result.state, CleanupState.INDETERMINATE)
 
+    def test_captured_output_uses_utf8_replacement_in_a_non_utf8_locale(self):
+        driver = (
+            'import json,locale,sys,tempfile,unittest\n'
+            'sys.path.insert(0,%r)\n'
+            'from fixture_processes import FixtureProcesses,FixtureSpec,CleanupState\n'
+            'with tempfile.TemporaryDirectory() as root:\n'
+            '    scope=FixtureProcesses(unittest.TestCase(),root)\n'
+            '    proc=scope.launch(FixtureSpec((sys.executable,"-c",'
+            '"import os; os.write(1,bytes([195,169,128])); os.write(2,bytes([195,169,128]))")))\n'
+            '    try:\n'
+            '        joined=proc.join(10)\n'
+            '        print(json.dumps(dict(state=joined.state.value,code=joined.returncode,'
+            'stdout=joined.stdout,stderr=joined.stderr,encoding=locale.getpreferredencoding(False),'
+            'utf8_mode=sys.flags.utf8_mode)))\n'
+            '    finally:\n'
+            '        assert proc.cleanup().state is CleanupState.CLEAN\n'
+        ) % str(Path(fixtures.__file__).resolve().parent)
+        env = dict(os.environ, LC_ALL='C', PYTHONUTF8='0', PYTHONCOERCECLOCALE='0')
+        run = subprocess.run([sys.executable, '-c', driver], env=env,
+                             capture_output=True, text=True, timeout=30)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        answer = json.loads(run.stdout)
+        self.assertEqual(answer['utf8_mode'], 0)
+        self.assertNotIn(answer['encoding'].lower(), ('utf-8', 'utf8'))
+        self.assertEqual(answer['state'], 'EXITED')
+        self.assertEqual(answer['code'], 0)
+        self.assertEqual(answer['stdout'], 'é�')
+        self.assertEqual(answer['stderr'], 'é�')
+
     def test_repeated_join_terminate_and_cleanup_preserve_reported_status(self):
         for exit_code in (0, 23):
             with self.subTest(exit_code=exit_code):
@@ -907,7 +936,8 @@ class TestSessionContainment(unittest.TestCase):
             if pid == 1000000000:
                 raise ProcessLookupError(errno.ESRCH, 'exiting row')
             return original_sid(pid)
-        output = '%d %d\n1000000000 1000000000\n' % (proc.supervisor_pid, proc.supervisor_pid)
+        output = '%d %d\n%d %d\n1000000000 1000000000\n' % (
+            proc.supervisor_pid, proc.supervisor_pid, os.getpid(), os.getpgrp())
         with mock.patch.object(fixtures.subprocess, 'check_output', return_value=output), mock.patch.object(
                 fixtures.os, 'getsid', lookup):
             rows = fixtures._session_rows(proc.supervisor_pid, set())
@@ -917,6 +947,19 @@ class TestSessionContainment(unittest.TestCase):
         self.assertEqual(result.state, CleanupState.ERROR, result)
         self.assertIn('signal denied', result.detail)
         self.assertEqual(proc.cleanup().state, CleanupState.CLEAN)
+
+    def test_empty_census_after_external_leader_death_cannot_certify_absence(self):
+        scope = self._scope()
+        proc = self._launch(scope, 'import time; print("ready",flush=True); time.sleep(600)')
+        wait_for(lambda: proc.stdout_path.read_text() == 'ready\n')
+        os.kill(proc.supervisor_pid, signal.SIGKILL)
+        self.assertEqual(proc.join(10).state, JoinState.STATUS_UNAVAILABLE)
+        with mock.patch.object(fixtures.subprocess, 'check_output', return_value=''):
+            result = proc.cleanup()
+        self.assertEqual(result.state, CleanupState.INDETERMINATE, result)
+        self.assertIn('omitted its live caller', result.detail)
+        self.assertEqual(proc.cleanup().state, CleanupState.CLEAN)
+        self.assertNotIn(proc.child_pid, process_table())
 
     def test_malformed_scoped_census_is_not_absence(self):
         scope = self._scope()

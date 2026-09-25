@@ -181,7 +181,7 @@ def _session_rows(sid, groups):
     output = subprocess.check_output(
         ['/bin/ps', '-U', str(os.geteuid()), '-o', 'pid=,pgid='],
         text=True, timeout=5)
-    rows = {}
+    rows, seen = {}, set()
     for line in output.splitlines():
         parts = line.split()
         if len(parts) != 2:
@@ -190,8 +190,9 @@ def _session_rows(sid, groups):
             pid, pgid = map(int, parts)
         except ValueError as error:
             raise _Indeterminate('malformed membership enumeration') from error
-        if pid <= 0 or pgid <= 0 or pid in rows:
+        if pid <= 0 or pgid <= 0 or pid in seen:
             raise _Indeterminate('invalid membership enumeration')
+        seen.add(pid)
         try:
             observed_sid = os.getsid(pid)
         except ProcessLookupError:
@@ -200,6 +201,10 @@ def _session_rows(sid, groups):
             # A ledger hit alone has no authority: retain its foreign sid so
             # the consumer can explicitly discard a reused group.
             rows[pid] = _Identity(pgid, observed_sid)
+    # The scanner itself cannot vanish during this call. This single-row
+    # completeness sentinel requires no stability from unrelated processes.
+    if os.getpid() not in seen:
+        raise _Indeterminate('membership census omitted its live caller')
     return rows
 
 
@@ -354,8 +359,8 @@ class FixtureProcess:
 
     def _output(self, state, code=None, detail=''):
         return JoinResult(state, code,
-                          self.stdout_path.read_text(errors='replace'),
-                          self.stderr_path.read_text(errors='replace'), detail)
+                          self.stdout_path.read_text(encoding='utf-8', errors='replace'),
+                          self.stderr_path.read_text(encoding='utf-8', errors='replace'), detail)
 
     def join(self, timeout=60):
         if self._joined is not None:
