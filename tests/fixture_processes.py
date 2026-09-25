@@ -188,7 +188,12 @@ def _identity(pid):
             fields = struct.unpack('=12I48s6I2Q', data.raw)
             if fields[3] != pid:
                 raise _Indeterminate('process identity changed during inspection')
-            return _Identity(fields[-2:], fields[5], fields[14], os.getsid(pid), fields[1] == 5)
+            zombie = fields[1] == 5
+            # getsid can report ESRCH for a zombie whose birth record still
+            # exists. Keep that record so old zombies cannot look like a
+            # disappearing, possibly newly forked descendant.
+            sid = 0 if zombie else os.getsid(pid)
+            return _Identity(fields[-2:], fields[5], fields[14], sid, zombie)
         if sys.platform.startswith('linux'):
             path = Path('/proc') / str(pid)
             fields = (path / 'stat').read_text().rsplit(')', 1)[1].split()
@@ -198,6 +203,32 @@ def _identity(pid):
         raise FixtureRefused('fixture absence inspection requires macOS or Linux')
     except (ProcessLookupError, FileNotFoundError):
         return None
+
+
+def _enumerate_pids():
+    """Use the kernel census for judging; ps is diagnostic-only.
+
+    ps formats command lines after collecting its rows, widening the window in
+    which short-lived processes disappear. The kernel census avoids that extra
+    latency; a changing or truncated census still cannot certify absence.
+    """
+    if sys.platform == 'darwin':
+        _identity(os.getpid())  # Initialize and validate the libproc ABI.
+        needed = _DARWIN_LIB.proc_listpids(4, os.geteuid(), None, 0)
+        if needed <= 0:
+            raise OSError('cannot size process enumeration')
+        array = (ctypes.c_int * (needed // 4 + 1024))()
+        size = ctypes.sizeof(array)
+        used = _DARWIN_LIB.proc_listpids(4, os.geteuid(), array, size)
+        if used <= 0 or used >= size or used % 4:
+            raise _Indeterminate('failed or truncated process enumeration')
+        pids = {p for p in array[:used // 4] if p > 0}
+    else:
+        with os.scandir('/proc') as entries:
+            pids = {int(p.name) for p in entries if p.name.isdigit()}
+    if os.getpid() not in pids:
+        raise _Indeterminate('process enumeration omitted its caller')
+    return pids
 
 
 def _environment(pid):
@@ -315,17 +346,25 @@ def wait_readable(fd, timeout):
 
 def process_table():
     """Enumerate this unprivileged uid with untruncated diagnostic commands."""
-    output = subprocess.check_output(
-        ['/bin/ps', '-ww', '-U', str(os.getuid()), '-o',
-         'pid=,ppid=,pgid=,uid=,stat=,command='],
-        text=True, timeout=60)
+    with subprocess.Popen(
+            ['/bin/ps', '-ww', '-U', str(os.getuid()), '-o',
+             'pid=,ppid=,pgid=,uid=,stat=,command='],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as reader:
+        try:
+            output, error = reader.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            reader.kill()
+            reader.wait(timeout=5)
+            raise
+        if reader.returncode != 0:
+            raise OSError('process enumeration failed: ' + error)
     rows = {}
     for line in output.splitlines():
         parts = line.strip().split(None, 5)
         if len(parts) != 6:
             raise _Indeterminate('malformed process enumeration')
         pid, ppid, pgid, uid = map(int, parts[:4])
-        if uid == os.geteuid():
+        if uid == os.geteuid() and pid != reader.pid:
             rows[pid] = (ppid, pgid, parts[4], parts[5])
     if os.getpid() not in rows:
         raise _Indeterminate('process enumeration omitted its caller')
@@ -479,8 +518,8 @@ class FixtureProcess:
         Processes predating this launch cannot descend from it. Identity/marker
         errors for any eligible same-uid process are unknown, never absence.
         """
-        targets, inspected = {}, set()
-        table = process_table()
+        targets, inspected, complete = {}, set(), True
+        table = _enumerate_pids()
         anchor = _identity(self.supervisor_pid)
         if anchor is not None:
             if anchor.birth != self._anchor.birth:
@@ -490,6 +529,7 @@ class FixtureProcess:
         for pid in table:
             identity = _identity(pid)
             if identity is None:
+                complete = False
                 continue
             if identity.uid != self._anchor.uid or identity.birth < self._anchor.birth:
                 continue
@@ -503,19 +543,27 @@ class FixtureProcess:
                 marked = _has_marker(pid, identity, self.marker)
                 if not marked:
                     marked = _cwd_marker(pid, identity, self.scope._root_identity)
+            after = _identity(pid)
+            if after is None:
+                complete = False
+                continue
+            if after.birth != identity.birth:
+                raise _Indeterminate('PID changed during survivor scan')
+            if identity.zombie and not in_session and known is None:
+                complete = False  # Its marker cannot be inspected until reap.
             if marked or in_session or known is not None:
                 self._record(pid, identity)
                 targets[pid] = identity
-        return targets, inspected
+        return targets, inspected, complete
 
     def _survivor_scan(self):
         deadline = time.monotonic() + 5
-        _first, before = self._snapshot()
+        _first, before, _complete = self._snapshot()
         while True:
             started = time.monotonic()
-            second, after = self._snapshot()
-            if second or not (after - before):
-                return second, not (after - before)
+            second, after, complete = self._snapshot()
+            if second or (complete and not (after - before)):
+                return second, complete and not (after - before)
             if started >= deadline:
                 return second, False
             before = after
