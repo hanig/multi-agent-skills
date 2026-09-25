@@ -335,11 +335,16 @@ class TestAgentDiscovery(unittest.TestCase):
                     self.assertEqual(peer.recv(1), b"R", "writer never reached its barrier")
                     try:
                         peer.sendall(b"W")
-                    except BrokenPipeError:
+                    except (BrokenPipeError, ConnectionResetError):
                         pass
-                    # EOF proves termination; a surviving writer writes the
-                    # marker before acknowledging release. Neither needs sleep.
-                    self.assertEqual(peer.recv(1), b"", "probe left an inherited writer running")
+                    # A write to the killed peer can elicit TCP RST instead of
+                    # EOF. Both mean the connection closed; a surviving writer
+                    # writes the marker before acknowledging release with E.
+                    try:
+                        response = peer.recv(1)
+                    except ConnectionResetError:
+                        response = b""
+                    self.assertEqual(response, b"", "probe left an inherited writer running")
                     self.assertFalse(marker.exists(), "probe left an inherited writer running")
                 finally:
                     # Release a blocked writer even when the watchdog/assertion
