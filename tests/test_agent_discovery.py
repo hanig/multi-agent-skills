@@ -258,8 +258,10 @@ class TestAgentDiscovery(unittest.TestCase):
                     polling.select.side_effect = expire_after_cli_started
                     with real_discovery(fixture_env(home, PATH=str(bin_dir))) as answer:
                         report = answer.result(timeout=WATCHDOG_SECONDS)
-                self.assertEqual(len(peers), 1)
-                self.assertEqual(peers[0].recv(1), b"", "timed-out CLI survived")
+                        # Observe termination before the fixture's fallback
+                        # cleanup can kill a survivor and mask a probe defect.
+                        self.assertEqual(len(peers), 1)
+                        self.assertEqual(peers[0].recv(1), b"", "timed-out CLI survived")
             finally:
                 for peer in peers:
                     peer.close()
