@@ -488,22 +488,12 @@ def reconcile(args, plan):
             raise Refusal("verification requires an OPEN PR with no unresolved merge intent")
         S.load_verifications(state_dir)
         target = observed_target(cmd["target"], binding["target"])
-        evidence, error = V.run_merge_precondition(
-            S.U.run, repo, binding["head"], target,
-            timeout=args.verification_timeout)
-        if error:
-            raise Refusal(error + ". " + verification_hint(args))
-        evidence.update({"unit": args.unit, "by": args.approver,
-                         "at": datetime.now(timezone.utc).isoformat()})
-        problem = S._verify_shape_problem(evidence)
-        if problem:
-            raise Refusal(problem)
-        S._fsync_append(state_dir / S.VERIFY_RECEIPTS, evidence)
-        print("integration-tests: {} for head {} into target {} (no merge requested)".format(
-            evidence["result"].upper(), evidence["subject_head"], evidence["target_commit"]))
-        if evidence["result"] != "pass":
-            raise Refusal("candidate merge verifier failed; repair the candidate")
-        return None
+        # Return only coordinator/forge inputs captured under the lease. The
+        # caller releases it before running the disposable candidate verifier.
+        return {"binding": binding, "scope_binding": scope_binding,
+                "state_dir": state_dir, "root": root, "repo": repo,
+                "operation_id": operation_id, "target": target,
+                "plan_digest": S.plan_digest(plan)}
     observation = {"approver": args.approver, "already_merged": pr["state"] == "MERGED",
                    "scope_exit": scope.returncode, "scope": scope_report,
                    "scope_stdout": scope.stdout, "scope_stderr": scope.stderr}
@@ -622,6 +612,74 @@ def reconcile(args, plan):
     return cmd["advance"]
 
 
+def verify_integration(args, snapshot):
+    """Run without the lease, then fence publication against fresh authority."""
+    binding, target = snapshot["binding"], snapshot["target"]
+    evidence, error = V.run_merge_precondition(
+        S.U.run, snapshot["repo"], binding["head"], target,
+        timeout=args.verification_timeout)
+    if error:
+        raise Refusal(error + ". " + verification_hint(args))
+
+    ok, holder = S.acquire_lease(args.state_dir)
+    if not ok:
+        raise Refusal("verification evidence not recorded: coordinator lock unavailable: {}. "
+                      "Rerun verification. {}".format(holder, verification_hint(args)))
+    try:
+        try:
+            # Read the plan again as well: an accepted plan edit must not be
+            # hidden by this process's pre-verification in-memory copy.
+            plan = read_object(args.plan)
+            if S.plan_digest(plan) != snapshot["plan_digest"]:
+                raise Refusal("plan changed during verification")
+            current = authority(args, plan)
+            state_dir, root, fresh, host, repo_path, scope_binding, repo = current
+            for key, value in binding.items():
+                if fresh.get(key) != value:
+                    raise Refusal("coordinator binding changed during verification: " + key)
+            # acquire_lease increments the epoch once for our own new lease.
+            # Any other increment (even a no-op coordinator pass) invalidates
+            # the observation; never refresh the saved epoch to accept it.
+            expected_scope = dict(snapshot["scope_binding"])
+            expected_scope["state_epoch"] += 1
+            for key, value in expected_scope.items():
+                if scope_binding.get(key) != value:
+                    raise Refusal("coordinator binding changed during verification: " + key)
+            if (state_dir != snapshot["state_dir"] or root != snapshot["root"]
+                    or repo != snapshot["repo"]):
+                raise Refusal("coordinator paths changed during verification")
+            operation_id, _, intent = current_intent(state_dir, fresh, root)
+            if intent or operation_id != snapshot["operation_id"]:
+                raise Refusal("merge intent changed during verification")
+            S.load_merge_receipts(state_dir)
+            S.load_verifications(state_dir)
+            cmd = commands(args, root, fresh, host, repo_path)
+            pr = json.loads(run(cmd["view"]).stdout)
+            check_pr(pr, fresh)
+            observed_pr_url(pr, host, repo_path, args.pr)
+            if pr["state"] != "OPEN":
+                raise Refusal("PR is no longer OPEN after verification")
+            if observed_target(cmd["target"], fresh["target"]) != target:
+                raise Refusal("target moved during verification")
+        except (OSError, ValueError, TypeError, KeyError, AttributeError,
+                subprocess.SubprocessError, S.PlanError, S.OutboxError,
+                CP.PathPolicyError) as exc:
+            raise Refusal("verification evidence not recorded: {}. Rerun verification. {}".format(
+                exc, verification_hint(args))) from exc
+        evidence.update({"unit": binding["unit"], "by": args.approver,
+                         "at": datetime.now(timezone.utc).isoformat()})
+        problem = S._verify_shape_problem(evidence)
+        if problem:
+            raise Refusal(problem)
+        S._fsync_append(state_dir / S.VERIFY_RECEIPTS, evidence)
+    finally:
+        S.release_lease(args.state_dir)
+    print("integration-tests: {} for head {} into target {} (no merge requested)".format(
+        evidence["result"].upper(), evidence["subject_head"], evidence["target_commit"]))
+    if evidence["result"] != "pass":
+        raise Refusal("candidate merge verifier failed; repair the candidate")
+
+
 def print_pending_close(args, plan):
     """Display the durable obligation; neither apply it nor acknowledge it."""
     try:
@@ -691,6 +749,9 @@ def main(argv=None):
             advance = reconcile(args, plan)
         finally:
             S.release_lease(args.state_dir)
+        if args.verify_integration:
+            verify_integration(args, advance)
+            return 0
         if advance is None:
             return 0
         # advance owns the same lease itself; never hold it across this child.

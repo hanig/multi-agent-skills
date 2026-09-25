@@ -296,7 +296,14 @@ This mode runs no merge. It reads `verifiers.json` and the pinned
 `verifiers/integration_tests.py` from the observed target commit, runs those
 bytes in the existing disposable candidate-merge checkout, and records the
 result in the external coordinator verification journal. Supply both Git
-objects locally first; the verifier never fetches. Ordinary invocation then
+objects locally first; the verifier never fetches. The coordinator lease is
+released while the candidate verifier runs. Before appending evidence, the
+operator reacquires it and rechecks the exact unit, attempt, judged head,
+target ref tip, and state epoch, along with the plan and merge intent. Its own
+reacquisition advances the epoch once; any intervening coordinator acquisition
+invalidates the observation, even if that coordinator changed no unit. A changed
+binding or epoch refuses publication and asks for verification to be rerun.
+The real merge path retains its existing lease scope. Ordinary invocation then
 admits that evidence before issuing one guarded merge. A changed head or
 target needs fresh evidence. The operator re-observes the branch ref before
 publishing the durable intent and again immediately before requesting the merge,
