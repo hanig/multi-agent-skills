@@ -2459,7 +2459,7 @@ def main():
         sys.exit(cmd_ledger(args))
     if args.round == "plan":
         config_error("--round plan is only an adjudication selector. "
-                     "For a plan review, use --kind plan without --round.")
+                     "Pass --kind plan without --round for a plan review.")
     if any(value is not None for value in
            (args.head, args.accepted_by, args.reason, args.decision)):
         config_error("Pass --adjudicate or --open-findings with ledger fields.")

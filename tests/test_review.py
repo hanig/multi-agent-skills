@@ -1474,7 +1474,7 @@ class TestFailClosed(unittest.TestCase):
 
 class TestPortability(unittest.TestCase):
     def test_stdlib_only(self):
-        allowed = {"argparse", "concurrent", "errno", "hashlib", "json", "os", "re", "signal", "stat",
+        allowed = {"argparse", "concurrent", "datetime", "errno", "hashlib", "json", "os", "re", "signal", "stat",
                    "subprocess", "sys", "tempfile", "time", "urllib", "pathlib"}
         for line in SCRIPT.read_text().splitlines():
             s = line.strip()
