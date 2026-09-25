@@ -21,6 +21,15 @@ sys.path.insert(0, str(ROOT))
 from lib import skill_lifecycle as lifecycle  # noqa: E402
 
 
+# These tests exercise diagnostic content, not production latency limits.
+# Keep real probes, with room for process startup on a shared host. Doctor's
+# outer supervisor must allow all four probes plus their cleanup to finish.
+REAL_PROBE_SECONDS = 60
+REAL_REAP_SECONDS = 5
+DOCTOR_SECONDS = 360
+WATCHDOG_SECONDS = 420
+
+
 class TestAgentDiagnostics(unittest.TestCase):
     def _env(self, home):
         return {"HOME": str(home), "PATH": ""}
@@ -393,7 +402,10 @@ class TestAgentDiagnostics(unittest.TestCase):
                 tool.chmod(0o755)
             env = self._env(tmp)
             env["PATH"] = str(bindir)
-            data = D.diagnostics(env=env)
+            with mock.patch.object(D.agent_discovery, "probe_deadline",
+                                   return_value=REAL_PROBE_SECONDS), \
+                    mock.patch.object(D.agent_discovery, "PROBE_REAP_SECONDS", REAL_REAP_SECONDS):
+                data = D.diagnostics(env=env)
         self.assertEqual(data["agents"]["claude"]["agent_present"]["version"], "2.1.261")
         self.assertEqual(data["agents"]["codex"]["agent_present"]["version"], "9.9.9")
         self.assertEqual(data["agents"]["codex"]["discovery"]["verification"], "unverified")
@@ -409,29 +421,52 @@ class TestDoctorAndSurveyAgentOutput(unittest.TestCase):
             path = bindir / name
             path.write_text(f"#!/bin/sh\nprintf '%s\\n' '{version}'\n")
             path.chmod(0o755)
-        for name in ("perl", "sh"):
-            found = shutil.which(name)
-            if found:
-                os.symlink(found, bindir / name)
+        shell = shutil.which("sh")
+        if shell:
+            os.symlink(shell, bindir / "sh")
+        perl = shutil.which("perl")
+        if perl:
+            # Run doctor's actual Perl supervisor, changing only its fixture
+            # budgets. Its production six-second outer limit would otherwise
+            # kill diagnostics before the fixture's probe budget can help.
+            wrapper = bindir / "perl"
+            wrapper.write_text(
+                f"#!{sys.executable}\n"
+                "import os, sys\n"
+                "args = sys.argv[1:]\n"
+                "assert args[0] == '-e' and args[2:4] == ['6', '2'], args\n"
+                f"args[2:4] = [{str(DOCTOR_SECONDS)!r}, {str(REAL_REAP_SECONDS)!r}]\n"
+                f"os.execv({perl!r}, [{perl!r}] + args)\n")
+            wrapper.chmod(0o755)
         os.symlink(sys.executable, bindir / "python3")
         return bindir
 
-    def _frozen_env(self, directory, version, observed):
-        """Freeze discovery's clock inside the actual entrypoint's child."""
+    def _probe_env(self, directory):
+        """Give actual doctor/survey children test-owned discovery budgets."""
         bindir = self._bin(directory)
-        (bindir / "claude").write_text(f"#!/bin/sh\nprintf '%s\\n' '{version}'\n")
         hooks = directory / "clock-fixture"
         hooks.mkdir()
         (hooks / "sitecustomize.py").write_text(
-            "import datetime\nimport agent_discovery\n"
-            "class FrozenDate(datetime.date):\n"
-            "    @classmethod\n"
-            "    def today(cls):\n"
-            f"        return cls.fromisoformat({observed.isoformat()!r})\n"
-            "agent_discovery.date = FrozenDate\n")
+            "import agent_discovery\n"
+            f"agent_discovery.probe_deadline = lambda spec: {REAL_PROBE_SECONDS!r}\n"
+            f"agent_discovery.PROBE_REAP_SECONDS = {REAL_REAP_SECONDS!r}\n")
         return {"HOME": str(directory / "home"), "PATH": str(bindir),
                 "PYTHONPATH": os.pathsep.join((str(hooks), str(SCRIPTS))),
                 "PYTHONDONTWRITEBYTECODE": "1"}
+
+    def _frozen_env(self, directory, version, observed):
+        """Freeze discovery's date as well as its child probe budgets."""
+        env = self._probe_env(directory)
+        (directory / "bin" / "claude").write_text(f"#!/bin/sh\nprintf '%s\\n' '{version}'\n")
+        with (directory / "clock-fixture" / "sitecustomize.py").open("a") as hook:
+            hook.write(
+                "import datetime\nimport agent_discovery\n"
+                "class FrozenDate(datetime.date):\n"
+                "    @classmethod\n"
+                "    def today(cls):\n"
+                f"        return cls.fromisoformat({observed.isoformat()!r})\n"
+                "agent_discovery.date = FrozenDate\n")
+        return env
 
     def test_doctor_json_expiry_changes_verification_and_next_step(self):
         for version, deadline in (("2.1.261", date(2026, 10, 5)),
@@ -443,7 +478,7 @@ class TestDoctorAndSurveyAgentOutput(unittest.TestCase):
                     directory = Path(raw)
                     env = self._frozen_env(directory, version, observed)
                     result = subprocess.run([str(DOCTOR), "--json"], cwd=directory,
-                                            env=env, text=True, capture_output=True, timeout=20)
+                                            env=env, text=True, capture_output=True, timeout=WATCHDOG_SECONDS)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     value = json.loads(result.stdout)
                     agent = value["agents"]["claude"]
@@ -478,7 +513,7 @@ class TestDoctorAndSurveyAgentOutput(unittest.TestCase):
                             "    return report\n"
                             "agent_discovery.discover = forged_discover\n")
                     result = subprocess.run([str(DOCTOR), "--json"], cwd=directory,
-                        env=env, text=True, capture_output=True, timeout=20)
+                        env=env, text=True, capture_output=True, timeout=WATCHDOG_SECONDS)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     value = json.loads(result.stdout)
                     agent = value["agents"]["claude"]
@@ -500,7 +535,7 @@ class TestDoctorAndSurveyAgentOutput(unittest.TestCase):
                 output = directory / "survey.json"
                 result = subprocess.run(
                     [sys.executable, str(SURVEY), "--repo", str(directory), "--out", str(output)],
-                    cwd=directory, env=env, text=True, capture_output=True, timeout=45)
+                    cwd=directory, env=env, text=True, capture_output=True, timeout=WATCHDOG_SECONDS)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 value = json.loads(output.read_text())["agent_diagnostics"]
                 agent = value["agents"]["claude"]
@@ -515,9 +550,9 @@ class TestDoctorAndSurveyAgentOutput(unittest.TestCase):
             home, prefix = tmp / "home", tmp / "chosen-skills"
             (prefix / "x" ).mkdir(parents=True)
             (prefix / "x" / "SKILL.md").write_text("ok\n")
-            env = {"HOME": str(home), "PATH": str(self._bin(tmp))}
+            env = self._probe_env(tmp)
             result = subprocess.run(["sh", str(DOCTOR), "--prefix", str(prefix), "--json"],
-                                    cwd=ROOT, env=env, text=True, capture_output=True, timeout=20)
+                                    cwd=ROOT, env=env, text=True, capture_output=True, timeout=WATCHDOG_SECONDS)
         self.assertEqual(result.returncode, 0, result.stderr)
         value = json.loads(result.stdout)
         self.assertEqual(set(value["agents"]), {"claude", "codex", "opencode", "pi"})
@@ -529,10 +564,10 @@ class TestDoctorAndSurveyAgentOutput(unittest.TestCase):
             home, config = tmp / "home", tmp / "custom-claude"
             (config / "skills" / "fixture").mkdir(parents=True)
             (config / "skills" / "fixture" / "SKILL.md").write_text("ok\n")
-            env = {"HOME": str(home), "PATH": str(self._bin(tmp)),
-                   "CLAUDE_CONFIG_DIR": str(config)}
+            env = self._probe_env(tmp)
+            env["CLAUDE_CONFIG_DIR"] = str(config)
             result = subprocess.run(["sh", str(DOCTOR), "--json"], cwd=ROOT, env=env,
-                                    text=True, capture_output=True, timeout=20)
+                                    text=True, capture_output=True, timeout=WATCHDOG_SECONDS)
         value = json.loads(result.stdout)
         self.assertEqual(value["agents"]["claude"]["installation"]["roots"][0]["logical_path"],
                          str(config / "skills"))
@@ -545,9 +580,9 @@ class TestDoctorAndSurveyAgentOutput(unittest.TestCase):
                 skill = prefix / ("skill-" + str(number).zfill(4) + "-metadata" * 3)
                 skill.mkdir(parents=True)
                 (skill / "SKILL.md").write_text("ok\n")
-            env = {"HOME": str(tmp / "home"), "PATH": str(self._bin(tmp))}
+            env = self._probe_env(tmp)
             result = subprocess.run(["sh", str(DOCTOR), "--prefix", str(prefix), "--json"],
-                                    cwd=ROOT, env=env, text=True, capture_output=True, timeout=30)
+                                    cwd=ROOT, env=env, text=True, capture_output=True, timeout=WATCHDOG_SECONDS)
         value = json.loads(result.stdout)
         self.assertTrue(value.get("truncated"), value)
         self.assertEqual(value["state"], "unknown")
@@ -560,9 +595,9 @@ class TestDoctorAndSurveyAgentOutput(unittest.TestCase):
                 skill = prefix / f"skill-{number}"
                 skill.mkdir(parents=True)
                 (skill / "SKILL.md").write_text("ok\n")
-            env = {"HOME": str(tmp / "home"), "PATH": str(self._bin(tmp))}
+            env = self._probe_env(tmp)
             result = subprocess.run(["sh", str(DOCTOR), str(prefix), "--json"],
-                                    cwd=ROOT, env=env, text=True, capture_output=True, timeout=20)
+                                    cwd=ROOT, env=env, text=True, capture_output=True, timeout=WATCHDOG_SECONDS)
         value = json.loads(result.stdout)
         self.assertNotIn("truncated", value)
         self.assertEqual(len(value["agents"]["claude"]["installation"]["roots"][0]["payloads"]), 13)
@@ -570,11 +605,11 @@ class TestDoctorAndSurveyAgentOutput(unittest.TestCase):
     def test_survey_preserves_existing_keys_and_adds_agent_diagnostics_without_claude(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
-            env = {"HOME": str(tmp / "home"), "PATH": str(self._bin(tmp))}
+            env = self._probe_env(tmp)
             # Make the no-Claude case explicit without relying on this host.
             (tmp / "bin" / "claude").unlink()
             result = subprocess.run([sys.executable, str(SURVEY), "--repo", str(tmp), "--json"],
-                                    cwd=ROOT, env=env, text=True, capture_output=True, timeout=45)
+                                    cwd=ROOT, env=env, text=True, capture_output=True, timeout=WATCHDOG_SECONDS)
         self.assertEqual(result.returncode, 0, result.stderr)
         value = json.loads(result.stdout)
         self.assertEqual(value["schema_version"], 4)
@@ -588,8 +623,11 @@ class TestDoctorAndSurveyAgentOutput(unittest.TestCase):
             copied.mkdir()
             for name in ("agent_diagnostics.py", "agent_discovery.py"):
                 shutil.copy2(SCRIPTS / name, copied / name)
+            # Do not preload discovery or disable bytecode here: either would
+            # mask a missing read-only guard in the copied entrypoint. This
+            # test accepts slow probes; only exit status and writes matter.
             env = {"HOME": str(tmp / "home"), "PATH": str(self._bin(tmp))}
             result = subprocess.run([sys.executable, str(copied / "agent_diagnostics.py"), "--json"],
-                                    cwd=tmp, env=env, text=True, capture_output=True, timeout=20)
+                                    cwd=tmp, env=env, text=True, capture_output=True, timeout=WATCHDOG_SECONDS)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse((copied / "__pycache__").exists())
