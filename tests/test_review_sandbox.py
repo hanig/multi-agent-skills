@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import signal
 import subprocess
 import sys
@@ -240,6 +241,8 @@ assert suite.countTestCases() == 0, suite.countTestCases()
         # No OS identities or signals: reaping releases this fake PID to an
         # unrelated session leader. The old parent then counts and signals it.
         events = []
+        self.addCleanup(self.assertNotIn, "counted stranger", events)
+        self.addCleanup(self.assertNotIn, "signalled stranger", events)
         class Worker:
             pid = 43210
             returncode = None
@@ -267,6 +270,8 @@ assert suite.countTestCases() == 0, suite.countTestCases()
         def members(sid):
             self.assertEqual(sid, worker.pid)
             events.append("scan")
+            if worker.returncode is not None and stranger:
+                events.append("counted stranger")
             return list(stranger) if worker.returncode is not None else []
 
         def signal_stranger(*args):
@@ -324,6 +329,60 @@ assert suite.countTestCases() == 0, suite.countTestCases()
                 self.run_module(self.simple_suite())
         launch.assert_not_called()
 
+    def test_os_waitid_uses_nowait_for_running_and_exited_worker(self):
+        with patch.object(sandbox.os, "waitid", create=True,
+                          side_effect=[None, SimpleNamespace(si_pid=43210)]) as waitid:
+            observe = sandbox.nonreaping_waiter()
+            self.assertFalse(observe(43210))
+            self.assertTrue(observe(43210))
+        self.assertEqual(waitid.call_count, 2)
+        for args, kwargs in waitid.call_args_list:
+            self.assertEqual(args, (os.P_PID, 43210,
+                                   os.WEXITED | os.WNOWAIT | os.WNOHANG))
+            self.assertEqual(kwargs, {})
+
+    def test_containment_does_not_signal_stale_or_foreign_groups(self):
+        for current_sid in (43210, 54321):
+            with self.subTest(current_sid=current_sid):
+                worker = SimpleNamespace(pid=43210, returncode=None)
+                events = []
+
+                def reap(timeout=None):
+                    events.append("reap")
+                    worker.returncode = 0
+
+                def signal_member(pid, sig):
+                    self.assertIsNone(worker.returncode)
+                    events.append((pid, sig))
+
+                worker.wait = reap
+                # A ps snapshot's group number can already belong elsewhere.
+                # Recheck the member's session and never use that group number.
+                with patch.object(sandbox, "session_members", side_effect=[
+                        [(43211, 54321)], []]), \
+                        patch.object(sandbox.os, "getsid", return_value=current_sid), \
+                        patch.object(sandbox.os, "kill", side_effect=signal_member) as kill, \
+                        patch.object(sandbox.os, "killpg") as killpg:
+                    sandbox.stop_session(worker, lambda pid: True)
+                killpg.assert_not_called()
+                if current_sid == worker.pid:
+                    kill.assert_called_once_with(43211, signal.SIGTERM)
+                else:
+                    kill.assert_not_called()
+                self.assertEqual(events[-1], "reap")
+
+    def test_lost_child_reservation_refuses_without_scan_or_signal(self):
+        worker = SimpleNamespace(pid=43210, returncode=None)
+        with patch.object(sandbox, "session_members") as members, \
+                patch.object(sandbox.os, "kill") as kill, \
+                patch.object(sandbox.os, "killpg") as killpg:
+            with self.assertRaises(ChildProcessError):
+                sandbox.stop_session(worker, lambda pid: (_ for _ in ()).throw(
+                    ChildProcessError("child was reaped outside supervisor")))
+        members.assert_not_called()
+        kill.assert_not_called()
+        killpg.assert_not_called()
+
     def test_new_process_group_in_worker_session_is_failed_and_killed(self):
         identity_file = self.root / "escaped-group.json"
         child = """import json, os, signal, sys, time
@@ -371,15 +430,16 @@ time.sleep(60)
 
     def test_unrelated_same_uid_process_churn_does_not_fail_a_worker(self):
         ready = self.root / "churn"
-        churn = """import os, subprocess, sys, time
+        churn = """import itertools, sys, time
 from pathlib import Path
 counter = Path(sys.argv[1])
-for count in range(10000):
-    subprocess.run([sys.executable, '-c', 'pass'], check=True)
+# One unrelated process makes observable progress; PID reuse is injected in
+# test_worker_pid_is_reserved_until_last_session_scan, never forced by churn.
+for count in itertools.count():
     temporary = counter.with_suffix('.pending')
     temporary.write_text(str(count))
     temporary.replace(counter)
-    time.sleep(0.005)
+    time.sleep(0.02)
 """
         process = subprocess.Popen([sys.executable, "-c", churn, str(ready)],
                                    start_new_session=True)

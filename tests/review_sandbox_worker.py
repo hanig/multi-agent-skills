@@ -6,11 +6,12 @@ startup/import/collection. Its load_tests hook requires a parent token and
 worker-local PID activation; inherited markers never authorize in-process
 execution in another interpreter.
 The parent owns the temporary root, seeds dedicated journal namespaces, waits
-for worker termination, rejects surviving ordinary descendants, kills every
-group in their session with TERM then KILL and establishes quiescence before
+for worker termination without reaping, rejects surviving ordinary descendants,
+signals live session members with TERM then KILL and establishes quiescence before
 comparing recursive names, types and bytes. It reaps its child; the OS reaps
 orphan descendants. Zombies cannot write and are not live survivors. No
-teardown fixture supplies the audit.
+teardown fixture supplies the audit. The unreaped leader reserves the session
+ID until the final scan; there are no session scans or signals after reaping.
 Timeout, signal death, unreadable state, protocol/comparison errors, missing
 completion, import/setup failure and worker test failure/error all fail closed.
 The completion file contains every collected id and outcome, including skips;
@@ -25,6 +26,7 @@ outside the repository unittest command, are outside this contract. There is
 no writer registry, stack inspection or runtime attribution.
 """
 import collections
+import ctypes
 import importlib.util
 import json
 import os
@@ -54,6 +56,66 @@ _REVIEW_RUN = None
 
 class SandboxFailure(AssertionError):
     pass
+
+
+def nonreaping_waiter():
+    """Return a waitid(WNOWAIT) exit observer, or refuse before launch.
+
+    CPython does not expose os.waitid on macOS. Darwin's native waitid and
+    siginfo_t (sys/wait.h and sys/signal.h) provide the same nonreaping API;
+    use ctypes only on that ABI. Never substitute Popen.poll/wait here.
+    """
+    required = ("P_PID", "WEXITED", "WNOWAIT", "WNOHANG")
+    if not all(hasattr(os, name) for name in required):
+        raise SandboxFailure("sandbox requires waitid with WNOWAIT")
+    options = os.WEXITED | os.WNOWAIT | os.WNOHANG
+    if callable(getattr(os, "waitid", None)):
+        def observe(pid):
+            info = os.waitid(os.P_PID, pid, options)
+            return info is not None and info.si_pid == pid
+        return observe
+    if sys.platform != "darwin":
+        raise SandboxFailure("sandbox requires waitid with WNOWAIT")
+
+    class Siginfo(ctypes.Structure):
+        _fields_ = [
+            ("si_signo", ctypes.c_int), ("si_errno", ctypes.c_int),
+            ("si_code", ctypes.c_int), ("si_pid", ctypes.c_int),
+            ("si_uid", ctypes.c_uint), ("si_status", ctypes.c_int),
+            ("si_addr", ctypes.c_void_p), ("si_value", ctypes.c_void_p),
+            ("si_band", ctypes.c_long), ("padding", ctypes.c_ulong * 7)]
+
+    try:
+        waitid = ctypes.CDLL(None, use_errno=True).waitid
+    except (OSError, AttributeError) as exc:
+        raise SandboxFailure("sandbox requires waitid with WNOWAIT: %s" % exc)
+    waitid.argtypes = [ctypes.c_int, ctypes.c_uint,
+                      ctypes.POINTER(Siginfo), ctypes.c_int]
+    waitid.restype = ctypes.c_int
+
+    def observe(pid):
+        info = Siginfo()
+        if waitid(os.P_PID, pid, ctypes.byref(info), options) != 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error))
+        return info.si_pid == pid
+    return observe
+
+
+def worker_exited(process, observe):
+    """Check ownership before any session scan; never release the leader PID."""
+    if process.returncode is not None:
+        raise SandboxFailure("worker was reaped before session quiescence")
+    # ECHILD is a lost reservation, not evidence of a quiescent owned session.
+    return observe(process.pid)
+
+
+def await_worker_exit(process, observe, timeout):
+    deadline = time.monotonic() + timeout
+    while not worker_exited(process, observe):
+        if time.monotonic() >= deadline:
+            raise subprocess.TimeoutExpired(process.args, timeout)
+        time.sleep(0.01)
 
 
 def manifest(root):
@@ -106,29 +168,36 @@ def session_members(sid):
     return members
 
 
-def stop_session(process):
-    """TERM then KILL all groups in the owned session, reap, await quiescence."""
+def stop_session(process, observe):
+    """Contain session members while its leader reserves the ID, then reap.
+
+    Signal individual live members after rechecking their session, not stale
+    ps process-group IDs: a descendant can leave or retire a process group
+    between enumeration and containment. No killpg can reach a foreign group.
+    This is not an atomic identity-and-signal primitive for descendant PIDs.
+    """
     for sig, grace in ((signal.SIGTERM, 1), (signal.SIGKILL, 10)):
         deadline = time.monotonic() + grace
         signalled = set()
         while True:
-            process.poll()  # Reap our worker; orphan descendants belong to the OS.
+            exited = worker_exited(process, observe)
             members = session_members(process.pid)
-            if not members:
+            if exited and not members:
                 process.wait(timeout=10)
                 return
-            for group in {group for _pid, group in members}:
-                if sig == signal.SIGTERM and group in signalled:
+            for pid, _group in members:
+                if sig == signal.SIGTERM and pid in signalled:
                     continue
                 try:
-                    os.killpg(group, sig)
+                    if os.getsid(pid) != process.pid:
+                        continue
+                    os.kill(pid, sig)
                 except ProcessLookupError:
                     pass
                 except PermissionError:
-                    # macOS may return EPERM for an exited, zombie-only group.
-                    if any(g == group for _pid, g in session_members(process.pid)):
+                    if any(p == pid for p, _g in session_members(process.pid)):
                         raise
-                signalled.add(group)
+                signalled.add(pid)
             if time.monotonic() >= deadline:
                 break
             time.sleep(0.05)
@@ -219,6 +288,7 @@ def validate_completion(report, module_name):
 
 def run_sandbox(module_path, module_name, timeout=REVIEW_TIMEOUT):
     """Parent-owned launch and final audit. A failed cleanup retains the root."""
+    observe = nonreaping_waiter()
     root = Path(tempfile.mkdtemp(prefix="review-sandbox-")).resolve()
     home, state, tmp = root / "home", root / "state", root / "tmp"
     for path in (home, state, tmp):
@@ -256,19 +326,19 @@ def run_sandbox(module_path, module_name, timeout=REVIEW_TIMEOUT):
                 start_new_session=True)
             quiet = False
             try:
-                process.wait(timeout=timeout)
+                await_worker_exit(process, observe, timeout)
             except subprocess.TimeoutExpired:
                 problems.append("worker timeout after %ss" % timeout)
             else:
-                if process.returncode != 0:
-                    problems.append("worker exit %s (signal death if negative)" % process.returncode)
                 survivors = session_members(process.pid)
                 if survivors:
                     problems.append("surviving worker descendants: %r" % survivors)
             finally:
                 # Includes timeout, process-inspection errors and parent interruption.
-                stop_session(process)
+                stop_session(process, observe)
                 quiet = True
+            if process.returncode != 0:
+                problems.append("worker exit %s (signal death if negative)" % process.returncode)
             try:
                 after = {str(path): manifest(path) for path in protected}
                 if after != before:
