@@ -127,6 +127,104 @@ class TestSharedGuard(unittest.TestCase):
         self.assertEqual(self.shared_receipt()["result"], "fail")
         self.assertIn("FAIL_ON_NTH_RUN", self.shared_receipt()["stderr_tail"])
 
+    def assert_module_refused(self, diagnostic):
+        verified = self.verify()
+        # Check the consumer first: package discovery mutations reach stub gh.
+        self.f.assert_refused(self.f.invoke())
+        self.assertNotEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+        self.assertEqual(self.shared_receipt()["result"], "fail")
+        self.assertIn(diagnostic, self.shared_receipt()["stderr_tail"])
+
+    def package_tests(self, hook=False):
+        package = ("import unittest\nclass PackageGuard(unittest.TestCase):\n"
+                   "    def test_package(self): pass\n")
+        if hook:
+            package += "def load_tests(loader, tests, pattern): return tests\n"
+        return package
+
+    def test_empty_module_cannot_borrow_package_tests(self):
+        self.install_policy()
+        self.candidate({"tests/__init__.py": self.package_tests(),
+                        "tests/test_guard.py": "# selected module has no cases\n"})
+        self.assert_module_refused("no tests")
+
+    def test_package_hook_cannot_hide_failing_changed_module(self):
+        self.install_policy()
+        self.candidate({"tests/__init__.py": self.package_tests(hook=True),
+                        "tests/test_guard.py": self.counter_test(fail_at=1)})
+        self.assert_module_refused("FAIL_ON_NTH_RUN")
+        self.assertEqual(self.counter.read_text(), "1")
+
+    def test_nested_package_hook_cannot_hide_failing_changed_module(self):
+        self.install_policy()
+        self.candidate({"tests/__init__.py": "",
+                        "tests/nested/__init__.py": self.package_tests(hook=True),
+                        "tests/nested/test_guard.py": self.counter_test(fail_at=1)})
+        self.assert_module_refused("FAIL_ON_NTH_RUN")
+        self.assertEqual(self.counter.read_text(), "1")
+
+    def test_other_changed_module_cannot_supply_empty_modules_count(self):
+        self.install_policy(repetitions=3)
+        self.candidate({"tests/test_a_passing.py": self.counter_test(),
+                        "tests/test_z_empty.py": "# zero cases after a passing module\n"})
+        self.assert_module_refused("no tests")
+        self.assertEqual(self.counter.read_text(), "3")
+
+    def test_module_own_hook_delegates_and_counts_each_worker_run(self):
+        self.install_policy(repetitions=3)
+        worker = self.counter_test() + "\nif __name__ == '__main__':\n    unittest.main()\n"
+        module = ("import subprocess, sys, unittest\nfrom pathlib import Path\n"
+                  "class DefaultCase(unittest.TestCase):\n"
+                  "    def test_default(self): self.fail('HOOK_MUST_REPLACE_DEFAULT')\n"
+                  "def load_tests(loader, tests, pattern):\n"
+                  "    def delegate():\n"
+                  "        subprocess.run([sys.executable, str(Path(__file__).with_name("
+                  "'review_worker.py'))], check=True)\n"
+                  "    return unittest.TestSuite([unittest.FunctionTestCase(delegate)])\n")
+        self.candidate({"tests/__init__.py": self.package_tests(hook=True),
+                        "tests/test_review.py": module, "tests/review_worker.py": worker})
+        verified = self.verify()
+        self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+        self.assertEqual(self.counter.read_text(), "3")
+        self.assertEqual(self.shared_receipt()["result"], "pass")
+        self.assertIn("test_review.py: repetition 3/3", self.shared_receipt()["stdout_tail"])
+        self.assertEqual(self.f.calls(["pr", "merge"]), [])
+        merged = self.f.invoke()
+        self.assertEqual(merged.returncode, 0, merged.stdout + merged.stderr)
+        self.assertEqual(len(self.f.calls(["pr", "merge"])), 1)
+
+    def test_module_own_empty_hook_cannot_borrow_default_or_package_tests(self):
+        self.install_policy()
+        module = ("import unittest\nclass DefaultCase(unittest.TestCase):\n"
+                  "    def test_default(self): pass\n"
+                  "def load_tests(loader, tests, pattern): return unittest.TestSuite()\n")
+        self.candidate({"tests/__init__.py": self.package_tests(),
+                        "tests/test_guard.py": module})
+        self.assert_module_refused("no tests")
+
+    def test_suite_declared_count_cannot_replace_executed_count(self):
+        self.install_policy()
+        module = ("import unittest\nclass EmptySuite(unittest.TestSuite):\n"
+                  "    def countTestCases(self): return 1\n"
+                  "def load_tests(loader, tests, pattern): return EmptySuite()\n")
+        self.candidate({"tests/test_guard.py": module})
+        self.assert_module_refused("no tests")
+
+    def test_changed_module_error_refuses_merge(self):
+        self.install_policy()
+        self.candidate({"tests/test_guard.py":
+                        "import unittest\nclass Broken(unittest.TestCase):\n"
+                        "    def test_error(self): raise RuntimeError('MODULE_ERROR')\n"})
+        self.assert_module_refused("MODULE_ERROR")
+
+    def test_changed_module_unexpected_success_refuses_merge(self):
+        self.install_policy()
+        self.candidate({"tests/test_guard.py":
+                        "import unittest\nclass Broken(unittest.TestCase):\n"
+                        "    @unittest.expectedFailure\n"
+                        "    def test_unexpected_success(self): pass\n"})
+        self.assert_module_refused("unexpected success")
+
     def test_no_changed_test_modules_passes_trivially(self):
         self.install_policy()
         result = self.verify()
