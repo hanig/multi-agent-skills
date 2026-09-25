@@ -478,6 +478,35 @@ class TestFixtureQuiescence(unittest.TestCase):
         self.assertEqual(proc.wait_quiescent(10).state, fixtures.QuiescenceState.QUIESCENT)
         self.assertEqual(proc.join(10).returncode, 0)
 
+    def test_project_interrupt_waits_for_bus_signal_readiness(self):
+        import test_project as project
+        original_script = fixtures.FixtureProcesses.shell_script
+        original_signal = os.killpg
+        roots, observed = [], []
+
+        def delay_start(scope, source):
+            anchor = "trap 'exit 143' HUP INT TERM\n"
+            if anchor in source:
+                roots.append(scope.root)
+                source = source.replace(anchor, 'sleep 0.2\n' + anchor)
+            return original_script(scope, source)
+
+        def check_readiness(pgid, signum):
+            if signum == signal.SIGTERM and not observed:
+                observed.append(bool(roots) and (roots[0] / 'bus-ready').exists())
+                self.assertTrue(observed[0], 'TERM sent before bus signal readiness')
+            return original_signal(pgid, signum)
+
+        case = project.TestVendoredAgentBusLayoutIsExplicit(
+            'test_the_documented_trap_cleans_failure_and_interruption')
+        result = unittest.TestResult()
+        with mock.patch.object(fixtures.FixtureProcesses, 'shell_script', delay_start), mock.patch.object(
+                project.os, 'killpg', check_readiness):
+            case.run(result)
+        self.assertEqual(len(roots), 1)
+        self.assertEqual(observed, [True], result.failures + result.errors)
+        self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
+
     def test_quiescence_inspection_failures_are_typed_and_never_signal(self):
         scope = self._scope()
         proc = self._launch(scope, 'pass')
