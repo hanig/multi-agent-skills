@@ -174,6 +174,53 @@ class TestMergeUnit(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.receipts(), [])
 
+    def intercept_scope_binding(self, fields=None, advance_epoch=False):
+        # Keep the real scope consumer and producer, changing only the report
+        # channel or the epoch between the operator and scope state reads.
+        site = self.directory / "scope-binding-probe"
+        site.mkdir()
+        (site / "sitecustomize.py").write_text(
+            "import atexit, io, json, os, pathlib, sys\n"
+            "if len(sys.argv) > 1 and sys.argv[0].endswith('swarm.py') "
+            "and sys.argv[1] == 'scope-check':\n"
+            "    if %r:\n"
+            "        path = pathlib.Path(os.environ['COORDINATOR_STATE']) / 'state-epoch.json'\n"
+            "        record = json.loads(path.read_text())\n"
+            "        record['epoch'] += 1\n"
+            "        path.write_text(json.dumps(record))\n"
+            "    original = sys.stdout\n"
+            "    sys.stdout = io.StringIO()\n"
+            "    def emit():\n"
+            "        report = json.loads(sys.stdout.getvalue())\n"
+            "        report.update(%r)\n"
+            "        original.write(json.dumps(report))\n"
+            "    atexit.register(emit)\n" % (advance_epoch, fields or {}))
+        self.env["PYTHONPATH"] = str(site)
+
+    def test_000_scope_base_mismatch_refuses_before_forge(self):
+        self.intercept_scope_binding({"base": "f" * 40})
+        result = self.invoke()
+        self.assert_refused(result)
+        self.assertEqual(self.calls(), [], result.stdout + result.stderr)
+
+    def test_001_scope_epoch_change_refuses_before_forge(self):
+        self.intercept_scope_binding(advance_epoch=True)
+        result = self.invoke()
+        self.assert_refused(result)
+        self.assertEqual(self.calls(), [], result.stdout + result.stderr)
+
+    def test_scope_repository_mismatch_refuses_before_forge(self):
+        self.intercept_scope_binding({"repo": str(self.repo) + "/other"})
+        result = self.invoke()
+        self.assert_refused(result)
+        self.assertEqual(self.calls(), [], result.stdout + result.stderr)
+
+    def test_scope_target_mismatch_refuses_before_forge(self):
+        self.intercept_scope_binding({"target": "other"})
+        result = self.invoke()
+        self.assert_refused(result)
+        self.assertEqual(self.calls(), [], result.stdout + result.stderr)
+
     def test_success_records_exact_anchor_and_advances_once(self):
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
