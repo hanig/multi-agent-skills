@@ -279,7 +279,13 @@ class TestAgentDiscovery(unittest.TestCase):
                         # Observe termination before the fixture's fallback
                         # cleanup can kill a survivor and mask a probe defect.
                         self.assertEqual(len(peers), 1)
-                        self.assertEqual(peers[0].recv(1), b"", "timed-out CLI survived")
+                        try:
+                            response = peers[0].recv(1)
+                        except ConnectionResetError:
+                            # As in the inherited-writer case, reset also
+                            # means the killed peer's connection has closed.
+                            response = b""
+                        self.assertEqual(response, b"", "timed-out CLI survived")
             finally:
                 for peer in peers:
                     peer.close()
