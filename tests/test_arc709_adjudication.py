@@ -251,6 +251,33 @@ class TestAdjudication(unittest.TestCase):
         self.assertEqual(result.returncode, 4)
         self.assertIn("not a regular file", result.stderr)
 
+    def test_file_cannot_redirect_a_query_away_from_open_history(self):
+        project_a, project_b, home = [self.root / name
+                                    for name in ("project-a", "project-b", "home")]
+        for repo in (project_a, project_b):
+            repo.mkdir()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        source = project_b / "input.py"
+        source.write_text("pass\n")
+        state = project_b / ".state"
+        self.journal = state / review.JOURNAL_DIR / review.JOURNAL_NAME
+        original = self.seed()
+        before = original.read_bytes()
+        previous = Path.cwd()
+        os.chdir(project_a)
+        self.addCleanup(os.chdir, previous)
+        with patch.dict(os.environ, {"XDG_STATE_HOME": str(state)}), \
+                patch.object(review.Path, "home", return_value=home):
+            self.assertEqual(self.query().returncode, 1)
+            result = self.invoke("--open-findings", "--head", HEAD,
+                                 "--file", str(source))
+            self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+            self.assertIn("Drop review options", result.stderr)
+            self.assertEqual(self.adjudicate("--file", str(source)).returncode, 4)
+            self.assertEqual(self.query().returncode, 1)
+        self.assertEqual(original.read_bytes(), before)
+        self.assertFalse(home.exists())
+
     def test_full_head_required_and_ledger_cannot_replace_review(self):
         self.seed()
         for head in ("HEAD", "1" * 7, " " + HEAD, HEAD + "0"):

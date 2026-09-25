@@ -200,11 +200,13 @@ python3 "$HANIG_REVIEW_GATE_DIR/scripts/review.py" --adjudicate FINDING_DIGEST \
   --decision overruled --author codex/gpt-6-astra
 ```
 
-Both commands are offline and emit JSON. `--head` takes the complete lowercase
+Both commands are offline and emit JSON. Review input flags, including `--file`,
+are refused for ledger commands. `--head` takes the complete lowercase
 commit SHA. Reviews using two- or three-dot `--range` bind the journal head to the
 resolved commits supplied to Git's diff. Working-tree, single-revision and file
 inputs have no bound head; older headless records remain intact and unattributed.
-Use the same state home and project directory as the original review.
+Use the effective state home from the original `journal.path` and the original
+project directory; the configured state home may have fallen back during review.
 
 Recording requires a matching confirmed finding on that head and a non-empty
 reason. If the digest occurs in multiple rounds, add `--round N`. Decisions are
