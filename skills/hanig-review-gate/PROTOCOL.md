@@ -198,6 +198,10 @@ canonical lowercase 40-/64-hex Git object IDs and lowercase 64-hex SHA-256
 finding/claim digests retain their exact bytes. Free text, arbitrary extra fields
 and invalid identifier values remain subject to redaction. No trimming,
 case-folding or reconstruction supplies a decision identity.
+Recognized schema keys and fixed ledger type, decision and output-state tokens
+are program vocabulary and retain their spelling; an API-key collision cannot
+rename the field that holds a validated identity. This exemption is restricted
+to known paths: lookalike keys in arbitrary reviewer extras remain redacted.
 
 `--open-findings --head SHA` validates identities across all canonical history
 before selecting that head. A missing or damaged head/digest, including earlier

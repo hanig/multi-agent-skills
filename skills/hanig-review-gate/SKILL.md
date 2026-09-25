@@ -225,7 +225,9 @@ review coverage nor complete historical capture. Unpublished pending files are i
 
 Full lowercase 40-/64-hex heads and 64-hex finding/claim digests are validated
 before exemption from redaction and retained exactly in their schema fields.
-Free text and invalid identifier values stay redacted. Adjudication binds only
+Recognized envelope keys and ledger type/decision tokens also retain their
+schema spelling. Unknown keys, free text and invalid identifiers stay redacted.
+Adjudication binds only
 validated identities; it cannot repair or conceal damaged historical identities.
 The query preserves old bytes rather than guessing an obscured head or digest.
 
