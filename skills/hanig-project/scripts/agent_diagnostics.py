@@ -337,6 +337,8 @@ def diagnostics(env: Optional[Mapping[str, str]] = None,
     report = agent_discovery.discover(env=context)
     agents: dict[str, Any] = {}
     for name, adapter in report["agents"].items():
+        verification = agent_discovery.assess_certification(
+            name, adapter.get("version"), adapter["verification"])["verification"]
         roots = list(adapter["roots"])
         if name == "claude" and claude_prefix is not None:
             logical = os.path.abspath(claude_prefix)
@@ -357,11 +359,11 @@ def diagnostics(env: Optional[Mapping[str, str]] = None,
                              "roots": installations,
                              "duplicate_names": _duplicate_names(installations)},
             "discovery": _state(discovery_state, discovery_reason,
-                                verification=adapter["verification"],
+                                verification=verification,
                                 native_probe="not run"),
             "workflow": _workflow(context, installations),
             "next_step": ("Use an explicitly supported version or pass an explicit target; this executable version is unverified."
-                          if adapter["state"] == "executable_found" and adapter["verification"] == "unverified"
+                          if adapter["state"] == "executable_found" and verification == "unverified"
                           else "Install the agent executable or select this agent explicitly for an offline install."
                           if adapter["state"] == "absent" else None),
         }

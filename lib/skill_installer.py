@@ -16,7 +16,8 @@ import os
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import date
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -232,17 +233,21 @@ def _direct_child(root: Path, name: str) -> Path:
     return destination
 
 
-def normalize_agents(records: Iterable[Any]) -> tuple[AgentTarget, ...]:
-    """Normalize discovery records without owning discovery policy.
+def normalize_agents(records: Iterable[Any], *, as_of: date | None = None) -> tuple[AgentTarget, ...]:
+    """Normalize records, checking certification against discovery's authority.
 
     The discovery API exposes plain mappings today; accepting attributes as
     well keeps this consumer resilient if it graduates to dataclasses.
     """
+    discovery = _load_discovery(_CHECKOUT_ROOT)
     result: list[AgentTarget] = []
     for record in records:
         name = _field(record, "name", _field(record, "id", None))
         if name not in SUPPORTED_AGENTS:
             continue
+        assessment = discovery.assess_certification(
+            name, _field(record, "version", None),
+            _field(record, "verification", "unverified"), as_of)
         raw_paths = _field(record, "destinations", ())
         destinations = tuple(
             Path(_field(item, "path", item)).expanduser()
@@ -253,13 +258,13 @@ def normalize_agents(records: Iterable[Any]) -> tuple[AgentTarget, ...]:
             name=name,
             state=str(_field(record, "state", "executable_found"
                             if _field(record, "detected", False) else "absent")),
-            discovery_verified=_field(record, "verification", "unverified") == "verified",
+            discovery_verified=assessment["verification"] == "verified",
             automatic=bool(_field(record, "eligible_for_automatic_target",
                                   _field(record, "detected", False))),
             destinations=destinations,
             consumers=consumers,
             version=_field(record, "version", None),
-            certification=_field(_field(record, "evidence", {}), "certification", None),
+            certification=assessment["certification_record"],
         ))
     return tuple(result)
 
@@ -313,7 +318,19 @@ def _uncertified_target_warning(target: AgentTarget, *, automatic: bool) -> str:
     )
 
 
-def build_plan(targets: Iterable[AgentTarget], options: InstallOptions) -> InstallPlan:
+def build_plan(targets: Iterable[AgentTarget], options: InstallOptions, *,
+               as_of: date | None = None) -> InstallPlan:
+    discovery = _load_discovery(_CHECKOUT_ROOT)
+    checked = []
+    for target in targets:
+        if target.name in SUPPORTED_AGENTS:
+            assessment = discovery.assess_certification(
+                target.name, target.version,
+                "verified" if target.discovery_verified else "unverified", as_of)
+            target = replace(target, discovery_verified=assessment["verification"] == "verified",
+                             certification=assessment["certification_record"])
+        checked.append(target)
+    targets = checked
     selected, skipped = select_agents(targets, options)
     by_destination: dict[Path, list[AgentTarget]] = {}
     for target in selected:
@@ -342,8 +359,13 @@ def build_plan(targets: Iterable[AgentTarget], options: InstallOptions) -> Insta
     )
 
 
-def build_discovery_plan(report: Mapping[str, Any], selection: Mapping[str, Any]) -> InstallPlan:
-    """Translate ARC-275's authoritative multi-target selection into our plan."""
+def build_discovery_plan(report: Mapping[str, Any], selection: Mapping[str, Any], *,
+                         as_of: date | None = None) -> InstallPlan:
+    """Translate selection topology and recheck its certification claims."""
+    discovery = _load_discovery(_CHECKOUT_ROOT)
+    assessments = {name: discovery.assess_certification(
+        name, record.get("version"), record["verification"], as_of)
+        for name, record in report["agents"].items() if name in SUPPORTED_AGENTS}
     if not selection["selected"]:
         observed = ", ".join(
             f"{item['agent']}={report['agents'][item['agent']]['state']}"
@@ -355,6 +377,7 @@ def build_discovery_plan(report: Mapping[str, Any], selection: Mapping[str, Any]
             "explicit bootstrap target with --agent claude|codex|opencode|pi"
         )
     selected: list[AgentTarget] = []
+    warnings = list(selection.get("certification_warnings", ()))
     selected_by_path: dict[Path, list[str]] = {}
     for item in selection["selected"]:
         name = item["agent"]
@@ -363,16 +386,22 @@ def build_discovery_plan(report: Mapping[str, Any], selection: Mapping[str, Any]
         selected_by_path.setdefault(path, []).append(name)
         selected.append(AgentTarget(
             name=name, state=record["state"],
-            discovery_verified=item["certification"] == "verified",
+            discovery_verified=(item["certification"] == "verified"
+                                and assessments[name]["verification"] == "verified"),
             automatic=item["mode"] == "automatic", destinations=(path,),
             consumers=tuple(item["consumers"]), version=record.get("version"),
-            certification=item.get("certification_record"),
+            certification=assessments[name]["certification_record"],
         ))
+        if item["certification"] == "verified" and not selected[-1].discovery_verified:
+            warnings.append(_uncertified_target_warning(
+                selected[-1], automatic=item["mode"] == "automatic"))
     skipped = tuple(AgentTarget(
         name=item["agent"], state=report["agents"][item["agent"]]["state"],
-        discovery_verified=item["certification"] == "verified",
+        discovery_verified=(item["certification"] == "verified"
+                            and assessments[item["agent"]]["verification"] == "verified"),
         automatic=report["agents"][item["agent"]]["eligible_for_automatic_target"],
         destinations=(), consumers=(), version=report["agents"][item["agent"]].get("version"),
+        certification=assessments[item["agent"]]["certification_record"],
     ) for item in selection["skipped"])
     destinations = tuple(DestinationPlan(
         path=_canonical_root(Path(item["physical_path"])),
@@ -386,7 +415,7 @@ def build_discovery_plan(report: Mapping[str, Any], selection: Mapping[str, Any]
     return InstallPlan(
         tuple(selected), skipped, destinations,
         tuple(selection.get("competing_visibility", ())),
-        tuple(selection.get("certification_warnings", ())),
+        tuple(warnings),
     )
 
 

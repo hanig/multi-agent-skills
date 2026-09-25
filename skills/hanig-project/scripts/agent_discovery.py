@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+from copy import deepcopy
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
@@ -226,7 +227,7 @@ def certification_for(spec: Mapping[str, Any], version: Optional[str]) -> Option
     """Newest retained evidence for this exact version, never a version range."""
     records = [record for record in spec["certifications"]
                if record["version"] == version]
-    return max(records, key=lambda record: record["verified_on"]) if records else None
+    return deepcopy(max(records, key=lambda record: record["verified_on"])) if records else None
 
 
 def verification_review_due(spec: Mapping[str, Any]) -> date:
@@ -248,6 +249,27 @@ def stale_adapter_certifications(as_of: Optional[date] = None) -> list[str]:
     observed = as_of or date.today()
     return [name for name, spec in ADAPTERS.items()
             if observed > verification_review_due(spec)]
+
+
+def assess_certification(agent: str, version: Optional[str], verification: str,
+                         as_of: Optional[date] = None) -> dict[str, Any]:
+    """Bound a reported claim by this module's exact-version evidence.
+
+    Report dates, freshness and embedded evidence are never authority. A
+    consumer may downgrade an earlier claim but cannot upgrade an unverified
+    observation. Returned evidence is detached from the module's records.
+    """
+    certification = certification_for(ADAPTERS[agent], version)
+    deadline = verification_review_due(certification) if certification else None
+    freshness = ("unverified" if deadline is None else
+                 "stale" if (as_of or date.today()) > deadline else "current")
+    return {
+        "verification": ("verified" if verification == "verified" and freshness == "current"
+                         else "unverified"),
+        "certification_record": certification,
+        "verification_review_due": deadline.isoformat() if deadline else None,
+        "verification_freshness": freshness,
+    }
 
 
 def _environment(env: Optional[Mapping[str, str]]) -> dict[str, str]:
@@ -556,11 +578,8 @@ def discover(
             version = _version(str(output)) if outcome == "ok" else None
         else:
             state, version = ("configured", None) if any(item["exists"] for item in evidence["config_directories"]) else ("absent", None)
-        certification = certification_for(spec, version)
-        review_due = verification_review_due(certification) if certification else None
-        freshness = ("unverified" if review_due is None else
-                     "stale" if observed > review_due else "current")
-        verified = freshness == "current"
+        assessment = assess_certification(key, version, "verified", observed)
+        certification = assessment["certification_record"]
         evidence["certification"] = certification
         source_verification = dict(spec["source_verification"])
         if certification and "authenticated_skill_invocation" in certification["checks"]:
@@ -572,13 +591,13 @@ def discover(
                                        cross_agent_handoff="live_verified")
         found_agents[key] = {
             "identity": spec["identity"], "state": state,
-            "verification": "verified" if verified else "unverified",
+            "verification": assessment["verification"],
             "version": version, "verified_versions": spec["verified_versions"],
             "roots": roots, "evidence": evidence, "sources": spec["sources"],
             "verified_on": certification["verified_on"] if certification else None,
             "source_verification": source_verification,
-            "verification_review_due": review_due.isoformat() if review_due else None,
-            "verification_freshness": freshness,
+            "verification_review_due": assessment["verification_review_due"],
+            "verification_freshness": assessment["verification_freshness"],
             "duplicate_behavior": spec["duplicates"],
             # Presence chooses a destination; verification says whether that
             # adapter version is certified. Conflating them made four present
@@ -608,11 +627,9 @@ def select_targets(
     """
     records = report["agents"]
     observed = as_of or date.today()
-    stale_certifications = {
-        name for name, record in records.items()
-        if record.get("verification_review_due")
-        and observed > datetime.strptime(record["verification_review_due"], "%Y-%m-%d").date()
-    }
+    assessments = {name: assess_certification(name, record.get("version"),
+                                             record["verification"], observed)
+                   for name, record in records.items() if name in ADAPTERS}
     requested, excluded = list(agents) or list(ADAPTERS), set(exclude_agents)
     if len(set(requested)) != len(requested):
         raise ValueError("agents contains a duplicate agent id")
@@ -624,8 +641,7 @@ def select_targets(
     eligible: set[str] = set()
     for agent in requested:
         record = records[agent]
-        certification = ("verified" if record["verification"] == "verified"
-                         and agent not in stale_certifications else "unverified")
+        certification = assessments[agent]["verification"]
         if agent in excluded:
             skipped.append({"agent": agent, "reason": "excluded",
                             "certification": certification})
@@ -667,8 +683,9 @@ def select_targets(
             continue
         item, covered = assignments[agent]
         record = records[agent]
+        assessment = assessments[agent]
         agent_warnings = []
-        if record["verification"] != "verified":
+        if record["verification"] != "verified" or assessment["certification_record"] is None:
             if mode == "automatic":
                 version = record.get("version") or "unknown version"
                 agent_warnings.append(
@@ -681,22 +698,21 @@ def select_targets(
                     f"{record['state']}; bootstrap destination planning proceeded, "
                     "but presence, native compatibility, and invocation remain "
                     "unverified (skip is not pass)")
-        if agent in stale_certifications:
+        if assessment["verification_freshness"] == "stale":
             selection_basis = ("selection continued from executable presence"
                                if mode == "automatic"
                                else "explicit bootstrap selection proceeded")
             agent_warnings.append(
                 f"{agent} adapter certification expired after "
-                f"{record['verification_review_due']}; {selection_basis}, but "
+                f"{assessment['verification_review_due']}; {selection_basis}, but "
                 "the adapter evidence is stale")
         warnings.extend(agent_warnings)
         selected.append({
             "agent": agent, "status": "selected", "mode": mode,
             "covered_by": list(item["target_agents"]) if covered else None,
             "destination": item["destination"], "consumers": item["consumers"],
-            "certification": ("verified" if record["verification"] == "verified"
-                              and agent not in stale_certifications else "unverified"),
-            "certification_record": record["evidence"].get("certification"),
+            "certification": assessment["verification"],
+            "certification_record": assessment["certification_record"],
             "certification_warnings": agent_warnings,
         })
     conflicts = []
