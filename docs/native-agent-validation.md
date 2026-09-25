@@ -1,5 +1,40 @@
 # Native agent validation
 
+## ARC-281 live certification — 2026-09-25
+
+The orchestrator checked the ARC-281 live-run artifacts on the operator host.
+Each agent received one short authenticated prompt in a scratch Git project,
+discovered the installed `hanig-portable-handoff` skill itself, and ran its
+script's `capture` followed by `resume`, yielding `HANDOFF_CLEAN`. An independent
+`resume` of each produced handoff exited 0. This is retained evidence from
+**ARC-281 live run**, not a new invocation performed by this documentation update.
+
+| Agent | Exact version | Observed skill root | Certification date |
+| --- | --- | --- | --- |
+| Claude Code | 2.1.282 | `~/.claude/skills` | 2026-09-25 |
+| Codex CLI | 0.154.0 | `~/.agents/skills` | 2026-09-25 |
+| OpenCode | 1.18.29 | `~/.agents/skills` | 2026-09-25 |
+| Pi | 0.86.1 | `~/.agents/skills` | 2026-09-25 |
+
+The verified scope is native discovery, authenticated skill invocation, and
+cross-agent handoff. Clean directed handoffs were Claude → Pi, Claude → OpenCode,
+Codex → Claude, and Pi → Codex. Codex ran as `codex exec -s workspace-write`.
+This evidence covers those versions, roots, and directions on that host; it does
+not certify every root, all agent pairs, a newer patch, or another OS/host.
+The credentialless harness remains a separate discovery check and still reports
+its own authenticated invocation as `not_run`.
+
+The installer retains the 2026-09-05 records with their original dates. Each
+exact version uses its newest matching record and the existing 30-day review
+window: the new evidence is current through 2026-10-25, then selection reports
+`unverified` and warns on stderr, including with `--json`. Older distinct
+versions expire after 2026-10-05; refreshing a different version cannot renew
+them. OpenCode retains both observations of 1.18.29 and uses the newer one.
+An unexercised patch remains `unverified` while executable presence still permits
+ordinary destination planning.
+
+## Historical credentialless validation — 2026-09-05
+
 - Date: 2026-09-05
 - Package-scope compatibility update: 2026-09-23
 - Initial integration: `2414d8a80e23ea8ae4e5638c65696b7a86f9f570`
@@ -77,7 +112,7 @@ the installer's fixed 2.0-second discovery deadline; consequently the combined
 installer honestly reported OpenCode as `undetermined` even when explicitly
 selected.
 
-## macOS/Linux matrix
+## Historical macOS/Linux matrix (2026-09-05)
 
 | Agent | Gated version | macOS native discovery | macOS representative invocation | Linux evidence | Minimal missing requirement |
 |---|---:|---|---|---|---|
@@ -86,7 +121,7 @@ selected.
 | OpenCode | 1.18.29 | **Pass.** Official pinned 1.18.29 `opencode debug skill --pure` found the exact installed `.agents` copy in both macOS fixtures. | Not run; `debug skill` is discovery, not a provider/model turn. | **Pass in run 33974800468.** Artifact gate has no failure, missing discovery, or version gap. | A configured test provider/model only if actual invocation is required. |
 | Pi | 0.73.1 | **Pass.** Official pinned 0.73.1 `DefaultResourceLoader.reload()`/`getSkills()` found the exact installed `.agents` copy in both macOS fixtures, with no diagnostics. | Not run; native SDK discovery starts no model. | **Pass in run 33974800468.** Artifact gate has no failure, missing discovery, or version gap. | A configured test model only if `/skill:hanig-portable-handoff` execution is required. |
 
-The current bounded cross-host gap is narrower than model invocation: the
+The bounded cross-host gap recorded on 2026-09-05 was narrower than model invocation: the
 updated no-Claude/capture fixture has not yet run in CI. The coordinator owns
 that final workflow rerun; this worker did not modify the workflow or use an
 unapproved local/remote Linux target.
@@ -104,7 +139,7 @@ disabled, and no auth variables. The exact releases were:
 
 Pi is now also published as `@earendil-works/pi-coding-agent`. The host's
 0.86.1 package under that scope was loader-tested on 2026-09-23, but its
-tarball integrity digest was not measured here. The 0.73.1 version gate,
+tarball integrity digest was not measured here. The historical 0.73.1 gate,
 digest, tarball URL, and disposable install below remain the proven old-scope
 provenance and are deliberately not relabelled or replaced.
 
@@ -351,6 +386,13 @@ perform a representative local capture independently of the checkout. It does
 
 ## Reusable harness
 
+`EXPECTED_VERSIONS` targets the four versions in the 2026-09-25 matrix.
+The Pi SDK gate requires the exact current pair
+`@earendil-works/pi-coding-agent` 0.86.1; the legacy scope remains a loader
+resolution candidate, but an old SDK cannot satisfy the current CLI target.
+The installer's historical certification records and this report's old
+observations remain preserved separately.
+
 Run:
 
 ```sh
@@ -392,7 +434,7 @@ response receives skill context and issues a tool call; it would not prove
 ordinary LLM skill selection. Building that cross-agent provider harness was
 out of scope and would not close a real-model invocation gate.
 
-## Release blockers
+## Historical release blockers (2026-09-05)
 
 1. Run the updated no-Claude/capture harness in coordinator-owned macOS and
    Linux CI; the first CI artifacts predate this follow-up.

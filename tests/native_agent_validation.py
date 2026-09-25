@@ -38,10 +38,10 @@ AGENTS = ("claude", "codex", "opencode", "pi")
 NON_CLAUDE_AGENTS = ("codex", "opencode", "pi")
 NON_CLAUDE_HELPERS = ("dirname", "git", "node", "python3", "sh")
 EXPECTED_VERSIONS = {
-    "claude": "2.1.261",
-    "codex": "0.153.4",
+    "claude": "2.1.282",
+    "codex": "0.154.0",
     "opencode": "1.18.29",
-    "pi": "0.73.1",
+    "pi": "0.86.1",
 }
 VERSION_RE = re.compile(r"(?<!\d)(\d+\.\d+\.\d+)(?!\d)")
 MAX_CAPTURE_CHARS = 1_000_000
@@ -49,7 +49,6 @@ PI_PACKAGE_NAMES = (
     "@mariozechner/pi-coding-agent",
     "@earendil-works/pi-coding-agent",
 )
-
 
 def _text(value: str | bytes | None) -> str:
     if value is None:
@@ -859,7 +858,7 @@ def _pi_candidate_discovery(
     package_version = manifest.get("version")
     loader_passed = all(checks.values())
     version_is_gated = (
-        package_name == PI_PACKAGE_NAMES[0]
+        package_name == PI_PACKAGE_NAMES[1]
         and package_version == EXPECTED_VERSIONS["pi"]
     )
     return {
@@ -876,7 +875,7 @@ def _pi_candidate_discovery(
             "status": "passed" if version_is_gated else "failed",
             "observed_package_name": package_name,
             "observed_version": package_version,
-            "expected_package_name": PI_PACKAGE_NAMES[0],
+            "expected_package_name": PI_PACKAGE_NAMES[1],
             "expected_version": EXPECTED_VERSIONS["pi"],
         },
         "skill": matches[0] if matches else None,
@@ -896,7 +895,7 @@ def _pi_discovery(paths: Mapping[str, Path], env: Mapping[str, str]) -> dict[str
             "status": "unavailable",
             "kind": "native_discovery",
             "reason": "pi is not in PATH; its native package/SDK loader could not be exercised",
-            "minimal_requirement": "Pi coding agent 0.73.1 with its importable SDK package",
+            "minimal_requirement": f"Pi coding agent {EXPECTED_VERSIONS['pi']} with its importable SDK package",
             "invocation": {
                 "status": "not_run",
                 "reason": "Pi is absent and actual invocation also requires a configured model",
@@ -914,7 +913,7 @@ def _pi_discovery(paths: Mapping[str, Path], env: Mapping[str, str]) -> dict[str
             ),
             "minimal_requirement": (
                 f"an importable {supported_names} package; the validated release "
-                "gate remains 0.73.1"
+                f"gate is {EXPECTED_VERSIONS['pi']}"
             ),
             "invocation": {
                 "status": "not_run",
@@ -967,7 +966,7 @@ console.log(JSON.stringify({
     )
     first_attempt["minimal_requirement"] = (
         f"an importable {supported_names} package; the validated release gate "
-        "remains 0.73.1"
+        f"is {EXPECTED_VERSIONS['pi']}"
     )
     return first_attempt
 

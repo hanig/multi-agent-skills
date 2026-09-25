@@ -23,7 +23,7 @@ EXPECTED_PI_PACKAGE_NAMES = (
 )
 
 
-def package_fixture(root, package_name, version="0.86.1"):
+def package_fixture(root, package_name, version="0.86.2"):
     package_root = root / "node_modules" / package_name
     entry = package_root / "dist" / "bundle" / "cli.js"
     entry.parent.mkdir(parents=True)
@@ -592,7 +592,7 @@ class TestPiPackageResolution(unittest.TestCase):
             for path in paths.values():
                 path.mkdir()
             package_root, _ = package_fixture(
-                root, "@earendil-works/pi-coding-agent", version="0.86.1"
+                root, "@earendil-works/pi-coding-agent", version="0.86.2"
             )
             entry = package_root / "dist" / "index.js"
             entry.write_text("// fixture\n", encoding="utf-8")
@@ -620,17 +620,17 @@ class TestPiPackageResolution(unittest.TestCase):
 
         self.assertEqual(result["status"], "unverified")
         self.assertEqual(result["package_version_gate"]["status"], "failed")
-        self.assertEqual(result["package_version_gate"]["expected_version"], "0.73.1")
-        self.assertEqual(result["package_version_gate"]["observed_version"], "0.86.1")
+        self.assertEqual(result["package_version_gate"]["expected_version"], "0.86.1")
+        self.assertEqual(result["package_version_gate"]["observed_version"], "0.86.2")
 
-    def test_validated_legacy_package_passes_without_a_version_gap(self):
+    def test_validated_current_package_passes_without_a_version_gap(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             paths = {name: root / name for name in ("workspace", "tmp", "home", "pi")}
             for path in paths.values():
                 path.mkdir()
             package_root, _ = package_fixture(
-                root, "@mariozechner/pi-coding-agent", version="0.73.1"
+                root, "@earendil-works/pi-coding-agent", version="0.86.1"
             )
             package_root.joinpath("dist", "index.js").write_text(
                 "// fixture\n", encoding="utf-8"
@@ -663,14 +663,14 @@ class TestPiPackageResolution(unittest.TestCase):
         versions = {"pi": {"version_gate": "passed"}}
         self.assertEqual(validation._version_gaps(("pi",), versions, {"pi": native}), [])
 
-    def test_absent_diagnostics_passes_validated_legacy_package(self):
+    def test_absent_diagnostics_passes_validated_current_package(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             paths = {name: root / name for name in ("workspace", "tmp", "home", "pi")}
             for path in paths.values():
                 path.mkdir()
             package_root, _ = package_fixture(
-                root, "@mariozechner/pi-coding-agent", version="0.73.1"
+                root, "@earendil-works/pi-coding-agent", version="0.86.1"
             )
             package_root.joinpath("dist", "index.js").write_text(
                 "// fixture\n", encoding="utf-8"
@@ -852,10 +852,58 @@ class TestPiPackageResolution(unittest.TestCase):
                 self.assertEqual(result["status"], "unverified")
                 self.assertEqual(run.call_count, 2)
 
+    def test_live_pi_certification_keeps_package_identity_exact(self):
+        for package_name, version, status in (
+                ("@earendil-works/pi-coding-agent", "0.86.1", "passed"),
+                ("@earendil-works/pi-coding-agent", "0.86.2", "unverified"),
+                ("@mariozechner/pi-coding-agent", "0.86.1", "unverified"),
+                ("@mariozechner/pi-coding-agent", "0.73.1", "unverified")):
+            with self.subTest(package=package_name, version=version), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                paths = {name: root / name for name in ("workspace", "tmp", "home", "pi")}
+                for path in paths.values():
+                    path.mkdir()
+                package_root, _ = package_fixture(root, package_name, version=version)
+                (package_root / "dist" / "index.js").write_text("// fixture\n")
+                installed = paths["home"] / ".agents" / "skills" / validation.SKILL / "SKILL.md"
+                installed.parent.mkdir(parents=True)
+                installed.write_text("fixture\n")
+                response = {"returncode": 0, "stderr": "", "stdout": json.dumps({
+                    "skills": [{"name": validation.SKILL, "filePath": str(installed)}],
+                    "diagnostics": []})}
+                with mock.patch.object(validation, "_run", return_value=response):
+                    native = validation._pi_candidate_discovery(
+                        package_root, paths=paths, env={"PATH": ""},
+                        script=paths["tmp"] / "loader.mjs")
+                self.assertEqual(native["status"], status)
+                self.assertTrue(all(native["checks"].values()))
+                self.assertEqual(native["package_version_gate"]["status"],
+                                 "passed" if status == "passed" else "failed")
+
     def test_unverified_sdk_is_a_version_gap_even_when_cli_pin_matches(self):
         versions = {"pi": {"version_gate": "passed"}}
         native = {"pi": {"status": "unverified"}}
         self.assertEqual(validation._version_gaps(("pi",), versions, native), ["pi"])
+
+
+class TestCurrentNativeVersions(unittest.TestCase):
+    def test_expected_versions_match_the_live_run_and_reject_newer_patches(self):
+        expected = {"claude": "2.1.282", "codex": "0.154.0",
+                    "opencode": "1.18.29", "pi": "0.86.1"}
+        self.assertEqual(validation.EXPECTED_VERSIONS, expected)
+        for agent, version in expected.items():
+            major, minor, patch = version.split(".")
+            newer = ".".join((major, minor, str(int(patch) + 1)))
+            for observed, gate in ((version, "passed"), (newer, "failed")):
+                with self.subTest(agent=agent, version=observed), mock.patch.object(
+                    validation.shutil, "which", return_value="/fixture/" + agent
+                ), mock.patch.object(validation, "_run", return_value={
+                    "status": "passed", "stdout": observed, "stderr": "",
+                    "elapsed_seconds": 0.01
+                }):
+                    result = validation._version(agent, cwd=ROOT, env={"PATH": ""})
+                    self.assertEqual(result["version_gate"], gate)
+                    self.assertEqual(result["expected_version"], version)
 
 
 if __name__ == "__main__":
