@@ -18,6 +18,7 @@ Python 3.8+, stdlib only.
 """
 import json
 import os
+import shlex
 import shutil
 import sys
 import tempfile
@@ -78,14 +79,18 @@ class Base(unittest.TestCase):
         """
         b = self.tmp / "bin"
         b.mkdir(exist_ok=True)
-        (b / "sacct").write_text(
-            "#!" + sys.executable + "\n"
+        program = (
             "import sys, time\n"
             "submits = %r\n" % self.accounting_submits +
             "job = sys.argv[sys.argv.index('-j') + 1]\n"
             "if job in submits:\n"
             "    print('COMPLETED|0:0|' + submits[job] + '|' + "
             "time.strftime('%Y-%m-%dT%H:%M:%S%z'))\n")
+        # Keep the kernel's interpreter line short even in a deeply nested
+        # environment; shell quoting also preserves spaces in the Python path.
+        (b / "sacct").write_text(
+            "#!/bin/sh\nexec " + shlex.quote(sys.executable) +
+            " -c " + shlex.quote(program) + ' "$@"\n')
         (b / "sacct").chmod(0o755)
         old = os.environ["PATH"]
         os.environ["PATH"] = f"{b}{os.pathsep}{old}"
@@ -406,6 +411,16 @@ class TestTheAgentCannotReachTheBaseline(Base):
         # a sleep: the fabricated attempt was bound long before this query.
         # Run the same consumer assertions, including the persisted receipt.
         with mock.patch.object(U, "now_iso", return_value="2000-01-01T00:00:00+0000"):
+            self.test_rewriting_the_specs_declared_outputs_is_refused()
+
+    def test_accounting_stub_accepts_a_long_interpreter_path(self):
+        interpreter = self.tmp
+        for _ in range(6):
+            interpreter /= "python-environment-" + "x" * 80
+        interpreter.mkdir(parents=True)
+        interpreter /= "python3"
+        interpreter.symlink_to(sys.executable)
+        with mock.patch.object(sys, "executable", str(interpreter)):
             self.test_rewriting_the_specs_declared_outputs_is_refused()
 
 

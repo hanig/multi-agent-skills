@@ -3720,18 +3720,24 @@ close $ready or die $!;
         from unittest import mock
 
         shell_script = FixtureProcesses.shell_script
+        injected = []
 
         def stopped_start(scope, source):
             if "writer()" in source:
                 # Deschedule the producer beyond the old 1s run + 1s grace.
                 # The tracked resumer belongs to the same fixture session.
+                anchor = "trap '' TERM\n"
+                self.assertEqual(source.count(anchor), 1,
+                                 "delayed-start trap anchor changed")
                 source = source.replace(
-                    "trap '' TERM\n", "trap '' TERM\n"
+                    anchor, anchor +
                     '(sleep 3; kill -CONT "$$") &\nkill -STOP "$$"\n', 1)
+                injected.append(True)
             return shell_script(scope, source)
 
         with mock.patch.object(FixtureProcesses, "shell_script", stopped_start):
             self.test_a_continuously_noisy_child_cannot_starve_its_deadline()
+        self.assertEqual(injected, [True], "writer delay was not injected once")
 
     def test_group_setup_and_wait_errors_fail_closed(self):
         """This is structural/code-inspection coverage: setpgid/waitpid
