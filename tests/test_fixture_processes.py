@@ -27,6 +27,87 @@ def kill_group(pgid):
 
 
 class TestFixtureProcessGuard(unittest.TestCase):
+    def _closed_standard_descriptors(self, closed):
+        """Compare native launches while the caller really lacks stdio FDs."""
+        with tempfile.TemporaryDirectory() as directory:
+            case = unittest.TestCase()
+            scope = FixtureProcesses(case, directory, kill_group)
+            saved = {fd: os.dup(fd) for fd in closed}
+            handles = []
+            try:
+                for fd in closed:
+                    os.close(fd)
+                # The child records descriptor state before opening its result
+                # file, which may itself temporarily occupy a closed slot.
+                probe = (
+                    'import json, os, sys\n'
+                    'from pathlib import Path\n'
+                    'opened = []\n'
+                    'for fd in (0, 1, 2):\n'
+                    '    try: os.fstat(fd)\n'
+                    '    except OSError: opened.append(False)\n'
+                    '    else: opened.append(True)\n'
+                    'Path(sys.argv[1]).write_text(json.dumps(opened))\n'
+                    'raise SystemExit(int(sys.argv[2]))\n')
+                for status in (0, 23):
+                    native_path = Path(directory) / 'native.json'
+                    fixture_path = Path(directory) / 'fixture.json'
+                    native = subprocess.Popen(
+                        [sys.executable, '-c', probe, str(native_path), str(status)])
+                    self.assertEqual(native.wait(timeout=10), status)
+                    child = scope.popen(
+                        [sys.executable, '-c', probe, str(fixture_path), str(status)])
+                    handles.append(child)
+                    self.assertEqual(child.wait(timeout=10), native.returncode)
+                    self.assertEqual(fixture_path.read_text(), native_path.read_text())
+                    self.assertIsNone(child.supervisor.returncode)
+                    self.assertIn(str(child.supervisor.pid),
+                                  scope.pidfiles[0].read_text().split())
+                    self.assertNotEqual(child.supervisor.pid, os.getpgrp())
+                # Exercise the other generated supervisor's result pipe. It
+                # explicitly redirects stdin; stdout/stderr stay inherited.
+                result = scope.run_python(
+                    probe.split('Path(sys.argv[1])', 1)[0] + 'result = opened\n')
+                self.assertEqual(result, [True, 1 not in closed, 2 not in closed])
+                sleeper = scope.popen(['/bin/sleep', '600'])
+                handles.append(sleeper)
+                self.assertEqual(os.getpgid(sleeper.pid), sleeper.supervisor.pid)
+                self.assertEqual(os.getsid(sleeper.pid), sleeper.supervisor.pid)
+                self.assertIn(str(sleeper.supervisor.pid),
+                              scope.pidfiles[0].read_text().split())
+                self.assertTrue(case.doCleanups())
+                for child in handles:
+                    self.assertIsNotNone(child.returncode)
+                    self.assertIsNotNone(child.supervisor.returncode)
+                    self.assertEqual(child.wait(timeout=0), child.returncode)
+                self.assertEqual(sleeper.returncode, -signal.SIGKILL)
+                row = process_table().get(sleeper.pid)
+                self.assertTrue(row is None or row[2].startswith('Z'), row)
+                for fd in closed:
+                    with self.assertRaises(OSError):
+                        os.fstat(fd)
+            finally:
+                try:
+                    self.assertTrue(case.doCleanups())
+                finally:
+                    for fd, backup in saved.items():
+                        os.dup2(backup, fd)
+                        os.close(backup)
+
+    def test_closed_caller_stdin_preserves_native_status_and_cleanup(self):
+        self._closed_standard_descriptors((0,))
+
+    def test_closed_caller_stdout_preserves_native_status_and_cleanup(self):
+        self._closed_standard_descriptors((1,))
+
+    def test_closed_caller_stdin_and_stdout_preserves_native_status_and_cleanup(self):
+        self._closed_standard_descriptors((0, 1))
+
+    def test_closed_caller_stderr_combinations_preserve_native_status_and_cleanup(self):
+        for closed in ((2,), (0, 2), (1, 2), (0, 1, 2)):
+            with self.subTest(closed=closed):
+                self._closed_standard_descriptors(closed)
+
     def test_high_descriptors_preserve_launch_status_signals_and_python_results(self):
         limits = resource.getrlimit(resource.RLIMIT_NOFILE)
         if limits[1] != resource.RLIM_INFINITY and limits[1] < 1100:
