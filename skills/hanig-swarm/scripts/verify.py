@@ -24,8 +24,10 @@ corpus. The existing three still apply unchanged when it does not:
 
 The reserved integration-tests claim adds a second binding: it runs in a
 disposable candidate merge of the produced head into an exact target commit,
-and its receipt names that target and their unique merge base. Other claims
-keep the existing produced-head checkout and receipt unchanged.
+and its receipt names that target and their unique merge base. The connected
+merge operator also admits changed-tests-stable against this same binding when
+the target policy declares it. Ordinary swarm verification keeps its existing
+anchored-base authorization and produced-head behavior for other claims.
 
 WHAT THIS DOES NOT ESTABLISH. The agent runs as the same Unix user as the
 coordinator, so it can write any file the coordinator can, including the
@@ -55,6 +57,9 @@ POLICY_FILE = "verifiers.json"
 INTEGRATION_CLAIM = "integration-tests"
 MERGE_VERIFIER = "merge-precondition"
 MERGE_VERIFIER_PATH = "verifiers/integration_tests.py"
+STABILITY_CLAIM = "changed-tests-stable"
+STABILITY_VERIFIER_PATH = "verifiers/changed_tests_stable.py"
+MERGE_BASIS_FIELDS = ("produced_head", "target_commit", "merge_base", "candidate_tree")
 
 # A mixed-version rollout must fail closed rather than silently accept a
 # policy written for different rules.
@@ -668,73 +673,151 @@ def run_in_candidate_merge(runner, repo, produced_head, target_commit, path,
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def merge_precondition_policy(runner, repo, target_commit):
-    """Authorize the merge precondition from the trusted target, never HEAD.
+def merge_precondition_policy(runner, repo, target_commit,
+                              claim=INTEGRATION_CLAIM):
+    """Authorize a designated merge verifier from the observed target.
 
-    Ordinary verification retains anchored-base authorization. In-flight
-    attempts can predate installation of this policy; their launch base is
-    deliberately not the authorization source for this merge-only check.
-    The caller must obtain target_commit from its trusted target observation.
+    An absent stability declaration is the only compatibility exception. A
+    declared but malformed, missing, or unpinned verifier always refuses.
     """
+    if claim not in (INTEGRATION_CLAIM, STABILITY_CLAIM):
+        return None, None, None, "unknown merge-precondition claim"
     policy, policy_digest, error = read_policy(
         runner, repo, target_commit, source="target commit")
     if error:
         return None, None, None, "merge-precondition target policy: " + error
-    digest, _size, error = _digest_base_blob(
-        repo, target_commit, MERGE_VERIFIER_PATH)
+    name, path = MERGE_VERIFIER, MERGE_VERIFIER_PATH
+    if claim == STABILITY_CLAIM:
+        name, path = STABILITY_CLAIM, STABILITY_VERIFIER_PATH
+        declarations = [v for v in policy["verifiers"] if isinstance(v, dict)
+                        and (v.get("name") == name
+                             or claim in (v.get("claims") or []))]
+        if not declarations:
+            return dict(policy, verifiers=[]), policy_digest, None, None
+        if len(declarations) != 1:
+            return None, None, None, "ambiguous changed-tests-stable target policy"
+    digest, _size, error = _digest_base_blob(repo, target_commit, path)
     if error:
         return None, None, None, "merge-precondition target verifier: " + error
-    entry, error = authorized(policy, MERGE_VERIFIER, digest, INTEGRATION_CLAIM)
+    entry, error = authorized(policy, name, digest, claim)
     if error:
         return None, None, None, "merge-precondition target authorization: " + error
-    # Admission must require this designated verifier, not any other verifier
-    # which the target policy happens to allow for an integration claim.
-    restricted = dict(policy, verifiers=[entry])
-    return restricted, policy_digest, digest, None
+    if claim == STABILITY_CLAIM:
+        repetitions = entry.get("repetitions", 5)
+        if type(repetitions) is not int or repetitions < 1:
+            return None, None, None, "changed-tests-stable repetitions must be a positive integer"
+    return dict(policy, verifiers=[entry]), policy_digest, digest, None
 
 
 def run_merge_precondition(runner, repo, produced_head, target_commit,
                            timeout=900):
-    """Run the target's pinned program using the existing candidate runner.
+    """Compatibility API for the original single integration claim."""
+    receipts, error = run_merge_preconditions(
+        runner, repo, produced_head, target_commit, timeout=timeout,
+        claims=(INTEGRATION_CLAIM,))
+    return (receipts[0] if receipts else None), error
 
-    Returns receipt fields, or an error. Persistence belongs to the connected
-    operator under its coordinator lock, outside worker directories.
+
+def run_merge_preconditions(runner, repo, produced_head, target_commit,
+                            timeout=900, claims=(INTEGRATION_CLAIM, STABILITY_CLAIM)):
+    """Run target-pinned claims in one disposable candidate merge.
+
+    Return receipts plus any execution error. A completed FAIL remains evidence
+    even if a later verifier cannot execute; the caller must publish completed
+    receipts under its original observation fence before reporting the error.
     """
-    policy, policy_digest, digest, error = merge_precondition_policy(
-        runner, repo, target_commit)
-    if error:
-        return None, error
-    entry = policy["verifiers"][0]
-    corpus, error = corpus_evidence(
-        runner, repo, target_commit, produced_head, entry)
-    if not error:
-        error = corpus_change_refusal(entry, corpus, INTEGRATION_CLAIM)
-    if error:
-        return None, error
-    tmp, tree, error = _isolated_checkout(
+    checks = []
+    for claim in claims:
+        policy, policy_digest, digest, error = merge_precondition_policy(
+            runner, repo, target_commit, claim=claim)
+        if error:
+            return [], error
+        if not policy["verifiers"]:
+            continue
+        entry = policy["verifiers"][0]
+        corpus, error = corpus_evidence(
+            runner, repo, target_commit, produced_head, entry)
+        if not error:
+            error = corpus_change_refusal(entry, corpus, claim)
+        if error:
+            return [], error
+        checks.append((claim, entry, policy_digest, digest, corpus))
+    tmp, policy_tree, error = _isolated_checkout(
         runner, repo, target_commit, "verify-target-policy-")
     if error:
-        return None, error
+        return [], error
+    candidate_tmp = None
+    receipts = []
     try:
-        outcome, basis, error = run_in_candidate_merge(
-            runner, repo, produced_head, target_commit,
-            os.path.join(tree, MERGE_VERIFIER_PATH), digest, timeout=timeout)
+        candidate_tmp, tree, basis, error = _candidate_checkout(
+            runner, repo, produced_head, target_commit)
         if error:
-            return None, error
-        receipt = dict(corpus, **basis)
-        receipt.update({
-            "claim": INTEGRATION_CLAIM, "verifier": MERGE_VERIFIER,
-            "verifier_sha256": digest, "policy_sha256": policy_digest,
-            "authorization_commit": target_commit,
-            "subject_head": produced_head,
-            "result": "pass" if outcome["exit_code"] == 0 else "fail",
-            "exit_code": outcome["exit_code"],
-            "stdout_tail": outcome["stdout"], "stderr_tail": outcome["stderr"],
-            "schema_version": 1,
-        })
-        return receipt, None
+            return [], error
+        for claim, entry, policy_digest, digest, corpus in checks:
+            path, args, extra = MERGE_VERIFIER_PATH, [], {}
+            if claim == STABILITY_CLAIM:
+                path = STABILITY_VERIFIER_PATH
+                extra = {"repetitions": entry.get("repetitions", 5)}
+                args = ["--merge-base", basis["merge_base"], "--head", produced_head,
+                        "--repetitions", str(extra["repetitions"])]
+            outcome, error = run_pinned(
+                runner, os.path.join(policy_tree, path), digest,
+                args=args, timeout=timeout, cwd=tree)
+            if error:
+                return receipts, error
+            receipt = dict(corpus, **basis, **extra)
+            receipt.update({
+                "claim": claim, "verifier": entry["name"],
+                "verifier_sha256": digest, "policy_sha256": policy_digest,
+                "authorization_commit": target_commit,
+                "subject_head": produced_head,
+                "result": "pass" if outcome["exit_code"] == 0 else "fail",
+                "exit_code": outcome["exit_code"],
+                "stdout_tail": outcome["stdout"], "stderr_tail": outcome["stderr"],
+                "schema_version": 1,
+            })
+            receipts.append(receipt)
+        return receipts, None
     finally:
+        if candidate_tmp:
+            shutil.rmtree(candidate_tmp, ignore_errors=True)
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def admit_stability(runner, repo, target, integration, unit, receipts):
+    """Bind stability to the independently admitted integration candidate.
+
+    This merge-only claim is consumed by the connected operator, not the
+    ordinary anchored-base swarm verification path. No receipt chooses its
+    policy, repetitions, subject or candidate basis.
+    """
+    policy, policy_digest, digest, error = merge_precondition_policy(
+        runner, repo, target, claim=STABILITY_CLAIM)
+    if error:
+        return None, error
+    if not policy["verifiers"]:
+        return None, None
+    entry = policy["verifiers"][0]
+    expected = {field: integration[field] for field in MERGE_BASIS_FIELDS}
+    expected.update(unit=unit, claim=STABILITY_CLAIM, verifier=STABILITY_CLAIM,
+                    subject_head=integration["subject_head"],
+                    authorization_commit=target, policy_sha256=policy_digest,
+                    verifier_sha256=digest, repetitions=entry.get("repetitions", 5))
+    corpus, error = corpus_evidence(
+        runner, repo, target, integration["subject_head"], entry)
+    if not error:
+        error = corpus_change_refusal(entry, corpus, STABILITY_CLAIM)
+    if error:
+        return None, error
+    expected.update(corpus)
+    matching = [r for r in receipts if all(r.get(k) == v for k, v in expected.items())
+                and type(r.get("repetitions")) is int]
+    if any(r.get("result") == "fail" for r in matching):
+        return None, "changed-tests-stable returned FAIL for this exact candidate binding"
+    for receipt in matching:
+        if receipt.get("result") == "pass" and receipt.get("exit_code") == 0:
+            return receipt, None
+    return None, "no passing changed-tests-stable receipt for this exact candidate binding"
 
 
 def run_pinned(runner, path, expect_digest, args=None, timeout=900,
