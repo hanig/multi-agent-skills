@@ -627,10 +627,10 @@ is in [`docs/cross-agent-acceptance.md`](docs/cross-agent-acceptance.md).
              [--allow-vendored-shadow] [--include-vendored]
 ```
 
-With no selector, the installer automatically targets every detected agent
-whose bounded `--version` probe exactly matches the adapter's allowlisted
-release. That is adapter-version eligibility, not proof that a native loader
-accepted a skill or that every loader/root behavior has been verified.
+With no selector, the installer targets agents whose bounded `--version` probe
+succeeds or is slow. Exact-version certification is reported separately;
+unexercised or stale releases remain `unverified`, with warnings on stderr even
+with `--json`. Selection alone is not a compatibility or invocation pass.
 `--agent` is repeatable and is the right choice for a deliberate subset or a
 bootstrap install of an absent CLI.
 `--exclude-agent` applies only to automatic selection.  `--prefix` remains the
@@ -669,6 +669,25 @@ conservative stdlib-only scalar subset requires ambiguous YAML-like values such
 as numbers, dates, booleans, nulls, and sexagesimal forms to be quoted. It also
 aborts on a name collision with an org-managed skill, prunes skills that are no
 longer shipped, and refuses to replace a directory it did not install.
+
+### Dated agent compatibility
+
+The **ARC-281 live run** (2026-09-25) checked native skill discovery,
+authenticated `hanig-portable-handoff` invocation, and cross-agent handoff on
+the operator host:
+
+| Agent | Exact certified version | Date | Observed skill root |
+| --- | --- | --- | --- |
+| Claude Code | 2.1.282 | 2026-09-25 | `~/.claude/skills` |
+| Codex CLI | 0.154.0 | 2026-09-25 | `~/.agents/skills` |
+| OpenCode | 1.18.29 | 2026-09-25 | `~/.agents/skills` |
+| Pi | 0.86.1 | 2026-09-25 | `~/.agents/skills` |
+
+[The native validation record](docs/cross-agent-acceptance.md#arc-281-live-certification--2026-09-25)
+names the four exercised handoff directions and the limits of this evidence.
+One patch newer remains unverified. The 30-day review window ends on
+2026-10-25; older distinct versions retain their 2026-09-05 records and expire
+after 2026-10-05. No new OS, root policy, or untested handoff pair is certified.
 
 ### Paseo, per machine
 
