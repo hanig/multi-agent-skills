@@ -4,6 +4,7 @@ Register before launch and retain PID files until unittest's cleanups finish.
 Only direct children are waitable here. Descendants are killed and observed
 non-running; their actual parent (or the OS reaper) collects their exit status.
 """
+import inspect
 import json
 import os
 from pathlib import Path
@@ -157,7 +158,7 @@ class FixtureProcesses:
     def record_pidfile(self, path):
         self.pidfiles.append(Path(path))
 
-    def popen(self, args, **kwargs):
+    def popen(self, *args, **kwargs):
         """Capture every fixture tree in a recorded private session.
 
         A non-session child inherits a retained supervisor's private session.
@@ -165,9 +166,11 @@ class FixtureProcesses:
         Explicit session leaders retain the native Popen interface and need
         root-bearing descendants if callers reap them before cleanup.
         """
-        if not kwargs.get('start_new_session'):
-            return self._supervised_popen(args, kwargs)
-        return self._start_session(args, kwargs)
+        options = dict(inspect.signature(subprocess.Popen).bind(*args, **kwargs).arguments)
+        command = options.pop('args')
+        if not options.get('start_new_session'):
+            return self._supervised_popen(command, options)
+        return self._start_session(command, options)
 
     def _start_session(self, args, kwargs):
         kwargs['start_new_session'] = True
@@ -191,7 +194,7 @@ class FixtureProcesses:
         control_read, control_write = os.pipe()
         self._channels.extend((report_read, control_write))
         try:
-            script = self.root / ('fixture-launch-%d.py' % len(self.children))
+            script = (self.root / ('fixture-launch-%d.py' % len(self.children))).absolute()
             script.write_text(
                 'import json, os, select, subprocess, time\n'
                 'report, control = %d, %d\n'
@@ -234,8 +237,8 @@ class FixtureProcesses:
         our group anchor. The supervisor stays alive until fixture cleanup.
         """
         stem = 'fixture-supervisor-%d' % len(self.children)
-        script = self.root / (stem + '.py')
-        result_file = self.root / (stem + '.json')
+        script = (self.root / (stem + '.py')).absolute()
+        result_file = (self.root / (stem + '.json')).absolute()
         read_fd, write_fd = os.pipe()
         try:
             script.write_text(

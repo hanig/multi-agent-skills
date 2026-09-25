@@ -156,6 +156,35 @@ class TestFixtureProcessGuard(unittest.TestCase):
             case = unittest.TestCase()
             scope = FixtureProcesses(case, directory, kill_group)
             try:
+                # Preserve the native positional surface (bufsize, executable,
+                # stdin, stdout, stderr), as well as keyword-only invocation.
+                positional = scope.popen(
+                    [sys.executable, '-c', 'print("positional")'],
+                    0, None, None, subprocess.PIPE, None)
+                self.assertEqual(positional.communicate(timeout=10), (b'positional\n', None))
+                self.assertEqual(positional.returncode, 0)
+                self.assertEqual(scope.popen(
+                    args=[sys.executable, '-c', 'pass'], bufsize=0).wait(timeout=10), 0)
+                saved_cwd = Path.cwd()
+                relative_case = unittest.TestCase()
+                try:
+                    os.chdir(directory)
+                    Path('relative-scope').mkdir()
+                    Path('child-cwd').mkdir()
+                    relative_scope = FixtureProcesses(relative_case, 'relative-scope', kill_group)
+                    relative = relative_scope.popen(
+                        [sys.executable, '-c', 'import os; print(os.getcwd())'],
+                        cwd='child-cwd', stdout=subprocess.PIPE, text=True)
+                    self.assertEqual(relative.communicate(timeout=10)[0].strip(),
+                                     str(Path('child-cwd').resolve()))
+                    self.assertEqual(relative.returncode, 0)
+                    self.assertEqual(relative_scope.run_python(
+                        'import os; os.chdir("/"); result = "cwd changed"'), 'cwd changed')
+                finally:
+                    try:
+                        self.assertTrue(relative_case.doCleanups())
+                    finally:
+                        os.chdir(saved_cwd)
                 proc = scope.popen(
                     [sys.executable, '-c', 'import sys; print(sys.stdin.read().upper())'],
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
