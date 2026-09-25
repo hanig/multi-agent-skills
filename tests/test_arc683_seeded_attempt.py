@@ -215,9 +215,11 @@ class SeedDispatchTests(unittest.TestCase):
         carry = argv[-1].split("CARRY FORWARD", 1)[1]
         commands = carry.split("```sh\n", 1)[1].split("\n```", 1)[0]
         picked = subprocess.run(["sh", "-c", commands], cwd=workspace,
-                                env=ENV, capture_output=True, text=True)
+                                env=dict(ENV, SWARM_UNIT_DIR=str(self.attempt)),
+                                capture_output=True, text=True)
         self.assertNotEqual(picked.returncode, 0)
         self.assertIn("empty", picked.stderr)
+        self.assertFalse(list(self.attempt.glob("seed-fetch.*")))
         git(workspace, "cherry-pick", "--skip")
         message = git(workspace, "log", "-1", "--format=%B")
         self.assertIn("cherry picked from commit " + self.head, message)
@@ -234,9 +236,30 @@ class SeedDispatchTests(unittest.TestCase):
         carry = argv[-1].split("CARRY FORWARD", 1)[1]
         commands = carry.split("```sh\n", 1)[1].split("\n```", 1)[0]
         result = subprocess.run(["sh", "-c", commands], cwd=workspace,
-                                env=ENV, capture_output=True, text=True)
+                                env=dict(ENV, SWARM_UNIT_DIR=str(self.attempt)),
+                                capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(list(self.attempt.glob("seed-fetch.*")))
         self.assertEqual(git(workspace, "rev-parse", "HEAD"), self.base)
+
+    def test_delivered_fetch_supports_equals_and_shell_characters_in_remote(self):
+        remote = self.tmp / "origin=quoted ' $cash.git"
+        self.remote.rename(remote)
+        self.remote = remote
+        git(self.repo, "remote", "set-url", "origin", str(remote))
+        job, error = self.submit()
+        self.assertIsNone(error)
+        self.assertTrue(job)
+        argv = self.fake.launches[0]
+        workspace = argv[argv.index("--cwd") + 1]
+        carry = argv[-1].split("CARRY FORWARD", 1)[1]
+        commands = carry.split("```sh\n", 1)[1].split("\n```", 1)[0]
+        result = subprocess.run(["sh", "-c", commands], cwd=workspace,
+                                env=dict(ENV, SWARM_UNIT_DIR=str(self.attempt)),
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(list(self.attempt.glob("seed-fetch.*")))
+        self.assertEqual((Path(workspace) / "repair.txt").read_text(), "carried forward\n")
 
     def test_temporary_ref_cleanup_lock_does_not_change_reachability(self):
         real_git = S._git

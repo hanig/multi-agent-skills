@@ -997,8 +997,11 @@ def _seed_carry_forward(seed, repo, remote):
     # Exactly-once routing, as in _git_push_destination: origin may fetch
     # from somewhere other than its push destination. Quote every shell arg.
     alias = "hanig-swarm-seed-" + hashlib.sha256(remote.encode()).hexdigest() + ":"
-    route = shlex.quote(f"url.{remote}.insteadOf={alias}")
-    fetch = (f"git -c {route} fetch --no-tags --recurse-submodules=no "
+    route_key = shlex.quote(f"url.{remote}.insteadOf")
+    # A URL may contain '='. Git -c key=value splits at the first one,
+    # even inside a shell-quoted argument, so write key and value separately.
+    fetch = ("git -c \"include.path=$swarm_seed_config\" "
+             "fetch --no-tags --recurse-submodules=no "
              f"{shlex.quote(alias)} {shlex.quote(seed['ref'])}")
     evidence = ""
     if "evidence" in seed:
@@ -1009,11 +1012,17 @@ def _seed_carry_forward(seed, repo, remote):
     return f"""\n\nCARRY FORWARD (recorded seed; provenance only)
 Stay on the new attempt branch and its recorded launch base. Fetch the seed ref {seed['ref']!r} from the recorded origin push destination:
 ```sh
-{fetch} &&
-swarm_seed_commits=$(git rev-list --max-count=1 {seed['base']}..{seed['head']}) &&
+(
+set -e
+swarm_seed_config=$(mktemp "$SWARM_UNIT_DIR/seed-fetch.XXXXXX")
+trap 'rm -f "$swarm_seed_config" || :' 0
+git config --file "$swarm_seed_config" --add {route_key} {shlex.quote(alias)}
+{fetch}
+swarm_seed_commits=$(git rev-list --max-count=1 {seed['base']}..{seed['head']})
 if test -n "$swarm_seed_commits"; then
     git cherry-pick -x {seed['base']}..{seed['head']}
 fi
+)
 ```
 An empty range carries no commits and is a successful no-op. Skip empty commits: when cherry-pick stops because a commit is empty or already applied, confirm that it is empty and run `git cherry-pick --skip`, repeating as needed. Resolve real conflicts explicitly; never skip a non-empty conflicting change just to finish. Never port by whole-file checkout.
 If fetching or replay cannot be completed, STOP AND REPORT; do not substitute another ref or range.{evidence}
