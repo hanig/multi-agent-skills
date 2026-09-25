@@ -306,8 +306,16 @@ The next invocation follows that resolved intent to a fresh operation, so
 verification can rerun without abandonment; the cancelled record is retained.
 If cancellation publication fails, the original intent remains unresolved and
 the operator refuses a second request. A pending cancellation record restores
-that barrier even if publication failed after rename; a crash before removing
-the pending record also conservatively leaves the intent unresolved.
+that barrier even if publication failed after rename. Only after cancellation's
+file and directory fsync succeed does the operator publish a separate
+`.cancellation-committed` marker bound to the complete resolved intent. A rerun
+with that marker and a leftover pending record retains the cancellation,
+persists the marker and removes the pending record before fresh verification.
+A visible cancelled phase without the marker remains unresolved when a pending
+record exists, including older ambiguous cancellations. Markers are retained so
+an interrupted cleanup cannot revive a committed request; they cannot resolve
+a successor operation's request. A crash before marker publication remains
+conservatively unresolved.
 A red run for the same exact binding cannot be
 hidden by an earlier pass.
 
