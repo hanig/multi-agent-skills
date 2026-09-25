@@ -24,44 +24,89 @@ def journal_writer(method):
     return method
 
 
+def _registered_function(method):
+    function = getattr(method, "__func__", method)
+    return inspect.unwrap(function, stop=lambda candidate: candidate in _WRITERS)
+
+
 def _test_method(case):
-    method = getattr(case, case._testMethodName)
-    method = getattr(method, "__func__", method)
-    # Preserve declarations across ordinary functools.wraps/mock.patch layers,
-    # regardless of which decorator is outermost.
-    return inspect.unwrap(method, stop=lambda function: function in _WRITERS)
+    # Selected-name lookup is for discovery only, never runtime authorization.
+    return _registered_function(getattr(case, case._testMethodName))
+
+
+def _frame_receiver(frame):
+    """Read the bound first argument without assuming it is named self."""
+    code = frame.f_code
+    if code.co_argcount:
+        return frame.f_locals.get(code.co_varnames[0])
+    if code.co_flags & inspect.CO_VARARGS:
+        arguments = frame.f_locals.get(code.co_varnames[code.co_kwonlyargcount], ())
+        return arguments[0] if arguments else None
+    return None
+
+
+def _bound_code_is_active(method, function, frames):
+    """Match the captured callable's code and, for methods, its receiver."""
+    code = getattr(function, "__code__", None)
+    receiver = getattr(method, "__self__", None)
+    return any(frame.f_code is code and
+               (receiver is None or _frame_receiver(frame) is receiver)
+               for frame in frames)
 
 
 def require_registered_writer():
-    """Refuse an unmarked running test, even when it borrows a marked helper.
+    """Authorize actual registered execution beneath every active unittest run.
 
-    Every active selected-test/run frame must be registered: a registered
-    borrowed test method cannot grant permission to an unmarked outer caller.
-    Helper-instance locals alone are not active tests and grant no permission.
-    A cached isolation fixture is not permission to write from an unmarked test.
+    TestCase.run captures testMethod before invoking it. Read that captured
+    callable and require its registered code below that run, bound to the same
+    receiver. A later _testMethodName change cannot grant or remove permission.
+    Directly called borrowed test methods remain constraints, never authority:
+    an unmarked nested method is refused even beneath a registered outer run.
     """
     frame = inspect.currentframe()
-    callers = []
+    frames = []
     try:
         frame = frame.f_back
         while frame is not None:
-            case = frame.f_locals.get("self")
-            if isinstance(case, unittest.TestCase):
-                selected = getattr(case, case._testMethodName)
-                test_codes = (getattr(selected, "__code__", None),
-                              getattr(inspect.unwrap(selected), "__code__", None))
-                if (any(frame.f_code is code for code in test_codes)
-                        or frame.f_code is unittest.TestCase.run.__code__):
-                    callers.append(case)
+            frames.append(frame)
             frame = frame.f_back
-        if not callers:
+        runs = {index: _frame_receiver(frame)
+                for index, frame in enumerate(frames)
+                if frame.f_code is unittest.TestCase.run.__code__
+                and isinstance(_frame_receiver(frame), unittest.TestCase)}
+        if not runs:
             raise AssertionError("journal helper called without a registered test")
-        for caller in callers:
-            if _test_method(caller) not in _WRITERS:
+        running_cases = {id(case) for case in runs.values()}
+        callers = []
+        for index, frame in enumerate(frames):
+            case = _frame_receiver(frame)
+            if index in runs:
+                # This is unittest's captured callable, not mutable case metadata.
+                selected = frame.f_locals.get("testMethod")
+                function = _registered_function(selected)
+                if not _bound_code_is_active(selected, function, frames[:index]):
+                    raise AssertionError(
+                        "journal helper called without active registered test code")
+                callers.append((case, function))
+            elif isinstance(case, unittest.TestCase) and id(case) not in running_cases:
+                # A borrowed helper instance grants nothing. A directly called
+                # test body on it must still be registered, including after a rename.
+                names = unittest.defaultTestLoader.getTestCaseNames(type(case))
+                if hasattr(type(case), "runTest"):
+                    names.append("runTest")
+                for name in names:
+                    candidate = getattr(case, name)
+                    leaf = inspect.unwrap(getattr(candidate, "__func__", candidate))
+                    if frame.f_code is getattr(leaf, "__code__", None):
+                        callers.append((case, _registered_function(candidate)))
+        for caller, function in callers:
+            if function not in _WRITERS:
                 raise AssertionError(
-                    "unregistered journal writer: %s; mark the test with "
-                    "@journal_writer so the isolation guard covers it" % caller.id())
+                    "unregistered journal writer: %s.%s; mark the test with "
+                    "@journal_writer so the isolation guard covers it" %
+                    (type(caller).__qualname__, getattr(function, "__name__", "unknown")))
     finally:
+        frames.clear()
         del frame
 
 
