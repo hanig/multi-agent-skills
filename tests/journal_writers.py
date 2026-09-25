@@ -15,7 +15,11 @@ _WRITERS = weakref.WeakSet()
 
 
 def journal_writer(method):
-    """Declare a test method for inclusion in the journal isolation guard."""
+    """Declare a test method for inclusion in the journal isolation guard.
+
+    Place this outermost when another decorator does not preserve __wrapped__.
+    Transparent decorators and static/class descriptors support either order.
+    """
     _WRITERS.add(getattr(method, "__func__", method))
     return method
 
@@ -33,20 +37,16 @@ def require_registered_writer():
 
     Every active selected-test/run frame must be registered: a registered
     borrowed test method cannot grant permission to an unmarked outer caller.
-    Helper-instance locals alone are not active tests. Direct fixture calls
-    outside a runner use the nearest selected TestCase.
+    Helper-instance locals alone are not active tests and grant no permission.
     A cached isolation fixture is not permission to write from an unmarked test.
     """
     frame = inspect.currentframe()
-    nearest = None
     callers = []
     try:
         frame = frame.f_back
         while frame is not None:
             case = frame.f_locals.get("self")
             if isinstance(case, unittest.TestCase):
-                if nearest is None:
-                    nearest = case
                 selected = getattr(case, case._testMethodName)
                 test_codes = (getattr(selected, "__code__", None),
                               getattr(inspect.unwrap(selected), "__code__", None))
@@ -54,8 +54,6 @@ def require_registered_writer():
                         or frame.f_code is unittest.TestCase.run.__code__):
                     callers.append(case)
             frame = frame.f_back
-        if not callers and nearest is not None:
-            callers.append(nearest)
         if not callers:
             raise AssertionError("journal helper called without a registered test")
         for caller in callers:

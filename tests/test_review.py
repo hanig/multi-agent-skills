@@ -1142,20 +1142,24 @@ class TestRangeDivergence(unittest.TestCase):
             env = dict(os.environ, XDG_STATE_HOME=str(state))
             env.pop(review.JOURNAL_TEST_MARKER, None)
             program = "\n".join((
-                "import json, os",
+                "import json, os, unittest",
                 "from pathlib import Path",
                 "import tests.test_review as module",
                 "assert module._MODULE_STATE_HOME is None",
                 "module.setUpModule()",
-                "case = module.TestRangeDivergence('test_range_cli_isolates_journal_before_first_in_process_write')",
+                "class RangeProbe(module.TestRangeDivergence):",
+                "    @module.journal_writer",
+                "    def runTest(self):",
+                "        result = self.range_cli('HEAD~1..HEAD')",
+                "        state = Path(os.environ['XDG_STATE_HOME'])",
+                "        records = [json.loads(p.read_text()) for p in state.glob('hanig-review-gate/review-rounds/*/record.jsonl')]",
+                "        print(json.dumps({'code': result.returncode, 'stderr': result.stderr, 'records': records}))",
                 "try:",
-                "    case.setUp()",
-                "    result = case.range_cli('HEAD~1..HEAD')",
-                "    state = Path(os.environ['XDG_STATE_HOME'])",
-                "    records = [json.loads(p.read_text()) for p in state.glob('hanig-review-gate/review-rounds/*/record.jsonl')]",
-                "    print(json.dumps({'code': result.returncode, 'stderr': result.stderr, 'records': records}))",
+                "    execution = unittest.TestResult()",
+                "    RangeProbe().run(execution)",
+                "    assert execution.testsRun == 1, execution.testsRun",
+                "    assert execution.wasSuccessful(), (execution.failures, execution.errors)",
                 "finally:",
-                "    case.doCleanups()",
                 "    module.tearDownModule()",
             ))
             result = subprocess.run(

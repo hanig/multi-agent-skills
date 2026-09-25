@@ -205,6 +205,26 @@ class TestJournalWriterRegistry(unittest.TestCase):
         self.assertTrue(report[1]['ok'], report[1])
         self.assertEqual(report[1]['records'], 2)
 
+    def test_case_object_without_active_test_cannot_authorize_a_helper(self):
+        report = self.child('''
+            borrowed = module.TestReviewJournal(
+                'test_two_invocations_append_two_records_with_monotonic_timestamps')
+            borrowed.setUp()
+            try:
+                refusal = None
+                try:
+                    borrowed.invoke()
+                except AssertionError as error:
+                    refusal = str(error)
+                print(json.dumps({'refusal': refusal,
+                                  'records': len(borrowed.records())}))
+            finally:
+                borrowed.doCleanups()
+        ''')
+        self.assertIsNotNone(report['refusal'], report)
+        self.assertIn('without a registered test', report['refusal'])
+        self.assertEqual(report['records'], 0)
+
     def test_static_and_class_methods_register_in_either_decorator_order(self):
         report = self.child('''
             from types import ModuleType
@@ -345,6 +365,42 @@ class TestJournalWriterRegistry(unittest.TestCase):
         self.assertEqual(len(report['failures']), 3)
         for failure in report['failures']:
             self.assertIn('changed seeded journal state', failure)
+
+    def test_opaque_decorator_requires_outermost_registration(self):
+        report = self.child('''
+            from types import ModuleType
+            def opaque(method):
+                def call(self):
+                    return method(self)
+                return call
+            outcomes = []
+            for marker_outermost in (False, True):
+                path = module._ensure_module_state_home() / str(marker_outermost)
+                def test_writer(self):
+                    module.review.append_review_journal(
+                        path, 'implementation', 1, [], 'REVIEW_PASS', [])
+                if marker_outermost:
+                    selected = journal_writer(opaque(test_writer))
+                else:
+                    selected = opaque(journal_writer(test_writer))
+                writer = type('Writer', (unittest.TestCase,), {'test_writer': selected})
+                discovered = ModuleType('opaque_fixture')
+                discovered.Writer = writer
+                result = unittest.TestResult()
+                writer('test_writer').run(result)
+                outcomes.append({'registered': list(registered_writer_names(discovered)),
+                                 'ok': result.wasSuccessful(),
+                                 'failures': [message for _, message in result.failures],
+                                 'records': len(list(path.glob('*/record.jsonl')))})
+            print(json.dumps(outcomes))
+        ''')
+        self.assertFalse(report[0]['ok'])
+        self.assertEqual(report[0]['registered'], [])
+        self.assertIn('unregistered journal writer', report[0]['failures'][0])
+        self.assertEqual(report[0]['records'], 0)
+        self.assertTrue(report[1]['ok'], report[1])
+        self.assertEqual(len(report[1]['registered']), 1)
+        self.assertEqual(report[1]['records'], 1)
 
 
 if __name__ == '__main__':
