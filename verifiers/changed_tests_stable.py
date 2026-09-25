@@ -16,9 +16,12 @@ import subprocess
 
 # Use unittest's normal discovery and load_tests hook (including the supervised
 # review module), but a selected file that discovers zero cases is not evidence.
-RUN_MODULE = """import sys, unittest
+RUN_MODULE = """import os, sys, unittest
+# Keep the helper import path supplied by the integration runner's -s tests,
+# while allowing discovery to retain package identities for relative imports.
+sys.path.insert(0, os.path.abspath('tests'))
 program = unittest.main(module=None, argv=[sys.argv[0], 'discover', '-s',
-                         sys.argv[1], '-p', sys.argv[2]], exit=False)
+                         sys.argv[1], '-p', sys.argv[2], '-t', sys.argv[3]], exit=False)
 if not program.result.testsRun:
     raise SystemExit('changed test module discovered no tests')
 raise SystemExit(0 if program.result.wasSuccessful() else 1)
@@ -56,6 +59,7 @@ def main():
     if not modules:
         print("changed-tests-stable: no changed test modules; pass", flush=True)
         return 0
+    top = "." if Path("tests/__init__.py").is_file() else "tests"
     for module in modules:
         path = Path(module)
         if path.is_symlink() or not path.is_file():
@@ -64,7 +68,7 @@ def main():
             print("{}: repetition {}/{}".format(
                 module, repetition + 1, args.repetitions), flush=True)
             result = subprocess.run(
-                ["python3", "-c", RUN_MODULE, str(path.parent), glob.escape(path.name)],
+                ["python3", "-c", RUN_MODULE, str(path.parent), glob.escape(path.name), top],
                 check=False)
             if result.returncode:
                 return 1
