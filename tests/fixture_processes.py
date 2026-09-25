@@ -303,9 +303,10 @@ def process_table():
 
     ps records start with a numeric PID. A nonnumeric physical line can only
     extend an already started command; preserve it instead of dropping it.
-    Numeric row candidates must parse completely, and duplicate PIDs refuse
-    ambiguous command text. Orphan continuations also refuse. This diagnostic
-    text never supplies session membership or signal authority.
+    Numeric row candidates (a digit, optionally preceded by a sign) must parse
+    completely, and duplicate PIDs refuse ambiguous command text. Signs alone
+    or followed by nondigits remain command continuations. Orphan continuations
+    also refuse. This text never supplies membership or signal authority.
     """
     with subprocess.Popen(
             [_ps_command(), '-ww', '-U', str(os.getuid()), '-o',
@@ -325,7 +326,11 @@ def process_table():
     # that may belong to a command. Remove only ps's final record terminator.
     for line in (output[:-1] if output.endswith('\n') else output).split('\n'):
         parts = line.strip().split(None, 5)
-        if not parts or parts[0][0] not in '0123456789+-':
+        numeric = bool(parts) and (
+            parts[0][0] in '0123456789' or
+            (len(parts[0]) > 1 and parts[0][0] in '+-' and
+             parts[0][1] in '0123456789'))
+        if not numeric:
             if previous is None:
                 raise _Indeterminate('orphan process command continuation')
             if previous in rows:

@@ -1044,15 +1044,18 @@ class TestSessionContainment(unittest.TestCase):
     def test_multiline_fixture_command_and_blank_continuations_are_retained(self):
         caller = '%d %d %d %d S caller\n' % (
             os.getpid(), os.getppid(), os.getpgrp(), os.geteuid())
-        command = 'fixture\n\ncontinued\rargument\vtext'
-        output = caller + '1000000000 1 1000000000 %d S %s\n' % (os.geteuid(), command)
-        self.assertEqual(self._diagnostic_output(output)[1000000000][3], command)
+        for continuation in ('\ncontinued\rargument\vtext', '-x', '+option', '-', '+'):
+            with self.subTest(continuation=continuation):
+                command = 'fixture\n' + continuation
+                output = caller + '1000000000 1 1000000000 %d S %s\n' % (os.geteuid(), command)
+                self.assertEqual(self._diagnostic_output(output)[1000000000][3], command)
 
     def test_ambiguous_diagnostic_rows_refuse_instead_of_dropping_members(self):
         caller = '%d %d %d %d S caller\n' % (
             os.getpid(), os.getppid(), os.getpgrp(), os.geteuid())
         bad = (
             '123 broken\n', '123x broken\n', '-1 1 1 501 S broken\n',
+            '+123 broken\n', '-123 broken\n', '0 1 1 501 S broken\n',
             '123 bad-parent 123 501 S broken\n', caller,
         )
         for row in bad:
