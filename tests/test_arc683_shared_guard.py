@@ -125,6 +125,17 @@ class TestSharedGuard(unittest.TestCase):
             "    def test_guard(self): self.assertEqual(VALUE, 7)\n"})
         self.assert_import_verification_passes()
 
+    def test_import_time_chdir_keeps_selected_file_identity(self):
+        self.use_real_integration()
+        self.candidate({"tests/test_guard.py":
+                        "import os\nfrom pathlib import Path\n"
+                        "os.chdir(Path(__file__).parent)\n" + self.counter_test()})
+        self.assert_import_verification_passes()
+        self.assertEqual(self.counter.read_text(), "6")  # integration plus five repetitions
+        merged = self.f.invoke()
+        self.assertEqual(merged.returncode, 0, merged.stdout + merged.stderr)
+        self.assertEqual(len(self.f.calls(["pr", "merge"])), 1)
+
     def test_000_fifth_run_failure_refuses_before_any_merge_call(self):
         self.install_policy()
         self.candidate({"tests/test_guard.py": self.counter_test(fail_at=5)})
