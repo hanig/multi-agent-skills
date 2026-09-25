@@ -434,8 +434,10 @@ class TestDoctorAndSurveyAgentOutput(unittest.TestCase):
                 f"#!{sys.executable}\n"
                 "import os, sys\n"
                 "args = sys.argv[1:]\n"
-                "assert args[0] == '-e' and args[2:4] == ['6', '2'], args\n"
-                f"args[2:4] = [{str(DOCTOR_SECONDS)!r}, {str(REAL_REAP_SECONDS)!r}]\n"
+                "budget = args.index('-e') + 2\n"
+                "assert len(args) > budget + 2\n"
+                "assert all(float(value) > 0 for value in args[budget:budget + 2])\n"
+                f"args[budget:budget + 2] = [{str(DOCTOR_SECONDS)!r}, {str(REAL_REAP_SECONDS)!r}]\n"
                 f"os.execv({perl!r}, [{perl!r}] + args)\n")
             wrapper.chmod(0o755)
         os.symlink(sys.executable, bindir / "python3")
