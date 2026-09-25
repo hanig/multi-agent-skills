@@ -210,7 +210,7 @@ class TestMergeUnit(unittest.TestCase):
         self.assertEqual(self.calls(), [], result.stdout + result.stderr)
 
     def test_scope_repository_mismatch_refuses_before_forge(self):
-        self.intercept_scope_binding({"repo": str(self.repo) + "/other"})
+        self.intercept_scope_binding({"repository": self.remote + "/other"})
         result = self.invoke()
         self.assert_refused(result)
         self.assertEqual(self.calls(), [], result.stdout + result.stderr)
@@ -220,6 +220,70 @@ class TestMergeUnit(unittest.TestCase):
         result = self.invoke()
         self.assert_refused(result)
         self.assertEqual(self.calls(), [], result.stdout + result.stderr)
+
+    def assert_binding_refused(self, result):
+        self.assert_refused(result)
+        self.assertEqual(self.calls(), [], result.stdout + result.stderr)
+
+    def test_scope_attempt_mismatch_refuses_before_forge(self):
+        self.intercept_scope_binding({"attempt": "older"})
+        self.assert_binding_refused(self.invoke())
+
+    def test_scope_unit_mismatch_refuses_before_forge(self):
+        self.intercept_scope_binding({"unit": "other"})
+        self.assert_binding_refused(self.invoke())
+
+    def test_scope_head_mismatch_refuses_before_forge(self):
+        self.intercept_scope_binding({"head": "f" * 40})
+        self.assert_binding_refused(self.invoke())
+
+    def test_scope_missing_epoch_refuses_before_forge(self):
+        self.intercept_scope_binding({"state_epoch": None})
+        self.assert_binding_refused(self.invoke())
+
+    def test_scope_boolean_epoch_refuses_before_forge(self):
+        # The first lease increments the absent legacy epoch from 0 to 1.
+        self.intercept_scope_binding({"state_epoch": True})
+        self.assert_binding_refused(self.invoke())
+
+    def test_scope_repository_normalization_cannot_hide_mismatch(self):
+        self.intercept_scope_binding({"repository": self.remote + "/"})
+        self.assert_binding_refused(self.invoke())
+
+    def test_launch_facts_previous_attempt_refuses_before_forge(self):
+        self.us["attempt_launch_facts"]["a1"]["attempt_id"] = "older"
+        self.save()
+        self.assert_binding_refused(self.invoke())
+
+    def test_launch_facts_other_unit_refuses_before_forge(self):
+        self.us["attempt_launch_facts"]["a1"]["unit_id"] = "other"
+        self.save()
+        self.assert_binding_refused(self.invoke())
+
+    def test_launch_facts_different_remote_refuses_before_forge(self):
+        self.us["attempt_launch_facts"]["a1"]["repository_remote"] += "/other"
+        self.save()
+        self.assert_binding_refused(self.invoke())
+
+    def test_launch_facts_raw_remote_difference_refuses_before_forge(self):
+        self.us["attempt_launch_facts"]["a1"]["repository_remote"] += "/"
+        self.save()
+        self.assert_binding_refused(self.invoke())
+
+    def test_missing_launch_facts_refuses_before_forge(self):
+        self.us["attempt_launch_facts"] = {}
+        self.save()
+        self.assert_binding_refused(self.invoke())
+
+    def test_launch_intent_previous_attempt_refuses_before_forge(self):
+        self.launch["attempt_id"] = "older"
+        self.save()
+        self.assert_binding_refused(self.invoke())
+
+    def test_launch_intent_missing_remote_refuses_before_forge(self):
+        del self.launch["repository_remote"]
+        self.save()
+        self.assert_binding_refused(self.invoke())
 
     def test_success_records_exact_anchor_and_advances_once(self):
         result = self.invoke()
