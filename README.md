@@ -277,6 +277,45 @@ selective install names all five bundles:
 host scheduler repeats it; the orchestrating session performs connected review,
 merge, tracker, and reporting work around those passes.
 
+The connected `merge_unit.py` operator requires passing `integration-tests`
+evidence for the exact judged head and observed target commit, including the
+rederived merge base and candidate tree. CI must also be green. There is no
+integration override. `--allow-unchecked-scope REASON` permits only a complete,
+schema-valid `unchecked` report with exit 2; exit 1 is never waivable. Every
+report must carry the exact coordinator binding and state epoch.
+
+```sh
+python3 "$HANIG_ORCHESTRATE_DIR/scripts/merge_unit.py" plan.json \
+  --state-dir "$STATE" --unit impl --pr 123 --approver "Operator" \
+  --verify-integration --verification-timeout 1800
+```
+
+This mode runs no merge. It reads `verifiers.json` and the pinned
+`verifiers/integration_tests.py` from the observed target commit, runs those
+bytes in the existing disposable candidate-merge checkout, and records the
+result in the external coordinator verification journal. Supply both Git
+objects locally first; the verifier never fetches. Ordinary invocation then
+admits that evidence before issuing one guarded merge. A changed head or
+target needs fresh evidence. A red run for the same exact binding cannot be
+hidden by an earlier pass.
+
+The designated `merge-precondition` verifier runs
+`python3 -m unittest discover -s tests` in the candidate tree. Its policy and
+program must first exist on the trusted target; missing policy or mismatched
+program bytes refuse. Reading target policy lets attempts whose launch bases
+predate installation use the new precondition without allowing a candidate
+to authorize itself. This merge-only authorization leaves ordinary
+anchored-base verification unchanged. Candidate tests remain candidate bytes;
+this policy does not promise an immutable test corpus.
+
+After a merge, the operator compares its actual parent with the checked
+target. A race is recorded as `integration-unverified` in the intent and merge
+receipt, reported with a warning, and withholds advancement. It never retries
+the merge call. Historical merges without a retained precondition can still
+be reconciled as attestations; unavailable integration evidence is explicitly
+labelled `integration-unverified`. Forge observations remain attestations,
+and the local lock and journals retain their same-node, trusted-writer limit.
+
 ### hanig-swarm
 
 The coordinator. Roughly 2,200 lines in `swarm.py`, 1,300 in `unit.py`.

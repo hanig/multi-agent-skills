@@ -245,9 +245,20 @@ def integration_evidence(state_dir, binding, repo, target):
         S.U.run, repo, target)
     if error:
         return None, error
-    return S.admit_verification(
+    admitted, error = S.admit_verification(
         state_dir, binding["unit"], V.INTEGRATION_CLAIM, binding["head"],
         policy_digest, policy, repo=repo, base_commit=target, target_commit=target)
+    if error:
+        return None, error
+    # A retained pass must never mask a later red run of the same candidate.
+    # A repaired head or a different target is a new binding, not a waiver.
+    for receipt in S.load_verifications(state_dir)[0]:
+        if (receipt.get("result") == "fail"
+                and all(receipt.get(k) == admitted.get(k) for k in (
+                    "unit", "claim", "verifier", "verifier_sha256", "policy_sha256",
+                    "subject_head", "produced_head", "target_commit", "merge_base", "candidate_tree"))):
+            return None, "the candidate merge verifier returned FAIL for this exact binding"
+    return admitted, None
 
 
 def verification_hint(args):
@@ -427,6 +438,11 @@ def reconcile(args, plan):
         evidence, error = integration_evidence(state_dir, binding, repo, target)
         if error:
             raise Refusal("integration-tests precondition: " + error + ". " + verification_hint(args))
+        latest = json.loads(run(cmd["view"]).stdout)
+        check_pr(latest, binding)
+        if latest["state"] != "OPEN" or latest.get("baseRefOid") != target:
+            raise Refusal("PR or target moved during preflight; rerun against the current target. "
+                          + verification_hint(args))
         observation.update({"allow_unchecked_scope": args.allow_unchecked_scope,
                             "checks": checks, "integration": evidence})
         intent = {"schema_version": 1, "operation_id": operation_id,
