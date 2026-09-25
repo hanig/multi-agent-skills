@@ -140,6 +140,41 @@ class TestFixtureProcessGuard(unittest.TestCase):
             finally:
                 self.assertTrue(case.doCleanups())
 
+    def test_supervisor_errors_and_timeouts_still_clean_up(self):
+        for source, error in (
+                ('raise ValueError("injected fixture error")', AssertionError),
+                ('import time; time.sleep(600)', subprocess.TimeoutExpired)):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
+                case = unittest.TestCase()
+                scope = FixtureProcesses(case, directory, kill_group)
+                try:
+                    with self.assertRaises(error):
+                        scope.run_python(source, timeout=1)
+                finally:
+                    self.assertTrue(case.doCleanups())
+                self.assertIsNotNone(scope.children[0][0].returncode)
+                scope.assert_no_survivors()
+
+    def test_reap_timeout_reaches_the_unittest_result(self):
+        class Probe(unittest.TestCase):
+            def runTest(case):
+                directory = tempfile.TemporaryDirectory()
+                case.addCleanup(directory.cleanup)
+                patcher = None
+                case.addCleanup(lambda: patcher.stop() if patcher else None)
+                scope = FixtureProcesses(case, directory.name, kill_group)
+                proc = scope.popen(['/bin/sleep', '600'])
+                self.addCleanup(proc.wait, timeout=5)
+                patcher = mock.patch.object(
+                    proc, 'wait', side_effect=subprocess.TimeoutExpired(proc.args, 5))
+                patcher.start()
+
+        result = unittest.TestResult()
+        Probe().run(result)
+        self.assertEqual(result.failures, [])
+        self.assertEqual(len(result.errors), 1)
+        self.assertIn('TimeoutExpired', result.errors[0][1])
+
     def _probe(self, outcome='pass', omit_cleanup=False, escape=False, root_free=False):
         observed = {}
 
