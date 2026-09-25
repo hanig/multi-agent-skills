@@ -634,5 +634,32 @@ class TestJournalWriterRegistry(unittest.TestCase):
         self.assertEqual(report[1]['records'], 0)
 
 
+    def test_default_bound_opaque_siblings_do_not_refuse_marked_writer(self):
+        report = self.child('''
+            path = module._ensure_module_state_home() / 'default-bound-wrapper'
+            def opaque(method):
+                def call(self, wrapped=method):
+                    return wrapped(self)
+                return call
+            class Writer(unittest.TestCase):
+                @journal_writer
+                @opaque
+                def test_marked(self):
+                    module.review.append_review_journal(
+                        path, 'implementation', 1, [], 'REVIEW_PASS', [])
+                @opaque
+                def test_unmarked(self):
+                    self.fail('this sibling must not execute')
+            result = unittest.TestResult()
+            Writer('test_marked').run(result)
+            print(json.dumps({'ok': result.wasSuccessful(),
+                              'failures': [message for _, message in result.failures],
+                              'errors': [message for _, message in result.errors],
+                              'records': len(list(path.glob('*/record.jsonl')))}))
+        ''')
+        self.assertTrue(report['ok'], report)
+        self.assertEqual(report['records'], 1)
+
+
 if __name__ == '__main__':
     unittest.main()
