@@ -57,7 +57,7 @@ class TestMergePrecondition(unittest.TestCase):
         self.assertEqual(receipts[-1]["result"], "pass")
         self.assertTrue((f.state_dir / S.VERIFY_RECEIPTS).read_bytes().startswith(previous))
         self.assertEqual(f.calls(["pr", "merge"]), [])
-        self.assertEqual(f.calls(["api"]), [f.forge["ref_command"]])
+        self.assertEqual(f.calls(["api"]), [f.forge["ref_command"]] * 2)
 
     def test_stale_pr_base_evidence_refuses_before_merge(self):
         f = self.f
