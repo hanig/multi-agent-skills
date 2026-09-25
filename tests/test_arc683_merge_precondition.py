@@ -221,8 +221,8 @@ class TestMergePrecondition(unittest.TestCase):
         f.unit["scope"] = []
         f.state["plan_digest"] = S.plan_digest(f.plan)
         f.save()
-        f.intercept_scope_binding({"status": None, "scope": None,
-                                   "out_of_scope": None, "deletions_out_of_scope": None})
+        f.intercept_scope_binding(remove=("status", "scope", "out_of_scope",
+                                         "deletions_out_of_scope"))
         f.assert_binding_refused(f.invoke("--allow-unchecked-scope", "follow-up"))
 
     def test_scope_every_exit_requires_complete_schema(self):
@@ -250,11 +250,19 @@ class TestMergePrecondition(unittest.TestCase):
         path.write_text(json.dumps(old))
         f.forge["pr"].update(state="MERGED", mergeCommit={"oid": f.merged})
         f.forge["commit"]["parents"] = [{"sha": "f" * 40}]
+        f.us["merge_receipt"] = {
+            "unit": "u", "repo": f.remote, "pr": f.remote + "/pull/7",
+            "target": "main", "head": f.head, "merged_as": f.merged,
+            "target_commit": f.base, "integration_status": "candidate-verified"}
         f.save()
         result = f.invoke()
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(f.intent()["integration_status"], "integration-unverified")
         self.assertEqual(f.receipts()[-1]["integration_status"], "integration-unverified")
+        saved = json.loads((f.state_dir / S.STATE_FILE).read_text())
+        self.assertEqual(saved["units"]["u"]["merge_receipt"]["integration_status"],
+                         "integration-unverified")
+        self.assertEqual(saved["units"]["u"]["merge_receipt"]["target_commit"], "f" * 40)
 
 
 if __name__ == "__main__":

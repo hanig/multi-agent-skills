@@ -494,6 +494,17 @@ def reconcile(args, plan):
     receipts, _ = S.load_merge_receipts(state_dir)
     if not any(all(r.get(k) == v for k, v in expected.items()) for r in receipts):
         raise Refusal("swarm merge did not persist the expected receipt")
+    # Correct an already-persisted audit label too. Do not alter the unit's
+    # judgment or erase old journal entries; append-only history is retained.
+    state = read_object(state_dir / S.STATE_FILE)
+    us = state["units"][args.unit]
+    prior = us.get("merge_receipt")
+    if isinstance(prior, dict) and all(prior.get(k) == expected[k] for k in (
+            "unit", "repo", "pr", "target", "head", "merged_as")):
+        corrected = dict(prior, target_commit=target, integration_status=integration_status)
+        if corrected != prior:
+            us["merge_receipt"] = corrected
+            S.save_state(state_dir, state)
     intent["phase"] = "receipt_recorded"
     durable_write(intent_path, intent)
     if integration_problem:

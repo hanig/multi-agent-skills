@@ -202,7 +202,7 @@ class TestMergeUnit(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.receipts(), [])
 
-    def intercept_scope_binding(self, fields=None, advance_epoch=False):
+    def intercept_scope_binding(self, fields=None, advance_epoch=False, remove=()):
         # Keep the real scope consumer and producer, changing only the report
         # channel or the epoch between the operator and scope state reads.
         site = self.directory / "scope-binding-probe"
@@ -221,8 +221,10 @@ class TestMergeUnit(unittest.TestCase):
             "    def emit():\n"
             "        report = json.loads(sys.stdout.getvalue())\n"
             "        report.update(%r)\n"
+            "        for key in %r:\n"
+            "            report.pop(key, None)\n"
             "        original.write(json.dumps(report))\n"
-            "    atexit.register(emit)\n" % (advance_epoch, fields or {}))
+            "    atexit.register(emit)\n" % (advance_epoch, fields or {}, remove))
         self.env["PYTHONPATH"] = str(site)
 
     def test_000_scope_base_mismatch_refuses_before_forge(self):

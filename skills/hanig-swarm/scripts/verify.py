@@ -179,7 +179,7 @@ def digest_file(path):
     return digest_bytes(data), len(data), None
 
 
-def read_policy(runner, repo, base_commit):
+def read_policy(runner, repo, base_commit, source="anchored base"):
     """(policy, digest, error), read from the ANCHORED BASE.
 
     NOT from the working tree, and not from HEAD. The agent owns both. Reading
@@ -198,7 +198,7 @@ def read_policy(runner, repo, base_commit):
     rc, out, err = _git(runner, repo, "--no-replace-objects", "show",
                         f"{base_commit}:{POLICY_FILE}")
     if rc != 0:
-        return None, None, (f"no {POLICY_FILE} at the anchored base "
+        return None, None, (f"no {POLICY_FILE} at the {source} "
                             f"{str(base_commit)[:12]}: nothing authorizes any "
                             f"verifier for this unit ({err[:120]})")
     raw = out.encode() if isinstance(out, str) else out
@@ -676,7 +676,8 @@ def merge_precondition_policy(runner, repo, target_commit):
     deliberately not the authorization source for this merge-only check.
     The caller must obtain target_commit from its trusted target observation.
     """
-    policy, policy_digest, error = read_policy(runner, repo, target_commit)
+    policy, policy_digest, error = read_policy(
+        runner, repo, target_commit, source="target commit")
     if error:
         return None, None, None, "merge-precondition target policy: " + error
     digest, _size, error = _digest_base_blob(
