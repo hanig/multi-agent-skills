@@ -889,6 +889,17 @@ are in [docs/clusters.md](docs/clusters.md).
 python3 -m unittest discover -s tests
 ```
 
+`python3 -m unittest tests.test_review` and discovery that includes
+`test_review.py` run the whole review module through the supervised worker.
+The parent reports one delegated test and prints the audited worker's test
+count and skips; full discovery launches the module once. `-k` filters do
+not narrow this delegated module: the command announces that it runs the
+whole module, so module loading cannot silently report zero tests.
+Fully qualified class or method names (for example,
+`python3 -m unittest tests.test_review.TestVerdictSchema.test_empty_object_is_not_a_review`)
+bypass the module hook and run in-process under the existing per-test
+fixtures, without the worker's session and journal-manifest audit.
+
 Standard library only; no network or cluster required. Green on macOS 3.10.16
 and on all three clusters (3.10.12, 3.12.3, 3.10.12).
 

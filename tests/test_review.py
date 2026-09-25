@@ -10,8 +10,9 @@ Offline: no API calls.
 
     python3 -m unittest discover -s tests
 
-The repository command delegates these tests to test_review_sandbox. Ad hoc
-execution of this file is outside that process-audit contract.
+Discovery and module-level invocation delegate the whole module to the
+supervised worker, including when -k is supplied. Fully qualified class or
+method names bypass load_tests and retain only the per-test fixtures.
 """
 
 import ast
@@ -4080,17 +4081,19 @@ class TestReviewJournal(unittest.TestCase):
 
 
 def load_tests(loader, tests, pattern):
-    """The repository suite delegates this module to its supervised worker.
+    """Return one supervised test for every parent-side module selection.
 
-    Collection is proved by the worker handshake in test_project's guard.
-    Named fixture probes inside this module keep their existing isolation.
+    The worker always collects the whole module with a fresh, unfiltered
+    loader. Parent -k patterns cannot remove the delegate and leave a false
+    zero-test success. Collection is still checked against the worker's ids.
+    Named class/method probes bypass this hook and keep their own fixtures.
     """
     if str(REPO) not in sys.path:
         sys.path.insert(0, str(REPO))
-    from tests.review_sandbox_worker import is_sandbox_worker
+    from tests.review_sandbox_worker import DelegatedReviewTests, is_sandbox_worker
     if is_sandbox_worker():
         return tests
-    return unittest.TestSuite()
+    return unittest.TestSuite([DelegatedReviewTests(patterns=loader.testNamePatterns)])
 
 
 if __name__ == "__main__":

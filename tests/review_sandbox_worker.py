@@ -1,6 +1,6 @@
 """Process boundary for the delegated review tests (ARC-1035).
 
-Contract: repository unittest discovery delegates test_review exactly once to a
+Contract: unittest discovery and module-level invocation delegate test_review to a
 sys.executable worker with fake HOME and XDG_STATE_HOME BEFORE interpreter
 startup/import/collection. Its load_tests hook requires a parent token and
 worker-local PID activation; inherited markers never authorize in-process
@@ -21,8 +21,8 @@ not affect the protected journal comparison.
 
 This is trusted test plumbing, not a security boundary against arbitrary
 same-UID code replacing the supervisor or forging its protocol. Descendants
-that deliberately detach with setsid, and ad hoc execution of test_review.py
-outside the repository unittest command, are outside this contract. There is
+that deliberately detach with setsid, and fully qualified class/method
+selections that bypass load_tests, are outside this contract. There is
 no writer registry, stack inspection or runtime attribution.
 """
 import collections
@@ -383,6 +383,34 @@ def review_report():
     if error is not None:
         raise SandboxFailure(error)
     return report
+
+
+class DelegatedReviewTests(unittest.TestCase):
+    """One parent test, shared by module loading and full discovery.
+
+    Keep the delegate outside discoverable test modules so discovery cannot
+    collect a second copy. Only review_report's audited result may pass it.
+    """
+    def __init__(self, methodName="runTest", patterns=None):
+        super().__init__(methodName)
+        self.patterns = patterns
+
+    def runTest(self):
+        if self.patterns:
+            print("test_review is delegated: -k selection runs the whole module "
+                  "in the supervised worker.", file=sys.stderr)
+        report = review_report()
+        self.assertIs(report, review_report())
+        self.assertTrue(report["collected"])
+        skips = report["skipped"]
+        print("\nDelegated test_review: %d tests, %.3fs, %d skips" % (
+            len(report["collected"]), report["elapsed_seconds"], len(skips)))
+        for outcome in skips:
+            print("  SKIP %s: %s" % (outcome["id"], outcome["reason"]))
+        # Optional validation artifact, written by the parent only after audit.
+        destination = os.environ.get("HANIG_REVIEW_SANDBOX_REPORT")
+        if destination:
+            Path(destination).write_text(json.dumps(report, indent=2))
 
 
 def walk_suite(suite):
