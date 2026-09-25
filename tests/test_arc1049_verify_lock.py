@@ -33,8 +33,12 @@ class TestVerificationLock(unittest.TestCase):
 import os, time
 from pathlib import Path
 Path(os.environ['ARC1049_STARTED']).write_text(str(Path.cwd()))
-# The parent owns the watchdog and releases this barrier even on failure.
+# The parent normally releases this barrier within its 300s budget. Keep a
+# longer independent backstop if that supervisor dies before cleanup.
+deadline = time.monotonic() + 600
 while not Path(os.environ['ARC1049_FINISH']).exists():
+    if time.monotonic() >= deadline:
+        raise SystemExit('verifier barrier watchdog expired')
     time.sleep(0.02)
 raise SystemExit(int(Path('target.fail').exists()))
 ''')
@@ -170,6 +174,27 @@ with (state / %r).open('r+') as lock:
             self.start()
         self.stop()
         self.assertIsNotNone(self.process.poll(), "watchdog cleanup left the operator running")
+
+    def test_verifier_has_an_independent_watchdog(self):
+        program = self.f.git("show", self.target + ":" + V.MERGE_VERIFIER_PATH)
+        # Execute the actual committed fixture without an operator supervising
+        # it. Advance its clock beyond the deadline without waiting ten minutes.
+        wrapper = '''
+import time
+ticks = iter((0.0, 601.0))
+time.monotonic = lambda: next(ticks)
+def unexpected_sleep(seconds):
+    raise AssertionError('expired verifier polled again')
+time.sleep = unexpected_sleep
+exec(%r)
+''' % program
+        result = subprocess.run([sys.executable, "-c", wrapper], cwd=self.f.repo,
+                                env=self.f.env, capture_output=True, text=True,
+                                timeout=self.WATCHDOG_SECONDS)
+        self.assertTrue(self.started.exists())
+        self.assertFalse(self.finish.exists())
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("verifier barrier watchdog expired", result.stderr)
 
     def test_epoch_change_refuses_stale_evidence(self):
         self.start()
