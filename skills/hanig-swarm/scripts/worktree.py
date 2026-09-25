@@ -247,10 +247,12 @@ def _as_status(value):
     return UNESTABLISHED_STATUS
 
 
-def _git(runner, repo, *args, timeout=60):
+def _git(runner, repo, *args, timeout=60, strip_output=True):
     rc, out, err = runner(["git", "-C", str(repo)] + list(args),
                           timeout=timeout)
-    return _as_status(rc), _as_text(out).strip(), _as_text(err).strip()
+    out = _as_text(out)
+    return (_as_status(rc), out.strip() if strip_output else out,
+            _as_text(err).strip())
 
 
 def repo_status(runner, repo):
@@ -687,8 +689,8 @@ def record_claim(rec, key):
 def launch_record_path(unit_dir):
     """One place for the convention, which three call sites had inlined."""
     attempt = Path(unit_dir).name
-    return Path(unit_dir).parent / (
-        f"launch-{render_for_record(attempt, len(attempt), collapse=False)}.json")
+    # This selects a file; rendering would alias distinct attempt names.
+    return Path(unit_dir).parent / ("launch-" + attempt + ".json")
 
 
 def read_sealed_launch_record(unit_dir, seal):
@@ -847,10 +849,9 @@ def launch_facts_problem(facts, unit_dir=None, spec=None):
     schema = facts.get("schema_version", 0)
     if schema >= 3:
         branch = _as_text(facts.get("branch"))
-        expected = (
-            f"refs/heads/{render_for_record(branch, len(branch), collapse=False)}"
-            if schema >= 4 else
-            f"refs/remotes/origin/{render_for_record(branch, len(branch), collapse=False)}")
+        # Ref identity is raw. Only the refusal below is rendered.
+        expected = ("refs/heads/" if schema >= 4 else
+                    "refs/remotes/origin/") + branch
         if judgment_ref != expected:
             return (f"the trusted launch snapshot has judgment_ref "
                     f"{render_for_record(judgment_ref, 4096, collapse=False)}, "
@@ -876,8 +877,7 @@ def effective_remote_ref(facts):
     schema = (facts or {}).get("schema_version", 0)
     if schema == 3:
         branch = _as_text(facts.get("branch"))
-        return (f"refs/heads/"
-                f"{render_for_record(branch, len(branch), collapse=False)}")
+        return "refs/heads/" + branch
     if schema >= 4:
         return facts.get("judgment_ref")
     return None
@@ -1044,8 +1044,22 @@ def _judge_anchored_ref(runner, facts, judgment=None):
     if route_problem:
         _set_judgment_state(judgment, "remote-route-changed")
         return False, None, route_problem
+    cache_ref = "refs/hanig-swarm/judgments/" + str(facts["attempt_id"])
+    # Validate both raw names before either can become refspec syntax. In
+    # particular, a rendered nonprinting character becomes a '?' wildcard.
+    for candidate in (ref, cache_ref):
+        if not isinstance(candidate, str) or "\0" in candidate:
+            _set_judgment_state(judgment, "remote-ref-unreadable")
+            return False, None, "judgment ref must be a string without NUL bytes"
+        rc, _, err = _git(runner, repo, "check-ref-format", candidate)
+        if rc != 0:
+            _set_judgment_state(judgment, "remote-ref-unreadable")
+            return False, None, (
+                f"cannot validate judgment ref "
+                f"{render_for_record(candidate, _DIAGNOSTIC_LIMIT, collapse=False)}: "
+                f"{render_git_diagnostic(rc, err)}")
     rc, out, err = _git(runner, repo, "ls-remote", "--exit-code",
-                         remote, ref)
+                         remote, ref, strip_output=False)
     if rc == 2:
         state = _worktree_residue_state(runner, facts)
         _set_judgment_state(judgment, state)
@@ -1074,7 +1088,9 @@ def _judge_anchored_ref(runner, facts, judgment=None):
             f"{render_for_record(ref, _DIAGNOSTIC_LIMIT, collapse=False)} "
             f"from the anchored "
             f"origin: {render_git_diagnostic(rc, err or out)}")
-    lines = [line.split() for line in out.splitlines() if line.strip()]
+    # Git separates fields with TAB and records with LF. Unicode whitespace
+    # is legal inside refs, so split()/splitlines()/strip() would change them.
+    lines = [line.split("\t") for line in out.split("\n") if line]
     if (len(lines) != 1 or len(lines[0]) != 2 or lines[0][1] != ref
             or len(lines[0][0]) not in (40, 64)
             or any(c not in "0123456789abcdef"
@@ -1089,13 +1105,10 @@ def _judge_anchored_ref(runner, facts, judgment=None):
     # establishes which value was observed; this fetch makes its commit/tree
     # available even after coordinator cleanup removes the worktree.
     # The explicit refspec ignores remote.origin.fetch and changes no config.
-    cache_ref = ("refs/hanig-swarm/judgments/" +
-                 str(facts["attempt_id"]))
     rc, _fetch_out, fetch_err = _git(
         runner, repo, "fetch", "--no-tags", "--force",
         "--recurse-submodules=no", remote,
-        f"+{render_for_record(ref, len(ref), collapse=False)}:"
-        f"{render_for_record(cache_ref, 4096, collapse=False)}", timeout=120)
+        "+" + ref + ":" + cache_ref, timeout=120)
     if rc != 0:
         _set_judgment_state(judgment, "remote-head-unavailable-locally")
         return False, None, (

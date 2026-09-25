@@ -908,6 +908,8 @@ class TestPinnedCommitIsNotAMovingRef(RepoCase):
                 return 0, facts["repository_remote"], ""
             if "ls-remote --exit-code" in joined:
                 return 0, "c" * 40 + "\t" + selected_ref, ""
+            if "check-ref-format" in argv:
+                return U.run(["git", "check-ref-format", argv[-1]], **kwargs)
             if "fetch" in argv:
                 seen["refspec"] = argv[-1]
                 return 1, "", "fetch stopped after refspec capture"
