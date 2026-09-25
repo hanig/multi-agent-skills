@@ -3,8 +3,8 @@ import itertools
 import inspect
 import os
 from pathlib import Path
-import select
 import re
+import resource
 import shlex
 import signal
 import subprocess
@@ -16,7 +16,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from fixture_processes import FixtureProcesses, process_table
+from fixture_processes import FixtureProcesses, process_table, wait_readable
 
 
 def kill_group(pgid):
@@ -27,6 +27,48 @@ def kill_group(pgid):
 
 
 class TestFixtureProcessGuard(unittest.TestCase):
+    def test_high_descriptors_preserve_launch_status_signals_and_python_results(self):
+        limits = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if limits[1] != resource.RLIM_INFINITY and limits[1] < 1100:
+            self.skipTest('hard descriptor limit cannot exercise descriptors above 1024')
+        held = []
+        try:
+            if limits[0] != resource.RLIM_INFINITY and limits[0] < 1100:
+                resource.setrlimit(resource.RLIMIT_NOFILE, (1100, limits[1]))
+            while not held or held[-1] < 1024:
+                held.append(os.open(os.devnull, os.O_RDONLY))
+            with tempfile.TemporaryDirectory() as directory:
+                case = unittest.TestCase()
+                scope = FixtureProcesses(case, directory, kill_group)
+                try:
+                    command = [sys.executable, '-c',
+                               'import sys; print(sys.stdin.read().upper())']
+                    native = subprocess.run(command, input='fixture', text=True,
+                                            capture_output=True, check=True, timeout=10)
+                    proc = scope.popen(command, stdin=subprocess.PIPE,
+                                       stdout=subprocess.PIPE, text=True)
+                    self.assertGreaterEqual(proc.report_fd, 1024)
+                    self.assertGreaterEqual(proc.control_fd, 1024)
+                    self.assertEqual(proc.communicate(input='fixture', timeout=10),
+                                     (native.stdout, None))
+                    self.assertEqual(proc.wait(timeout=0), 0)
+                    sleeper = scope.popen(['/bin/sleep', '600'])
+                    with self.assertRaises(subprocess.TimeoutExpired):
+                        sleeper.wait(timeout=0.01)
+                    sleeper.terminate()
+                    self.assertEqual(sleeper.wait(timeout=10), -signal.SIGTERM)
+                    self.assertEqual(scope.run_python('result = "high fd result"'),
+                                     'high fd result')
+                    self.assertTrue(case.doCleanups())
+                    self.assertEqual(proc.wait(timeout=0), 0)
+                    sleeper.send_signal(signal.SIGTERM)
+                finally:
+                    self.assertTrue(case.doCleanups())
+        finally:
+            for fd in held:
+                os.close(fd)
+            resource.setrlimit(resource.RLIMIT_NOFILE, limits)
+
     @unittest.skipUnless('process_group' in inspect.signature(subprocess.Popen).parameters,
                          'this Python does not expose Popen(process_group=...)')
     def test_process_group_zero_keeps_native_semantics_and_contains_reaped_orphans(self):
@@ -89,7 +131,7 @@ class TestFixtureProcessGuard(unittest.TestCase):
                     elif state == 'reported':
                         # Leave the status unread by this handle until cleanup.
                         if b'\n' not in proc.buffer:
-                            ready, _, _ = select.select([proc.report_fd], [], [], 10)
+                            ready = wait_readable(proc.report_fd, 10)
                             self.assertTrue(ready)
                         self.assertIsNone(proc.returncode)
                     self.assertTrue(case.doCleanups())
@@ -426,7 +468,7 @@ class TestFixtureProcessGuard(unittest.TestCase):
                         case.assertLess(time.monotonic(), deadline, 'fixture did not exec')
                         time.sleep(0.01)
                 if not escape and not root_free:
-                    ready, _, _ = select.select([proc.stdout], [], [], 10)
+                    ready = wait_readable(proc.stdout, 10)
                     case.assertTrue(ready, 'fixture did not reach its sleep')
                     case.assertEqual(proc.stdout.readline(), b'ready\n')
                 if escape:
@@ -598,7 +640,7 @@ class TestFixtureProcessGuard(unittest.TestCase):
                 proc = scope.popen([str(script)], start_new_session=True,
                                    stdout=subprocess.PIPE, text=True)
                 try:
-                    ready, _, _ = select.select([proc.stdout], [], [], 10)
+                    ready = wait_readable(proc.stdout, 10)
                     self.assertTrue(ready, 'parent did not report its child')
                     int(proc.stdout.readline())  # Background job started.
                     child = None
