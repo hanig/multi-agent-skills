@@ -293,14 +293,14 @@ def retained_integration_problem(preconditions, evidence, binding, repo, target)
     """
     required = preconditions.get("required_merge_claims")
     if required is None:
-        policy, _pd, _vd, error = V.merge_precondition_policy(
-            S.U.run, repo, target, claim=V.STABILITY_CLAIM)
+        policy, _pd, error = V.read_policy(
+            S.U.run, repo, target, source="target commit")
         if error:
             # Preserve already-admitted legacy reconciliation after Git cleanup.
             # Every new intent captures its required claims before any merge.
             return None
         required = [V.INTEGRATION_CLAIM]
-        if policy["verifiers"]:
+        if V.stability_declarations(policy):
             required.append(V.STABILITY_CLAIM)
     if required not in ([V.INTEGRATION_CLAIM], [V.INTEGRATION_CLAIM, V.STABILITY_CLAIM]):
         return "invalid retained merge claim requirements"
