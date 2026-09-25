@@ -171,12 +171,13 @@ def _identity(pid):
                 _DARWIN_LIB = ctypes.CDLL(ctypes.util.find_library('proc'), use_errno=True)
             # Darwin proc_bsdinfo, PROC_PIDTBSDINFO=3 (bsd/sys/proc_info.h).
             data = ctypes.create_string_buffer(136)
+            ctypes.set_errno(0)
             count = _DARWIN_LIB.proc_pidinfo(pid, 3, 0, data, len(data))
             if count != len(data):
                 number = ctypes.get_errno()
                 if number == errno.ESRCH:
                     return None
-                raise OSError(number, 'cannot read process birth identity')
+                raise OSError(number, 'cannot read process birth identity for PID %s' % pid)
             fields = struct.unpack('=12I48s6I2Q', data.raw)
             if fields[3] != pid:
                 raise _Indeterminate('process identity changed during inspection')

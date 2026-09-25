@@ -1,8 +1,10 @@
-"""Exercise fixture cleanups and their guard through real unittest outcomes."""
+"""Exercise the typed fixture contract through real processes and unittest."""
+import ast
+from dataclasses import replace
 import itertools
+import json
 import os
 from pathlib import Path
-import select
 import re
 import shlex
 import signal
@@ -10,12 +12,14 @@ import subprocess
 import sys
 import tempfile
 import time
-from types import SimpleNamespace
 import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from fixture_processes import FixtureProcesses, process_table
+import fixture_processes as fixtures
+from fixture_processes import (CleanupState, FixtureProcesses, FixtureProcess,
+                               FixtureSpec, FixtureSignal, JoinState, SignalState,
+                               process_table, wait_readable)
 
 
 def kill_group(pgid):
@@ -25,7 +29,26 @@ def kill_group(pgid):
         pass
 
 
+def wait_for(predicate, timeout=10):
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() >= deadline:
+            raise AssertionError('fixture did not become ready')
+        time.sleep(0.01)
+
+
 class TestFixtureProcessGuard(unittest.TestCase):
+    def _scope(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        scope = FixtureProcesses(self, directory.name)
+        return scope
+
+    def _launch(self, scope, source):
+        script = scope.root / ('child-%d.py' % len(scope.children))
+        script.write_text(source)
+        return scope.launch(FixtureSpec((sys.executable, str(script))))
+
     def _probe(self, outcome='pass', omit_cleanup=False, escape=False, root_free=False):
         observed = {}
 
@@ -34,10 +57,7 @@ class TestFixtureProcessGuard(unittest.TestCase):
                 directory = tempfile.TemporaryDirectory()
                 observed['root'] = directory.name
                 case.addCleanup(directory.cleanup)
-                scope = FixtureProcesses(case, directory.name, kill_group)
-                # The outer test contains its intentional leak even if the
-                # inner guard regresses; this runs after result assertions.
-                self.addCleanup(scope.cleanup)
+                scope = FixtureProcesses(case, directory.name)
                 observed['scope'] = scope
                 script = Path(directory.name) / 'fixture.py'
                 if escape:
@@ -58,30 +78,23 @@ class TestFixtureProcessGuard(unittest.TestCase):
                         'os.close(write_fd)\n'
                         'time.sleep(600)\n' % str(pidfile))
                 elif root_free:
-                    script.write_text(
-                        'import os\nos.execl("/bin/sleep", "/bin/sleep", "600")\n')
+                    script.write_text('import os\nos.execl("/bin/sleep", "/bin/sleep", "600")\n')
                 else:
-                    script.write_text(
-                        'import time\nprint("ready", flush=True)\ntime.sleep(600)\n')
-                proc = scope.popen(
-                    [sys.executable, str(script)], start_new_session=True,
-                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL)
+                    script.write_text('import time\nprint("ready", flush=True)\ntime.sleep(600)\n')
+                proc = scope.launch(FixtureSpec((sys.executable, str(script))))
                 observed['proc'] = proc
+                # Independent outer containment is also used by mutations.
+                self.addCleanup(proc._perform_cleanup)
                 if root_free:
-                    deadline = time.monotonic() + 10
-                    while True:
-                        row = process_table().get(proc.pid)
-                        if row and row[3] == '/bin/sleep 600':
-                            break
-                        case.assertLess(time.monotonic(), deadline, 'fixture did not exec')
-                        time.sleep(0.01)
+                    wait_for(lambda: process_table().get(proc.child_pid, (None, None, None, ''))[3]
+                             == '/bin/sleep 600')
                 if not escape and not root_free:
-                    ready, _, _ = select.select([proc.stdout], [], [], 10)
-                    case.assertTrue(ready, 'fixture did not reach its sleep')
-                    case.assertEqual(proc.stdout.readline(), b'ready\n')
+                    wait_for(lambda: proc.stdout_path.read_bytes() == b'ready\n')
+                    case.assertEqual(proc.stdout_path.read_bytes(), b'ready\n')
                 if escape:
-                    case.assertEqual(proc.wait(timeout=10), 0)
+                    result = proc.join(10)
+                    case.assertEqual(result.state, JoinState.EXITED)
+                    case.assertEqual(result.returncode, 0)
                     pid = int(pidfile.read_text())
                     observed['escaped'] = pid
                     case.assertEqual(os.getpgid(pid), pid)
@@ -89,13 +102,14 @@ class TestFixtureProcessGuard(unittest.TestCase):
                 if outcome == 'failure':
                     case.fail('injected assertion failure')
                 if outcome == 'timeout':
-                    proc.wait(timeout=0.01)
+                    result = proc.join(0.01)
+                    case.assertEqual(result.state, JoinState.TIMED_OUT)
+                    raise TimeoutError('typed fixture join timed out')
 
         real_add = Probe.addCleanup
 
         def register(case, function, *args, **kwargs):
             if omit_cleanup and getattr(function, '__name__', '') == 'cleanup':
-                # Remove exactly FixtureProcesses.cleanup, not dir cleanup.
                 if isinstance(getattr(function, '__self__', None), FixtureProcesses):
                     return
             real_add(case, function, *args, **kwargs)
@@ -103,11 +117,10 @@ class TestFixtureProcessGuard(unittest.TestCase):
         with mock.patch.object(Probe, 'addCleanup', register):
             result = unittest.TestResult()
             Probe().run(result)
-        # Inspect what unittest received, not text printed by the guard.
         observed['result'] = result
-        scope = observed['scope']
-        self.assertEqual(scope._root_rows(process_table()), {})
-        self.assertIsNotNone(observed['proc'].returncode)
+        self.assertEqual(observed['scope']._root_rows(process_table()), {})
+        self.assertIn(observed['proc'].join(0).state,
+                      (JoinState.EXITED, JoinState.STATUS_UNAVAILABLE))
         self.assertFalse(Path(observed['root']).exists())
         return observed
 
@@ -115,16 +128,16 @@ class TestFixtureProcessGuard(unittest.TestCase):
         for outcome in ('pass', 'failure', 'timeout'):
             with self.subTest(outcome=outcome):
                 result = self._probe(outcome)['result']
-                self.assertEqual(len(result.failures), int(outcome == 'failure'))
-                self.assertEqual(len(result.errors), int(outcome == 'timeout'))
+                self.assertEqual(len(result.failures), int(outcome == 'failure'), result.failures)
+                self.assertEqual(len(result.errors), int(outcome == 'timeout'), result.errors)
                 if outcome == 'failure':
                     self.assertIn('injected assertion failure', result.failures[0][1])
                 if outcome == 'timeout':
-                    self.assertIn('TimeoutExpired', result.errors[0][1])
+                    self.assertIn('typed fixture join timed out', result.errors[0][1])
 
     def test_guard_fails_through_unittest_when_cleanup_is_removed(self):
         result = self._probe(omit_cleanup=True)['result']
-        self.assertEqual(len(result.failures), 1)
+        self.assertEqual(len(result.failures), 1, result.failures)
         self.assertEqual(result.errors, [])
         self.assertIn('fixture processes survived cleanup', result.failures[0][1])
 
@@ -136,148 +149,108 @@ class TestFixtureProcessGuard(unittest.TestCase):
         self.assertIn('fixture processes survived cleanup', result.failures[0][1])
 
     def test_reaped_pid_records_do_not_target_unrelated_reused_ids(self):
-        with tempfile.TemporaryDirectory() as directory:
-            scope = FixtureProcesses(unittest.TestCase(), directory, mock.Mock())
-            pid = 123456789
-            child = SimpleNamespace(pid=pid, returncode=0, stdin=None,
-                                    stdout=None, stderr=None, wait=mock.Mock())
-            scope.children.append((child, pid))
-            scope.pidfiles[0].write_text(str(pid))
-            foreign = {pid: (1, pid, 'S', '/unrelated/worker')}
-            with mock.patch('fixture_processes.process_table', return_value=foreign), mock.patch(
-                    'fixture_processes.os.kill') as kill:
-                scope.cleanup()
-                scope.assert_no_survivors()
-            scope.kill_group.assert_not_called()
-            kill.assert_not_called()
+        scope = self._scope()
+        proc = self._launch(scope, 'pass\n')
+        self.assertEqual(proc.join(10).returncode, 0)
+        self.assertEqual(proc.cleanup().state, CleanupState.CLEAN)
+        foreign = replace(proc._anchor, birth=(9999999999, 0))
+        with mock.patch.object(fixtures, '_identity', return_value=foreign), mock.patch.object(
+                fixtures.os, 'kill') as kill:
+            result = proc._perform_cleanup()
+        self.assertEqual(result.state, CleanupState.INDETERMINATE)
+        kill.assert_not_called()
 
     def test_post_kill_observation_does_not_reuse_old_pid_identity(self):
-        with tempfile.TemporaryDirectory() as directory:
-            scope = FixtureProcesses(unittest.TestCase(), directory, mock.Mock())
-            pid = 123456789
-            scope.pidfiles[0].write_text(str(pid))
-            fixture = {pid: (1, pid, 'S', str(Path(directory) / 'fixture'))}
-            foreign = {pid: (1, pid, 'S', '/unrelated/worker')}
-            with mock.patch('fixture_processes.process_table', side_effect=itertools.chain([fixture], itertools.repeat(foreign))), mock.patch(
-                    'fixture_processes.os.kill') as kill:
-                scope.cleanup()
-            scope.kill_group.assert_called_once_with(pid)
-            # Group KILL is enough; a subsequent positive signal would race reuse.
-            kill.assert_not_called()
+        scope = self._scope()
+        proc = self._launch(scope, 'pass\n')
+        self.assertEqual(proc.join(10).returncode, 0)
+        foreign = replace(proc._anchor, birth=(9999999999, 0))
+        with mock.patch.object(fixtures, '_identity', return_value=foreign), mock.patch.object(
+                fixtures.os, 'kill') as kill:
+            with self.assertRaisesRegex(fixtures._Indeterminate, 'PID changed'):
+                proc._signal_owned(proc.supervisor_pid, proc._anchor, signal.SIGKILL)
+        kill.assert_not_called()
 
     def test_slow_snapshot_requires_a_fresh_observation_after_grace(self):
         for survives in (False, True):
-            with self.subTest(survives=survives), tempfile.TemporaryDirectory() as directory:
-                scope = FixtureProcesses(unittest.TestCase(), directory, mock.Mock())
-                pid = 123456789
-                scope.pidfiles[0].write_text(str(pid))
-                fixture = {pid: (1, pid, 'S', str(Path(directory) / 'fixture'))}
-                clock = [0]
-                snapshots = []
+            with self.subTest(survives=survives):
+                scope = self._scope()
+                proc = self._launch(scope, 'pass\n')
+                self.assertEqual(proc.join(10).returncode, 0)
+                clock, snapshots = [0], []
+                target = {proc.child_pid: proc._anchor}
 
                 def snapshot():
                     snapshots.append(clock[0])
                     if len(snapshots) == 2:
-                        clock[0] = 6  # ps delivers an old row after the grace period.
-                    if len(snapshots) <= 2 or survives:
-                        return fixture
-                    return {}
+                        clock[0] = 9
+                    return (target if len(snapshots) <= 2 or survives else {}), True
 
-                with mock.patch('fixture_processes.process_table', snapshot), mock.patch(
-                        'fixture_processes.time.monotonic', side_effect=lambda: clock[0]), mock.patch(
-                        'fixture_processes.time.sleep'), mock.patch('fixture_processes.os.kill'):
-                    if survives:
-                        with self.assertRaisesRegex(AssertionError, 'fixture PIDs survived KILL'):
-                            scope.cleanup()
-                    else:
-                        scope.cleanup()
-                self.assertEqual(snapshots, [0, 0, 6])
+                with mock.patch.object(proc, '_survivor_scan', snapshot), mock.patch.object(
+                        fixtures.time, 'monotonic', side_effect=lambda: clock[0]), mock.patch.object(
+                        fixtures.time, 'sleep'), mock.patch.object(proc, '_signal_owned'), mock.patch.object(
+                        proc, '_reap'):
+                    result = proc._perform_cleanup()
+                if survives:
+                    self.assertEqual(result.state, CleanupState.INDETERMINATE)
+                else:
+                    self.assertEqual(result.state, CleanupState.CLEAN)
+                self.assertEqual(snapshots[:3], [0, 0, 9])
+                # Synthetic reap did not release the real anchor. The outer
+                # scope still has to contain it through the real cleanup path.
 
     def test_detached_descendant_is_cleaned_after_its_parent_is_reaped(self):
         observed = self._probe(escape=True)
-        self.assertTrue(observed['result'].wasSuccessful())
-        row = process_table().get(observed['escaped'])
-        self.assertTrue(row is None or row[2].startswith('Z'), row)
+        self.assertTrue(observed['result'].wasSuccessful(), observed['result'].failures)
+        self.assertNotIn(observed['escaped'], process_table())
 
     def test_group_kill_precedes_wait_and_never_polls(self):
-        with tempfile.TemporaryDirectory() as directory:
-            case = unittest.TestCase()
-            events = []
+        scope = self._scope()
+        proc = self._launch(scope, 'import time\ntime.sleep(600)\n')
+        events = []
+        original_signal, original_reap = proc._signal_owned, proc._reap
 
-            def record_kill(pgid):
-                self.assertIsNone(proc.returncode, 'group kill requested after reap')
-                events.append('kill')
-                kill_group(pgid)
+        def record_signal(pid, identity, signum):
+            self.assertIsNone(proc._supervisor.returncode, 'signal requested after reap')
+            events.append('kill')
+            return original_signal(pid, identity, signum)
 
-            scope = FixtureProcesses(case, directory, record_kill)
-            script = Path(directory) / 'fixture.py'
-            script.write_text('import time\ntime.sleep(600)\n')
-            proc = scope.popen([sys.executable, str(script)], start_new_session=True)
-            original_wait = proc.wait
+        def record_reap():
+            self.assertIn('kill', events)
+            events.append('wait')
+            return original_reap()
 
-            def record_wait(*args, **kwargs):
-                self.assertIn('kill', events)
-                events.append('wait')
-                return original_wait(*args, **kwargs)
-
-            try:
-                with mock.patch.object(proc, 'wait', record_wait), mock.patch.object(
-                        proc, 'poll', side_effect=AssertionError('polled before KILL')):
-                    self.assertTrue(case.doCleanups())
-                self.assertEqual(events[0], 'kill')
-                self.assertIn('wait', events)
-                self.assertIsNotNone(proc.returncode)
-            finally:
-                # Independent containment if the ordering assertion regresses.
-                if proc.returncode is None:
-                    record_kill(proc.pid)
-                    original_wait(timeout=5)
-
+        with mock.patch.object(proc, '_signal_owned', record_signal), mock.patch.object(
+                proc, '_reap', record_reap), mock.patch.object(
+                proc._supervisor, 'poll', side_effect=AssertionError('polled before KILL')):
+            self.assertEqual(proc.cleanup().state, CleanupState.CLEAN)
+        self.assertEqual(events[0], 'kill')
+        self.assertIn('wait', events)
+        self.assertIsNotNone(proc._supervisor.returncode)
 
     def test_sleep_factory_records_post_exec_identity_and_keeps_the_group(self):
         for invocation in ('bare', 'absolute'):
-            with self.subTest(invocation=invocation), tempfile.TemporaryDirectory() as directory:
-                case = unittest.TestCase()
-                scope = FixtureProcesses(case, directory, kill_group)
+            with self.subTest(invocation=invocation):
+                scope = self._scope()
                 wrapper = scope.sleep_command()
                 command = 'sleep' if invocation == 'bare' else shlex.quote(str(wrapper))
-                script = Path(directory) / 'parent'
+                script = scope.root / 'parent'
                 script.write_text(scope.shell_script(
                     '#!/bin/sh\n' + command + ' 600 &\n' +
                     'printf \'%s\\n\' "$!"\nexit 0\n'))
                 script.chmod(0o700)
-                proc = scope.popen([str(script)], start_new_session=True,
-                                   stdout=subprocess.PIPE, text=True)
-                try:
-                    ready, _, _ = select.select([proc.stdout], [], [], 10)
-                    self.assertTrue(ready, 'parent did not report its child')
-                    int(proc.stdout.readline())  # Background job started.
-                    child = None
-                    deadline = time.monotonic() + 10
-                    while True:
-                        table = process_table()
-                        for word in scope.pidfiles[0].read_text().split():
-                            candidate = int(word)
-                            row = table.get(candidate)
-                            if candidate != proc.pid and row and not row[3].startswith(('/bin/sh ', 'sh ')):
-                                child = candidate
-                                break
-                        if child is not None:
-                            break
-                        self.assertLess(time.monotonic(), deadline, 'sleep did not exec')
-                        time.sleep(0.01)
-                    # Check the actual long-lived executable, not its wrapper.
-                    self.assertIn(directory + '/', row[3])
-                    self.assertEqual(row[1], proc.pid)
-                    self.assertIn(str(child), scope.pidfiles[0].read_text().split())
-                    self.assertEqual(proc.wait(timeout=5), 0)
-                    self.assertTrue(case.doCleanups())
-                    row = process_table().get(child)
-                    self.assertTrue(row is None or row[2].startswith('Z'), row)
-                finally:
-                    # Before the identity assertion passes, do not reap the
-                    # parent: its reserved PGID contains a root-free mutant.
-                    self.assertTrue(case.doCleanups())
+                proc = scope.launch(FixtureSpec((str(script),)))
+                wait_for(lambda: bool(proc.stdout_path.read_text().strip()))
+                child = int(proc.stdout_path.read_text())
+                wait_for(lambda: 'fixture-sleep-executable' in
+                         process_table().get(child, (None, None, None, ''))[3])
+                row = process_table()[child]
+                self.assertIn(str(scope.root) + '/', row[3])
+                self.assertEqual(row[1], proc.child_pid)
+                self.assertIn(str(child), scope.pidfiles[0].read_text().split())
+                self.assertEqual(proc.join(5).returncode, 0)
+                self.assertEqual(proc.cleanup().state, CleanupState.CLEAN)
+                self.assertNotIn(child, process_table())
 
     def test_project_consumers_clean_up_after_a_leader_only_supervisor(self):
         import test_project as project
@@ -400,6 +373,235 @@ class TestFixtureProcessGuard(unittest.TestCase):
         for pgid in {row[1] for row in survivors.values()} - {os.getpgrp()}:
             kill_group(pgid)
         self.assertEqual(survivors, {})
+
+
+class TestTypedFixtureContract(unittest.TestCase):
+    _scope = TestFixtureProcessGuard._scope
+    _launch = TestFixtureProcessGuard._launch
+
+    def test_every_unsupported_launch_field_is_refused_before_side_effects(self):
+        import inspect
+        scope = self._scope()
+        side_effect = scope.root / 'SHOULD-NOT-EXIST'
+        command = (sys.executable, '-c', 'from pathlib import Path; Path(%r).touch()' % str(side_effect))
+        unsupported = set(inspect.signature(subprocess.Popen).parameters) | {
+            'process_group', 'pass_fds', 'preexec_fn', 'user', 'group',
+            'extra_groups', 'umask', 'start_new_session', 'unknown_field'}
+        for field in sorted(unsupported):
+            with self.subTest(field=field), mock.patch.object(fixtures.subprocess, 'Popen') as launch:
+                with self.assertRaises((TypeError, ValueError)):
+                    scope.launch(FixtureSpec(command, **{field: 0}))
+                launch.assert_not_called()
+                self.assertFalse(side_effect.exists())
+        # Validation also runs at launch, before a forged/mutated spec reaches
+        # the supervisor. This is the executable refusal mutation target.
+        forged = FixtureSpec(command)
+        object.__setattr__(forged, 'pass_fds', ())
+        with mock.patch.object(fixtures.subprocess, 'Popen', wraps=subprocess.Popen) as launch:
+            with self.assertRaisesRegex(TypeError, 'FixtureSpec fields'):
+                scope.launch(forged)
+            launch.assert_not_called()
+        self.assertFalse(side_effect.exists())
+        self.assertEqual(list(scope.root.iterdir()), [])
+
+    def test_invalid_values_and_non_specs_are_refused_before_launch(self):
+        scope = self._scope()
+        bad = (
+            {'command': 'echo hello'}, {'command': ()},
+            {'command': ('x\0y',)}, {'command': ('x',), 'directory': '.'},
+            {'command': ('x',), 'environment': {'PATH': '/bin'}},
+            {'command': ('x',), 'environment': (('X', '1'), ('X', '2'))},
+            {'command': ('x',), 'environment': ((fixtures._MARKER, 'wrong'),)},
+        )
+        with mock.patch.object(fixtures.subprocess, 'Popen') as launch:
+            for value in bad:
+                with self.subTest(value=value), self.assertRaises((TypeError, ValueError)):
+                    scope.launch(FixtureSpec(**value))
+            for value in (None, {}, ('echo',), object()):
+                with self.assertRaises(TypeError):
+                    scope.launch(value)
+            launch.assert_not_called()
+
+    def _orphan(self, scope, mode):
+        ready = scope.root / ('orphan-' + mode)
+        extra = {
+            'ordinary': '',
+            'group': 'os.setpgid(0, 0)\n',
+            'double-fork-session': 'os.setsid()\nif os.fork(): os._exit(0)\n',
+        }[mode]
+        source = (
+            'import os\n'
+            'r,w=os.pipe()\n'
+            'pid=os.fork()\n'
+            'if pid:\n'
+            '    os.close(w); os.read(r,1); os._exit(0)\n'
+            'os.close(r)\n' + extra +
+            'with open(%r,"w") as f: f.write(str(os.getpid()))\n'
+            'os.write(w,b"R"); os.close(w)\n'
+            'os.execl("/bin/sleep", "/bin/sleep", "600")\n') % str(ready)
+        proc = self._launch(scope, source)
+        joined = proc.join(10)
+        self.assertEqual(joined.state, JoinState.EXITED, joined)
+        self.assertEqual(joined.returncode, 0, joined)
+        pid = int(ready.read_text())
+        wait_for(lambda: process_table().get(pid, (None, None, None, ''))[3] == '/bin/sleep 600')
+        # Exact PID plus birth only for outer emergency containment; not a
+        # cleanup oracle. Assertions below use a fresh process enumeration.
+        identity = fixtures._identity(pid)
+        self.addCleanup(proc._signal_owned, pid, identity, signal.SIGKILL)
+        return proc, pid
+
+    def test_non_session_parent_exit_does_not_release_its_descendants(self):
+        scope = self._scope()
+        proc, pid = self._orphan(scope, 'ordinary')
+        self.assertNotEqual(proc.child_pid, proc.supervisor_pid)
+        self.assertEqual(os.getsid(pid), proc.supervisor_pid)
+        self.assertEqual(proc.cleanup().state, CleanupState.CLEAN)
+        self.assertNotIn(pid, process_table())
+        self.assertEqual(proc.join(0).returncode, 0)
+
+    def test_additional_groups_and_rapid_double_fork_sessions_are_found(self):
+        for mode in ('group', 'double-fork-session'):
+            with self.subTest(mode=mode):
+                scope = self._scope()
+                proc, pid = self._orphan(scope, mode)
+                pgid = os.getpgid(pid)
+                self.assertNotEqual(pgid, proc.child_pid)
+                if mode == 'double-fork-session':
+                    self.assertNotEqual(os.getsid(pid), proc.supervisor_pid)
+                targets, _stable = proc._survivor_scan()
+                self.assertIn(pid, targets)
+                self.assertIn(str(pgid), scope.pidfiles[0].read_text().split())
+                self.assertEqual(proc.cleanup().state, CleanupState.CLEAN)
+                self.assertNotIn(pid, process_table())
+
+    def test_external_supervisor_or_group_kill_never_fabricates_child_status(self):
+        for group in (False, True):
+            with self.subTest(group=group):
+                scope = self._scope()
+                proc = self._launch(scope, 'import time\nprint("ready",flush=True)\ntime.sleep(600)\n')
+                wait_for(lambda: proc.stdout_path.read_text() == 'ready\n')
+                if group:
+                    os.killpg(proc.supervisor_pid, signal.SIGKILL)
+                else:
+                    os.kill(proc.supervisor_pid, signal.SIGKILL)
+                joined = proc.join(10)
+                self.assertEqual(joined.state, JoinState.STATUS_UNAVAILABLE)
+                self.assertIsNone(joined.returncode)
+                self.assertEqual(proc.cleanup().state, CleanupState.CLEAN)
+                self.assertNotIn(proc.child_pid, process_table())
+                self.assertIs(proc.join(0), joined)
+                self.assertEqual(proc.terminate().state, SignalState.STATUS_UNAVAILABLE)
+
+    def test_injected_scan_signal_reap_and_marker_failures_prevent_clean(self):
+        for failure in ('scan', 'signal', 'reap', 'marker'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as root:
+                observed = {}
+
+                class Probe(unittest.TestCase):
+                    def runTest(case):
+                        scope = FixtureProcesses(case, root)
+                        proc = scope.launch(FixtureSpec((sys.executable, '-c', 'import time; time.sleep(600)')))
+                        observed['proc'] = proc
+                        target, name = {
+                            'scan': (fixtures, 'process_table'),
+                            'signal': (proc, '_signal_owned'),
+                            'reap': (proc, '_reap'),
+                            'marker': (fixtures, '_environment'),
+                        }[failure]
+                        with mock.patch.object(target, name, side_effect=OSError('injected ' + failure)):
+                            case.doCleanups()
+
+                result = unittest.TestResult()
+                try:
+                    Probe().run(result)
+                    proc = observed['proc']
+                    self.assertFalse(result.wasSuccessful())
+                    self.assertEqual(result.errors, [])
+                    self.assertGreaterEqual(len(result.failures), 1)
+                    self.assertIn('injected ' + failure, result.failures[0][1])
+                    self.assertEqual(proc.cleanup().state, CleanupState.ERROR)
+                    self.assertIs(proc.cleanup(), proc.cleanup())
+                finally:
+                    if 'proc' in observed:
+                        self.assertEqual(observed['proc']._perform_cleanup().state, CleanupState.CLEAN)
+
+    def test_ambiguous_identity_prevents_clean_without_a_signal(self):
+        scope = self._scope()
+        proc = self._launch(scope, 'pass\n')
+        self.assertEqual(proc.join(10).returncode, 0)
+        with mock.patch.object(proc, '_snapshot', side_effect=fixtures._Indeterminate('ambiguous')):
+            result = proc._perform_cleanup()
+        self.assertEqual(result.state, CleanupState.INDETERMINATE)
+
+    def test_repeated_join_terminate_and_cleanup_preserve_reported_status(self):
+        for exit_code in (0, 23):
+            with self.subTest(exit_code=exit_code):
+                scope = self._scope()
+                proc = self._launch(scope, 'raise SystemExit(%d)\n' % exit_code)
+                status = proc.join(10)
+                self.assertEqual(status.state, JoinState.EXITED)
+                self.assertEqual(status.returncode, exit_code)
+                self.assertIs(proc.join(0), status)
+                self.assertEqual(proc.terminate().state, SignalState.ALREADY_EXITED)
+                cleaned = proc.cleanup()
+                self.assertEqual(cleaned.state, CleanupState.CLEAN)
+                self.assertIs(proc.cleanup(), cleaned)
+                self.assertIs(proc.join(0), status)
+                self.assertEqual(proc.terminate().state, SignalState.ALREADY_EXITED)
+        scope = self._scope()
+        proc = self._launch(scope, 'import time\nprint("ready",flush=True)\ntime.sleep(600)\n')
+        wait_for(lambda: proc.stdout_path.read_text() == 'ready\n')
+        self.assertEqual(proc.join(0).state, JoinState.TIMED_OUT)
+        requested = proc.terminate()
+        self.assertEqual(requested.state, SignalState.SENT)
+        status = proc.join(10)
+        self.assertEqual(status.state, JoinState.EXITED)
+        self.assertEqual(status.returncode, -signal.SIGTERM)
+        self.assertEqual(proc.cleanup().state, CleanupState.CLEAN)
+        self.assertIs(proc.join(0), status)
+
+    def test_closed_caller_stdio_is_supported_without_descriptor_passing(self):
+        with tempfile.TemporaryDirectory() as root:
+            report = Path(root) / 'report.json'
+            driver = (
+                'import json, os, sys, tempfile, unittest\n'
+                'sys.path.insert(0,%r)\n'
+                'from fixture_processes import *\n'
+                'answers=[]\n'
+                'for mask in range(1,8):\n'
+                '    saved={fd:os.dup(fd) for fd in (0,1,2)}\n'
+                '    try:\n'
+                '        for fd in (0,1,2):\n'
+                '            if mask & (1<<fd): os.close(fd)\n'
+                '        with tempfile.TemporaryDirectory() as d:\n'
+                '            scope=FixtureProcesses(unittest.TestCase(),d)\n'
+                '            proc=scope.launch(FixtureSpec((sys.executable,"-c","print(42)")))\n'
+                '            joined=proc.join(10)\n'
+                '            cleaned=proc.cleanup()\n'
+                '            answers.append([mask,joined.state.value,joined.returncode,joined.stdout,cleaned.state.value])\n'
+                '    finally:\n'
+                '        for fd,backup in saved.items(): os.dup2(backup,fd); os.close(backup)\n'
+                'with open(%r,"w") as f: json.dump(answers,f)\n'
+            ) % (str(Path(fixtures.__file__).parent), str(report))
+            result = subprocess.run([sys.executable, '-c', driver], capture_output=True, text=True, timeout=90)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(report.read_text()),
+                             [[mask, 'EXITED', 0, '42\n', 'CLEAN'] for mask in range(1, 8)])
+
+    def test_unsupported_platform_and_missing_marker_capability_refuse_before_launch(self):
+        scope = self._scope()
+        spec = FixtureSpec((sys.executable, '-c', 'pass'))
+        with mock.patch.object(fixtures.sys, 'platform', 'unsupported'), mock.patch.object(
+                fixtures.subprocess, 'Popen') as launch:
+            with self.assertRaises(fixtures.FixtureRefused):
+                scope.launch(spec)
+            launch.assert_not_called()
+        with mock.patch.object(fixtures, '_environment', side_effect=OSError('marker unavailable')), mock.patch.object(
+                fixtures.subprocess, 'Popen') as launch:
+            with self.assertRaisesRegex(OSError, 'marker unavailable'):
+                scope.launch(spec)
+            launch.assert_not_called()
 
 
 if __name__ == '__main__':

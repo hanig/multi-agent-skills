@@ -29,7 +29,8 @@ SURVEY, TICKETS = SCRIPTS / "survey.py", SCRIPTS / "tickets.py"
 sys.path.insert(0, str(SCRIPTS))
 import tickets as T  # noqa: E402
 sys.path.insert(0, str(ROOT / "tests"))
-from fixture_processes import FixtureProcesses  # noqa: E402
+from fixture_processes import (FixtureProcesses, FixtureSpec, JoinState,
+                               FixtureSignal, wait_readable)  # noqa: E402
 
 PLAN = {"name": "p", "units": [
     {"id": "a", "kind": "slurm", "runtime": "none", "command": "true", "outputs": ["o.txt"],
@@ -81,13 +82,32 @@ class _FixtureTestCase(unittest.TestCase):
         if not hasattr(self, "_fixture_scopes"):
             self._fixture_scopes = {}
         self._fixture_scopes[directory.name] = FixtureProcesses(
-            self, directory.name, _kill_group_for_cleanup)
+            self, directory.name)
         # Keep PID files until all process cleanups and the guard have run,
         # including when an assertion or a subprocess timeout exits this block.
         yield directory.name
 
     def _fixture_scope(self, directory):
         return self._fixture_scopes[str(directory)]
+
+    def _fixture_python(self, directory, source):
+        scope = self._fixture_scope(directory)
+        script = Path(directory) / ('fixture-code-%d.py' % len(scope.children))
+        script.write_text(source + '\nimport json\nprint(json.dumps(result))\n')
+        proc = scope.launch(FixtureSpec((sys.executable, str(script))))
+        joined = proc.join(60)
+        self.assertEqual(joined.state, JoinState.EXITED, joined)
+        self.assertEqual(joined.returncode, 0, joined.stderr)
+        return json.loads(joined.stdout)
+
+    def _fixture_answer(self, proc, timeout=60):
+        joined = proc.join(timeout)
+        # This adapter belongs to the test, not the typed process API. Preserve
+        # the tests' existing timeout assertions while consuming the typed state.
+        if joined.state is JoinState.TIMED_OUT:
+            raise subprocess.TimeoutExpired(proc.spec.command, timeout)
+        self.assertEqual(joined.state, JoinState.EXITED, joined)
+        return joined
 
 
 class TestProcessGroupCleanup(unittest.TestCase):
@@ -1200,9 +1220,12 @@ class TestRound2ProjectFindings(_FixtureTestCase):
         import survey as S2
         t0 = _t.time()
         with self._fixture_directory() as d:
-            with self._fixture_scope(d).capture_popen():
-                rc, out, err = S2.run(
-                    ["sh", "-c", "exec sleep 30"], timeout=2)
+            rc, out, err = self._fixture_python(d, 
+                'import sys\n'
+                'sys.path.insert(0, %r)\n'
+                'import survey\n'
+                'result = survey.run(["sh", "-c", "exec sleep 30"], timeout=2)\n'
+                % str(SCRIPTS))
         elapsed = _t.time() - t0
         self.assertLess(elapsed, 15, "the timeout did not apply")
         self.assertIn("timed out", err)
@@ -2117,18 +2140,23 @@ class TestVendoredAgentBusLayoutIsExplicit(_FixtureTestCase):
                 "trap 'exit 143' HUP INT TERM\n"
                 "while :; do sleep 1; done\n"))
             fake_bus.chmod(0o700)
-            proc = self._fixture_scope(d).popen(
-                ["sh", "-c", documented], cwd=outside, env=env,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                stdin=subprocess.DEVNULL, start_new_session=True)
-            line = proc.stderr.readline()
+            proc = self._fixture_scope(d).launch(FixtureSpec(tuple(["sh", "-c", documented]) , directory=str(outside), environment=tuple(env.items())))
+            deadline = time.monotonic() + 15
+            while True:
+                line = proc.stderr_path.read_text()
+                if '\n' in line:
+                    line = line.splitlines(keepends=True)[0]
+                    break
+                self.assertLess(time.monotonic(), deadline, "fixture emitted no state path")
+                time.sleep(0.01)
             active_state = printed_path(line)
             self.assertTrue(active_state.is_dir(), line)
-            os.killpg(os.getpgid(proc.pid), 15)
-            _out, err = proc.communicate(timeout=15)
+            os.killpg(os.getpgid(proc.child_pid), 15)
+            joined = self._fixture_answer(proc, timeout=15)
+            _out, err = joined.stdout, joined.stderr
             # The wrapper `sh -c` may itself die from the group signal before
             # the documented subshell exits 143; cleanup is the contract.
-            self.assertIn(proc.returncode, (-15, 143), line + err)
+            self.assertIn(joined.returncode, (-15, 143), line + err)
             self.assertFalse(active_state.exists())
             self.assertEqual(list(scratch.iterdir()), [])
             self.assertFalse((fake_home / ".agent-bus").exists())
@@ -2731,21 +2759,15 @@ class TestTheWalkCannotBeHeldOpenByASyscall(_FixtureTestCase):
             # The kill deadline is shortened rather than waited out: what is
             # under test is that the walk returns when the deadline passes,
             # not the particular number of seconds in it.
-            keep = (S2.WALK_KILL_SECONDS, S2.REAP_SECONDS,
-                    os.environ.get("PYTHONPATH"))
-            S2.WALK_KILL_SECONDS, S2.REAP_SECONDS = 3, 1
-            os.environ["PYTHONPATH"] = str(site)
-            try:
-                t0 = _t.time()
-                with self._fixture_scope(d).capture_popen():
-                    out = S2.repo(str(root))
-                elapsed = _t.time() - t0
-            finally:
-                S2.WALK_KILL_SECONDS, S2.REAP_SECONDS = keep[0], keep[1]
-                if keep[2] is None:
-                    os.environ.pop("PYTHONPATH", None)
-                else:
-                    os.environ["PYTHONPATH"] = keep[2]
+            t0 = _t.time()
+            out = self._fixture_python(d, 
+                'import os, sys\n'
+                'sys.path.insert(0, %r)\n'
+                'import survey\n'
+                'survey.WALK_KILL_SECONDS, survey.REAP_SECONDS = 3, 1\n'
+                'os.environ["PYTHONPATH"] = %r\n'
+                'result = survey.repo(%r)\n' % (str(SCRIPTS), str(site), str(root)))
+            elapsed = _t.time() - t0
             self.assertLess(elapsed, 30,
                             "a blocked opendir outlasted the kill deadline")
             walk = out["walk"]
@@ -2776,18 +2798,15 @@ class TestTheWalkCannotBeHeldOpenByASyscall(_FixtureTestCase):
             env = dict(os.environ)
             env["PYTHONPATH"] = str(site)
             t0 = _t.time()
-            proc = self._fixture_scope(d).popen(
-                [sys.executable, str(SURVEY), "--repo", str(root)],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                stdin=subprocess.DEVNULL, env=env, start_new_session=True)
+            proc = self._fixture_scope(d).launch(FixtureSpec(tuple([sys.executable, str(SURVEY), "--repo", str(root)]) , environment=tuple(env.items())))
             try:
-                out, err = proc.communicate(
-                    timeout=S2.WALK_KILL_SECONDS + 90)
+                joined = self._fixture_answer(proc, timeout=S2.WALK_KILL_SECONDS + 90)
+                out, err = joined.stdout, joined.stderr
             except subprocess.TimeoutExpired:
                 self.fail("the survey never returned: a blocked opendir is "
                           "still able to hang it")
             elapsed = _t.time() - t0
-            self.assertEqual(proc.returncode, 0, err)
+            self.assertEqual(joined.returncode, 0, err)
             self.assertLess(elapsed, S2.WALK_KILL_SECONDS + 30,
                             f"the survey took {elapsed:.0f}s against a "
                             f"declared {S2.WALK_KILL_SECONDS}s bound")
@@ -3402,11 +3421,10 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(_FixtureTestCase):
         argv = ["sh", str(DOCTOR)]
         if prefix:
             argv.extend(["--prefix", str(prefix)])
-        proc = self._fixture_scope(d).popen(
-            argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, cwd=ROOT, env=env, start_new_session=True)
-        out, err = proc.communicate(timeout=120)
-        r = subprocess.CompletedProcess(argv, proc.returncode, out, err)
+        proc = self._fixture_scope(d).launch(FixtureSpec(tuple(argv) , directory=str(ROOT), environment=tuple(env.items())))
+        joined = self._fixture_answer(proc, timeout=120)
+        out, err = joined.stdout, joined.stderr
+        r = subprocess.CompletedProcess(argv, joined.returncode, out, err)
         self.assertIn("=== PREREQUISITES ===", r.stdout, r.stderr)
         return r
 
@@ -3589,15 +3607,13 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(_FixtureTestCase):
             script.write_text(self._fixture_scope(d).shell_script(
                 script.read_text()))
             script.chmod(0o755)
-            proc = self._fixture_scope(d).popen(
-                [shutil.which("perl"), "-e", self._supervisor_source(),
-                 "1", "1", str(script)],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                start_new_session=True)
+            proc = self._fixture_scope(d).launch(FixtureSpec(tuple([shutil.which("perl"), "-e", self._supervisor_source(),
+                 "1", "1", str(script)])))
             child = None
             try:
-                out, err = proc.communicate(timeout=5)
-                self.assertEqual(proc.returncode, 0, err)
+                joined = self._fixture_answer(proc, timeout=5)
+                out, err = joined.stdout, joined.stderr
+                self.assertEqual(joined.returncode, 0, err)
                 lines = out.splitlines()
                 self.assertEqual(lines[:2], ["timeout", "124"], out[:200])
                 self.assertEqual(len(lines[2]), 65536,
@@ -3831,10 +3847,8 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(_FixtureTestCase):
                 script.read_text()))
             script.chmod(0o755)
             started = time.monotonic()
-            proc = self._fixture_scope(d).popen(
-                [shutil.which("perl"), "-e", self._supervisor_source(),
-                 "1", "3", str(script)], stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, text=True, start_new_session=True)
+            proc = self._fixture_scope(d).launch(FixtureSpec(tuple([shutil.which("perl"), "-e", self._supervisor_source(),
+                 "1", "3", str(script)])))
             leader = child = None
             deadline = started + 3
             while time.monotonic() < deadline:
@@ -3850,8 +3864,9 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(_FixtureTestCase):
             else:
                 self.fail("TERM-exited group leader was reaped before grace")
             self.assertLess(time.monotonic() - started, 3.5)
-            out, err = proc.communicate(timeout=4)
-            self.assertEqual(proc.returncode, 0, err)
+            joined = self._fixture_answer(proc, timeout=4)
+            out, err = joined.stdout, joined.stderr
+            self.assertEqual(joined.returncode, 0, err)
             self.assertEqual(out.splitlines()[:2], ["timeout", "124"])
             self.assertGreaterEqual(time.monotonic() - started, 3.5)
             gone = time.monotonic() + 3
@@ -3885,10 +3900,8 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(_FixtureTestCase):
                 script.write_text(self._fixture_scope(d).shell_script(
                     script.read_text()))
                 script.chmod(0o755)
-                proc = self._fixture_scope(d).popen(
-                    [shutil.which("perl"), "-e", self._supervisor_source(),
-                     "30", "2", str(script)], stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE, text=True, start_new_session=True)
+                proc = self._fixture_scope(d).launch(FixtureSpec(tuple([shutil.which("perl"), "-e", self._supervisor_source(),
+                     "30", "2", str(script)])))
                 leader = child = None
                 deadline = time.monotonic() + 3
                 while time.monotonic() < deadline:
@@ -3904,11 +3917,12 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(_FixtureTestCase):
                 # absolute cleanup deadline. An implementation that resets
                 # it on every signal takes well over this test's bound.
                 for _ in range(5):
-                    os.kill(proc.pid, signum)
+                    os.kill(proc.child_pid, signum)
                     time.sleep(0.3)
-                out, err = proc.communicate(timeout=3)
+                joined = self._fixture_answer(proc, timeout=3)
+                out, err = joined.stdout, joined.stderr
                 self.assertLess(time.monotonic() - started, 2.8)
-                self.assertEqual(proc.returncode, 0, err)
+                self.assertEqual(joined.returncode, 0, err)
                 self.assertEqual(out.splitlines()[:2],
                                  ["supervisor-error", "127"])
                 self.assertIn("interrupted by SIG" + signame, out)
@@ -3977,20 +3991,27 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(_FixtureTestCase):
         with self._fixture_directory() as d:
             script = Path(d) / "ignore-term"
             witness = self._fixture_scope(d).sleep_command()
-            read_fd, write_fd = os.pipe()
-            barrier_read, barrier_write = os.pipe()
+            witness_pipe = Path(d) / "witness.fifo"
+            barrier_pipe = Path(d) / "barrier.fifo"
+            os.mkfifo(witness_pipe)
+            os.mkfifo(barrier_pipe)
+            read_fd = os.open(witness_pipe, os.O_RDONLY | os.O_NONBLOCK)
+            os.set_blocking(read_fd, True)
+            barrier_write = os.open(barrier_pipe, os.O_RDWR)
+            write_fd = barrier_read = None
             leader = None
             proc = None
             try:
                 script.write_text(
                     "#!/bin/sh\n"
+                    "exec 3>" + shlex.quote(str(witness_pipe)) + "\n" +
                     "trap '' HUP INT TERM\n" +
                     # This alone exceeded the rejected readiness precondition.
                     shlex.quote(str(witness)) + " 3.2\n"
                     "(trap '' HUP INT TERM; "
-                    "printf 'W\\n' >&" + str(write_fd) + "; "
+                    "printf 'W\\n' >&" + "3" + "; "
                     "exec " + shlex.quote(str(witness)) + " 600) &\n"
-                    "printf 'L %s\\n' \"$$\" >&" + str(write_fd) + "\n"
+                    "printf 'L %s\\n' \"$$\" >&" + "3" + "\n"
                     "exec " + shlex.quote(str(witness)) + " 600\n")
                 script.write_text(self._fixture_scope(d).shell_script(
                     script.read_text()))
@@ -4000,8 +4021,8 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(_FixtureTestCase):
                 loop_anchor = "while (1) {\n    drain();"
                 self.assertEqual(source.count(loop_anchor), 1)
                 barrier = (
-                    "open(my $test_barrier, q(<&=), "
-                    "$ENV{HANIG_TEST_BARRIER_FD})\n"
+                    "open(my $test_barrier, q(<), "
+                    "$ENV{HANIG_TEST_BARRIER_PATH})\n"
                     "    or answer(q(unknown), 127, q(test barrier open));\n"
                     "my $test_release = q();\n"
                     "while (!length($test_release)) {\n"
@@ -4013,21 +4034,15 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(_FixtureTestCase):
                     "close $test_barrier;\n")
                 source = source.replace(loop_anchor, barrier + loop_anchor)
                 env = os.environ.copy()
-                env["HANIG_TEST_BARRIER_FD"] = str(barrier_read)
-                proc = self._fixture_scope(d).popen(
-                    [shutil.which("perl"), "-e", source,
-                     "3", "2", str(script)],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                    start_new_session=True,
-                    pass_fds=(write_fd, barrier_read), env=env)
-                os.close(write_fd)
-                write_fd = None
-                os.close(barrier_read)
-                barrier_read = None
+                env["HANIG_TEST_BARRIER_PATH"] = str(barrier_pipe)
+                proc = self._fixture_scope(d).launch(FixtureSpec(tuple([shutil.which("perl"), "-e", source,
+                     "3", "2", str(script)]) , environment=tuple(env.items())))
 
                 ready = b""
                 match = None
                 while b"W\n" not in ready or match is None:
+                    self.assertTrue(wait_readable(read_fd, 15),
+                                    "group witness did not report readiness")
                     chunk = os.read(read_fd, 4096)
                     self.assertNotEqual(
                         chunk, b"", "group witness exited before readiness")
@@ -4035,7 +4050,7 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(_FixtureTestCase):
                     match = re.search(rb"(?:^|\n)L ([0-9]+)\n", ready)
                 leader = int(match.group(1))
 
-                os.kill(proc.pid, signal.SIGTERM)
+                os.kill(proc.child_pid, signal.SIGTERM)
                 # Simulate the observer being descheduled after real delivery.
                 # A pause may delay observation, never change the assertion.
                 time.sleep(5)
@@ -4043,8 +4058,9 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(_FixtureTestCase):
                 os.close(barrier_write)
                 barrier_write = None
 
-                out, err = proc.communicate()
-                self.assertEqual(proc.returncode, 0, err)
+                joined = self._fixture_answer(proc)
+                out, err = joined.stdout, joined.stderr
+                self.assertEqual(joined.returncode, 0, err)
                 self.assertEqual(out.splitlines()[:2],
                                  ["supervisor-error", "127"])
                 self.assertIn("interrupted by SIGTERM", out)
