@@ -45,21 +45,18 @@ def _frame_receiver(frame):
     return None
 
 
-def _bound_code_is_active(method, function, frames):
-    """Match the captured callable's code and, for methods, its receiver."""
+def _registered_code_is_active(function, frames):
+    """Match the captured callable's code without trusting mutable body locals."""
     code = getattr(function, "__code__", None)
-    receiver = getattr(method, "__self__", None)
-    return any(frame.f_code is code and
-               (receiver is None or _frame_receiver(frame) is receiver)
-               for frame in frames)
+    return any(frame.f_code is code for frame in frames)
 
 
 def require_registered_writer():
     """Authorize actual registered execution beneath every active unittest run.
 
     TestCase.run captures testMethod before invoking it. Read that captured
-    callable and require its registered code below that run, bound to the same
-    receiver. A later _testMethodName change cannot grant or remove permission.
+    callable and require its registered code below that run. Mutating the case's
+    selected name or the body's receiver local cannot grant or remove permission.
     Directly called borrowed test methods remain constraints, never authority:
     an unmarked nested method is refused even beneath a registered outer run.
     """
@@ -84,7 +81,7 @@ def require_registered_writer():
                 # This is unittest's captured callable, not mutable case metadata.
                 selected = frame.f_locals.get("testMethod")
                 function = _registered_function(selected)
-                if not _bound_code_is_active(selected, function, frames[:index]):
+                if not _registered_code_is_active(function, frames[:index]):
                     raise AssertionError(
                         "journal helper called without active registered test code")
                 callers.append((case, function))
