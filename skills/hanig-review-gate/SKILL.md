@@ -227,7 +227,7 @@ review coverage nor complete historical capture. Unpublished pending files are i
 
 Decision fields validate before recording and redaction exemption: full lowercase
 40-/64-hex heads, 64-hex finding/claim digests, positive integer or null rounds,
-boolean classifications, schema/type/decision labels, timestamps, and identities.
+boolean classifications, schema/type/decision/verdict labels, timestamps, and identities.
 Authors require PROVIDER/MODEL; acceptors may be names. Both are ASCII tokens of
 1–256 characters, slash-separated nonempty components starting with a letter or
 digit and continuing with letters, digits, `_ . : @ + -`. They retain exact bytes;

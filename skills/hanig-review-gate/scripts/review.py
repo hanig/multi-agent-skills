@@ -706,6 +706,7 @@ def valid_ledger_field(field, value):
         "type": lambda v: isinstance(v, str) and v in ("review_round", "adjudication"),
         "kind": lambda v: isinstance(v, str) and v in ("plan", "implementation"),
         "decision": lambda v: isinstance(v, str) and v in ADJUDICATION_DECISIONS,
+        "verdict": lambda v: isinstance(v, str) and v in STATES,
         "confirmed": lambda v: type(v) is bool,
     }
     return validators[field](value)
@@ -722,7 +723,7 @@ def redact_ledger(obj, path=()):
     """
     typed_paths = {(field,): field for field in (
         "reviewed_head", "finding_digest", "accepted_by", "round",
-        "timestamp", "date", "schema_version", "type", "kind", "decision")}
+        "timestamp", "date", "schema_version", "type", "kind", "decision", "verdict")}
     typed_paths[("author", "[]")] = "author"
     typed_paths[("claim_digests", "[]")] = "claim_digest"
     for prefix in (("results", "[]", "findings", "[]"), ("open_findings", "[]")):
@@ -1474,7 +1475,7 @@ def journal_identity_problems(record, allow_unbound=False):
         if "notes" in record and not isinstance(record["notes"], str):
             problems.append("notes must be text")
     elif record.get("type") == "review_round":
-        for field in ("kind", "date"):
+        for field in ("kind", "date", "verdict"):
             check(field)
         digests = record.get("claim_digests")
         if not isinstance(digests, list) or any(not valid_digest(d) for d in digests):

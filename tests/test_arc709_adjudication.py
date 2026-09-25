@@ -148,7 +148,7 @@ class TestAdjudication(unittest.TestCase):
             expected = {"reviewed_head": HEAD, "round": round_no,
                         "claim_digests": review.claim_digests([review.HONEST_RUN_CLAIM]),
                         "type": "review_round", "schema_version": 2,
-                        "date": stamp, "kind": "implementation"}
+                        "date": stamp, "kind": "implementation", "verdict": "REVIEW_FAIL"}
             for field, value in expected.items():
                 self.assertEqual(record[field], value, field)
             self.assertEqual(record["results"][0]["findings"][0]["finding_digest"], self.digest)
@@ -217,6 +217,36 @@ class TestAdjudication(unittest.TestCase):
 
     def test_kind_secret_collision_is_exact_and_queryable(self):
         self.collision_round_trip("implementation")
+
+    def test_verdict_secret_collision_is_exact_and_queryable(self):
+        self.collision_round_trip("REVIEW_FAIL")
+
+    def test_damaged_verdict_is_unattributable_even_after_adjudication(self):
+        path = self.seed()
+        self.assertEqual(self.adjudicate().returncode, 0)
+        original = json.loads(path.read_text())
+        for head in (HEAD, "2" * 40):
+            for verdict in ("<OPENAI_API_KEY redacted>", "unknown", None, True):
+                with self.subTest(head=head, verdict=verdict):
+                    record = dict(original, verdict=verdict, reviewed_head=head)
+                    path.write_text(json.dumps(record) + "\n")
+                    before = path.read_bytes()
+                    query = self.query()
+                    self.assertEqual(query.returncode, 1, query.stderr)
+                    output = json.loads(query.stdout)
+                    self.assertEqual(output["state"], "UNATTRIBUTABLE")
+                    self.assertEqual(output["unattributable_records"][0]["record_path"], str(path))
+                    self.assertEqual(path.read_bytes(), before)
+
+    def test_invalid_review_fields_are_refused_before_publication(self):
+        for field, value in (("verdict", "not-a-state"), ("kind", "not-a-kind"),
+                             ("round_no", True), ("reviewed_head", "not-a-head")):
+            kwargs = dict(kind="implementation", round_no=1, effective_panel=[],
+                          verdict="REVIEW_PASS", claims=[], reviewed_head=HEAD)
+            kwargs[field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                review.append_review_journal(self.journal, **kwargs)
+        self.assertEqual(self.records(), [])
 
     def test_confirmed_secret_collision_is_exact_and_queryable(self):
         self.collision_round_trip("true")

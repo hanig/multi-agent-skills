@@ -197,7 +197,7 @@ Decision-bearing identity fields are validated before redaction exemption:
 canonical lowercase 40-/64-hex Git object IDs and lowercase 64-hex SHA-256
 finding/claim digests retain their exact bytes. Rounds are null or positive
 integers (never booleans); confirmed classifications are booleans. Schema
-versions and type/kind/decision labels use exact enumerations. Timestamps use
+versions and type/kind/decision/root-verdict labels use exact enumerations. Timestamps use
 the emitted UTC nanosecond format with a valid calendar date. Author lists
 are nonempty and require PROVIDER/MODEL tokens; accepted_by permits a name or
 slash-separated identity. Both use 1–256 ASCII characters, nonempty components
