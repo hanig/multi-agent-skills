@@ -498,6 +498,7 @@ class FixtureProcess:
     def _contain(self, grace=0.2, budget=8):
         started = time.monotonic()
         deadline = started + budget
+        term_deadline = None
         while True:
             observed_after = time.monotonic()
             targets, stable = self._survivor_scan()
@@ -505,9 +506,15 @@ class FixtureProcess:
                            if pid != self.supervisor_pid}
             if not descendants and stable:
                 break
-            signum = signal.SIGTERM if observed_after < started + grace else signal.SIGKILL
+            signum = (signal.SIGTERM if term_deadline is None or
+                      observed_after < term_deadline else signal.SIGKILL)
             for group in {(row.sid, row.pgid) for row in descendants.values()}:
                 self._signal_group(group, signum)
+            if term_deadline is None:
+                # Arm grace once, after the first TERM round. Scheduling and
+                # census latency before any signal cannot skip TERM or spend
+                # the response interval; the overall cleanup budget stays fixed.
+                term_deadline = time.monotonic() + grace
             if observed_after >= deadline:
                 raise _Indeterminate('fixture session did not reach scoped absence')
             _pause(0.02)
