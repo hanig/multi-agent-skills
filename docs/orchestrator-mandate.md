@@ -108,15 +108,21 @@ it is not a pass.
 ### The concurrence rule
 
 A confirmed finding may be dispositioned nonblocking only when **the
-orchestrator and GPT-Astra agree that it is not a deal breaker**. If they
-disagree, the change goes through another review cycle rather than merging.
+orchestrator and GPT-Sol (the `sol` reviewer in `reviewers.json`) agree that
+it is not a deal breaker**. If they disagree, the change goes through another
+review cycle rather than merging.
 
-Two things keep this honest rather than ceremonial. Astra must be asked to
+Two things keep this honest rather than ceremonial. Sol must be asked to
 assess the finding and its impact, never asked to ratify a conclusion the
 orchestrator has already framed as correct; the question put to it must state
 the finding, the evidence, and the reason for believing it irrelevant, and must
 invite refutation. And the second party is named in advance, so an
 inconvenient answer cannot be routed to a friendlier reviewer.
+
+The second party is never the author of the change under disposition. Sol
+replaced GPT-Astra here on 2026-09-25, because Astra became the code author of
+every unit and an author does not accept its own rebuttal. If Sol authored the
+change, the disposition goes to the owner.
 
 Deadlock fails toward more work, not toward shipping.
 
