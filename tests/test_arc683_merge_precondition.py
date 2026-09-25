@@ -198,6 +198,46 @@ class TestMergePrecondition(unittest.TestCase):
         self.assertEqual(f.invoke().returncode, 0)
         self.assertEqual(len(f.calls(["pr", "merge"])), 1)
 
+    def test_local_repo_anchor_works_when_operator_cwd_is_elsewhere(self):
+        f = self.f
+        self.assertTrue(Path(f.launch["repo"]).is_absolute())
+        self.assertNotEqual(f.launch["repo"], "example/project")
+        (f.state_dir / S.VERIFY_RECEIPTS).unlink()
+        result = f.invoke("--verify-integration", cwd=f.directory)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = f.invoke(cwd=f.directory)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(f.calls(["pr", "merge"])), 1)
+
+    def test_shipped_policy_pins_program_that_runs_the_discovered_suite(self):
+        f = self.f
+        root = Path(__file__).resolve().parents[1]
+        verifier = root / V.MERGE_VERIFIER_PATH
+        digest = hashlib.sha256(verifier.read_bytes()).hexdigest()
+        policy = json.loads((root / V.POLICY_FILE).read_text())
+        entry, error = V.authorized(policy, V.MERGE_VERIFIER, digest, V.INTEGRATION_CLAIM)
+        self.assertIsNone(error, error)
+        self.assertEqual(entry["sha256"], digest)
+        suite = f.directory / "small-candidate"
+        tests = suite / "tests"
+        tests.mkdir(parents=True)
+        test = tests / "test_candidate.py"
+        test.write_text("import unittest\nclass Candidate(unittest.TestCase):\n"
+                        "    def test_candidate(self):\n"
+                        "        self.fail('INTENTIONAL_BROKEN_CANDIDATE')\n")
+        result = subprocess.run([sys.executable, str(verifier)], cwd=suite, env=f.env,
+                                capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("INTENTIONAL_BROKEN_CANDIDATE", result.stderr)
+        self.assertIn("Ran 1 test", result.stderr)
+        test.write_text("import unittest\nclass Candidate(unittest.TestCase):\n"
+                        "    def test_candidate(self):\n"
+                        "        self.assertEqual(2 + 2, 4)\n")
+        result = subprocess.run([sys.executable, str(verifier)], cwd=suite, env=f.env,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Ran 1 test", result.stderr)
+
     def test_target_race_is_recorded_unverified_and_never_advanced(self):
         f = self.f
         # The target changes only during the forge mutation, after admission.

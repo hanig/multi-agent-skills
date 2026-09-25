@@ -176,12 +176,12 @@ class TestMergeUnit(unittest.TestCase):
         (self.state_dir / S.STATE_FILE).write_text(json.dumps(self.state))
         Path(self.env["FORGE_STATE"]).write_text(json.dumps(self.forge))
 
-    def invoke(self, *extra, approver=True):
+    def invoke(self, *extra, approver=True, cwd=None):
         command = [sys.executable, str(self.operator), str(self.plan_path),
                    "--state-dir", str(self.state_dir), "--unit", "u", "--pr", "7"]
         if approver:
             command += ["--approver", "Operator"]
-        return subprocess.run(command + list(extra), cwd=str(self.repo), env=self.env,
+        return subprocess.run(command + list(extra), cwd=str(cwd or self.repo), env=self.env,
                               capture_output=True, text=True, timeout=60)
 
     def calls(self, prefix=None):

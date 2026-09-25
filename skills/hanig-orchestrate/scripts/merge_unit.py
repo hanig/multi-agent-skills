@@ -163,6 +163,8 @@ def authority(args, plan):
     if us.get("state") not in ("READY_FOR_PR", "DONE"):
         raise Refusal("current attempt is not READY_FOR_PR or DONE")
     remote = launch.get("repository_remote")
+    # repo_path is the forge's owner/name, not a filesystem checkout.
+    # Local Git reads use launch["repo"], captured by the coordinator.
     host, repo_path = forge_route(remote)
     binding = {"unit": args.unit, "attempt": attempt, "head": head,
                "repo": remote, "target": launch["target_branch"], "pr": args.pr}
