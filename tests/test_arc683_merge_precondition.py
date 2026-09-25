@@ -182,6 +182,68 @@ class TestMergePrecondition(unittest.TestCase):
             self.assertIn("unresolved", result.stderr)
             self.assertEqual(f.intent(), unresolved)
 
+    def test_cancellation_directory_fsync_failure_remains_unresolved(self):
+        f = self.f
+        self.move_after_publication(fail_resolution="directory-sync")
+        result = f.invoke()
+        f.assert_refused(result)
+        self.assertIn("injected cancellation directory fsync failure", result.stderr)
+        unresolved = f.intent()
+        self.assertEqual(unresolved["phase"], "merge_requested")
+        del f.env["PYTHONPATH"]
+        result = f.invoke()
+        f.assert_refused(result)
+        self.assertIn("unresolved outcome", result.stderr)
+        self.assertEqual(f.intent(), unresolved)
+
+    def test_pending_cancellation_restores_unresolved_after_failed_rollback(self):
+        f = self.f
+        self.move_after_publication(fail_resolution="rollback")
+        result = f.invoke()
+        f.assert_refused(result)
+        self.assertIn("injected cancellation rollback failure", result.stderr)
+        # The rename was visible, but its failed fsync is not a resolution.
+        self.assertEqual(f.intent()["phase"], "cancelled_before_request")
+        pending, = f.state_dir.glob("merge-unit-*.cancellation-pending")
+        unresolved = json.loads(pending.read_text())
+        self.assertEqual(unresolved["phase"], "merge_requested")
+        del f.env["PYTHONPATH"]
+        result = f.invoke("--verify-integration")
+        f.assert_refused(result)
+        self.assertIn("unresolved", result.stderr)
+        self.assertEqual(f.intent(), unresolved)
+        self.assertFalse(pending.exists())
+        # The ordinary investigated-abandonment route remains available.
+        abandoned = f.abandon_intent(unresolved)
+        self.assertEqual(abandoned.returncode, 0, abandoned.stdout + abandoned.stderr)
+        self.assertEqual(f.intent()["phase"], "resolved_by_abandonment")
+        self.assertEqual(f.calls(["pr", "merge"]), [])
+
+    def test_cancelled_intent_cannot_resolve_a_later_queued_request(self):
+        f = self.f
+        target, log = self.move_after_publication()
+        self.assert_cancelled(f.invoke(), log, target)
+        del f.env["PYTHONPATH"]
+        self.assertEqual(f.invoke("--verify-integration").returncode, 0)
+        path = Path(f.env["FORGE_STATE"])
+        forge = json.loads(path.read_text())
+        forge["queued"] = True
+        path.write_text(json.dumps(forge))
+        self.assertNotEqual(f.invoke().returncode, 0)
+        result = f.invoke()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unresolved outcome", result.stderr)
+        self.assertEqual(len(f.calls(["pr", "merge"])), 1)
+        self.assertEqual(f.receipts(), [])
+
+    def test_malformed_ref_after_publication_is_cancelled_without_normalizing(self):
+        f = self.f
+        malformed = {"ref": "refs/heads/main", "object": {
+            "type": "commit", "sha": f.base + "\n"}}
+        log = f.intercept_intent_publication({"ref": malformed})
+        cancelled = self.assert_cancelled(f.invoke(), log, None)
+        self.assertIn("invalid exact Git object id", cancelled["cancellation"]["reason"])
+
     def test_stable_ref_is_read_after_durable_intent_and_merges_once(self):
         f = self.f
         log = f.intercept_intent_publication()

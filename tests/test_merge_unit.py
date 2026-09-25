@@ -253,10 +253,14 @@ class TestMergeUnit(unittest.TestCase):
             "    fired = False\n"
             "    def sync(fd):\n"
             "        global fired\n"
+            "        state = pathlib.Path(os.environ['COORDINATOR_STATE'])\n"
+            "        if stat.S_ISDIR(os.fstat(fd).st_mode) and %r:\n"
+            "            if any(json.loads(p.read_text()).get('phase') == "
+            "'cancelled_before_request' for p in state.glob('merge-unit-*.json')):\n"
+            "                raise OSError('injected cancellation directory fsync failure')\n"
             "        original_sync(fd)\n"
             "        if not stat.S_ISDIR(os.fstat(fd).st_mode):\n"
             "            return\n"
-            "        state = pathlib.Path(os.environ['COORDINATOR_STATE'])\n"
             "        for path in state.glob('merge-unit-*.json'):\n"
             "            intent = json.loads(path.read_text())\n"
             "            with open(%r, 'a') as log:\n"
@@ -268,13 +272,18 @@ class TestMergeUnit(unittest.TestCase):
             "                data.update(%r)\n"
             "                forge.write_text(json.dumps(data))\n"
             "    def replace(src, dst):\n"
-            "        if pathlib.Path(dst).name.startswith('merge-unit-') and %r:\n"
+            "        if pathlib.Path(dst).name.startswith('merge-unit-') "
+            "and pathlib.Path(dst).suffix == '.json' and %r:\n"
             "            if json.loads(pathlib.Path(src).read_text()).get('phase') == "
             "'cancelled_before_request':\n"
             "                raise OSError('injected cancellation publication failure')\n"
+            "        if %r and pathlib.Path(dst).with_suffix('.cancellation-pending').exists():\n"
+            "            if json.loads(pathlib.Path(src).read_text()).get('phase') == 'merge_requested':\n"
+            "                raise OSError('injected cancellation rollback failure')\n"
             "        return original_replace(src, dst)\n"
             "    os.fsync, os.replace = sync, replace\n"
-            % (str(log), forge_update or {}, fail_resolution))
+            % (fail_resolution in ("directory-sync", "rollback"), str(log),
+               forge_update or {}, fail_resolution is True, fail_resolution == "rollback"))
         self.env["PYTHONPATH"] = str(site)
         return log
 
