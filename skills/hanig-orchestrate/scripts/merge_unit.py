@@ -490,10 +490,10 @@ def reconcile(args, plan):
         target = observed_target(cmd["target"], binding["target"])
         # Return only coordinator/forge inputs captured under the lease. The
         # caller releases it before running the disposable candidate verifier.
-        return {"binding": binding, "scope_binding": scope_binding,
-                "state_dir": state_dir, "root": root, "repo": repo,
-                "operation_id": operation_id, "target": target,
-                "plan_digest": S.plan_digest(plan)}
+        return repo, {"binding": binding, "scope_binding": scope_binding,
+                      "state_dir": state_dir, "root": root,
+                      "operation_id": operation_id, "target": target,
+                      "plan_digest": S.plan_digest(plan)}
     observation = {"approver": args.approver, "already_merged": pr["state"] == "MERGED",
                    "scope_exit": scope.returncode, "scope": scope_report,
                    "scope_stdout": scope.stdout, "scope_stderr": scope.stderr}
@@ -612,11 +612,15 @@ def reconcile(args, plan):
     return cmd["advance"]
 
 
-def verify_integration(args, snapshot):
-    """Run without the lease, then fence publication against fresh authority."""
+def verify_integration(args, repo, snapshot):
+    """Run without the lease using the repo extracted by the authority reader.
+
+    Like integration_evidence, this helper receives the local repository as an
+    explicit argument; it introduces no repository-key reader of its own.
+    """
     binding, target = snapshot["binding"], snapshot["target"]
     evidence, error = V.run_merge_precondition(
-        S.U.run, snapshot["repo"], binding["head"], target,
+        S.U.run, repo, binding["head"], target,
         timeout=args.verification_timeout)
     if error:
         raise Refusal(error + ". " + verification_hint(args))
@@ -633,7 +637,7 @@ def verify_integration(args, snapshot):
             if S.plan_digest(plan) != snapshot["plan_digest"]:
                 raise Refusal("plan changed during verification")
             current = authority(args, plan)
-            state_dir, root, fresh, host, repo_path, scope_binding, repo = current
+            state_dir, root, fresh, host, repo_path, scope_binding, fresh_repo = current
             for key, value in binding.items():
                 if fresh.get(key) != value:
                     raise Refusal("coordinator binding changed during verification: " + key)
@@ -646,7 +650,7 @@ def verify_integration(args, snapshot):
                 if scope_binding.get(key) != value:
                     raise Refusal("coordinator binding changed during verification: " + key)
             if (state_dir != snapshot["state_dir"] or root != snapshot["root"]
-                    or repo != snapshot["repo"]):
+                    or fresh_repo != repo):
                 raise Refusal("coordinator paths changed during verification")
             operation_id, _, intent = current_intent(state_dir, fresh, root)
             if intent or operation_id != snapshot["operation_id"]:
@@ -750,7 +754,7 @@ def main(argv=None):
         finally:
             S.release_lease(args.state_dir)
         if args.verify_integration:
-            verify_integration(args, advance)
+            verify_integration(args, *advance)
             return 0
         if advance is None:
             return 0
