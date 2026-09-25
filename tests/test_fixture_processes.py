@@ -1,7 +1,7 @@
 """Exercise the typed fixture contract through real processes and unittest."""
 import ast
 from dataclasses import replace
-import itertools
+import errno
 import json
 import os
 from pathlib import Path
@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import threading
 import unittest
 from unittest import mock
 
@@ -63,6 +64,10 @@ class TestFixtureProcessGuard(unittest.TestCase):
                 if escape:
                     pidfile = Path(directory.name) / 'escaped.pid'
                     scope.record_pidfile(pidfile)
+                    def contain_escape():
+                        if pidfile.exists():
+                            kill_group(int(pidfile.read_text()))
+                    case.addCleanup(contain_escape)
                     script.write_text(
                         'import os, time\n'
                         'read_fd, write_fd = os.pipe()\n'
@@ -153,18 +158,18 @@ class TestFixtureProcessGuard(unittest.TestCase):
         proc = self._launch(scope, 'pass\n')
         self.assertEqual(proc.join(10).returncode, 0)
         self.assertEqual(proc.cleanup().state, CleanupState.CLEAN)
-        foreign = replace(proc._anchor, birth=(9999999999, 0))
-        with mock.patch.object(fixtures, '_identity', return_value=foreign), mock.patch.object(
+        foreign = replace(proc._anchor, sid=proc.supervisor_pid + 1000000)
+        with mock.patch.object(fixtures, '_session_rows', return_value={proc.supervisor_pid: foreign}), mock.patch.object(
                 fixtures.os, 'kill') as kill:
             result = proc._perform_cleanup()
-        self.assertEqual(result.state, CleanupState.INDETERMINATE)
+        self.assertEqual(result.state, CleanupState.CLEAN)
         kill.assert_not_called()
 
     def test_post_kill_observation_does_not_reuse_old_pid_identity(self):
         scope = self._scope()
         proc = self._launch(scope, 'pass\n')
         self.assertEqual(proc.join(10).returncode, 0)
-        foreign = replace(proc._anchor, birth=(9999999999, 0))
+        foreign = replace(proc._anchor, sid=proc.supervisor_pid + 1000000)
         with mock.patch.object(fixtures, '_identity', return_value=foreign), mock.patch.object(
                 fixtures.os, 'kill') as kill:
             with self.assertRaisesRegex(fixtures._Indeterminate, 'PID changed'):
@@ -188,7 +193,7 @@ class TestFixtureProcessGuard(unittest.TestCase):
 
                 with mock.patch.object(proc, '_survivor_scan', snapshot), mock.patch.object(
                         fixtures.time, 'monotonic', side_effect=lambda: clock[0]), mock.patch.object(
-                        fixtures.time, 'sleep'), mock.patch.object(proc, '_signal_owned'), mock.patch.object(
+                        fixtures, '_pause'), mock.patch.object(proc, '_signal_group'), mock.patch.object(proc, '_signal_owned'), mock.patch.object(
                         proc, '_reap'):
                     result = proc._perform_cleanup()
                 if survives:
@@ -199,7 +204,7 @@ class TestFixtureProcessGuard(unittest.TestCase):
                 # Synthetic reap did not release the real anchor. The outer
                 # scope still has to contain it through the real cleanup path.
 
-    def test_detached_descendant_is_cleaned_after_its_parent_is_reaped(self):
+    def test_detached_descendant_has_independent_teardown_after_parent_reap(self):
         observed = self._probe(escape=True)
         self.assertTrue(observed['result'].wasSuccessful(), observed['result'].failures)
         self.assertNotIn(observed['escaped'], process_table())
@@ -420,7 +425,7 @@ class TestTypedFixtureContract(unittest.TestCase):
             {'command': ('x\0y',)}, {'command': ('x',), 'directory': '.'},
             {'command': ('x',), 'environment': {'PATH': '/bin'}},
             {'command': ('x',), 'environment': (('X', '1'), ('X', '2'))},
-            {'command': ('x',), 'environment': ((fixtures._MARKER, 'wrong'),)},
+            {'command': ('x',), 'environment': (('invalid=key', 'wrong'),)},
         )
         with mock.patch.object(fixtures.subprocess, 'Popen') as launch:
             for value in bad:
@@ -454,10 +459,8 @@ class TestTypedFixtureContract(unittest.TestCase):
         self.assertEqual(joined.returncode, 0, joined)
         pid = int(ready.read_text())
         wait_for(lambda: process_table().get(pid, (None, None, None, ''))[3] == '/bin/sleep 600')
-        # Exact PID plus birth only for outer emergency containment; not a
-        # cleanup oracle. Assertions below use a fresh process enumeration.
-        identity = fixtures._identity(pid)
-        self.addCleanup(proc._signal_owned, pid, identity, signal.SIGKILL)
+        # This test retains its deliberately escaped PID out of band.
+        self.addCleanup(kill_group, os.getpgid(pid))
         return proc, pid
 
     def test_non_session_parent_exit_does_not_release_its_descendants(self):
@@ -469,20 +472,27 @@ class TestTypedFixtureContract(unittest.TestCase):
         self.assertNotIn(pid, process_table())
         self.assertEqual(proc.join(0).returncode, 0)
 
-    def test_additional_groups_and_rapid_double_fork_sessions_are_found(self):
+    def test_additional_groups_are_found_and_double_fork_sessions_are_outside(self):
         for mode in ('group', 'double-fork-session'):
             with self.subTest(mode=mode):
                 scope = self._scope()
                 proc, pid = self._orphan(scope, mode)
                 pgid = os.getpgid(pid)
                 self.assertNotEqual(pgid, proc.child_pid)
+                targets, _stable = proc._survivor_scan()
+                ledger = [json.loads(line) for line in scope.ledger_path.read_text().splitlines()]
                 if mode == 'double-fork-session':
                     self.assertNotEqual(os.getsid(pid), proc.supervisor_pid)
-                targets, _stable = proc._survivor_scan()
-                self.assertIn(pid, targets)
-                self.assertIn(str(pgid), scope.pidfiles[0].read_text().split())
-                self.assertEqual(proc.cleanup().state, CleanupState.CLEAN)
-                self.assertNotIn(pid, process_table())
+                    self.assertNotIn(pid, targets)
+                    self.assertNotIn({'sid': proc.supervisor_pid, 'pgid': pgid}, ledger)
+                    self.assertEqual(proc.cleanup().state, CleanupState.CLEAN)
+                    os.kill(pid, 0)  # Deliberate escape really survived CLEAN.
+                    self.assertIn(pid, process_table())
+                else:
+                    self.assertIn(pid, targets)
+                    self.assertIn({'sid': proc.supervisor_pid, 'pgid': pgid}, ledger)
+                    self.assertEqual(proc.cleanup().state, CleanupState.CLEAN)
+                    self.assertNotIn(pid, process_table())
 
     def test_external_supervisor_or_group_kill_never_fabricates_child_status(self):
         for group in (False, True):
@@ -502,38 +512,37 @@ class TestTypedFixtureContract(unittest.TestCase):
                 self.assertIs(proc.join(0), joined)
                 self.assertEqual(proc.terminate().state, SignalState.STATUS_UNAVAILABLE)
 
-    def test_injected_scan_signal_reap_and_marker_failures_prevent_clean(self):
-        for failure in ('scan', 'signal', 'reap', 'marker'):
-            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as root:
-                observed = {}
-
-                class Probe(unittest.TestCase):
-                    def runTest(case):
-                        scope = FixtureProcesses(case, root)
-                        proc = scope.launch(FixtureSpec((sys.executable, '-c', 'import time; time.sleep(600)')))
-                        observed['proc'] = proc
-                        target, name = {
-                            'scan': (fixtures, '_enumerate_pids'),
-                            'signal': (proc, '_signal_owned'),
-                            'reap': (proc, '_reap'),
-                            'marker': (fixtures, '_environment'),
-                        }[failure]
-                        with mock.patch.object(target, name, side_effect=OSError('injected ' + failure)):
-                            case.doCleanups()
-
-                result = unittest.TestResult()
-                try:
-                    Probe().run(result)
-                    proc = observed['proc']
-                    self.assertFalse(result.wasSuccessful())
-                    self.assertEqual(result.errors, [])
-                    self.assertGreaterEqual(len(result.failures), 1)
-                    self.assertIn('injected ' + failure, result.failures[0][1])
-                    self.assertEqual(proc.cleanup().state, CleanupState.ERROR)
-                    self.assertIs(proc.cleanup(), proc.cleanup())
-                finally:
-                    if 'proc' in observed:
-                        self.assertEqual(observed['proc']._perform_cleanup().state, CleanupState.CLEAN)
+    def test_injected_scan_signal_and_reap_failures_still_contain_and_retry(self):
+        for failure in ('scan', 'signal', 'reap'):
+            with self.subTest(failure=failure):
+                scope = self._scope()
+                proc = self._launch(scope, 'import time; print("ready",flush=True); time.sleep(600)')
+                wait_for(lambda: proc.stdout_path.read_text() == 'ready\n')
+                target, name = {
+                    'scan': (proc, '_survivor_scan'),
+                    'signal': (proc, '_signal_group'),
+                    'reap': (proc, '_reap'),
+                }[failure]
+                original = getattr(target, name)
+                calls = []
+                def fail_once(*args, **kwargs):
+                    calls.append(1)
+                    if len(calls) == 1:
+                        raise OSError('injected ' + failure)
+                    return original(*args, **kwargs)
+                with mock.patch.object(target, name, fail_once):
+                    result = proc.cleanup()
+                self.assertEqual(result.state, CleanupState.ERROR, result)
+                self.assertIn('injected ' + failure, result.detail)
+                # Observe before calling cleanup again: emergency containment
+                # must already have run despite caching the original ERROR.
+                wait_for(lambda: not fixtures._session_rows(proc.supervisor_pid, set()))
+                self.assertNotIn(proc.child_pid, process_table())
+                self.assertTrue(proc._reaped)
+                with mock.patch.object(proc, '_perform_cleanup', wraps=proc._perform_cleanup) as retry:
+                    self.assertEqual(proc.cleanup().state, CleanupState.CLEAN)
+                    retry.assert_called_once_with()
+                self.assertIs(proc.cleanup(), proc.cleanup())
 
     def test_ambiguous_identity_prevents_clean_without_a_signal(self):
         scope = self._scope()
@@ -598,7 +607,7 @@ class TestTypedFixtureContract(unittest.TestCase):
             self.assertEqual(json.loads(report.read_text()),
                              [[mask, 'EXITED', 0, '42\n', 'CLEAN', ''] for mask in range(1, 8)])
 
-    def test_unsupported_platform_and_missing_marker_capability_refuse_before_launch(self):
+    def test_unsupported_platform_and_missing_membership_capability_refuse_before_launch(self):
         scope = self._scope()
         spec = FixtureSpec((sys.executable, '-c', 'pass'))
         with mock.patch.object(fixtures.sys, 'platform', 'unsupported'), mock.patch.object(
@@ -606,9 +615,9 @@ class TestTypedFixtureContract(unittest.TestCase):
             with self.assertRaises(fixtures.FixtureRefused):
                 scope.launch(spec)
             launch.assert_not_called()
-        with mock.patch.object(fixtures, '_environment', side_effect=OSError('marker unavailable')), mock.patch.object(
+        with mock.patch.object(fixtures, '_identity', side_effect=OSError('membership unavailable')), mock.patch.object(
                 fixtures.subprocess, 'Popen') as launch:
-            with self.assertRaisesRegex(OSError, 'marker unavailable'):
+            with self.assertRaisesRegex(OSError, 'membership unavailable'):
                 scope.launch(spec)
             launch.assert_not_called()
 
@@ -616,7 +625,7 @@ class TestTypedFixtureContract(unittest.TestCase):
         scope = self._scope()
         with tempfile.TemporaryDirectory() as elsewhere, mock.patch.object(
                 fixtures.subprocess, 'Popen') as launch:
-            with self.assertRaisesRegex(fixtures.FixtureRefused, 'cwd marker'):
+            with self.assertRaisesRegex(fixtures.FixtureRefused, 'beneath its root'):
                 scope.launch(FixtureSpec((sys.executable, '-c', 'pass'), directory=elsewhere))
             launch.assert_not_called()
         proc = self._launch(scope, 'pass\n')
@@ -630,17 +639,16 @@ class TestTypedFixtureContract(unittest.TestCase):
         scope = self._scope()
         proc = self._launch(scope, 'pass\n')
         self.assertEqual(proc.join(10).state, JoinState.EXITED)
-        with mock.patch.object(fixtures, '_enumerate_pids', return_value=set()):
+        with mock.patch.object(fixtures, '_session_rows', return_value={}):
             self.assertEqual(proc._perform_cleanup().state, CleanupState.INDETERMINATE)
 
-    def test_injected_cwd_marker_failure_prevents_clean(self):
+    def test_injected_membership_permission_failure_prevents_clean(self):
         scope = self._scope()
-        proc, pid = self._orphan(scope, 'double-fork-session')
-        with mock.patch.object(fixtures, '_has_marker', return_value=False), mock.patch.object(
-                fixtures, '_cwd_marker', side_effect=OSError('injected cwd inspection')):
+        proc, pid = self._orphan(scope, 'group')
+        with mock.patch.object(fixtures, '_session_rows', side_effect=PermissionError('injected membership inspection')):
             result = proc._perform_cleanup()
         self.assertEqual(result.state, CleanupState.ERROR)
-        self.assertIn('injected cwd inspection', result.detail)
+        self.assertIn('injected membership inspection', result.detail)
         self.assertEqual(proc.cleanup().state, CleanupState.CLEAN)
         self.assertNotIn(pid, process_table())
 
