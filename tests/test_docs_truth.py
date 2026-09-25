@@ -1197,7 +1197,8 @@ def expected_test_methods(path, module, concrete=None):
             sorted(unconsumed_declarations))
 
 
-def assert_every_test_method_collected(paths, loader=None, module_loader=None):
+def assert_every_test_method_collected(paths, loader=None, module_loader=None,
+                                     delegated_reports=None):
     # A FRESH loader for the repository sweep, never the caller's.
     # kimi-k2.7-code: reusing the ambient loader meant `unittest discover
     # -s tests -k docs_truth` -- an ordinary invocation -- compared every
@@ -1275,9 +1276,22 @@ def assert_every_test_method_collected(paths, loader=None, module_loader=None):
             problems["source methods unavailable at runtime"] = erased
         if unconsumed:
             problems["test declarations have no TestCase consumer"] = unconsumed
+        module_collected = collected
+        if (repository_discovery and path == ROOT / "tests/test_review.py"
+                and delegated_reports is not None):
+            # This one module executes in the supervised worker. Keep every
+            # source/runtime check above, and require its completed ids here.
+            from tests.review_sandbox_worker import validate_completion
+            report = validate_completion(delegated_reports["test_review"],
+                                         "test_review")
+            worker_ids = set(report["collected"])
+            module_collected = {
+                (cls, method) for cls, method in expected
+                if "%s.%s.%s" % (module.__name__, cls.__qualname__, method)
+                in worker_ids}
         missing = sorted(
             f"{cls.__name__}.{method}"
-            for cls, method in expected - collected)
+            for cls, method in expected - module_collected)
         if missing:
             problems["declared but not collected"] = missing
         if problems:

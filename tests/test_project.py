@@ -509,8 +509,23 @@ class TestNoTestGoesUncollectedAnywhere(unittest.TestCase):
         unittest_discoverable_paths = _docs_truth.unittest_discoverable_paths
         walk_suite = _docs_truth.walk_suite
 
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))
+        from tests.review_sandbox_worker import review_report
+        report = review_report()
+        paths = unittest_discoverable_paths(ROOT / "tests")
         assert_every_test_method_collected(
-            unittest_discoverable_paths(ROOT / "tests"))
+            paths, delegated_reports={"test_review": report})
+        # A delegated module is not exempt: deleting a collected id from an
+        # otherwise valid completion must still fail this very consumer.
+        import copy
+        incomplete = copy.deepcopy(report)
+        omitted = incomplete["collected"].pop()
+        incomplete["outcomes"] = [o for o in incomplete["outcomes"]
+                                  if o["id"] != omitted]
+        with self.assertRaisesRegex(AssertionError, "declared but not collected"):
+            assert_every_test_method_collected(
+                paths, delegated_reports={"test_review": incomplete})
 
         source = """
 import unittest
