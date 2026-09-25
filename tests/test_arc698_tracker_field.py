@@ -194,6 +194,19 @@ class TestTrackerField(unittest.TestCase):
         self.assertTrue((self.state_dir / S.OUTBOX).read_bytes().startswith(before))
         self.assertEqual(list(self.state_dir.glob('.outbox-tracker-*')), [])
 
+    def test_outbox_stat_failure_does_not_halt_advance(self):
+        original = Path.is_file
+
+        def failed_stat(path):
+            if path == self.state_dir / S.OUTBOX:
+                raise OSError('injected outbox stat I/O error')
+            return original(path)
+
+        err = io.StringIO()
+        with mock.patch.object(Path, 'is_file', failed_stat), redirect_stderr(err):
+            self.advance()
+        self.assertIn('could not backfill tracker labels', err.getvalue())
+
 
 if __name__ == '__main__':
     unittest.main()

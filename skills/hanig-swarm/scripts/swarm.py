@@ -5257,10 +5257,12 @@ def backfill_tracker_intents(state_dir, project, units):
     """
     labels = {uid: u["tracker"] for uid, u in units.items() if "tracker" in u}
     path = Path(state_dir) / OUTBOX
-    if not labels or not path.is_file():
+    if not labels:
         return
     temporary = None
     try:
+        if not path.is_file():
+            return
         # Refuse a partial/corrupt journal before replacing any bytes.
         load_outbox_contract(state_dir)
         lines = path.read_bytes().splitlines(keepends=True)
