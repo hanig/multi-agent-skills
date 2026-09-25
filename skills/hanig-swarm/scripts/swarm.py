@@ -990,12 +990,10 @@ def _validate_runtimes(plan, units):
     # one cannot see.
 
 
-def _seed_carry_forward(intent):
+def _seed_carry_forward(seed, repo, remote):
     """Render recorded provenance as instructions, never as closure evidence."""
-    if "seed" not in intent:
+    if seed is None:
         return ""
-    seed = intent["seed"]
-    remote = intent["repository_remote"]
     # Exactly-once routing, as in _git_push_destination: origin may fetch
     # from somewhere other than its push destination. Quote every shell arg.
     alias = "hanig-swarm-seed-" + hashlib.sha256(remote.encode()).hexdigest() + ":"
@@ -1006,15 +1004,18 @@ def _seed_carry_forward(intent):
     if "evidence" in seed:
         evidence = (f"\nRead the previous evidence file {seed['evidence']!r} before "
                     f"editing; relative paths are relative to the source repository "
-                    f"{intent['repo']!r}, not the new worktree. Treat it as prior "
+                    f"{repo!r}, not the new worktree. Treat it as prior "
                     "context, not a review pass or completion evidence.")
     return f"""\n\nCARRY FORWARD (recorded seed; provenance only)
 Stay on the new attempt branch and its recorded launch base. Fetch the seed ref {seed['ref']!r} from the recorded origin push destination:
 ```sh
-{fetch}
-git cherry-pick -x {seed['base']}..{seed['head']}
+{fetch} &&
+swarm_seed_commits=$(git rev-list --max-count=1 {seed['base']}..{seed['head']}) &&
+if test -n "$swarm_seed_commits"; then
+    git cherry-pick -x {seed['base']}..{seed['head']}
+fi
 ```
-Skip empty commits: when cherry-pick stops because a commit is empty or already applied, confirm that it is empty and run `git cherry-pick --skip`, repeating as needed. Resolve real conflicts explicitly; never skip a non-empty conflicting change just to finish. Never port by whole-file checkout.
+An empty range carries no commits and is a successful no-op. Skip empty commits: when cherry-pick stops because a commit is empty or already applied, confirm that it is empty and run `git cherry-pick --skip`, repeating as needed. Resolve real conflicts explicitly; never skip a non-empty conflicting change just to finish. Never port by whole-file checkout.
 If fetching or replay cannot be completed, STOP AND REPORT; do not substitute another ref or range.{evidence}
 The coordinator checked reachability at launch, not whether replay will be conflict-free. It does not cherry-pick or alter the worktree for you. Seed history does not change judging, scope-check, review, or merged-PR closure; the produced head is judged against this fresh attempt's recorded base."""
 
@@ -1136,7 +1137,7 @@ fi
 NEVER run `git stash`, in any form. The stash stack is a SINGLE ref in the shared common Git directory, so every worktree of {repo!r} shares one stack and a pop takes whatever another agent parked. Do these instead: to read a file as it was at base, `git show {base}:<path>`; to set work aside, `git diff > /tmp/wip.patch` then `git checkout -- <path>`; and to answer "was this test already failing", add a separate worktree at {base} and run it there, rather than moving anything in this one. Note what such a comparison does and does not show: green at {base} and green here is a claim about your change alone, not about {target!r} after a merge.
 Before every commit, run `git status --porcelain` and read it. Stage only paths you changed yourself; if it lists a path you did not touch, STOP AND REPORT instead of committing it. The observed failure is a commit that carried another agent's files.
 If you cannot finish cleanly, STOP AND REPORT the problem instead of working around it.
-Leave the worktree clean. Do not force-push or rewrite history. The final commit must descend from recorded base {base}; rewritten history makes honest work unjudgeable.{_seed_carry_forward(intent)}"""
+Leave the worktree clean. Do not force-push or rewrite history. The final commit must descend from recorded base {base}; rewritten history makes honest work unjudgeable.{_seed_carry_forward(intent.get('seed'), repo, remote)}"""
 
 
 def _dispatch_prompt(u, intent=None):
@@ -3007,7 +3008,10 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
                 except PlanError as exc:
                     anchor_err = str(exc)
                 else:
-                    anchor_err = _seed_reachability_problem(seed, existing_intent)
+                    anchor_err = (_seed_reachability_problem(
+                        seed, existing_intent["repo"],
+                        existing_intent.get("repository_remote_raw"),
+                        existing_intent.get("repository_remote")))
             # This path may create an agent after an interrupted submission.
             # Recheck admission, but never migrate an existing intent or ask
             # this question while judging an already-launched attempt.
@@ -4255,7 +4259,7 @@ def _warn_installed_skill_drift(snapshot, base, uid):
             pass
 
 
-def _seed_reachability_problem(seed, source):
+def _seed_reachability_problem(seed, repo, raw, remote):
     """Fetch an exact seed ref and check base <= head <= fetched tip.
 
     The private temporary ref avoids stale tracking refs and shared FETCH_HEAD
@@ -4265,9 +4269,6 @@ def _seed_reachability_problem(seed, source):
     """
     if seed is None:
         return None
-    repo = source["repo"]
-    raw = source["repository_remote_raw"]
-    remote = source["repository_remote"]
     cache_ref = "refs/hanig-swarm-seeds/" + os.urandom(16).hex()
     problem = None
     try:
@@ -4283,6 +4284,13 @@ def _seed_reachability_problem(seed, source):
                 if rc != 0 or kind != "commit":
                     problem = f"seed.{field} {seed[field]!r} is not an available commit"
                     break
+                # Git accepts a unique 40-hex abbreviation in a SHA-256
+                # repository. Syntax alone therefore does not establish a
+                # full object ID. Preserve the input spelling; compare widths.
+                rc, full_id, _ = _git(repo, "rev-parse", "--verify", seed[field])
+                if rc != 0 or len(full_id) != len(seed[field]):
+                    problem = f"seed.{field} {seed[field]!r} is not a full commit id in this repository"
+                    break
             if not problem:
                 for ancestor, descendant in ((seed["base"], seed["head"]),
                                              (seed["head"], cache_ref)):
@@ -4295,7 +4303,11 @@ def _seed_reachability_problem(seed, source):
     finally:
         cleanup_rc, _, _ = _git(repo, "update-ref", "-d", cache_ref)
     if cleanup_rc != 0:
-        return f"seed preflight could not remove temporary Git ref {cache_ref!r}"
+        # The random cache ref is never reused. A leftover metadata ref is
+        # housekeeping, not reachability evidence or a reason to reject work.
+        print(f"WARNING: seed preflight could not remove temporary Git ref "
+              f"{cache_ref!r}; remove it after the competing Git operation "
+              "finishes. The reachability result is unchanged.", file=sys.stderr)
     return problem
 
 
@@ -4349,7 +4361,8 @@ def _capture_code_launch(unit_dir, u, dispatch_source=None):
     if source.get("repo") != repo or source.get("target_branch") != target:
         return _dispatch_base_refusal(
             u.get("id"), repo, "cached dispatch source names another target"), None
-    seed_problem = _seed_reachability_problem(seed, source)
+    seed_problem = _seed_reachability_problem(
+        seed, repo, source["repository_remote_raw"], source["repository_remote"])
     if seed_problem:
         return seed_problem, None
     head, tree = source["base_commit"], source["base_tree"]

@@ -160,9 +160,12 @@ attempts are never backfilled from a later plan.
 
 The completion protocol tells the worker to fetch that source, cherry-pick
 `-x base..head`, skip empty commits with `git cherry-pick --skip`, and read
-the previous evidence when supplied. Never port by whole-file checkout. The
-coordinator does not replay commits or alter the worktree. Reachability does
-not guarantee conflict-free replay or certify previous evidence.
+the previous evidence when supplied. An empty range is a successful no-op.
+Never port by whole-file checkout. The coordinator does not replay commits or
+alter the worktree. A temporary-ref
+cleanup failure warns without changing the reachability result; that ref is
+never reused. Reachability does not guarantee conflict-free replay or certify
+previous evidence.
 
 This is provenance for a fresh attempt. Its launch base, judged produced head,
 scope comparison, review requirements, and merged-PR closure remain unchanged.

@@ -2,8 +2,6 @@
 import copy
 import hashlib
 import json
-import os
-import shlex
 import subprocess
 import sys
 import tempfile
@@ -215,11 +213,8 @@ class SeedDispatchTests(unittest.TestCase):
         argv = self.fake.launches[0]
         workspace = argv[argv.index("--cwd") + 1]
         carry = argv[-1].split("CARRY FORWARD", 1)[1]
-        commands = carry.split("```sh\n", 1)[1].split("\n```", 1)[0].splitlines()
-        fetched = subprocess.run(shlex.split(commands[0]), cwd=workspace,
-                                 env=ENV, capture_output=True, text=True)
-        self.assertEqual(fetched.returncode, 0, fetched.stderr)
-        picked = subprocess.run(shlex.split(commands[1]), cwd=workspace,
+        commands = carry.split("```sh\n", 1)[1].split("\n```", 1)[0]
+        picked = subprocess.run(["sh", "-c", commands], cwd=workspace,
                                 env=ENV, capture_output=True, text=True)
         self.assertNotEqual(picked.returncode, 0)
         self.assertIn("empty", picked.stderr)
@@ -228,6 +223,70 @@ class SeedDispatchTests(unittest.TestCase):
         self.assertIn("cherry picked from commit " + self.head, message)
         self.assertEqual(git(workspace, "status", "--porcelain"), "")
         self.assertEqual((Path(workspace) / "repair.txt").read_text(), "carried forward\n")
+
+    def test_empty_seed_range_is_a_successful_noop_in_delivered_commands(self):
+        self.seed["head"] = self.base
+        job, error = self.submit()
+        self.assertIsNone(error)
+        self.assertTrue(job)
+        argv = self.fake.launches[0]
+        workspace = argv[argv.index("--cwd") + 1]
+        carry = argv[-1].split("CARRY FORWARD", 1)[1]
+        commands = carry.split("```sh\n", 1)[1].split("\n```", 1)[0]
+        result = subprocess.run(["sh", "-c", commands], cwd=workspace,
+                                env=ENV, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(git(workspace, "rev-parse", "HEAD"), self.base)
+
+    def test_temporary_ref_cleanup_lock_does_not_change_reachability(self):
+        real_git = S._git
+
+        def locked_cleanup(repo, *args, **kwargs):
+            if args[:2] == ("update-ref", "-d") and args[2].startswith(
+                    "refs/hanig-swarm-seeds/"):
+                path = Path(git(repo, "rev-parse", "--git-path", args[2] + ".lock"))
+                if not path.is_absolute():
+                    path = Path(repo) / path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("another Git operation\n")
+            return real_git(repo, *args, **kwargs)
+
+        with mock.patch.object(S, "_git", locked_cleanup), \
+                mock.patch.object(S.sys, "stderr") as warnings:
+            job, error = self.submit()
+            self.assertIsNone(error)
+            self.assertTrue(job)
+            # A cleanup error must not hide the original fetch diagnostic.
+            missing = dict(self.seed, ref="refs/heads/missing")
+            error = S._seed_reachability_problem(
+                missing, str(self.repo), str(self.remote), str(self.remote))
+            self.assertIn("cannot be fetched", error)
+            rendered = "".join(call.args[0] for call in warnings.write.call_args_list)
+            self.assertIn("could not remove temporary Git ref", rendered)
+
+    def test_sha256_repository_refuses_40_hex_abbreviations(self):
+        repo = self.tmp / "sha256"
+        init = subprocess.run(["git", "init", "-q", "--object-format=sha256", str(repo)],
+                              capture_output=True, text=True, env=ENV)
+        if init.returncode:
+            self.skipTest("this Git cannot initialize SHA-256 repositories")
+        git(repo, "commit", "-q", "--allow-empty", "-m", "base")
+        base = git(repo, "rev-parse", "HEAD")
+        (repo / "impl.txt").write_text("implementation\n")
+        git(repo, "add", "impl.txt")
+        git(repo, "commit", "-qm", "implementation")
+        head = git(repo, "rev-parse", "HEAD")
+        source = str(repo)
+        ref = git(repo, "symbolic-ref", "HEAD")
+        for field in ("base", "head"):
+            seed = {"ref": ref, "base": base, "head": head}
+            seed[field] = seed[field][:40]
+            with self.subTest(field=field):
+                error = S._seed_reachability_problem(seed, source, source, source)
+                self.assertIsNotNone(error)
+                self.assertIn("seed." + field, error)
+        self.assertIsNone(S._seed_reachability_problem(
+            {"ref": ref, "base": base, "head": head}, source, source, source))
 
     def test_seed_does_not_replace_produced_head_or_exempt_seeded_scope(self):
         self.unit["scope"] = ["tracked.txt"]
