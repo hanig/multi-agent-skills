@@ -4078,6 +4078,18 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(_FixtureTestCase):
         with self._fixture_directory() as d:
             pidfile = Path(d) / "setsid-child.pid"
             self._fixture_scope(d).record_pidfile(pidfile)
+            # This deliberate session escape is outside FixtureProcess's
+            # boundary. Register its independent teardown before launch, so
+            # even a failed product assertion or PID read cannot leave it.
+            def contain_escape():
+                if pidfile.exists():
+                    pid = int(pidfile.read_text())
+                    try:
+                        if os.getsid(pid) == pid:
+                            os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+            self.addCleanup(contain_escape)
             code = ("use POSIX qw(setsid); setsid(); "
                     "open(my $f, q(>), q(%s)) or die $!; "
                     "print $f $$; close $f; sleep 600") % pidfile
