@@ -298,9 +298,16 @@ bytes in the existing disposable candidate-merge checkout, and records the
 result in the external coordinator verification journal. Supply both Git
 objects locally first; the verifier never fetches. Ordinary invocation then
 admits that evidence before issuing one guarded merge. A changed head or
-target needs fresh evidence. The operator re-observes the branch ref as its
-last forge read before publishing the durable intent and requesting the merge;
-a moved ref refuses with the verification command and leaves no merge request.
+target needs fresh evidence. The operator re-observes the branch ref before
+publishing the durable intent and again immediately before requesting the merge,
+after intent publication. A moved or unreadable ref at that last read durably
+marks the intent `cancelled_before_request` and refuses without a merge call.
+The next invocation follows that resolved intent to a fresh operation, so
+verification can rerun without abandonment; the cancelled record is retained.
+If cancellation publication fails, the original intent remains unresolved and
+the operator refuses a second request. A pending cancellation record restores
+that barrier even if publication failed after rename; a crash before removing
+the pending record also conservatively leaves the intent unresolved.
 A red run for the same exact binding cannot be
 hidden by an earlier pass.
 

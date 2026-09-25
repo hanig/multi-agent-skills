@@ -304,7 +304,7 @@ def observed_pr_url(pr, host, repo_path, number):
 
 
 def current_intent(state_dir, binding, root, repair=True):
-    """Follow durable abandonments from the legacy binding-derived operation.
+    """Follow durable resolutions from the legacy binding-derived operation.
 
     The sidecar is the abandonment commit point. If a crash leaves the original
     intent unmarked, finish that local update before permitting a successor.
@@ -318,6 +318,33 @@ def current_intent(state_dir, binding, root, repair=True):
         if intent is not None and (
                 intent.get("binding") != binding or intent.get("root") != root):
             raise Refusal("durable merge intent conflicts with current authority/root")
+        # A cancellation write can fail after rename but before directory fsync.
+        # Retain the original request until the resolution is fully published;
+        # a leftover rollback record always restores the unresolved outcome.
+        rollback_path = path.with_suffix(".cancellation-pending")
+        if rollback_path.exists():
+            original = read_object(rollback_path)
+            if (original.get("binding") != binding or original.get("root") != root
+                    or original.get("operation_id") != operation_id
+                    or original.get("phase") != "merge_requested"):
+                raise Refusal("invalid pending cancellation record")
+            if repair:
+                durable_write(path, original)
+                rollback_path.unlink()
+            intent = original
+        if intent is not None and intent.get("phase") == "cancelled_before_request":
+            if (intent.get("operation_id") != operation_id
+                    or intent.get("schema_version") != 1
+                    or not isinstance(intent.get("cancellation"), dict)):
+                raise Refusal("invalid pre-request cancellation record")
+            cancellation = intent["cancellation"]
+            nonempty(cancellation.get("reason", ""))
+            datetime.fromisoformat(cancellation["observed_at"])
+            if cancellation.get("observed_target") is not None:
+                oid(cancellation["observed_target"])
+            operation_id = hashlib.sha256(
+                (operation_id + ":after-cancellation").encode()).hexdigest()
+            continue
         if not abandonment_path.exists():
             # Legacy metadata never gated ordinary MERGED reconciliation.
             # Only our new resolution marker requires a companion record.
@@ -360,6 +387,28 @@ def abandon(args, intent_path, intent, pr, operation_id):
         operation_id, record_path))
 
 
+def cancel_before_request(intent_path, intent, observed, reason):
+    """Resolve only a request this invocation has not transmitted.
+
+    The pending record keeps even a post-rename fsync failure unresolved on
+    rerun. Removing it happens only after durable publication of cancellation.
+    A crash before removal conservatively retains the never-re-merge barrier.
+    """
+    rollback_path = intent_path.with_suffix(".cancellation-pending")
+    durable_write(rollback_path, intent)
+    resolved = dict(intent, phase="cancelled_before_request", cancellation={
+        "observed_target": observed, "reason": reason,
+        "observed_at": datetime.now(timezone.utc).isoformat()})
+    try:
+        durable_write(intent_path, resolved)
+    except OSError:
+        # Best effort restores the on-disk phase now; the pending record also
+        # fences reruns if storage refuses this restoration.
+        durable_write(intent_path, intent)
+        raise
+    rollback_path.unlink()
+
+
 def reconcile(args, plan):
     state_dir, root, binding, host, repo_path, scope_binding, repo = authority(args, plan)
     cmd = commands(args, root, binding, host, repo_path)
@@ -390,6 +439,8 @@ def reconcile(args, plan):
             print("re-observe the exact target branch ref immediately before persisting the intent")
             print("+ " + shlex.join(cmd["target"]))
             print("persist intent {} before the conditional merge".format(intent_path))
+            print("re-read the target ref; on movement/read failure durably cancel before request")
+            print("+ " + shlex.join(cmd["target"]))
             print("+ " + shlex.join(cmd["merge"]))
             print("+ " + shlex.join(cmd["view"]))
         print("if MERGED at judged head (including reconciliation):")
@@ -468,12 +519,25 @@ def reconcile(args, plan):
         intent = {"schema_version": 1, "operation_id": operation_id,
                   "binding": binding, "root": root, "phase": "merge_requested",
                   "preconditions": observation, "target_before_request": target}
-        # Final forge read before durable intent publication and the merge call.
-        # A detected move creates no unresolved request; verification can rerun.
+        # Avoid publishing an intent for a move already visible in preflight.
         if observed_target(cmd["target"], binding["target"]) != target:
             raise Refusal("target moved during preflight; rerun against the current target. "
                           + verification_hint(args))
         durable_write(intent_path, intent)
+        observed = None
+        try:
+            # This is the final external observation before transmission. In
+            # particular, no intent fsync belongs between this read and merge.
+            observed = observed_target(cmd["target"], binding["target"])
+            if observed != target:
+                raise Refusal("target moved after intent publication")
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            # Command diagnostics may span lines; only this display reason is
+            # flattened. The observed ref comparison above always uses raw IDs.
+            reason = " ".join(str(exc).splitlines()) or type(exc).__name__
+            cancel_before_request(intent_path, intent, observed, reason)
+            raise Refusal("cancelled before merge request: " + reason + ". "
+                          + verification_hint(args))
         run(cmd["merge"])
         pr = json.loads(run(cmd["view"]).stdout)
         check_pr(pr, binding)
