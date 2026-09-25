@@ -389,6 +389,83 @@ class TestFixtureProcessGuard(unittest.TestCase):
         self.assertEqual(survivors, {})
 
 
+class TestFixtureQuiescence(unittest.TestCase):
+    _scope = TestFixtureProcessGuard._scope
+    _launch = TestFixtureProcessGuard._launch
+
+    def _delayed_descendant(self, scope, new_group=False):
+        release, effect = scope.root / 'release', scope.root / 'effect'
+        proc = self._launch(scope,
+            'import os, time\nfrom pathlib import Path\n'
+            'if os.fork(): os._exit(23)\n' +
+            ('os.setpgid(0, 0)\n' if new_group else '') +
+            'while not Path(%r).exists(): time.sleep(0.01)\n'
+            'time.sleep(0.15)\n'
+            'Path(%r).write_text("finished")\n'
+            'os.write(1, b"late stdout\\n")\n'
+            'os.write(2, b"late stderr\\n")\n' % (str(release), str(effect)))
+        return proc, release, effect
+
+    def test_join_precedes_descendant_effect_but_quiescence_observes_it(self):
+        for new_group in (False, True):
+            with self.subTest(new_group=new_group):
+                scope = self._scope()
+                proc, release, effect = self._delayed_descendant(scope, new_group)
+                joined = proc.join(10)
+                self.assertEqual(joined.state, JoinState.EXITED, joined)
+                self.assertEqual(joined.returncode, 23)
+                self.assertFalse(effect.exists(), 'join alone must not release the barrier')
+                self.assertEqual(joined.stdout, '')
+                release.touch()
+                with mock.patch.object(fixtures.os, 'kill', side_effect=AssertionError('wait signalled')), mock.patch.object(
+                        fixtures.os, 'killpg', side_effect=AssertionError('wait signalled')):
+                    quiet = proc.wait_quiescent(10)
+                self.assertEqual(quiet.state, fixtures.QuiescenceState.QUIESCENT, quiet)
+                self.assertEqual(effect.read_text(), 'finished')
+                self.assertEqual(quiet.stdout, 'late stdout\n')
+                self.assertEqual(quiet.stderr, 'late stderr\n')
+                self.assertIs(proc.join(0), joined, 'quiescence must not rewrite child status')
+                self.assertIsNone(proc._cleaned, 'waiting must not perform cleanup')
+                self.assertFalse(proc._reaped, 'retain the session anchor for cleanup')
+
+    def test_timeout_is_not_success_and_can_be_retried_without_signalling(self):
+        scope = self._scope()
+        proc, release, effect = self._delayed_descendant(scope)
+        self.assertEqual(proc.join(10).state, JoinState.EXITED)
+        with mock.patch.object(fixtures.os, 'kill', side_effect=AssertionError('wait signalled')), mock.patch.object(
+                fixtures.os, 'killpg', side_effect=AssertionError('wait signalled')):
+            quiet = proc.wait_quiescent(0.05)
+            self.assertEqual(quiet.state, fixtures.QuiescenceState.TIMED_OUT, quiet)
+            self.assertFalse(effect.exists())
+            release.touch()
+            self.assertEqual(proc.wait_quiescent(10).state, fixtures.QuiescenceState.QUIESCENT)
+        self.assertEqual(effect.read_text(), 'finished')
+
+    def test_project_trap_waits_for_delayed_descendant_cleanup(self):
+        import test_project as project
+        original_read = Path.read_text
+        injected = []
+
+        def delayed_trap(path, *args, **kwargs):
+            text = original_read(path, *args, **kwargs)
+            if path == project.ROOT / 'README.md':
+                anchor = '  trap - EXIT HUP INT TERM\n'
+                self.assertEqual(text.count(anchor), 1)
+                injected.append(1)
+                # Delay after saving $? and disabling traps: every documented
+                # cleanup operation and return status remains unchanged.
+                return text.replace(anchor, anchor + '  sleep 0.3\n')
+            return text
+
+        case = project.TestVendoredAgentBusLayoutIsExplicit(
+            'test_the_documented_trap_cleans_failure_and_interruption')
+        result = unittest.TestResult()
+        with mock.patch.object(Path, 'read_text', delayed_trap):
+            case.run(result)
+        self.assertEqual(injected, [1])
+        self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
+
+
 class TestTypedFixtureContract(unittest.TestCase):
     _scope = TestFixtureProcessGuard._scope
     _launch = TestFixtureProcessGuard._launch
