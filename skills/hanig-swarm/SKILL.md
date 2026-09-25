@@ -142,6 +142,32 @@ suppresses the flag. `mode` is provider-specific and has no portable default:
 codex accepts `auto`, `auto-review`, or `full-access`; claude accepts `bypass`
 or `default`. Dispatch refuses a mode the selected provider does not support.
 
+## Seed a fresh code repair attempt
+
+A code unit may declare `seed` as a JSON object with `ref`, `base`, `head`,
+and optional `evidence`. The ref must be a valid `refs/heads/...` branch in
+the unit repository's origin push destination; both commits must be full
+40- or 64-hex object IDs. Values are validated and recorded without trimming,
+case-folding, or rewriting them. Evidence is a non-empty path string; relative
+paths are interpreted from the source repository directory.
+
+Before creating an agent, dispatch fetches the exact ref into temporary Git
+metadata and requires `base` to be an ancestor of `head`, and `head` to be
+reachable from that fetched ref. It records the exact seed object in the
+attempt's coordinator launch intent. An interrupted submission rechecks
+reachability and refuses a seed different from its persisted intent; historical
+attempts are never backfilled from a later plan.
+
+The completion protocol tells the worker to fetch that source, cherry-pick
+`-x base..head`, skip empty commits with `git cherry-pick --skip`, and read
+the previous evidence when supplied. Never port by whole-file checkout. The
+coordinator does not replay commits or alter the worktree. Reachability does
+not guarantee conflict-free replay or certify previous evidence.
+
+This is provenance for a fresh attempt. Its launch base, judged produced head,
+scope comparison, review requirements, and merged-PR closure remain unchanged.
+Omitting `seed` leaves existing intent, prompt and plan digest bytes unchanged.
+
 ## Declare the runtime; prove it where the job lands
 
 Every `slurm` and `pipeline` unit declares a runtime. A base-image-only unit

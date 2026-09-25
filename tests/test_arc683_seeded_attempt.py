@@ -15,7 +15,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "hanig-swarm" / "scripts"))
 import swarm as S
-from tests.test_attempt_worktrees import FakePaseo, git, repo_at, paseo_resolvable
+from tests.test_attempt_worktrees import ENV, FakePaseo, git, repo_at, paseo_resolvable
 
 
 class SeedValidationTests(unittest.TestCase):
@@ -198,6 +198,90 @@ class SeedDispatchTests(unittest.TestCase):
         self.assertEqual(git(fresh, "status", "--porcelain"), "")
         self.assertNotIn("refs/hanig-swarm-seeds/", git(fresh, "show-ref"))
         self.assertIn("refs/heads/main", before)
+
+    def test_prompt_commands_replay_from_push_route_and_skip_empty_commits(self):
+        # The fetch URL deliberately cannot serve the seed. Admission and
+        # the actual commands delivered to a worker must use the push route.
+        git(self.repo, "remote", "set-url", "--push", "origin", str(self.remote))
+        git(self.repo, "remote", "set-url", "origin", str(self.tmp / "absent.git"))
+        empty_head = git(self.repo, "commit-tree", self.head + "^{tree}",
+                         "-p", self.head, "-m", "empty seed commit")
+        git(self.repo, "push", "-q", "origin", empty_head + ":refs/heads/previous")
+        self.seed["head"] = empty_head
+        self.seed["ref"] = "refs/heads/previous"
+        job, error = self.submit()
+        self.assertIsNone(error)
+        self.assertTrue(job)
+        argv = self.fake.launches[0]
+        workspace = argv[argv.index("--cwd") + 1]
+        carry = argv[-1].split("CARRY FORWARD", 1)[1]
+        commands = carry.split("```sh\n", 1)[1].split("\n```", 1)[0].splitlines()
+        fetched = subprocess.run(shlex.split(commands[0]), cwd=workspace,
+                                 env=ENV, capture_output=True, text=True)
+        self.assertEqual(fetched.returncode, 0, fetched.stderr)
+        picked = subprocess.run(shlex.split(commands[1]), cwd=workspace,
+                                env=ENV, capture_output=True, text=True)
+        self.assertNotEqual(picked.returncode, 0)
+        self.assertIn("empty", picked.stderr)
+        git(workspace, "cherry-pick", "--skip")
+        message = git(workspace, "log", "-1", "--format=%B")
+        self.assertIn("cherry picked from commit " + self.head, message)
+        self.assertEqual(git(workspace, "status", "--porcelain"), "")
+        self.assertEqual((Path(workspace) / "repair.txt").read_text(), "carried forward\n")
+
+    def test_seed_does_not_replace_produced_head_or_exempt_seeded_scope(self):
+        self.unit["scope"] = ["tracked.txt"]
+        job, error = self.submit()
+        self.assertIsNone(error)
+        self.assertTrue(job)
+        us = self.state["units"]["repair"]
+        facts = us["attempt_launch_facts"][self.attempt.name]
+        workspace = facts["execution_workspace"]
+        git(workspace, "cherry-pick", "-x", self.base + ".." + self.head)
+        produced = git(workspace, "rev-parse", "HEAD")
+        self.assertNotEqual(produced, self.head)
+        git(workspace, "push", "-q", "origin", "HEAD:" + facts["judgment_ref"])
+        ok, head, why = S.W.judge_detail(S.U.run, str(self.attempt), self.unit, facts)
+        self.assertTrue(ok, why)
+        self.assertEqual(head, produced)
+        us["attempt_dir"] = str(self.attempt)
+        us["attempt_produced_heads"] = {self.attempt.name: head}
+        S.save_state(self.state_dir, self.state)
+        plan_path = self.tmp / "plan.json"
+        plan_path.write_text(json.dumps({"units": [self.unit]}))
+        result = subprocess.run([sys.executable, str(S._HERE / "swarm.py"),
+                                 "scope-check", str(plan_path), "--state-dir",
+                                 self.state_dir, "--unit", "repair", "--json"],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, S.EXIT_SCOPE_OUTSIDE, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["base"], self.base)
+        self.assertEqual(report["head"], produced)
+        self.assertEqual(report["out_of_scope"], ["repair.txt"])
+
+    def test_raw_unicode_ref_and_uppercase_ids_are_recorded_without_normalizing(self):
+        ref = "refs/heads/repair/\u00a0prior"
+        git(self.repo, "push", "-q", "origin", self.head + ":" + ref)
+        self.unit["seed"] = dict(self.seed, ref=ref, base=self.base.upper(),
+                                 head=self.head.upper())
+        job, error = self.submit()
+        self.assertIsNone(error)
+        self.assertTrue(job)
+        intent = self.state["units"]["repair"]["attempt_launch_intents"][self.attempt.name]
+        self.assertEqual(intent["seed"], self.unit["seed"])
+
+    def test_redispatch_of_recorded_seed_succeeds_without_recapturing_it(self):
+        error, anchor = S._capture_code_launch(str(self.attempt), self.unit)
+        self.assertIsNone(error)
+        original = copy.deepcopy(anchor["intent"])
+        self.state = {"units": {"repair": {"attempt_launch_intents": {
+            self.attempt.name: anchor["intent"]}}}}
+        S.save_state(self.state_dir, self.state)
+        job, error = self.submit()
+        self.assertIsNone(error)
+        self.assertTrue(job)
+        self.assertEqual(S.load_state(self.state_dir)["units"]["repair"][
+            "attempt_launch_intents"][self.attempt.name], original)
 
     def test_redispatch_rechecks_remote_and_preserves_intent_bytes(self):
         error, anchor = S._capture_code_launch(str(self.attempt), self.unit)

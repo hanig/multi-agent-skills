@@ -153,6 +153,36 @@ class PlanError(Exception):
 
 
 # --- plan validation ------------------------------------------------------
+def declared_seed(u):
+    """Validate optional code provenance without rewriting any deciding byte."""
+    if "seed" not in u:
+        return None
+    seed = u["seed"]
+    prefix = f"unit {u.get('id', '?')!r}: seed"
+    if not isinstance(seed, dict):
+        raise PlanError(prefix + " must be a JSON object")
+    if u.get("kind") != "code":
+        raise PlanError(prefix + " is supported only for kind=code")
+    if set(seed) - {"ref", "base", "head", "evidence"}:
+        raise PlanError(prefix + " has unknown fields; use ref, base, head, evidence")
+    ref = seed.get("ref")
+    if not isinstance(ref, str) or not ref.startswith("refs/heads/"):
+        raise PlanError(prefix + ".ref must be a full refs/heads/... branch ref")
+    rc, _, _ = U.run(["git", "check-ref-format", ref])
+    if rc != 0:
+        raise PlanError(prefix + ".ref is not a valid refs/heads/... branch ref")
+    for field in ("base", "head"):
+        value = seed.get(field)
+        if (not isinstance(value, str)
+                or re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", value) is None):
+            raise PlanError(prefix + "." + field + " must be a full 40/64-hex commit id")
+    if "evidence" in seed:
+        value = seed["evidence"]
+        if not isinstance(value, str) or not value or "\0" in value:
+            raise PlanError(prefix + ".evidence must be a non-empty path string without NUL")
+    return seed
+
+
 def declared_scope(u):
     """Return optional fnmatch patterns without normalizing deciding bytes."""
     if "scope" not in u:
@@ -960,6 +990,35 @@ def _validate_runtimes(plan, units):
     # one cannot see.
 
 
+def _seed_carry_forward(intent):
+    """Render recorded provenance as instructions, never as closure evidence."""
+    if "seed" not in intent:
+        return ""
+    seed = intent["seed"]
+    remote = intent["repository_remote"]
+    # Exactly-once routing, as in _git_push_destination: origin may fetch
+    # from somewhere other than its push destination. Quote every shell arg.
+    alias = "hanig-swarm-seed-" + hashlib.sha256(remote.encode()).hexdigest() + ":"
+    route = shlex.quote(f"url.{remote}.insteadOf={alias}")
+    fetch = (f"git -c {route} fetch --no-tags --recurse-submodules=no "
+             f"{shlex.quote(alias)} {shlex.quote(seed['ref'])}")
+    evidence = ""
+    if "evidence" in seed:
+        evidence = (f"\nRead the previous evidence file {seed['evidence']!r} before "
+                    f"editing; relative paths are relative to the source repository "
+                    f"{intent['repo']!r}, not the new worktree. Treat it as prior "
+                    "context, not a review pass or completion evidence.")
+    return f"""\n\nCARRY FORWARD (recorded seed; provenance only)
+Stay on the new attempt branch and its recorded launch base. Fetch the seed ref {seed['ref']!r} from the recorded origin push destination:
+```sh
+{fetch}
+git cherry-pick -x {seed['base']}..{seed['head']}
+```
+Skip empty commits: when cherry-pick stops because a commit is empty or already applied, confirm that it is empty and run `git cherry-pick --skip`, repeating as needed. Resolve real conflicts explicitly; never skip a non-empty conflicting change just to finish. Never port by whole-file checkout.
+If fetching or replay cannot be completed, STOP AND REPORT; do not substitute another ref or range.{evidence}
+The coordinator checked reachability at launch, not whether replay will be conflict-free. It does not cherry-pick or alter the worktree for you. Seed history does not change judging, scope-check, review, or merged-PR closure; the produced head is judged against this fresh attempt's recorded base."""
+
+
 def _code_completion_protocol(intent):
     """Instructions that make a code attempt capable of closing its unit.
 
@@ -1077,7 +1136,7 @@ fi
 NEVER run `git stash`, in any form. The stash stack is a SINGLE ref in the shared common Git directory, so every worktree of {repo!r} shares one stack and a pop takes whatever another agent parked. Do these instead: to read a file as it was at base, `git show {base}:<path>`; to set work aside, `git diff > /tmp/wip.patch` then `git checkout -- <path>`; and to answer "was this test already failing", add a separate worktree at {base} and run it there, rather than moving anything in this one. Note what such a comparison does and does not show: green at {base} and green here is a claim about your change alone, not about {target!r} after a merge.
 Before every commit, run `git status --porcelain` and read it. Stage only paths you changed yourself; if it lists a path you did not touch, STOP AND REPORT instead of committing it. The observed failure is a commit that carried another agent's files.
 If you cannot finish cleanly, STOP AND REPORT the problem instead of working around it.
-Leave the worktree clean. Do not force-push or rewrite history. The final commit must descend from recorded base {base}; rewritten history makes honest work unjudgeable."""
+Leave the worktree clean. Do not force-push or rewrite history. The final commit must descend from recorded base {base}; rewritten history makes honest work unjudgeable.{_seed_carry_forward(intent)}"""
 
 
 def _dispatch_prompt(u, intent=None):
@@ -1302,6 +1361,7 @@ def validate_plan(plan, survey=None):
     for u in units:
         if not isinstance(u, dict):
             continue
+        declared_seed(u)
         declared_scope(u)
         if "tracker" in u and not _nonblank_text(u["tracker"]):
             raise PlanError(
@@ -1940,8 +2000,11 @@ def validate_plan(plan, survey=None):
     for u in units:
         if not isinstance(u, dict) or u.get("kind") != "code":
             continue
-        assembled = _dispatch_prompt(u, validation_intent)
-        problem = _code_protocol_problem(assembled, validation_intent)
+        unit_intent = dict(validation_intent)
+        if "seed" in u:
+            unit_intent["seed"] = u["seed"]
+        assembled = _dispatch_prompt(u, unit_intent)
+        problem = _code_protocol_problem(assembled, unit_intent)
         if problem:
             raise PlanError(
                 f"unit {u.get('id','?')!r} is kind=code but the coordinator "
@@ -2931,6 +2994,20 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
         if existing_intent:
             anchor_err = _code_launch_intent_problem(
                 existing_intent, u, attempt)
+            # Never manufacture provenance for a historical attempt from a
+            # changed plan. A repair is a fresh attempt, including after a
+            # crash before agent creation. This is admission only, not judging.
+            if not anchor_err and (("seed" in u) != ("seed" in existing_intent)
+                                   or u.get("seed") != existing_intent.get("seed")):
+                anchor_err = (f"unit {u['id']!r}: seed differs from recorded "
+                              "launch intent; allocate a fresh attempt")
+            if not anchor_err:
+                try:
+                    seed = declared_seed(u)
+                except PlanError as exc:
+                    anchor_err = str(exc)
+                else:
+                    anchor_err = _seed_reachability_problem(seed, existing_intent)
             # This path may create an agent after an interrupted submission.
             # Recheck admission, but never migrate an existing intent or ask
             # this question while judging an already-launched attempt.
@@ -4178,6 +4255,50 @@ def _warn_installed_skill_drift(snapshot, base, uid):
             pass
 
 
+def _seed_reachability_problem(seed, source):
+    """Fetch an exact seed ref and check base <= head <= fetched tip.
+
+    The private temporary ref avoids stale tracking refs and shared FETCH_HEAD
+    as a deciding value. Fetch writes Git metadata only; no index, worktree or
+    attempt branch is changed. Reachability is a point-in-time admission fact,
+    not proof that a worker replayed the seed or that replay has no conflicts.
+    """
+    if seed is None:
+        return None
+    repo = source["repo"]
+    raw = source["repository_remote_raw"]
+    remote = source["repository_remote"]
+    cache_ref = "refs/hanig-swarm-seeds/" + os.urandom(16).hex()
+    problem = None
+    try:
+        rc, _, err = _git_push_destination(
+            repo, raw, remote, 4, "fetch", "--no-tags", "--force",
+            "--recurse-submodules=no", raw, seed["ref"] + ":" + cache_ref,
+            timeout=120)
+        if rc != 0:
+            problem = f"seed.ref {seed['ref']!r} cannot be fetched: {err[:200]}"
+        else:
+            for field in ("base", "head"):
+                rc, kind, _ = _git(repo, "cat-file", "-t", seed[field])
+                if rc != 0 or kind != "commit":
+                    problem = f"seed.{field} {seed[field]!r} is not an available commit"
+                    break
+            if not problem:
+                for ancestor, descendant in ((seed["base"], seed["head"]),
+                                             (seed["head"], cache_ref)):
+                    rc, _, _ = _git(repo, "merge-base", "--is-ancestor",
+                                    ancestor, descendant)
+                    if rc != 0:
+                        problem = (f"seed range {seed['base']}..{seed['head']} "
+                                   f"is not reachable in order from seed.ref {seed['ref']!r}")
+                        break
+    finally:
+        cleanup_rc, _, _ = _git(repo, "update-ref", "-d", cache_ref)
+    if cleanup_rc != 0:
+        return f"seed preflight could not remove temporary Git ref {cache_ref!r}"
+    return problem
+
+
 def _capture_code_launch(unit_dir, u, dispatch_source=None):
     """Record immutable input to coordinator worktree creation.
 
@@ -4189,6 +4310,10 @@ def _capture_code_launch(unit_dir, u, dispatch_source=None):
 
     The stash stack is the exception, and `_stash_refusal` says why.
     """
+    try:
+        seed = declared_seed(u)
+    except PlanError as exc:
+        return str(exc), None
     repo, err = _plan_workspace(u)
     if err:
         return err, None
@@ -4224,6 +4349,9 @@ def _capture_code_launch(unit_dir, u, dispatch_source=None):
     if source.get("repo") != repo or source.get("target_branch") != target:
         return _dispatch_base_refusal(
             u.get("id"), repo, "cached dispatch source names another target"), None
+    seed_problem = _seed_reachability_problem(seed, source)
+    if seed_problem:
+        return seed_problem, None
     head, tree = source["base_commit"], source["base_tree"]
     remote_raw = source["repository_remote_raw"]
     remote = source["repository_remote"]
@@ -4288,6 +4416,8 @@ def _capture_code_launch(unit_dir, u, dispatch_source=None):
         "provider": u.get("provider") or DEFAULT_AGENT_PROVIDER,
         "model": u.get("model"),
     }
+    if seed is not None:
+        intent["seed"] = dict(seed)
     return None, {"base": head, "intent": intent}
 
 
@@ -9175,6 +9305,14 @@ SCHEMA_FIELDS = [
     ("target_branch", "code", "required",
      "the destination of the attempt's pull request. The coordinator creates "
      "a separate swarm-<attempt> source branch; legacy branch is not reused"),
+    ("seed", "code", "optional",
+     "JSON object: ref (refs/heads/...), base and head (full 40/64-hex commit "
+     "ids), optional evidence path. Dispatch requires base <= head <= the "
+     "fetched origin push-destination ref. Raw provenance is recorded in "
+     "coordinator launch intent; the worker fetches and cherry-picks -x, "
+     "skipping empty commits. No whole-file checkout. The coordinator does "
+     "not replay commits; judging, closure and scope-check are unchanged. "
+     "Relative evidence paths use the source repository directory"),
     ("mode", "code", "required",
      "no default on purpose. Absent or empty means default permissions, so "
      "the agent stalls at its first write"),
