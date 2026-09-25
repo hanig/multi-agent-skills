@@ -419,7 +419,7 @@ class TestTheAgentCannotReachTheBaseline(Base):
         # the long path and must not be pushed past the filesystem path limit.
         while len(os.fsencode(str(interpreter))) < 600:
             interpreter /= "python-environment-" + "x" * 80
-        interpreter.mkdir(parents=True)
+        interpreter.mkdir(parents=True, exist_ok=True)
         interpreter /= "python3"
         interpreter.symlink_to(sys.executable)
         with mock.patch.object(sys, "executable", str(interpreter)):
