@@ -13,6 +13,80 @@ import signal
 import subprocess
 import sys
 import time
+from unittest import mock
+
+
+class _SupervisedFixture:
+    """Child-facing handle; only FixtureProcesses may reap the supervisor."""
+    def __init__(self, supervisor, args, report_fd, control_fd):
+        self.supervisor = supervisor
+        self.args = args
+        self.report_fd = report_fd
+        self.control_fd = control_fd
+        self.buffer = b''
+        self.returncode = None
+        started = self._read(60)
+        if 'error' in started:
+            raise OSError(*started['error'])
+        self.pid = started['pid']
+
+    def __getattr__(self, name):
+        if name in ('stdin', 'stdout', 'stderr'):
+            return getattr(self.supervisor, name)
+        raise AttributeError(name)
+
+    def _read(self, timeout):
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while b'\n' not in self.buffer:
+            left = None if deadline is None else max(0, deadline - time.monotonic())
+            ready, _, _ = select.select([self.report_fd], [], [], left)
+            if not ready:
+                raise subprocess.TimeoutExpired(self.args, timeout)
+            chunk = os.read(self.report_fd, 4096)
+            if not chunk:
+                raise AssertionError('fixture supervisor lost child status')
+            self.buffer += chunk
+        line, self.buffer = self.buffer.split(b'\n', 1)
+        return json.loads(line)
+
+    def wait(self, timeout=None):
+        if self.returncode is None:
+            self.returncode = self._read(timeout)['returncode']
+        return self.returncode
+
+    def poll(self):
+        try:
+            return self.wait(timeout=0)
+        except subprocess.TimeoutExpired:
+            return None
+
+    def communicate(self, input=None, timeout=None):
+        # Reuse Popen's pipe buffering/timeout behavior, but wait for the
+        # reported child status rather than reaping our still-live anchor.
+        with mock.patch.object(self.supervisor, 'wait', self.wait), mock.patch.object(
+                self.supervisor, 'poll', self.poll):
+            return self.supervisor.communicate(input=input, timeout=timeout)
+
+    def send_signal(self, signum):
+        if self.poll() is None:
+            # The sole reaper sends the signal using the native child handle.
+            # Sending to a child PID here would race its supervisor's wait.
+            os.write(self.control_fd, ('%d\n' % signum).encode('ascii'))
+
+    def terminate(self):
+        self.send_signal(signal.SIGTERM)
+
+    def kill(self):
+        self.send_signal(signal.SIGKILL)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, value, traceback):
+        for stream in (self.stdin, self.stdout, self.stderr):
+            if stream is not None:
+                stream.close()
+        self.wait()
 
 
 def process_table():
@@ -43,6 +117,7 @@ class FixtureProcesses:
         self.root = Path(root)
         self.kill_group = kill_group
         self.children = []
+        self._channels = []
         self.pidfiles = [self.root / 'fixture-groups.pid']
         self._sleep_wrapper = None
         # LIFO: kill/reap first, inspect second. The caller registers directory
@@ -83,17 +158,73 @@ class FixtureProcesses:
         self.pidfiles.append(Path(path))
 
     def popen(self, args, **kwargs):
-        """Capture a fixture in a private session, even without a caller flag.
+        """Capture every fixture tree in a recorded private session.
 
-        Use run_python for product calls whose own children must inherit their
-        parent's session: its retained supervisor owns the enclosing session.
+        A non-session child inherits a retained supervisor's private session.
+        Waiting for that child never releases the enclosing group anchor.
+        Explicit session leaders retain the native Popen interface and need
+        root-bearing descendants if callers reap them before cleanup.
         """
+        if not kwargs.get('start_new_session'):
+            return self._supervised_popen(args, kwargs)
+        return self._start_session(args, kwargs)
+
+    def _start_session(self, args, kwargs):
         kwargs['start_new_session'] = True
         proc = subprocess.Popen(args, **kwargs)
         self.children.append((proc, proc.pid))
         with self.pidfiles[0].open('a') as record:
             record.write('%s\n' % proc.pid)
         return proc
+
+    def _supervised_popen(self, args, kwargs):
+        if kwargs.get('preexec_fn') is not None or kwargs.get('close_fds') is False:
+            raise ValueError('use run_python for preexec_fn or close_fds=False fixtures')
+        child_options = {key: kwargs.pop(key) for key in
+                         ('shell', 'executable', 'restore_signals') if key in kwargs}
+        if child_options.get('executable') is not None:
+            child_options['executable'] = os.fsdecode(child_options['executable'])
+        child_options['args'] = (os.fsdecode(args) if isinstance(args, (str, bytes, os.PathLike))
+                                 else [os.fsdecode(arg) for arg in args])
+        child_options['pass_fds'] = list(kwargs.get('pass_fds', ()))
+        report_read, report_write = os.pipe()
+        control_read, control_write = os.pipe()
+        self._channels.extend((report_read, control_write))
+        try:
+            script = self.root / ('fixture-launch-%d.py' % len(self.children))
+            script.write_text(
+                'import json, os, select, subprocess, time\n'
+                'report, control = %d, %d\n'
+                'os.set_inheritable(report, False)\n'
+                'os.set_inheritable(control, False)\n'
+                'def send(value):\n'
+                '    os.write(report, (json.dumps(value) + "\\n").encode())\n'
+                'try:\n'
+                '    child = subprocess.Popen(**json.loads(%r))\n'
+                'except OSError as error:\n'
+                '    send({"error": [error.errno, error.strerror, error.filename]})\n'
+                'else:\n'
+                '    for fd in (0, 1, 2): os.close(fd)\n'
+                '    send({"pid": child.pid})\n'
+                '    pending = b""\n'
+                '    while child.poll() is None:\n'
+                '        ready, _, _ = select.select([control], [], [], 0.01)\n'
+                '        if ready:\n'
+                '            chunk = os.read(control, 4096)\n'
+                '            if not chunk: raise RuntimeError("fixture control lost")\n'
+                '            pending += chunk\n'
+                '            while b"\\n" in pending:\n'
+                '                line, pending = pending.split(b"\\n", 1)\n'
+                '                child.send_signal(int(line))\n'
+                '    send({"returncode": child.returncode})\n'
+                'while True: time.sleep(600)\n' % (
+                    report_write, control_read, json.dumps(child_options)))
+            kwargs['pass_fds'] = tuple(child_options['pass_fds']) + (report_write, control_read)
+            proc = self._start_session([sys.executable, '-I', str(script)], kwargs)
+        finally:
+            os.close(report_write)
+            os.close(control_read)
+        return _SupervisedFixture(proc, args, report_read, control_write)
 
     def run_python(self, source, timeout=60):
         """Return JSON-valued `result` while retaining the session supervisor.
@@ -121,7 +252,8 @@ class FixtureProcesses:
                 'while True: time.sleep(600)\n' % (
                     source, str(script), str(result_file), write_fd, write_fd))
             self.popen([sys.executable, str(script)],
-                       stdin=subprocess.DEVNULL, pass_fds=(write_fd,))
+                       stdin=subprocess.DEVNULL, pass_fds=(write_fd,),
+                       start_new_session=True)
             os.close(write_fd)
             write_fd = None
             ready, _, _ = select.select([read_fd], [], [], timeout)
@@ -197,6 +329,8 @@ class FixtureProcesses:
                         stream.close()
         if failure is not None:
             raise failure
+        while self._channels:
+            os.close(self._channels.pop())
 
     def cleanup(self):
         self._kill(*self._targets(process_table()))
