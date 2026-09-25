@@ -479,7 +479,7 @@ class TestFixtureQuiescence(unittest.TestCase):
             # Exercise check_output's real timeout, kill and reap path with
             # a slow helper in the caller's session, just like ps itself.
             helper = real_popen(
-                [sys.executable, '-c', 'import time; time.sleep(600)'],
+                [sys.executable, '-c', 'import time; time.sleep(1)'],
                 *args, **kwargs)
             helpers.append(helper)
             return helper
