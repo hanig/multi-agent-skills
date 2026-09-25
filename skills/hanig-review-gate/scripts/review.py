@@ -2279,7 +2279,7 @@ def main():
                     help="external decision (default overruled)")
     args = ap.parse_args()
     if args.adjudicate is not None or args.open_findings:
-        if (args.diff or args.staged or args.range or args.list or args.kind
+        if (args.diff or args.staged or args.range or args.file or args.list or args.kind
                 or args.plan or args.claim or args.escalate or args.only
                 or args.profile or args.dispositions or args.fresh_cycle_from
                 or args.allow_single_reviewer or args.context or args.threat_model):
