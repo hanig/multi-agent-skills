@@ -679,5 +679,254 @@ class TestTypedFixtureContract(unittest.TestCase):
             resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
 
 
+class TestSessionContainment(unittest.TestCase):
+    _scope = TestFixtureProcessGuard._scope
+    _launch = TestFixtureProcessGuard._launch
+
+    def _foreign(self, cwd=None):
+        proc = subprocess.Popen(
+            [sys.executable, '-c', 'import time; print("ready",flush=True); time.sleep(600)'],
+            cwd=cwd, start_new_session=True, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL)
+        def contain():
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
+            proc.stdout.close()
+        self.addCleanup(contain)
+        self.assertTrue(wait_readable(proc.stdout, 10))
+        self.assertEqual(proc.stdout.readline(), b'ready\n')
+        return proc
+
+    def test_unrelated_churn_deleted_cwd_and_denied_metadata_do_not_affect_clean(self):
+        scope = self._scope()
+        deleted = scope.root / 'unrelated-deleted-cwd'
+        deleted.mkdir()
+        foreign = self._foreign(cwd=deleted)
+        deleted.rmdir()  # A real same-uid neighbour retains a deleted cwd.
+        proc = self._launch(scope, 'import time; print("ready",flush=True); time.sleep(600)')
+        wait_for(lambda: proc.stdout_path.read_text() == 'ready\n')
+        stop, running = threading.Event(), threading.Event()
+        iterations, failures = [], []
+        def churn():
+            try:
+                while not stop.is_set():
+                    subprocess.run([sys.executable, '-c', 'pass'], check=True,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    iterations.append(1)
+                    if len(iterations) >= 2:
+                        running.set()
+            except BaseException as error:
+                failures.append(error)
+                running.set()
+        worker = threading.Thread(target=churn)
+        worker.start()
+        try:
+            self.assertTrue(running.wait(10))
+            # Runtime tripwires, including the old marker entry points: this
+            # test fails if a whole-population inspection is restored.
+            import ctypes
+            with mock.patch.object(fixtures, '_environment', create=True,
+                                   side_effect=PermissionError('unrelated environment denied')) as env, mock.patch.object(
+                    fixtures, '_cwd_marker', create=True,
+                    side_effect=FileNotFoundError('unrelated cwd deleted')) as cwd, mock.patch.object(
+                    ctypes, 'CDLL', side_effect=AssertionError('process metadata API invoked')) as metadata:
+                result = proc.cleanup()
+                self.assertEqual(result.state, CleanupState.CLEAN, result)
+                env.assert_not_called()
+                cwd.assert_not_called()
+                metadata.assert_not_called()
+            self.assertIsNone(foreign.poll())
+            self.assertGreaterEqual(len(iterations), 2)
+            self.assertEqual(failures, [])
+        finally:
+            stop.set()
+            worker.join(10)
+            self.assertFalse(worker.is_alive())
+
+    def test_only_scoped_rows_participate_in_snapshot_stability(self):
+        scope = self._scope()
+        proc = self._launch(scope, 'pass')
+        self.assertEqual(proc.join(10).returncode, 0)
+        original = fixtures._session_rows
+        serial = [1000000]
+        def unrelated_churn(sid, groups):
+            rows = original(sid, groups)
+            serial[0] += 1
+            rows[serial[0]] = fixtures._Identity(serial[0], serial[0])
+            return rows
+        with mock.patch.object(fixtures, '_session_rows', unrelated_churn):
+            result = proc.cleanup()
+        self.assertEqual(result.state, CleanupState.CLEAN, result)
+
+    def test_multigeneration_groups_require_term_then_kill_and_disappear(self):
+        scope = self._scope()
+        ready = scope.root / 'generations.pid'
+        proc = self._launch(scope,
+            'import os, signal, time\n'
+            'signal.signal(signal.SIGTERM, signal.SIG_IGN)\n'
+            'for depth in range(4):\n'
+            '    os.setpgid(0,0)\n'
+            '    with open(%r,"a") as f: f.write(str(os.getpid())+"\\n")\n'
+            '    if depth == 3 or os.fork():\n'
+            '        while True: time.sleep(600)\n' % str(ready))
+        wait_for(lambda: ready.exists() and len(ready.read_text().split()) == 4)
+        pids = [int(word) for word in ready.read_text().split()]
+        self.assertEqual(len({os.getpgid(pid) for pid in pids}), 4)
+        self.assertEqual({os.getsid(pid) for pid in pids}, {proc.supervisor_pid})
+        with mock.patch.object(fixtures.os, 'killpg', wraps=os.killpg) as signals:
+            result = proc.cleanup()
+        self.assertEqual(result.state, CleanupState.CLEAN, result)
+        delivered = {call.args[1] for call in signals.call_args_list}
+        self.assertIn(signal.SIGTERM, delivered)
+        self.assertIn(signal.SIGKILL, delivered)
+        self.assertEqual(fixtures._session_rows(proc.supervisor_pid, set()), {})
+        self.assertFalse(set(pids) & set(process_table()))
+        ledger = [json.loads(line) for line in scope.ledger_path.read_text().splitlines()]
+        self.assertTrue(all(row['sid'] == proc.supervisor_pid for row in ledger))
+        self.assertTrue(set(pids) <= {row['pgid'] for row in ledger})
+
+    def test_descendant_joining_the_retained_leader_group_is_contained(self):
+        scope = self._scope()
+        proc = self._launch(scope,
+            'import os, signal, time\n'
+            'os.setpgid(0,os.getsid(0))\n'
+            'signal.signal(signal.SIGTERM, signal.SIG_IGN)\n'
+            'print("ready",flush=True)\n'
+            'time.sleep(600)\n')
+        wait_for(lambda: proc.stdout_path.read_text() == 'ready\n')
+        self.assertEqual(os.getpgid(proc.child_pid), proc.supervisor_pid)
+        result = proc.cleanup()
+        self.assertEqual(result.state, CleanupState.CLEAN, result)
+        self.assertEqual(fixtures._session_rows(proc.supervisor_pid, set()), {})
+        self.assertEqual(proc.join(0).state, JoinState.STATUS_UNAVAILABLE)
+
+    def test_stale_ledger_group_in_another_session_is_never_signalled(self):
+        scope = self._scope()
+        proc = self._launch(scope, 'pass')
+        self.assertEqual(proc.join(10).returncode, 0)
+        foreign = self._foreign()
+        stale = (proc.supervisor_pid, foreign.pid)
+        # Model persisted stale state too, not just a fresh forward-path group.
+        proc._record(foreign.pid, fixtures._Identity(foreign.pid, proc.supervisor_pid))
+        self.assertIn(stale, proc._groups)
+        ledger = [json.loads(line) for line in scope.ledger_path.read_text().splitlines()]
+        self.assertIn({'sid': stale[0], 'pgid': stale[1]}, ledger)
+        with mock.patch.object(fixtures.os, 'killpg', wraps=os.killpg) as sent:
+            proc._signal_group(stale, signal.SIGKILL)
+            result = proc.cleanup()
+        self.assertEqual(result.state, CleanupState.CLEAN, result)
+        self.assertNotIn(foreign.pid, [call.args[0] for call in sent.call_args_list])
+        self.assertIsNone(foreign.poll())
+
+    def test_failed_cache_cannot_skip_emergency_containment_or_retry(self):
+        scope = self._scope()
+        proc = self._launch(scope, 'import time; print("ready",flush=True); time.sleep(600)')
+        wait_for(lambda: proc.stdout_path.read_text() == 'ready\n')
+        # Populate a prior failed verdict while the fixture really is alive.
+        # F08 skipped every future cleanup when this cache entry existed.
+        proc._cleaned = fixtures.CleanupResult(CleanupState.ERROR, 'prior failure')
+        with mock.patch.object(proc, '_survivor_scan', side_effect=OSError('scan failure')):
+            result = proc.cleanup()
+        self.assertEqual(result.state, CleanupState.ERROR)
+        self.assertIn('scan failure', result.detail)
+        wait_for(lambda: not fixtures._session_rows(proc.supervisor_pid, set()))
+        self.assertTrue(proc._reaped)
+        self.assertEqual(proc.cleanup().state, CleanupState.CLEAN)
+
+    def test_cwd_validation_precedes_all_launch_side_effects(self):
+        scope = self._scope()
+        root = scope.root / 'root'
+        root.mkdir()
+        case = unittest.TestCase()
+        scope = FixtureProcesses(case, root)
+        outside = root.with_name('root2')
+        outside.mkdir()
+        link = root / 'outside-link'
+        link.symlink_to(outside, target_is_directory=True)
+        non_directory = root / 'file'
+        non_directory.write_text('not a directory')
+        bad = (link, outside, root / '..' / 'root2', root / 'missing', non_directory)
+        before = sorted(root.iterdir())
+        for requested in bad:
+            with self.subTest(cwd=requested), mock.patch.object(fixtures, '_private_pipe') as pipe, mock.patch.object(
+                    fixtures.subprocess, 'Popen') as spawn, mock.patch.object(fixtures.os, 'setsid') as session:
+                with self.assertRaises((fixtures.FixtureRefused, FileNotFoundError)):
+                    scope.launch(FixtureSpec((sys.executable, '-c', 'pass'), directory=str(requested)))
+                pipe.assert_not_called()
+                spawn.assert_not_called()
+                session.assert_not_called()
+                self.assertEqual(scope.children, [])
+                self.assertFalse(scope.ledger_path.exists())
+                self.assertEqual(sorted(root.iterdir()), before)
+        canonical = root / 'inside'
+        canonical.mkdir()
+        alias = root / 'inside-link'
+        alias.symlink_to(canonical, target_is_directory=True)
+        proc = scope.launch(FixtureSpec(
+            (sys.executable, '-c', 'import os; print(os.getcwd())'), directory=str(alias)))
+        self.addCleanup(scope.cleanup)
+        status = proc.join(10)
+        self.assertEqual(status.state, JoinState.EXITED, status)
+        self.assertEqual(status.stdout.strip(), str(canonical.resolve()))
+        config = json.loads((root / 'fixture-launch-0.json').read_text())
+        self.assertEqual(config['directory'], str(canonical.resolve()))
+        self.assertEqual(proc.cleanup().state, CleanupState.CLEAN)
+
+    def test_exit_race_at_group_signal_rescans_and_unavailable_status_is_honest(self):
+        scope = self._scope()
+        proc = self._launch(scope, 'import time; print("ready",flush=True); time.sleep(600)')
+        wait_for(lambda: proc.stdout_path.read_text() == 'ready\n')
+        original = os.killpg
+        calls = []
+        def exit_at_signal(pgid, signum):
+            calls.append((pgid, signum))
+            original(pgid, signal.SIGKILL)
+            raise ProcessLookupError(errno.ESRCH, 'exited before signal')
+        with mock.patch.object(fixtures.os, 'killpg', exit_at_signal), mock.patch.object(
+                proc, '_snapshot', wraps=proc._snapshot) as scan:
+            proc._signal_group((proc.supervisor_pid, proc.child_pid), signal.SIGTERM)
+            scan.assert_called_once_with()
+        self.assertTrue(calls)
+        self.assertEqual(proc.cleanup().state, CleanupState.CLEAN)
+        scope = self._scope()
+        proc = self._launch(scope, 'import time; time.sleep(600)')
+        os.kill(proc.supervisor_pid, signal.SIGKILL)
+        os.waitpid(proc.supervisor_pid, 0)  # Status has been consumed elsewhere.
+        self.assertEqual(proc.join(10).state, JoinState.STATUS_UNAVAILABLE)
+        self.assertIsNone(proc.join(0).returncode)
+        result = proc.cleanup()
+        self.assertEqual(result.state, CleanupState.CLEAN, result)
+
+    def test_departing_census_rows_are_absent_and_permission_errors_are_errors(self):
+        scope = self._scope()
+        proc = self._launch(scope, 'pass')
+        self.assertEqual(proc.join(10).returncode, 0)
+        original_sid = os.getsid
+        def lookup(pid):
+            if pid == 1000000000:
+                raise ProcessLookupError(errno.ESRCH, 'exiting row')
+            return original_sid(pid)
+        output = '%d %d\n1000000000 1000000000\n' % (proc.supervisor_pid, proc.supervisor_pid)
+        with mock.patch.object(fixtures.subprocess, 'check_output', return_value=output), mock.patch.object(
+                fixtures.os, 'getsid', lookup):
+            rows = fixtures._session_rows(proc.supervisor_pid, set())
+        self.assertEqual(rows, {proc.supervisor_pid: proc._anchor})
+        with mock.patch.object(fixtures.os, 'kill', side_effect=PermissionError(errno.EPERM, 'signal denied')):
+            result = proc.cleanup()
+        self.assertEqual(result.state, CleanupState.ERROR, result)
+        self.assertIn('signal denied', result.detail)
+        self.assertEqual(proc.cleanup().state, CleanupState.CLEAN)
+
+    def test_malformed_scoped_census_is_not_absence(self):
+        scope = self._scope()
+        proc = self._launch(scope, 'pass')
+        self.assertEqual(proc.join(10).returncode, 0)
+        with mock.patch.object(fixtures.subprocess, 'check_output', return_value='invalid census\n'):
+            result = proc.cleanup()
+        self.assertEqual(result.state, CleanupState.INDETERMINATE, result)
+        self.assertEqual(proc.cleanup().state, CleanupState.CLEAN)
+
+
 if __name__ == '__main__':
     unittest.main()
