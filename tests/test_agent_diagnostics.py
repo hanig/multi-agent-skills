@@ -81,6 +81,33 @@ class TestAgentDiagnostics(unittest.TestCase):
             self.assertIn("workflow", agent)
         self.assertIn("selection", data)
 
+    def test_diagnostics_rechecks_report_claims_and_next_step(self):
+        discovery = D.agent_discovery
+        for version, current in (("2.1.261", False), ("2.1.282", True), ("2.1.283", False)):
+            for fields in ({}, {"verification_review_due": None},
+                           {"verification_review_due": "2099-12-31"}):
+                with self.subTest(version=version, fields=fields), \
+                        tempfile.TemporaryDirectory() as raw, \
+                        mock.patch.object(discovery, "date", wraps=date) as clock:
+                    clock.today.return_value = date(2026, 10, 6)
+                    env = self._env(Path(raw))
+                    report = discovery.discover(env,
+                        which=lambda name: "/fixtures/claude" if name == "claude" else None,
+                        probe=lambda path, timeout: (True, version))
+                    record = report["agents"]["claude"]
+                    record.pop("verification_review_due")
+                    record.update(verification="verified", **fields)
+                    with mock.patch.object(discovery, "discover", return_value=report):
+                        result = D.diagnostics(env=env)
+                    agent = result["agents"]["claude"]
+                    expected = "verified" if current else "unverified"
+                    self.assertEqual(agent["discovery"]["verification"], expected)
+                    self.assertEqual(result["selection"]["selected"][0]["certification"], expected)
+                    if current:
+                        self.assertIsNone(agent["next_step"])
+                    else:
+                        self.assertIn("this executable version is unverified", agent["next_step"])
+
     def test_custom_root_payload_ownership_version_and_duplicate_are_preserved(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -429,6 +456,40 @@ class TestDoctorAndSurveyAgentOutput(unittest.TestCase):
                                     if item["agent"] == "claude")
                     self.assertEqual(selected["certification"], expected)
                     self.assertFalse((directory / "home").exists())
+
+    def test_doctor_rechecks_forged_report_deadlines(self):
+        for version, expected in (("2.1.261", "unverified"), ("2.1.283", "unverified"),
+                                  ("2.1.282", "verified")):
+            for fields in ({}, {"verification_review_due": None},
+                           {"verification_review_due": "2099-12-31"}):
+                with self.subTest(version=version, fields=fields), \
+                        tempfile.TemporaryDirectory() as raw:
+                    directory = Path(raw)
+                    env = self._frozen_env(directory, version, date(2026, 10, 6))
+                    hook = directory / "clock-fixture" / "sitecustomize.py"
+                    with hook.open("a") as handle:
+                        handle.write(
+                            "original_discover = agent_discovery.discover\n"
+                            "def forged_discover(*args, **kwargs):\n"
+                            "    report = original_discover(*args, **kwargs)\n"
+                            "    record = report['agents']['claude']\n"
+                            "    record.pop('verification_review_due')\n"
+                            f"    record.update(verification='verified', **{fields!r})\n"
+                            "    return report\n"
+                            "agent_discovery.discover = forged_discover\n")
+                    result = subprocess.run([str(DOCTOR), "--json"], cwd=directory,
+                        env=env, text=True, capture_output=True, timeout=20)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    value = json.loads(result.stdout)
+                    agent = value["agents"]["claude"]
+                    self.assertEqual(agent["discovery"]["verification"], expected)
+                    selected = next(item for item in value["selection"]["selected"]
+                                    if item["agent"] == "claude")
+                    self.assertEqual(selected["certification"], expected)
+                    if expected == "unverified":
+                        self.assertIn("this executable version is unverified", agent["next_step"])
+                    else:
+                        self.assertIsNone(agent["next_step"])
 
     def test_saved_survey_does_not_certify_expired_evidence(self):
         for version, observed in (("2.1.261", date(2026, 10, 6)),

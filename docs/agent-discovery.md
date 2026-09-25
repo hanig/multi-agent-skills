@@ -30,8 +30,15 @@ is current, including its review deadline. On the following day it reports
 `verification: "unverified"` and `verification_freshness: "stale"`, retaining
 the date, deadline, and certification record as historical evidence. Doctor
 and survey consume this same status; doctor supplies the unverified next step.
-`select_targets()` also checks deadlines when consuming a previously generated
-report. Expiry never prevents destination planning.
+`select_targets()` checks the authoritative module record for the report's
+exact version when consuming a previously generated report. A missing, null,
+earlier, or later deadline in that report cannot change the decision: absent
+or expired module evidence yields `unverified`, with a not-certified or stale
+warning. The normalizer, both installer plan paths, and diagnostics apply the
+same assessment. Returned certification evidence is copied from the module,
+so editing a report cannot renew its record. These checks only downgrade
+reported claims; they never upgrade an unverified observation.
+Expiry never prevents destination planning.
 
 For recertification queries, `verification_review_due(adapter)` returns the
 earliest deadline among the newest records for each distinct version.

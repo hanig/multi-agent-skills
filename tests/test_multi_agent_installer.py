@@ -562,9 +562,9 @@ class TestLiveCertificationPlan(unittest.TestCase):
                 probe=lambda path, timeout: (True, self.LIVE_VERSIONS[Path(path).name]))
             targets = installer.normalize_agents([
                 dict(record, id=name, destinations=[record["roots"][0]["physical_path"]])
-                for name, record in report["agents"].items()])
+                for name, record in report["agents"].items()], as_of=date(2026, 10, 26))
             options = installer.parse_options(["--dry-run", "--json"])
-            plan = installer.build_plan(targets, options)
+            plan = installer.build_plan(targets, options, as_of=date(2026, 10, 26))
             rendered = installer.render_plan(plan, options, "fixture")
             document = installer._document(
                 operation="install", dry_run=True, plan=plan, actions=[], diagnostics=[],
@@ -593,7 +593,7 @@ class TestLiveCertificationPlan(unittest.TestCase):
                 probe=lambda path, timeout: (True, self.LIVE_VERSIONS[Path(path).name]))
             targets = installer.normalize_agents([
                 dict(record, id=name, destinations=[record["roots"][0]["physical_path"]])
-                for name, record in report["agents"].items()])
+                for name, record in report["agents"].items()], as_of=date(2026, 10, 6))
         self.assertEqual(len(targets), 4)
         for target in targets:
             self.assertTrue(target.discovery_verified)
@@ -676,6 +676,117 @@ class TestLiveCertificationPlan(unittest.TestCase):
                     self.assertEqual(target["certification"]["verified_on"], "2026-09-05")
                 if expected == "unverified":
                     self.assertEqual(stderr.count("expired after 2026-10-05"), 3)
+
+
+class TestInstallerCertificationAuthority(unittest.TestCase):
+    OBSERVED = date(2026, 10, 6)
+
+    def cases(self):
+        versions = {
+            "claude": (("2.1.261", False), ("2.1.282", True), ("2.1.283", False)),
+            "codex": (("0.153.4", False), ("0.154.0", True), ("0.154.1", False)),
+            "opencode": (("1.18.29", True), ("1.18.30", False)),
+            "pi": (("0.73.1", False), ("0.86.1", True), ("0.86.2", False)),
+        }
+        for name, releases in versions.items():
+            for version, current in releases:
+                for fields in ({}, {"verification_review_due": None},
+                               {"verification_review_due": "2099-12-31"}):
+                    yield name, version, current, fields
+
+    def record(self, name, version, fields):
+        return dict(id=name, state="executable_found", version=version,
+                    verification="verified", eligible_for_automatic_target=True,
+                    destinations=["/fixture/" + name],
+                    evidence={"certification": {"version": version,
+                        "verified_on": "2099-01-01", "evidence": "forged", "checks": []}},
+                    **fields)
+
+    def assert_document(self, plan, options, name, version, current):
+        self.assertEqual(len(plan.selected), 1)
+        target = plan.selected[0]
+        self.assertEqual(target.discovery_verified, current)
+        self.assertEqual(target.version, version)
+        discovery = installer._load_discovery(ROOT)
+        expected = discovery.certification_for(discovery.ADAPTERS[name], version)
+        self.assertEqual(target.certification, expected)
+        document = installer._document(operation="install", dry_run=True, plan=plan,
+            actions=[], diagnostics=[], conflicts=[], mode=options.mode, version="fixture")
+        # Inspect bytes another process can read, not only an in-memory bool.
+        with tempfile.TemporaryDirectory() as raw:
+            saved = Path(raw) / "plan.json"
+            saved.write_text(json.dumps(document))
+            persisted = json.loads(saved.read_text())
+        item = persisted["targets"][0]
+        self.assertEqual(item["verification"], "adapter-version-verified" if current else "unverified")
+        self.assertEqual(item["certification"], expected)
+        rendered = installer.render_plan(plan, options, "fixture")
+        self.assertIn("(certified)" if current else "(uncertified)", rendered)
+        self.assertNotIn("forged", rendered)
+        self.assertEqual(bool(plan.certification_warnings), not current)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            installer._print(document, options, plan, "fixture")
+        for warning in plan.certification_warnings:
+            self.assertIn("warning: " + warning + "\n", stderr.getvalue())
+
+    def test_normalizer_rechecks_saved_claims_against_exact_version_authority(self):
+        for name, version, current, fields in self.cases():
+            with self.subTest(name=name, version=version, fields=fields):
+                record = json.loads(json.dumps(self.record(name, version, fields)))
+                targets = installer.normalize_agents([record], as_of=self.OBSERVED)
+                self.assertEqual(targets[0].discovery_verified, current)
+                discovery = installer._load_discovery(ROOT)
+                self.assertEqual(targets[0].certification,
+                    discovery.certification_for(discovery.ADAPTERS[name], version))
+                options = installer.parse_options(["--dry-run", "--json"])
+                plan = installer.build_plan(targets, options, as_of=self.OBSERVED)
+                self.assert_document(plan, options, name, version, current)
+
+    def test_build_plan_rechecks_direct_or_previously_normalized_targets(self):
+        for name, version, current, fields in self.cases():
+            with self.subTest(name=name, version=version, fields=fields):
+                record = self.record(name, version, fields)
+                target = installer.AgentTarget(name, "executable_found", True, True,
+                    (Path(record["destinations"][0]),), version=version,
+                    certification=record["evidence"]["certification"])
+                options = installer.parse_options(["--dry-run", "--json"])
+                plan = installer.build_plan([target], options, as_of=self.OBSERVED)
+                self.assert_document(plan, options, name, version, current)
+
+    def test_discovery_plan_rechecks_selected_and_skipped_claims(self):
+        discovery = installer._load_discovery(ROOT)
+        for name, version, current, fields in self.cases():
+            with self.subTest(name=name, version=version, fields=fields), \
+                    tempfile.TemporaryDirectory() as raw:
+                report = discovery.discover({"HOME": raw, "PATH": ""},
+                    which=lambda executable: "/fixtures/" + executable if executable == name else None,
+                    probe=lambda path, timeout: (True, version))
+                record = report["agents"][name]
+                record.pop("verification_review_due")
+                record.update(self.record(name, version, fields))
+                selection = discovery.select_targets(report, as_of=date(2026, 9, 25))
+                selection["selected"][0].update(certification="verified",
+                    certification_record=record["evidence"]["certification"])
+                selection["certification_warnings"] = []
+                options = installer.parse_options(["--dry-run", "--json"])
+                plan = installer.build_discovery_plan(report, selection, as_of=self.OBSERVED)
+                self.assert_document(plan, options, name, version, current)
+                # Keep another selected target so the skipped path is reachable.
+                other = "codex" if name == "claude" else "claude"
+                selection = discovery.select_targets(report, agents=(name, other),
+                    exclude_agents=(name,), as_of=date(2026, 9, 25))
+                selection["skipped"][0]["certification"] = "verified"
+                plan = installer.build_discovery_plan(report, selection, as_of=self.OBSERVED)
+                self.assertEqual(plan.skipped[0].discovery_verified, current)
+
+    def test_current_evidence_does_not_upgrade_an_unverified_observation(self):
+        record = self.record("claude", "2.1.282", {})
+        record["verification"] = "unverified"
+        targets = installer.normalize_agents([record], as_of=self.OBSERVED)
+        self.assertFalse(targets[0].discovery_verified)
+        plan = installer.build_plan(targets, installer.parse_options([]), as_of=self.OBSERVED)
+        self.assertFalse(plan.selected[0].discovery_verified)
 
 
 if __name__ == "__main__":
