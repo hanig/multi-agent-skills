@@ -29,6 +29,19 @@ python3 skills/hanig-review-gate/scripts/review.py --kind implementation --stage
 python3 tests/native_agent_validation.py         # release-time host harness, not a unit test
 ```
 
+`python3 -m unittest tests.test_review` and discovery that includes
+`test_review.py` run the whole review module through the supervised worker.
+The parent reports one delegated test and prints the audited worker's test
+count and skips; full discovery launches the module once. `-k` filters do
+not narrow this delegated module: the command announces that it runs the
+whole module, so module loading cannot silently report zero tests.
+Fully qualified class or method names (for example,
+`python3 -m unittest tests.test_review.TestVerdictSchema.test_empty_object_is_not_a_review`)
+bypass the module hook and run in-process under the existing per-test
+fixtures, without the worker's session and journal-manifest audit.
+A named class whose filter matches no methods fails with a delegation
+diagnostic instead of reporting success with zero tests.
+
 Automatic install selection uses executable presence and reports adapter certification separately: an installed but uncertified version is planned and visibly `unverified`, never claimed supported. Selection itself produces certification warnings, and the installer emits them to stderr even with `--json`; stale dated evidence downgrades an exact version to unverified without blocking routine destination planning. Explicit `--agent` remains the offline/bootstrap route. Copy is the default deliberately; `--mode link` is for developing a skill.
 
 Measured on this host on 2026-09-24 UTC: `./install.sh --dry-run --json` with no selector exited 2 before the ARC-708 restoration and 0 afterwards. The restored plan selected claude 2.1.281, codex 0.154.0, opencode 1.18.29 and pi 0.86.1; only opencode matched current adapter certification, and the other three emitted warnings. The dry run reported no destination conflicts. Recheck the plan before a real install: `--allow-vendored-shadow` addresses a reported vendored-destination conflict, while `--allow-org-shadow` addresses the separate organization-store shadow case. Neither flag was needed for this measured dry run; no real install was performed.

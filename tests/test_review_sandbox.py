@@ -1,4 +1,5 @@
 """Exercise the process sandbox through its real worker and parent audit."""
+import ast
 import contextlib
 import json
 import os
@@ -17,22 +18,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from tests import review_sandbox_worker as sandbox
-
-
-class TestReviewSandbox(unittest.TestCase):
-    def test_review_module_runs_once_in_supervised_worker(self):
-        report = sandbox.review_report()
-        self.assertIs(report, sandbox.review_report())
-        self.assertTrue(report["collected"])
-        skips = report["skipped"]
-        print("\nDelegated test_review: %d tests, %.3fs, %d skips" % (
-            len(report["collected"]), report["elapsed_seconds"], len(skips)))
-        for outcome in skips:
-            print("  SKIP %s: %s" % (outcome["id"], outcome["reason"]))
-        # Optional validation artifact, written by the parent only after audit.
-        destination = os.environ.get("HANIG_REVIEW_SANDBOX_REPORT")
-        if destination:
-            Path(destination).write_text(json.dumps(report, indent=2))
 
 
 class TestSandboxRegressions(unittest.TestCase):
@@ -317,8 +302,11 @@ class Skipped(unittest.TestCase):
         env = dict(os.environ)
         env.pop(sandbox.WORKER_MARKER, None)
         code = """import unittest
+from tests import review_sandbox_worker as sandbox
 suite = unittest.TestLoader().discover('tests', pattern='test_review.py')
-assert suite.countTestCases() == 0, suite.countTestCases()
+cases = list(sandbox.walk_suite(suite))
+assert len(cases) == 1, cases
+assert isinstance(cases[0], sandbox.DelegatedReviewTests), cases
 """
         result = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env,
                                 capture_output=True, text=True, timeout=30)
@@ -544,8 +532,15 @@ for count in itertools.count():
     def discovery_probe(self):
         # Exercise TestSuite.run, not just its count: a bare-marker mutation
         # dispatches real test_review TestCases to this spy in the parent.
-        return """import json, unittest
+        return """import contextlib, io, json, os, unittest
+from unittest.mock import patch
+from tests import review_sandbox_worker as sandbox
+os.environ.pop('HANIG_REVIEW_SANDBOX_REPORT', None)
 ran = []
+supervised = []
+def certify(*args):
+    supervised.append(True)
+    return {'collected': ['probe'], 'skipped': [], 'elapsed_seconds': 0}
 original = unittest.TestCase.run
 def traced(case, result=None):
     if type(case).__module__ == 'test_review':
@@ -558,8 +553,11 @@ def traced(case, result=None):
 unittest.TestCase.run = traced
 suite = unittest.TestLoader().discover('tests', pattern='test_review.py')
 result = unittest.TestResult()
-suite.run(result)
-print(json.dumps({'ran': ran, 'count': result.testsRun, 'errors': result.errors}))
+with patch.object(sandbox, 'run_sandbox', side_effect=certify):
+    with contextlib.redirect_stdout(io.StringIO()):
+        suite.run(result)
+print(json.dumps({'ran': ran, 'count': result.testsRun, 'errors': result.errors,
+                  'supervised': supervised}))
 """
 
     def test_inherited_or_stale_marker_never_runs_review_tests_in_parent(self):
@@ -573,15 +571,17 @@ print(json.dumps({'ran': ran, 'count': result.testsRun, 'errors': result.errors}
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 observed = json.loads(result.stdout)
                 self.assertEqual(observed["ran"], [], "review tests ran in the parent")
-                self.assertEqual(observed["count"], 0)
+                self.assertEqual(observed["count"], 1)
                 self.assertEqual(observed["errors"], [])
+                self.assertEqual(observed["supervised"], [True])
 
     def test_live_worker_token_inherited_by_subprocess_still_delegates(self):
         source = "import json, subprocess, sys\n" + self.simple_suite(
             "result = subprocess.run([sys.executable, '-c', %r], "
             "capture_output=True, text=True, timeout=30); "
             "self.assertEqual(result.returncode, 0, result.stdout + result.stderr); "
-            "self.assertEqual(json.loads(result.stdout)['ran'], [])" % self.discovery_probe())
+            "self.assertEqual(json.loads(result.stdout)['ran'], []); "
+            "self.assertEqual(json.loads(result.stdout)['supervised'], [True])" % self.discovery_probe())
         report = self.run_module(source)
         self.assertEqual(report["outcomes"][0]["status"], "success")
 
@@ -600,12 +600,18 @@ class Probe(unittest.TestCase):
                              (worker.WORKER_ROOT, '/nonexistent'),
                              ('HOME', '/'), ('XDG_STATE_HOME', '/')):
             with self.subTest(field=field), patch.dict(os.environ, {field: value}):
-                self.assertEqual(test_review.load_tests(loader, sentinel, None).countTestCases(), 0)
+                delegated = test_review.load_tests(loader, sentinel, None)
+                self.assertIsNot(delegated, sentinel)
+                self.assertEqual(delegated.countTestCases(), 1)
+                self.assertIsInstance(next(iter(delegated)), worker.DelegatedReviewTests)
         token_file = Path(os.environ[worker.WORKER_ROOT]) / 'worker-token'
         original = token_file.read_bytes()
         try:
             token_file.write_text('wrong token')
-            self.assertEqual(test_review.load_tests(loader, sentinel, None).countTestCases(), 0)
+            delegated = test_review.load_tests(loader, sentinel, None)
+            self.assertIsNot(delegated, sentinel)
+            self.assertEqual(delegated.countTestCases(), 1)
+            self.assertIsInstance(next(iter(delegated)), worker.DelegatedReviewTests)
         finally:
             token_file.write_bytes(original)
 """
@@ -619,6 +625,146 @@ class Probe(unittest.TestCase):
                 with self.assertRaisesRegex(sandbox.SandboxFailure, "failed once"):
                     sandbox.review_report()
             self.assertEqual(run.call_count, 1)
+
+
+class TestDelegatedReviewInvocation(unittest.TestCase):
+    """Exercise the live hook and supervisor through the real unittest CLI.
+
+    Copy the hook from its AST into a tiny fixture module so injected failures
+    test command exit status without rerunning the large review corpus. The
+    supervisor is copied verbatim; its process and audit paths are not mocked.
+    """
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        tests = self.root / "tests"
+        tests.mkdir()
+        (tests / "__init__.py").write_text("")
+        (tests / "review_sandbox_worker.py").write_bytes(
+            (ROOT / "tests/review_sandbox_worker.py").read_bytes())
+        source = (ROOT / "tests/test_review.py").read_text()
+        hook = next(node for node in ast.parse(source).body
+                    if isinstance(node, ast.FunctionDef) and node.name == "load_tests")
+        self.hook = ast.get_source_segment(source, hook)
+        self.module = tests / "test_review.py"
+        self.report = self.root / "report.json"
+        self.executed = self.root / "executed.jsonl"
+        self.write_module()
+
+    def write_module(self, failing=False):
+        self.module.write_text("""import json, os, sys, unittest
+from pathlib import Path
+from tests import review_sandbox_worker as sandbox
+REPO = Path(__file__).resolve().parents[1]
+class TestReviewJournal(unittest.TestCase):
+    def record(self):
+        with (REPO / 'executed.jsonl').open('a') as stream:
+            stream.write(json.dumps({'method': self._testMethodName,
+                                     'worker': sandbox.is_sandbox_worker(),
+                                     'pid': os.getpid(), 'sid': os.getsid(0)}) + '\\n')
+    def test_a(self):
+        self.record()
+    def test_b(self):
+        self.record()
+        if %r:
+            self.fail('delegated failure sentinel')
+""" % failing + "\n" + self.hook + '\n\nif __name__ == "__main__":\n    unittest.main()\n')
+
+    def invoke(self, *arguments):
+        self.report.unlink(missing_ok=True)
+        self.executed.unlink(missing_ok=True)
+        env = dict(os.environ, HANIG_REVIEW_SANDBOX_REPORT=str(self.report))
+        return subprocess.run([sys.executable, "-m", "unittest", *arguments],
+                              cwd=self.root, env=env, capture_output=True,
+                              text=True, timeout=30)
+
+    def assert_certified(self, result):
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Ran 1 test", result.stderr)
+        self.assertIn("Delegated test_review: 2 tests", result.stdout)
+        report = sandbox.validate_completion(json.loads(self.report.read_text()), "test_review")
+        expected = ["test_review.TestReviewJournal.test_" + name for name in ("a", "b")]
+        self.assertEqual(report["collected"], expected)
+        self.assertEqual([o["id"] for o in report["outcomes"]], expected)
+        self.assertEqual([o["status"] for o in report["outcomes"]], ["success", "success"])
+        records = [json.loads(line) for line in self.executed.read_text().splitlines()]
+        self.assertEqual([r["method"] for r in records], ["test_a", "test_b"])
+        self.assertTrue(all(r["worker"] and r["pid"] == r["sid"] for r in records))
+        self.assertEqual(len({r["pid"] for r in records}), 1)
+
+    def test_module_command_certifies_every_worker_test(self):
+        self.assert_certified(self.invoke("tests.test_review"))
+
+    def test_module_command_fails_when_a_delegated_test_fails(self):
+        self.write_module(failing=True)
+        result = self.invoke("tests.test_review")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("test_review.TestReviewJournal.test_b: failure", result.stderr)
+        self.assertIn("delegated failure sentinel", result.stderr)
+        self.assertFalse(self.report.exists(), "failed worker published a certified report")
+
+    def test_filtered_and_file_selections_cannot_hide_the_delegate(self):
+        for arguments in (
+                ("discover", "-s", "tests", "-k", "TestReviewJournal"),
+                ("discover", "-s", "tests", "-k", "SomethingInTestReview"),
+                ("tests.test_review", "-k", "test_a"),
+                ("discover", "-s", "tests", "-p", "test_review.py"),
+                ("tests/test_review.py",)):
+            with self.subTest(arguments=arguments):
+                result = self.invoke(*arguments)
+                self.assert_certified(result)
+                if "-k" in arguments:
+                    self.assertIn("test_review is delegated", result.stderr)
+
+    def test_full_discovery_and_collection_guard_share_one_worker(self):
+        # The collection guard requests the report before the delegated test.
+        # Its cache must keep actual test-body execution at exactly once.
+        (self.root / "tests/test_guard.py").write_text("""import unittest
+from tests import review_sandbox_worker as sandbox
+class Guard(unittest.TestCase):
+    def test_guard(self):
+        self.assertIs(sandbox.review_report(), sandbox.review_report())
+""")
+        result = self.invoke("discover", "-s", "tests")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Ran 2 tests", result.stderr)
+        self.assertEqual(len(self.executed.read_text().splitlines()), 2)
+        report = sandbox.validate_completion(json.loads(self.report.read_text()), "test_review")
+        self.assertEqual(len(report["collected"]), 2)
+
+    def test_real_discovery_collects_one_delegate_and_no_parent_review_cases(self):
+        code = """import unittest
+from tests import review_sandbox_worker as sandbox
+suite = unittest.TestLoader().discover('tests')
+cases = list(sandbox.walk_suite(suite))
+delegates = [t for t in cases if isinstance(t, sandbox.DelegatedReviewTests)]
+assert len(delegates) == 1, delegates
+assert not [t for t in cases if type(t).__module__ in ('test_review', 'tests.test_review')]
+"""
+        result = subprocess.run([sys.executable, "-c", code], cwd=ROOT,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_fully_qualified_single_method_keeps_in_process_execution(self):
+        result = self.invoke("tests.test_review.TestReviewJournal.test_a")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Ran 1 test", result.stderr)
+        self.assertFalse(self.report.exists())
+        records = [json.loads(line) for line in self.executed.read_text().splitlines()]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["method"], "test_a")
+        self.assertFalse(records[0]["worker"])
+
+    def test_named_class_with_empty_filter_fails_loudly(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "unittest",
+             "tests.test_review.TestReviewJournal", "-k", "NoSuchReviewMethod"],
+            cwd=ROOT, capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Ran 1 test", result.stderr)
+        self.assertIn("test_review is delegated", result.stderr)
+        self.assertIn("class selection matched no tests", result.stderr)
 
 
 if __name__ == "__main__":

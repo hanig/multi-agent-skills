@@ -10,8 +10,9 @@ Offline: no API calls.
 
     python3 -m unittest discover -s tests
 
-The repository command delegates these tests to test_review_sandbox. Ad hoc
-execution of this file is outside that process-audit contract.
+Discovery and module-level invocation delegate the whole module to the
+supervised worker, including when -k is supplied. Fully qualified class or
+method names bypass load_tests and retain only the per-test fixtures.
 """
 
 import ast
@@ -4079,18 +4080,36 @@ class TestReviewJournal(unittest.TestCase):
         self.assertEqual(target.read_bytes(), before)
 
 
-def load_tests(loader, tests, pattern):
-    """The repository suite delegates this module to its supervised worker.
+def _empty_class_selection(self):
+    self.fail("test_review is delegated; this class selection matched no tests. "
+              "Run python3 -m unittest tests.test_review for the supervised "
+              "module, or name an existing test method.")
 
-    Collection is proved by the worker handshake in test_project's guard.
-    Named fixture probes inside this module keep their existing isolation.
+
+# unittest bypasses load_tests for an explicitly named class. Its
+# runTest fallback runs only when the loader finds no matching test methods.
+# Preserve any class's own fallback; never replace an existing test body.
+for _case in tuple(globals().values()):
+    if (isinstance(_case, type) and issubclass(_case, unittest.TestCase)
+            and _case.__module__ == __name__ and not hasattr(_case, "runTest")):
+        _case.runTest = _empty_class_selection
+del _case
+
+
+def load_tests(loader, tests, pattern):
+    """Return one supervised test for every parent-side module selection.
+
+    The worker always collects the whole module with a fresh, unfiltered
+    loader. Parent -k patterns cannot remove the delegate and leave a false
+    zero-test success. Collection is still checked against the worker's ids.
+    Named class/method probes bypass this hook and keep their own fixtures.
     """
     if str(REPO) not in sys.path:
         sys.path.insert(0, str(REPO))
-    from tests.review_sandbox_worker import is_sandbox_worker
+    from tests.review_sandbox_worker import DelegatedReviewTests, is_sandbox_worker
     if is_sandbox_worker():
         return tests
-    return unittest.TestSuite()
+    return unittest.TestSuite([DelegatedReviewTests(patterns=loader.testNamePatterns)])
 
 
 if __name__ == "__main__":
