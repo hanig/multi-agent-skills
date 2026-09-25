@@ -8,13 +8,20 @@ import inspect
 import json
 import os
 from pathlib import Path
-import select
+import selectors
 import shlex
 import signal
 import subprocess
 import sys
 import time
 from unittest import mock
+
+
+def wait_readable(fd, timeout):
+    """Wait on a pipe without select(2)'s descriptor-number ceiling."""
+    with selectors.DefaultSelector() as readiness:
+        readiness.register(fd, selectors.EVENT_READ)
+        return bool(readiness.select(timeout))
 
 
 class _SupervisedFixture:
@@ -40,8 +47,7 @@ class _SupervisedFixture:
         deadline = None if timeout is None else time.monotonic() + timeout
         while b'\n' not in self.buffer:
             left = None if deadline is None else max(0, deadline - time.monotonic())
-            ready, _, _ = select.select([self.report_fd], [], [], left)
-            if not ready:
+            if not wait_readable(self.report_fd, left):
                 raise subprocess.TimeoutExpired(self.args, timeout)
             chunk = os.read(self.report_fd, 4096)
             if not chunk:
@@ -212,7 +218,7 @@ class FixtureProcesses:
         try:
             script = (self.root / ('fixture-launch-%d.py' % len(self.children))).absolute()
             script.write_text(
-                'import json, os, select, subprocess, time\n'
+                'import json, os, selectors, subprocess, time\n'
                 'report, control = %d, %d\n'
                 'os.set_inheritable(report, False)\n'
                 'os.set_inheritable(control, False)\n'
@@ -226,15 +232,17 @@ class FixtureProcesses:
                 '    for fd in (0, 1, 2): os.close(fd)\n'
                 '    send({"pid": child.pid})\n'
                 '    pending = b""\n'
+                '    readiness = selectors.DefaultSelector()\n'
+                '    readiness.register(control, selectors.EVENT_READ)\n'
                 '    while child.poll() is None:\n'
-                '        ready, _, _ = select.select([control], [], [], 0.01)\n'
-                '        if ready:\n'
+                '        if readiness.select(0.01):\n'
                 '            chunk = os.read(control, 4096)\n'
                 '            if not chunk: raise RuntimeError("fixture control lost")\n'
                 '            pending += chunk\n'
                 '            while b"\\n" in pending:\n'
                 '                line, pending = pending.split(b"\\n", 1)\n'
                 '                child.send_signal(int(line))\n'
+                '    readiness.close()\n'
                 '    send({"returncode": child.returncode})\n'
                 'while True: time.sleep(600)\n' % (
                     report_write, control_read, json.dumps(child_options)))
@@ -280,8 +288,7 @@ class FixtureProcesses:
                        start_new_session=True)
             os.close(write_fd)
             write_fd = None
-            ready, _, _ = select.select([read_fd], [], [], timeout)
-            if not ready:
+            if not wait_readable(read_fd, timeout):
                 raise subprocess.TimeoutExpired(str(script), timeout)
             if os.read(read_fd, 1) != b'R':
                 raise AssertionError('fixture supervisor exited before reporting')
