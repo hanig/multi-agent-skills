@@ -19,8 +19,8 @@ import subprocess
 RUN_MODULE = """import importlib, os, sys, unittest
 # Keep the helper import path supplied by the integration runner's -s tests,
 # and the package root needed for the selected dotted module's relative imports.
-sys.path.insert(0, os.path.abspath('tests'))
 sys.path.insert(0, os.path.abspath(sys.argv[3]))
+sys.path.insert(0, os.path.abspath('tests'))
 module = importlib.import_module(sys.argv[1])
 if module.__file__ != os.path.abspath(sys.argv[2]):
     raise SystemExit('changed test module imported from a different file')
