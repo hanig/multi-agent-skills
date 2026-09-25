@@ -6,6 +6,7 @@ import shutil
 import unittest
 
 from tests import test_arc683_merge_precondition as fixtures
+from tests import test_arc1049_verify_lock as lock_fixtures
 
 S, V = fixtures.S, fixtures.V
 CLAIM = "changed-tests-stable"
@@ -297,6 +298,39 @@ class TestSharedGuard(unittest.TestCase):
         self.assertEqual(state["units"]["u"]["merge_receipt"]["integration_status"],
                          "integration-unverified")
         self.assertEqual(len(self.f.calls(["pr", "merge"])), 1)
+
+
+class TestSharedGuardPublication(unittest.TestCase):
+    def setUp(self):
+        self.lock = lock_fixtures.TestVerificationLock()
+        self.lock.setUp()
+        self.addCleanup(self.lock.doCleanups)
+        f = self.lock.f
+        barrier = f.git("show", self.lock.target + ":" + V.MERGE_VERIFIER_PATH)
+        # Restore the original fast integration stub, then put the existing
+        # real-process barrier in the second, independently pinned verifier.
+        policy = dict(f.policy, verifiers=f.policy["verifiers"] + [{
+            "name": CLAIM, "claims": [CLAIM],
+            "sha256": hashlib.sha256(barrier.encode()).hexdigest()}])
+        self.lock.target = self.lock.precondition.target_commit({
+            V.MERGE_VERIFIER_PATH: f.verifier_bytes.decode(), PROGRAM: barrier,
+            V.POLICY_FILE: json.dumps(policy)})
+
+    def test_second_verifier_releases_lease_and_publishes_both_claims(self):
+        self.lock.start()
+        self.lock.locked_change()
+        result = self.lock.complete()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        rows = S.load_verifications(self.lock.f.state_dir)[0]
+        self.assertEqual([r["claim"] for r in rows[-2:]], [V.INTEGRATION_CLAIM, CLAIM])
+        self.assertEqual(len(rows), 3)
+
+    def test_target_move_during_second_verifier_publishes_neither_claim(self):
+        self.lock.start()
+        self.lock.locked_change("forge = json.loads(forge_path.read_text())\n"
+                               "forge['ref']['object']['sha'] = 'f' * 40\n"
+                               "forge_path.write_text(json.dumps(forge))\n")
+        self.lock.assert_stale("target moved during verification")
 
 
 if __name__ == "__main__":
