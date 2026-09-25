@@ -340,7 +340,9 @@ def reconcile(args, plan):
     pr = json.loads(run(cmd["view"]).stdout)
     check_pr(pr, binding)
     url = observed_pr_url(pr, host, repo_path, args.pr)
-    observation = {"approver": args.approver, "already_merged": pr["state"] == "MERGED"}
+    observation = {"approver": args.approver, "already_merged": pr["state"] == "MERGED",
+                   "scope_exit": scope.returncode, "scope": scope_report,
+                   "scope_stdout": scope.stdout, "scope_stderr": scope.stderr}
     if args.abandon_intent and pr["state"] == "OPEN":
         if intent["phase"] != "merge_requested":
             raise Refusal("cannot abandon an intent that already observed a merge")
@@ -355,9 +357,8 @@ def reconcile(args, plan):
         if not isinstance(checks, list) or not checks or any(
                 not isinstance(c, dict) or c.get("state") != "SUCCESS" for c in checks):
             raise Refusal("at least one CI check is required and every check must be SUCCESS")
-        observation.update({"scope_exit": scope.returncode, "scope": scope_report,
-                            "scope_stdout": scope.stdout, "scope_stderr": scope.stderr,
-                            "allow_unchecked_scope": args.allow_unchecked_scope, "checks": checks})
+        observation.update({"allow_unchecked_scope": args.allow_unchecked_scope,
+                            "checks": checks})
         intent = {"schema_version": 1, "operation_id": operation_id,
                   "binding": binding, "root": root, "phase": "merge_requested",
                   "preconditions": observation, "target_before_request": oid(pr.get("baseRefOid"))}

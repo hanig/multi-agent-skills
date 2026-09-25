@@ -317,6 +317,61 @@ class TestMergeUnit(unittest.TestCase):
         self.assertEqual(self.calls(["pr", "merge"]), [])
         self.assertEqual(len(self.receipts()), 1)
 
+    def test_launch_facts_repo_mismatch_refuses_before_forge(self):
+        self.us["attempt_launch_facts"]["a1"]["repo"] = str(self.repo) + "/other"
+        self.save()
+        self.assert_binding_refused(self.invoke())
+
+    def test_launch_facts_base_commit_mismatch_refuses_before_forge(self):
+        self.us["attempt_launch_facts"]["a1"]["base_commit"] = "f" * 40
+        self.save()
+        self.assert_binding_refused(self.invoke())
+
+    def test_launch_facts_base_tree_mismatch_refuses_before_forge(self):
+        self.us["attempt_launch_facts"]["a1"]["base_tree"] = "f" * 40
+        self.save()
+        self.assert_binding_refused(self.invoke())
+
+    def test_launch_facts_branch_mismatch_refuses_before_forge(self):
+        self.us["attempt_launch_facts"]["a1"]["branch"] = "other"
+        self.save()
+        self.assert_binding_refused(self.invoke())
+
+    def test_matching_launch_facts_need_no_target_field(self):
+        # Real completed facts carry target only in the launch intent.
+        del self.us["attempt_launch_facts"]["a1"]["target_branch"]
+        self.save()
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.calls(["pr", "merge"])), 1)
+
+    def test_nonzero_epoch_is_read_after_our_own_lease_increment(self):
+        (self.state_dir / S.STATE_EPOCH_FILE).write_text('{"epoch": 20}')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.calls(["pr", "merge"])), 1)
+        self.assertEqual(self.intent()["preconditions"]["scope"]["state_epoch"], 21)
+
+    def test_invalid_persisted_epoch_refuses_before_forge(self):
+        (self.state_dir / S.STATE_EPOCH_FILE).write_text('{"epoch": true}')
+        self.assert_binding_refused(self.invoke())
+
+    def test_reconciliation_records_fresh_binding_without_rekeying_legacy_intent(self):
+        old = self.leave_transport_failure()
+        path = self.state_dir / ("merge-unit-" + old["operation_id"] + ".json")
+        old["preconditions"]["scope"]["base"] = "f" * 40
+        path.write_text(json.dumps(old))
+        self.forge["pr"].update(state="MERGED", mergeCommit={"oid": self.merged})
+        self.save()
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        current = self.intent()
+        self.assertEqual(current["operation_id"], old["operation_id"])
+        self.assertEqual(current["preconditions"], old["preconditions"])
+        self.assertEqual(current["reconciliation"]["scope"]["base"], self.base)
+        self.assertEqual(current["reconciliation"]["scope"]["repository"], self.remote)
+        self.assertEqual(len(self.calls(["pr", "merge"])), 1)
+
     def test_success_records_exact_anchor_and_advances_once(self):
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
