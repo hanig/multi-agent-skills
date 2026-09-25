@@ -229,7 +229,7 @@ class TestAdjudication(unittest.TestCase):
                 self.assertEqual(self.adjudicate(acceptor=token).returncode, 4)
                 author = "codex/" + token
                 # argparse rejects the same restricted token before ledger I/O.
-                self.assertEqual(self.adjudicate("--author", author).returncode, 2)
+                self.assertEqual(self.adjudicate("--author", author).returncode, 4)
         self.assertEqual(len(self.records()), 1)
         self.assertEqual(self.query().returncode, 1)
 
