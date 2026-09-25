@@ -1,5 +1,6 @@
 """Exercise the typed fixture contract through real processes and unittest."""
 import ast
+import contextlib
 from dataclasses import replace
 import errno
 import json
@@ -45,10 +46,10 @@ class TestFixtureProcessGuard(unittest.TestCase):
         scope = FixtureProcesses(self, directory.name)
         return scope
 
-    def _launch(self, scope, source):
+    def _launch(self, scope, source, python_options=()):
         script = scope.root / ('child-%d.py' % len(scope.children))
         script.write_text(source)
-        return scope.launch(FixtureSpec((sys.executable, str(script))))
+        return scope.launch(FixtureSpec((sys.executable, *python_options, str(script))))
 
     def _probe(self, outcome='pass', omit_cleanup=False, escape=False, root_free=False):
         observed = {}
@@ -393,6 +394,29 @@ class TestFixtureQuiescence(unittest.TestCase):
     _scope = TestFixtureProcessGuard._scope
     _launch = TestFixtureProcessGuard._launch
 
+    @contextlib.contextmanager
+    def _no_fixture_signals(self, proc):
+        real_kill = os.kill
+
+        def checked_kill(pid, signum):
+            # Census timeout cleanup may kill its own positive-PID ps child.
+            # No group/broadcast signal is needed by that helper, and every
+            # fixture member (including later descendants) has the private SID.
+            self.assertGreater(pid, 0, 'wait signalled a process group')
+            self.assertNotIn(pid, (proc.supervisor_pid, proc.child_pid),
+                             'wait signalled a fixture PID')
+            try:
+                sid = os.getsid(pid)
+            except ProcessLookupError:
+                return real_kill(pid, signum)
+            self.assertNotEqual(sid, proc.supervisor_pid,
+                                'wait signalled a fixture session member')
+            return real_kill(pid, signum)
+
+        with mock.patch.object(fixtures.os, 'kill', side_effect=checked_kill) as sent, mock.patch.object(
+                fixtures.os, 'killpg', side_effect=AssertionError('wait signalled a process group')):
+            yield sent
+
     def _delayed_descendant(self, scope, new_group=False):
         release, effect = scope.root / 'release', scope.root / 'effect'
         proc = self._launch(scope,
@@ -403,7 +427,10 @@ class TestFixtureQuiescence(unittest.TestCase):
             'time.sleep(0.15)\n'
             'Path(%r).write_text("finished")\n'
             'os.write(1, b"late stdout\\n")\n'
-            'os.write(2, b"late stderr\\n")\n' % (str(release), str(effect)))
+            'os.write(2, b"late stderr\\n")\n' % (str(release), str(effect)),
+            # Python 3.12 can warn here when its runtime has started threads.
+            # Keep the captured bytes about the delayed write, not warnings.
+            python_options=('-W', 'ignore::DeprecationWarning'))
         return proc, release, effect
 
     def test_join_precedes_descendant_effect_but_quiescence_observes_it(self):
@@ -416,9 +443,9 @@ class TestFixtureQuiescence(unittest.TestCase):
                 self.assertEqual(joined.returncode, 23)
                 self.assertFalse(effect.exists(), 'join alone must not release the barrier')
                 self.assertEqual(joined.stdout, '')
+                self.assertEqual(joined.stderr, '')
                 release.touch()
-                with mock.patch.object(fixtures.os, 'kill', side_effect=AssertionError('wait signalled')), mock.patch.object(
-                        fixtures.os, 'killpg', side_effect=AssertionError('wait signalled')):
+                with self._no_fixture_signals(proc):
                     quiet = proc.wait_quiescent(10)
                 self.assertEqual(quiet.state, fixtures.QuiescenceState.QUIESCENT, quiet)
                 self.assertEqual(effect.read_text(), 'finished')
@@ -432,14 +459,50 @@ class TestFixtureQuiescence(unittest.TestCase):
         scope = self._scope()
         proc, release, effect = self._delayed_descendant(scope)
         self.assertEqual(proc.join(10).state, JoinState.EXITED)
-        with mock.patch.object(fixtures.os, 'kill', side_effect=AssertionError('wait signalled')), mock.patch.object(
-                fixtures.os, 'killpg', side_effect=AssertionError('wait signalled')):
+        with self._no_fixture_signals(proc):
             quiet = proc.wait_quiescent(0.05)
             self.assertEqual(quiet.state, fixtures.QuiescenceState.TIMED_OUT, quiet)
             self.assertFalse(effect.exists())
             release.touch()
             self.assertEqual(proc.wait_quiescent(10).state, fixtures.QuiescenceState.QUIESCENT)
         self.assertEqual(effect.read_text(), 'finished')
+
+    def test_census_timeout_can_kill_its_helper_without_signalling_fixtures(self):
+        scope = self._scope()
+        proc, release, effect = self._delayed_descendant(scope)
+        self.assertEqual(proc.join(10).state, JoinState.EXITED)
+        real_popen = subprocess.Popen
+        helpers = []
+
+        def slow_census(command, *args, **kwargs):
+            self.assertEqual(command[0], '/bin/ps')
+            # Exercise check_output's real timeout, kill and reap path with
+            # a slow helper in the caller's session, just like ps itself.
+            helper = real_popen(
+                [sys.executable, '-c', 'import time; time.sleep(600)'],
+                *args, **kwargs)
+            helpers.append(helper)
+            return helper
+
+        try:
+            with self._no_fixture_signals(proc) as sent:
+                with mock.patch.object(fixtures.subprocess, 'Popen', slow_census):
+                    quiet = proc.wait_quiescent(0.05)
+                self.assertEqual(quiet.state, fixtures.QuiescenceState.TIMED_OUT, quiet)
+                self.assertEqual(len(helpers), 1)
+                sent.assert_any_call(helpers[0].pid, signal.SIGKILL)
+                self.assertEqual(helpers[0].returncode, -signal.SIGKILL)
+                self.assertFalse(effect.exists())
+                release.touch()
+                self.assertEqual(proc.wait_quiescent(10).state,
+                                 fixtures.QuiescenceState.QUIESCENT)
+            self.assertEqual(effect.read_text(), 'finished')
+        finally:
+            # Independent containment also runs when the signal guard mutates.
+            for helper in helpers:
+                if helper.poll() is None:
+                    helper.kill()
+                helper.wait(timeout=5)
 
     def test_project_trap_waits_for_delayed_descendant_cleanup(self):
         import test_project as project
