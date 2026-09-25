@@ -3664,7 +3664,7 @@ class TestReviewJournal(unittest.TestCase):
         self.assertEqual(record["results"][0]["verdict"],
                          "<OPENAI_API_KEY redacted>")
 
-    def test_digest_collisions_obey_mandatory_redaction(self):
+    def test_valid_claim_digest_survives_secret_substring_collision(self):
         digest = hashlib.sha256(b"abc").hexdigest()
         self.assertIn("4141", digest)
         with patch.dict(os.environ, {"OPENAI_API_KEY": "4141"}):
@@ -3673,9 +3673,7 @@ class TestReviewJournal(unittest.TestCase):
         self.assertEqual(stderr, "")
         record = self.records()[0]
         self.assertEqual(record["claims"], [self.CLAIM, "abc"])
-        self.assertEqual(record["claim_digests"][1],
-                         digest.replace("4141", "<OPENAI_API_KEY redacted>"))
-        self.assertNotIn("4141", json.dumps(record))
+        self.assertEqual(record["claim_digests"][1], digest)
 
     def test_transport_key_collisions_cannot_drop_or_rehash_record_data(self):
         for secret in ("files", "record_line", "details", "claims", "claim",

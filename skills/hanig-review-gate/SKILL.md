@@ -204,7 +204,7 @@ Both commands are offline and emit JSON. Review input flags, including `--file`,
 are refused for ledger commands. `--head` takes the complete lowercase
 commit SHA. Reviews using two- or three-dot `--range` bind the journal head to the
 resolved commits supplied to Git's diff. Working-tree, single-revision and file
-inputs have no bound head; older headless records remain intact and unattributed.
+inputs have no bound head; headless records remain intact and `UNATTRIBUTABLE`.
 Use the effective state home from the original `journal.path` and the original
 project directory; the configured state home may have fallen back during review.
 
@@ -216,9 +216,18 @@ not a fix or a pass. Declare all authors with repeatable `--author`; the record'
 after the outer provider prefix; names are not case-folded or substring-matched.
 
 The read-only query exits 1 when confirmed findings lack an adjudication for
-that head, round and digest, 0 when none are recorded as open, and 4 on invalid
-input or unreadable canonical history. Zero certifies neither review coverage nor
-complete historical capture. It ignores unpublished pending files.
+that head, round and digest, or when any canonical record has a missing/invalid
+head or digest. It lists damaged records by path as `UNATTRIBUTABLE`, including
+already-redacted history and records otherwise associated with another head.
+It exits 0 only when neither open findings nor unattributable records exist,
+and 4 on invalid input or unreadable canonical history. Zero certifies neither
+review coverage nor complete historical capture. Unpublished pending files are ignored.
+
+Full lowercase 40-/64-hex heads and 64-hex finding/claim digests are validated
+before exemption from redaction and retained exactly in their schema fields.
+Free text and invalid identifier values stay redacted. Adjudication binds only
+validated identities; it cannot repair or conceal damaged historical identities.
+The query preserves old bytes rather than guessing an obscured head or digest.
 
 Adjudications append redacted, immutable JSON lines through the same atomic,
 bounded, non-gating writer as reviews. A valid recording request exits 0 even

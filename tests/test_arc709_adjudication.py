@@ -196,9 +196,121 @@ class TestAdjudication(unittest.TestCase):
         record["results"][0]["findings"][0].pop("finding_digest")
         original.write_text(json.dumps(record) + "\n")
         before = original.read_bytes()
-        self.assertEqual(self.query().returncode, 0)
+        queried = self.query()
+        self.assertEqual(queried.returncode, 1)
+        report = json.loads(queried.stdout)
+        self.assertEqual(report["state"], "UNATTRIBUTABLE")
+        self.assertEqual(report["unattributable_records"][0]["record_path"], str(original))
         self.assertEqual(self.adjudicate().returncode, 4)
         self.assertEqual(original.read_bytes(), before)
+
+    def test_head_prefix_secret_preserves_identity_and_open_finding(self):
+        actual_head = subprocess.check_output(
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
+        for head in (actual_head, "1234abcd" * 8):
+            with self.subTest(head=head):
+                with patch.dict(os.environ, {"OPENAI_API_KEY": head[:4]}):
+                    path = self.seed(head=head)
+                    record = json.loads(path.read_text())
+                    self.assertEqual(record["reviewed_head"], head)
+                    self.assertIs(record["results"][0]["findings"][0]["confirmed"], True)
+                    queried = self.query(head)
+                    self.assertEqual(queried.returncode, 1, queried.stderr)
+                    report = json.loads(queried.stdout)
+                    self.assertEqual(report["state"], "OPEN_FINDINGS")
+                    self.assertEqual(report["reviewed_head"], head)
+                    self.assertEqual(report["open_findings"][0]["reviewed_head"], head)
+                self.assertEqual(self.query(head).returncode, 1)
+
+    def test_digest_prefix_secrets_preserve_review_and_adjudication_identities(self):
+        claim_digests = review.claim_digests([review.HONEST_RUN_CLAIM])
+        secrets = {"OPENAI_API_KEY": self.digest[:4],
+                   "OPENROUTER_API_KEY": HEAD[:4],
+                   "ANTHROPIC_API_KEY": claim_digests[0][:4]}
+        with patch.dict(os.environ, secrets):
+            path = self.seed()
+            before = path.read_bytes()
+            record = json.loads(before)
+            self.assertEqual(record["claim_digests"], claim_digests)
+            self.assertEqual(record["results"][0]["findings"][0]["finding_digest"], self.digest)
+            report = json.loads(self.query().stdout)
+            self.assertEqual(report["open_findings"][0]["finding_digest"], self.digest)
+            result = self.adjudicate(reason="Reproduction excludes " + self.digest[:4])
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["finding_digest"], self.digest)
+            adjudication = self.records()[-1]
+            self.assertEqual(adjudication["reviewed_head"], HEAD)
+            self.assertEqual(adjudication["finding_digest"], self.digest)
+            self.assertIn("<OPENAI_API_KEY redacted>", adjudication["reason"])
+            self.assertEqual(self.query().returncode, 0)
+        self.assertEqual(self.query().returncode, 0)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_pre_corrupted_legacy_record_is_named_and_cannot_be_adjudicated(self):
+        path = self.seed()
+        record = json.loads(path.read_text())
+        record["reviewed_head"] = "<OPENAI_API_KEY redacted>" + HEAD[4:]
+        path.write_text(json.dumps(record) + "\n")
+        before = path.read_bytes()
+        queried = self.query()
+        self.assertEqual(queried.returncode, 1, queried.stderr)
+        report = json.loads(queried.stdout)
+        self.assertEqual(report["state"], "UNATTRIBUTABLE")
+        damaged = report["unattributable_records"]
+        self.assertEqual(len(damaged), 1)
+        self.assertEqual(damaged[0]["record_path"], str(path))
+        self.assertEqual(damaged[0]["reviewed_head"], record["reviewed_head"])
+        self.assertIn("reviewed_head", " ".join(damaged[0]["problems"]))
+        self.assertEqual(self.adjudicate().returncode, 4)
+        self.assertEqual(self.adjudicate(head=record["reviewed_head"]).returncode, 4)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_bad_digests_cannot_hide_behind_another_head_or_a_disposition(self):
+        original = self.seed()
+        self.assertEqual(self.adjudicate().returncode, 0)
+        original_review = original.read_bytes()
+        adjudication = sorted(self.journal.glob("*/record.jsonl"))[-1]
+        original_adjudication = adjudication.read_bytes()
+        for field in ("claim_digests", "finding_digest", "adjudication"):
+            for head in (HEAD, "2" * 40):
+                with self.subTest(field=field, head=head):
+                    original.write_bytes(original_review)
+                    adjudication.write_bytes(original_adjudication)
+                    path = adjudication if field == "adjudication" else original
+                    record = json.loads(path.read_text())
+                    record["reviewed_head"] = head
+                    bad_digest = "<OPENAI_API_KEY redacted>" + self.digest[4:]
+                    if field == "claim_digests":
+                        record[field] = [bad_digest]
+                    elif field == "finding_digest":
+                        record["results"][0]["findings"][0][field] = bad_digest
+                    else:
+                        record["finding_digest"] = bad_digest
+                    path.write_text(json.dumps(record) + "\n")
+                    before = path.read_bytes()
+                    queried = self.query()
+                    self.assertEqual(queried.returncode, 1, queried.stderr)
+                    report = json.loads(queried.stdout)
+                    self.assertEqual(report["state"], "UNATTRIBUTABLE")
+                    self.assertEqual(report["unattributable_records"][0]["record_path"], str(path))
+                    self.assertEqual(path.read_bytes(), before)
+
+    def test_non_hex_head_and_hex_free_text_are_still_redacted(self):
+        secret = "secret-test-key"
+        with patch.dict(os.environ, {"OPENAI_API_KEY": secret}):
+            path = self.seed(head="not-a-head/" + secret)
+        self.assertNotIn(secret, path.read_text())
+        self.assertEqual(json.loads(path.read_text())["reviewed_head"],
+                         "not-a-head/<OPENAI_API_KEY redacted>")
+        self.assertEqual(json.loads(self.query().stdout)["state"], "UNATTRIBUTABLE")
+        with patch.dict(os.environ, {"OPENAI_API_KEY": HEAD[:4]}):
+            path = self.seed(finding={**self.finding, "summary": HEAD,
+                                     "extra": {"reviewed_head": HEAD}})
+        record = json.loads(path.read_text())
+        self.assertEqual(record["reviewed_head"], HEAD)
+        finding = record["results"][0]["findings"][0]
+        self.assertIn("<OPENAI_API_KEY redacted>", finding["summary"])
+        self.assertIn("<OPENAI_API_KEY redacted>", finding["extra"]["reviewed_head"])
 
     def test_redaction_and_one_line_atomic_records(self):
         self.seed()
@@ -280,8 +392,12 @@ class TestAdjudication(unittest.TestCase):
 
     def test_full_head_required_and_ledger_cannot_replace_review(self):
         self.seed()
-        for head in ("HEAD", "1" * 7, " " + HEAD, HEAD + "0"):
+        for head in ("HEAD", "1" * 7, " " + HEAD, HEAD + "0", "g" * 40,
+                     HEAD + "\n"):
             self.assertEqual(self.query(head).returncode, 4)
+            self.assertEqual(self.adjudicate(head=head).returncode, 4)
+        for digest in ("not-a-digest", self.digest[:40], self.digest + "\n"):
+            self.assertEqual(self.adjudicate(digest=digest).returncode, 4)
         for extra in (("--kind", "implementation"), ("--diff",), ("--range", "HEAD~1..HEAD"),
                       ("--list",), ("--claim", review.HONEST_RUN_CLAIM)):
             self.assertEqual(self.adjudicate(*extra).returncode, 4)
