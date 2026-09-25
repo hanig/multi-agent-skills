@@ -50,6 +50,7 @@ import os
 from pathlib import Path
 import selectors
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -189,6 +190,16 @@ def _identity(pid):
         return None
 
 
+def _ps_command():
+    """Prefer the system path; support hosts that install ps elsewhere."""
+    if os.access('/bin/ps', os.X_OK):
+        return '/bin/ps'
+    command = shutil.which('ps')
+    if command is None:
+        raise FileNotFoundError(errno.ENOENT, 'fixture inspection requires ps')
+    return command
+
+
 def _session_rows(sid, groups, timeout=5):
     """Census membership, retaining only the session or its ledger groups.
 
@@ -197,7 +208,7 @@ def _session_rows(sid, groups, timeout=5):
     No command, environment, directory, uid or birth field is requested.
     """
     output = subprocess.check_output(
-        ['/bin/ps', '-U', str(os.geteuid()), '-o', 'pid=,pgid='],
+        [_ps_command(), '-U', str(os.geteuid()), '-o', 'pid=,pgid='],
         text=True, timeout=timeout)
     rows, seen = {}, set()
     for line in output.splitlines():
@@ -259,7 +270,7 @@ def wait_readable(fd, timeout):
 def process_table():
     """Enumerate this unprivileged uid with untruncated diagnostic commands."""
     with subprocess.Popen(
-            ['/bin/ps', '-ww', '-U', str(os.getuid()), '-o',
+            [_ps_command(), '-ww', '-U', str(os.getuid()), '-o',
              'pid=,ppid=,pgid=,uid=,stat=,command='],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as reader:
         try:

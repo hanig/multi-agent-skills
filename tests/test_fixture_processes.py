@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -475,7 +476,8 @@ class TestFixtureQuiescence(unittest.TestCase):
         helpers = []
 
         def slow_census(command, *args, **kwargs):
-            self.assertEqual(command[0], '/bin/ps')
+            self.assertEqual(command, [fixtures._ps_command(), '-U',
+                                      str(os.geteuid()), '-o', 'pid=,pgid='])
             # Exercise check_output's real timeout, kill and reap path with
             # a slow helper in the caller's session, just like ps itself.
             helper = real_popen(
@@ -952,6 +954,38 @@ class TestTypedFixtureContract(unittest.TestCase):
 class TestSessionContainment(unittest.TestCase):
     _scope = TestFixtureProcessGuard._scope
     _launch = TestFixtureProcessGuard._launch
+
+    def test_path_resolvable_ps_serves_both_readers_when_bin_ps_is_absent(self):
+        scope = self._scope()
+        proc = self._launch(scope, 'pass')
+        self.assertEqual(proc.join(10).returncode, 0)
+        real_ps = shutil.which('ps')
+        self.assertIsNotNone(real_ps)
+        alias = scope.root / 'ps'
+        alias.symlink_to(real_ps)
+        real_access, real_popen = os.access, subprocess.Popen
+        launched = []
+
+        def missing_bin_access(path, mode, *args, **kwargs):
+            return False if path == '/bin/ps' else real_access(path, mode, *args, **kwargs)
+
+        def launch(command, *args, **kwargs):
+            if command[0] == '/bin/ps':
+                raise FileNotFoundError(errno.ENOENT, 'no /bin/ps on this host')
+            launched.append(command[0])
+            return real_popen(command, *args, **kwargs)
+
+        with mock.patch.dict(os.environ, {'PATH': str(scope.root)}), mock.patch.object(
+                fixtures.os, 'access', side_effect=missing_bin_access), mock.patch.object(
+                fixtures.subprocess, 'Popen', side_effect=launch):
+            with self.subTest(reader='session'):
+                self.assertIn(proc.supervisor_pid,
+                              fixtures._session_rows(proc.supervisor_pid, set()))
+            with self.subTest(reader='diagnostic'):
+                self.assertIn(os.getpid(), process_table())
+            self.assertEqual(proc.cleanup().state, CleanupState.CLEAN)
+        self.assertTrue(launched)
+        self.assertEqual(set(launched), {str(alias)})
 
     def _foreign(self, cwd=None):
         proc = subprocess.Popen(
