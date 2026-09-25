@@ -3691,8 +3691,13 @@ close $ready or die $!;
                 while not ready.exists() or not ready.read_text().endswith("\n"):
                     self.assertLess(time.monotonic(), watchdog,
                                     "noisy pipe did not reach readiness")
-                    self.assertEqual(proc.join(0).state, JoinState.TIMED_OUT,
-                                     "supervisor exited before noisy readiness")
+                    if proc.join(0).state is not JoinState.TIMED_OUT:
+                        # The observer may have paused since checking ready.
+                        # Completion publishes readiness first; re-read it
+                        # before diagnosing an early exit from an old look.
+                        self.assertTrue(
+                            ready.exists() and ready.read_text().endswith("\n"),
+                            "supervisor exited before noisy readiness")
                     time.sleep(0.01)
                 ready_at = float(ready.read_text())
                 joined = self._fixture_answer(
