@@ -31,6 +31,7 @@ sys.path.insert(0, str(_SWARM_DIR / "scripts"))
 import child_environment as CE
 import coordinator_paths as CP
 import swarm as S
+import verify as V
 
 
 SWARM = str(_SWARM_DIR / "scripts" / "swarm.py")
@@ -162,6 +163,8 @@ def authority(args, plan):
     if us.get("state") not in ("READY_FOR_PR", "DONE"):
         raise Refusal("current attempt is not READY_FOR_PR or DONE")
     remote = launch.get("repository_remote")
+    # repo_path is the forge's owner/name, not a filesystem checkout.
+    # Local Git reads use launch["repo"], captured by the coordinator.
     host, repo_path = forge_route(remote)
     binding = {"unit": args.unit, "attempt": attempt, "head": head,
                "repo": remote, "target": launch["target_branch"], "pr": args.pr}
@@ -170,7 +173,7 @@ def authority(args, plan):
     scope_binding = {"unit": args.unit, "attempt": attempt, "head": head,
                      "base": launch["base_commit"], "repository": remote,
                      "target": launch["target_branch"], "state_epoch": epoch}
-    return state_dir, str(root), binding, host, repo_path, scope_binding
+    return state_dir, str(root), binding, host, repo_path, scope_binding, launch["repo"]
 
 
 def commands(args, root, binding, host, repo_path):
@@ -201,11 +204,71 @@ def check_pr(pr, binding):
         raise Refusal("PR is neither OPEN nor MERGED")
 
 
-def receipt_command(args, binding, url, merged, target):
+def receipt_command(args, binding, url, merged, target, integration_status):
     return [sys.executable, SWARM, "merge", "--state-dir", args.state_dir,
             "--unit", args.unit, "--pr", url, "--head", binding["head"],
             "--target", binding["target"], "--target-commit", target,
-            "--merged-as", merged, "--method", "squash", "--repo", binding["repo"]]
+            "--merged-as", merged, "--method", "squash", "--repo", binding["repo"],
+            "--integration-status", integration_status]
+
+
+def validate_scope_report(report, code, binding):
+    """Validate every exit's complete report before considering an exception."""
+    if not isinstance(report, dict):
+        raise Refusal("scope-check returned an invalid scope report")
+    for key, expected in binding.items():
+        if report.get(key) != expected:
+            raise Refusal("scope-check binding differs from coordinator state: " + key)
+    if type(report.get("state_epoch")) is not int:
+        raise Refusal("scope-check returned an invalid state epoch")
+    oid(report.get("base"))
+    statuses = {0: "in_scope", 1: "out_of_scope", 2: "unchecked"}
+    if report.get("status") != statuses.get(code):
+        raise Refusal("scope-check returned an invalid scope report status/exit")
+    for key in ("scope", "out_of_scope", "deletions_out_of_scope"):
+        if key not in report:
+            raise Refusal("scope-check returned an invalid scope report: missing " + key)
+        value = report[key]
+        # No declared scope is the producer's explicit null, only unchecked.
+        if key == "scope" and value is None and code == 2:
+            continue
+        if not isinstance(value, list) or any(not isinstance(p, str) or not p for p in value):
+            raise Refusal("scope-check returned an invalid scope report: " + key)
+    outside, deletions = report["out_of_scope"], report["deletions_out_of_scope"]
+    if (code in (0, 2) and (outside or deletions)
+            or code == 1 and not outside
+            or not set(deletions).issubset(outside)):
+        raise Refusal("scope-check returned an invalid scope report path lists")
+
+
+def integration_evidence(state_dir, binding, repo, target):
+    """Admit coordinator evidence under the exact observed target's policy."""
+    policy, policy_digest, _digest, error = V.merge_precondition_policy(
+        S.U.run, repo, target)
+    if error:
+        return None, error
+    admitted, error = S.admit_verification(
+        state_dir, binding["unit"], V.INTEGRATION_CLAIM, binding["head"],
+        policy_digest, policy, repo=repo, base_commit=target, target_commit=target)
+    if error:
+        return None, error
+    # A retained pass must never mask a later red run of the same candidate.
+    # A repaired head or a different target is a new binding, not a waiver.
+    for receipt in S.load_verifications(state_dir)[0]:
+        if (receipt.get("result") == "fail"
+                and all(receipt.get(k) == admitted.get(k) for k in (
+                    "unit", "claim", "verifier", "verifier_sha256", "policy_sha256",
+                    "subject_head", "produced_head", "target_commit", "merge_base", "candidate_tree"))):
+            return None, "the candidate merge verifier returned FAIL for this exact binding"
+    return admitted, None
+
+
+def verification_hint(args):
+    return "Run the target-authorized verifier (no merge): " + shlex.join([
+        sys.executable, str(Path(__file__).resolve()), args.plan,
+        "--state-dir", args.state_dir, "--unit", args.unit, "--pr", str(args.pr),
+        "--approver", args.approver, "--verify-integration"] +
+        (["--root", args.root] if args.root else []))
 
 
 def parent_command(host, repo_path, merged):
@@ -284,7 +347,7 @@ def abandon(args, intent_path, intent, pr, operation_id):
 
 
 def reconcile(args, plan):
-    state_dir, root, binding, host, repo_path, scope_binding = authority(args, plan)
+    state_dir, root, binding, host, repo_path, scope_binding, repo = authority(args, plan)
     cmd = commands(args, root, binding, host, repo_path)
     operation_id, intent_path, intent = current_intent(
         state_dir, binding, root, repair=not args.dry_run)
@@ -297,6 +360,12 @@ def reconcile(args, plan):
         print("+ " + shlex.join(cmd["scope"]))
         print("require exact coordinator binding and state epoch before forge access")
         print("+ " + shlex.join(cmd["view"]))
+        print("require target-authorized integration-tests at exact head, target, "
+              "merge base and candidate tree; no override")
+        if args.verify_integration:
+            print("run the target's pinned verifier in a disposable candidate merge; "
+                  "record coordinator evidence only")
+            return None
         if args.abandon_intent:
             print("if OPEN at judged head: persist abandonment record and resolve {}; "
                   "no merge or advance".format(intent_path))
@@ -309,7 +378,8 @@ def reconcile(args, plan):
         print("if MERGED at judged head (including reconciliation):")
         print("+ " + shlex.join(parent_command(host, repo_path, "<merged-sha>")))
         print("+ " + shlex.join(receipt_command(
-            args, binding, "<observed-pr-url>", "<merged-sha>", "<merge-parent-sha>")))
+            args, binding, "<observed-pr-url>", "<merged-sha>", "<merge-parent-sha>",
+            "<integration-status>")))
         print("+ " + shlex.join(cmd["advance"]))
         return None
 
@@ -320,27 +390,33 @@ def reconcile(args, plan):
         scope_report = json.loads(scope.stdout)
     except ValueError:
         raise Refusal("scope-check returned malformed JSON; binding unavailable")
-    if not isinstance(scope_report, dict):
-        raise Refusal("scope-check returned an invalid scope report")
-    for key, expected in scope_binding.items():
-        if scope_report.get(key) != expected:
-            raise Refusal("scope-check binding differs from coordinator state: " + key)
-    if type(scope_report.get("state_epoch")) is not int:
-        raise Refusal("scope-check returned an invalid state epoch")
-    if scope.returncode == 0:
-        if (scope_report.get("status") != "in_scope"
-                or not isinstance(scope_report.get("scope"), list)
-                or any(not isinstance(p, str) for p in scope_report["scope"])
-                or scope_report.get("out_of_scope") != []
-                or scope_report.get("deletions_out_of_scope") != []):
-            raise Refusal("successful scope-check returned an invalid scope report")
-        oid(scope_report.get("base"))
+    validate_scope_report(scope_report, scope.returncode, scope_binding)
 
     # Refuse an unreadable receipt journal before any merge request.
     receipts, _ = S.load_merge_receipts(state_dir)
     pr = json.loads(run(cmd["view"]).stdout)
     check_pr(pr, binding)
     url = observed_pr_url(pr, host, repo_path, args.pr)
+    if args.verify_integration:
+        if pr["state"] != "OPEN" or intent:
+            raise Refusal("verification requires an OPEN PR with no unresolved merge intent")
+        S.load_verifications(state_dir)
+        evidence, error = V.run_merge_precondition(
+            S.U.run, repo, binding["head"], oid(pr.get("baseRefOid")),
+            timeout=args.verification_timeout)
+        if error:
+            raise Refusal(error + ". " + verification_hint(args))
+        evidence.update({"unit": args.unit, "by": args.approver,
+                         "at": datetime.now(timezone.utc).isoformat()})
+        problem = S._verify_shape_problem(evidence)
+        if problem:
+            raise Refusal(problem)
+        S._fsync_append(state_dir / S.VERIFY_RECEIPTS, evidence)
+        print("integration-tests: {} for head {} into target {} (no merge requested)".format(
+            evidence["result"].upper(), evidence["subject_head"], evidence["target_commit"]))
+        if evidence["result"] != "pass":
+            raise Refusal("candidate merge verifier failed; repair the candidate")
+        return None
     observation = {"approver": args.approver, "already_merged": pr["state"] == "MERGED",
                    "scope_exit": scope.returncode, "scope": scope_report,
                    "scope_stdout": scope.stdout, "scope_stderr": scope.stderr}
@@ -352,14 +428,25 @@ def reconcile(args, plan):
     if pr["state"] == "OPEN":
         if intent:
             raise Refusal("earlier merge request has an unresolved outcome; refusing a second merge call")
-        if scope.returncode and not args.allow_unchecked_scope:
+        if scope.returncode != 0 and not (
+                scope.returncode == 2 and scope_report["status"] == "unchecked"
+                and args.allow_unchecked_scope):
             raise Refusal("scope-check exited {}: {}".format(scope.returncode, scope.stdout))
         checks = json.loads(run(cmd["checks"]).stdout)
         if not isinstance(checks, list) or not checks or any(
                 not isinstance(c, dict) or c.get("state") != "SUCCESS" for c in checks):
             raise Refusal("at least one CI check is required and every check must be SUCCESS")
+        target = oid(pr.get("baseRefOid"))
+        evidence, error = integration_evidence(state_dir, binding, repo, target)
+        if error:
+            raise Refusal("integration-tests precondition: " + error + ". " + verification_hint(args))
+        latest = json.loads(run(cmd["view"]).stdout)
+        check_pr(latest, binding)
+        if latest["state"] != "OPEN" or latest.get("baseRefOid") != target:
+            raise Refusal("PR or target moved during preflight; rerun against the current target. "
+                          + verification_hint(args))
         observation.update({"allow_unchecked_scope": args.allow_unchecked_scope,
-                            "checks": checks})
+                            "checks": checks, "integration": evidence})
         intent = {"schema_version": 1, "operation_id": operation_id,
                   "binding": binding, "root": root, "phase": "merge_requested",
                   "preconditions": observation, "target_before_request": oid(pr.get("baseRefOid"))}
@@ -376,6 +463,19 @@ def reconcile(args, plan):
     if commit.get("sha") != merged or not isinstance(parents, list) or len(parents) != 1:
         raise Refusal("squash reconciliation requires the observed single-parent merge commit")
     target = oid(parents[0].get("sha"))
+    # An already-admitted precondition survives crashes and local Git cleanup.
+    # Its target must be the actual parent, not baseRefOid after the merge.
+    evidence = (intent or {}).get("preconditions", {}).get("integration")
+    integration_problem = None
+    if evidence is not None:
+        if (evidence.get("target_commit") != target
+                or (intent or {}).get("target_before_request") != target):
+            integration_problem = "target moved between integration check and merge"
+        elif evidence.get("subject_head") != binding["head"] or evidence.get("result") != "pass":
+            integration_problem = "retained integration evidence does not match the judged head"
+    else:
+        evidence, integration_problem = integration_evidence(state_dir, binding, repo, target)
+    integration_status = ("integration-unverified" if integration_problem else "candidate-verified")
     # The actual merge parent survives crashes and target movement. baseRefOid
     # after merging is NOT the pre-merge target and must never be recorded as it.
     if intent is None:
@@ -383,19 +483,37 @@ def reconcile(args, plan):
                   "binding": binding, "root": root}
     intent.update({"operation_id": operation_id,
                    "phase": "merged", "merged_as": merged, "target_commit": target,
-                   "reconciliation": observation})
+                   "reconciliation": observation,
+                   "integration_status": integration_status,
+                   "integration_problem": integration_problem})
     durable_write(intent_path, intent)
     expected = {"unit": args.unit, "repo": binding["repo"], "pr": url,
                 "target": binding["target"], "head": binding["head"],
                 "merged_as": merged, "method": "squash", "target_commit": target,
-                "merged": True, "attested": True}
+                "merged": True, "attested": True, "integration_status": integration_status}
     if not any(all(r.get(k) == v for k, v in expected.items()) for r in receipts):
-        run(receipt_command(args, binding, url, merged, target))
+        run(receipt_command(args, binding, url, merged, target, integration_status))
     receipts, _ = S.load_merge_receipts(state_dir)
     if not any(all(r.get(k) == v for k, v in expected.items()) for r in receipts):
         raise Refusal("swarm merge did not persist the expected receipt")
+    # Correct an already-persisted audit label too. Do not alter the unit's
+    # judgment or erase old journal entries; append-only history is retained.
+    state = read_object(state_dir / S.STATE_FILE)
+    us = state["units"][args.unit]
+    prior = us.get("merge_receipt")
+    if isinstance(prior, dict) and all(prior.get(k) == expected[k] for k in (
+            "unit", "repo", "pr", "target", "head", "merged_as")):
+        corrected = dict(prior, target_commit=target, integration_status=integration_status)
+        if corrected != prior:
+            us["merge_receipt"] = corrected
+            S.save_state(state_dir, state)
     intent["phase"] = "receipt_recorded"
     durable_write(intent_path, intent)
+    if integration_problem:
+        print("WARNING: INTEGRATION-UNVERIFIED: " + integration_problem, file=sys.stderr)
+        if intent.get("preconditions", {}).get("integration") is not None:
+            raise Refusal("merge occurred but its integration precondition is invalid; "
+                          "receipt retained, advancement withheld")
     return cmd["advance"]
 
 
@@ -437,10 +555,17 @@ def main(argv=None):
     parser.add_argument("--approver", required=True, type=nonempty)
     parser.add_argument("--root")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--verify-integration", action="store_true",
+                        help="run target-authorized integration verifier and record evidence; never merge")
+    parser.add_argument("--verification-timeout", type=int, default=900)
     parser.add_argument("--allow-unchecked-scope", type=nonempty, metavar="REASON")
     parser.add_argument("--abandon-intent", type=nonempty, metavar="OPERATION_ID")
     parser.add_argument("--reason", type=nonempty)
     args = parser.parse_args(argv)
+    if args.verify_integration and args.abandon_intent:
+        parser.error("--verify-integration cannot abandon an intent")
+    if args.verification_timeout <= 0:
+        parser.error("--verification-timeout must be positive")
     if args.pr <= 0:
         parser.error("--pr must be a positive PR number")
     if args.abandon_intent and not args.reason:

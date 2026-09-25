@@ -3,6 +3,7 @@
 import ast
 from datetime import datetime
 import json
+import hashlib
 import os
 from pathlib import Path
 import shutil
@@ -18,6 +19,7 @@ OPERATOR = SCRIPTS.parents[1] / "hanig-orchestrate/scripts/merge_unit.py"
 sys.path.insert(0, str(SCRIPTS))
 import swarm as S
 import child_environment as CE
+import verify as V
 
 
 GH_STUB = r'''
@@ -100,7 +102,18 @@ class TestMergeUnit(unittest.TestCase):
         self.git("init", "-q")
         self.git("checkout", "-qb", "main")
         (self.repo / "change.txt").write_text("base\n")
-        self.git("add", "change.txt")
+        verifier = self.repo / V.MERGE_VERIFIER_PATH
+        verifier.parent.mkdir()
+        verifier.write_text(
+            "#!" + sys.executable + "\nfrom pathlib import Path\n"
+            "raise SystemExit(int(Path('target.fail').exists() and "
+            "Path('change.txt').read_text() == 'produced\\n'))\n")
+        self.verifier_bytes = verifier.read_bytes()
+        self.policy = {"schema_version": 1, "verifiers": [{
+            "name": V.MERGE_VERIFIER, "claims": [V.INTEGRATION_CLAIM],
+            "sha256": hashlib.sha256(self.verifier_bytes).hexdigest()}]}
+        (self.repo / V.POLICY_FILE).write_text(json.dumps(self.policy))
+        self.git("add", "change.txt", V.MERGE_VERIFIER_PATH, V.POLICY_FILE)
         self.git("commit", "-qm", "base")
         self.base = self.git("rev-parse", "HEAD")
         base_tree = self.git("rev-parse", "HEAD^{tree}")
@@ -137,6 +150,21 @@ class TestMergeUnit(unittest.TestCase):
                       "commit": {"sha": self.merged, "parents": [{"sha": self.base}]}}
         self.plan_path = self.directory / "plan.json"
         self.save()
+        self.record_integration()
+
+    def verifier_runner(self, command, timeout=60, cwd=None):
+        result = subprocess.run(command, env=self.env, cwd=cwd,
+                                capture_output=True, text=True, timeout=timeout)
+        return result.returncode, result.stdout, result.stderr
+
+    def record_integration(self, target=None):
+        evidence, error = V.run_merge_precondition(
+            self.verifier_runner, self.repo, self.head, target or self.base)
+        self.assertIsNone(error, error)
+        self.assertEqual(evidence["result"], "pass")
+        evidence["unit"] = "u"
+        (self.state_dir / S.VERIFY_RECEIPTS).write_text(json.dumps(evidence) + "\n")
+        return evidence
 
     def git(self, *args):
         result = subprocess.run([str(self.bin / "git"), "-C", str(self.repo)] + list(args),
@@ -148,12 +176,12 @@ class TestMergeUnit(unittest.TestCase):
         (self.state_dir / S.STATE_FILE).write_text(json.dumps(self.state))
         Path(self.env["FORGE_STATE"]).write_text(json.dumps(self.forge))
 
-    def invoke(self, *extra, approver=True):
+    def invoke(self, *extra, approver=True, cwd=None):
         command = [sys.executable, str(self.operator), str(self.plan_path),
                    "--state-dir", str(self.state_dir), "--unit", "u", "--pr", "7"]
         if approver:
             command += ["--approver", "Operator"]
-        return subprocess.run(command + list(extra), cwd=str(self.repo), env=self.env,
+        return subprocess.run(command + list(extra), cwd=str(cwd or self.repo), env=self.env,
                               capture_output=True, text=True, timeout=60)
 
     def calls(self, prefix=None):
@@ -174,7 +202,7 @@ class TestMergeUnit(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.receipts(), [])
 
-    def intercept_scope_binding(self, fields=None, advance_epoch=False):
+    def intercept_scope_binding(self, fields=None, advance_epoch=False, remove=()):
         # Keep the real scope consumer and producer, changing only the report
         # channel or the epoch between the operator and scope state reads.
         site = self.directory / "scope-binding-probe"
@@ -193,8 +221,10 @@ class TestMergeUnit(unittest.TestCase):
             "    def emit():\n"
             "        report = json.loads(sys.stdout.getvalue())\n"
             "        report.update(%r)\n"
+            "        for key in %r:\n"
+            "            report.pop(key, None)\n"
             "        original.write(json.dumps(report))\n"
-            "    atexit.register(emit)\n" % (advance_epoch, fields or {}))
+            "    atexit.register(emit)\n" % (advance_epoch, fields or {}, remove))
         self.env["PYTHONPATH"] = str(site)
 
     def test_000_scope_base_mismatch_refuses_before_forge(self):
@@ -581,8 +611,13 @@ class TestMergeUnit(unittest.TestCase):
         self.assertEqual(observed["scope_exit"], expected_exit)
         self.assertEqual(observed["allow_unchecked_scope"], "Reviewed exception")
 
-    def test_scope_override_is_recorded_for_out_of_scope(self):
-        self.assert_scope_override([], 1)
+    def test_scope_override_refuses_out_of_scope(self):
+        self.unit["scope"] = []
+        self.state["plan_digest"] = S.plan_digest(self.plan)
+        self.save()
+        result = self.invoke("--allow-unchecked-scope", "Reviewed exception")
+        self.assert_refused(result)
+        self.assertIn("scope-check exited 1", result.stderr)
 
     def test_scope_override_is_recorded_for_unchecked(self):
         self.assert_scope_override(None, 2)

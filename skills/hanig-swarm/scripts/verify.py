@@ -53,6 +53,8 @@ import child_environment as CE
 
 POLICY_FILE = "verifiers.json"
 INTEGRATION_CLAIM = "integration-tests"
+MERGE_VERIFIER = "merge-precondition"
+MERGE_VERIFIER_PATH = "verifiers/integration_tests.py"
 
 # A mixed-version rollout must fail closed rather than silently accept a
 # policy written for different rules.
@@ -177,7 +179,7 @@ def digest_file(path):
     return digest_bytes(data), len(data), None
 
 
-def read_policy(runner, repo, base_commit):
+def read_policy(runner, repo, base_commit, source="anchored base"):
     """(policy, digest, error), read from the ANCHORED BASE.
 
     NOT from the working tree, and not from HEAD. The agent owns both. Reading
@@ -196,7 +198,7 @@ def read_policy(runner, repo, base_commit):
     rc, out, err = _git(runner, repo, "--no-replace-objects", "show",
                         f"{base_commit}:{POLICY_FILE}")
     if rc != 0:
-        return None, None, (f"no {POLICY_FILE} at the anchored base "
+        return None, None, (f"no {POLICY_FILE} at the {source} "
                             f"{str(base_commit)[:12]}: nothing authorizes any "
                             f"verifier for this unit ({err[:120]})")
     raw = out.encode() if isinstance(out, str) else out
@@ -662,6 +664,75 @@ def run_in_candidate_merge(runner, repo, produced_head, target_commit, path,
         outcome, run_error = run_pinned(
             runner, path, expect_digest, args=args, timeout=timeout, cwd=tree)
         return outcome, basis, run_error
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def merge_precondition_policy(runner, repo, target_commit):
+    """Authorize the merge precondition from the trusted target, never HEAD.
+
+    Ordinary verification retains anchored-base authorization. In-flight
+    attempts can predate installation of this policy; their launch base is
+    deliberately not the authorization source for this merge-only check.
+    The caller must obtain target_commit from its trusted target observation.
+    """
+    policy, policy_digest, error = read_policy(
+        runner, repo, target_commit, source="target commit")
+    if error:
+        return None, None, None, "merge-precondition target policy: " + error
+    digest, _size, error = _digest_base_blob(
+        repo, target_commit, MERGE_VERIFIER_PATH)
+    if error:
+        return None, None, None, "merge-precondition target verifier: " + error
+    entry, error = authorized(policy, MERGE_VERIFIER, digest, INTEGRATION_CLAIM)
+    if error:
+        return None, None, None, "merge-precondition target authorization: " + error
+    # Admission must require this designated verifier, not any other verifier
+    # which the target policy happens to allow for an integration claim.
+    restricted = dict(policy, verifiers=[entry])
+    return restricted, policy_digest, digest, None
+
+
+def run_merge_precondition(runner, repo, produced_head, target_commit,
+                           timeout=900):
+    """Run the target's pinned program using the existing candidate runner.
+
+    Returns receipt fields, or an error. Persistence belongs to the connected
+    operator under its coordinator lock, outside worker directories.
+    """
+    policy, policy_digest, digest, error = merge_precondition_policy(
+        runner, repo, target_commit)
+    if error:
+        return None, error
+    entry = policy["verifiers"][0]
+    corpus, error = corpus_evidence(
+        runner, repo, target_commit, produced_head, entry)
+    if not error:
+        error = corpus_change_refusal(entry, corpus, INTEGRATION_CLAIM)
+    if error:
+        return None, error
+    tmp, tree, error = _isolated_checkout(
+        runner, repo, target_commit, "verify-target-policy-")
+    if error:
+        return None, error
+    try:
+        outcome, basis, error = run_in_candidate_merge(
+            runner, repo, produced_head, target_commit,
+            os.path.join(tree, MERGE_VERIFIER_PATH), digest, timeout=timeout)
+        if error:
+            return None, error
+        receipt = dict(corpus, **basis)
+        receipt.update({
+            "claim": INTEGRATION_CLAIM, "verifier": MERGE_VERIFIER,
+            "verifier_sha256": digest, "policy_sha256": policy_digest,
+            "authorization_commit": target_commit,
+            "subject_head": produced_head,
+            "result": "pass" if outcome["exit_code"] == 0 else "fail",
+            "exit_code": outcome["exit_code"],
+            "stdout_tail": outcome["stdout"], "stderr_tail": outcome["stderr"],
+            "schema_version": 1,
+        })
+        return receipt, None
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
