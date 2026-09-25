@@ -75,10 +75,11 @@ class TestFixtureProcessGuard(unittest.TestCase):
                 # is mutated away. Never signal the outer test runner's group.
                 pgid = os.getpgid(proc.pid)
                 self.assertNotEqual(pgid, os.getpgrp())
+                supervisor = scope.children[-1][0]
 
                 def contain():
                     kill_group(pgid)
-                    proc.wait(timeout=5)
+                    supervisor.wait(timeout=5)
 
                 self.addCleanup(contain)
                 deadline = time.monotonic() + 20
@@ -110,6 +111,60 @@ class TestFixtureProcessGuard(unittest.TestCase):
         self.assertIsNone(observed['proc'].returncode,
                           'failed termination released the group ownership anchor')
         self.assertFalse(observed['gone'])
+
+    def test_reaping_non_session_fixture_does_not_release_its_group_anchor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case = unittest.TestCase()
+            scope = FixtureProcesses(case, directory, kill_group)
+            script = Path(directory) / 'fixture.py'
+            script.write_text(
+                'import subprocess\n'
+                'child = subprocess.Popen(["/bin/sleep", "600"], '
+                'stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, '
+                'stderr=subprocess.DEVNULL)\n'
+                'print(child.pid, flush=True)\n')
+            proc = scope.popen([sys.executable, str(script)],
+                               stdout=subprocess.PIPE, text=True)
+            anchor = scope.children[-1][0]
+            try:
+                out, _err = proc.communicate(timeout=10)
+                orphan = int(out.strip())
+                self.assertEqual(proc.returncode, 0)
+                self.assertIsNone(anchor.returncode)
+                self.assertNotEqual(proc.pid, anchor.pid)
+                self.assertEqual(os.getpgid(orphan), anchor.pid)
+                self.assertTrue(case.doCleanups())
+                row = process_table().get(orphan)
+                self.assertTrue(row is None or row[2].startswith('Z'), row)
+            finally:
+                kill_group(anchor.pid)
+                anchor.wait(timeout=5)
+                case.doCleanups()
+
+    def test_non_session_handle_keeps_native_io_timeout_signal_and_launch_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case = unittest.TestCase()
+            scope = FixtureProcesses(case, directory, kill_group)
+            try:
+                proc = scope.popen(
+                    [sys.executable, '-c', 'import sys; print(sys.stdin.read().upper())'],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+                out, _err = proc.communicate(input='fixture', timeout=10)
+                self.assertEqual(out, 'FIXTURE\n')
+                self.assertEqual(proc.wait(timeout=0), 0)
+                proc = scope.popen(['/bin/sleep', '600'], stdout=subprocess.PIPE)
+                self.assertIsNone(proc.poll())
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    proc.communicate(timeout=0.01)
+                proc.kill()
+                self.assertEqual(proc.communicate(timeout=5), (b'', None))
+                self.assertEqual(proc.returncode, -signal.SIGKILL)
+                missing = str(Path(directory) / 'missing-command')
+                with self.assertRaises(FileNotFoundError) as caught:
+                    scope.popen([missing])
+                self.assertEqual(caught.exception.filename, missing)
+            finally:
+                self.assertTrue(case.doCleanups())
 
     def test_retained_supervisor_contains_a_reaped_non_session_fixture(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -164,9 +219,10 @@ class TestFixtureProcessGuard(unittest.TestCase):
                 case.addCleanup(lambda: patcher.stop() if patcher else None)
                 scope = FixtureProcesses(case, directory.name, kill_group)
                 proc = scope.popen(['/bin/sleep', '600'])
-                self.addCleanup(proc.wait, timeout=5)
+                anchor = scope.children[-1][0]
+                self.addCleanup(anchor.wait, timeout=5)
                 patcher = mock.patch.object(
-                    proc, 'wait', side_effect=subprocess.TimeoutExpired(proc.args, 5))
+                    anchor, 'wait', side_effect=subprocess.TimeoutExpired(proc.args, 5))
                 patcher.start()
 
         result = unittest.TestResult()
