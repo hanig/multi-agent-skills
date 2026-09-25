@@ -1,5 +1,6 @@
 """Exercise fixture cleanups and their guard through real unittest outcomes."""
 import itertools
+import inspect
 import os
 from pathlib import Path
 import select
@@ -26,6 +27,89 @@ def kill_group(pgid):
 
 
 class TestFixtureProcessGuard(unittest.TestCase):
+    @unittest.skipUnless('process_group' in inspect.signature(subprocess.Popen).parameters,
+                         'this Python does not expose Popen(process_group=...)')
+    def test_process_group_zero_keeps_native_semantics_and_contains_reaped_orphans(self):
+        command = [sys.executable, '-c',
+                   'import os; print(os.getpid(), os.getpgrp(), flush=True)']
+        native = subprocess.run(command, start_new_session=False, process_group=0,
+                                capture_output=True, text=True, check=True)
+        native_pid, native_group = map(int, native.stdout.split())
+        self.assertEqual(native_pid, native_group)
+        for process_group in (0, -1, None):
+            with self.subTest(process_group=process_group), tempfile.TemporaryDirectory() as directory:
+                case = unittest.TestCase()
+                scope = FixtureProcesses(case, directory, kill_group)
+                orphan = None
+                anchor = None
+                try:
+                    proc = scope.popen(
+                        [sys.executable, '-c',
+                         'import os, subprocess; '
+                         'child = subprocess.Popen(["/bin/sleep", "600"], '
+                         'stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, '
+                         'stderr=subprocess.DEVNULL); '
+                         'print(os.getpid(), os.getpgrp(), child.pid, flush=True)'],
+                        start_new_session=False, process_group=process_group,
+                        stdout=subprocess.PIPE, text=True)
+                    anchor = scope.children[-1][0]
+                    out, _ = proc.communicate(timeout=10)
+                    pid, pgid, orphan = map(int, out.split())
+                    self.assertEqual(pid, proc.pid)
+                    self.assertEqual(pgid, pid if process_group == 0 else anchor.pid)
+                    self.assertEqual(os.getpgid(orphan), pgid)
+                    self.assertEqual(os.getsid(orphan), anchor.pid)
+                    self.assertIn(str(pgid), scope.pidfiles[0].read_text().split())
+                    self.assertEqual(proc.returncode, 0)
+                    self.assertIsNone(anchor.returncode)
+                    self.assertTrue(case.doCleanups())
+                    row = process_table().get(orphan)
+                    self.assertTrue(row is None or row[2].startswith('Z'), row)
+                finally:
+                    if orphan is not None:
+                        try:
+                            os.kill(orphan, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    if anchor is not None:
+                        kill_group(anchor.pid)
+                    self.assertTrue(case.doCleanups())
+
+    def test_handle_is_reaped_after_cleanup_with_or_without_consumed_status(self):
+        for state in ('running', 'reported', 'waited'):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as directory:
+                case = unittest.TestCase()
+                scope = FixtureProcesses(case, directory, kill_group)
+                proc = scope.popen([sys.executable, '-c',
+                                    'import time; time.sleep(600)' if state == 'running'
+                                    else 'raise SystemExit(23)'])
+                try:
+                    if state == 'waited':
+                        self.assertEqual(proc.wait(timeout=10), 23)
+                    elif state == 'reported':
+                        # Leave the status unread by this handle until cleanup.
+                        if b'\n' not in proc.buffer:
+                            ready, _, _ = select.select([proc.report_fd], [], [], 10)
+                            self.assertTrue(ready)
+                        self.assertIsNone(proc.returncode)
+                    self.assertTrue(case.doCleanups())
+                    self.assertIsNotNone(proc.returncode)
+                    self.assertEqual(proc.returncode, -signal.SIGKILL if state == 'running' else 23)
+                    self.assertEqual(proc.wait(timeout=1), proc.returncode)
+                    self.assertEqual(proc.poll(), proc.returncode)
+                    proc.send_signal(signal.SIGTERM)
+                    proc.terminate()
+                    proc.kill()
+                    # Repeated cleanup and descriptor reuse cannot make the
+                    # retained handle read or signal an unrelated resource.
+                    with open(os.devnull) as reused:
+                        self.assertTrue(case.doCleanups())
+                        self.assertEqual(proc.wait(timeout=0), proc.returncode)
+                        proc.send_signal(signal.SIGTERM)
+                        self.assertEqual(reused.read(), '')
+                finally:
+                    self.assertTrue(case.doCleanups())
+
     def test_000_non_session_fixture_orphan_exec_is_killed_by_cleanup(self):
         for session_flag in ({}, {'start_new_session': False}):
             with self.subTest(session_flag=session_flag):
