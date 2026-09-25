@@ -32,9 +32,132 @@ class TestMergePrecondition(unittest.TestCase):
         target = f.git("rev-parse", "HEAD")
         f.git("checkout", "-q", "swarm-a1")
         f.forge["pr"]["baseRefOid"] = target
+        f.forge["ref"]["object"]["sha"] = target
         f.forge["commit"]["parents"] = [{"sha": target}]
         f.save()
         return target
+
+    def stale_pr_base(self):
+        target = self.target_commit({"unrelated.txt": "advanced target\n"})
+        self.f.forge["pr"]["baseRefOid"] = self.f.base
+        self.f.save()
+        return target
+
+    def test_stale_pr_base_verifies_current_branch_ref(self):
+        f = self.f
+        target = self.stale_pr_base()
+        previous = (f.state_dir / S.VERIFY_RECEIPTS).read_bytes()
+        result = f.invoke("--verify-integration")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        receipts = S.load_verifications(f.state_dir)[0]
+        self.assertEqual(len(receipts), 2)
+        self.assertEqual(receipts[-1]["target_commit"], target)
+        self.assertEqual(receipts[-1]["authorization_commit"], target)
+        self.assertEqual(receipts[-1]["subject_head"], f.head)
+        self.assertEqual(receipts[-1]["result"], "pass")
+        self.assertTrue((f.state_dir / S.VERIFY_RECEIPTS).read_bytes().startswith(previous))
+        self.assertEqual(f.calls(["pr", "merge"]), [])
+        self.assertEqual(f.calls(["api"]), [f.forge["ref_command"]])
+
+    def test_stale_pr_base_evidence_refuses_before_merge(self):
+        f = self.f
+        self.stale_pr_base()
+        previous = (f.state_dir / S.VERIFY_RECEIPTS).read_bytes()
+        result = f.invoke()
+        f.assert_refused(result)
+        self.assertIn("target moved", result.stderr)
+        self.assertIn("--verify-integration", result.stderr)
+        self.assertEqual(list(f.state_dir.glob("merge-unit-*.json")), [])
+        self.assertEqual((f.state_dir / S.VERIFY_RECEIPTS).read_bytes(), previous)
+
+    def test_ref_move_during_preflight_refuses_before_merge(self):
+        f = self.f
+        target = self.stale_pr_base()
+        f.forge["ref"]["object"]["sha"] = f.base
+        f.forge["ref_after_read"] = {
+            "ref": "refs/heads/main", "object": {"type": "commit", "sha": target}}
+        f.save()
+        result = f.invoke()
+        f.assert_refused(result)
+        self.assertIn("target moved during preflight", result.stderr)
+        self.assertIn("--verify-integration", result.stderr)
+        self.assertEqual(f.calls(["api"]), [f.forge["ref_command"]] * 2)
+        self.assertEqual(list(f.state_dir.glob("merge-unit-*.json")), [])
+        # No request was made, so fresh verification can proceed without abandonment.
+        verified = f.invoke("--verify-integration")
+        self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+        self.assertEqual(S.load_verifications(f.state_dir)[0][-1]["target_commit"], target)
+
+    def test_stale_pr_base_with_current_evidence_merges_once(self):
+        f = self.f
+        target = self.stale_pr_base()
+        receipt = f.record_integration(target)
+        result = f.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = f.calls()
+        merge_index = next(i for i, call in enumerate(calls) if call[:2] == ["pr", "merge"])
+        self.assertEqual(calls[merge_index - 1], f.forge["ref_command"])
+        self.assertEqual(f.intent()["target_before_request"], target)
+        self.assertEqual(f.intent()["preconditions"]["integration"], receipt)
+        self.assertEqual(f.receipts()[0]["target_commit"], target)
+        self.assertEqual(f.receipts()[0]["integration_status"], "candidate-verified")
+        self.assertEqual(f.invoke().returncode, 0)
+        self.assertEqual(len(f.calls(["pr", "merge"])), 1)
+
+    def test_invalid_target_ref_never_falls_back_to_pr_base(self):
+        f = self.f
+        payloads = [None, [], {},
+                    {"ref": "refs/heads/main", "object": {}},
+                    {"ref": "refs/heads/main", "object": {"type": "tag", "sha": f.base}}]
+        for name in ("refs/heads/Main", "refs/heads/main/", "refs/heads/main\n"):
+            payloads.append({"ref": name, "object": {"type": "commit", "sha": f.base}})
+        for sha in (None, f.base.upper(), f.base + "\n", f.base + "0", f.base[:12]):
+            payloads.append({"ref": "refs/heads/main", "object": {"type": "commit", "sha": sha}})
+        original = (f.state_dir / S.VERIFY_RECEIPTS).read_bytes()
+        for payload in payloads:
+            for extra in ((), ("--verify-integration",)):
+                with self.subTest(payload=payload, extra=extra):
+                    f.forge["ref"] = payload
+                    f.save()
+                    f.assert_refused(f.invoke(*extra))
+                    self.assertEqual((f.state_dir / S.VERIFY_RECEIPTS).read_bytes(), original)
+                    self.assertEqual(list(f.state_dir.glob("merge-unit-*.json")), [])
+
+    def test_unavailable_target_ref_never_falls_back_to_pr_base(self):
+        f = self.f
+        f.forge["ref_exit"] = 1
+        f.save()
+        for extra in ((), ("--verify-integration",)):
+            with self.subTest(extra=extra):
+                result = f.invoke(*extra)
+                f.assert_refused(result)
+                self.assertIn("target ref unavailable", result.stderr)
+                self.assertEqual(list(f.state_dir.glob("merge-unit-*.json")), [])
+
+    def test_ref_route_uses_anchored_remote_and_exact_encoded_branch(self):
+        f = self.f
+        branch = "release/next#%+é"
+        f.git("branch", "-m", "main", branch)
+        f.unit["target_branch"] = branch
+        remote = "git@forge.example:another/repository.git"
+        for anchor in (f.launch, f.us["attempt_launch_facts"]["a1"]):
+            anchor.update(target_branch=branch, repository_remote=remote,
+                          repository_remote_raw=remote)
+        f.state["plan_digest"] = S.plan_digest(f.plan)
+        f.forge["pr"].update(baseRefName=branch,
+                             url="https://forge.example/another/repository/pull/7")
+        f.forge["ref"]["ref"] = "refs/heads/" + branch
+        f.forge["ref_command"] = [
+            "api", "--hostname", "forge.example",
+            "repos/another/repository/git/ref/heads/release/next%23%25%2B%C3%A9"]
+        f.save()
+        verified = f.invoke("--verify-integration")
+        self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+        result = f.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(f.calls(["api"])[:3], [f.forge["ref_command"]] * 3)
+        self.assertEqual(f.receipts()[0]["target"], branch)
+        self.assertEqual(f.receipts()[0]["repo"], remote)
 
     def test_000_failed_candidate_cannot_be_waived(self):
         f = self.f
@@ -288,8 +411,8 @@ class TestMergePrecondition(unittest.TestCase):
         old["integration_status"] = "candidate-verified"
         path = f.state_dir / ("merge-unit-" + old["operation_id"] + ".json")
         path.write_text(json.dumps(old))
+        target = self.stale_pr_base()
         f.forge["pr"].update(state="MERGED", mergeCommit={"oid": f.merged})
-        f.forge["commit"]["parents"] = [{"sha": "f" * 40}]
         f.us["merge_receipt"] = {
             "unit": "u", "repo": f.remote, "pr": f.remote + "/pull/7",
             "target": "main", "head": f.head, "merged_as": f.merged,
@@ -302,7 +425,7 @@ class TestMergePrecondition(unittest.TestCase):
         saved = json.loads((f.state_dir / S.STATE_FILE).read_text())
         self.assertEqual(saved["units"]["u"]["merge_receipt"]["integration_status"],
                          "integration-unverified")
-        self.assertEqual(saved["units"]["u"]["merge_receipt"]["target_commit"], "f" * 40)
+        self.assertEqual(saved["units"]["u"]["merge_receipt"]["target_commit"], target)
 
 
 if __name__ == "__main__":
