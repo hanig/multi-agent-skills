@@ -119,7 +119,7 @@ class TestFixtureProcessGuard(unittest.TestCase):
                 self.assertTrue(observed['gone'],
                                 'root-free orphan survived a clean unittest result')
 
-    def _orphan_probe(self, session_flag=None, leader_only=False):
+    def _orphan_probe(self, session_flag=None, leader_only=False, separate_group=False):
         observed = {}
 
         class Probe(unittest.TestCase):
@@ -147,6 +147,7 @@ class TestFixtureProcessGuard(unittest.TestCase):
                 # chain. The grandchild execs away every root-bearing marker.
                 script.write_text(
                     'import os, time\n'
+                    + ('os.setpgid(0, 0)\n' if separate_group else '') +
                     'middle = os.fork()\n'
                     'if middle == 0:\n'
                     '    if os.fork(): os._exit(0)\n'
@@ -160,7 +161,9 @@ class TestFixtureProcessGuard(unittest.TestCase):
                 observed['proc'] = proc
                 # Independent containment also works when group *recording*
                 # is mutated away. Never signal the outer test runner's group.
-                pgid = os.getpgid(proc.pid)
+                # setpgid runs inside the interpreter after Popen's exec
+                # handshake. Assert its final group below, after readiness.
+                pgid = proc.pid if separate_group else os.getpgid(proc.pid)
                 self.assertNotEqual(pgid, os.getpgrp())
                 supervisor = scope.children[-1][0]
                 observed['anchor'] = supervisor
@@ -168,6 +171,7 @@ class TestFixtureProcessGuard(unittest.TestCase):
                 def contain():
                     if supervisor.returncode is None or not observed.get('gone', False):
                         kill_group(pgid)
+                        kill_group(supervisor.pid)
                     supervisor.wait(timeout=5)
 
                 self.addCleanup(contain)
@@ -189,6 +193,22 @@ class TestFixtureProcessGuard(unittest.TestCase):
         row = process_table().get(observed['orphan'])
         observed['gone'] = row is None or row[2].startswith('Z')
         return observed
+
+    def test_later_process_group_changes_keep_root_free_orphans_contained(self):
+        for leader_only in (False, True):
+            with self.subTest(leader_only=leader_only):
+                observed = self._orphan_probe(separate_group=True, leader_only=leader_only)
+                result = observed['result']
+                self.assertEqual(result.errors, [])
+                if leader_only:
+                    self.assertEqual(len(result.failures), 2)
+                    self.assertIn('fixture PIDs survived KILL', result.failures[0][1])
+                    self.assertIn('fixture processes survived cleanup', result.failures[1][1])
+                    self.assertIsNone(observed['anchor'].returncode)
+                    self.assertFalse(observed['gone'])
+                else:
+                    self.assertTrue(result.wasSuccessful(), result.failures)
+                    self.assertTrue(observed['gone'])
 
     def test_root_free_group_survivor_fails_before_the_leader_is_reaped(self):
         observed = self._orphan_probe(leader_only=True)
