@@ -4,6 +4,7 @@ Register before launch and retain PID files until unittest's cleanups finish.
 Only direct children are waitable here. Descendants are killed and observed
 non-running; their actual parent (or the OS reaper) collects their exit status.
 """
+import fcntl
 import inspect
 import json
 import os
@@ -15,6 +16,26 @@ import subprocess
 import sys
 import time
 from unittest import mock
+
+
+def _private_pipe():
+    """Keep internal channels out of a caller's absent standard descriptors.
+
+    Filling an absent stdin/stdout/stderr would change the child's inherited
+    I/O and let its redirections overwrite a supervisor channel. Move both
+    ends above stdio before launching either kind of supervisor.
+    """
+    descriptors = list(os.pipe())
+    try:
+        for index, fd in enumerate(descriptors):
+            if fd < 3:
+                descriptors[index] = fcntl.fcntl(fd, fcntl.F_DUPFD_CLOEXEC, 3)
+                os.close(fd)
+        return tuple(descriptors)
+    except BaseException:
+        for fd in descriptors:
+            os.close(fd)
+        raise
 
 
 def wait_readable(fd, timeout):
@@ -212,13 +233,18 @@ class FixtureProcesses:
         child_options['args'] = (os.fsdecode(args) if isinstance(args, (str, bytes, os.PathLike))
                                  else [os.fsdecode(arg) for arg in args])
         child_options['pass_fds'] = list(kwargs.get('pass_fds', ()))
-        report_read, report_write = os.pipe()
-        control_read, control_write = os.pipe()
+        report_read, report_write = _private_pipe()
+        try:
+            control_read, control_write = _private_pipe()
+        except BaseException:
+            os.close(report_read)
+            os.close(report_write)
+            raise
         self._channels.extend((report_read, control_write))
         try:
             script = (self.root / ('fixture-launch-%d.py' % len(self.children))).absolute()
             script.write_text(
-                'import json, os, selectors, subprocess, time\n'
+                'import errno, json, os, selectors, subprocess, time\n'
                 'report, control = %d, %d\n'
                 'os.set_inheritable(report, False)\n'
                 'os.set_inheritable(control, False)\n'
@@ -229,7 +255,10 @@ class FixtureProcesses:
                 'except OSError as error:\n'
                 '    send({"error": [error.errno, error.strerror, error.filename]})\n'
                 'else:\n'
-                '    for fd in (0, 1, 2): os.close(fd)\n'
+                '    for fd in (0, 1, 2):\n'
+                '        try: os.close(fd)\n'
+                '        except OSError as error:\n'
+                '            if error.errno != errno.EBADF: raise\n'
                 '    send({"pid": child.pid})\n'
                 '    pending = b""\n'
                 '    readiness = selectors.DefaultSelector()\n'
@@ -268,7 +297,7 @@ class FixtureProcesses:
         stem = 'fixture-supervisor-%d' % len(self.children)
         script = (self.root / (stem + '.py')).absolute()
         result_file = (self.root / (stem + '.json')).absolute()
-        read_fd, write_fd = os.pipe()
+        read_fd, write_fd = _private_pipe()
         try:
             script.write_text(
                 'import json, os, time, traceback\n'
