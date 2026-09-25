@@ -10,7 +10,7 @@
     },
     {
       "name": "changed-tests-stable",
-      "sha256": "433526c042a03effdba3aabe68eb9477d76f25773dab512fb0a60eeae340fa32",
+      "sha256": "79037733c862828e49f44e2f4c0ce99a91f70e8c268621b15efdfd0192aca940",
       "claims": [
         "changed-tests-stable"
       ],

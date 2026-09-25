@@ -71,6 +71,50 @@ class TestSharedGuard(unittest.TestCase):
         return [r for r in S.load_verifications(self.f.state_dir)[0]
                 if r["claim"] == CLAIM][-1]
 
+    def use_real_integration(self, root_discovery=False):
+        self.install_policy()
+        program = (ROOT / V.MERGE_VERIFIER_PATH).read_text()
+        if root_discovery:
+            program = program.replace(', "-s", "tests"', '')
+        self.policy["verifiers"][0]["sha256"] = hashlib.sha256(program.encode()).hexdigest()
+        self.target = self.precondition.target_commit({
+            V.MERGE_VERIFIER_PATH: program, V.POLICY_FILE: json.dumps(self.policy)})
+
+    def assert_import_verification_passes(self):
+        result = self.verify()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        integration, shared = S.load_verifications(self.f.state_dir)[0][-2:]
+        self.assertEqual((integration["result"], shared["result"]), ("pass", "pass"))
+        self.assertIn("repetition 5/5", shared["stdout_tail"])
+        self.assertEqual(self.f.calls(["pr", "merge"]), [])
+
+    def test_nested_package_relative_imports_match_integration_discovery(self):
+        self.use_real_integration()
+        self.candidate({
+            "tests/nested/__init__.py": "", "tests/nested/helpers.py": "VALUE=7\n",
+            "tests/nested/test_guard.py": "import unittest\nfrom .helpers import VALUE\n"
+            "class Guard(unittest.TestCase):\n"
+            "    def test_guard(self): self.assertEqual(VALUE, 7)\n"})
+        self.assert_import_verification_passes()
+
+    def test_root_package_relative_imports_with_target_package_runner(self):
+        self.use_real_integration(root_discovery=True)
+        self.candidate({
+            "tests/__init__.py": "", "tests/helpers.py": "VALUE=7\n",
+            "tests/test_guard.py": "import unittest\nfrom .helpers import VALUE\n"
+            "class Guard(unittest.TestCase):\n"
+            "    def test_guard(self): self.assertEqual(VALUE, 7)\n"})
+        self.assert_import_verification_passes()
+
+    def test_root_package_keeps_legacy_absolute_helper_imports(self):
+        self.use_real_integration()
+        self.candidate({
+            "tests/__init__.py": "", "tests/helpers.py": "VALUE=7\n",
+            "tests/test_guard.py": "import unittest\nfrom helpers import VALUE\n"
+            "class Guard(unittest.TestCase):\n"
+            "    def test_guard(self): self.assertEqual(VALUE, 7)\n"})
+        self.assert_import_verification_passes()
+
     def test_000_fifth_run_failure_refuses_before_any_merge_call(self):
         self.install_policy()
         self.candidate({"tests/test_guard.py": self.counter_test(fail_at=5)})
