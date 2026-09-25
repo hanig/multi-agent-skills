@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -387,6 +388,65 @@ class TestDoctorAndSurveyAgentOutput(unittest.TestCase):
                 os.symlink(found, bindir / name)
         os.symlink(sys.executable, bindir / "python3")
         return bindir
+
+    def _frozen_env(self, directory, version, observed):
+        """Freeze discovery's clock inside the actual entrypoint's child."""
+        bindir = self._bin(directory)
+        (bindir / "claude").write_text(f"#!/bin/sh\nprintf '%s\\n' '{version}'\n")
+        hooks = directory / "clock-fixture"
+        hooks.mkdir()
+        (hooks / "sitecustomize.py").write_text(
+            "import datetime\nimport agent_discovery\n"
+            "class FrozenDate(datetime.date):\n"
+            "    @classmethod\n"
+            "    def today(cls):\n"
+            f"        return cls.fromisoformat({observed.isoformat()!r})\n"
+            "agent_discovery.date = FrozenDate\n")
+        return {"HOME": str(directory / "home"), "PATH": str(bindir),
+                "PYTHONPATH": os.pathsep.join((str(hooks), str(SCRIPTS))),
+                "PYTHONDONTWRITEBYTECODE": "1"}
+
+    def test_doctor_json_expiry_changes_verification_and_next_step(self):
+        for version, deadline in (("2.1.261", date(2026, 10, 5)),
+                                  ("2.1.282", date(2026, 10, 25))):
+            for offset, expected in ((-1, "verified"), (0, "verified"), (1, "unverified")):
+                observed = deadline + timedelta(days=offset)
+                with self.subTest(version=version, observed=observed), \
+                        tempfile.TemporaryDirectory() as raw:
+                    directory = Path(raw)
+                    env = self._frozen_env(directory, version, observed)
+                    result = subprocess.run([str(DOCTOR), "--json"], cwd=directory,
+                                            env=env, text=True, capture_output=True, timeout=20)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    value = json.loads(result.stdout)
+                    agent = value["agents"]["claude"]
+                    self.assertEqual(agent["agent_present"]["version"], version)
+                    self.assertEqual(agent["discovery"]["verification"], expected)
+                    self.assertEqual(agent["next_step"],
+                        "Use an explicitly supported version or pass an explicit target; this executable version is unverified."
+                        if expected == "unverified" else None)
+                    selected = next(item for item in value["selection"]["selected"]
+                                    if item["agent"] == "claude")
+                    self.assertEqual(selected["certification"], expected)
+                    self.assertFalse((directory / "home").exists())
+
+    def test_saved_survey_does_not_certify_expired_evidence(self):
+        for version, observed in (("2.1.261", date(2026, 10, 6)),
+                                   ("2.1.282", date(2026, 10, 26))):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as raw:
+                directory = Path(raw)
+                env = self._frozen_env(directory, version, observed)
+                output = directory / "survey.json"
+                result = subprocess.run(
+                    [sys.executable, str(SURVEY), "--repo", str(directory), "--out", str(output)],
+                    cwd=directory, env=env, text=True, capture_output=True, timeout=45)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                value = json.loads(output.read_text())["agent_diagnostics"]
+                agent = value["agents"]["claude"]
+                self.assertEqual(agent["agent_present"]["version"], version)
+                self.assertEqual(agent["discovery"]["verification"], "unverified")
+                self.assertIn("this executable version is unverified", agent["next_step"])
+                self.assertFalse((directory / "home").exists())
 
     def test_doctor_json_honors_prefix_and_contains_all_agent_facts(self):
         with tempfile.TemporaryDirectory() as tmp:
