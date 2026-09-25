@@ -26,6 +26,120 @@ def kill_group(pgid):
 
 
 class TestFixtureProcessGuard(unittest.TestCase):
+    def test_000_non_session_fixture_orphan_exec_is_killed_by_cleanup(self):
+        for session_flag in ({}, {'start_new_session': False}):
+            with self.subTest(session_flag=session_flag):
+                observed = self._orphan_probe(session_flag=session_flag)
+                self.assertTrue(observed['result'].wasSuccessful(),
+                                observed['result'].failures)
+                self.assertTrue(observed['gone'],
+                                'root-free orphan survived a clean unittest result')
+
+    def _orphan_probe(self, session_flag=None, leader_only=False):
+        observed = {}
+
+        class Probe(unittest.TestCase):
+            def runTest(case):
+                directory = tempfile.TemporaryDirectory()
+                case.addCleanup(directory.cleanup)
+
+                def kill(pgid):
+                    if leader_only:
+                        try:
+                            os.kill(pgid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    else:
+                        kill_group(pgid)
+
+                scope = FixtureProcesses(case, directory.name, kill)
+                script = Path(directory.name) / 'fixture.py'
+                pidfile = Path(directory.name) / 'orphan.pid'
+                reaped = Path(directory.name) / 'middle-reaped'
+                # The middle child exits before cleanup, severing the PPID
+                # chain. The grandchild execs away every root-bearing marker.
+                script.write_text(
+                    'import os, time\n'
+                    'middle = os.fork()\n'
+                    'if middle == 0:\n'
+                    '    if os.fork(): os._exit(0)\n'
+                    '    with open(%r, "w") as f: f.write(str(os.getpid()))\n'
+                    '    os.execl("/bin/sleep", "/bin/sleep", "600")\n'
+                    'os.waitpid(middle, 0)\n'
+                    'open(%r, "w").close()\n'
+                    'time.sleep(600)\n' % (str(pidfile), str(reaped)))
+                proc = scope.popen([sys.executable, str(script)],
+                                   **(session_flag or {}))
+                observed['proc'] = proc
+                # Independent containment also works when group *recording*
+                # is mutated away. Never signal the outer test runner's group.
+                pgid = os.getpgid(proc.pid)
+                self.assertNotEqual(pgid, os.getpgrp())
+
+                def contain():
+                    kill_group(pgid)
+                    proc.wait(timeout=5)
+
+                self.addCleanup(contain)
+                deadline = time.monotonic() + 20
+                while True:
+                    if reaped.exists() and pidfile.exists() and pidfile.read_text():
+                        pid = int(pidfile.read_text())
+                        row = process_table().get(pid)
+                        if row and row[0] != proc.pid and row[3] == '/bin/sleep 600':
+                            observed['orphan'] = pid
+                            case.assertEqual(row[1], pgid)
+                            break
+                    case.assertLess(time.monotonic(), deadline, 'orphan did not exec')
+                    time.sleep(0.01)
+
+        result = unittest.TestResult()
+        Probe().run(result)
+        observed['result'] = result
+        row = process_table().get(observed['orphan'])
+        observed['gone'] = row is None or row[2].startswith('Z')
+        return observed
+
+    def test_root_free_group_survivor_fails_before_the_leader_is_reaped(self):
+        observed = self._orphan_probe(leader_only=True)
+        result = observed['result']
+        self.assertEqual(result.errors, [])
+        self.assertEqual(len(result.failures), 2)
+        self.assertIn('fixture PIDs survived KILL', result.failures[0][1])
+        self.assertIn('fixture processes survived cleanup', result.failures[1][1])
+        self.assertIsNone(observed['proc'].returncode,
+                          'failed termination released the group ownership anchor')
+        self.assertFalse(observed['gone'])
+
+    def test_retained_supervisor_contains_a_reaped_non_session_fixture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case = unittest.TestCase()
+            scope = FixtureProcesses(case, directory, kill_group)
+            fixture = (
+                'import json, os, subprocess\n'
+                'child = subprocess.Popen(["/bin/sleep", "600"], '
+                'stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, '
+                'stderr=subprocess.DEVNULL)\n'
+                'print(json.dumps({"pid": child.pid, '
+                '"pgid": os.getpgid(child.pid), "sid": os.getsid(child.pid)}))\n')
+            source = (
+                'import json, subprocess, sys\n'
+                'completed = subprocess.run([sys.executable, "-c", %r], '
+                'capture_output=True, text=True, check=True)\n'
+                'result = json.loads(completed.stdout)\n' % fixture)
+            try:
+                result = scope.run_python(source)
+                supervisor = scope.children[0][0]
+                self.assertEqual(result['pgid'], supervisor.pid)
+                self.assertEqual(result['sid'], supervisor.pid)
+                self.assertNotEqual(result['pid'], result['pgid'])
+                self.assertIsNone(supervisor.returncode)
+                self.assertTrue(case.doCleanups())
+                row = process_table().get(result['pid'])
+                self.assertTrue(row is None or row[2].startswith('Z'), row)
+            finally:
+                self.assertTrue(case.doCleanups())
+
     def _probe(self, outcome='pass', omit_cleanup=False, escape=False, root_free=False):
         observed = {}
 
