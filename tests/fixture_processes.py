@@ -4,14 +4,15 @@ Register before launch and retain PID files until unittest's cleanups finish.
 Only direct children are waitable here. Descendants are killed and observed
 non-running; their actual parent (or the OS reaper) collects their exit status.
 """
-import contextlib
+import json
 import os
 from pathlib import Path
+import select
 import shlex
 import signal
 import subprocess
+import sys
 import time
-from unittest import mock
 
 
 def process_table():
@@ -81,23 +82,61 @@ class FixtureProcesses:
     def record_pidfile(self, path):
         self.pidfiles.append(Path(path))
 
-    def popen(self, *args, **kwargs):
-        proc = subprocess.Popen(*args, **kwargs)
-        self.children.append((proc, proc.pid if kwargs.get('start_new_session') else None))
+    def popen(self, args, **kwargs):
+        """Capture a fixture in a private session, even without a caller flag.
+
+        Use run_python for product calls whose own children must inherit their
+        parent's session: its retained supervisor owns the enclosing session.
+        """
+        kwargs['start_new_session'] = True
+        proc = subprocess.Popen(args, **kwargs)
+        self.children.append((proc, proc.pid))
+        with self.pidfiles[0].open('a') as record:
+            record.write('%s\n' % proc.pid)
         return proc
 
-    @contextlib.contextmanager
-    def capture_popen(self):
-        """Keep handles for in-process product calls without changing launch."""
-        original = subprocess.Popen
+    def run_python(self, source, timeout=60):
+        """Return JSON-valued `result` while retaining the session supervisor.
 
-        def launch(*args, **kwargs):
-            proc = original(*args, **kwargs)
-            self.children.append((proc, proc.pid if kwargs.get('start_new_session') else None))
-            return proc
-
-        with mock.patch.object(subprocess, 'Popen', launch):
-            yield
+        The test code runs in a fresh interpreter. Its Popen calls keep their
+        real session semantics, and may reap their children without releasing
+        our group anchor. The supervisor stays alive until fixture cleanup.
+        """
+        stem = 'fixture-supervisor-%d' % len(self.children)
+        script = self.root / (stem + '.py')
+        result_file = self.root / (stem + '.json')
+        read_fd, write_fd = os.pipe()
+        try:
+            script.write_text(
+                'import json, os, time, traceback\n'
+                'try:\n'
+                '    namespace = {}\n'
+                '    exec(compile(%r, %r, "exec"), namespace)\n'
+                '    answer = {"result": namespace["result"]}\n'
+                'except BaseException:\n'
+                '    answer = {"error": traceback.format_exc()}\n'
+                'with open(%r, "w") as stream: json.dump(answer, stream)\n'
+                'os.write(%d, b"R")\n'
+                'os.close(%d)\n'
+                'while True: time.sleep(600)\n' % (
+                    source, str(script), str(result_file), write_fd, write_fd))
+            self.popen([sys.executable, str(script)],
+                       stdin=subprocess.DEVNULL, pass_fds=(write_fd,))
+            os.close(write_fd)
+            write_fd = None
+            ready, _, _ = select.select([read_fd], [], [], timeout)
+            if not ready:
+                raise subprocess.TimeoutExpired(str(script), timeout)
+            if os.read(read_fd, 1) != b'R':
+                raise AssertionError('fixture supervisor exited before reporting')
+            answer = json.loads(result_file.read_text())
+            if 'error' in answer:
+                raise AssertionError('fixture supervisor failed:\n' + answer['error'])
+            return answer['result']
+        finally:
+            os.close(read_fd)
+            if write_fd is not None:
+                os.close(write_fd)
 
     def _root_rows(self, table):
         roots = {str(self.root), os.path.realpath(str(self.root))}
@@ -161,7 +200,6 @@ class FixtureProcesses:
 
     def cleanup(self):
         self._kill(*self._targets(process_table()))
-        self._reap()
         deadline = time.monotonic() + 5
         while True:
             # Re-establish ownership, rather than treating reused numeric PIDs
@@ -171,6 +209,10 @@ class FixtureProcesses:
             alive = {pid: row for pid, row in targets.items()
                      if not row[2].startswith('Z')}
             if not alive:
+                # Reserve every unreaped leader's PID through the termination
+                # check. Reaping first can erase the last root-free group's
+                # ownership anchor and turn a failed KILL into a clean guard.
+                self._reap()
                 return
             # A slow read may finish after the deadline with older rows.
             # Require a snapshot started after the grace period before failing.

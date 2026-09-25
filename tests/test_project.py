@@ -1200,9 +1200,12 @@ class TestRound2ProjectFindings(_FixtureTestCase):
         import survey as S2
         t0 = _t.time()
         with self._fixture_directory() as d:
-            with self._fixture_scope(d).capture_popen():
-                rc, out, err = S2.run(
-                    ["sh", "-c", "exec sleep 30"], timeout=2)
+            rc, out, err = self._fixture_scope(d).run_python(
+                'import sys\n'
+                'sys.path.insert(0, %r)\n'
+                'import survey\n'
+                'result = survey.run(["sh", "-c", "exec sleep 30"], timeout=2)\n'
+                % str(SCRIPTS))
         elapsed = _t.time() - t0
         self.assertLess(elapsed, 15, "the timeout did not apply")
         self.assertIn("timed out", err)
@@ -2731,21 +2734,15 @@ class TestTheWalkCannotBeHeldOpenByASyscall(_FixtureTestCase):
             # The kill deadline is shortened rather than waited out: what is
             # under test is that the walk returns when the deadline passes,
             # not the particular number of seconds in it.
-            keep = (S2.WALK_KILL_SECONDS, S2.REAP_SECONDS,
-                    os.environ.get("PYTHONPATH"))
-            S2.WALK_KILL_SECONDS, S2.REAP_SECONDS = 3, 1
-            os.environ["PYTHONPATH"] = str(site)
-            try:
-                t0 = _t.time()
-                with self._fixture_scope(d).capture_popen():
-                    out = S2.repo(str(root))
-                elapsed = _t.time() - t0
-            finally:
-                S2.WALK_KILL_SECONDS, S2.REAP_SECONDS = keep[0], keep[1]
-                if keep[2] is None:
-                    os.environ.pop("PYTHONPATH", None)
-                else:
-                    os.environ["PYTHONPATH"] = keep[2]
+            t0 = _t.time()
+            out = self._fixture_scope(d).run_python(
+                'import os, sys\n'
+                'sys.path.insert(0, %r)\n'
+                'import survey\n'
+                'survey.WALK_KILL_SECONDS, survey.REAP_SECONDS = 3, 1\n'
+                'os.environ["PYTHONPATH"] = %r\n'
+                'result = survey.repo(%r)\n' % (str(SCRIPTS), str(site), str(root)))
+            elapsed = _t.time() - t0
             self.assertLess(elapsed, 30,
                             "a blocked opendir outlasted the kill deadline")
             walk = out["walk"]
