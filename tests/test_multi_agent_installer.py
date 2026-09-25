@@ -572,10 +572,33 @@ class TestLiveCertificationPlan(unittest.TestCase):
         self.assertEqual(len(plan.selected), 4)
         for target in plan.selected:
             self.assertFalse(target.discovery_verified, target.name)
+            self.assertEqual(target.certification,
+                             report["agents"][target.name]["evidence"]["certification"])
             self.assertIn(f"{target.name}: executable_found {target.version} (uncertified)", rendered)
         self.assertEqual([target["verification"] for target in document["targets"]],
                          ["unverified"] * 4)
         self.assertEqual(len(plan.certification_warnings), 4)
+        for target in document["targets"]:
+            self.assertEqual(target["certification"],
+                             report["agents"][target["agent"]]["evidence"]["certification"])
+        self.assertEqual(rendered.count("evidence: 2026-09-25 — ARC-281 live run"), 4)
+
+    def test_normalized_current_discovery_retains_dated_evidence(self):
+        discovery = installer._load_discovery(ROOT)
+        with tempfile.TemporaryDirectory() as raw, \
+                mock.patch.object(discovery, "date", wraps=date) as clock:
+            clock.today.return_value = date(2026, 10, 6)
+            report = discovery.discover(
+                {"HOME": raw, "PATH": ""}, which=lambda name: "/fixtures/" + name,
+                probe=lambda path, timeout: (True, self.LIVE_VERSIONS[Path(path).name]))
+            targets = installer.normalize_agents([
+                dict(record, id=name, destinations=[record["roots"][0]["physical_path"]])
+                for name, record in report["agents"].items()])
+        self.assertEqual(len(targets), 4)
+        for target in targets:
+            self.assertTrue(target.discovery_verified)
+            self.assertEqual(target.certification,
+                             report["agents"][target.name]["evidence"]["certification"])
 
     def plan(self, versions, observed=date(2026, 10, 6)):
         discovery = installer._load_discovery(ROOT)
