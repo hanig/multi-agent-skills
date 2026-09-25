@@ -3653,15 +3653,22 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(_FixtureTestCase):
             source = self._supervisor_source()
             loop = "while (1) {\n    drain();"
             answer_end = "    exit 0;"
+            timing_start = "my $started = "
+            timing_end = 'my $state = "RUNNING";'
             self.assertEqual(source.count(loop), 1)
             self.assertEqual(source.count(answer_end), 1)
+            self.assertEqual(source.count(timing_start), 1)
+            self.assertEqual(source.count(timing_end), 1)
+            start = source.index(timing_start)
+            end = source.index(timing_end, start)
+            timing = source[start:end]
+            source = source[:start] + source[end:]
             # Only the extracted fixture gains a startup barrier. Execute the
-            # shipped drain, deadline transitions, signals and answer unchanged.
+            # shipped timing expressions too: copying them here could conceal
+            # a regression in the supervisor's deadline initialization.
             prime = '''
 while (length($tail) < 65536) { drain(); sleep 0.001; }
-$started = clock_gettime(CLOCK_MONOTONIC);
-$run_deadline = $started + $limit;
-$grace_deadline = $run_deadline + $reap;
+''' + timing + '''
 open(my $ready, ">", $ENV{HANIG_NOISY_READY}) or die $!;
 print $ready "$started\\n";
 close $ready or die $!;
