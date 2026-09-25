@@ -25,6 +25,14 @@ and older distinct versions after 2026-10-05. Unknown or stale versions remain
 `unverified` and emit selection warnings; refreshing one version cannot extend
 another's date. No record is deleted just because it ages out.
 
+`discover()` reports `verification: "verified"` only while the matching record
+is current, including its review deadline. On the following day it reports
+`verification: "unverified"` and `verification_freshness: "stale"`, retaining
+the date, deadline, and certification record as historical evidence. Doctor
+and survey consume this same status; doctor supplies the unverified next step.
+`select_targets()` also checks deadlines when consuming a previously generated
+report. Expiry never prevents destination planning.
+
 For recertification queries, `verification_review_due(adapter)` returns the
 earliest deadline among the newest records for each distinct version.
 `stale_adapter_certifications(as_of)` names an adapter when any such version

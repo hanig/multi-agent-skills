@@ -518,6 +518,7 @@ def discover(
     context = _environment(env)
     finder = which or (lambda executable: _which(executable, context))
     runner = probe or (lambda path, seconds: _default_probe(path, seconds, context))
+    observed = date.today()
     found_agents: dict[str, Any] = {}
     for key, spec in ADAPTERS.items():
         roots = resolve_roots(key, context)
@@ -556,8 +557,10 @@ def discover(
         else:
             state, version = ("configured", None) if any(item["exists"] for item in evidence["config_directories"]) else ("absent", None)
         certification = certification_for(spec, version)
-        verified = certification is not None
         review_due = verification_review_due(certification) if certification else None
+        freshness = ("unverified" if review_due is None else
+                     "stale" if observed > review_due else "current")
+        verified = freshness == "current"
         evidence["certification"] = certification
         source_verification = dict(spec["source_verification"])
         if certification and "authenticated_skill_invocation" in certification["checks"]:
@@ -575,8 +578,7 @@ def discover(
             "verified_on": certification["verified_on"] if certification else None,
             "source_verification": source_verification,
             "verification_review_due": review_due.isoformat() if review_due else None,
-            "verification_freshness": ("unverified" if review_due is None else
-                                       "stale" if date.today() > review_due else "current"),
+            "verification_freshness": freshness,
             "duplicate_behavior": spec["duplicates"],
             # Presence chooses a destination; verification says whether that
             # adapter version is certified. Conflating them made four present

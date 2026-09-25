@@ -639,7 +639,8 @@ class TestLiveCertificationPlan(unittest.TestCase):
                 self.assertEqual(target["verification"], "unverified")
                 self.assertEqual(target["certification"]["verified_on"], "2026-09-25")
                 self.assertIn(target["agent"] + " adapter certification expired after 2026-10-25", stderr)
-        self.assertEqual(stderr.count("warning:"), 4)
+        self.assertEqual(stderr.count("warning:"), 8)
+        self.assertEqual(stderr.count("not adapter-certified"), 4)
 
     def test_old_releases_are_not_renewed_by_the_new_records(self):
         versions = {"claude": "2.1.261", "codex": "0.153.4", "pi": "0.73.1"}
