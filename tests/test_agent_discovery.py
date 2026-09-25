@@ -2,10 +2,16 @@
 import os
 import copy
 import json
+import select
+import signal
+import socket
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from concurrent.futures import Future
+from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
 from unittest import mock
@@ -16,6 +22,17 @@ import agent_discovery as discovery  # noqa: E402
 
 
 VERSIONS = {name: spec["verified_versions"][0] for name, spec in discovery.adapters().items()}
+# Real process startup is not the property under test. Give it headroom on a
+# shared host; short production deadlines are covered separately below.
+REAL_PROBE_SECONDS = 60
+REAL_REAP_SECONDS = 1
+# Measure only after observed readiness/forced expiry, excluding interpreter
+# startup. The 1s drain window plus 7s slack gives an 8s bound. The slack covers
+# the additional post-kill/finally reap windows and scheduling/exit delays,
+# while still rejecting an extra 10s wait or the full 60s probe budget. The
+# 120s watchdog separately detects deadlock.
+REAL_COMPLETION_SLACK_SECONDS = 7
+WATCHDOG_SECONDS = 120
 
 
 def fixture_env(home, **extra):
@@ -39,6 +56,49 @@ def fake_cli(directory, name, body):
     path.write_text("#!%s\n%s\n" % (sys.executable, body))
     path.chmod(0o755)
     return path
+
+
+@contextmanager
+def real_discovery(env):
+    """Run the real probe with fixture budgets and an independent watchdog.
+
+    Callers await the Future before releasing any fixture barrier. Cleanup
+    uses the owned supervisor, independently of the production kill helper.
+    The worker timestamps discovery's return so a delayed observer cannot add
+    time after completion to the measured latency.
+    """
+    answer = Future()
+    processes = []
+    popen = discovery.subprocess.Popen
+
+    def launch(*args, **kwargs):
+        proc = popen(*args, **kwargs)
+        processes.append(proc)
+        return proc
+
+    def run():
+        try:
+            report = discovery.discover(env, timeout=REAL_PROBE_SECONDS)
+            answer.set_result((report, time.monotonic()))
+        except BaseException as error:
+            answer.set_exception(error)
+
+    with mock.patch.object(discovery, "PROBE_REAP_SECONDS", REAL_REAP_SECONDS), \
+            mock.patch.object(discovery.subprocess, "Popen", side_effect=launch):
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        try:
+            yield answer
+        finally:
+            for proc in processes:
+                if proc.poll() is None:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+            worker.join(WATCHDOG_SECONDS)
+            if worker.is_alive():
+                raise AssertionError("discovery worker survived cleanup")
 
 
 class TestAgentDiscovery(unittest.TestCase):
@@ -159,7 +219,8 @@ class TestAgentDiscovery(unittest.TestCase):
             executable = bin_dir / "claude"
             executable.write_text("#!/bin/sh\nprintf '2.1.261\\n'\n")
             executable.chmod(0o755)
-            report = discovery.discover(fixture_env(home, PATH=str(bin_dir)))
+            with real_discovery(fixture_env(home, PATH=str(bin_dir))) as answer:
+                report, _ = answer.result(timeout=WATCHDOG_SECONDS)
         self.assertEqual(report["agents"]["claude"]["state"], "executable_found")
         self.assertEqual(report["agents"]["claude"]["verification"], "verified")
 
@@ -169,21 +230,65 @@ class TestAgentDiscovery(unittest.TestCase):
             home.mkdir()
             bin_dir.mkdir()
             fake_cli(bin_dir, "claude", "import sys; sys.stdout.write('x' * 1000000 + ' 2.1.261')")
-            report = discovery.discover(fixture_env(home, PATH=str(bin_dir)))
+            with real_discovery(fixture_env(home, PATH=str(bin_dir))) as answer:
+                report, _ = answer.result(timeout=WATCHDOG_SECONDS)
         output = report["agents"]["claude"]["evidence"]["executable"]["output"]
         self.assertLessEqual(len(output.encode()), discovery.PROBE_OUTPUT_BYTES)
         self.assertTrue(output.endswith("2.1.261"))
 
     def test_real_hung_cli_is_slow_not_probe_failed_or_undetermined(self):
-        with tempfile.TemporaryDirectory() as raw:
+        with tempfile.TemporaryDirectory() as raw, socket.socket() as listener:
             home, bin_dir = Path(raw) / "home", Path(raw) / "bin"
             home.mkdir()
             bin_dir.mkdir()
-            fake_cli(bin_dir, "claude", "import time; time.sleep(10)")
-            start = time.monotonic()
-            report = discovery.discover(fixture_env(home, PATH=str(bin_dir)), timeout=0.1)
-            elapsed = time.monotonic() - start
-        self.assertLess(elapsed, 1.5)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            listener.settimeout(WATCHDOG_SECONDS)
+            fake_cli(bin_dir, "claude", "\n".join([
+                "import socket",
+                "peer = socket.create_connection(%r, timeout=%r)" % (
+                    listener.getsockname(), WATCHDOG_SECONDS * 2),
+                "peer.sendall(b'R')",
+                "peer.recv(1)",
+            ]))
+            peers = []
+            expired_at = None
+
+            def expire_after_cli_started(readers, writers, errors, timeout):
+                nonlocal expired_at
+                peer, _ = listener.accept()
+                peers.append(peer)
+                peer.settimeout(WATCHDOG_SECONDS)
+                self.assertEqual(peer.recv(1), b"R", "hung CLI never started")
+                # Exercise the real timeout branch only after the CLI is
+                # blocked. Zero readiness comes from the OS, not a fake report.
+                self.assertGreater(timeout, 0)
+                expired_at = time.monotonic()
+                return select.select(readers, writers, errors, 0)
+
+            try:
+                with mock.patch.object(discovery, "select", wraps=select) as polling:
+                    polling.select.side_effect = expire_after_cli_started
+                    with real_discovery(fixture_env(home, PATH=str(bin_dir))) as answer:
+                        report, completed_at = answer.result(timeout=WATCHDOG_SECONDS)
+                        self.assertIsNotNone(expired_at)
+                        self.assertLess(
+                            completed_at - expired_at,
+                            REAL_REAP_SECONDS + REAL_COMPLETION_SLACK_SECONDS,
+                            "discovery exceeded the post-expiry completion bound")
+                        # Observe termination before the fixture's fallback
+                        # cleanup can kill a survivor and mask a probe defect.
+                        self.assertEqual(len(peers), 1)
+                        try:
+                            response = peers[0].recv(1)
+                        except ConnectionResetError:
+                            # As in the inherited-writer case, reset also
+                            # means the killed peer's connection has closed.
+                            response = b""
+                        self.assertEqual(response, b"", "timed-out CLI survived")
+            finally:
+                for peer in peers:
+                    peer.close()
         agent = report["agents"]["claude"]
         self.assertEqual(agent["state"], "slow")
         self.assertEqual(agent["evidence"]["executable"]["outcome"], "SLOW")
@@ -214,23 +319,74 @@ class TestAgentDiscovery(unittest.TestCase):
         self.assertEqual(deadlines["claude"], discovery.PROBE_DEADLINE_FLOOR_SECONDS)
 
     def test_real_parent_exit_cannot_leave_inherited_output_writer(self):
-        with tempfile.TemporaryDirectory() as raw:
+        with tempfile.TemporaryDirectory() as raw, socket.socket() as listener:
             home, bin_dir, marker = Path(raw) / "home", Path(raw) / "bin", Path(raw) / "escaped"
             home.mkdir()
             bin_dir.mkdir()
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            listener.settimeout(WATCHDOG_SECONDS)
+            writer = "\n".join([
+                "import os, pathlib, socket, sys",
+                "peer = socket.create_connection(%r, timeout=%r)" % (
+                    listener.getsockname(), WATCHDOG_SECONDS * 2),
+                "peer.sendall(b'R')",
+                "assert peer.recv(1) == b'A'",
+                "os.write(int(sys.argv[1]), b'R')",
+                "os.close(int(sys.argv[1]))",
+                "if peer.recv(1) == b'W':",
+                "    pathlib.Path(%r).write_text('escaped')" % str(marker),
+                "    peer.sendall(b'E')",
+                "peer.close()",
+            ])
             fake_cli(bin_dir, "claude", "\n".join([
-                "import subprocess, sys",
-                "subprocess.Popen([sys.executable, '-c', 'import pathlib, time; time.sleep(.8); pathlib.Path(sys.argv[1]).write_text(\"escaped\")', %r])" % str(marker),
+                "import os, subprocess, sys",
+                "ready, notify = os.pipe()",
+                "subprocess.Popen([sys.executable, '-c', %r, str(notify)], pass_fds=(notify,))" % writer,
+                "os.close(notify)",
+                "assert os.read(ready, 1) == b'R'",
+                "os.close(ready)",
                 "print('2.1.261')",
             ]))
-            start = time.monotonic()
-            report = discovery.discover(fixture_env(home, PATH=str(bin_dir)))
-            elapsed = time.monotonic() - start
-            time.sleep(0.9)
-            escaped = marker.exists()
-        self.assertLess(elapsed, 1.5)
-        self.assertEqual(report["agents"]["claude"]["state"], "executable_found")
-        self.assertFalse(escaped, "probe left an inherited writer running")
+            peer = None
+            with real_discovery(fixture_env(home, PATH=str(bin_dir))) as answer:
+                try:
+                    peer, _ = listener.accept()
+                    peer.settimeout(WATCHDOG_SECONDS)
+                    self.assertEqual(peer.recv(1), b"R", "writer never reached its barrier")
+                    ready_at = time.monotonic()
+                    # Only this acknowledgment lets the writer notify the CLI
+                    # to print/exit. The drain cannot precede our timestamp,
+                    # even if this test thread was starved during startup.
+                    peer.sendall(b"A")
+                    # No release is sent until discovery returns. Waiting for
+                    # inherited stdout EOF would therefore trip this watchdog.
+                    report, completed_at = answer.result(timeout=WATCHDOG_SECONDS)
+                    self.assertLess(
+                        completed_at - ready_at,
+                        REAL_REAP_SECONDS + REAL_COMPLETION_SLACK_SECONDS,
+                        "discovery exceeded the post-readiness drain bound")
+                    self.assertEqual(report["agents"]["claude"]["state"], "executable_found")
+                    try:
+                        peer.sendall(b"W")
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                    # A write to the killed peer can elicit TCP RST instead of
+                    # EOF. Both mean the connection closed; a surviving writer
+                    # writes the marker before acknowledging release with E.
+                    try:
+                        response = peer.recv(1)
+                    except ConnectionResetError:
+                        response = b""
+                    self.assertEqual(response, b"", "probe left an inherited writer running")
+                    self.assertFalse(marker.exists(), "probe left an inherited writer running")
+                finally:
+                    # Release a blocked writer even when the watchdog/assertion
+                    # failed. The context then stops any owned supervisor.
+                    if peer is None and select.select([listener], [], [], 0)[0]:
+                        peer, _ = listener.accept()
+                    if peer is not None:
+                        peer.close()
 
     def test_explicit_selection_is_bootstrap_safe_and_exclusions_are_visible(self):
         with tempfile.TemporaryDirectory() as raw:
