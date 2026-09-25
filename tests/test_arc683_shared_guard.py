@@ -115,6 +115,16 @@ class TestSharedGuard(unittest.TestCase):
             "    def test_guard(self): self.assertEqual(VALUE, 7)\n"})
         self.assert_import_verification_passes()
 
+    def test_tests_helper_keeps_precedence_over_same_named_root_helper(self):
+        self.use_real_integration()
+        self.candidate({
+            "helpers.py": "VALUE=0\n", "tests/__init__.py": "",
+            "tests/helpers.py": "VALUE=7\n",
+            "tests/test_guard.py": "import unittest\nfrom helpers import VALUE\n"
+            "class Guard(unittest.TestCase):\n"
+            "    def test_guard(self): self.assertEqual(VALUE, 7)\n"})
+        self.assert_import_verification_passes()
+
     def test_000_fifth_run_failure_refuses_before_any_merge_call(self):
         self.install_policy()
         self.candidate({"tests/test_guard.py": self.counter_test(fail_at=5)})
