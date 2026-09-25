@@ -241,10 +241,19 @@ class TestFixtureProcessGuard(unittest.TestCase):
                 script.chmod(0o700)
                 proc = scope.launch(FixtureSpec((str(script),)))
                 wait_for(lambda: bool(proc.stdout_path.read_text().strip()))
-                child = int(proc.stdout_path.read_text())
-                wait_for(lambda: 'fixture-sleep-executable' in
-                         process_table().get(child, (None, None, None, ''))[3])
-                row = process_table()[child]
+                int(proc.stdout_path.read_text())  # Background job started.
+                observed = {}
+                def find_sleep():
+                    table = process_table()
+                    for word in scope.pidfiles[0].read_text().split():
+                        candidate = int(word)
+                        row = table.get(candidate)
+                        if row and row[3].startswith(str(scope.root / 'fixture-sleep-executable')):
+                            observed['child'], observed['row'] = candidate, row
+                            return True
+                    return False
+                wait_for(find_sleep)
+                child, row = observed['child'], observed['row']
                 self.assertIn(str(scope.root) + '/', row[3])
                 self.assertEqual(row[1], proc.child_pid)
                 self.assertIn(str(child), scope.pidfiles[0].read_text().split())
@@ -579,7 +588,7 @@ class TestTypedFixtureContract(unittest.TestCase):
                 '            proc=scope.launch(FixtureSpec((sys.executable,"-c","print(42)")))\n'
                 '            joined=proc.join(10)\n'
                 '            cleaned=proc.cleanup()\n'
-                '            answers.append([mask,joined.state.value,joined.returncode,joined.stdout,cleaned.state.value])\n'
+                '            answers.append([mask,joined.state.value,joined.returncode,joined.stdout,cleaned.state.value,cleaned.detail])\n'
                 '    finally:\n'
                 '        for fd,backup in saved.items(): os.dup2(backup,fd); os.close(backup)\n'
                 'with open(%r,"w") as f: json.dump(answers,f)\n'
@@ -587,7 +596,7 @@ class TestTypedFixtureContract(unittest.TestCase):
             result = subprocess.run([sys.executable, '-c', driver], capture_output=True, text=True, timeout=90)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(report.read_text()),
-                             [[mask, 'EXITED', 0, '42\n', 'CLEAN'] for mask in range(1, 8)])
+                             [[mask, 'EXITED', 0, '42\n', 'CLEAN', ''] for mask in range(1, 8)])
 
     def test_unsupported_platform_and_missing_marker_capability_refuse_before_launch(self):
         scope = self._scope()
@@ -602,6 +611,64 @@ class TestTypedFixtureContract(unittest.TestCase):
             with self.assertRaisesRegex(OSError, 'marker unavailable'):
                 scope.launch(spec)
             launch.assert_not_called()
+
+    def test_external_directory_and_second_launch_are_refused(self):
+        scope = self._scope()
+        with tempfile.TemporaryDirectory() as elsewhere, mock.patch.object(
+                fixtures.subprocess, 'Popen') as launch:
+            with self.assertRaisesRegex(fixtures.FixtureRefused, 'cwd marker'):
+                scope.launch(FixtureSpec((sys.executable, '-c', 'pass'), directory=elsewhere))
+            launch.assert_not_called()
+        proc = self._launch(scope, 'pass\n')
+        self.assertEqual(proc.join(10).state, JoinState.EXITED)
+        with mock.patch.object(fixtures.subprocess, 'Popen') as launch:
+            with self.assertRaisesRegex(fixtures.FixtureRefused, 'one launch'):
+                self._launch(scope, 'pass\n')
+            launch.assert_not_called()
+
+    def test_omitted_supervisor_is_indeterminate_not_an_empty_scan(self):
+        scope = self._scope()
+        proc = self._launch(scope, 'pass\n')
+        self.assertEqual(proc.join(10).state, JoinState.EXITED)
+        with mock.patch.object(fixtures, 'process_table', return_value={}):
+            self.assertEqual(proc._perform_cleanup().state, CleanupState.INDETERMINATE)
+
+    def test_injected_cwd_marker_failure_prevents_clean(self):
+        scope = self._scope()
+        proc, pid = self._orphan(scope, 'double-fork-session')
+        with mock.patch.object(fixtures, '_has_marker', return_value=False), mock.patch.object(
+                fixtures, '_cwd_marker', side_effect=OSError('injected cwd inspection')):
+            result = proc._perform_cleanup()
+        self.assertEqual(result.state, CleanupState.ERROR)
+        self.assertIn('injected cwd inspection', result.detail)
+        self.assertEqual(proc.cleanup().state, CleanupState.CLEAN)
+        self.assertNotIn(pid, process_table())
+
+    def test_high_descriptors_use_selectors_for_report_and_control(self):
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if hard < 1200:
+            self.skipTest('host descriptor limit cannot exercise select ceiling')
+        held = []
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (max(soft, 1200), hard))
+            while not held or held[-1] < 1050:
+                held.append(os.open(os.devnull, os.O_RDONLY))
+            scope = self._scope()
+            proc = self._launch(scope, 'import time\nprint("ready",flush=True)\ntime.sleep(600)\n')
+            self.assertGreater(proc._report, 1024)
+            self.assertGreater(proc._control, 1024)
+            wait_for(lambda: proc.stdout_path.read_text() == 'ready\n')
+            self.assertEqual(proc.join(0).state, JoinState.TIMED_OUT)
+            self.assertEqual(proc.terminate().state, SignalState.SENT)
+            joined = proc.join(10)
+            self.assertEqual(joined.state, JoinState.EXITED)
+            self.assertEqual(joined.returncode, -signal.SIGTERM)
+            self.assertEqual(proc.cleanup().state, CleanupState.CLEAN)
+        finally:
+            for fd in held:
+                os.close(fd)
+            resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
 
 
 if __name__ == '__main__':

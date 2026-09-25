@@ -14,11 +14,14 @@ supervisor or group yields STATUS_UNAVAILABLE rather than a fabricated -9,
 while cleanup independently proves absence or fails closed.
 
 Only trusted repository fixtures on macOS/Linux are supported. Fixtures must
-inherit their launch environment, retain the marker across exec, stay at the
+inherit their launch environment, retain the marker across exec, keep any
+long-lived descendant cwd inside their exclusive fixture root, stay at the
 same uid, and not delegate work to pre-existing services. This is a convention
 for authored tests, not a sandbox for hostile commands. A fixture that cannot
-obey that convention is unsupported. The scanner uses kernel birth identities
-and environment reads, never argv substring matching as ownership authority.
+obey that convention is unsupported. The scanner uses kernel birth identities and inherited environment/cwd
+markers, never argv substring matching as ownership authority. macOS can hide
+system-binary environments; the inherited cwd supplies a second marker. Each
+scope accepts one launch and caller-selected directories outside it are refused.
 Only our supervisor is waitable by this process; it reaps its child. Orphaned
 descendants must disappear through their parent/OS reaper before CLEAN.
 
@@ -45,6 +48,7 @@ import struct
 import subprocess
 import sys
 import time
+from typing import Optional, Tuple
 import uuid
 
 
@@ -79,7 +83,7 @@ class FixtureSignal(Enum):
 @dataclass(frozen=True)
 class JoinResult:
     state: JoinState
-    returncode: object = None
+    returncode: Optional[int] = None
     stdout: str = ''
     stderr: str = ''
     detail: str = ''
@@ -109,9 +113,9 @@ class FixtureSpec:
     Environment values are copied into the private launch, never caller fds.
     The caller is responsible for the documented trusted-fixture convention.
     """
-    command: tuple
-    environment: object = None
-    directory: object = None
+    command: Tuple[str, ...]
+    environment: Optional[Tuple[Tuple[str, str], ...]] = None
+    directory: Optional[str] = None
 
     def __post_init__(self):
         self.validate()
@@ -177,6 +181,9 @@ def _identity(pid):
                 number = ctypes.get_errno()
                 if number == errno.ESRCH:
                     return None
+                # Darwin may refuse proc info during exit. Confirm disappearance
+                # independently; a still-present unreadable process is an error.
+                os.kill(pid, 0)
                 raise OSError(number, 'cannot read process birth identity for PID %s' % pid)
             fields = struct.unpack('=12I48s6I2Q', data.raw)
             if fields[3] != pid:
@@ -225,6 +232,44 @@ def _environment(pid):
             raise _Indeterminate('incomplete launch arguments')
         pos = end + 1
     return raw[pos:].split(b'\0')
+
+
+def _cwd_marker(pid, identity, root_identity):
+    """Inspect the inherited directory marker, including restricted macOS execs.
+
+    Compare filesystem identities up the observed cwd, not normalized strings.
+    A removed/unreadable cwd or a PID change is indeterminate, never absence.
+    """
+    try:
+        if sys.platform == 'darwin':
+            # PROC_PIDVNODEPATHINFO=9: two 1176-byte vnode_info_path records;
+            # each has 152 bytes of vnode_info followed by MAXPATHLEN bytes.
+            data = ctypes.create_string_buffer(2352)
+            ctypes.set_errno(0)
+            count = _DARWIN_LIB.proc_pidinfo(pid, 9, 0, data, len(data))
+            if count != len(data):
+                raise OSError(ctypes.get_errno(), 'cannot inspect inherited cwd marker')
+            raw = data.raw[152:1176]
+            if b'\0' not in raw or not raw.split(b'\0', 1)[0]:
+                raise _Indeterminate('incomplete cwd marker inspection')
+            path = Path(os.fsdecode(raw.split(b'\0', 1)[0]))
+        else:
+            path = Path(os.readlink('/proc/%d/cwd' % pid))
+        after = _identity(pid)
+        if after is None:
+            return False
+        if after.birth != identity.birth:
+            raise _Indeterminate('PID reused during cwd marker inspection')
+        for candidate in (path,) + tuple(path.parents):
+            observed = candidate.stat()
+            if (observed.st_dev, observed.st_ino) == root_identity:
+                return True
+        return False
+    except OSError:
+        after = _identity(pid)
+        if after is None or (after.birth == identity.birth and after.zombie):
+            return False
+        raise
 
 
 def _has_marker(pid, identity, marker):
@@ -282,6 +327,8 @@ def process_table():
         pid, ppid, pgid, uid = map(int, parts[:4])
         if uid == os.geteuid():
             rows[pid] = (ppid, pgid, parts[4], parts[5])
+    if os.getpid() not in rows:
+        raise _Indeterminate('process enumeration omitted its caller')
     return rows
 
 # The supervisor is a separate interpreter, not a caller-side Popen facade.
@@ -391,7 +438,7 @@ class FixtureProcess:
             self._joined = self._output(JoinState.EXITED, report['returncode'])
         except EOFError as error:
             self._joined = self._output(JoinState.STATUS_UNAVAILABLE, detail=str(error))
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError, TypeError) as error:
             self._joined = JoinResult(JoinState.ERROR, detail=str(error))
         return self._joined
 
@@ -435,8 +482,11 @@ class FixtureProcess:
         targets, inspected = {}, set()
         table = process_table()
         anchor = _identity(self.supervisor_pid)
-        if anchor is not None and anchor.birth != self._anchor.birth:
-            raise _Indeterminate('supervisor identity changed')
+        if anchor is not None:
+            if anchor.birth != self._anchor.birth:
+                raise _Indeterminate('supervisor identity changed')
+            if self.supervisor_pid not in table:
+                raise _Indeterminate('process enumeration omitted the supervisor')
         for pid in table:
             identity = _identity(pid)
             if identity is None:
@@ -448,7 +498,11 @@ class FixtureProcess:
             if known is not None and known.birth != identity.birth:
                 raise _Indeterminate('known descendant identity changed')
             in_session = anchor is not None and identity.sid == self.supervisor_pid
-            marked = False if identity.zombie else _has_marker(pid, identity, self.marker)
+            marked = False
+            if not identity.zombie:
+                marked = _has_marker(pid, identity, self.marker)
+                if not marked:
+                    marked = _cwd_marker(pid, identity, self.scope._root_identity)
             if marked or in_session or known is not None:
                 self._record(pid, identity)
                 targets[pid] = identity
@@ -541,6 +595,8 @@ class FixtureProcesses:
     """
     def __init__(self, case, root):
         self.root = Path(root).absolute()
+        root_stat = self.root.stat()
+        self._root_identity = (root_stat.st_dev, root_stat.st_ino)
         self.children = []
         self.pidfiles = [self.root / 'fixture-groups.pid']
         self._sleep_wrapper = None
@@ -551,6 +607,12 @@ class FixtureProcesses:
         if type(spec) is not FixtureSpec:
             raise TypeError('launch requires a FixtureSpec')
         spec.validate()
+        if self.children:
+            raise FixtureRefused('one launch per exclusive fixture scope')
+        directory = self.root if spec.directory is None else Path(spec.directory)
+        if not any((p.stat().st_dev, p.stat().st_ino) == self._root_identity
+                   for p in (directory,) + tuple(directory.parents)):
+            raise FixtureRefused('fixture directory must retain the scope cwd marker')
         if sys.platform not in ('darwin', 'linux') or os.geteuid() == 0:
             raise FixtureRefused('requires unprivileged macOS/Linux fixture inspection')
         # Refuse missing inspection capability before creating the supervisor.
@@ -565,7 +627,7 @@ class FixtureProcesses:
         out_path.write_bytes(b'')
         err_path.write_bytes(b'')
         config_path.write_text(json.dumps({
-            'command': spec.command, 'directory': spec.directory,
+            'command': spec.command, 'directory': str(directory),
             'stdout': str(out_path), 'stderr': str(err_path)}))
         env = dict(os.environ if spec.environment is None else spec.environment)
         env[_MARKER] = marker
