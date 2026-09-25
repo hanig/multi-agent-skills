@@ -552,6 +552,31 @@ class TestLiveCertificationPlan(unittest.TestCase):
     LIVE_VERSIONS = {"claude": "2.1.282", "codex": "0.154.0",
                      "opencode": "1.18.29", "pi": "0.86.1"}
 
+    def test_normalized_discovery_plan_does_not_certify_expired_versions(self):
+        discovery = installer._load_discovery(ROOT)
+        with tempfile.TemporaryDirectory() as raw, \
+                mock.patch.object(discovery, "date", wraps=date) as clock:
+            clock.today.return_value = date(2026, 10, 26)
+            report = discovery.discover(
+                {"HOME": raw, "PATH": ""}, which=lambda name: "/fixtures/" + name,
+                probe=lambda path, timeout: (True, self.LIVE_VERSIONS[Path(path).name]))
+            targets = installer.normalize_agents([
+                dict(record, id=name, destinations=[record["roots"][0]["physical_path"]])
+                for name, record in report["agents"].items()])
+            options = installer.parse_options(["--dry-run", "--json"])
+            plan = installer.build_plan(targets, options)
+            rendered = installer.render_plan(plan, options, "fixture")
+            document = installer._document(
+                operation="install", dry_run=True, plan=plan, actions=[], diagnostics=[],
+                conflicts=[], mode=options.mode, version="fixture")
+        self.assertEqual(len(plan.selected), 4)
+        for target in plan.selected:
+            self.assertFalse(target.discovery_verified, target.name)
+            self.assertIn(f"{target.name}: executable_found {target.version} (uncertified)", rendered)
+        self.assertEqual([target["verification"] for target in document["targets"]],
+                         ["unverified"] * 4)
+        self.assertEqual(len(plan.certification_warnings), 4)
+
     def plan(self, versions, observed=date(2026, 10, 6)):
         discovery = installer._load_discovery(ROOT)
         with tempfile.TemporaryDirectory() as raw:

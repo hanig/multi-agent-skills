@@ -6,6 +6,7 @@ import time
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "hanig-project" / "scripts"))
@@ -147,7 +148,9 @@ class TestAgentDiscovery(unittest.TestCase):
                          plan["certification_warnings"])
 
     def test_supplied_path_not_the_process_path_controls_default_finder(self):
-        with tempfile.TemporaryDirectory() as raw:
+        with tempfile.TemporaryDirectory() as raw, \
+                mock.patch.object(discovery, "date", wraps=date) as clock:
+            clock.today.return_value = date(2026, 9, 25)
             home, bin_dir = Path(raw) / "home", Path(raw) / "bin"
             home.mkdir()
             bin_dir.mkdir()
@@ -288,7 +291,9 @@ class TestDatedLiveCertifications(unittest.TestCase):
             "opencode": "1.18.29", "pi": "0.86.1"}
 
     def report(self, versions):
-        with tempfile.TemporaryDirectory() as raw:
+        with tempfile.TemporaryDirectory() as raw, \
+                mock.patch.object(discovery, "date", wraps=date) as clock:
+            clock.today.return_value = date(2026, 9, 25)
             return discovery.discover(
                 fixture_env(raw), finder({name: "/fixtures/" + name for name in versions}),
                 probe_for(versions))
@@ -367,3 +372,34 @@ class TestDatedLiveCertifications(unittest.TestCase):
                 self.assertEqual(discovery.verification_review_due(spec),
                                  date(2026, 10, 25) if agent == "opencode"
                                  else date(2026, 10, 5))
+
+    def test_discovery_verification_expires_with_each_exact_version_record(self):
+        versions = [
+            ("claude", "2.1.261", date(2026, 9, 5)),
+            ("codex", "0.153.4", date(2026, 9, 5)),
+            ("pi", "0.73.1", date(2026, 9, 5)),
+        ] + [(name, version, date(2026, 9, 25))
+             for name, version in self.LIVE.items()]
+        for name, version, verified_on in versions:
+            deadline = verified_on + timedelta(days=30)
+            for offset, verification, freshness in (
+                    (-1, "verified", "current"), (0, "verified", "current"),
+                    (1, "unverified", "stale")):
+                observed = deadline + timedelta(days=offset)
+                with self.subTest(agent=name, version=version, observed=observed), \
+                        tempfile.TemporaryDirectory() as raw, \
+                        mock.patch.object(discovery, "date", wraps=date) as clock:
+                    clock.today.return_value = observed
+                    report = discovery.discover(
+                        fixture_env(raw), finder({name: "/fixtures/" + name}),
+                        probe_for({name: version}))
+                    agent = report["agents"][name]
+                    self.assertEqual(agent["verification"], verification)
+                    self.assertEqual(agent["verification_freshness"], freshness)
+                    self.assertEqual(agent["verified_on"], verified_on.isoformat())
+                    self.assertEqual(agent["verification_review_due"], deadline.isoformat())
+                    self.assertEqual(agent["evidence"]["certification"]["version"], version)
+                    self.assertTrue(agent["eligible_for_automatic_target"])
+                    selected = discovery.select_targets(report)["selected"]
+                    self.assertEqual([item["agent"] for item in selected], [name])
+                    self.assertEqual(selected[0]["certification"], verification)
