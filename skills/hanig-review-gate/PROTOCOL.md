@@ -186,6 +186,28 @@ prior finding; completeness of the supplied map remains caller-attested.
 
 ## Convergence
 
+### Audit ledger identity and external adjudication
+
+`--adjudicate` records an independent acceptor's declared disposition for a
+confirmed finding, round and full reviewed head. Declared authors cannot accept
+their own rebuttals. This is caller-attested audit history, not authentication or
+merge authority; an adjudication never changes the original review verdict.
+
+Decision-bearing identity fields are validated before redaction exemption:
+canonical lowercase 40-/64-hex Git object IDs and lowercase 64-hex SHA-256
+finding/claim digests retain their exact bytes. Free text, arbitrary extra fields
+and invalid identifier values remain subject to redaction. No trimming,
+case-folding or reconstruction supplies a decision identity.
+
+`--open-findings --head SHA` validates identities across all canonical history
+before selecting that head. A missing or damaged head/digest, including earlier
+redaction damage, is listed by record path as `UNATTRIBUTABLE` and exits 1.
+This takes precedence over `NO_OPEN_FINDINGS`, even if all attributable findings
+have dispositions. The query is read-only: damaged history is neither silently
+skipped nor rebound to a guessed identity. Existing headless records also block
+a clean query; they do not block new review verdicts. Adjudication can still
+record a disposition for a separate valid finding but cannot clear the damage.
+
 Convergence is when arriving findings are **out of scope, minor, or taste**.
 Never an empty findings list: that will not happen, because reviewers are told
 to refute when uncertain.

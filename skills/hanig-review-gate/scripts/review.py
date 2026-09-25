@@ -405,15 +405,14 @@ def prepare_review_journal(kind, round_no, effective_panel, verdict, claims,
         "reviewed_head": reviewed_head,
         "effective_panel": list(effective_panel),
         "verdict": verdict,
-        # Hash the original text. Mandatory redaction
-        # can obscure a digest that contains a configured key value.
+        # Hash the original text; validated identifiers survive redaction.
         "claim_digests": claim_digests(claims),
         "claims": list(claims),
     }
     record.update(review_journal_details(results))
     if panel_policy is not None:
         record["panel_policy"] = panel_policy
-    record = deep_redact(record)
+    record = redact_ledger(record)
     return record, json.dumps(record, sort_keys=True) + "\n"
 
 
@@ -652,6 +651,43 @@ def deep_redact(obj):
         return {redact(k) if isinstance(k, str) else k: deep_redact(v)
                 for k, v in obj.items()}
     return obj
+
+
+def valid_head(value):
+    """A complete canonical Git object ID, without trimming or case folding."""
+    return (isinstance(value, str)
+            and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value) is not None)
+
+
+def valid_digest(value):
+    """Finding and claim identities use lowercase SHA-256 hex."""
+    return (isinstance(value, str)
+            and re.fullmatch(r"[0-9a-f]{64}", value) is not None)
+
+
+def redact_ledger(obj, path=()):
+    """Preserve validated identity slots; redact all other strings and keys.
+
+    Only schema-owned identifier paths are exempt, not arbitrary hex text or
+    lookalike keys in reviewer extras. Validate the original value before
+    exempting it, including when rendering an offline query's identifiers.
+    """
+    head_paths = {("reviewed_head",),
+                  ("open_findings", "[]", "reviewed_head"),
+                  ("unattributable_records", "[]", "reviewed_head")}
+    digest_paths = {("finding_digest",), ("claim_digests", "[]"),
+                    ("results", "[]", "findings", "[]", "finding_digest"),
+                    ("open_findings", "[]", "finding_digest")}
+    if ((path in head_paths and valid_head(obj))
+            or (path in digest_paths and valid_digest(obj))):
+        return obj
+    if isinstance(obj, list):
+        return [redact_ledger(value, path + ("[]",)) for value in obj]
+    if isinstance(obj, dict):
+        return {redact(key) if isinstance(key, str) else key:
+                redact_ledger(value, path + (key,))
+                for key, value in obj.items()}
+    return deep_redact(obj)
 
 
 def redact(text):
@@ -1314,7 +1350,7 @@ def read_review_journal(path):
         record = json.loads(raw, object_pairs_hook=reject_duplicate_keys)
         if not isinstance(record, dict):
             raise ValueError(f"{record_path} is not a JSON object")
-        records.append(record)
+        records.append((record_path, record))
     return records
 
 
@@ -1330,13 +1366,54 @@ def adjudicator_is_author(accepted_by, authors):
     return accepted_by in models or model in models
 
 
+def journal_identity_problems(record):
+    """Check every persisted identity before filtering history by head.
+
+    Old redaction is irreversible here. Missing or damaged identities stay
+    unattributable; neither another head nor an adjudication can hide them.
+    """
+    problems = []
+    if not valid_head(record.get("reviewed_head")):
+        problems.append("reviewed_head is missing or not a full lowercase object ID")
+    if record.get("type") == "adjudication":
+        if not valid_digest(record.get("finding_digest")):
+            problems.append("finding_digest is missing or not a SHA-256 digest")
+    elif record.get("type") == "review_round":
+        digests = record.get("claim_digests")
+        if not isinstance(digests, list) or any(not valid_digest(d) for d in digests):
+            problems.append("claim_digests is missing or contains an invalid digest")
+        results = record.get("results")
+        if not isinstance(results, list):
+            problems.append("results is missing or not a list")
+        else:
+            for i, result in enumerate(results):
+                if (not isinstance(result, dict)
+                        or not isinstance(result.get("findings"), list)):
+                    problems.append(f"results[{i}].findings is missing or not a list")
+                    continue
+                for j, finding in enumerate(result["findings"]):
+                    if (not isinstance(finding, dict)
+                            or not valid_digest(finding.get("finding_digest"))):
+                        problems.append(f"results[{i}].findings[{j}].finding_digest "
+                                        "is missing or not a SHA-256 digest")
+    else:
+        problems.append("record type is missing or unknown")
+    return problems
+
+
 def journal_findings(records, head):
-    """Return confirmed findings and dispositions keyed by (round, digest)."""
-    findings, adjudicated = {}, set()
-    for record in records:
-        if record.get("reviewed_head") != head:
+    """Return head-bound findings/dispositions and all unattributable records."""
+    findings, adjudicated, unattributable = {}, set(), []
+    for record_path, record in records:
+        problems = journal_identity_problems(record)
+        if problems:
+            unattributable.append({
+                "record_path": str(record_path), "problems": problems,
+                "reviewed_head": record.get("reviewed_head"),
+                "type": record.get("type"), "round": record.get("round"),
+            })
             continue
-        if record.get("type") not in ("review_round", "adjudication"):
+        if record.get("reviewed_head") != head:
             continue
         round_no = record.get("round")
         if ("round" not in record or (round_no is not None
@@ -1348,7 +1425,6 @@ def journal_findings(records, head):
             reason = record.get("reason")
             digest = record.get("finding_digest")
             if (record.get("decision") not in ADJUDICATION_DECISIONS
-                    or not isinstance(digest, str) or not digest
                     or not isinstance(acceptor, str) or not acceptor.strip()
                     or not isinstance(reason, str) or not reason.strip()
                     or not isinstance(authors, list) or not authors):
@@ -1375,19 +1451,17 @@ def journal_findings(records, head):
                 if not finding["confirmed"]:
                     continue
                 digest = finding.get("finding_digest")
-                if not isinstance(digest, str) or not digest:
-                    raise ValueError("confirmed finding has no finding_digest")
                 findings[(round_no, digest)] = {
                     **finding, "round": round_no, "reviewed_head": head,
                     "reviewer": result.get("name"),
                 }
-    return findings, adjudicated
+    return findings, adjudicated, unattributable
 
 
 def record_adjudication(args, round_no):
     """Append the external decision without revising any review verdict."""
     def write():
-        record = deep_redact({
+        record = redact_ledger({
             "type": "adjudication", "schema_version": 2,
             "finding_digest": args.adjudicate, "round": round_no,
             "reviewed_head": args.head, "decision": args.decision,
@@ -1401,11 +1475,13 @@ def record_adjudication(args, round_no):
 
 def cmd_ledger(args):
     """Offline command outcomes are ledger status, never a review pass."""
-    if (not args.head
-            or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", args.head)):
+    if not valid_head(args.head):
         config_error("--head must be a full lowercase commit SHA. Pass the "
                      "reviewed range head, not a moving ref or abbreviation.")
     if args.adjudicate is not None:
+        if not valid_digest(args.adjudicate):
+            config_error("--adjudicate must be a full lowercase SHA-256 digest. "
+                         "Pass a validated finding digest from --open-findings.")
         if (not args.author or not args.accepted_by or not args.accepted_by.strip()
                 or args.accepted_by != args.accepted_by.strip()
                 or len(args.accepted_by.splitlines()) != 1):
@@ -1426,18 +1502,20 @@ def cmd_ledger(args):
         config_error("Drop adjudication fields when querying --open-findings.")
     try:
         records = read_review_journal(review_journal_path(args.file))
-        findings, adjudicated = journal_findings(records, args.head)
+        findings, adjudicated, unattributable = journal_findings(records, args.head)
     except (OSError, ValueError, argparse.ArgumentTypeError) as exc:
         config_error(redact(f"cannot read adjudication history: {exc}. "
                             "Pass the original state home after repairing its journal."))
     if args.open_findings:
         opened = [finding for key, finding in findings.items()
                   if key not in adjudicated]
-        print(json.dumps(deep_redact({
-            "state": "OPEN_FINDINGS" if opened else "NO_OPEN_FINDINGS",
+        print(json.dumps(redact_ledger({
+            "state": ("UNATTRIBUTABLE" if unattributable else
+                      "OPEN_FINDINGS" if opened else "NO_OPEN_FINDINGS"),
             "reviewed_head": args.head, "open_findings": opened,
+            "unattributable_records": unattributable,
         }), indent=2))
-        return 1 if opened else 0
+        return 1 if opened or unattributable else 0
     matches = [key for key in findings if key[1] == args.adjudicate
                and (args.round is None or key[0] == args.round)]
     if not matches:
@@ -1448,7 +1526,7 @@ def cmd_ledger(args):
                      "to identify the occurrence being adjudicated.")
     args.decision = args.decision or "overruled"
     journal = record_adjudication(args, matches[0][0])
-    print(json.dumps(deep_redact({
+    print(json.dumps(redact_ledger({
         "state": ("ADJUDICATION_RECORDED" if journal["written"]
                   else "ADJUDICATION_UNCONFIRMED"),
         "reviewed_head": args.head, "round": matches[0][0],
