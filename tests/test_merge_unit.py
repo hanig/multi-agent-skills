@@ -174,6 +174,220 @@ class TestMergeUnit(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.receipts(), [])
 
+    def intercept_scope_binding(self, fields=None, advance_epoch=False):
+        # Keep the real scope consumer and producer, changing only the report
+        # channel or the epoch between the operator and scope state reads.
+        site = self.directory / "scope-binding-probe"
+        site.mkdir(exist_ok=True)
+        (site / "sitecustomize.py").write_text(
+            "import atexit, io, json, os, pathlib, sys\n"
+            "if len(sys.argv) > 1 and sys.argv[0].endswith('swarm.py') "
+            "and sys.argv[1] == 'scope-check':\n"
+            "    if %r:\n"
+            "        path = pathlib.Path(os.environ['COORDINATOR_STATE']) / 'state-epoch.json'\n"
+            "        record = json.loads(path.read_text())\n"
+            "        record['epoch'] += 1\n"
+            "        path.write_text(json.dumps(record))\n"
+            "    original = sys.stdout\n"
+            "    sys.stdout = io.StringIO()\n"
+            "    def emit():\n"
+            "        report = json.loads(sys.stdout.getvalue())\n"
+            "        report.update(%r)\n"
+            "        original.write(json.dumps(report))\n"
+            "    atexit.register(emit)\n" % (advance_epoch, fields or {}))
+        self.env["PYTHONPATH"] = str(site)
+
+    def test_000_scope_base_mismatch_refuses_before_forge(self):
+        self.intercept_scope_binding({"base": "f" * 40})
+        result = self.invoke()
+        self.assert_refused(result)
+        self.assertEqual(self.calls(), [], result.stdout + result.stderr)
+
+    def test_001_scope_epoch_change_refuses_before_forge(self):
+        self.intercept_scope_binding(advance_epoch=True)
+        result = self.invoke()
+        self.assert_refused(result)
+        self.assertEqual(self.calls(), [], result.stdout + result.stderr)
+
+    def test_scope_repository_mismatch_refuses_before_forge(self):
+        self.intercept_scope_binding({"repository": self.remote + "/other"})
+        result = self.invoke()
+        self.assert_refused(result)
+        self.assertEqual(self.calls(), [], result.stdout + result.stderr)
+
+    def test_scope_target_mismatch_refuses_before_forge(self):
+        self.intercept_scope_binding({"target": "other"})
+        result = self.invoke()
+        self.assert_refused(result)
+        self.assertEqual(self.calls(), [], result.stdout + result.stderr)
+
+    def assert_binding_refused(self, result):
+        self.assert_refused(result)
+        self.assertEqual(self.calls(), [], result.stdout + result.stderr)
+
+    def test_scope_attempt_mismatch_refuses_before_forge(self):
+        self.intercept_scope_binding({"attempt": "older"})
+        self.assert_binding_refused(self.invoke())
+
+    def test_scope_unit_mismatch_refuses_before_forge(self):
+        self.intercept_scope_binding({"unit": "other"})
+        self.assert_binding_refused(self.invoke())
+
+    def test_scope_head_mismatch_refuses_before_forge(self):
+        self.intercept_scope_binding({"head": "f" * 40})
+        self.assert_binding_refused(self.invoke())
+
+    def test_scope_missing_epoch_refuses_before_forge(self):
+        self.intercept_scope_binding({"state_epoch": None})
+        self.assert_binding_refused(self.invoke())
+
+    def test_scope_boolean_epoch_refuses_before_forge(self):
+        # The first lease increments the absent legacy epoch from 0 to 1.
+        self.intercept_scope_binding({"state_epoch": True})
+        self.assert_binding_refused(self.invoke())
+
+    def test_scope_repository_normalization_cannot_hide_mismatch(self):
+        self.intercept_scope_binding({"repository": self.remote + "/"})
+        self.assert_binding_refused(self.invoke())
+
+    def test_launch_facts_previous_attempt_refuses_before_forge(self):
+        self.us["attempt_launch_facts"]["a1"]["attempt_id"] = "older"
+        self.save()
+        self.assert_binding_refused(self.invoke())
+
+    def test_launch_facts_other_unit_refuses_before_forge(self):
+        self.us["attempt_launch_facts"]["a1"]["unit_id"] = "other"
+        self.save()
+        self.assert_binding_refused(self.invoke())
+
+    def test_launch_facts_different_remote_refuses_before_forge(self):
+        self.us["attempt_launch_facts"]["a1"]["repository_remote"] += "/other"
+        self.save()
+        self.assert_binding_refused(self.invoke())
+
+    def test_launch_facts_raw_remote_difference_refuses_before_forge(self):
+        self.us["attempt_launch_facts"]["a1"]["repository_remote"] += "/"
+        self.save()
+        self.assert_binding_refused(self.invoke())
+
+    def test_missing_launch_facts_refuses_before_forge(self):
+        self.us["attempt_launch_facts"] = {}
+        self.save()
+        self.assert_binding_refused(self.invoke())
+
+    def test_launch_intent_previous_attempt_refuses_before_forge(self):
+        self.launch["attempt_id"] = "older"
+        self.save()
+        self.assert_binding_refused(self.invoke())
+
+    def test_launch_intent_missing_remote_refuses_before_forge(self):
+        del self.launch["repository_remote"]
+        self.save()
+        self.assert_binding_refused(self.invoke())
+
+    def test_scope_exception_cannot_bypass_mismatched_binding(self):
+        self.unit["scope"] = []
+        self.state["plan_digest"] = S.plan_digest(self.plan)
+        self.save()
+        self.intercept_scope_binding({"repository": self.remote + "/other"})
+        self.assert_binding_refused(self.invoke("--allow-unchecked-scope", "Policy exception"))
+
+    def test_merged_reconciliation_cannot_bypass_mismatched_binding(self):
+        self.forge["pr"].update(state="MERGED", mergeCommit={"oid": self.merged})
+        self.save()
+        self.intercept_scope_binding({"base": "f" * 40})
+        self.assert_binding_refused(self.invoke())
+
+    def test_pending_intent_cannot_bypass_mismatched_binding(self):
+        intent = self.leave_transport_failure()
+        before = self.calls()
+        self.intercept_scope_binding({"attempt": "older"})
+        result = self.abandon_intent(intent)
+        self.assert_abandon_refused(result)
+        self.assertEqual(self.calls(), before)
+
+    def test_merged_reconciliation_with_missing_local_objects_keeps_binding(self):
+        self.forge["pr"].update(state="MERGED", mergeCommit={"oid": self.merged})
+        self.us["state"] = "DONE"
+        self.save()
+        # Cleanup of local objects does not erase the coordinator's anchors.
+        shutil.rmtree(self.repo / ".git/objects")
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.calls(["pr", "merge"]), [])
+        self.assertEqual(len(self.receipts()), 1)
+
+    def test_launch_facts_repo_mismatch_refuses_before_forge(self):
+        self.us["attempt_launch_facts"]["a1"]["repo"] = str(self.repo) + "/other"
+        self.save()
+        self.assert_binding_refused(self.invoke())
+
+    def test_launch_facts_base_commit_mismatch_refuses_before_forge(self):
+        self.us["attempt_launch_facts"]["a1"]["base_commit"] = "f" * 40
+        self.save()
+        self.assert_binding_refused(self.invoke())
+
+    def test_launch_facts_base_tree_mismatch_refuses_before_forge(self):
+        self.us["attempt_launch_facts"]["a1"]["base_tree"] = "f" * 40
+        self.save()
+        self.assert_binding_refused(self.invoke())
+
+    def test_launch_facts_branch_mismatch_refuses_before_forge(self):
+        self.us["attempt_launch_facts"]["a1"]["branch"] = "other"
+        self.save()
+        self.assert_binding_refused(self.invoke())
+
+    def test_matching_launch_facts_need_no_target_field(self):
+        # Real completed facts carry target only in the launch intent.
+        del self.us["attempt_launch_facts"]["a1"]["target_branch"]
+        self.save()
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.calls(["pr", "merge"])), 1)
+
+    def test_nonzero_epoch_is_read_after_our_own_lease_increment(self):
+        (self.state_dir / S.STATE_EPOCH_FILE).write_text('{"epoch": 20}')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.calls(["pr", "merge"])), 1)
+        self.assertEqual(self.intent()["preconditions"]["scope"]["state_epoch"], 21)
+
+    def test_invalid_persisted_epoch_refuses_before_forge(self):
+        (self.state_dir / S.STATE_EPOCH_FILE).write_text('{"epoch": true}')
+        self.assert_binding_refused(self.invoke())
+
+    def test_reconciliation_records_fresh_binding_without_rekeying_legacy_intent(self):
+        old = self.leave_transport_failure()
+        path = self.state_dir / ("merge-unit-" + old["operation_id"] + ".json")
+        old["preconditions"]["scope"]["base"] = "f" * 40
+        path.write_text(json.dumps(old))
+        self.forge["pr"].update(state="MERGED", mergeCommit={"oid": self.merged})
+        self.save()
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        current = self.intent()
+        self.assertEqual(current["operation_id"], old["operation_id"])
+        self.assertEqual(current["preconditions"], old["preconditions"])
+        self.assertEqual(current["reconciliation"]["scope"]["base"], self.base)
+        self.assertEqual(current["reconciliation"]["scope"]["repository"], self.remote)
+        self.assertEqual(len(self.calls(["pr", "merge"])), 1)
+
+    def test_missing_scope_binding_fields_refuse_before_forge(self):
+        for key in ("unit", "attempt", "head", "base", "repository", "target", "state_epoch"):
+            with self.subTest(key=key):
+                self.intercept_scope_binding({key: None})
+                self.assert_binding_refused(self.invoke())
+
+    def test_missing_launch_facts_fields_refuse_before_forge(self):
+        facts = self.us["attempt_launch_facts"]["a1"]
+        for key in ("unit_id", "attempt_id", "repository_remote", "repo",
+                    "base_commit", "base_tree", "branch"):
+            with self.subTest(key=key):
+                original = facts.pop(key)
+                self.save()
+                self.assert_binding_refused(self.invoke())
+                facts[key] = original
+
     def test_success_records_exact_anchor_and_advances_once(self):
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -409,8 +623,9 @@ class TestMergeUnit(unittest.TestCase):
         self.save()
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertNotIn(" scope-check ", result.stdout)
+        self.assertLess(result.stdout.index(" scope-check "), result.stdout.index("gh pr view"))
         self.assertEqual(self.calls(["pr", "merge"]), [])
+        self.assertEqual(self.calls(["pr", "checks"]), [])
 
     def test_trailing_slash_remote_preserves_exact_receipt(self):
         self.launch["repository_remote"] += "/"
@@ -442,18 +657,16 @@ class TestMergeUnit(unittest.TestCase):
             "    print('scope startup diagnostic')\n")
         self.env["PYTHONPATH"] = str(site)
 
-    def test_explicit_scope_exception_retains_non_json_output(self):
+    def test_explicit_scope_exception_cannot_bypass_unreadable_binding(self):
         self.scope_startup_notice()
         self.unit["scope"] = []
         self.state["plan_digest"] = S.plan_digest(self.plan)
         self.save()
         result = self.invoke("--allow-unchecked-scope", "Accept failed scope observation")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        observed = self.intent()["preconditions"]
-        self.assertEqual(observed["scope_exit"], 1)
-        self.assertIn("scope startup diagnostic", observed["scope"]["unparsed_stdout"])
+        self.assert_binding_refused(result)
+        self.assertIn("binding unavailable", result.stderr)
 
-    def test_scope_exception_retains_schema_invalid_json_verbatim(self):
+    def test_scope_exception_cannot_bypass_schema_invalid_binding(self):
         site = self.directory / "scope-exception-output"
         site.mkdir()
         (site / "sitecustomize.py").write_text(
@@ -470,11 +683,8 @@ class TestMergeUnit(unittest.TestCase):
         self.state["plan_digest"] = S.plan_digest(self.plan)
         self.save()
         result = self.invoke("--allow-unchecked-scope", "Accept failed observation")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        observed = self.intent()["preconditions"]
-        self.assertEqual(observed["scope_exit"], 1)
-        self.assertEqual(observed.get("scope_stdout"), self.env["SCOPE_OUTPUT"])
-        self.assertEqual(observed.get("scope_stderr"), "scope diagnostic\n")
+        self.assert_binding_refused(result)
+        self.assertIn("invalid scope report", result.stderr)
 
     def test_malformed_successful_scope_output_is_not_an_exception(self):
         self.scope_startup_notice()
@@ -665,7 +875,7 @@ class TestMergeUnit(unittest.TestCase):
         self.assertEqual(len(self.calls(["pr", "checks"])), 1)
         self.assertEqual(self.receipts(), [])
         self.assertEqual([json.loads(line) for line in coordinator_log.read_text().splitlines()],
-                         ["scope-check"])
+                         ["scope-check", "scope-check"])
         # A second transport failure consumes the one new operation. A further
         # ordinary call cannot silently reuse this abandonment to merge again.
         self.assertNotEqual(self.invoke().returncode, 0)
@@ -713,7 +923,7 @@ class TestMergeUnit(unittest.TestCase):
         self.assertEqual(self.intent()["phase"], "receipt_recorded")
         self.assertEqual(self.receipts()[0]["head"], self.head)
         self.assertEqual([json.loads(line) for line in coordinator_log.read_text().splitlines()],
-                         ["scope-check", "merge", "advance"])
+                         ["scope-check", "scope-check", "merge", "advance"])
         state = json.loads((self.state_dir / S.STATE_FILE).read_text())
         self.assertEqual(state["units"]["u"]["state"], "DONE")
 

@@ -74,7 +74,7 @@ class TestScopeCheck(unittest.TestCase):
         self.plan_path.write_text(json.dumps(self.plan))
         state_file = self.state_dir / S.STATE_FILE
         state_file.write_text(json.dumps(self.state))
-        before = state_file.read_bytes()
+        before = {p.name: p.read_bytes() for p in self.state_dir.iterdir()}
         cmd = [sys.executable, str(SCRIPTS / "swarm.py"), "scope-check",
                str(self.plan_path), "--state-dir", str(self.state_dir),
                "--unit", "u"]
@@ -82,9 +82,7 @@ class TestScopeCheck(unittest.TestCase):
             cmd.append("--json")
         proc = subprocess.run(cmd, cwd=self.repo, env=env or self.env,
                               capture_output=True, text=True, check=False)
-        self.assertEqual(state_file.read_bytes(), before)
-        self.assertEqual(sorted(p.name for p in self.state_dir.iterdir()),
-                         [S.STATE_FILE])
+        self.assertEqual({p.name: p.read_bytes() for p in self.state_dir.iterdir()}, before)
         self.assertEqual(proc.stderr, "")
         return proc.returncode, (json.loads(proc.stdout) if json_output
                                  else proc.stdout)
@@ -99,6 +97,53 @@ class TestScopeCheck(unittest.TestCase):
         self.assertEqual(report["out_of_scope"], ["skills/x/SKILL.md"])
         self.assertEqual(report["deletions_out_of_scope"],
                          ["skills/x/SKILL.md"])
+
+    def test_report_emits_exact_coordinator_binding_and_epoch(self):
+        self.write("tests/new.py", "new test\n")
+        self.pin()
+        self.intent["repository_remote"] = "https://Example.invalid/Owner/Project.git/"
+        self.state["epoch"] = 999  # obsolete inline metadata is not the fence
+        (self.state_dir / S.STATE_EPOCH_FILE).write_text(json.dumps({"epoch": 17}))
+        code, report = self.check()
+        self.assertEqual(code, 0, report)
+        expected = {"unit": "u", "attempt": "a1", "base": self.base,
+                    "head": self.us["attempt_produced_heads"]["a1"],
+                    "repository": self.intent["repository_remote"],
+                    "target": self.intent["target_branch"], "state_epoch": 17}
+        self.assertEqual({key: report.get(key) for key in expected}, expected)
+
+    def test_absent_scope_still_reports_coordinator_binding(self):
+        del self.unit["scope"]
+        self.write("tests/new.py", "new test\n")
+        self.pin()
+        self.intent["repository_remote"] = "git@example.invalid:Owner/Project.git"
+        code, report = self.check()
+        self.assertEqual(code, 2, report)
+        self.assertEqual(report["status"], "unchecked")
+        self.assertEqual(report["repository"], self.intent["repository_remote"])
+        self.assertEqual(report["attempt"], "a1")
+        self.assertEqual(report["head"], self.us["attempt_produced_heads"]["a1"])
+        self.assertEqual(report["base"], self.base)
+        self.assertEqual(report["target"], "main")
+        self.assertEqual(report["state_epoch"], 0)
+
+    def test_legacy_absent_epoch_is_observed_as_zero_without_writes(self):
+        self.write("tests/new.py", "new test\n")
+        self.pin()
+        code, report = self.check()
+        self.assertEqual(code, 0, report)
+        self.assertEqual(report["state_epoch"], 0)
+        self.assertIsNone(report["repository"])
+        self.assertFalse((self.state_dir / S.STATE_EPOCH_FILE).exists())
+
+    def test_malformed_epoch_is_unchecked(self):
+        self.write("tests/new.py", "new test\n")
+        self.pin()
+        (self.state_dir / S.STATE_EPOCH_FILE).write_text('{"epoch": true}')
+        code, report = self.check()
+        self.assertEqual(code, 2, report)
+        self.assertIsNone(report["state_epoch"])
+        self.assertIn("epoch", report["reason"])
 
     def test_in_scope_change_passes_at_multiple_depths(self):
         self.write("tests/new.py", "new test\n")

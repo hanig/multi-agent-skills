@@ -9377,6 +9377,7 @@ def cmd_scope_check(args):
     """Advisory merge precondition; reads state, never judges or mutates it."""
     report = {"unit": args.unit, "status": "unchecked", "attempt": None,
               "base": None, "head": None, "scope": None,
+              "repository": None, "target": None, "state_epoch": None,
               "out_of_scope": [], "deletions_out_of_scope": []}
     code = EXIT_SCOPE_UNCHECKED
     try:
@@ -9393,13 +9394,15 @@ def cmd_scope_check(args):
         u = matches[0]
         patterns = declared_scope(u)
         report["scope"] = patterns
-        if patterns is None:
-            raise PlanError("unit declares no scope")
         if u.get("kind") != "code":
             raise PlanError("unit has no code-attempt judgment")
         # Explicit state-dir: validate containment without default migration.
         state_dir, _root, _trees = CP.resolve_paths(
             args.state_dir, plan=plan, cwd=os.getcwd())
+        epoch, error = _read_state_epoch(state_dir)
+        if error:
+            raise PlanError(error)
+        report["state_epoch"] = epoch
         state, error = U.read_json(state_dir / STATE_FILE)
         if error or not isinstance(state, dict):
             raise PlanError(f"no readable coordinator state: "
@@ -9416,7 +9419,11 @@ def cmd_scope_check(args):
             raise PlanError(problem)
         base, repo = intent["base_commit"], intent["repo"]
         head = trusted_produced_head(state, args.unit, attempt_dir)
-        report.update({"base": base, "head": head})
+        report.update({"base": base, "head": head,
+                       "repository": intent.get("repository_remote"),
+                       "target": intent["target_branch"]})
+        if patterns is None:
+            raise PlanError("unit declares no scope")
         if (not isinstance(head, str)
                 or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", head)):
             raise PlanError("no valid judged head for this attempt in "

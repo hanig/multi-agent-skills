@@ -116,6 +116,9 @@ def forge_route(remote):
 
 
 def authority(args, plan):
+    epoch, error = S._read_state_epoch(args.state_dir)
+    if error:
+        raise Refusal(error)
     state = read_object(Path(args.state_dir) / S.STATE_FILE)
     S.validate_plan(plan)
     if state.get("plan_digest") != S.plan_digest(plan):
@@ -132,6 +135,15 @@ def authority(args, plan):
     problem = S._code_launch_intent_problem(launch, unit, attempt)
     if problem:
         raise Refusal(problem)
+    # Both anchors are coordinator-held. A dictionary key alone does not
+    # establish that its contents belong to the current attempt or remote.
+    facts = (us.get("attempt_launch_facts") or {}).get(attempt)
+    if not isinstance(facts, dict):
+        raise Refusal("no current attempt launch facts in coordinator state")
+    for key in ("unit_id", "attempt_id", "repository_remote", "repo",
+                "base_commit", "base_tree", "branch"):
+        if not facts.get(key) or facts[key] != launch.get(key):
+            raise Refusal("launch facts disagree with current launch intent: " + key)
     head = oid(S.trusted_produced_head(state, args.unit, attempt_dir))
     root = state.get("root")
     if root is not None and (not isinstance(root, str) or not root):
@@ -153,7 +165,12 @@ def authority(args, plan):
     host, repo_path = forge_route(remote)
     binding = {"unit": args.unit, "attempt": attempt, "head": head,
                "repo": remote, "target": launch["target_branch"], "pr": args.pr}
-    return state_dir, str(root), binding, host, repo_path
+    # Keep the legacy journal key stable: the epoch is an observation fence,
+    # not a new operation, and adding it to binding would hide old intents.
+    scope_binding = {"unit": args.unit, "attempt": attempt, "head": head,
+                     "base": launch["base_commit"], "repository": remote,
+                     "target": launch["target_branch"], "state_epoch": epoch}
+    return state_dir, str(root), binding, host, repo_path, scope_binding
 
 
 def commands(args, root, binding, host, repo_path):
@@ -267,7 +284,7 @@ def abandon(args, intent_path, intent, pr, operation_id):
 
 
 def reconcile(args, plan):
-    state_dir, root, binding, host, repo_path = authority(args, plan)
+    state_dir, root, binding, host, repo_path, scope_binding = authority(args, plan)
     cmd = commands(args, root, binding, host, repo_path)
     operation_id, intent_path, intent = current_intent(
         state_dir, binding, root, repair=not args.dry_run)
@@ -277,14 +294,15 @@ def reconcile(args, plan):
         raise Refusal("named operation is not the unit's current unresolved intent")
     if args.dry_run:
         print("DRY RUN: no forge calls, writes, receipt or advancement; exit 2.")
+        print("+ " + shlex.join(cmd["scope"]))
+        print("require exact coordinator binding and state epoch before forge access")
         print("+ " + shlex.join(cmd["view"]))
         if args.abandon_intent:
             print("if OPEN at judged head: persist abandonment record and resolve {}; "
                   "no merge or advance".format(intent_path))
         else:
             print("if OPEN with no prior merge request:")
-            for key in ("scope", "checks"):
-                print("+ " + shlex.join(cmd[key]))
+            print("+ " + shlex.join(cmd["checks"]))
             print("persist intent {} before the conditional merge".format(intent_path))
             print("+ " + shlex.join(cmd["merge"]))
             print("+ " + shlex.join(cmd["view"]))
@@ -295,12 +313,37 @@ def reconcile(args, plan):
         print("+ " + shlex.join(cmd["advance"]))
         return None
 
+    # Identity is mandatory even for a named scope-policy exception or
+    # already-merged reconciliation. Check it before the first forge read.
+    scope = run(cmd["scope"], allowed=(0, 1, 2))
+    try:
+        scope_report = json.loads(scope.stdout)
+    except ValueError:
+        raise Refusal("scope-check returned malformed JSON; binding unavailable")
+    if not isinstance(scope_report, dict):
+        raise Refusal("scope-check returned an invalid scope report")
+    for key, expected in scope_binding.items():
+        if scope_report.get(key) != expected:
+            raise Refusal("scope-check binding differs from coordinator state: " + key)
+    if type(scope_report.get("state_epoch")) is not int:
+        raise Refusal("scope-check returned an invalid state epoch")
+    if scope.returncode == 0:
+        if (scope_report.get("status") != "in_scope"
+                or not isinstance(scope_report.get("scope"), list)
+                or any(not isinstance(p, str) for p in scope_report["scope"])
+                or scope_report.get("out_of_scope") != []
+                or scope_report.get("deletions_out_of_scope") != []):
+            raise Refusal("successful scope-check returned an invalid scope report")
+        oid(scope_report.get("base"))
+
     # Refuse an unreadable receipt journal before any merge request.
     receipts, _ = S.load_merge_receipts(state_dir)
     pr = json.loads(run(cmd["view"]).stdout)
     check_pr(pr, binding)
     url = observed_pr_url(pr, host, repo_path, args.pr)
-    observation = {"approver": args.approver, "already_merged": pr["state"] == "MERGED"}
+    observation = {"approver": args.approver, "already_merged": pr["state"] == "MERGED",
+                   "scope_exit": scope.returncode, "scope": scope_report,
+                   "scope_stdout": scope.stdout, "scope_stderr": scope.stderr}
     if args.abandon_intent and pr["state"] == "OPEN":
         if intent["phase"] != "merge_requested":
             raise Refusal("cannot abandon an intent that already observed a merge")
@@ -309,36 +352,14 @@ def reconcile(args, plan):
     if pr["state"] == "OPEN":
         if intent:
             raise Refusal("earlier merge request has an unresolved outcome; refusing a second merge call")
-        scope = run(cmd["scope"], allowed=(0, 1, 2))
         if scope.returncode and not args.allow_unchecked_scope:
             raise Refusal("scope-check exited {}: {}".format(scope.returncode, scope.stdout))
         checks = json.loads(run(cmd["checks"]).stdout)
         if not isinstance(checks, list) or not checks or any(
                 not isinstance(c, dict) or c.get("state") != "SUCCESS" for c in checks):
             raise Refusal("at least one CI check is required and every check must be SUCCESS")
-        try:
-            scope_report = json.loads(scope.stdout)
-        except ValueError:
-            if scope.returncode == 0:
-                raise Refusal("successful scope-check returned malformed JSON")
-            # The named exception authorizes the nonzero exit, not a guessed
-            # report. Preserve the exact failed observation for the operator.
-            scope_report = {"unparsed_stdout": scope.stdout, "stderr": scope.stderr}
-        if scope.returncode == 0:
-            if (not isinstance(scope_report, dict)
-                    or scope_report.get("status") != "in_scope"
-                    or scope_report.get("unit") != binding["unit"]
-                    or scope_report.get("attempt") != binding["attempt"]
-                    or scope_report.get("head") != binding["head"]
-                    or not isinstance(scope_report.get("scope"), list)
-                    or any(not isinstance(p, str) for p in scope_report["scope"])
-                    or scope_report.get("out_of_scope") != []
-                    or scope_report.get("deletions_out_of_scope") != []):
-                raise Refusal("successful scope-check returned an invalid scope report")
-            oid(scope_report.get("base"))
-        observation.update({"scope_exit": scope.returncode, "scope": scope_report,
-                            "scope_stdout": scope.stdout, "scope_stderr": scope.stderr,
-                            "allow_unchecked_scope": args.allow_unchecked_scope, "checks": checks})
+        observation.update({"allow_unchecked_scope": args.allow_unchecked_scope,
+                            "checks": checks})
         intent = {"schema_version": 1, "operation_id": operation_id,
                   "binding": binding, "root": root, "phase": "merge_requested",
                   "preconditions": observation, "target_before_request": oid(pr.get("baseRefOid"))}
