@@ -2,12 +2,15 @@
 
 Contract: repository unittest discovery delegates test_review exactly once to a
 sys.executable worker with fake HOME and XDG_STATE_HOME BEFORE interpreter
-startup/import/collection. Its load_tests hook prevents in-process execution.
+startup/import/collection. Its load_tests hook requires a parent token and
+worker-local PID activation; inherited markers never authorize in-process
+execution in another interpreter.
 The parent owns the temporary root, seeds dedicated journal namespaces, waits
-for worker termination, rejects surviving ordinary descendants, kills their
-process group and establishes quiescence before comparing recursive names,
-types and bytes. It reaps its child; the OS reaps orphan descendants. Zombies
-cannot write and are not live survivors. No teardown fixture supplies the audit.
+for worker termination, rejects surviving ordinary descendants, kills every
+group in their session with TERM then KILL and establishes quiescence before
+comparing recursive names, types and bytes. It reaps its child; the OS reaps
+orphan descendants. Zombies cannot write and are not live survivors. No
+teardown fixture supplies the audit.
 Timeout, signal death, unreadable state, protocol/comparison errors, missing
 completion, import/setup failure and worker test failure/error all fail closed.
 The completion file contains every collected id and outcome, including skips;
@@ -26,6 +29,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import secrets
 import shutil
 import signal
 import stat
@@ -39,6 +43,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKER_MARKER = "HANIG_REVIEW_SANDBOX_WORKER"
+WORKER_ROOT = "HANIG_REVIEW_SANDBOX_ROOT"
+_WORKER_PID = None
 # The old three-writer bound was 600s. The complete module needs minutes;
 # allow 30 minutes for loaded CI hosts, while every timeout remains a failure.
 REVIEW_TIMEOUT = 1800
@@ -74,35 +80,97 @@ def manifest(root):
     return entries
 
 
-def group_members(pgid):
-    """Read ordinary group liveness, not which process wrote an artifact."""
+def session_members(sid):
+    """List live (pid, pgid) pairs in the owned session, without env/cwd reads.
+
+    macOS ps has no numeric sid column (sess is not a session id), so use
+    getsid for each listed live pid. A process exiting during enumeration is
+    ordinary host churn, not an audit failure. Other inspection errors fail
+    closed. Zombies cannot write; their reaping belongs to their OS parent.
+    """
     result = subprocess.run(
         ["ps", "-axo", "pid=,pgid=,stat="], capture_output=True, text=True,
         check=True, timeout=10)
     members = []
     for line in result.stdout.splitlines():
         pid, group, state = line.split()
-        if int(group) == pgid and not state.startswith("Z"):
-            members.append(int(pid))
+        if state.startswith("Z"):
+            continue
+        pid, group = int(pid), int(group)
+        try:
+            session = os.getsid(pid)
+        except ProcessLookupError:
+            continue
+        if session == sid:
+            members.append((pid, group))
     return members
 
 
-def stop_group(process):
-    """Kill the owned session, reap the worker, and await no live members."""
+def stop_session(process):
+    """TERM then KILL all groups in the owned session, reap, await quiescence."""
+    for sig, grace in ((signal.SIGTERM, 1), (signal.SIGKILL, 10)):
+        deadline = time.monotonic() + grace
+        signalled = set()
+        while True:
+            process.poll()  # Reap our worker; orphan descendants belong to the OS.
+            members = session_members(process.pid)
+            if not members:
+                process.wait(timeout=10)
+                return
+            for group in {group for _pid, group in members}:
+                if sig == signal.SIGTERM and group in signalled:
+                    continue
+                try:
+                    os.killpg(group, sig)
+                except ProcessLookupError:
+                    pass
+                except PermissionError:
+                    # macOS may return EPERM for an exited, zombie-only group.
+                    if any(g == group for _pid, g in session_members(process.pid)):
+                        raise
+                signalled.add(group)
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+    raise SandboxFailure("could not establish worker-session quiescence")
+
+
+def launch_environment_matches():
+    """Check the parent's random token and the fake launch homes, fail closed."""
+    token = os.environ.get(WORKER_MARKER, "")
+    root_value = os.environ.get(WORKER_ROOT, "")
+    if (len(token) != 64 or any(c not in "0123456789abcdef" for c in token)
+            or not root_value or not Path(root_value).is_absolute()):
+        return False
     try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    except PermissionError:
-        # macOS can return EPERM for an exited group containing only zombies.
-        if group_members(process.pid):
-            raise
-    process.wait(timeout=10)
-    deadline = time.monotonic() + 10
-    while group_members(process.pid):
-        if time.monotonic() >= deadline:
-            raise SandboxFailure("could not establish process-group quiescence")
-        time.sleep(0.05)
+        root = Path(root_value).resolve(strict=True)
+        for key in ("HOME", "XDG_STATE_HOME", "TMPDIR"):
+            value = os.environ.get(key, "")
+            if not value or not Path(value).is_absolute():
+                return False
+            path = Path(value).resolve(strict=True)
+            if root not in path.parents or not path.is_dir():
+                return False
+        fd = os.open(root / "worker-token", os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(fd)
+            return (stat.S_ISREG(info.st_mode) and info.st_size == 64
+                    and os.read(fd, 65) == token.encode("ascii"))
+        finally:
+            os.close(fd)
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def is_sandbox_worker():
+    """Environment inheritance cannot grant this interpreter worker status.
+
+    Only worker_main activates the current PID after checking the parent's
+    launch token. Exec starts with no activation; fork inherits the old PID.
+    The file token and contained homes remain required at collection time.
+    This is accidental-inheritance protection, not a same-UID security gate.
+    """
+    return _WORKER_PID == os.getpid() and launch_environment_matches()
 
 
 def validate_completion(report, module_name):
@@ -163,8 +231,10 @@ def run_sandbox(module_path, module_name, timeout=REVIEW_TIMEOUT):
         seed.parent.mkdir(parents=True)
         seed.write_bytes(SEED)
     before = {str(path): manifest(path) for path in protected}
+    token = secrets.token_hex(32)
+    (root / "worker-token").write_text(token)
     env = dict(os.environ, HOME=str(home), XDG_STATE_HOME=str(state),
-               TMPDIR=str(tmp), **{WORKER_MARKER: "1"})
+               TMPDIR=str(tmp), **{WORKER_MARKER: token, WORKER_ROOT: str(root)})
     # Test bodies supply their own mock keys. Never give the delegated module
     # operator credentials or an inherited per-test journal marker.
     for key in ("OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY",
@@ -192,12 +262,12 @@ def run_sandbox(module_path, module_name, timeout=REVIEW_TIMEOUT):
             else:
                 if process.returncode != 0:
                     problems.append("worker exit %s (signal death if negative)" % process.returncode)
-                survivors = group_members(process.pid)
+                survivors = session_members(process.pid)
                 if survivors:
                     problems.append("surviving worker descendants: %r" % survivors)
             finally:
                 # Includes timeout, process-inspection errors and parent interruption.
-                stop_group(process)
+                stop_session(process)
                 quiet = True
             try:
                 after = {str(path): manifest(path) for path in protected}
@@ -331,8 +401,14 @@ class RecordingResult(unittest.TextTestResult):
 
 
 def worker_main(module_path, module_name, completion):
-    if os.environ.get(WORKER_MARKER) != "1":
+    global _WORKER_PID
+    if not launch_environment_matches():
         raise RuntimeError("worker must be launched by the sandbox parent")
+    _WORKER_PID = os.getpid()
+    # The script is __main__; the collection hook imports this package name.
+    # Keep one activation object. A fresh interpreter importing the helper
+    # starts with _WORKER_PID=None even if all launch variables were inherited.
+    sys.modules["tests.review_sandbox_worker"] = sys.modules[__name__]
     sys.path.insert(0, str(ROOT))
     sys.path.insert(0, str(Path(module_path).parent))
     report = {"version": 1, "module": module_name, "collected": [],

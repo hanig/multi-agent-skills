@@ -4085,7 +4085,10 @@ def load_tests(loader, tests, pattern):
     Collection is proved by the worker handshake in test_project's guard.
     Named fixture probes inside this module keep their existing isolation.
     """
-    if os.environ.get("HANIG_REVIEW_SANDBOX_WORKER") == "1":
+    if str(REPO) not in sys.path:
+        sys.path.insert(0, str(REPO))
+    from tests.review_sandbox_worker import is_sandbox_worker
+    if is_sandbox_worker():
         return tests
     return unittest.TestSuite()
 

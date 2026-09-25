@@ -125,7 +125,7 @@ def delayed():
             % str(group_file))
         with self.assertRaisesRegex(sandbox.SandboxFailure, "surviving worker descendants"):
             self.run_module(source)
-        self.assertEqual(sandbox.group_members(int(group_file.read_text())), [])
+        self.assertEqual(sandbox.session_members(int(group_file.read_text())), [])
 
     def test_import_failure_requires_completion_handshake(self):
         with self.assertRaisesRegex(sandbox.SandboxFailure, "ImportError: delegated import failed"):
