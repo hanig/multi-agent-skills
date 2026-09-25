@@ -3632,7 +3632,8 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(_FixtureTestCase):
         Prime the real pipe before arming the fixture's run/grace windows.
         Timestamp readiness and completion in the supervisor, so neither
         writer startup nor a late Python observer consumes the latency bound.
-        The independent watchdog only contains a broken fixture.
+        Separate startup and collection watchdogs contain a broken fixture;
+        the completion timestamp alone measures post-readiness latency.
         """
         with self._fixture_directory() as d:
             script = Path(d) / "noisy"
@@ -3700,8 +3701,7 @@ close $ready or die $!;
                             "supervisor exited before noisy readiness")
                     time.sleep(0.01)
                 ready_at = float(ready.read_text())
-                joined = self._fixture_answer(
-                    proc, timeout=max(0, watchdog - time.monotonic()))
+                joined = self._fixture_answer(proc, timeout=60)
                 out, err = joined.stdout, joined.stderr
                 self.assertEqual(joined.returncode, 0, err)
                 self.assertLess(
@@ -3713,6 +3713,8 @@ close $ready or die $!;
                 self.assertEqual(len(lines[2]), 65536,
                                  "the retained output tail is not 64 KiB")
                 self.assertEqual(set(lines[2]), {"0"})
+                self.assertEqual(lines[3:], ["__DOCTOR_END__"],
+                                 "unexpected records after the retained tail")
             except subprocess.TimeoutExpired:
                 self.fail("continuous output starved the monotonic deadline")
 
