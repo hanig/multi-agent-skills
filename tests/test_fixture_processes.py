@@ -45,10 +45,13 @@ class TestFixtureProcessGuard(unittest.TestCase):
 
                 def kill(pgid):
                     if leader_only:
-                        try:
-                            os.kill(pgid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
+                        # Remove both marker-bearing leaders, leaving only
+                        # the orphan and the unreaped session anchor's PID.
+                        for pid in {pgid, proc.pid}:
+                            try:
+                                os.kill(pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
                     else:
                         kill_group(pgid)
 
@@ -76,9 +79,11 @@ class TestFixtureProcessGuard(unittest.TestCase):
                 pgid = os.getpgid(proc.pid)
                 self.assertNotEqual(pgid, os.getpgrp())
                 supervisor = scope.children[-1][0]
+                observed['anchor'] = supervisor
 
                 def contain():
-                    kill_group(pgid)
+                    if supervisor.returncode is None or not observed.get('gone', False):
+                        kill_group(pgid)
                     supervisor.wait(timeout=5)
 
                 self.addCleanup(contain)
@@ -108,7 +113,7 @@ class TestFixtureProcessGuard(unittest.TestCase):
         self.assertEqual(len(result.failures), 2)
         self.assertIn('fixture PIDs survived KILL', result.failures[0][1])
         self.assertIn('fixture processes survived cleanup', result.failures[1][1])
-        self.assertIsNone(observed['proc'].returncode,
+        self.assertIsNone(observed['anchor'].returncode,
                           'failed termination released the group ownership anchor')
         self.assertFalse(observed['gone'])
 
@@ -126,18 +131,23 @@ class TestFixtureProcessGuard(unittest.TestCase):
             proc = scope.popen([sys.executable, str(script)],
                                stdout=subprocess.PIPE, text=True)
             anchor = scope.children[-1][0]
+            cleaned = False
             try:
                 out, _err = proc.communicate(timeout=10)
                 orphan = int(out.strip())
+                reserved = anchor.returncode is None
+                pgid = os.getpgid(orphan)
                 self.assertEqual(proc.returncode, 0)
-                self.assertIsNone(anchor.returncode)
-                self.assertNotEqual(proc.pid, anchor.pid)
-                self.assertEqual(os.getpgid(orphan), anchor.pid)
                 self.assertTrue(case.doCleanups())
                 row = process_table().get(orphan)
-                self.assertTrue(row is None or row[2].startswith('Z'), row)
+                cleaned = row is None or row[2].startswith('Z')
+                self.assertTrue(cleaned, 'caller-reaped fixture left a live orphan: %r' % (row,))
+                self.assertTrue(reserved)
+                self.assertNotEqual(proc.pid, anchor.pid)
+                self.assertEqual(pgid, anchor.pid)
             finally:
-                kill_group(anchor.pid)
+                if not cleaned:
+                    kill_group(anchor.pid)
                 anchor.wait(timeout=5)
                 case.doCleanups()
 
@@ -196,15 +206,16 @@ class TestFixtureProcessGuard(unittest.TestCase):
                 self.assertTrue(case.doCleanups())
 
     def test_supervisor_errors_and_timeouts_still_clean_up(self):
-        for source, error in (
-                ('raise ValueError("injected fixture error")', AssertionError),
-                ('import time; time.sleep(600)', subprocess.TimeoutExpired)):
+        for source, error, timeout in (
+                ('import time; time.sleep(2); raise ValueError("injected fixture error")',
+                 AssertionError, 60),
+                ('import time; time.sleep(600)', subprocess.TimeoutExpired, 1)):
             with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
                 case = unittest.TestCase()
                 scope = FixtureProcesses(case, directory, kill_group)
                 try:
                     with self.assertRaises(error):
-                        scope.run_python(source, timeout=1)
+                        scope.run_python(source, timeout=timeout)
                 finally:
                     self.assertTrue(case.doCleanups())
                 self.assertIsNotNone(scope.children[0][0].returncode)
