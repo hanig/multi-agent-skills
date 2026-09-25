@@ -236,6 +236,94 @@ assert suite.countTestCases() == 0, suite.countTestCases()
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_worker_pid_is_reserved_until_last_session_scan(self):
+        # No OS identities or signals: reaping releases this fake PID to an
+        # unrelated session leader. The old parent then counts and signals it.
+        events = []
+        class Worker:
+            pid = 43210
+            returncode = None
+
+            def wait(self, timeout=None):
+                events.append("reap")
+                self.returncode = 0
+                return 0
+
+            def poll(self):
+                return self.wait()
+
+        worker = Worker()
+        stranger = [(worker.pid, worker.pid)]
+
+        def launch(argv, **kwargs):
+            Path(argv[-1]).write_text(json.dumps({
+                "version": 1, "module": "delegated_probe",
+                "collected": ["delegated_probe.Probe.test_probe"],
+                "outcomes": [{"id": "delegated_probe.Probe.test_probe",
+                              "status": "success", "traceback": ""}],
+                "problems": [], "threads": [], "skipped": []}))
+            return worker
+
+        def members(sid):
+            self.assertEqual(sid, worker.pid)
+            events.append("scan")
+            return list(stranger) if worker.returncode is not None else []
+
+        def signal_stranger(*args):
+            events.append("signalled stranger")
+            stranger.clear()
+
+        def observe(pid):
+            self.assertEqual(pid, worker.pid)
+            events.append("observe exit without reap")
+            return True
+
+        with patch.object(sandbox.subprocess, "Popen", side_effect=launch), \
+                patch.object(sandbox, "nonreaping_waiter", create=True,
+                             return_value=observe), \
+                patch.object(sandbox, "session_members", side_effect=members), \
+                patch.object(sandbox.os, "killpg", side_effect=signal_stranger) as groups, \
+                patch.object(sandbox.os, "kill", side_effect=signal_stranger) as pids, \
+                patch.object(sandbox.os, "getsid", return_value=worker.pid):
+            report = self.run_module(self.simple_suite())
+        self.assertEqual(report["outcomes"][0]["status"], "success")
+        self.assertEqual(events.count("reap"), 1, events)
+        self.assertEqual(events[-1], "reap", events)
+        self.assertGreaterEqual(events.count("scan"), 2, events)
+        self.assertIn("observe exit without reap", events)
+        groups.assert_not_called()
+        pids.assert_not_called()
+
+    def test_native_exit_observation_keeps_worker_waitable(self):
+        observe = sandbox.nonreaping_waiter()
+        worker = subprocess.Popen([sys.executable, "-c", "raise SystemExit(7)"],
+                                  start_new_session=True)
+        try:
+            deadline = time.monotonic() + 10
+            while not observe(worker.pid):
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(0.01)
+            # A second waitid must still return the same child's exit; no
+            # poll/wait call is allowed to consume it until after the scan.
+            self.assertTrue(observe(worker.pid))
+            self.assertIsNone(worker.returncode)
+            self.assertEqual(sandbox.session_members(worker.pid), [])
+            self.assertEqual(worker.wait(timeout=10), 7)
+            with self.assertRaises(ChildProcessError):
+                observe(worker.pid)
+        finally:
+            if worker.returncode is None:
+                worker.kill()
+                worker.wait(timeout=10)
+
+    def test_missing_waitid_refuses_before_launch(self):
+        with patch.object(sandbox.os, "waitid", None, create=True), \
+                patch.object(sandbox.sys, "platform", "unsupported"), \
+                patch.object(sandbox.subprocess, "Popen") as launch:
+            with self.assertRaisesRegex(sandbox.SandboxFailure, "waitid.*WNOWAIT"):
+                self.run_module(self.simple_suite())
+        launch.assert_not_called()
+
     def test_new_process_group_in_worker_session_is_failed_and_killed(self):
         identity_file = self.root / "escaped-group.json"
         child = """import json, os, signal, sys, time
