@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+from copy import deepcopy
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
@@ -40,14 +41,20 @@ ADAPTERS: dict[str, dict[str, Any]] = {
     "claude": {
         "identity": "Claude Code",
         "executable": "claude",
-        "verified_versions": ["2.1.261"],
+        "certifications": [
+            {"version": "2.1.261", "verified_on": "2026-09-05",
+             "checks": ["package_manifest"], "evidence": "2026-09-05 package manifest"},
+            {"version": "2.1.282", "verified_on": "2026-09-25",
+             "checks": ["native_discovery", "authenticated_skill_invocation",
+                        "cross_agent_handoff"],
+             "evidence": "ARC-281 live run", "skill_root": "~/.claude/skills"},
+        ],
         "invocation": ["claude", "--version"],
         "sources": [
             "https://registry.npmjs.org/@anthropic-ai/claude-code/2.1.261",
             "https://code.claude.com/docs/en/env-vars",
             "https://code.claude.com/docs/en/claude-directory",
         ],
-        "verified_on": "2026-09-05",
         "probe_timing": {"measured_on": "2026-09-22", "observed_max_seconds": 0.123},
         "source_verification": {"release": "package_manifest", "root_policy": "unverified",
                                 "native_discovery": "unverified", "invocation": "unverified"},
@@ -61,14 +68,20 @@ ADAPTERS: dict[str, dict[str, Any]] = {
     "codex": {
         "identity": "Codex CLI",
         "executable": "codex",
-        "verified_versions": ["0.153.4"],
+        "certifications": [
+            {"version": "0.153.4", "verified_on": "2026-09-05",
+             "checks": ["package_manifest"], "evidence": "2026-09-05 package manifest"},
+            {"version": "0.154.0", "verified_on": "2026-09-25",
+             "checks": ["native_discovery", "authenticated_skill_invocation",
+                        "cross_agent_handoff"],
+             "evidence": "ARC-281 live run", "skill_root": "~/.agents/skills"},
+        ],
         "invocation": ["codex", "--version"],
         "sources": [
             "https://registry.npmjs.org/@openai/codex/0.153.4",
             "https://github.com/openai/codex/blob/main/codex-rs/core-skills/src/loader.rs",
             "https://github.com/openai/skills/blob/main/skills/.system/skill-installer/SKILL.md",
         ],
-        "verified_on": "2026-09-05",
         "probe_timing": {"measured_on": "2026-09-22", "observed_max_seconds": 0.018},
         "source_verification": {"release": "package_manifest", "root_policy": "unverified",
                                 "native_discovery": "unverified", "invocation": "unverified"},
@@ -84,7 +97,14 @@ ADAPTERS: dict[str, dict[str, Any]] = {
     "opencode": {
         "identity": "OpenCode",
         "executable": "opencode",
-        "verified_versions": ["1.18.29"],
+        "certifications": [
+            {"version": "1.18.29", "verified_on": "2026-09-05",
+             "checks": ["package_manifest"], "evidence": "2026-09-05 package manifest"},
+            {"version": "1.18.29", "verified_on": "2026-09-25",
+             "checks": ["native_discovery", "authenticated_skill_invocation",
+                        "cross_agent_handoff"],
+             "evidence": "ARC-281 live run", "skill_root": "~/.agents/skills"},
+        ],
         "invocation": ["opencode", "--version"],
         "sources": [
             "https://registry.npmjs.org/opencode-ai/1.18.29",
@@ -92,7 +112,6 @@ ADAPTERS: dict[str, dict[str, Any]] = {
             "https://dev.opencode.ai/docs/config",
             "https://github.com/anomalyco/opencode/blob/v1.18.29/packages/opencode/src/skill/index.ts",
         ],
-        "verified_on": "2026-09-05",
         "probe_timing": {"measured_on": "2026-09-22", "observed_max_seconds": 2.460},
         "source_verification": {"release": "package_manifest", "root_policy": "source_verified",
                                 "native_discovery": "unverified", "invocation": "unverified"},
@@ -114,7 +133,14 @@ ADAPTERS: dict[str, dict[str, Any]] = {
     "pi": {
         "identity": "Pi coding agent",
         "executable": "pi",
-        "verified_versions": ["0.73.1"],
+        "certifications": [
+            {"version": "0.73.1", "verified_on": "2026-09-05",
+             "checks": ["package_manifest"], "evidence": "2026-09-05 package manifest"},
+            {"version": "0.86.1", "verified_on": "2026-09-25",
+             "checks": ["native_discovery", "authenticated_skill_invocation",
+                        "cross_agent_handoff"],
+             "evidence": "ARC-281 live run", "skill_root": "~/.agents/skills"},
+        ],
         "invocation": ["pi", "--version"],
         "sources": [
             "https://registry.npmjs.org/@mariozechner/pi-coding-agent/0.73.1",
@@ -122,7 +148,6 @@ ADAPTERS: dict[str, dict[str, Any]] = {
             "https://github.com/badlogic/pi-mono/blob/v0.73.1/packages/coding-agent/docs/skills.md",
             "https://github.com/badlogic/pi-mono/blob/v0.73.1/packages/coding-agent/src/config.ts",
         ],
-        "verified_on": "2026-09-05",
         "probe_timing": {"measured_on": "2026-09-22", "observed_max_seconds": 0.615},
         "source_verification": {"release": "package_manifest", "root_policy": "source_verified",
                                 "native_discovery": "unverified", "invocation": "unverified"},
@@ -136,6 +161,14 @@ ADAPTERS: dict[str, dict[str, Any]] = {
                        "consumed_by": ["pi"]},
     },
 }
+
+# Compatibility summaries for callers; decisions below use the exact version's
+# dated record, so refreshing one release never renews another release's age.
+for _adapter in ADAPTERS.values():
+    _adapter["verified_versions"] = list(dict.fromkeys(
+        record["version"] for record in _adapter["certifications"]))
+    _adapter["verified_on"] = max(
+        record["verified_on"] for record in _adapter["certifications"])
 
 # Consumer edges include compatibility stores, not just an adapter's preferred
 # destination.  They let an installer show that two requested copies will be
@@ -190,17 +223,53 @@ def probe_deadline(spec: Mapping[str, Any]) -> float:
                observed * PROBE_DEADLINE_HEADROOM)
 
 
+def certification_for(spec: Mapping[str, Any], version: Optional[str]) -> Optional[dict[str, Any]]:
+    """Newest retained evidence for this exact version, never a version range."""
+    records = [record for record in spec["certifications"]
+               if record["version"] == version]
+    return deepcopy(max(records, key=lambda record: record["verified_on"])) if records else None
+
+
 def verification_review_due(spec: Mapping[str, Any]) -> date:
-    """Date by which an exact-version certification must be reviewed again."""
+    """One record's deadline, or an adapter's earliest exact-version deadline.
+
+    A newer observation supersedes older evidence only for the same version.
+    An adapter still needs review when any distinct version's evidence expires.
+    """
+    if "certifications" in spec:
+        versions = {record["version"] for record in spec["certifications"]}
+        return min(verification_review_due(certification_for(spec, version))
+                   for version in versions)
     verified = datetime.strptime(spec["verified_on"], "%Y-%m-%d").date()
     return verified + timedelta(days=VERIFICATION_MAX_AGE_DAYS)
 
 
 def stale_adapter_certifications(as_of: Optional[date] = None) -> list[str]:
-    """Adapter IDs whose release evidence has passed its review deadline."""
+    """Adapter IDs with an expired exact version's newest retained evidence."""
     observed = as_of or date.today()
     return [name for name, spec in ADAPTERS.items()
             if observed > verification_review_due(spec)]
+
+
+def assess_certification(agent: str, version: Optional[str], verification: str,
+                         as_of: Optional[date] = None) -> dict[str, Any]:
+    """Bound a reported claim by this module's exact-version evidence.
+
+    Report dates, freshness and embedded evidence are never authority. A
+    consumer may downgrade an earlier claim but cannot upgrade an unverified
+    observation. Returned evidence is detached from the module's records.
+    """
+    certification = certification_for(ADAPTERS[agent], version)
+    deadline = verification_review_due(certification) if certification else None
+    freshness = ("unverified" if deadline is None else
+                 "stale" if (as_of or date.today()) > deadline else "current")
+    return {
+        "verification": ("verified" if verification == "verified" and freshness == "current"
+                         else "unverified"),
+        "certification_record": certification,
+        "verification_review_due": deadline.isoformat() if deadline else None,
+        "verification_freshness": freshness,
+    }
 
 
 def _environment(env: Optional[Mapping[str, str]]) -> dict[str, str]:
@@ -471,6 +540,7 @@ def discover(
     context = _environment(env)
     finder = which or (lambda executable: _which(executable, context))
     runner = probe or (lambda path, seconds: _default_probe(path, seconds, context))
+    observed = date.today()
     found_agents: dict[str, Any] = {}
     for key, spec in ADAPTERS.items():
         roots = resolve_roots(key, context)
@@ -508,16 +578,26 @@ def discover(
             version = _version(str(output)) if outcome == "ok" else None
         else:
             state, version = ("configured", None) if any(item["exists"] for item in evidence["config_directories"]) else ("absent", None)
-        verified = bool(version and version in spec["verified_versions"])
-        review_due = verification_review_due(spec)
+        assessment = assess_certification(key, version, "verified", observed)
+        certification = assessment["certification_record"]
+        evidence["certification"] = certification
+        source_verification = dict(spec["source_verification"])
+        if certification and "authenticated_skill_invocation" in certification["checks"]:
+            if not any(record["version"] == version and "package_manifest" in record["checks"]
+                       for record in spec["certifications"]):
+                source_verification.update(release="live_version_probe", root_policy="unverified")
+            source_verification.update(native_discovery="live_verified",
+                                       invocation="live_verified",
+                                       cross_agent_handoff="live_verified")
         found_agents[key] = {
             "identity": spec["identity"], "state": state,
-            "verification": "verified" if verified else "unverified",
+            "verification": assessment["verification"],
             "version": version, "verified_versions": spec["verified_versions"],
             "roots": roots, "evidence": evidence, "sources": spec["sources"],
-            "verified_on": spec["verified_on"], "source_verification": spec["source_verification"],
-            "verification_review_due": review_due.isoformat(),
-            "verification_freshness": ("stale" if date.today() > review_due else "current"),
+            "verified_on": certification["verified_on"] if certification else None,
+            "source_verification": source_verification,
+            "verification_review_due": assessment["verification_review_due"],
+            "verification_freshness": assessment["verification_freshness"],
             "duplicate_behavior": spec["duplicates"],
             # Presence chooses a destination; verification says whether that
             # adapter version is certified. Conflating them made four present
@@ -546,7 +626,10 @@ def select_targets(
     instead of receiving an unnecessary second copy.
     """
     records = report["agents"]
-    stale_certifications = set(stale_adapter_certifications(as_of))
+    observed = as_of or date.today()
+    assessments = {name: assess_certification(name, record.get("version"),
+                                             record["verification"], observed)
+                   for name, record in records.items() if name in ADAPTERS}
     requested, excluded = list(agents) or list(ADAPTERS), set(exclude_agents)
     if len(set(requested)) != len(requested):
         raise ValueError("agents contains a duplicate agent id")
@@ -558,8 +641,7 @@ def select_targets(
     eligible: set[str] = set()
     for agent in requested:
         record = records[agent]
-        certification = ("verified" if record["verification"] == "verified"
-                         and agent not in stale_certifications else "unverified")
+        certification = assessments[agent]["verification"]
         if agent in excluded:
             skipped.append({"agent": agent, "reason": "excluded",
                             "certification": certification})
@@ -601,8 +683,9 @@ def select_targets(
             continue
         item, covered = assignments[agent]
         record = records[agent]
+        assessment = assessments[agent]
         agent_warnings = []
-        if record["verification"] != "verified":
+        if record["verification"] != "verified" or assessment["certification_record"] is None:
             if mode == "automatic":
                 version = record.get("version") or "unknown version"
                 agent_warnings.append(
@@ -615,21 +698,21 @@ def select_targets(
                     f"{record['state']}; bootstrap destination planning proceeded, "
                     "but presence, native compatibility, and invocation remain "
                     "unverified (skip is not pass)")
-        if agent in stale_certifications:
+        if assessment["verification_freshness"] == "stale":
             selection_basis = ("selection continued from executable presence"
                                if mode == "automatic"
                                else "explicit bootstrap selection proceeded")
             agent_warnings.append(
                 f"{agent} adapter certification expired after "
-                f"{record['verification_review_due']}; {selection_basis}, but "
+                f"{assessment['verification_review_due']}; {selection_basis}, but "
                 "the adapter evidence is stale")
         warnings.extend(agent_warnings)
         selected.append({
             "agent": agent, "status": "selected", "mode": mode,
             "covered_by": list(item["target_agents"]) if covered else None,
             "destination": item["destination"], "consumers": item["consumers"],
-            "certification": ("verified" if record["verification"] == "verified"
-                              and agent not in stale_certifications else "unverified"),
+            "certification": assessment["verification"],
+            "certification_record": assessment["certification_record"],
             "certification_warnings": agent_warnings,
         })
     conflicts = []

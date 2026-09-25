@@ -1,11 +1,14 @@
 """Fixtures for the read-only user-agent discovery contract."""
 import os
+import copy
+import json
 import sys
 import tempfile
 import time
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "hanig-project" / "scripts"))
@@ -147,7 +150,9 @@ class TestAgentDiscovery(unittest.TestCase):
                          plan["certification_warnings"])
 
     def test_supplied_path_not_the_process_path_controls_default_finder(self):
-        with tempfile.TemporaryDirectory() as raw:
+        with tempfile.TemporaryDirectory() as raw, \
+                mock.patch.object(discovery, "date", wraps=date) as clock:
+            clock.today.return_value = date(2026, 9, 25)
             home, bin_dir = Path(raw) / "home", Path(raw) / "bin"
             home.mkdir()
             bin_dir.mkdir()
@@ -281,3 +286,205 @@ class TestAgentDiscovery(unittest.TestCase):
                       if item["destination"]["id"] == "claude-user")
         self.assertEqual(claude["consumers"], ["claude"])
         self.assertEqual(claude["selected_agents"], ["claude"])
+
+
+class TestDatedLiveCertifications(unittest.TestCase):
+    LIVE = {"claude": "2.1.282", "codex": "0.154.0",
+            "opencode": "1.18.29", "pi": "0.86.1"}
+
+    def report(self, versions):
+        with tempfile.TemporaryDirectory() as raw, \
+                mock.patch.object(discovery, "date", wraps=date) as clock:
+            clock.today.return_value = date(2026, 9, 25)
+            return discovery.discover(
+                fixture_env(raw), finder({name: "/fixtures/" + name for name in versions}),
+                probe_for(versions))
+
+    def test_live_exact_versions_select_their_own_dated_record(self):
+        report = self.report(self.LIVE)
+        plan = discovery.select_targets(report, as_of=date(2026, 10, 6))
+        for item in plan["selected"]:
+            with self.subTest(agent=item["agent"]):
+                self.assertEqual(item["certification"], "verified")
+                record = item["certification_record"]
+                self.assertEqual(record["version"], self.LIVE[item["agent"]])
+                self.assertEqual(record["verified_on"], "2026-09-25")
+                self.assertEqual(record["evidence"], "ARC-281 live run")
+                self.assertEqual(record["checks"], ["native_discovery",
+                    "authenticated_skill_invocation", "cross_agent_handoff"])
+                observed = report["agents"][item["agent"]]
+                self.assertEqual(observed["verification_review_due"], "2026-10-25")
+                self.assertEqual(observed["source_verification"]["native_discovery"], "live_verified")
+                self.assertEqual(observed["source_verification"]["invocation"], "live_verified")
+        self.assertEqual(plan["certification_warnings"], [])
+
+    def test_one_patch_newer_has_no_certification_record(self):
+        versions = {"claude": "2.1.283", "codex": "0.154.1",
+                    "opencode": "1.18.30", "pi": "0.86.2"}
+        plan = discovery.select_targets(self.report(versions), as_of=date(2026, 10, 6))
+        self.assertEqual(len(plan["selected"]), 4)
+        for item in plan["selected"]:
+            with self.subTest(agent=item["agent"]):
+                self.assertEqual(item["certification"], "unverified")
+                self.assertIsNone(item["certification_record"])
+                self.assertTrue(item["certification_warnings"])
+
+    def test_new_live_records_expire_without_blocking_selection(self):
+        report = self.report(self.LIVE)
+        current = discovery.select_targets(report, as_of=date(2026, 10, 25))
+        expired = discovery.select_targets(report, as_of=date(2026, 10, 26))
+        self.assertEqual([item["certification"] for item in current["selected"]],
+                         ["verified"] * 4)
+        self.assertEqual([item["certification"] for item in expired["selected"]],
+                         ["unverified"] * 4)
+        self.assertEqual(len(expired["certification_warnings"]), 4)
+        self.assertTrue(all("expired after 2026-10-25" in warning
+                            for warning in expired["certification_warnings"]))
+
+    def test_old_releases_keep_their_original_date_and_expiry(self):
+        old = {"claude": "2.1.261", "codex": "0.153.4", "pi": "0.73.1"}
+        report = self.report(old)
+        current = discovery.select_targets(report, as_of=date(2026, 10, 5))
+        expired = discovery.select_targets(report, as_of=date(2026, 10, 6))
+        self.assertEqual([item["certification"] for item in current["selected"]],
+                         ["verified"] * 3)
+        self.assertEqual([item["certification"] for item in expired["selected"]],
+                         ["unverified"] * 3)
+        for item in expired["selected"]:
+            self.assertEqual(item["certification_record"]["verified_on"], "2026-09-05")
+            self.assertEqual(report["agents"][item["agent"]]["source_verification"]["invocation"],
+                             "unverified")
+        self.assertEqual([record["verified_on"] for record in
+                          discovery.adapters()["opencode"]["certifications"]],
+                         ["2026-09-05", "2026-09-25"])
+
+
+    def test_adapter_staleness_includes_expired_distinct_versions(self):
+        # A renewed OpenCode record supersedes the old record for that SAME
+        # version. A newer Claude/Codex/Pi version cannot renew an older one.
+        for observed, expected in (
+                (date(2026, 10, 5), []),
+                (date(2026, 10, 6), ["claude", "codex", "pi"]),
+                (date(2026, 10, 25), ["claude", "codex", "pi"]),
+                (date(2026, 10, 26), ["claude", "codex", "opencode", "pi"])):
+            with self.subTest(observed=observed):
+                self.assertEqual(discovery.stale_adapter_certifications(observed), expected)
+        for agent, spec in discovery.adapters().items():
+            with self.subTest(agent=agent):
+                self.assertEqual(discovery.verification_review_due(spec),
+                                 date(2026, 10, 25) if agent == "opencode"
+                                 else date(2026, 10, 5))
+
+    def test_discovery_verification_expires_with_each_exact_version_record(self):
+        versions = [
+            ("claude", "2.1.261", date(2026, 9, 5)),
+            ("codex", "0.153.4", date(2026, 9, 5)),
+            ("pi", "0.73.1", date(2026, 9, 5)),
+        ] + [(name, version, date(2026, 9, 25))
+             for name, version in self.LIVE.items()]
+        for name, version, verified_on in versions:
+            deadline = verified_on + timedelta(days=30)
+            for offset, verification, freshness in (
+                    (-1, "verified", "current"), (0, "verified", "current"),
+                    (1, "unverified", "stale")):
+                observed = deadline + timedelta(days=offset)
+                with self.subTest(agent=name, version=version, observed=observed), \
+                        tempfile.TemporaryDirectory() as raw, \
+                        mock.patch.object(discovery, "date", wraps=date) as clock:
+                    clock.today.return_value = observed
+                    report = discovery.discover(
+                        fixture_env(raw), finder({name: "/fixtures/" + name}),
+                        probe_for({name: version}))
+                    agent = report["agents"][name]
+                    self.assertEqual(agent["verification"], verification)
+                    self.assertEqual(agent["verification_freshness"], freshness)
+                    self.assertEqual(agent["verified_on"], verified_on.isoformat())
+                    self.assertEqual(agent["verification_review_due"], deadline.isoformat())
+                    self.assertEqual(agent["evidence"]["certification"]["version"], version)
+                    self.assertTrue(agent["eligible_for_automatic_target"])
+                    selected = discovery.select_targets(report)["selected"]
+                    self.assertEqual([item["agent"] for item in selected], [name])
+                    self.assertEqual(selected[0]["certification"], verification)
+
+
+class TestCertificationAuthority(unittest.TestCase):
+    def report(self, version):
+        with tempfile.TemporaryDirectory() as raw, \
+                mock.patch.object(discovery, "date", wraps=date) as clock:
+            clock.today.return_value = date(2026, 9, 25)
+            return discovery.discover(
+                fixture_env(raw), finder({"claude": "/fixtures/claude"}),
+                probe_for({"claude": version}))
+
+    def assert_forged_deadline_is_ignored(self, fields):
+        for version, observed, deadline in (
+                ("2.1.261", date(2026, 10, 6), "2026-10-05"),
+                ("2.1.282", date(2026, 10, 26), "2026-10-25"),
+                ("2.1.283", date(2026, 10, 6), None)):
+            with self.subTest(version=version, fields=fields):
+                report = self.report(version)
+                record = report["agents"]["claude"]
+                record.pop("verification_review_due")
+                record.update(verification="verified", **fields)
+                # Round-trip an old saved report, not only today's producer.
+                with tempfile.TemporaryDirectory() as raw:
+                    saved = Path(raw) / "report.json"
+                    saved.write_text(json.dumps(report))
+                    plan = discovery.select_targets(json.loads(saved.read_text()), as_of=observed)
+                selected = plan["selected"][0]
+                self.assertEqual(selected["agent"], "claude")
+                self.assertEqual(selected["certification"], "unverified")
+                warnings = selected["certification_warnings"]
+                self.assertTrue(warnings)
+                if deadline:
+                    self.assertTrue(any("expired after " + deadline in warning
+                                        for warning in warnings))
+                else:
+                    self.assertTrue(any("not adapter-certified" in warning for warning in warnings))
+
+    def test_null_report_deadline_cannot_certify_expired_or_unknown_version(self):
+        self.assert_forged_deadline_is_ignored({"verification_review_due": None})
+
+    def test_future_report_deadline_cannot_certify_expired_or_unknown_version(self):
+        self.assert_forged_deadline_is_ignored({"verification_review_due": "2099-12-31"})
+
+    def test_absent_report_deadline_cannot_certify_expired_or_unknown_version(self):
+        self.assert_forged_deadline_is_ignored({})
+
+    def test_current_version_ignores_report_dates_and_other_versions_expiry(self):
+        for deadline in (None, "2000-01-01", "2099-12-31"):
+            with self.subTest(deadline=deadline):
+                report = self.report("2.1.282")
+                report["agents"]["claude"]["verification_review_due"] = deadline
+                selected = discovery.select_targets(report, as_of=date(2026, 10, 6))["selected"][0]
+                self.assertEqual(selected["certification"], "verified")
+                self.assertEqual(selected["certification_warnings"], [])
+
+    def test_excluded_and_explicit_targets_use_the_same_authority(self):
+        report = self.report("2.1.261")
+        report["agents"]["claude"]["verification_review_due"] = "2099-12-31"
+        for excluded in ((), ("claude",)):
+            with self.subTest(excluded=excluded):
+                plan = discovery.select_targets(report, agents=("claude",),
+                    exclude_agents=excluded, as_of=date(2026, 10, 6))
+                items = plan["skipped"] if excluded else plan["selected"]
+                self.assertEqual(items[0]["certification"], "unverified")
+                if not excluded:
+                    self.assertTrue(plan["certification_warnings"])
+
+    def test_report_evidence_is_not_a_mutable_alias_of_authority(self):
+        before = copy.deepcopy(discovery.ADAPTERS)
+        report = self.report("2.1.261")
+        try:
+            record = report["agents"]["claude"]
+            record["evidence"]["certification"]["verified_on"] = "2099-01-01"
+            record["evidence"]["certification"]["checks"].append("forged")
+            self.assertEqual(discovery.ADAPTERS, before)
+            selected = discovery.select_targets(report, as_of=date(2026, 10, 6))["selected"][0]
+            self.assertEqual(selected["certification"], "unverified")
+            self.assertEqual(selected["certification_record"]["verified_on"], "2026-09-05")
+            selected["certification_record"]["checks"].append("also forged")
+            self.assertEqual(discovery.ADAPTERS, before)
+        finally:
+            discovery.ADAPTERS.clear()
+            discovery.ADAPTERS.update(before)
