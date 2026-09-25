@@ -285,20 +285,18 @@ def integration_evidence(state_dir, binding, repo, target):
 
 
 def retained_integration_problem(preconditions, evidence, binding, repo, target):
-    """Validate the retained claim set without needing cleaned-up Git objects.
+    """Validate retained claims, consulting target policy for legacy intents.
 
-    Older intents lack the captured requirement list. When their target policy
-    is still available, honor its stability declaration too; an old integration
-    receipt alone cannot label that merge candidate-verified.
+    New intents retain their requirements across Git cleanup. Older intents
+    lack that list, so an unreadable target policy cannot establish which
+    claims were required and must withhold verified status and advancement.
     """
     required = preconditions.get("required_merge_claims")
     if required is None:
         policy, _pd, error = V.read_policy(
             S.U.run, repo, target, source="target commit")
         if error:
-            # Preserve already-admitted legacy reconciliation after Git cleanup.
-            # Every new intent captures its required claims before any merge.
-            return None
+            return "retained merge target policy is unreadable: " + error
         required = [V.INTEGRATION_CLAIM]
         if V.stability_declarations(policy):
             required.append(V.STABILITY_CLAIM)
@@ -603,7 +601,8 @@ def reconcile(args, plan):
     if commit.get("sha") != merged or not isinstance(parents, list) or len(parents) != 1:
         raise Refusal("squash reconciliation requires the observed single-parent merge commit")
     target = oid(parents[0].get("sha"))
-    # An already-admitted precondition survives crashes and local Git cleanup.
+    # Captured claim requirements survive crashes and local Git cleanup;
+    # legacy preconditions still require a readable target policy.
     # Its target must be the actual parent, not PR metadata or today's ref tip.
     evidence = (intent or {}).get("preconditions", {}).get("integration")
     integration_problem = None

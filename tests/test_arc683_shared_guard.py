@@ -555,7 +555,13 @@ class TestSharedGuard(unittest.TestCase):
         self.assertEqual(self.f.receipts()[-1]["integration_status"], "integration-unverified")
 
     def test_legacy_policy_read_error_cannot_keep_verified_label(self):
-        """Preserved failing regression for the unresolved round-3 finding."""
+        """A malformed read must correct persisted labels and withhold DONE."""
+        self.assert_legacy_policy_read_error_refused(read_exit=0)
+
+    def test_legacy_policy_command_error_cannot_keep_verified_label(self):
+        self.assert_legacy_policy_read_error_refused(read_exit=128)
+
+    def assert_legacy_policy_read_error_refused(self, read_exit):
         self.install_policy()
         self.assertEqual(self.verify().returncode, 0)
         self.f.forge["queued"] = True
@@ -566,12 +572,17 @@ class TestSharedGuard(unittest.TestCase):
         intent = self.f.intent()
         intent["preconditions"].pop("required_merge_claims")
         intent["preconditions"]["integration"].pop(CLAIM)
+        intent["integration_status"] = "candidate-verified"
         path = self.f.state_dir / ("merge-unit-" + intent["operation_id"] + ".json")
         path.write_text(json.dumps(intent))
         rows = [r for r in S.load_verifications(self.f.state_dir)[0] if r["claim"] != CLAIM]
         (self.f.state_dir / S.VERIFY_RECEIPTS).write_text(
             "".join(json.dumps(r) + "\n" for r in rows))
         self.f.forge["pr"].update(state="MERGED", mergeCommit={"oid": self.f.merged})
+        self.f.us["merge_receipt"] = {
+            "unit": "u", "repo": self.f.remote, "pr": self.f.remote + "/pull/7",
+            "target": "main", "head": self.f.head, "merged_as": self.f.merged,
+            "target_commit": self.target, "integration_status": "candidate-verified"}
         self.f.save()
         # The target objects remain available. Break only the policy reader's
         # stdout, reaching its malformed-policy branch through the real CLI.
@@ -584,9 +595,10 @@ class TestSharedGuard(unittest.TestCase):
             "result = subprocess.run([%r] + args, stdout=subprocess.PIPE)\n"
             "if 'show' in args and args[-1] == %r:\n"
             "    sys.stdout.write('broken policy output\\n')\n"
+            "    raise SystemExit(%r)\n"
             "sys.stdout.flush()\nsys.stdout.buffer.write(result.stdout)\n"
             "raise SystemExit(result.returncode)\n"
-            % (actual_git, self.target + ":" + V.POLICY_FILE))
+            % (actual_git, self.target + ":" + V.POLICY_FILE, read_exit))
         git.chmod(0o755)
         result = self.f.invoke()
         self.assertEqual(self.f.intent()["integration_status"], "integration-unverified",
@@ -594,6 +606,46 @@ class TestSharedGuard(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.f.receipts()[-1]["integration_status"], "integration-unverified")
         self.assertEqual(len(self.f.calls(["pr", "merge"])), 1)
+        state = json.loads((self.f.state_dir / S.STATE_FILE).read_text())
+        self.assertEqual(state["units"]["u"]["merge_receipt"]["integration_status"],
+                         "integration-unverified")
+        self.assertEqual(state["units"]["u"]["state"], "READY_FOR_PR")
+        self.assertNotIn(" advance ", result.stdout)
+        self.assertIn("target policy is unreadable", result.stderr)
+        self.assertFalse(any(row["verb"] == "close" for row in S.read_outbox(self.f.state_dir)))
+        # A second reconciliation cannot resurrect the old label or re-merge.
+        result = self.f.invoke()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.f.intent()["integration_status"], "integration-unverified")
+        self.assertEqual(len(self.f.calls(["pr", "merge"])), 1)
+
+    def assert_readable_legacy_reconciles(self, stability):
+        if stability:
+            self.install_policy()
+            verified = self.verify()
+            self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+        self.f.forge["queued"] = True
+        self.f.save()
+        self.assertNotEqual(self.f.invoke().returncode, 0)
+        intent = self.f.intent()
+        intent["preconditions"].pop("required_merge_claims")
+        path = self.f.state_dir / ("merge-unit-" + intent["operation_id"] + ".json")
+        path.write_text(json.dumps(intent))
+        self.f.forge["pr"].update(state="MERGED", mergeCommit={"oid": self.f.merged})
+        self.f.save()
+        result = self.f.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.f.intent()["integration_status"], "candidate-verified")
+        self.assertEqual(self.f.receipts()[-1]["integration_status"], "candidate-verified")
+        state = json.loads((self.f.state_dir / S.STATE_FILE).read_text())
+        self.assertEqual(state["units"]["u"]["state"], "DONE")
+        self.assertEqual(len(self.f.calls(["pr", "merge"])), 1)
+
+    def test_readable_legacy_policy_without_stability_reconciles(self):
+        self.assert_readable_legacy_reconciles(stability=False)
+
+    def test_readable_legacy_policy_with_both_claims_reconciles(self):
+        self.assert_readable_legacy_reconciles(stability=True)
 
 
 class TestCompletionProtocol(unittest.TestCase):

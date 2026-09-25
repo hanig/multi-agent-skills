@@ -368,8 +368,10 @@ require both claims with no waiver. Missing or invalid declared verifier bytes,
 policy, or evidence refuse. A retained failure for either claim at the exact
 binding cannot be hidden by another pass. New merge intents retain the required
 claim list and both admitted receipts for reconciliation after Git cleanup;
-legacy intents with available target policy are checked for a missing stability
-claim and any incorrect persisted integration label is corrected.
+legacy intents require readable target policy to establish the claim list.
+An unreadable legacy policy or missing required stability claim corrects any
+incorrect persisted integration label to `integration-unverified` and withholds
+advancement for human intervention. Unreadable policy never means no requirement.
 
 After a merge, the operator compares its actual parent with the checked
 target. A race is recorded as `integration-unverified` in the intent and merge
