@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import unittest
+from unittest import mock
 
 from tests import test_arc683_merge_precondition as preconditions
 
@@ -82,15 +83,14 @@ raise SystemExit(int(Path('target.fail').exists()))
         try:
             self.process.wait(timeout=self.remaining())
         except subprocess.TimeoutExpired:
-            pass
-        finally:
-            # Include descendants if the operator hangs or exits before them.
+            # wait timed out without reaping: the child still owns this PID.
+            # Never signal a group after a successful wait/poll freed its ID.
             try:
                 os.killpg(self.process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
             self.process.wait(timeout=10)
-            self._stopped = True
+        self._stopped = True
 
     def complete(self):
         self.finish.touch()
@@ -157,6 +157,9 @@ with (state / %r).open('r+') as lock:
         with self.assertRaisesRegex(AssertionError,
                                     "operator exited before verifier barrier.*7.*fixture exit diagnostic"):
             self.start()
+        with mock.patch.object(os, "killpg") as signal_group:
+            self.stop()
+        signal_group.assert_not_called()
 
     def test_watchdog_bounds_a_stuck_operator(self):
         operator = self.f.directory / "stuck.py"
