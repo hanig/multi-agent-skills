@@ -202,6 +202,93 @@ class TestSharedGuard(unittest.TestCase):
         self.assertIsNone(error, error)
         self.assertEqual(entry.get("repetitions", 5), 5)
 
+    def test_both_verifiers_run_in_the_same_disposable_checkout(self):
+        self.install_policy()
+        integration = ("#!/usr/bin/env python3\nfrom pathlib import Path\n"
+                       "Path('integration-marker').write_text(str(Path.cwd()))\n")
+        self.policy["verifiers"][0] = dict(
+            self.policy["verifiers"][0], sha256=hashlib.sha256(integration.encode()).hexdigest())
+        self.target = self.precondition.target_commit({
+            V.MERGE_VERIFIER_PATH: integration, V.POLICY_FILE: json.dumps(self.policy)})
+        test = ("import unittest\nfrom pathlib import Path\n"
+                "class SameCheckout(unittest.TestCase):\n"
+                "    def test_checkout(self):\n"
+                "        self.assertEqual(Path('integration-marker').read_text(), str(Path.cwd()))\n"
+                "        self.assertNotEqual(str(Path.cwd()), %r)\n" % str(self.f.repo))
+        self.candidate({"tests/test_same_checkout.py": test})
+        result = self.verify()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.f.repo / "integration-marker").exists())
+
+    def test_modified_and_renamed_modules_run_but_target_only_module_does_not(self):
+        f = self.f
+        passing = "import unittest\nclass Old(unittest.TestCase):\n    def test_old(self): pass\n"
+        # Put old tests into both branches' common history, then install policy
+        # only on the target so the PR diff is still measured from merge_base.
+        base = self.precondition.target_commit({"tests/test_modified.py": passing,
+                                                "tests/test_old.py": passing})
+        f.git("merge", "--no-edit", base)
+        self.install_policy()
+        self.target = self.precondition.target_commit({"tests/test_target_only.py":
+                                                       "raise RuntimeError('NOT_PR_CHANGED')\n"})
+        self.candidate({"tests/test_modified.py": self.counter_test(),
+                        "tests/test_old.py": None, "tests/test_renamed.py": passing})
+        result = self.verify()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        receipt = self.shared_receipt()
+        self.assertIn("test_modified.py: repetition 5/5", receipt["stdout_tail"])
+        self.assertIn("test_renamed.py: repetition 5/5", receipt["stdout_tail"])
+        self.assertNotIn("test_target_only.py", receipt["stdout_tail"])
+        self.assertEqual(self.counter.read_text(), "5")
+
+    def test_retained_both_claims_survive_git_cleanup_after_lost_merge_response(self):
+        self.install_policy()
+        self.assertEqual(self.verify().returncode, 0)
+        self.f.forge["fail_view_once"] = True
+        self.f.save()
+        self.assertNotEqual(self.f.invoke().returncode, 0)
+        shutil.rmtree(self.f.repo / ".git/objects")
+        # DONE avoids asking advancement to redo production judgment after the
+        # deliberately simulated Git-object cleanup; reconciliation still runs.
+        state_path = self.f.state_dir / S.STATE_FILE
+        state = json.loads(state_path.read_text())
+        state["units"]["u"]["state"] = "DONE"
+        state_path.write_text(json.dumps(state))
+        result = self.f.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.f.intent()["integration_status"], "candidate-verified")
+        self.assertEqual(len(self.f.calls(["pr", "merge"])), 1)
+
+    def test_legacy_single_claim_intent_is_relabelled_under_shared_policy(self):
+        self.install_policy()
+        self.assertEqual(self.verify().returncode, 0)
+        self.f.forge["queued"] = True
+        self.f.save()
+        self.assertNotEqual(self.f.invoke().returncode, 0)
+        intent = self.f.intent()
+        intent["preconditions"].pop("required_merge_claims", None)
+        intent["preconditions"]["integration"].pop(CLAIM, None)
+        intent["integration_status"] = "candidate-verified"
+        path = self.f.state_dir / ("merge-unit-" + intent["operation_id"] + ".json")
+        path.write_text(json.dumps(intent))
+        rows = [r for r in S.load_verifications(self.f.state_dir)[0] if r["claim"] != CLAIM]
+        (self.f.state_dir / S.VERIFY_RECEIPTS).write_text(
+            "".join(json.dumps(r) + "\n" for r in rows))
+        self.f.forge["pr"].update(state="MERGED", mergeCommit={"oid": self.f.merged})
+        self.f.us["merge_receipt"] = {
+            "unit": "u", "repo": self.f.remote, "pr": self.f.remote + "/pull/7",
+            "target": "main", "head": self.f.head, "merged_as": self.f.merged,
+            "target_commit": self.target, "integration_status": "candidate-verified"}
+        self.f.save()
+        result = self.f.invoke()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.f.intent()["integration_status"], "integration-unverified")
+        self.assertEqual(self.f.receipts()[-1]["integration_status"], "integration-unverified")
+        state = json.loads((self.f.state_dir / S.STATE_FILE).read_text())
+        self.assertEqual(state["units"]["u"]["merge_receipt"]["integration_status"],
+                         "integration-unverified")
+        self.assertEqual(len(self.f.calls(["pr", "merge"])), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
