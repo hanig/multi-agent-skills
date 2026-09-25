@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -185,6 +186,56 @@ class TestMergeUnit(unittest.TestCase):
         self.assertEqual(state["units"]["u"]["state"], "DONE", result.stdout)
         self.assertIn("--root " + str(self.root), result.stdout)
         self.assertEqual(self.intent()["phase"], "receipt_recorded")
+
+    def test_tracker_close_is_printed_after_advance_and_acknowledged_separately(self):
+        self.state_dir.rename(self.directory / "state with spaces")
+        self.state_dir = self.directory / "state with spaces"
+        self.env["COORDINATOR_STATE"] = str(self.state_dir)
+        self.unit["tracker"] = "ARC-1"
+        self.state["plan_digest"] = S.plan_digest(self.plan)
+        self.save()
+        old_keys = []
+        for unit, attempt in (("u", "/runs/u/older"), ("other", str(self.attempt))):
+            old_keys.append(S.emit_intent(
+                self.state_dir, self.plan["name"], unit, "DONE",
+                {"attempt_dir": attempt}, evidence={"receipt": {"state": "DONE"}}))
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        close, = [i for i in S.load_outbox_contract(self.state_dir)
+                  if i["verb"] == "close" and i["unit"] == "u"
+                  and i["attempt_dir"] == str(self.attempt)]
+        for key in old_keys:
+            self.assertNotIn(key, result.stdout)
+        self.assertEqual(close["tracker"], "ARC-1")
+        self.assertIn("key={} tracker='ARC-1'".format(close["key"]), result.stdout)
+        self.assertLess(result.stdout.index("Merge receipt recorded and advance ran."),
+                        result.stdout.index("Pending tracker close:"))
+        self.assertEqual(S.acknowledgment_status(self.state_dir)[0], {})
+        line, = [line for line in result.stdout.splitlines()
+                 if "--record-receipt" in line]
+        command = shlex.split(line)
+        self.assertEqual(command, [sys.executable, str(SCRIPTS / "swarm.py"), "outbox",
+                                  "--state-dir", str(self.state_dir), "--record-receipt",
+                                  close["key"], "--ref", "ID"])
+        # The displayed command is actually consumable after the session's
+        # external action. This test supplies an attestation, not a tracker call.
+        command[-1] = "ARC-1"
+        ack = subprocess.run(command, cwd=str(self.repo), env=self.env,
+                             capture_output=True, text=True)
+        self.assertEqual(ack.returncode, 0, ack.stdout + ack.stderr)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Pending tracker close:", result.stdout)
+        self.assertNotIn("--record-receipt", result.stdout)
+        self.assertEqual(len(self.calls(["pr", "merge"])), 1)
+
+    def test_tracker_close_without_declared_issue_is_explicit(self):
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        close, = [i for i in S.read_outbox(self.state_dir) if i["verb"] == "close"]
+        self.assertNotIn("tracker", close)
+        self.assertIn("key={} no tracker declared".format(close["key"]), result.stdout)
+        self.assertIn("--record-receipt {} --ref ID".format(close["key"]), result.stdout)
 
     def test_forge_auth_survives_but_all_coordinator_children_are_contained(self):
         names = sorted(CE.DENIED_ENV_NAMES | {"SWARM_UNIT_TEST", "SWARM_DEP_TEST"})

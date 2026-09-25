@@ -1303,6 +1303,10 @@ def validate_plan(plan, survey=None):
         if not isinstance(u, dict):
             continue
         declared_scope(u)
+        if "tracker" in u and not _nonblank_text(u["tracker"]):
+            raise PlanError(
+                f"unit {u.get('id', '?')!r} has tracker={u['tracker']!r}; "
+                "tracker must be a non-empty issue string")
         deadline = u.get("deadline_s")
         try:
             finite_deadline = (float(deadline) if deadline is not None
@@ -4939,8 +4943,8 @@ def _intent_envelope(project, uid, attempt_dir, key, verb, evidence):
 def normalize_intent(intent):
     """Give persisted pre-envelope intents the same read contract as new ones.
 
-    Old JSONL records are append-only audit history and are not rewritten in
-    place.  Normalizing them at the sole reader keeps a restart from exposing
+    Envelope migration leaves JSONL audit history untouched. Normalizing
+    at the sole reader keeps a restart from exposing
     the obsolete connector shape while preserving their original bytes.
     """
     if not isinstance(intent, dict) or "envelope" in intent:
@@ -5166,7 +5170,7 @@ def _intent_key(project, uid, unit_state, us, verb, kind, evidence):
 
 
 def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
-                kind=None):
+                kind=None, tracker=None):
     """Append one tracker intent. Returns the key, or None if already emitted.
 
     Deterministic from state: replaying the same local transition produces the
@@ -5230,6 +5234,8 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
         # cannot see the evidence must refuse to close.
         "evidence": evidence,
     }
+    if tracker is not None:
+        intent["tracker"] = tracker
     intent["envelope"] = _intent_envelope(
         project, uid, us.get("attempt_dir"), key, verb, evidence)
     try:
@@ -5239,6 +5245,57 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
               file=sys.stderr)
         return None
     return key
+
+
+def backfill_tracker_intents(state_dir, project, units):
+    """Add missing labels to historical intents under the coordinator lease.
+
+    The accepted plan supplies labels, never evidence or acknowledgments.
+    Existing labels and all other record values survive unchanged. This is an
+    additive migration of pre-tracker records, not a replay or a new intent.
+    Invalid journals remain intact; failure warns without halting dispatch.
+    """
+    labels = {uid: u["tracker"] for uid, u in units.items() if "tracker" in u}
+    path = Path(state_dir) / OUTBOX
+    if not labels:
+        return
+    temporary = None
+    try:
+        if not path.is_file():
+            return
+        # Refuse a partial/corrupt journal before replacing any bytes.
+        load_outbox_contract(state_dir)
+        lines = path.read_bytes().splitlines(keepends=True)
+        changed = False
+        for index, line in enumerate(lines):
+            if not line.strip():
+                continue
+            intent = json.loads(line)
+            if (intent.get("project") == project
+                    and intent.get("unit") in labels and "tracker" not in intent):
+                intent["tracker"] = labels[intent["unit"]]
+                lines[index] = (json.dumps(intent, sort_keys=True) + "\n").encode()
+                changed = True
+        if not changed:
+            return
+        fd, temporary = tempfile.mkstemp(prefix=".outbox-tracker-", dir=str(path.parent))
+        with os.fdopen(fd, "wb") as handle:
+            os.fchmod(handle.fileno(), stat.S_IMODE(path.stat().st_mode))
+            handle.writelines(lines)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        _fsync_directory(path.parent)
+    except (OSError, ValueError, OutboxError) as exc:
+        print(f"WARNING: could not backfill tracker labels: {exc}", file=sys.stderr)
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError as exc:
+                print(f"WARNING: could not remove tracker migration temporary: {exc}",
+                      file=sys.stderr)
 
 
 # --- acknowledgment: did the drain actually land? -------------------------
@@ -8088,6 +8145,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     # forever. Comparing before-and-after cannot miss a path, including paths
     # added later.
     project = plan.get("name") or "swarm"
+    if not dry_run:
+        backfill_tracker_intents(state_dir, project, units)
     existing_outbox_keys = {
         rec.get("key") for rec in read_outbox(state_dir)
         if isinstance(rec, dict)} if dry_run else set()
@@ -8165,7 +8224,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                         f"{uid}: DRY RUN -- would re-emit tracker {verb} "
                         f"intent from durable state {now}")
             continue
-        emit_intent(state_dir, project, uid, now, us, evidence, kind=kind)
+        emit_intent(state_dir, project, uid, now, us, evidence, kind=kind,
+                    tracker=units[uid].get("tracker"))
     return report, dispatched, halted or dispatch_refusal
 
 
@@ -9053,6 +9113,10 @@ SCHEMA_FIELDS = [
      "env var SWARM_DEP_<ID>"),
     ("kind", "all", "required", "slurm | pipeline | code; fixes what closes "
      "the unit and cannot be overridden per plan"),
+    ("tracker", "all", "optional",
+     "non-empty issue string, e.g. ARC-698. Labels tracker intents only; "
+     "never admission, closure or DONE authority. Omission preserves the "
+     "plan digest and intent keys"),
     ("command", "slurm, pipeline", "required",
      "the WORK. Never sbatch/srun/salloc: the coordinator submits it. An "
      "absolute path or glob in its ARGUMENTS is refused only when its "
@@ -9613,6 +9677,8 @@ def _cmd_outbox_inner(args, intents):
         print(f"  [{label:8}] {i['verb']:6} {i['unit']:12} "
               f"{i['unit_state']:16} {ev}")
         print(f"      {i['why']}  key={i['key']}")
+        if "tracker" in i:
+            print(f"      tracker: {i['tracker']!r}")
         if i["ack_refs"]:
             print(f"      tracker ref: {', '.join(i['ack_refs'])}")
 
