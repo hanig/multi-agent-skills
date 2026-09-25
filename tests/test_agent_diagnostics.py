@@ -429,9 +429,11 @@ class TestDoctorAndSurveyAgentOutput(unittest.TestCase):
             # Run doctor's actual Perl supervisor, changing only its fixture
             # budgets. Its production six-second outer limit would otherwise
             # kill diagnostics before the fixture's probe budget can help.
+            # PATH contains only bindir, whose python3 symlink selects this
+            # test's interpreter without putting its path into a shebang.
             wrapper = bindir / "perl"
             wrapper.write_text(
-                f"#!{sys.executable}\n"
+                "#!/usr/bin/env python3\n"
                 "import os, sys\n"
                 "args = sys.argv[1:]\n"
                 "budget = args.index('-e') + 2\n"
