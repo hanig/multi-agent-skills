@@ -319,8 +319,8 @@ def current_intent(state_dir, binding, root, repair=True):
                 intent.get("binding") != binding or intent.get("root") != root):
             raise Refusal("durable merge intent conflicts with current authority/root")
         # A cancellation write can fail after rename but before directory fsync.
-        # Retain the original request until the resolution is fully published;
-        # a leftover rollback record always restores the unresolved outcome.
+        # Only the separate commit marker witnesses successful cancellation
+        # fsync. A visible cancelled phase alone cannot resolve a pending write.
         rollback_path = path.with_suffix(".cancellation-pending")
         if rollback_path.exists():
             original = read_object(rollback_path)
@@ -328,10 +328,24 @@ def current_intent(state_dir, binding, root, repair=True):
                     or original.get("operation_id") != operation_id
                     or original.get("phase") != "merge_requested"):
                 raise Refusal("invalid pending cancellation record")
-            if repair:
-                durable_write(path, original)
-                rollback_path.unlink()
-            intent = original
+            commit_path = path.with_suffix(".cancellation-committed")
+            if commit_path.exists():
+                committed = read_object(commit_path)
+                if (committed != intent or committed != dict(
+                        original, phase="cancelled_before_request",
+                        cancellation=committed.get("cancellation"))):
+                    raise Refusal("cancellation commit does not match its retained intent")
+                if repair:
+                    # The marker may have been visible before its own directory
+                    # fsync failed. Its publication still proves the cancellation
+                    # fsync succeeded; persist the marker before cleaning up.
+                    durable_write(commit_path, committed)
+                    rollback_path.unlink()
+            else:
+                if repair:
+                    durable_write(path, original)
+                    rollback_path.unlink()
+                intent = original
         if intent is not None and intent.get("phase") == "cancelled_before_request":
             if (intent.get("operation_id") != operation_id
                     or intent.get("schema_version") != 1
@@ -391,8 +405,9 @@ def cancel_before_request(intent_path, intent, observed, reason):
     """Resolve only a request this invocation has not transmitted.
 
     The pending record keeps even a post-rename fsync failure unresolved on
-    rerun. Removing it happens only after durable publication of cancellation.
-    A crash before removal conservatively retains the never-re-merge barrier.
+    rerun. Publish a separate commit marker only AFTER cancellation's directory
+    fsync succeeds, so repair can distinguish committed cleanup from rollback.
+    Keep the marker: pending removal may itself be lost in a later crash.
     """
     rollback_path = intent_path.with_suffix(".cancellation-pending")
     durable_write(rollback_path, intent)
@@ -406,6 +421,9 @@ def cancel_before_request(intent_path, intent, observed, reason):
         # fences reruns if storage refuses this restoration.
         durable_write(intent_path, intent)
         raise
+    # Do not roll back after starting marker publication. Even if its directory
+    # fsync fails, a visible marker witnesses the already durable cancellation.
+    durable_write(intent_path.with_suffix(".cancellation-committed"), resolved)
     rollback_path.unlink()
 
 
