@@ -25,12 +25,13 @@ VERSIONS = {name: spec["verified_versions"][0] for name, spec in discovery.adapt
 # Real process startup is not the property under test. Give it headroom on a
 # shared host; short production deadlines are covered separately below.
 REAL_PROBE_SECONDS = 60
-REAL_REAP_SECONDS = 5
+REAL_REAP_SECONDS = 1
 # Measure only after observed readiness/forced expiry, excluding interpreter
-# startup. Three seconds of scheduling/exit slack on top of the 5s drain window
-# gives an 8s bound: generous under load, but rejects an extra 10s wait or the
-# full 60s probe budget. The 120s watchdog separately detects deadlock.
-REAL_COMPLETION_SLACK_SECONDS = 3
+# startup. The 1s drain window plus 7s slack gives an 8s bound. The slack covers
+# the additional post-kill/finally reap windows and scheduling/exit delays,
+# while still rejecting an extra 10s wait or the full 60s probe budget. The
+# 120s watchdog separately detects deadlock.
+REAL_COMPLETION_SLACK_SECONDS = 7
 WATCHDOG_SECONDS = 120
 
 
@@ -63,6 +64,8 @@ def real_discovery(env):
 
     Callers await the Future before releasing any fixture barrier. Cleanup
     uses the owned supervisor, independently of the production kill helper.
+    The worker timestamps discovery's return so a delayed observer cannot add
+    time after completion to the measured latency.
     """
     answer = Future()
     processes = []
@@ -75,7 +78,8 @@ def real_discovery(env):
 
     def run():
         try:
-            answer.set_result(discovery.discover(env, timeout=REAL_PROBE_SECONDS))
+            report = discovery.discover(env, timeout=REAL_PROBE_SECONDS)
+            answer.set_result((report, time.monotonic()))
         except BaseException as error:
             answer.set_exception(error)
 
@@ -216,7 +220,7 @@ class TestAgentDiscovery(unittest.TestCase):
             executable.write_text("#!/bin/sh\nprintf '2.1.261\\n'\n")
             executable.chmod(0o755)
             with real_discovery(fixture_env(home, PATH=str(bin_dir))) as answer:
-                report = answer.result(timeout=WATCHDOG_SECONDS)
+                report, _ = answer.result(timeout=WATCHDOG_SECONDS)
         self.assertEqual(report["agents"]["claude"]["state"], "executable_found")
         self.assertEqual(report["agents"]["claude"]["verification"], "verified")
 
@@ -227,7 +231,7 @@ class TestAgentDiscovery(unittest.TestCase):
             bin_dir.mkdir()
             fake_cli(bin_dir, "claude", "import sys; sys.stdout.write('x' * 1000000 + ' 2.1.261')")
             with real_discovery(fixture_env(home, PATH=str(bin_dir))) as answer:
-                report = answer.result(timeout=WATCHDOG_SECONDS)
+                report, _ = answer.result(timeout=WATCHDOG_SECONDS)
         output = report["agents"]["claude"]["evidence"]["executable"]["output"]
         self.assertLessEqual(len(output.encode()), discovery.PROBE_OUTPUT_BYTES)
         self.assertTrue(output.endswith("2.1.261"))
@@ -266,10 +270,10 @@ class TestAgentDiscovery(unittest.TestCase):
                 with mock.patch.object(discovery, "select", wraps=select) as polling:
                     polling.select.side_effect = expire_after_cli_started
                     with real_discovery(fixture_env(home, PATH=str(bin_dir))) as answer:
-                        report = answer.result(timeout=WATCHDOG_SECONDS)
+                        report, completed_at = answer.result(timeout=WATCHDOG_SECONDS)
                         self.assertIsNotNone(expired_at)
                         self.assertLess(
-                            time.monotonic() - expired_at,
+                            completed_at - expired_at,
                             REAL_REAP_SECONDS + REAL_COMPLETION_SLACK_SECONDS,
                             "discovery exceeded the post-expiry completion bound")
                         # Observe termination before the fixture's fallback
@@ -351,9 +355,9 @@ class TestAgentDiscovery(unittest.TestCase):
                     peer.sendall(b"A")
                     # No release is sent until discovery returns. Waiting for
                     # inherited stdout EOF would therefore trip this watchdog.
-                    report = answer.result(timeout=WATCHDOG_SECONDS)
+                    report, completed_at = answer.result(timeout=WATCHDOG_SECONDS)
                     self.assertLess(
-                        time.monotonic() - ready_at,
+                        completed_at - ready_at,
                         REAL_REAP_SECONDS + REAL_COMPLETION_SLACK_SECONDS,
                         "discovery exceeded the post-readiness drain bound")
                     self.assertEqual(report["agents"]["claude"]["state"], "executable_found")
