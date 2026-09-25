@@ -285,6 +285,38 @@ class TestMergeUnit(unittest.TestCase):
         self.save()
         self.assert_binding_refused(self.invoke())
 
+    def test_scope_exception_cannot_bypass_mismatched_binding(self):
+        self.unit["scope"] = []
+        self.state["plan_digest"] = S.plan_digest(self.plan)
+        self.save()
+        self.intercept_scope_binding({"repository": self.remote + "/other"})
+        self.assert_binding_refused(self.invoke("--allow-unchecked-scope", "Policy exception"))
+
+    def test_merged_reconciliation_cannot_bypass_mismatched_binding(self):
+        self.forge["pr"].update(state="MERGED", mergeCommit={"oid": self.merged})
+        self.save()
+        self.intercept_scope_binding({"base": "f" * 40})
+        self.assert_binding_refused(self.invoke())
+
+    def test_pending_intent_cannot_bypass_mismatched_binding(self):
+        intent = self.leave_transport_failure()
+        before = self.calls()
+        self.intercept_scope_binding({"attempt": "older"})
+        result = self.abandon_intent(intent)
+        self.assert_abandon_refused(result)
+        self.assertEqual(self.calls(), before)
+
+    def test_merged_reconciliation_with_missing_local_objects_keeps_binding(self):
+        self.forge["pr"].update(state="MERGED", mergeCommit={"oid": self.merged})
+        self.us["state"] = "DONE"
+        self.save()
+        # Cleanup of local objects does not erase the coordinator's anchors.
+        shutil.rmtree(self.repo / ".git/objects")
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.calls(["pr", "merge"]), [])
+        self.assertEqual(len(self.receipts()), 1)
+
     def test_success_records_exact_anchor_and_advances_once(self):
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -520,8 +552,9 @@ class TestMergeUnit(unittest.TestCase):
         self.save()
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertNotIn(" scope-check ", result.stdout)
+        self.assertLess(result.stdout.index(" scope-check "), result.stdout.index("gh pr view"))
         self.assertEqual(self.calls(["pr", "merge"]), [])
+        self.assertEqual(self.calls(["pr", "checks"]), [])
 
     def test_trailing_slash_remote_preserves_exact_receipt(self):
         self.launch["repository_remote"] += "/"
@@ -553,18 +586,16 @@ class TestMergeUnit(unittest.TestCase):
             "    print('scope startup diagnostic')\n")
         self.env["PYTHONPATH"] = str(site)
 
-    def test_explicit_scope_exception_retains_non_json_output(self):
+    def test_explicit_scope_exception_cannot_bypass_unreadable_binding(self):
         self.scope_startup_notice()
         self.unit["scope"] = []
         self.state["plan_digest"] = S.plan_digest(self.plan)
         self.save()
         result = self.invoke("--allow-unchecked-scope", "Accept failed scope observation")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        observed = self.intent()["preconditions"]
-        self.assertEqual(observed["scope_exit"], 1)
-        self.assertIn("scope startup diagnostic", observed["scope"]["unparsed_stdout"])
+        self.assert_binding_refused(result)
+        self.assertIn("binding unavailable", result.stderr)
 
-    def test_scope_exception_retains_schema_invalid_json_verbatim(self):
+    def test_scope_exception_cannot_bypass_schema_invalid_binding(self):
         site = self.directory / "scope-exception-output"
         site.mkdir()
         (site / "sitecustomize.py").write_text(
@@ -581,11 +612,8 @@ class TestMergeUnit(unittest.TestCase):
         self.state["plan_digest"] = S.plan_digest(self.plan)
         self.save()
         result = self.invoke("--allow-unchecked-scope", "Accept failed observation")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        observed = self.intent()["preconditions"]
-        self.assertEqual(observed["scope_exit"], 1)
-        self.assertEqual(observed.get("scope_stdout"), self.env["SCOPE_OUTPUT"])
-        self.assertEqual(observed.get("scope_stderr"), "scope diagnostic\n")
+        self.assert_binding_refused(result)
+        self.assertIn("invalid scope report", result.stderr)
 
     def test_malformed_successful_scope_output_is_not_an_exception(self):
         self.scope_startup_notice()
@@ -776,7 +804,7 @@ class TestMergeUnit(unittest.TestCase):
         self.assertEqual(len(self.calls(["pr", "checks"])), 1)
         self.assertEqual(self.receipts(), [])
         self.assertEqual([json.loads(line) for line in coordinator_log.read_text().splitlines()],
-                         ["scope-check"])
+                         ["scope-check", "scope-check"])
         # A second transport failure consumes the one new operation. A further
         # ordinary call cannot silently reuse this abandonment to merge again.
         self.assertNotEqual(self.invoke().returncode, 0)
@@ -824,7 +852,7 @@ class TestMergeUnit(unittest.TestCase):
         self.assertEqual(self.intent()["phase"], "receipt_recorded")
         self.assertEqual(self.receipts()[0]["head"], self.head)
         self.assertEqual([json.loads(line) for line in coordinator_log.read_text().splitlines()],
-                         ["scope-check", "merge", "advance"])
+                         ["scope-check", "scope-check", "merge", "advance"])
         state = json.loads((self.state_dir / S.STATE_FILE).read_text())
         self.assertEqual(state["units"]["u"]["state"], "DONE")
 
