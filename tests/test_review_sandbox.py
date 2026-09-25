@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -234,6 +235,153 @@ assert suite.countTestCases() == 0, suite.countTestCases()
         result = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env,
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_new_process_group_in_worker_session_is_failed_and_killed(self):
+        identity_file = self.root / "escaped-group.json"
+        child = """import json, os, signal, sys, time
+from pathlib import Path
+os.setpgid(0, os.getpid())
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+identity = Path(sys.argv[1])
+ready = identity.with_suffix('.pending')
+ready.write_text(json.dumps([os.getpid(), os.getpgrp(), os.getsid(0)]))
+ready.replace(identity)
+time.sleep(60)
+"""
+        source = "import json, os, subprocess, sys, time\nfrom pathlib import Path\n" + self.simple_suite(
+            "child = subprocess.Popen([sys.executable, '-c', %r, %r]); "
+            "deadline = time.monotonic() + 10\n"
+            "        while not Path(%r).exists() and time.monotonic() < deadline:\n"
+            "            time.sleep(0.01)\n"
+            "        self.assertTrue(Path(%r).exists(), 'child did not become ready')\n"
+            "        pid, pgid, sid = json.loads(Path(%r).read_text())\n"
+            "        self.assertEqual(pid, pgid)\n"
+            "        self.assertNotEqual(pgid, os.getpgrp())\n"
+            "        self.assertEqual(sid, os.getsid(0))" % (
+                child, str(identity_file), str(identity_file),
+                str(identity_file), str(identity_file)))
+        try:
+            with self.assertRaisesRegex(sandbox.SandboxFailure, "surviving worker descendants"):
+                self.run_module(source)
+            pid, pgid, sid = json.loads(identity_file.read_text())
+            self.assertEqual(sandbox.session_members(sid), [])
+            # Check the particular child independently of the supervisor's
+            # session filter, so reverting that filter cannot hide a survivor.
+            result = subprocess.run(["ps", "-p", str(pid), "-o", "stat="],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertTrue(not result.stdout.strip() or result.stdout.strip().startswith("Z"),
+                            "new-group child is still alive: " + result.stdout)
+        finally:
+            # Also contain the intentionally broken implementation during the
+            # mutation run, where the supervisor misses this group entirely.
+            if identity_file.exists():
+                pid, pgid, sid = json.loads(identity_file.read_text())
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_unrelated_same_uid_process_churn_does_not_fail_a_worker(self):
+        ready = self.root / "churn"
+        churn = """import os, subprocess, sys, time
+from pathlib import Path
+counter = Path(sys.argv[1])
+for count in range(10000):
+    subprocess.run([sys.executable, '-c', 'pass'], check=True)
+    temporary = counter.with_suffix('.pending')
+    temporary.write_text(str(count))
+    temporary.replace(counter)
+    time.sleep(0.005)
+"""
+        process = subprocess.Popen([sys.executable, "-c", churn, str(ready)],
+                                   start_new_session=True)
+        try:
+            deadline = time.monotonic() + 10
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(ready.exists(), "churn did not start")
+            before = int(ready.read_text())
+            report = self.run_module("import time\n" + self.simple_suite("time.sleep(0.5)"))
+            self.assertEqual(report["outcomes"][0]["status"], "success")
+            self.assertGreater(int(ready.read_text()), before)
+            self.assertIsNone(process.poll(), "unrelated process was killed")
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=10)
+
+    def discovery_probe(self):
+        # Exercise TestSuite.run, not just its count: a bare-marker mutation
+        # dispatches real test_review TestCases to this spy in the parent.
+        return """import json, unittest
+ran = []
+original = unittest.TestCase.run
+def traced(case, result=None):
+    if type(case).__module__ == 'test_review':
+        ran.append(case.id())
+        result.startTest(case)
+        result.addSuccess(case)
+        result.stopTest(case)
+        return result
+    return original(case, result)
+unittest.TestCase.run = traced
+suite = unittest.TestLoader().discover('tests', pattern='test_review.py')
+result = unittest.TestResult()
+suite.run(result)
+print(json.dumps({'ran': ran, 'count': result.testsRun, 'errors': result.errors}))
+"""
+
+    def test_inherited_or_stale_marker_never_runs_review_tests_in_parent(self):
+        for marker in ("1", "stale-token", "0" * 64):
+            with self.subTest(marker=marker):
+                env = dict(os.environ, HANIG_REVIEW_SANDBOX_WORKER=marker,
+                           HANIG_REVIEW_SANDBOX_ROOT=str(self.root / "missing"))
+                result = subprocess.run([sys.executable, "-c", self.discovery_probe()],
+                                        cwd=ROOT, env=env, capture_output=True,
+                                        text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                observed = json.loads(result.stdout)
+                self.assertEqual(observed["ran"], [], "review tests ran in the parent")
+                self.assertEqual(observed["count"], 0)
+                self.assertEqual(observed["errors"], [])
+
+    def test_live_worker_token_inherited_by_subprocess_still_delegates(self):
+        source = "import json, subprocess, sys\n" + self.simple_suite(
+            "result = subprocess.run([sys.executable, '-c', %r], "
+            "capture_output=True, text=True, timeout=30); "
+            "self.assertEqual(result.returncode, 0, result.stdout + result.stderr); "
+            "self.assertEqual(json.loads(result.stdout)['ran'], [])" % self.discovery_probe())
+        report = self.run_module(source)
+        self.assertEqual(report["outcomes"][0]["status"], "success")
+
+    def test_worker_load_tests_requires_matching_token_and_contained_homes(self):
+        source = """import os, unittest
+from pathlib import Path
+from unittest.mock import patch
+from tests import test_review
+from tests import review_sandbox_worker as worker
+class Probe(unittest.TestCase):
+    def test_context(self):
+        sentinel = unittest.TestSuite([unittest.FunctionTestCase(lambda: None)])
+        loader = unittest.TestLoader()
+        self.assertIs(test_review.load_tests(loader, sentinel, None), sentinel)
+        for field, value in ((worker.WORKER_MARKER, 'stale'),
+                             (worker.WORKER_ROOT, '/nonexistent'),
+                             ('HOME', '/'), ('XDG_STATE_HOME', '/')):
+            with self.subTest(field=field), patch.dict(os.environ, {field: value}):
+                self.assertEqual(test_review.load_tests(loader, sentinel, None).countTestCases(), 0)
+        token_file = Path(os.environ[worker.WORKER_ROOT]) / 'worker-token'
+        original = token_file.read_bytes()
+        try:
+            token_file.write_text('wrong token')
+            self.assertEqual(test_review.load_tests(loader, sentinel, None).countTestCases(), 0)
+        finally:
+            token_file.write_bytes(original)
+"""
+        report = self.run_module(source)
+        self.assertEqual(report["outcomes"][0]["status"], "success")
 
     def test_cached_failure_does_not_rerun_worker(self):
         with patch.object(sandbox, "_REVIEW_RUN", None), patch.object(
