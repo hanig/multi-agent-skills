@@ -60,8 +60,17 @@ elif args[:2] == ["pr", "merge"]:
         data["pr"]["baseRefOid"] = data["commit"]["sha"]
     p.write_text(json.dumps(data))
 elif args[:1] == ["api"]:
-    assert args[-1].endswith("/git/commits/" + data["commit"]["sha"])
-    print(json.dumps(data["commit"]))
+    if "/git/ref/heads/" in args[-1]:
+        assert args == data["ref_command"], "target read used the wrong forge route"
+        if data.get("ref_exit"):
+            sys.exit("target ref unavailable")
+        print(json.dumps(data["ref"]))
+        if "ref_after_read" in data:
+            data["ref"] = data.pop("ref_after_read")
+            p.write_text(json.dumps(data))
+    else:
+        assert args[-1].endswith("/git/commits/" + data["commit"]["sha"])
+        print(json.dumps(data["commit"]))
 else:
     sys.exit("unexpected forge call: " + repr(args))
 '''
@@ -146,6 +155,10 @@ class TestMergeUnit(unittest.TestCase):
         self.forge = {"pr": {"number": 7, "url": self.remote + "/pull/7", "state": "OPEN",
                              "headRefOid": self.head, "baseRefName": "main",
                              "baseRefOid": self.base, "mergeCommit": None},
+                      "ref_command": ["api", "--hostname", "github.com",
+                                      "repos/example/project/git/ref/heads/main"],
+                      "ref": {"ref": "refs/heads/main",
+                              "object": {"type": "commit", "sha": self.base}},
                       "checks": [{"name": "test", "state": "SUCCESS"}],
                       "commit": {"sha": self.merged, "parents": [{"sha": self.base}]}}
         self.plan_path = self.directory / "plan.json"
@@ -226,6 +239,53 @@ class TestMergeUnit(unittest.TestCase):
             "        original.write(json.dumps(report))\n"
             "    atexit.register(emit)\n" % (advance_epoch, fields or {}, remove))
         self.env["PYTHONPATH"] = str(site)
+
+    def intercept_intent_publication(self, forge_update=None, fail_resolution=False):
+        # Inject only after the real intent file and directory have been fsynced.
+        # Exercise the CLI consumer, not an in-process replacement of reconcile.
+        site = self.directory / "intent-publication-probe"
+        site.mkdir()
+        log = self.directory / "intent-syncs.jsonl"
+        (site / "sitecustomize.py").write_text(
+            "import json, os, pathlib, stat, sys\n"
+            "if sys.argv[0].endswith('merge_unit.py'):\n"
+            "    original_sync, original_replace = os.fsync, os.replace\n"
+            "    fired = False\n"
+            "    def sync(fd):\n"
+            "        global fired\n"
+            "        state = pathlib.Path(os.environ['COORDINATOR_STATE'])\n"
+            "        if stat.S_ISDIR(os.fstat(fd).st_mode) and %r:\n"
+            "            if any(json.loads(p.read_text()).get('phase') == "
+            "'cancelled_before_request' for p in state.glob('merge-unit-*.json')):\n"
+            "                raise OSError('injected cancellation directory fsync failure')\n"
+            "        original_sync(fd)\n"
+            "        if not stat.S_ISDIR(os.fstat(fd).st_mode):\n"
+            "            return\n"
+            "        for path in state.glob('merge-unit-*.json'):\n"
+            "            intent = json.loads(path.read_text())\n"
+            "            with open(%r, 'a') as log:\n"
+            "                log.write(json.dumps(intent) + '\\n')\n"
+            "            if intent['phase'] == 'merge_requested' and not fired:\n"
+            "                fired = True\n"
+            "                forge = pathlib.Path(os.environ['FORGE_STATE'])\n"
+            "                data = json.loads(forge.read_text())\n"
+            "                data.update(%r)\n"
+            "                forge.write_text(json.dumps(data))\n"
+            "    def replace(src, dst):\n"
+            "        if pathlib.Path(dst).name.startswith('merge-unit-') "
+            "and pathlib.Path(dst).suffix == '.json' and %r:\n"
+            "            if json.loads(pathlib.Path(src).read_text()).get('phase') == "
+            "'cancelled_before_request':\n"
+            "                raise OSError('injected cancellation publication failure')\n"
+            "        if %r and pathlib.Path(dst).with_suffix('.cancellation-pending').exists():\n"
+            "            if json.loads(pathlib.Path(src).read_text()).get('phase') == 'merge_requested':\n"
+            "                raise OSError('injected cancellation rollback failure')\n"
+            "        return original_replace(src, dst)\n"
+            "    os.fsync, os.replace = sync, replace\n"
+            % (fail_resolution in ("directory-sync", "rollback"), str(log),
+               forge_update or {}, fail_resolution is True, fail_resolution == "rollback"))
+        self.env["PYTHONPATH"] = str(site)
+        return log
 
     def test_000_scope_base_mismatch_refuses_before_forge(self):
         self.intercept_scope_binding({"base": "f" * 40})
@@ -674,6 +734,7 @@ class TestMergeUnit(unittest.TestCase):
         self.launch["repository_remote"] = "http://forge.example/example/project"
         self.us["attempt_launch_facts"]["a1"]["repository_remote"] = self.launch["repository_remote"]
         self.forge["pr"]["url"] = "http://forge.example/example/project/pull/7"
+        self.forge["ref_command"][2] = "forge.example"
         self.save()
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -779,6 +840,7 @@ class TestMergeUnit(unittest.TestCase):
     def test_already_merged_reconciles_without_merge_call(self):
         self.forge["pr"].update(state="MERGED", mergeCommit={"oid": self.merged},
                                  baseRefOid="e" * 40)
+        self.forge["ref_exit"] = 1  # Historical parent does not need today's ref.
         self.save()
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
