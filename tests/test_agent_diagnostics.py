@@ -1,6 +1,7 @@
 """Acceptance evidence for separate agent/install/discovery/workflow facts."""
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -606,7 +607,8 @@ class TestDoctorAndSurveyAgentOutput(unittest.TestCase):
                     (skill / "SKILL.md").write_text("fixture skill\n")
                     (skill / D.MARKER).write_text(TestAgentDiagnostics._record(skill))
             full = subprocess.run(
-                [sys.executable, str(SCRIPTS / "agent_diagnostics.py"), "--json"],
+                [str(directory / "bin" / "python3"),
+                 str(SCRIPTS / "agent_diagnostics.py"), "--json"],
                 cwd=directory, env=env, capture_output=True, text=True,
                 timeout=WATCHDOG_SECONDS)
             self.assertEqual(full.returncode, 0, full.stderr)
@@ -647,6 +649,72 @@ class TestDoctorAndSurveyAgentOutput(unittest.TestCase):
         value = json.loads(result.stdout)
         self.assertNotIn("truncated", value)
         self.assertEqual(len(value["agents"]["claude"]["installation"]["roots"][0]["payloads"]), 13)
+
+    def _fixture_json_result(self, directory, body, deadline=DOCTOR_SECONDS):
+        """Drive doctor itself with arbitrary child output and private scratch."""
+        bindir = directory / "bin"
+        bindir.mkdir()
+        scratch = directory / "scratch"
+        scratch.mkdir()
+        child = directory / "result.py"
+        child.write_text(body)
+        python = bindir / "python3"
+        python.write_text("#!/bin/sh\nexec " + shlex.quote(sys.executable) + " " +
+                          shlex.quote(str(child)) + "\n")
+        python.chmod(0o755)
+        perl = bindir / "perl"
+        perl.write_text(
+            '#!/bin/sh\nsource=$2\nshift 4\nexec ' + shlex.quote(shutil.which("perl")) +
+            f' -e "$source" {deadline} {REAL_REAP_SECONDS} "$@"\n')
+        perl.chmod(0o755)
+        env = {"HOME": str(directory / "home"), "PATH": str(bindir),
+               "TMPDIR": str(scratch), "PYTHONDONTWRITEBYTECODE": "1"}
+        result = subprocess.run([str(DOCTOR), "--json"], cwd=directory, env=env,
+                                capture_output=True, text=True, timeout=WATCHDOG_SECONDS)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(list(scratch.iterdir()), [], "doctor left its result file behind")
+        self.assertLessEqual(len(result.stdout.encode("utf-8")), 262_145)
+        return json.loads(result.stdout)
+
+    def test_doctor_json_result_boundary_and_stderr_are_independent(self):
+        # Exact bytes include the newline. The payload also carries escaped
+        # Unicode and newlines, which must survive the single-line protocol.
+        for size in (262_144, 262_145):
+            with self.subTest(size=size), tempfile.TemporaryDirectory() as raw:
+                body = (
+                    "import json, sys\n"
+                    "value = {'text': '\\u03bb\\n', 'padding': ''}\n"
+                    "base = json.dumps(value, separators=(',', ':'))\n"
+                    f"value['padding'] = 'x' * ({size} - len(base) - 1)\n"
+                    "sys.stderr.write('diagnostic warning\\n' * 20000)\n"
+                    "print(json.dumps(value, separators=(',', ':')))\n")
+                value = self._fixture_json_result(Path(raw), body)
+                if size == 262_144:
+                    self.assertNotIn("truncated", value)
+                    self.assertEqual(value["text"], "\u03bb\n")
+                    self.assertEqual(len(json.dumps(value, separators=(",", ":"))) + 1, size)
+                else:
+                    self.assertTrue(value["truncated"])
+                    self.assertEqual(value["state"], "unknown")
+                    self.assertEqual(value["limit_bytes"], 262_144)
+
+    def test_doctor_json_rejects_invalid_document_even_with_valid_final_line(self):
+        for output in ('{"unfinished":', 'broken\n{}\n', '[1,2]', ''):
+            with self.subTest(output=output), tempfile.TemporaryDirectory() as raw:
+                value = self._fixture_json_result(
+                    Path(raw), "import sys\nsys.stdout.write(" + repr(output) + ")\n")
+                self.assertEqual(value["state"], "unknown")
+                self.assertNotIn("truncated", value)
+
+    def test_doctor_json_does_not_accept_success_output_after_timeout_or_nonzero_exit(self):
+        for end, deadline in (("raise SystemExit(7)", DOCTOR_SECONDS),
+                              ("import time; time.sleep(600)", 1)):
+            with self.subTest(end=end), tempfile.TemporaryDirectory() as raw:
+                value = self._fixture_json_result(
+                    Path(raw), "print('{\"state\":\"ready\"}', flush=True)\n" + end + "\n",
+                    deadline=deadline)
+                self.assertEqual(value["state"], "unknown")
+                self.assertNotIn("truncated", value)
 
     def test_survey_preserves_existing_keys_and_adds_agent_diagnostics_without_claude(self):
         with tempfile.TemporaryDirectory() as tmp:
