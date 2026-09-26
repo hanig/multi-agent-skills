@@ -82,11 +82,12 @@ def read_policy(state_dir):
     return policy, hashlib.sha256(raw).hexdigest()
 
 
-def resolve_executables(declaration=None, names=("python", "git")):
-    """Resolve once outside candidate cwd; Git defaults deliberately ignore PATH."""
+def resolve_executables(declaration=None, names=("python", "git"), excluded_roots=()):
+    """Prefer system Git; allow external operator PATH only when it is absent."""
     declaration = declaration or {}
     paths = {"python": declaration.get("python", sys.executable),
-             "git": declaration.get("git") or shutil.which("git", path=os.defpath)}
+             "git": declaration.get("git") or coordinator_program("git", excluded_roots, os.defpath)
+                    or coordinator_program("git", excluded_roots)}
     result = {}
     for name in names:
         path = paths[name]
@@ -479,22 +480,28 @@ os.execv(sys.executable, [sys.executable, str(stage / 'remote_verify.py'), '--su
 """ % (FILES, FILES)
 
 
-def coordinator_ssh(repo, tree):
-    """Keep operator PATH wrappers, excluding both operated Git trees."""
-    roots = [os.path.realpath(str(path)) for path in (repo, tree)]
+def coordinator_program(name, roots, search_path=None):
+    """Select absolute operator tools outside both lexical and resolved roots."""
+    roots = [os.path.realpath(str(path)) for path in roots if path is not None]
 
     def excluded(path):
         return any(os.path.commonpath([root, candidate]) == root
                    for root in roots
                    for candidate in (os.path.abspath(path), os.path.realpath(path)))
 
-    for directory in os.get_exec_path():
+    directories = os.get_exec_path() if search_path is None else search_path.split(os.pathsep)
+    for directory in directories:
         if not os.path.isabs(directory) or excluded(directory):
             continue
-        program = shutil.which("ssh", path=directory)
+        program = shutil.which(name, path=directory)
         if program and not excluded(program):
             return os.path.realpath(program)
     return None
+
+
+def coordinator_ssh(repo, tree):
+    """Keep operator PATH wrappers, excluding both operated Git trees."""
+    return coordinator_program("ssh", (repo, tree))
 
 
 def cancellation_tail(text):
@@ -752,6 +759,12 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
             "launch_id": run["launch_id"], "cleanup": "unconfirmed",
             "executables": {key: {"path": remote[key], "version": None}
                             for key in ("python", "git")}})
+        if not retry and not ssh:
+            # No transport was attempted. A missing local client cannot create
+            # unresolved remote evidence or require retrieval from a fake stage.
+            execution.pop("launch_id")
+            execution.update(stage=None, cleanup="not-created")
+            return [incomplete("ssh is unavailable") for _ in checks], execution
         prefix = [ssh, "-oBatchMode=yes", "-oConnectTimeout=15", remote["ssh_alias"]] if ssh else None
         error = None
 
