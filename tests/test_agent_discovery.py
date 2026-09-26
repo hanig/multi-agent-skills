@@ -256,6 +256,10 @@ class TestAgentDiscovery(unittest.TestCase):
 
             def expire_after_cli_started(readers, writers, errors, timeout):
                 nonlocal expired_at
+                if expired_at is not None:
+                    # Only the first poll owns the readiness barrier and
+                    # forced expiry; subsequent polls retain their timeout.
+                    return select.select(readers, writers, errors, timeout)
                 peer, _ = listener.accept()
                 peers.append(peer)
                 peer.settimeout(WATCHDOG_SECONDS)
