@@ -43,6 +43,7 @@ class InstalledPipeline(unittest.TestCase):
         # test_swarm.py::_fake_scheduler (the current tree has no fake agent
         # launcher there). A pipeline needs only a foreground worker and sh.
         (self.bin / "sh").symlink_to("/bin/sh")
+        (self.bin / "sleep").symlink_to("/bin/sleep")
         worker = self.bin / "fixture-worker"
         shutil.copyfile(FIXTURES / "worker.sh", worker)
         worker.chmod(0o755)
@@ -103,7 +104,7 @@ class InstalledPipeline(unittest.TestCase):
         self.assertIn(result.returncode, allowed, result.stdout + result.stderr)
         return result
 
-    def exercise(self, mode):
+    def exercise(self, mode, on_observation=None):
         plan = {"name": "installed acceptance", "units": [{
             "id": "work", "kind": "pipeline", "runtime": "none",
             "command": "fixture-worker " + mode, "outputs": OUTPUTS,
@@ -122,17 +123,23 @@ class InstalledPipeline(unittest.TestCase):
                 allowed=(0, 2)).stdout)
             self.assertEqual(len(status["units"]), 1)
             unit = status["units"][0]
-            if unit["state"] not in ("SUBMITTED", "RUNNING", "ALLOCATED"):
+            report = json.loads(self.cli("project", "report.py", ".", "--json").stdout)
+            self.assertEqual(len(report["units"]), 1)
+            notes = " ".join(report["units"][0]["notes"])
+            if on_observation is not None:
+                on_observation(status, report)
+            # With ps intentionally absent, a still-starting wrapper can be
+            # INCOMPLETE because liveness is unknown. That is not a terminal
+            # observation: wait for the report to record the wrapper's exit.
+            if "engine exited" in notes:
                 break
-            self.assertLess(time.monotonic(), deadline, status)
+            self.assertLess(time.monotonic(), deadline, (status, report))
             time.sleep(0.02)
         self.assertEqual(unit["id"], "work")
         self.assertEqual(unit["attempts"], 1, status)
         # Both human and machine reports go through the installed sibling.
         self.cli("project", "report.py", ".", "--out", "report.html")
-        report = json.loads(self.cli("project", "report.py", ".", "--json").stdout)
         self.assertTrue((self.project / "report.html").is_file())
-        self.assertEqual(len(report["units"]), 1)
         self.assertEqual(report["units"][0]["id"], "work")
         self.assertEqual(report["units"][0]["attempts"], 1)
         # These receipt fields are consumed through the pipeline's report,
@@ -218,6 +225,26 @@ class InstalledPipeline(unittest.TestCase):
             "_pipeline_state(", "_pipeline_state(\n    ") + "\n")
         self.select_store(reformatted)
         self.test_020_missing_output_mutation_is_caught_by_hollow_grader()
+
+    def test_040_starting_worker_is_not_graded_as_finished(self):
+        release = self.base / "release worker"
+        self.env["PIPELINE_RELEASE"] = str(release)
+        observations = []
+
+        def release_after_first_observation(status, report):
+            if not observations:
+                self.assertEqual(status["units"][0]["state"], "INCOMPLETE")
+                self.assertNotIn("engine exited", " ".join(report["units"][0]["notes"]))
+                release.touch()
+            observations.append(status["units"][0]["state"])
+
+        try:
+            self.grade_hollow(*self.exercise("hollow", release_after_first_observation))
+        finally:
+            # Also release on an assertion failure; the fixture itself has
+            # a bounded timeout if the test process is killed.
+            release.touch()
+        self.assertGreaterEqual(len(observations), 2)
 
 
 if __name__ == "__main__":
