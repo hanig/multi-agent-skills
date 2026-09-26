@@ -274,7 +274,7 @@ def supervise(stage):
                 remote["python"], str(stage / "remote_verify.py"),
                 "--worker", str(stage)]) + "\n")
             rc, out, err = _command([
-                "sbatch", "--parsable", "--partition=" + cfg["partition"],
+                "sbatch", "--parsable", "--no-requeue", "--partition=" + cfg["partition"],
                 "--mem=" + cfg["mem"], "--time=" + cfg["time"],
                 "--output=" + str(stage / "job.out"), "--error=" + str(stage / "job.err"),
                 str(script)])
@@ -286,7 +286,7 @@ def supervise(stage):
                 state = scheduler_state(job)
                 if state or time.monotonic() >= deadline:
                     break
-                time.sleep(0.2)
+                time.sleep(min(2, max(0, deadline - time.monotonic())))
         try:
             result = json.loads((stage / "result.json").read_text())
         except (OSError, ValueError):
