@@ -773,6 +773,118 @@ def remote_call(prefix, remote, code, timeout=45):
                           env=CE.child_env(), timeout=timeout)
 
 
+# This reader is sent by the current coordinator. Old stages need no harness
+# upgrade, and their immutable evidence is never rewritten to fit a response.
+READ_FRAME = r'''
+import base64, hashlib, json
+from pathlib import Path
+stage, name, offset, limit, request_limit = SPEC
+try:
+    source = 'request.json' if name == 'request-header' else name
+    with (Path(stage) / source).open('rb') as handle:
+        data = handle.read((request_limit if name == 'request-header' else limit) + 1)
+    if len(data) > (request_limit if name == 'request-header' else limit):
+        raise ValueError('remote evidence exceeds file budget')
+    if name == 'request-header':
+        request = json.loads(data)
+        data = json.dumps({'basis': request['basis'], 'launch_id': request['launch_id'],
+                           'check_count': len(request['checks'])}, sort_keys=True,
+                          separators=(',', ':')).encode('utf-8')
+    if len(data) > limit:
+        raise ValueError('remote evidence exceeds file budget')
+    frame = {'name': name, 'offset': offset, 'size': len(data),
+             'sha256': hashlib.sha256(data).hexdigest(),
+             'data': base64.b64encode(data[offset:offset + 32768]).decode('ascii')}
+except FileNotFoundError:
+    frame = {'name': name, 'offset': offset, 'missing': True}
+except (OSError, ValueError, KeyError, TypeError) as error:
+    frame = {'name': name, 'offset': offset, 'error': str(error)}
+print(json.dumps(frame))
+'''
+MISSING = object()
+
+
+def read_remote_record(call, stage, name, limit, request_limit, budget):
+    """Bound every frame and total transfer; verify original bytes before JSON."""
+    data, identity = bytearray(), None
+    while True:
+        budget['calls'] -= 1
+        if budget['calls'] < 0:
+            raise ValueError('remote evidence call budget exceeded')
+        spec = (stage, name, len(data), limit, request_limit)
+        raw = call(READ_FRAME.replace('SPEC', repr(spec), 1))
+        if len(raw) > 100000:
+            raise ValueError('oversized remote response')
+        frame = json.loads(raw)
+        if (not isinstance(frame, dict) or frame.get('name') != name
+                or type(frame.get('offset')) is not int or frame['offset'] != len(data)):
+            raise ValueError('remote evidence frame identity mismatch')
+        if frame.get('missing') is True and not data:
+            return MISSING
+        if frame.get('error'):
+            raise ValueError(str(frame['error']))
+        size, digest = frame.get('size'), frame.get('sha256')
+        if (type(size) is not int or not 0 <= size <= limit
+                or not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest)
+                or not isinstance(frame.get('data'), str)):
+            raise ValueError('invalid remote evidence frame bounds')
+        if identity is not None and identity != (size, digest):
+            raise ValueError('remote evidence changed between frames')
+        identity = size, digest
+        chunk = base64.b64decode(frame['data'], validate=True)
+        if len(chunk) != min(32768, size - len(data)):
+            raise ValueError('invalid remote evidence chunk length')
+        budget['bytes'] -= len(chunk)
+        if budget['bytes'] < 0:
+            raise ValueError('remote evidence aggregate budget exceeded')
+        data.extend(chunk)
+        if len(data) == size:
+            if hashlib.sha256(data).hexdigest() != digest:
+                raise ValueError('remote evidence digest mismatch')
+            return json.loads(data)
+
+
+def retrieve_records(run, call, save):
+    """Ingest each claim before later reads; reconcile only the complete shape."""
+    request = run['request']
+    count, request_size = len(request['checks']), len(encoded(request))
+    # JSON can expand one astral codepoint to two six-byte escapes. Existing
+    # immutable 4000/2000-character diagnostic tails must remain retrievable.
+    claim_limit = request_size + 12 * (4000 + 2000) + 65536
+    final_limit = request_size + 65536 + count * (12 * (4000 + 2000) + 8192)
+    request_limit = len(json.dumps(request).encode('utf-8')) + 65536
+    limits = [claim_limit] * count + [request_size + 65536, final_limit, 65536, 65536]
+    budget = {'bytes': sum(limits), 'calls': sum(max(1, (n + 32767) // 32768) for n in limits)}
+    response = {'basis': request['basis'], 'launch_id': run['launch_id'],
+                'receipts': {}, 'final': None, 'supervision': None}
+
+    def fetch(name, limit, optional=False):
+        try:
+            return read_remote_record(call, run['stage'], name, limit, request_limit, budget)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            if not optional:
+                response.setdefault('errors', []).append(str(exc))
+            return MISSING
+
+    for index in range(count):
+        receipt = fetch('claim-{}.json'.format(index), claim_limit)
+        if receipt is not MISSING:
+            response['receipts'][str(index)] = receipt
+        ingest(run, response)
+        save()
+    header = fetch('request-header', limits[count])
+    if header != dict(basis=request['basis'], launch_id=run['launch_id'], check_count=count):
+        response.setdefault('errors', []).append('remote staged request header mismatch or missing')
+    for field, name, limit in (('final', 'worker-complete', final_limit),
+                               ('supervision', 'supervision-finished', 65536),
+                               ('lifecycle', 'cleanup.json', 65536)):
+        value = fetch(name, limit, optional=field == 'lifecycle')
+        if value is not MISSING:
+            response[field] = value
+    ingest(run, response)
+    save()
+
+
 def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, unit,
                journal_entries, retrieve_only=False):
     """Persist intent before launch and ingest completed receipts monotonically.
@@ -881,16 +993,24 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
                     except (OSError, ValueError, subprocess.SubprocessError) as exc:
                         receive_timeout(exc)
                         error = "remote transport incomplete: " + str(exc)
-        # Lost stdout is recoverable without executing another verifier.
+        # Bounded retrieval also works when the original aggregate or staged
+        # harness is unavailable. Never rerun a verifier to recover its result.
         if not run["reconciled"] and prefix:
-            code = ("import json, pathlib, sys; p=pathlib.Path(%r); "
-                    "sys.path.insert(0, str(p)); from remote_verify import collect; "
-                    "print(json.dumps(collect(p)))") % stage
-            try:
-                receive(remote_call(prefix, remote, code))
-            except (OSError, ValueError, subprocess.SubprocessError) as exc:
-                receive_timeout(exc)
-                error = "remote retrieval incomplete: " + str(exc)
+            def frame_call(code):
+                nonlocal error
+                try:
+                    proc = remote_call(prefix, remote, code)
+                except subprocess.TimeoutExpired as exc:
+                    if not exc.stdout:
+                        raise
+                    captured = exc.stdout
+                    if isinstance(captured, bytes):
+                        captured = captured.decode("utf-8", "replace")
+                    proc = subprocess.CompletedProcess([], 255, captured, "transport capture timed out")
+                if proc.returncode:
+                    error = "ssh/remote transport exited {}: {}".format(proc.returncode, proc.stderr[-2000:])
+                return proc.stdout
+            retrieve_records(run, frame_call, lambda: publish(path, ledger))
         if error:
             run["transport_error"] = error
         # Raw evidence is durable before authorizing remote removal. This is

@@ -6202,7 +6202,7 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
                       f"it:\n  swarm.py verify --unit {unit} --claim {claim} "
                       f"--verifier NAME --path PATH")
     stale, moved_target, wrong_policy, failed, unauthorized = [], [], [], [], []
-    corpus_refusals = []
+    corpus_refusals, candidate_refusals = [], []
     incomplete = []
     for r in mine:
         if str(r.get("subject_head")) != str(produced):
@@ -6250,15 +6250,31 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
                 f"receipt corpus evidence does not match the anchored base "
                 f"and produced commit for claim {claim!r}")
             continue
-        if claim == V.INTEGRATION_CLAIM:
-            problem = V.RV.execution_problem(r)
+        problem = V.RV.execution_problem(r)
+        if problem:
+            corpus_refusals.append(problem)
+            continue
+        candidate = (any(k in r for k in V.MERGE_BASIS_FIELDS[1:])
+                     or (r.get("execution") or {}).get("location") == "remote")
+        if candidate:
+            basis = {k: r.get(k) for k in V.MERGE_BASIS_FIELDS}
+            if (any(not isinstance(v, str) or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", v)
+                    for v in basis.values()) or basis["produced_head"] != r["subject_head"]):
+                candidate_refusals.append("incomplete or invalid candidate basis in verification receipt")
+                continue
+            problem = V.RV.pending_problem(state_dir, unit, basis, recs)
             if problem:
-                corpus_refusals.append(problem)
+                candidate_refusals.append(problem)
                 continue
             problem = V.merge_failure_problem(recs, r)
             if problem:
-                return None, problem
+                if claim == V.INTEGRATION_CLAIM:
+                    return None, problem
+                candidate_refusals.append(problem)
+                continue
         return r, None
+    if candidate_refusals:
+        return None, candidate_refusals[0]
     if failed:
         subject = ("the candidate merge" if claim == V.INTEGRATION_CLAIM
                    else "the produced commit")

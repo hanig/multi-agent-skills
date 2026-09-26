@@ -52,6 +52,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -942,7 +943,9 @@ def _observe_execution(argv, timeout, cwd, launch_config=None, launch_prefix=(),
             # discard the declared interpreter or its child-tool selection.
             executable = argv[0]
             verifier_argv = [executable if final_argv0 is None else final_argv0] + argv[1:]
-            argv = list(launch_prefix) + [python, "-c", launcher, str(launch_write),
+            # Verifier startup hooks belong to the final interpreter only.
+            # Use the actual harness, even when the declared Python is a wrapper.
+            argv = list(launch_prefix) + [sys.executable, "-I", "-S", "-c", launcher, str(launch_write),
                                           bindir, git, child_python, executable] + verifier_argv
             pass_fds = (launch_write,)
         child = subprocess.Popen(
