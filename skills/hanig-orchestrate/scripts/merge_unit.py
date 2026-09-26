@@ -256,12 +256,27 @@ def validate_scope_report(report, code, binding):
         raise Refusal("scope-check returned an invalid scope report path lists")
 
 
+def declared_execution(state_dir, repo):
+    policy, digest = RV.read_policy(state_dir)
+    for executable in policy.get("local", {}).values():
+        if CP._inside(executable, repo):
+            raise Refusal("verification executable is inside the operated repository")
+    return policy, digest
+
+
+def execution_runner(state_dir, repo):
+    policy, _digest = declared_execution(state_dir, repo)
+    if policy.get("local"):
+        return RV.GitRunner(S.U.run, RV.resolve_executables(policy["local"], names=("git",)))
+    return S.U.run
+
+
 def integration_evidence(state_dir, binding, repo, target):
     """Admit coordinator evidence under the exact observed target's policy."""
-    execution_policy, _ = RV.read_policy(state_dir)
-    runner = S.U.run
-    if execution_policy.get("local"):
-        runner = RV.GitRunner(runner, RV.resolve_executables(execution_policy["local"]))
+    try:
+        runner = execution_runner(state_dir, repo)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return None, "verification executable policy unavailable: " + str(exc)
     policy, policy_digest, _digest, error = V.merge_precondition_policy(
         runner, repo, target)
     if error:
@@ -291,8 +306,12 @@ def retained_integration_problem(preconditions, evidence, binding, repo, target,
     """
     required = preconditions.get("required_merge_claims")
     if required is None:
+        try:
+            runner = execution_runner(state_dir, repo)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            return "retained merge target policy is unreadable: " + str(exc)
         policy, _pd, error = V.read_policy(
-            S.U.run, repo, target, source="target commit")
+            runner, repo, target, source="target commit")
         if error:
             return "retained merge target policy is unreadable: " + error
         required = [V.INTEGRATION_CLAIM]
@@ -539,10 +558,7 @@ def reconcile(args, plan):
             raise Refusal("verification requires an OPEN PR with no unresolved merge intent")
         S.load_verifications(state_dir)
         target = observed_target(cmd["target"], binding["target"])
-        execution_policy, execution_digest = RV.read_policy(state_dir)
-        for executable in execution_policy.get("local", {}).values():
-            if CP._inside(executable, repo):
-                raise Refusal("verification executable is inside the operated repository")
+        execution_policy, execution_digest = declared_execution(state_dir, repo)
         # Return only coordinator/forge inputs captured under the lease. The
         # caller releases it before running the disposable candidate verifier.
         return repo, {"binding": binding, "scope_binding": scope_binding,
