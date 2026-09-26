@@ -754,6 +754,44 @@ class TestDoctorAndSurveyAgentOutput(unittest.TestCase):
             self.assertGreater(value["estimated_bytes"], 48_000)
             self.assertLessEqual(len(result.stdout.encode()), 48_001)
 
+    def test_doctor_result_file_io_failures_retain_the_health_summary(self):
+        faults = (
+            ("syswrite", "return undef", 'CORE::syswrite($_[0], $_[1], length($_[1]))'),
+            ("syswrite", "return CORE::syswrite($_[0], $_[1], 1)",
+             'CORE::syswrite($_[0], $_[1], length($_[1]))'),
+            ("sysseek", "return undef", 'CORE::sysseek($_[0], $_[1], $_[2])'),
+            ("sysread", "return undef", 'CORE::sysread($_[0], $_[1], $_[2])'),
+            ("sysread", "return 0", 'CORE::sysread($_[0], $_[1], $_[2])'),
+        )
+        for operation, fault, forward in faults:
+            with self.subTest(operation=operation, fault=fault), tempfile.TemporaryDirectory() as raw:
+                directory = Path(raw)
+                env = self._populated_env(directory)
+                library = directory / "perl-fault"
+                library.mkdir()
+                # Fault only the supervisor-owned regular file. Its setup and
+                # data pipes still perform real I/O through the real consumer.
+                (library / "DoctorFileFault.pm").write_text(
+                    "package DoctorFileFault;\nuse Errno qw(ENOSPC);\nBEGIN {\n"
+                    f"*CORE::GLOBAL::{operation} = sub {{\n"
+                    f'if (ref($_[0]) eq "File::Temp") {{ $! = ENOSPC; {fault}; }}\n'
+                    f"return {forward};\n}};\n}}\n1;\n")
+                env.update(PERL5LIB=str(library), PERL5OPT="-MDoctorFileFault")
+                result = subprocess.run([str(DOCTOR), "--json"], env=env,
+                                        capture_output=True, text=True, timeout=WATCHDOG_SECONDS)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                value = json.loads(result.stdout)
+                self.assertNotEqual(value.get("state"), "unknown", (value, result.stderr))
+                self.assertNotIn("truncated", value)
+                self.assertEqual(value["detail"], "summary")
+                self.assertEqual(set(value["agents"]), {"claude", "codex", "opencode", "pi"})
+                for agent in value["agents"].values():
+                    self.assertEqual(agent["agent_present"]["state"], "executable_found")
+                    self.assertEqual(agent["installation"]["state"], "present")
+                    for root in agent["installation"]["roots"]:
+                        if root["state"] == "present":
+                            self.assertEqual(root["ownership_counts"], {"owned": 30})
+
     def test_doctor_without_perl_json_validates_the_fallback_document(self):
         for output, state in (('broken', 'unknown'), ('[]', 'unknown'),
                               ('{"state":"ready"}', 'ready')):

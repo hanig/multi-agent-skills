@@ -58,7 +58,7 @@ beyond that transport bound, run
 The legacy helper `--doctor-json` option retains its 48,000-byte cap for older
 callers. Doctor's process deadlines and ordinary log-tail bound are unchanged.
 If the private file cannot be set up (including a Perl installation without
-`JSON::PP`), doctor uses a summary capped at 48,000 bytes and validates it through
+`JSON::PP`), written, or read, doctor uses a summary capped at 48,000 bytes and validates it through
 Python's stdin inside the same supervised process group. These two stages share
 a nine-second run deadline and the existing two-second cleanup grace; report
 bytes never travel in command-line arguments. `detail: "summary"` identifies this fallback:

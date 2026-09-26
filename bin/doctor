@@ -410,7 +410,7 @@ if ($state eq "TIMED_OUT") {
         : WIFSIGNALED($status) ? 128 + WTERMSIG($status) : 127;
 }
 if ($json_result && $state eq "RUNNING" && $rc == 0) {
-    answer("unknown", 127, $result_error) if length $result_error;
+    answer("summary-required", 127, $result_error) if length $result_error;
     if ($result_overflow) {
         answer("answered", 0, JSON::PP::encode_json({
             schema_version => 1, state => "unknown", truncated => JSON::PP::true(),
@@ -418,10 +418,10 @@ if ($json_result && $state eq "RUNNING" && $rc == 0) {
             limit_bytes => $RESULT_BYTES}));
     }
     defined(sysseek($result_file, 0, 0))
-        or answer("unknown", 127, "JSON result file seek");
+        or answer("summary-required", 127, "JSON result file seek");
     my $document = "";
     my $read = sysread($result_file, $document, $RESULT_BYTES);
-    answer("unknown", 127, "JSON result file read")
+    answer("summary-required", 127, "JSON result file read")
         unless defined($read) && $read == $result_size;
     my $value = eval { JSON::PP::decode_json($document) };
     answer("unknown", 127, "incomplete or invalid JSON result")
