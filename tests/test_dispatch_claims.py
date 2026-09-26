@@ -536,8 +536,8 @@ class TestTheProtocolRequiresReviewAndPush(unittest.TestCase):
             ({"provider": "codex", "model": "gpt-6-astra"},
              "codex/gpt-6-astra"),
             ({"provider": "codex/gpt-6-astra"}, "codex/gpt-6-astra"),
-            ({"provider": "codex/gpt-6-astra", "model": "gpt-5.6-luna"},
-             "codex/gpt-5.6-luna"),
+            ({"provider": "codex/gpt-6-astra", "model": "gpt-6-luna"},
+             "codex/gpt-6-luna"),
             ({"provider": "openrouter", "model": "moonshotai/kimi-k2.7-code"},
              "openrouter/moonshotai/kimi-k2.7-code"),
         )

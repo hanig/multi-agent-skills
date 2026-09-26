@@ -16,18 +16,26 @@
       "notes": "UI/design/artistic judgment per orchestration preferences. AA Coding Index ~78.0, essentially tied with Sol."
     },
     {
-      "id": "codex/gpt-5.6-sol",
-      "label": "GPT-5.6 Sol",
-      "intelligence_index": 58.9,
-      "intelligence_index_source": "Artificial Analysis Intelligence Index, Aug 2026",
-      "coding_index": 80,
+      "id": "codex/gpt-6-sol",
+      "label": "GPT-6 Sol",
+      "intelligence_index": null,
+      "intelligence_index_source": "6-series not measured here; prior-release August 2026 scores are retained in _previous_release_measurements",
+      "coding_index": null,
       "modalities": [
         "text",
         "image"
       ],
       "cost_tier": "plan-high",
       "quota": "codex plan; live rate-limit windows read from codex rollouts",
-      "notes": "Integration/review gate in sprints. AA Coding Index 78.3, leads Opus by a hair."
+      "notes": "Upgraded by owner decision on 2026-09-25. Deep-tier review gate at xhigh; optional code dispatch at high. API budget acceptance is recorded in reviewers.json; Paseo dispatch of this release was not measured here. Prior-release scores and qualitative notes remain dated history, not measurements of this release.",
+      "_previous_release_measurements": {
+        "id": "codex/gpt-5.6-sol",
+        "date": "2026-08",
+        "intelligence_index": 58.9,
+        "intelligence_index_source": "Artificial Analysis Intelligence Index, Aug 2026",
+        "coding_index": 80,
+        "notes": "Integration/review gate in sprints. AA Coding Index 78.3, leads Opus by a hair."
+      }
     },
     {
       "id": "kimi/kimi-code/k3-256k",
@@ -56,18 +64,26 @@
       "notes": "Default code-unit driver since 2026-09-24 by owner decision. Dispatch verified live on the coordinator host: paseo inspect read Provider codex, Model gpt-6-astra, Thinking high, and the agent answered. Both indexes are deliberately null: nothing here measured them, and a plausible number would be fabricated evidence."
     },
     {
-      "id": "codex/gpt-5.6-luna",
-      "label": "GPT-5.6 Luna",
-      "intelligence_index": 52,
-      "intelligence_index_source": "Artificial Analysis Intelligence Index, Aug 2026, max reasoning (default effort ~51)",
-      "coding_index": 74.6,
+      "id": "codex/gpt-6-luna",
+      "label": "GPT-6 Luna",
+      "intelligence_index": null,
+      "intelligence_index_source": "6-series not measured here; prior-release August 2026 scores are retained in _previous_release_measurements",
+      "coding_index": null,
       "modalities": [
         "text",
         "image"
       ],
       "cost_tier": "plan-mid",
       "quota": "codex plan; live rate-limit windows read from codex rollouts",
-      "notes": "User-preferred on max reasoning. AA Coding Agent Index ~74.6 (Terra 77, Sol 80). Stronger instruction following + image-capable frontend inspection in sprints."
+      "notes": "Upgraded by owner decision on 2026-09-25. Review gate at high; research/audit dispatch intent at xhigh. API budget acceptance is recorded in reviewers.json; Paseo dispatch of this release was not measured here. Prior-release scores and qualitative notes remain dated history, not measurements of this release.",
+      "_previous_release_measurements": {
+        "id": "codex/gpt-5.6-luna",
+        "date": "2026-08",
+        "intelligence_index": 52,
+        "intelligence_index_source": "Artificial Analysis Intelligence Index, Aug 2026, max reasoning (default effort ~51)",
+        "coding_index": 74.6,
+        "notes": "User-preferred on max reasoning. AA Coding Agent Index ~74.6 (Terra 77, Sol 80). Stronger instruction following + image-capable frontend inspection in sprints."
+      }
     },
     {
       "id": "pi/deepseek-runai/deepseek-v4-flash-0731",

@@ -175,6 +175,19 @@ class TestTheRoutingDecisionItEncodes(unittest.TestCase):
     def setUp(self):
         self.providers = json.loads(TEMPLATE.read_text())["providers"]
 
+    def test_six_series_routing_retains_the_separate_driver(self):
+        self.assertEqual(self.providers["impl"], "codex/gpt-6-astra")
+        for role in ("research", "audit"):
+            self.assertEqual(self.providers[role], "codex/gpt-6-luna")
+        models = {m["id"]: m for m in json.loads(MODELS.read_text())["models"]}
+        for name in ("Sol", "Luna"):
+            model = models["codex/gpt-6-" + name.lower()]
+            self.assertEqual(model["label"], "GPT-6 " + name)
+            self.assertIsNone(model["intelligence_index"])
+            self.assertIsNone(model["coding_index"])
+            self.assertEqual(model["_previous_release_measurements"]["date"],
+                             "2026-08")
+
     def test_the_author_does_not_review_itself(self):
         """Verbatim from the decision: sol coordinates and integrates, and
         does NOT review, because an author reviewing itself is what the roster

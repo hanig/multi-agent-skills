@@ -163,7 +163,7 @@ class TestCommitteeTiebreak(unittest.TestCase):
             return self.response(value, self.tie_status), None
         return self.response(self.synthesis), None
 
-    def invoke(self, command="synthesize", *extra, author="gpt-5.6-sol"):
+    def invoke(self, command="synthesize", *extra, author="gpt-6-sol"):
         argv = [str(SCRIPT), command, "split"]
         if command not in ("show",):
             argv += ["--mandate-file", str(self.mandate)]
@@ -184,7 +184,7 @@ class TestCommitteeTiebreak(unittest.TestCase):
         code, output, saved = self.invoke()
         self.assertEqual(code, 0, output)
         self.assertEqual([p["model"] for p in self.calls],
-                         ["gpt-5.6-luna", "gpt-6-astra"])
+                         ["gpt-6-luna", "gpt-6-astra"])
         request = self.calls[-1]
         self.assertEqual(request["reasoning"], {"effort": "xhigh"})
         self.assertEqual(request["max_output_tokens"], 128000)
@@ -236,19 +236,19 @@ class TestCommitteeTiebreak(unittest.TestCase):
     def test_repeated_authors_include_astra_on_tiebreak_and_reload(self):
         code, output, saved = self.invoke(
             "tiebreak", "--author", "codex/gpt-6-astra",
-            author="codex/gpt-5.6-sol")
+            author="codex/gpt-6-sol")
         self.assertEqual(code, 1, output)
-        self.assertEqual(saved["author"], ["codex/gpt-5.6-sol", "codex/gpt-6-astra"])
+        self.assertEqual(saved["author"], ["codex/gpt-6-sol", "codex/gpt-6-astra"])
         self.assertEqual(self.calls, [])
         self.assertIn("cannot judge itself", saved["resolution"]["reason"])
         self.assertEqual(self.invoke("tiebreak", author=None)[0], 1)
         self.assertEqual(self.calls, [])
 
     def test_equivalent_provider_declaration_preserves_existing_authors(self):
-        self.assertEqual(self.invoke("tiebreak", author="codex/gpt-5.6-sol")[0], 0)
-        code, output, saved = self.invoke("tiebreak", author="openai/gpt-5.6-sol")
+        self.assertEqual(self.invoke("tiebreak", author="codex/gpt-6-sol")[0], 0)
+        code, output, saved = self.invoke("tiebreak", author="openai/gpt-6-sol")
         self.assertEqual(code, 0, output)
-        self.assertEqual(saved["author"], "codex/gpt-5.6-sol")
+        self.assertEqual(saved["author"], "codex/gpt-6-sol")
 
     def test_synthesis_divergence_respects_astra_author(self):
         code, output, _saved = self.invoke(author="gpt-6-astra")
@@ -264,7 +264,7 @@ class TestCommitteeTiebreak(unittest.TestCase):
 
     def test_open_accepts_author_and_prints_followup_instructions(self):
         argv = [str(SCRIPT), "open", "fresh", "--problem", "Which order?",
-                "--member", "luna,kimi-k2.7-code", "--author", "gpt-5.6-sol"]
+                "--member", "luna,kimi-k2.7-code", "--author", "gpt-6-sol"]
         output = io.StringIO()
         with mock.patch.object(sys, "argv", argv), \
                 mock.patch.object(committee, "ask_member",
@@ -273,7 +273,7 @@ class TestCommitteeTiebreak(unittest.TestCase):
             with self.assertRaises(SystemExit) as stopped:
                 committee.main()
         self.assertEqual(stopped.exception.code, 0, output.getvalue())
-        self.assertEqual(committee.load_session("fresh")["author"], "gpt-5.6-sol")
+        self.assertEqual(committee.load_session("fresh")["author"], "gpt-6-sol")
         self.assertIn("committee.py synthesize fresh", output.getvalue())
 
     def test_open_padded_astra_author_then_synthesize_refuses(self):
@@ -290,7 +290,7 @@ class TestCommitteeTiebreak(unittest.TestCase):
         code, _output, saved = self.invoke(author=None)
         self.assertEqual(code, 1)
         self.assertIn("cannot judge itself", saved["resolution"]["reason"])
-        self.assertEqual([p["model"] for p in self.calls], ["gpt-5.6-luna"])
+        self.assertEqual([p["model"] for p in self.calls], ["gpt-6-luna"])
 
     def test_legacy_padded_author_is_repaired_and_refused_on_both_paths(self):
         for author in ("gpt-6-astra", "openai/gpt-6-astra", "ASTRA", "astra-xhigh"):
@@ -340,7 +340,7 @@ class TestCommitteeTiebreak(unittest.TestCase):
 
                     # invoke reloads the saved session; no flag is repeated.
                     code, output, retried = self.invoke(
-                        retry, author=None if prior else "gpt-5.6-sol")
+                        retry, author=None if prior else "gpt-6-sol")
                     self.assertEqual(code, 1, output)
                     self.assertEqual(refused.get("stop_and_ask"), reason)
                     self.assertEqual(retried.get("stop_and_ask"), reason)
@@ -355,7 +355,7 @@ class TestCommitteeTiebreak(unittest.TestCase):
 
     def test_stop_and_ask_survives_conflicting_author_retry(self):
         self.assert_veto_survives_author_error(
-            "gpt-5.6-sol", "luna", "author conflicts")
+            "gpt-6-sol", "luna", "author conflicts")
 
     def test_model_identified_stop_and_ask_routes_owner(self):
         for command in ("synthesize", "tiebreak"):
@@ -523,7 +523,7 @@ class TestCommitteeAuthorMembers(unittest.TestCase):
     def test_explicit_sol_author_is_refused_before_session_or_provider(self):
         code, output, calls = self.invoke(
             "open", "--member", "sol", "--member", "kimi-k2.7-code",
-            "--author", "codex/gpt-5.6-sol", "--problem", "Which ordering?")
+            "--author", "codex/gpt-6-sol", "--problem", "Which ordering?")
         self.assertNotEqual(code, 0, output)
         self.assertIn("sol refused: authored this change", str(code))
         self.assertEqual(calls, 0)
@@ -531,14 +531,14 @@ class TestCommitteeAuthorMembers(unittest.TestCase):
 
     def test_default_committee_cannot_seat_its_author(self):
         code, _output, calls = self.invoke(
-            "open", "--author", "codex/gpt-5.6-luna", "--problem", "Order?")
+            "open", "--author", "codex/gpt-6-luna", "--problem", "Order?")
         self.assertIn("luna refused: authored this change", str(code))
         self.assertEqual(calls, 0)
 
     def test_repeated_author_exclusion_is_not_last_flag_wins(self):
         code, _output, calls = self.invoke(
             "open", "--member", "sol,kimi-k2.7-code", "--problem", "Order?",
-            "--author", "codex/gpt-5.6-sol", "--author", "codex/gpt-6-astra")
+            "--author", "codex/gpt-6-sol", "--author", "codex/gpt-6-astra")
         self.assertIn("sol refused: authored this change", str(code))
         self.assertEqual(calls, 0)
 
@@ -550,7 +550,7 @@ class TestCommitteeAuthorMembers(unittest.TestCase):
         self.assertEqual(calls, 2)
 
     def test_repeated_authors_are_saved_and_checked_on_later_turns(self):
-        authors = ["codex/gpt-5.6-sol", "codex/gpt-6-astra"]
+        authors = ["codex/gpt-6-sol", "codex/gpt-6-astra"]
         code, output, calls = self.invoke(
             "open", "--member", "luna,kimi-k2.7-code", "--problem", "Order?",
             "--author", authors[0], "--author", authors[1])
@@ -575,30 +575,30 @@ class TestCommitteeAuthorMembers(unittest.TestCase):
                     session = {
                         "name": "authors", "phase": "plan", "problem": "Order?",
                         "members": {
-                            "sol": {"model": "gpt-5.6-sol", "provider": "openai",
+                            "sol": {"model": "gpt-6-sol", "provider": "openai",
                                     "history": [{"role": "assistant", "content": "A"}]},
                             "kimi-k2.7-code": {"model": "moonshotai/kimi-k2.7-code",
                                               "provider": "openrouter", "history": []}},
                         "turns": [],
                         "resolution": {"status": "CONVERGED", "plan": "stale"},
                         "decisions": [{"status": "CONVERGED", "plan": "stale"}]}
-                    flags = ["--author", "codex/gpt-5.6-sol"] if declared else []
+                    flags = ["--author", "codex/gpt-6-sol"] if declared else []
                     if not declared:
-                        session["author"] = "codex/gpt-5.6-sol"
+                        session["author"] = "codex/gpt-6-sol"
                     committee.save_session("authors", session)
                     code, output, calls = self.invoke(command, *flags)
                     self.assertEqual(code, 1, output)
                     self.assertEqual(calls, 0)
                     saved = committee.load_session("authors")
-                    self.assertEqual(saved["author"], "codex/gpt-5.6-sol")
+                    self.assertEqual(saved["author"], "codex/gpt-6-sol")
                     self.assertEqual(saved["resolution"]["status"], "OWNER")
                     self.assertIn("sol refused", saved["resolution"]["reason"])
                     self.assertNotIn("plan", saved["resolution"])
                     self.assertEqual(saved["decisions"][0]["plan"], "stale")
 
     def test_saved_member_model_survives_roster_route_change(self):
-        session = {"name": "authors", "author": "codex/gpt-5.6-sol",
-                   "members": {"sol": {"model": "gpt-5.6-sol"}}, "turns": []}
+        session = {"name": "authors", "author": "codex/gpt-6-sol",
+                   "members": {"sol": {"model": "gpt-6-sol"}}, "turns": []}
         committee.save_session("authors", session)
         roster = committee.R.load_reviewers()
         for member in roster:

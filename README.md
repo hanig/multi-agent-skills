@@ -472,10 +472,16 @@ Panels, from `reviewers.json`:
 
 | profile | membership | use |
 |---|---|---|
-| `plan` | deepseek-v4-pro, luna | acceptance criteria and designs, before code exists |
-| `fast` | deepseek-v4-pro, luna | cheapest implementation panel, first tier of `--escalate` |
-| `standard` | fast + kimi-k2.7-code, kimi-k3, glm-5.3 | the usual implementation panel |
-| `deep` | everything, including sol at `xhigh` | reached only via `--escalate` |
+| `plan` | luna, kimi-k2.7-code | acceptance criteria and designs, before code exists |
+| `fast` | luna, kimi-k2.7-code | cheapest implementation panel, first tier of `--escalate` |
+| `standard` | fast + glm-5.3 | the usual implementation panel |
+| `deep` | standard + sol at `xhigh` | final escalation tier or explicit `--profile deep` |
+
+Luna routes to `gpt-6-luna` at `high`, and Sol to `gpt-6-sol` at `xhigh`,
+by owner decision on 2026-09-25. Both retain their 128000-token output caps;
+dated acceptance probes and prior-release measurements live in `reviewers.json`.
+Astra drives code and is in no gate tier; `kimi-k3` is disabled and DeepSeek
+is a committee member. Pass every author's provider/model ID with `--author`.
 
 **Two contrasting models for a plan, never escalated.** A third adds agreement,
 not insight. That is measured, not assumed. `reviewers.json` carries routing
@@ -849,7 +855,11 @@ an example of it.
 
 `examples/orchestration-preferences.json` is that example, carrying this
 project's routing decision of 2026-09-01 (`docs/plan-field-reports.md`, "Model
-routing"). Copy it into place on the machine that runs agents:
+routing"), amended on 2026-09-24 for the Astra driver and on 2026-09-25 for
+the Sol/Luna upgrade. Research and audit now use `codex/gpt-6-luna`; swarm
+dispatch retains Luna's `xhigh` and Sol's `high` effort intent. API acceptance
+does not certify a live Paseo dispatch. Copy it into place on the machine that
+runs agents:
 
 ```bash
 mkdir -p ~/.paseo && cp examples/orchestration-preferences.json ~/.paseo/
