@@ -396,7 +396,17 @@ For merge verification, an explicitly declared Python replaces a Python shebang
 naming `python`, `python3`, or a numeric version such as `python3.10` (directly,
 through `env`, or `env -S`). Python shebang arguments, environment options and
 assignments are retained; the selected tools are installed after those options
-are applied. Remote policy
+are applied. Process `argv[0]` is carried separately to the final exec, so an
+`env -a` name never becomes an executable path. Explicit selection uses a bounded
+env grammar: `-i`/`-`/`--ignore-environment`, `-v`/`--debug`, operands for
+`-u`/`--unset`, `-P`, `-C`/`--chdir`, and `-a`/`--argv0`, followed by `--` and
+assignments where applicable. Short attached operands and long equals operands
+are supported; repeated argv0 options use the last value, which must be nonempty. Initial
+`-S`/`--split-string` accepts ordinary quoting and whitespace. Backslash escapes,
+expansion, signal options, unknown option clusters, and malformed or ambiguous
+selectors produce an incomplete configuration result. Other env options depend
+on the selected host's env implementation. This grammar does not reinterpret
+implicit local execution. Remote policy
 always declares Python. With no local Python declaration, the authorized
 shebang and its native Python child selection are preserved; the receipt marks
 the operator Python as `launcher`, not the verifier interpreter. An explicit Python

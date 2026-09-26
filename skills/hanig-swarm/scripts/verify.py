@@ -904,7 +904,8 @@ def outcome_result(outcome):
     return {"result": "pass" if outcome["exit_code"] == 0 else "fail"}
 
 
-def _observe_execution(argv, timeout, cwd, launch_config=None, launch_prefix=()):
+def _observe_execution(argv, timeout, cwd, launch_config=None, launch_prefix=(),
+                       final_argv0=None):
     """Observe merge-verifier completion without unit.run's overloaded exit 127.
 
     Only our timeout or a launch/transport exception is incomplete. Every
@@ -932,15 +933,17 @@ def _observe_execution(argv, timeout, cwd, launch_config=None, launch_prefix=())
                 "os.environ['HANIG_VERIFICATION_GIT'] = sys.argv[3]\n"
                 "if sys.argv[4]: os.environ['HANIG_VERIFICATION_PYTHON'] = sys.argv[4]\n"
                 "else: os.environ.pop('HANIG_VERIFICATION_PYTHON', None)\n"
-                "try: os.execv(sys.argv[5], sys.argv[5:])\n"
+                "try: os.execv(sys.argv[5], sys.argv[6:])\n"
                 "except OSError as error:\n"
                 "    os.write(fd, (str(error) or type(error).__name__).encode('utf-8', 'replace')[:1000])\n"
                 "    os._exit(125)\n")
             # Apply a Python shebang's env options before installing the
             # coordinator's selected tools. In particular env -i must not
             # discard the declared interpreter or its child-tool selection.
+            executable = argv[0]
+            verifier_argv = [executable if final_argv0 is None else final_argv0] + argv[1:]
             argv = list(launch_prefix) + [python, "-c", launcher, str(launch_write),
-                                          bindir, git, child_python] + argv
+                                          bindir, git, child_python, executable] + verifier_argv
             pass_fds = (launch_write,)
         child = subprocess.Popen(
             argv, cwd=cwd, env=CE.child_env(), stdin=subprocess.DEVNULL,
@@ -1002,6 +1005,84 @@ def _observe_execution(argv, timeout, cwd, launch_config=None, launch_prefix=())
     return outcome
 
 
+def _python_selector(first_line):
+    """Return a bounded explicit-Python launch description, or native None.
+
+    Only pinned bytes supply the language. Env splits accept ordinary quoting,
+    not backslash escapes or expansion. Unknown options cannot guess a command.
+    Native implicit execution never calls this parser.
+    """
+    declaration = os.fsdecode(first_line[2:]).strip()
+    parts = declaration.split(None, 1)
+    if not parts:
+        raise ValueError("missing shebang interpreter")
+    prefix, argv0 = [], None
+    words = declaration.split()
+    if posixpath.basename(parts[0]) == "env":
+        prefix = [parts[0]]
+        raw = parts[1] if len(parts) == 2 else ""
+        split = False
+        split_parts = raw.split(None, 1)
+        if split_parts and split_parts[0] in ("-S", "--split-string"):
+            raw = split_parts[1] if len(split_parts) == 2 else ""
+            split = True
+        elif raw.startswith("-S"):
+            raw = raw[2:]
+            split = True
+        elif raw.startswith("--split-string="):
+            raw = raw[len("--split-string="):]
+            split = True
+        if split:
+            if not raw or "\\" in raw or "$" in raw:
+                raise ValueError("empty or unsupported env split string")
+            words = shlex.split(raw)
+        else:
+            words = raw.split()
+        index = 0
+        required = ("-u", "--unset", "-P", "-C", "--chdir", "-a", "--argv0")
+        while index < len(words):
+            word = words[index]
+            if word == "--":
+                prefix.append(word)
+                index += 1
+                break
+            if word in ("-", "-i", "--ignore-environment", "-v", "--debug"):
+                prefix.append(word)
+                index += 1
+                continue
+            option, value, consumed = word, None, 1
+            if word in required:
+                if index + 1 >= len(words):
+                    raise ValueError("missing env operand for " + word)
+                value, consumed = words[index + 1], 2
+            elif word.startswith("--") and "=" in word:
+                option, value = word.split("=", 1)
+                if option not in required:
+                    raise ValueError("unsupported env option " + option)
+            elif len(word) > 2 and word[:2] in ("-u", "-P", "-C", "-a"):
+                option, value = word[:2], word[2:]
+            elif word.startswith("-"):
+                raise ValueError("unsupported env option " + word)
+            else:
+                break
+            if option in ("-a", "--argv0"):
+                argv0 = value
+            else:
+                prefix.extend(words[index:index + consumed])
+            index += consumed
+        while index < len(words) and "=" in words[index]:
+            prefix.append(words[index])
+            index += 1
+        words = words[index:]
+    if not words or not words[0]:
+        raise ValueError("missing shebang command")
+    if not re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?", posixpath.basename(words[0])):
+        return None
+    if argv0 == "":
+        raise ValueError("empty process argv0 is unsupported")
+    return {"prefix": prefix, "argv0": argv0, "args": words[1:]}
+
+
 def run_pinned(runner, path, expect_digest, args=None, timeout=900,
                cwd=None, observe_completion=False, executables=None):
     """Execute the bytes that hashed, not the path that was named.
@@ -1030,6 +1111,7 @@ def run_pinned(runner, path, expect_digest, args=None, timeout=900,
             argv = [copy] + list(args or [])
             launch_config = None
             launch_prefix = []
+            final_argv0 = None
             if executables is not None:
                 # The pinned programs and their subprocesses share declared
                 # executables. A candidate's cwd/PATH never supplies either.
@@ -1040,40 +1122,14 @@ def run_pinned(runner, path, expect_digest, args=None, timeout=900,
                 elif select_python:
                     # Only target-authorized bytes select this rule. The
                     # filename says nothing about the program's language.
-                    declaration = first_line[2:].decode("utf-8", "replace").strip()
-                    words = declaration.split()
-                    env_prefix = []
-                    if words and posixpath.basename(words[0]) == "env":
-                        env_program = words[0]
-                        words = words[1:]
-                        if words and words[0] == "-S":
-                            try:
-                                words = shlex.split(declaration.split(None, 2)[2])
-                            except ValueError:
-                                return None, "invalid pinned verifier env -S shebang"
-                        # Keep env's options and assignments, including values
-                        # named python3; only its actual command names a language.
-                        index = 0
-                        while index < len(words):
-                            word = words[index]
-                            if word == "--":
-                                index += 1
-                                break
-                            if word in ("-u", "--unset", "-P", "-C", "--chdir",
-                                        "-a", "--argv0"):
-                                index += 2
-                            elif word.startswith("-"):
-                                index += 1
-                            else:
-                                break
-                        while index < len(words) and "=" in words[index]:
-                            index += 1
-                        env_prefix = [env_program] + words[:index]
-                        words = words[index:]
-                    if select_python and words and re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?",
-                                              posixpath.basename(words[0])):
-                        launch_prefix = env_prefix
-                        argv = [executables["python"]["path"]] + words[1:] + argv
+                    try:
+                        selection = _python_selector(first_line)
+                    except ValueError as exc:
+                        return None, "invalid pinned verifier selector: " + str(exc)
+                    if selection is not None:
+                        launch_prefix = selection["prefix"]
+                        final_argv0 = selection["argv0"]
+                        argv = [executables["python"]["path"]] + selection["args"] + argv
                 bindir = Path(tmpdir) / "bin"
                 bindir.mkdir()
                 for name, key in (("python3", "python"), ("python", "python"), ("git", "git")):
@@ -1084,7 +1140,8 @@ def run_pinned(runner, path, expect_digest, args=None, timeout=900,
                 launch_config = (str(bindir), executables["git"]["path"],
                                  executables["python"]["path"],
                                  executables["python"]["path"] if select_python else "")
-            return _observe_execution(argv, timeout, cwd, launch_config, launch_prefix), None
+            return _observe_execution(argv, timeout, cwd, launch_config,
+                                      launch_prefix, final_argv0), None
         # No before/after dance here any more. `run_in_checkout` gives this a
         # worktree the agent is not working in, so there is nothing to drift.
         rc, out, errout = runner([copy] + list(args or []), timeout=timeout,
