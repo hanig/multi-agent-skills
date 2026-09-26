@@ -874,6 +874,7 @@ class TestRemoteVerification(unittest.TestCase):
         (self.f.state_dir / RV.POLICY).unlink()
         result = self.verify()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
         git = self.f.bin / 'git'
         actual = str(git.resolve())
         git.unlink()
@@ -885,6 +886,80 @@ class TestRemoteVerification(unittest.TestCase):
         result = self.admitted()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_default_git_falls_back_to_external_operator_path(self):
+        (self.f.state_dir / RV.POLICY).unlink()
+        empty = self.f.directory / 'empty-defpath'
+        empty.mkdir()
+        (empty / 'env').symlink_to(shutil.which('env', path=os.defpath))
+        site = self.f.directory / 'default-git-probe'
+        site.mkdir()
+        (site / 'sitecustomize.py').write_text('import os\nos.defpath = %r\n' % str(empty))
+        self.f.env['PYTHONPATH'] = str(site)
+        result = self.verify()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        row, = self.rows()
+        self.assertEqual(row['execution']['executables']['git']['path'],
+                         str((self.f.bin / 'git').resolve()))
+        result = self.admitted()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_fallback_git_excludes_candidate_and_external_symlink(self):
+        (self.f.state_dir / RV.POLICY).unlink()
+        marker = self.f.directory / 'candidate-git-selected'
+        actual = str((self.f.bin / 'git').resolve())
+        program = ('#!' + sys.executable + '\nimport os, sys\nfrom pathlib import Path\n'
+                   'if "--version" in sys.argv or ("show" in sys.argv and sys.argv[-1].endswith(":verifiers.json")):\n'
+                   '    Path(%r).write_text("candidate policy tool selected")\n'
+                   'os.execv(%r, [%r] + sys.argv[1:])\n' % (str(marker), actual, actual))
+        self.shared.candidate({'git': program})
+        (self.f.repo / 'git').chmod(0o755)
+        self.shared.candidate({'git-mode.txt': 'record executable mode\n'})
+        linked = self.f.directory / 'linked-tools'
+        linked.mkdir()
+        (linked / 'git').symlink_to(self.f.repo / 'git')
+        empty = self.f.directory / 'empty-defpath'
+        empty.mkdir()
+        (empty / 'env').symlink_to(shutil.which('env', path=os.defpath))
+        site = self.f.directory / 'default-git-probe'
+        site.mkdir()
+        (site / 'sitecustomize.py').write_text('import os\nos.defpath = %r\n' % str(empty))
+        self.f.env['PYTHONPATH'] = str(site)
+        self.f.env['PATH'] = os.pathsep.join(('.', str(self.f.repo), str(linked), self.f.env['PATH']))
+        result = self.verify()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.rows()[-1]['execution']['executables']['git']['path'], actual)
+        generic = subprocess.run([
+            sys.executable, S.__file__, 'verify', '--state-dir', str(self.f.state_dir),
+            '--unit', 'u', '--attempt', str(self.f.attempt), '--claim', V.INTEGRATION_CLAIM,
+            '--target-commit', self.f.base, '--verifier', V.MERGE_VERIFIER,
+            '--path', str(self.f.repo / V.MERGE_VERIFIER_PATH)],
+            cwd=self.f.repo, env=self.f.env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(generic.returncode, 0, generic.stdout + generic.stderr)
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.rows()[-1]['execution']['executables']['git']['path'], actual)
+        result = self.admitted()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(marker.exists())
+
+    def test_absent_ssh_client_does_not_create_an_unresolved_launch(self):
+        self.program()
+        ssh = self.f.bin / 'ssh'
+        content = ssh.read_bytes()
+        ssh.unlink()
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'incomplete')
+        self.assertIn('ssh is unavailable', row['incomplete_reason'])
+        self.assertEqual(list((self.f.state_dir / 'remote-verifications').glob('*.json')), [])
+        self.assertFalse(Path(self.f.env['REMOTE_LOG']).exists())
+        ssh.write_bytes(content)
+        ssh.chmod(0o755)
+        result = self.verify()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.rows()[-1]['result'], 'pass')
+        self.assert_clean()
     def test_generic_integration_policy_reads_and_admission_use_declared_git(self):
         self.policy.pop('verification_host')
         log = self.f.directory / 'generic-git.log'

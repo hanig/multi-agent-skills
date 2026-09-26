@@ -361,8 +361,10 @@ and the kill does not erase the failure.
 The optional `verification-execution.json` belongs directly in the external
 coordinator state directory. It is never read from the plan, PR or candidate
 checkout; a symlink policy is refused. Without it verification stays local. Local
-defaults select the operator's Python for the launcher and Git from `os.defpath`;
-explicit paths replace those defaults. A declaration can select a remote SSH alias with `direct` execution.
+defaults select the operator's Python for the launcher and prefer Git from
+`os.defpath`. If no system Git is available, absolute operator PATH directories
+outside the operated repository supply the fallback; relative entries and
+symlinks into the repository are excluded. Explicit paths replace those defaults. A declaration can select a remote SSH alias with `direct` execution.
 Policy validation refuses `executor: "slurm"`; its enablement is tracked in
 ARC-1103. The retained Slurm implementation is disabled.
 
@@ -446,8 +448,9 @@ same verification command to retrieve it. Add `--retrieve-remote-evidence` to
 `--verify-integration` for an explicitly idempotent retrieval: it uses the
 existing launch even after reconciliation and never starts a new verifier. If a launch or its stage cannot be
 accounted for, operator investigation is required; deleting the coordinator
-ledger is not resolution. Even a connection failure before visible execution
-can leave an uncertain launch and block retries. Changing the execution host or
+ledger is not resolution. A missing local SSH client is a preflight failure and records no launch; fixing
+the client allows a retry. Once SSH has been attempted, even a connection failure
+before visible execution can leave an uncertain launch and block retries. Changing the execution host or
 switching to local mode cannot bypass that block.
 
 Remote cleanup requires quiescence and the coordinator's acknowledgment of the

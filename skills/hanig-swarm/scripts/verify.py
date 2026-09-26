@@ -668,7 +668,7 @@ def run_in_candidate_merge(runner, repo, produced_head, target_commit, path,
     result is evidence unavailability, not permission to test either branch.
     Returns ``(outcome, basis, error)``.
     """
-    executables = executables or RV.resolve_executables()
+    executables = executables or RV.resolve_executables(excluded_roots=(repo,))
     runner = RV.GitRunner(runner, executables)
     tmp, tree, basis, error = _candidate_checkout(
         runner, repo, produced_head, target_commit)
@@ -759,7 +759,7 @@ def run_merge_preconditions(runner, repo, produced_head, target_commit,
     receipts under its original observation fence before reporting the error.
     """
     execution_policy = execution_policy or {}
-    executables = RV.resolve_executables(execution_policy.get("local"))
+    executables = RV.resolve_executables(execution_policy.get("local"), excluded_roots=(repo,))
     runner = RV.GitRunner(runner, executables)
     checks = []
     for claim in claims:
