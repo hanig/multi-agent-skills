@@ -600,6 +600,9 @@ class TestSharedGuard(unittest.TestCase):
             "raise SystemExit(result.returncode)\n"
             % (actual_git, self.target + ":" + V.POLICY_FILE, read_exit))
         git.chmod(0o755)
+        # Git now comes from coordinator policy or defpath, never ambient PATH.
+        (self.f.state_dir / V.RV.POLICY).write_text(json.dumps({
+            "schema_version": 1, "local": {"git": str(git)}}))
         result = self.f.invoke()
         self.assertEqual(self.f.intent()["integration_status"], "integration-unverified",
                          result.stdout + result.stderr)
