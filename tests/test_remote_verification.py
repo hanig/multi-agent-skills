@@ -183,8 +183,7 @@ class TestRemoteVerification(unittest.TestCase):
         python.symlink_to(sys.executable)
         self.f.env['PATH'] = str(native) + os.pathsep + self.f.env['PATH']
         for shebang in ('#!' + str(python) + '\n', '#!/usr/bin/env python3\n',
-                        '#!/usr/bin/env -S python3 -u\n',
-                        '#!/usr/bin/env -S python3 \\c "\n'):
+                        '#!/usr/bin/env -S python3 -u\n'):
             with self.subTest(shebang=shebang):
                 self.authorize_program(shebang +
                     'import os, subprocess, sys\n'
@@ -199,6 +198,28 @@ class TestRemoteVerification(unittest.TestCase):
                 self.assertFalse(row['execution']['executables']['python']['declared'])
                 self.assertEqual(row['execution']['executables']['python']['role'], 'launcher')
                 self.assert_clean()
+
+    def test_local_implicit_shebang_preserves_native_parser_outcome(self):
+        self.policy.pop('verification_host')
+        self.policy['local'].pop('python')
+        self.save_policy()
+        program = '#!/usr/bin/env -S python3 \\c "\nprint("native split")\n'
+        control = self.f.directory / 'native-control'
+        control.write_text(program)
+        control.chmod(0o755)
+        native = subprocess.run([str(control)], cwd=self.f.repo, env=self.f.env,
+                                capture_output=True, text=True, timeout=10)
+        # Kernels differ in how they split shebang arguments. The contract is
+        # the native completed result, including a native FAIL, never an
+        # incomplete result invented by our shell parser before execution.
+        self.authorize_program(program)
+        result = self.verify()
+        row, = self.rows()
+        self.assertEqual(row['exit_code'], native.returncode)
+        self.assertEqual(row['result'], 'pass' if native.returncode == 0 else 'fail')
+        self.assertNotIn('incomplete_reason', row)
+        self.assertEqual(result.returncode, 0 if native.returncode == 0 else 1)
+        self.assert_clean()
 
     def cancellation_fixture(self, mode='slurm-pending', retry_succeeds=False,
                              terminal_on_success=True):
