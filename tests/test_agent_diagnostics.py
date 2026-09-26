@@ -591,6 +591,46 @@ class TestDoctorAndSurveyAgentOutput(unittest.TestCase):
         self.assertTrue(value.get("truncated"), value)
         self.assertEqual(value["state"], "unknown")
 
+    def test_doctor_json_keeps_realistic_four_agent_host_complete(self):
+        """Exercise the public consumer with detail larger than its old tail."""
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            env = self._frozen_env(directory, "2.1.261", date(2026, 9, 25))
+            home = Path(env["HOME"])
+            for relative in (".claude/skills", ".agents/skills",
+                             ".config/opencode/skills", ".pi/agent/skills"):
+                root = home / relative
+                for number in range(30):
+                    skill = root / f"hanig-fixture-{number:02d}"
+                    skill.mkdir(parents=True)
+                    (skill / "SKILL.md").write_text("fixture skill\n")
+                    (skill / D.MARKER).write_text(TestAgentDiagnostics._record(skill))
+            full = subprocess.run(
+                [sys.executable, str(SCRIPTS / "agent_diagnostics.py"), "--json"],
+                cwd=directory, env=env, capture_output=True, text=True,
+                timeout=WATCHDOG_SECONDS)
+            self.assertEqual(full.returncode, 0, full.stderr)
+            self.assertGreaterEqual(len(full.stdout.encode("utf-8")), 70_000)
+            result = subprocess.run([str(DOCTOR), "--json"], cwd=directory,
+                                    env=env, text=True, capture_output=True,
+                                    timeout=WATCHDOG_SECONDS)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            value = json.loads(result.stdout)
+            self.assertNotEqual(value.get("state"), "unknown", value)
+            self.assertNotIn("truncated", value)
+            self.assertEqual(set(value["agents"]), {"claude", "codex", "opencode", "pi"})
+            # scandir order is not a contract. Compare all other facts exactly
+            # and normalize only these lists for the comparison.
+            expected = json.loads(full.stdout)
+            for report in (value, expected):
+                for agent in report["agents"].values():
+                    for root in agent["installation"]["roots"]:
+                        root["payloads"].sort(key=lambda payload: payload["name"])
+            self.assertEqual(value, expected)
+            for agent in value["agents"].values():
+                self.assertEqual(agent["agent_present"]["state"], "executable_found")
+                self.assertEqual(agent["installation"]["state"], "present")
+
     def test_doctor_json_keeps_an_ordinary_thirteen_skill_install_complete(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
