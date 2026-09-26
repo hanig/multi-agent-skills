@@ -48,6 +48,7 @@ SBATCH = r'''
 import json, os, pathlib, subprocess, sys
 with open(os.environ['SCHED_LOG'], 'a') as log:
     log.write(json.dumps(['sbatch'] + sys.argv[1:]) + '\n')
+assert '--no-requeue' in sys.argv
 assert '--partition=fixture-cpu' in sys.argv
 assert '--mem=2G' in sys.argv
 assert '--time=00:05:00' in sys.argv
@@ -61,7 +62,7 @@ SACCT = r'''
 import os, pathlib
 mode = pathlib.Path(os.environ['REMOTE_MODE']).read_text()
 print('321|PENDING|0:0' if mode == 'slurm-pending' else
-      '321|FAILED|1:0' if mode == 'slurm-missing' else '321|COMPLETED|0:0')
+      '321|FAILED|1:0' if mode in ('slurm-missing', 'slurm-completed-fail') else '321|COMPLETED|0:0')
 '''
 
 
@@ -212,6 +213,25 @@ class TestRemoteVerification(unittest.TestCase):
         refused = self.admitted()
         self.f.assert_refused(refused)
         self.assertIn('FAIL', refused.stderr)
+        self.assert_clean()
+
+    def test_completed_verifier_fail_survives_a_failed_slurm_job(self):
+        self.policy['remote'].update(executor='slurm', slurm={
+            'partition': 'fixture-cpu', 'mem': '2G', 'time': '00:05:00'})
+        self.save_policy()
+        self.program('raise SystemExit(int(Path(%r).read_text() == "slurm-completed-fail"))\n'
+                     % str(self.mode))
+        self.mode.write_text('slurm-completed-fail')
+        self.assertNotEqual(self.verify().returncode, 0)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'fail')
+        self.assertEqual(row['execution']['sacct_state'], 'FAILED')
+        self.mode.write_text('pass')
+        result = self.verify()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = self.admitted()
+        self.f.assert_refused(result)
+        self.assertIn('FAIL', result.stderr)
         self.assert_clean()
 
     def test_slurm_without_completed_worker_is_incomplete_and_retryable(self):
