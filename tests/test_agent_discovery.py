@@ -321,6 +321,7 @@ class TestAgentDiscovery(unittest.TestCase):
     def test_real_parent_exit_cannot_leave_inherited_output_writer(self):
         with tempfile.TemporaryDirectory() as raw, socket.socket() as listener:
             home, bin_dir, marker = Path(raw) / "home", Path(raw) / "bin", Path(raw) / "escaped"
+            released_at = Path(raw) / "released-at"
             home.mkdir()
             bin_dir.mkdir()
             listener.bind(("127.0.0.1", 0))
@@ -340,12 +341,13 @@ class TestAgentDiscovery(unittest.TestCase):
                 "peer.close()",
             ])
             fake_cli(bin_dir, "claude", "\n".join([
-                "import os, subprocess, sys",
+                "import os, pathlib, subprocess, sys, time",
                 "ready, notify = os.pipe()",
                 "subprocess.Popen([sys.executable, '-c', %r, str(notify)], pass_fds=(notify,))" % writer,
                 "os.close(notify)",
                 "assert os.read(ready, 1) == b'R'",
                 "os.close(ready)",
+                "pathlib.Path(%r).write_text(str(time.monotonic()))" % str(released_at),
                 "print('2.1.261')",
             ]))
             peer = None
@@ -354,14 +356,17 @@ class TestAgentDiscovery(unittest.TestCase):
                     peer, _ = listener.accept()
                     peer.settimeout(WATCHDOG_SECONDS)
                     self.assertEqual(peer.recv(1), b"R", "writer never reached its barrier")
-                    ready_at = time.monotonic()
                     # Only this acknowledgment lets the writer notify the CLI
-                    # to print/exit. The drain cannot precede our timestamp,
-                    # even if this test thread was starved during startup.
+                    # to print/exit. The CLI timestamps its own release before
+                    # printing, so test-thread pauses around this send neither
+                    # inflate the interval nor hide any post-exit drain time.
+                    # Its timestamp write and exit remain inside the existing
+                    # scheduling/exit slack; no discovery latency is subtracted.
                     peer.sendall(b"A")
                     # No release is sent until discovery returns. Waiting for
                     # inherited stdout EOF would therefore trip this watchdog.
                     report, completed_at = answer.result(timeout=WATCHDOG_SECONDS)
+                    ready_at = float(released_at.read_text())
                     self.assertLess(
                         completed_at - ready_at,
                         REAL_REAP_SECONDS + REAL_COMPLETION_SLACK_SECONDS,
