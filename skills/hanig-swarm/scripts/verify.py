@@ -872,6 +872,7 @@ def _observe_execution(argv, timeout, cwd):
     Keep the shared child environment and process-group containment.
     """
     child = None
+    completed_failure = None
     out, err, reason = "", "", None
     try:
         child = subprocess.Popen(
@@ -885,6 +886,12 @@ def _observe_execution(argv, timeout, cwd):
         reason = "coordinator could not launch or collect verifier: {}".format(exc)
     finally:
         if reason and child is not None:
+            # Capture the child's status BEFORE our intervention. A finished
+            # failure is still evidence when a descendant holds a pipe open;
+            # the capture timeout must not launder it into a retryable result.
+            finished = child.poll()
+            if finished is not None and finished != 0:
+                completed_failure = finished
             # Kill the session even if its leader exited while descendants
             # kept a capture pipe open. The runner created this process group.
             try:
@@ -899,7 +906,10 @@ def _observe_execution(argv, timeout, cwd):
                         stream.close()
     outcome = {"exit_code": child.returncode if child is not None else None,
                "stdout": (out or "")[-4000:], "stderr": (err or "")[-2000:]}
-    if reason:
+    if completed_failure is not None:
+        outcome["exit_code"] = completed_failure
+        outcome["stderr"] = (outcome["stderr"] + "\n" + reason)[-2000:]
+    elif reason:
         outcome["incomplete_reason"] = reason
     return outcome
 

@@ -35,10 +35,11 @@ class TestEvidenceSemantics(unittest.TestCase):
     def barrier(self):
         return ("import os, time\nfrom pathlib import Path\n"
                 "Path(%r).write_text(str(os.getpid()))\n"
-                "while not Path(%r).exists(): time.sleep(0.02)\n"
-                % (str(self.started), str(self.release)))
+                "while Path(%r).parent.exists() and not Path(%r).exists(): time.sleep(0.02)\n"
+                % (str(self.started), str(self.release), str(self.release)))
 
-    def fault_after_barrier(self, stability=False, transport=False, intent=False):
+    def fault_after_barrier(self, stability=False, transport=False, intent=False,
+                            wait_for_exit=False):
         """Fault after the real child starts; load cannot race a short deadline.
 
         The real communicate timeout then kills the running process group.
@@ -58,9 +59,10 @@ class TestEvidenceSemantics(unittest.TestCase):
             "        self._faulted = True\n"
             "        deadline = time.monotonic() + 45\n"
             "        while not pathlib.Path(%r).exists():\n"
-            "            if self.poll() is not None or time.monotonic() >= deadline:\n"
+            "            if (self.poll() is not None and not %r) or time.monotonic() >= deadline:\n"
             "                raise RuntimeError('fixture child never reached barrier')\n"
             "            time.sleep(0.02)\n"
+            "        if %r: self.wait(timeout=45)\n"
             "        if %r:\n"
             "            pathlib.Path(%r).write_text(json.dumps({'binding': {'unit': 'u'}}))\n"
             "            pathlib.Path(%r).touch()\n"
@@ -70,7 +72,7 @@ class TestEvidenceSemantics(unittest.TestCase):
             "            kwargs['timeout'] = 0\n"
             "    return original(self, *args, **kwargs)\n"
             "subprocess.Popen.communicate = communicate\n"
-            % (stability, str(self.started), intent,
+            % (stability, str(self.started), wait_for_exit, wait_for_exit, intent,
                str(self.f.state_dir / 'merge-unit-during-run.json'),
                str(self.release), transport))
         self.f.env["PYTHONPATH"] = str(site)
@@ -170,6 +172,23 @@ class TestEvidenceSemantics(unittest.TestCase):
         self.assertNotIn("incomplete_reason", row)
         self.f.assert_refused(self.f.invoke())
 
+    def test_completed_failure_survives_capture_timeout_from_descendant(self):
+        self.integration_program(
+            "import subprocess, sys\nfrom pathlib import Path\n"
+            "if not Path(%r).exists():\n"
+            "    subprocess.Popen([sys.executable, '-c', %r])\n"
+            "    raise SystemExit(1)\n" % (str(self.release), self.barrier()))
+        self.fault_after_barrier(wait_for_exit=True)
+        self.assertNotEqual(self.verify().returncode, 0)
+        first = self.rows()[-1]
+        self.release.touch()
+        self.f.env.pop("PYTHONPATH")
+        self.assertEqual(self.verify().returncode, 0)
+        result = self.f.invoke()
+        self.f.assert_refused(result)
+        self.assertIn("FAIL", result.stderr)
+        self.assertEqual((first["result"], first["exit_code"]), ("fail", 1))
+
     def test_candidate_system_exit_without_handshake_is_fail(self):
         self.shared.install_policy(repetitions=2)
         self.shared.candidate({"tests/test_exit.py": "raise SystemExit(0)\n"})
@@ -226,8 +245,8 @@ class TestEvidenceSemantics(unittest.TestCase):
         S._fsync_append(self.f.state_dir / S.VERIFY_RECEIPTS, failed)
         for _ in range(2):
             result = self.f.invoke()
-            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(self.f.intent()["integration_status"], "integration-unverified")
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("FAIL", self.f.intent()["integration_problem"])
             self.assertEqual(self.f.receipts()[-1]["integration_status"], "integration-unverified")
             state = json.loads((self.f.state_dir / S.STATE_FILE).read_text())

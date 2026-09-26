@@ -332,6 +332,8 @@ completed pass may supply the missing evidence. Returned nonzero child statuses,
 including exit 127 and signals not sent by the coordinator, remain `fail`.
 Child diagnostic text never determines completion. Existing `fail` receipts
 retain their meaning, including historical timeout receipts.
+A failure already observed before timeout cleanup remains `fail`, including
+when a descendant keeps a capture pipe open after the verifier exits.
 
 The designated `merge-precondition` verifier runs
 `python3 -m unittest discover -s tests` in the candidate tree. Its policy and
