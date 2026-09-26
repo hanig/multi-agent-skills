@@ -89,6 +89,7 @@ my $json_result = @cmd && $cmd[0] eq "--json-result";
 shift @cmd if $json_result;
 my $RESULT_BYTES = 262144;
 my ($result_file, $result_size, $result_overflow, $result_error) = (undef, 0, 0, "");
+my ($result_reader, $result_writer);
 sub answer {
     my ($state, $rc, $line) = @_;
     $line = "" unless defined $line;
@@ -111,6 +112,11 @@ if ($json_result) {
         require JSON::PP;
         $result_file = File::Temp->new(TMPDIR => 1, UNLINK => 1);
         unlink($result_file->filename) or die "unlink result file: $!";
+        pipe($result_reader, $result_writer) or die "result pipe: $!";
+        my $flags = fcntl($result_reader, F_GETFL, 0);
+        defined($flags) or die "result pipe flags: $!";
+        fcntl($result_reader, F_SETFL, $flags | O_NONBLOCK)
+            or die "result pipe nonblocking mode: $!";
         1;
     } or answer("unknown", 127, "JSON result file setup");
 }
@@ -156,6 +162,7 @@ my $pid = fork();
 answer("unknown", 127, "fork") unless defined $pid;
 if ($pid == 0) {
     close $result_file if $result_file;
+    close $result_reader if $result_reader;
     close $reader;
     close $setup_reader;
     my $write_setup = sub {
@@ -181,7 +188,7 @@ if ($pid == 0) {
         $write_setup->("error:setpgid");
         _exit($SETUP_EXIT);
     }
-    unless (open STDOUT, ">&", $writer) {
+    unless (open STDOUT, ">&", ($json_result ? $result_writer : $writer)) {
         $write_setup->("error:stdout");
         _exit($SETUP_EXIT);
     }
@@ -190,6 +197,7 @@ if ($pid == 0) {
         _exit($SETUP_EXIT);
     }
     close $writer;
+    close $result_writer if $result_writer;
     # A command can execute only after this complete handshake. Thus absence
     # of ready is a setup failure without reserving any command exit status.
     $write_setup->("ready") or _exit($SETUP_EXIT);
@@ -199,6 +207,7 @@ if ($pid == 0) {
     };
 }
 close $writer;
+close $result_writer if $result_writer;
 close $setup_writer;
 $active_pid = $pid;
 unless (sigprocmask(SIG_SETMASK, $old_signal_mask)) {
@@ -221,18 +230,19 @@ my $wait_error = "";
 my $cleanup_deadline;
 my $DRAIN_READS = 8;
 my $DRAIN_BYTES = 65536;
-sub drain {
+sub drain_stream {
+    my ($source, $is_result) = @_;
     my ($reads, $bytes) = (0, 0);
     while ($reads < $DRAIN_READS && $bytes < $DRAIN_BYTES) {
         $reads++;
         my $chunk = "";
         my $want = $DRAIN_BYTES - $bytes;
         $want = 8192 if $want > 8192;
-        my $n = sysread($reader, $chunk, $want);
+        my $n = sysread($source, $chunk, $want);
         next if !defined($n) && $! == EINTR;
         last unless defined($n) && $n > 0;
         $bytes += $n;
-        if ($result_file && !$result_overflow && !length($result_error)) {
+        if ($is_result && !$result_overflow && !length($result_error)) {
             if ($n > $RESULT_BYTES - $result_size) {
                 $result_overflow = 1;
             } else {
@@ -246,9 +256,15 @@ sub drain {
                 }
             }
         }
-        $tail .= $chunk;
-        $tail = substr($tail, -65536) if length($tail) > 65536;
+        unless ($is_result) {
+            $tail .= $chunk;
+            $tail = substr($tail, -65536) if length($tail) > 65536;
+        }
     }
+}
+sub drain {
+    drain_stream($reader, 0);
+    drain_stream($result_reader, 1) if $json_result;
 }
 sub drain_setup {
     for (1 .. 4) {

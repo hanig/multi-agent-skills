@@ -619,11 +619,13 @@ class TestDoctorAndSurveyAgentOutput(unittest.TestCase):
             self.assertNotEqual(value.get("state"), "unknown", value)
             self.assertNotIn("truncated", value)
             self.assertEqual(set(value["agents"]), {"claude", "codex", "opencode", "pi"})
-            # scandir order is not a contract. Compare all other facts exactly
-            # and normalize only these lists for the comparison.
+            # scandir order and measured probe duration vary between runs.
+            # Compare every other fact exactly.
             expected = json.loads(full.stdout)
             for report in (value, expected):
                 for agent in report["agents"].values():
+                    probe = agent["agent_present"]["executable"]
+                    self.assertGreaterEqual(probe.pop("elapsed_seconds"), 0)
                     for root in agent["installation"]["roots"]:
                         root["payloads"].sort(key=lambda payload: payload["name"])
             self.assertEqual(value, expected)
