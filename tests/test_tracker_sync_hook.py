@@ -104,6 +104,7 @@ def run_hook(command, env_overrides=None, timeout=60):
             env[key] = value
     payload = json.dumps({
         "hook_event_name": "PostToolUse",
+        "cwd": os.path.abspath(env.get("HANIG_TRACKER_REPO") or REPO_ROOT),
         "tool_name": "Bash",
         "tool_input": {"command": command},
     })
@@ -114,6 +115,7 @@ def run_hook(command, env_overrides=None, timeout=60):
         raise AssertionError(
             "expected exactly one wired tracker-sync command, got %r" % (commands,))
     env["CLAUDE_PROJECT_DIR"] = REPO_ROOT
+    env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env.get("PATH", "")
     proc = subprocess.run(
         ["/bin/sh", "-c", commands[0]],
         input=payload.encode("utf-8"),
@@ -284,6 +286,16 @@ def fake_repo(script_body, root):
     os.makedirs(scripts, exist_ok=True)
     with open(os.path.join(scripts, "swarm.py"), "w") as handle:
         handle.write(textwrap.dedent(script_body))
+    # Supply a real command repository and coordinator provenance separately
+    # from the probe bytes. A parseable probe alone cannot establish identity.
+    subprocess.run(["git", "init", "-q", root], check=True)
+    subprocess.run(["git", "-C", root, "config", "remote.origin.url",
+                    "https://github.com/example/project"], check=True)
+    state = os.path.join(os.path.dirname(root), "state")
+    os.makedirs(state, exist_ok=True)
+    with open(os.path.join(state, "swarm-state.json"), "w") as handle:
+        json.dump({"units": {"u": {"attempt_launch_facts": {
+            "a1": {"repository_remote": "https://github.com/example/project"}}}}}, handle)
     return root
 
 
@@ -458,8 +470,10 @@ class TrackerSyncHookOutboxReporting(unittest.TestCase):
         env["HANIG_TRACKER_REPO"] = "repo"          # relative, on purpose
         env["HANIG_TRACKER_STATE_DIR"] = os.path.join(self.tmp, "state")
         env["CLAUDE_PROJECT_DIR"] = REPO_ROOT
+        env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env.get("PATH", "")
         commands = wired_commands()
         payload = json.dumps({"hook_event_name": "PostToolUse",
+                              "cwd": os.path.join(self.tmp, "repo"),
                               "tool_name": "Bash",
                               "tool_input": {"command": "git push origin HEAD"}})
         proc = subprocess.run(
@@ -649,6 +663,7 @@ class TrackerSyncHookInputContract(unittest.TestCase):
         env["HANIG_TRACKER_REPO"] = os.path.join(self.tmp, "repo")
         env["HANIG_TRACKER_STATE_DIR"] = os.path.join(self.tmp, "state")
         env["CLAUDE_PROJECT_DIR"] = REPO_ROOT
+        env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env.get("PATH", "")
         for key, value in (env_overrides or {}).items():
             if value is None:
                 env.pop(key, None)
@@ -1381,7 +1396,8 @@ class TrackerSyncHookInputContract(unittest.TestCase):
                 ' "envelope": {}}]}\')',
         }
         payload = json.dumps(
-            {"tool_input": {"command": "git push origin HEAD"}}).encode()
+            {"cwd": os.path.join(self.tmp, "repo"),
+             "tool_input": {"command": "git push origin HEAD"}}).encode()
         for label, body in breakages.items():
             with self.subTest(broken=label):
                 repo = os.path.join(self.tmp, "repo")
@@ -1406,6 +1422,124 @@ class TrackerSyncHookInputContract(unittest.TestCase):
         context = injected_context(out)
         self.assertIsNotNone(context, out)
         self.assertIn("total 0", context)
+
+
+class TrackerSyncHookProvenance(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="hook-provenance-")
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = fake_repo(PROBE_EMPTY, os.path.join(self.tmp.name, "repo"))
+        self.state = os.path.join(self.tmp.name, "state")
+        self.env = {"HANIG_TRACKER_REPO": self.repo, "HANIG_TRACKER_STATE_DIR": self.state}
+
+    def context(self, command="git push origin HEAD"):
+        code, output, error = run_hook(command, self.env)
+        self.assertEqual(code, 0, error)
+        context = injected_context(output)
+        self.assertIsNotNone(context, output)
+        return context
+
+    def test_other_repository_valid_empty_outbox_cannot_give_all_clear(self):
+        with open(os.path.join(self.state, "swarm-state.json"), "w") as handle:
+            json.dump({"units": {"u": {"attempt_launch_facts": {
+                "a1": {"repository_remote": "https://github.com/other/repository"}}}}}, handle)
+        context = self.context()
+        self.assertIn("Cannot confirm tracker state for this repository", context)
+        self.assertNotIn("total 0", context)
+
+    def test_identity_requires_valid_coordinator_anchors(self):
+        path = os.path.join(self.state, "swarm-state.json")
+        for value in (None, [], {}, {"units": []}, {"units": {"u": None}},
+                      {"units": {"u": {"attempt_launch_facts": []}}},
+                      {"units": {"u": {"attempt_launch_facts": {"a1": {"repository_remote": 1}}}}}):
+            with self.subTest(value=value):
+                with open(path, "w") as handle:
+                    json.dump(value, handle)
+                context = self.context()
+                self.assertIn("Cannot confirm tracker state for this repository", context)
+                self.assertNotIn("total 0", context)
+        os.unlink(path)
+        self.assertNotIn("total 0", self.context())
+        os.mkfifo(path)
+        self.assertNotIn("total 0", self.context())
+
+    def test_explicit_repo_and_cwd_redirects_do_not_reuse_another_source(self):
+        for command in ("gh pr merge 7 --repo other/repo", "gh pr merge https://github.com/other/repo/pull/7 --repo example/project",
+                        "cd /elsewhere && git push origin HEAD", "git -C /missing push origin HEAD",
+                        "git push upstream HEAD", "git push origin HEAD --repo=other",
+                        "GH_REPO=other/repo gh pr merge 7"):
+            with self.subTest(command=command):
+                self.assertNotIn("total 0", self.context(command))
+        self.assertIn("total 0", self.context("gh pr merge 7 --repo example/project"))
+        self.assertIn("total 0", self.context())
+
+    def test_relative_state_locator_resolves_once(self):
+        fake_repo("""
+            import json, sys
+            from pathlib import Path
+            state = Path(sys.argv[sys.argv.index('--state-dir') + 1])
+            json.loads((state / 'swarm-state.json').read_text())
+            print(json.dumps({'intents': []}))
+        """, self.repo)
+        self.env["HANIG_TRACKER_STATE_DIR"] = "state"
+        previous = os.getcwd()
+        try:
+            os.chdir(self.tmp.name)
+            self.assertIn("total 0", self.context())
+        finally:
+            os.chdir(previous)
+
+    def test_two_interleaved_invocations_keep_their_own_output(self):
+        script = '''
+            import json, os, time
+            from pathlib import Path
+            barrier = Path(os.environ['HOOK_BARRIER'])
+            name = os.environ['HOOK_INVOCATION']
+            (barrier / ('entered-' + name)).touch()
+            deadline = time.monotonic() + 10
+            while not (barrier / ('release-' + name)).exists():
+                if time.monotonic() > deadline:
+                    raise SystemExit(1)
+                time.sleep(.01)
+            intents = [] if name == 'first' else [
+                {'ack_status': 'unacknowledged', 'envelope': {'requested_operation': 'close'}}]
+            print(json.dumps({'intents': intents}))
+        '''
+        fake_repo(script, self.repo)
+        procs = {}
+        try:
+            for name in ("first", "second"):
+                env = dict(os.environ, **self.env, CLAUDE_PROJECT_DIR=REPO_ROOT,
+                           HOOK_BARRIER=self.tmp.name, HOOK_INVOCATION=name)
+                env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env.get("PATH", "")
+                proc = subprocess.Popen(["/bin/sh", "-c", wired_commands()[0]],
+                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE, env=env)
+                procs[name] = proc
+                proc.stdin.write(json.dumps({"cwd": self.repo,
+                    "tool_input": {"command": "git push origin HEAD"}}).encode())
+                proc.stdin.close()
+                proc.stdin = None
+            deadline = time.monotonic() + 10
+            while not all(os.path.exists(os.path.join(self.tmp.name, "entered-" + name)) for name in procs):
+                self.assertLess(time.monotonic(), deadline, "both probes must be in flight")
+                time.sleep(.01)
+            with open(os.path.join(self.tmp.name, "release-second"), "w"):
+                pass
+            output, error = procs["second"].communicate(timeout=10)
+            self.assertEqual(procs["second"].returncode, 0, error)
+            self.assertIn("total 1", injected_context(output.decode()))
+            self.assertIsNone(procs["first"].poll(), "first probe must still be waiting")
+            with open(os.path.join(self.tmp.name, "release-first"), "w"):
+                pass
+            output, error = procs["first"].communicate(timeout=10)
+            self.assertEqual(procs["first"].returncode, 0, error)
+            self.assertIn("total 0", injected_context(output.decode()))
+        finally:
+            for name, proc in procs.items():
+                with open(os.path.join(self.tmp.name, "release-" + name), "w"):
+                    pass
+                proc.communicate(timeout=15)
 
 
 if __name__ == "__main__":

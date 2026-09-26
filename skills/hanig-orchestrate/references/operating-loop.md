@@ -67,3 +67,50 @@ The reporting order incorporates the still-open pull request 60 source material:
 3. Ready work: compare the backlog to what landed and dispatch; otherwise state the exact blocker or saturation reason.
 
 The order and the dispatch action are part of the decision surface rather than a pointer-only recommendation. Before the report is written, step-three dispatches reach the tracker or the report names their pending synchronization when the connector is unavailable. <!-- declaration: report.three-parts -->
+
+## Hourly read-only bypass check
+
+Run this alongside the hourly loop, supplying every coordinator state directory
+for the repository and a window that overlaps the preceding successful check:
+
+```bash
+python3 "$HANIG_ORCHESTRATE_DIR/scripts/reconcile.py" \
+  --state-dir "$STATE" --since 2026-09-26T00:00:00Z --json
+```
+
+`--repo OWNER/REPO` (or a forge URL) defaults to the checkout's origin;
+`--branch` defaults to `main`. Repeat `--state-dir` for older runs. Supply
+`--since` with a timezone and/or `--limit N` for the most recently merged N PRs.
+With both, the limit applies within the inclusive time window. Pagination uses
+update time as an upper bound on unseen merge times, so a comment on an old PR
+does not substitute that PR for a newer merge. This is a live observation,
+not an atomic forge snapshot; retry a changed or unreadable page.
+
+- **UNMEDIATED MERGE:** no matching merge-unit record was found for the PR,
+  repository, target and head/merge. Investigate the bypass and reconcile its
+  evidence and tracker obligations through the authorized operating procedure.
+  A pending merge request accounts for a lost response; a cancelled or abandoned
+  request does not account for a later merge. A historical reconciliation record
+  establishes only that the merge was recorded, not who executed it.
+- **UNACKNOWLEDGED OBLIGATION:** an outbox intent lacks a receipt. Resolve an
+  ambiguous operation by receiver read-back or deduplication, then drain and
+  attest it through the existing procedure. Absence of a receipt does not mean
+  the tracker operation never happened.
+- **MISMATCHED SOURCE:** coordinator launch anchors name another repository (or
+  several repositories). Select the correct source; it contributes no merge
+  coverage. State without repository anchors is unreadable for this check.
+
+Exit 0 means every source was read and the selected window has no findings;
+exit 1 means findings; exit 2 means some input could not be read. Never report a
+clean check after exit 2. The command changes no forge, tracker or coordinator
+state. Its coverage is limited to the supplied directories and merged PR window;
+a direct push without a merged PR is outside this comparison.
+
+`merge_unit.py` can be bypassed with the same credential. This detects bypass
+after the fact; it does not prevent it. The hook also remains a reminder: it
+reports counts only when coordinator launch anchors match the command's
+repository. Its conservative identity check supports a single literal
+`git [-C DIR] push origin ...` without push options, or an explicit
+`gh ... --repo OWNER/REPO` (`-R` also works). Other routing, compound commands,
+missing anchors and malformed identity inputs produce “cannot confirm tracker
+state for this repository” rather than an all-clear; action detection is unchanged.
