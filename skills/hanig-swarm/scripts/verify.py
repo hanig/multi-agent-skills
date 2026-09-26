@@ -42,6 +42,7 @@ what the receipts have always said about isolation.
 
 Python 3.8+, standard library only.
 """
+import base64
 import hashlib
 import json
 import os
@@ -53,6 +54,7 @@ import tempfile
 from pathlib import Path
 
 import child_environment as CE
+import remote_verify as RV
 
 POLICY_FILE = "verifiers.json"
 INTEGRATION_CLAIM = "integration-tests"
@@ -95,7 +97,7 @@ def _isolated_git(runner, repo, *args, timeout=60):
         "GIT_ATTRIBUTES_FILE", "GIT_TEMPLATE_DIR",
     )
     env_program = shutil.which("env", path=os.defpath)
-    git_program = shutil.which("git", path=os.defpath)
+    git_program = getattr(runner, "git_program", None) or shutil.which("git", path=os.defpath)
     if not env_program or not git_program:
         return 127, "", "system env or git executable is unavailable"
     argv = [env_program]
@@ -295,7 +297,7 @@ def declared_corpus(entry):
     return paths, None
 
 
-def _digest_base_blob(repo, base_commit, path):
+def _digest_base_blob(repo, base_commit, path, git_program="git"):
     """(sha256, size, error) for exact blob bytes at the anchored base.
 
     A blob is not necessarily a regular file: a symlink is a blob containing
@@ -310,10 +312,10 @@ def _digest_base_blob(repo, base_commit, path):
     environment, and Python hashes those bytes.
     """
     spec = f"{base_commit}:{path}"
-    argv = ["git", "-C", str(repo), "--no-replace-objects", "cat-file"]
+    argv = [git_program, "-C", str(repo), "--no-replace-objects", "cat-file"]
     try:
         entry = subprocess.run(
-            ["git", "-C", str(repo), "--no-replace-objects", "ls-tree",
+            [git_program, "-C", str(repo), "--no-replace-objects", "ls-tree",
              "-z", "--full-tree", str(base_commit), "--",
              f":(literal){path}"],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -428,7 +430,8 @@ def corpus_evidence(runner, repo, base_commit, subject_commit, entry):
     changed = sorted(p for p in out.split("\x00") if p)
     digests, total = {}, 0
     for path in corpus:
-        digest, size, derr = _digest_base_blob(repo, base_commit, path)
+        digest, size, derr = _digest_base_blob(
+            repo, base_commit, path, getattr(runner, "git_program", "git"))
         if derr:
             return None, derr
         total += size
@@ -712,7 +715,8 @@ def merge_precondition_policy(runner, repo, target_commit,
         if sum(isinstance(v, dict) and v.get("name") == name
                for v in policy["verifiers"]) != 1:
             return None, None, None, "ambiguous changed-tests-stable verifier name"
-    digest, _size, error = _digest_base_blob(repo, target_commit, path)
+    digest, _size, error = _digest_base_blob(
+        repo, target_commit, path, getattr(runner, "git_program", "git"))
     if error:
         return None, None, None, "merge-precondition target verifier: " + error
     entry, error = authorized(policy, name, digest, claim)
@@ -735,13 +739,17 @@ def run_merge_precondition(runner, repo, produced_head, target_commit,
 
 
 def run_merge_preconditions(runner, repo, produced_head, target_commit,
-                            timeout=900, claims=(INTEGRATION_CLAIM, STABILITY_CLAIM)):
+                            timeout=900, claims=(INTEGRATION_CLAIM, STABILITY_CLAIM),
+                            execution_policy=None):
     """Run target-pinned claims in one disposable candidate merge.
 
     Return receipts plus any execution error. A completed FAIL remains evidence
     even if a later verifier cannot execute; the caller must publish completed
     receipts under its original observation fence before reporting the error.
     """
+    execution_policy = execution_policy or {}
+    executables = RV.resolve_executables(execution_policy.get("local"))
+    runner = RV.GitRunner(runner, executables)
     checks = []
     for claim in claims:
         policy, policy_digest, digest, error = merge_precondition_policy(
@@ -769,6 +777,8 @@ def run_merge_preconditions(runner, repo, produced_head, target_commit,
             runner, repo, produced_head, target_commit)
         if error:
             return [], error
+        programs = []
+        extras = []
         for claim, entry, policy_digest, digest, corpus in checks:
             path, args, extra = MERGE_VERIFIER_PATH, [], {}
             if claim == STABILITY_CLAIM:
@@ -776,12 +786,27 @@ def run_merge_preconditions(runner, repo, produced_head, target_commit,
                 extra = {"repetitions": entry.get("repetitions", 5)}
                 args = ["--merge-base", basis["merge_base"], "--head", produced_head,
                         "--repetitions", str(extra["repetitions"])]
-            outcome, error = run_pinned(
-                runner, os.path.join(policy_tree, path), digest,
-                args=args, timeout=timeout, cwd=tree, observe_completion=True)
-            if error:
-                return receipts, error
+            programs.append({"path": os.path.join(policy_tree, path), "digest": digest,
+                             "args": args, "program": base64.b64encode(
+                                 Path(policy_tree, path).read_bytes()).decode("ascii")})
+            extras.append(extra)
+        remote = execution_policy.get("remote")
+        if remote:
+            outcomes, execution = RV.run_remote(
+                runner, tree, basis, programs, remote, timeout)
+        else:
+            outcomes = []
+            execution = RV.local_execution(executables)
+            for program in programs:
+                outcome, error = run_pinned(
+                    runner, program["path"], program["digest"], args=program["args"],
+                    timeout=timeout, cwd=tree, observe_completion=True,
+                    executables=executables)
+                outcomes.append(outcome if not error else RV.incomplete(error))
+        for check, extra, outcome in zip(checks, extras, outcomes):
+            claim, entry, policy_digest, digest, corpus = check
             receipt = dict(corpus, **basis, **extra)
+            receipt["execution"] = execution
             receipt.update({
                 "claim": claim, "verifier": entry["name"],
                 "verifier_sha256": digest, "policy_sha256": policy_digest,
@@ -831,7 +856,8 @@ def admit_stability(runner, repo, target, integration, unit, receipts):
     if any(r.get("result") == "fail" for r in matching):
         return None, "changed-tests-stable returned FAIL for this exact candidate binding"
     for receipt in matching:
-        if receipt.get("result") == "pass" and receipt.get("exit_code") == 0:
+        if (receipt.get("result") == "pass" and receipt.get("exit_code") == 0
+                and not RV.execution_problem(receipt)):
             return receipt, None
     return None, "no passing changed-tests-stable receipt for this exact candidate binding"
 
@@ -862,7 +888,7 @@ def outcome_result(outcome):
     return {"result": "pass" if outcome["exit_code"] == 0 else "fail"}
 
 
-def _observe_execution(argv, timeout, cwd):
+def _observe_execution(argv, timeout, cwd, env=None):
     """Observe merge-verifier completion without unit.run's overloaded exit 127.
 
     Only our timeout or a launch/transport exception is incomplete. Every
@@ -876,7 +902,7 @@ def _observe_execution(argv, timeout, cwd):
     out, err, reason = "", "", None
     try:
         child = subprocess.Popen(
-            argv, cwd=cwd, env=CE.child_env(), stdin=subprocess.DEVNULL,
+            argv, cwd=cwd, env=env if env is not None else CE.child_env(), stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True,
             encoding="utf-8", errors="replace", start_new_session=True)
         out, err = child.communicate(timeout=timeout)
@@ -921,7 +947,7 @@ def _observe_execution(argv, timeout, cwd):
 
 
 def run_pinned(runner, path, expect_digest, args=None, timeout=900,
-               cwd=None, observe_completion=False):
+               cwd=None, observe_completion=False, executables=None):
     """Execute the bytes that hashed, not the path that was named.
 
     Hashing a file and then executing the path re-reads it, so the bytes that
@@ -945,7 +971,21 @@ def run_pinned(runner, path, expect_digest, args=None, timeout=900,
             return None, "the verified bytes changed while being copied"
         os.chmod(copy, 0o500)
         if observe_completion:
-            return _observe_execution([copy] + list(args or []), timeout, cwd), None
+            argv = [copy] + list(args or [])
+            env = None
+            if executables is not None:
+                # The pinned programs and their subprocesses share declared
+                # executables. A candidate's cwd/PATH never supplies either.
+                argv.insert(0, executables["python"]["path"])
+                bindir = Path(tmpdir) / "bin"
+                bindir.mkdir()
+                for name, key in (("python3", "python"), ("git", "git")):
+                    (bindir / name).symlink_to(executables[key]["path"])
+                env = CE.child_env()
+                env["PATH"] = str(bindir) + os.pathsep + os.defpath
+                env["HANIG_VERIFICATION_GIT"] = executables["git"]["path"]
+                env["HANIG_VERIFICATION_PYTHON"] = executables["python"]["path"]
+            return _observe_execution(argv, timeout, cwd, env=env), None
         # No before/after dance here any more. `run_in_checkout` gives this a
         # worktree the agent is not working in, so there is nothing to drift.
         rc, out, errout = runner([copy] + list(args or []), timeout=timeout,
