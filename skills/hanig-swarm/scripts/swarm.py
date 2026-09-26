@@ -6172,7 +6172,7 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
                 if CP._inside(executable, repo):
                     return None, "verification executable is inside the operated repository"
             runner = V.RV.GitRunner(
-                U.run, V.RV.resolve_executables(execution_policy.get("local")))
+                U.run, V.RV.resolve_executables(execution_policy.get("local"), names=("git",)))
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             return None, "verification executables unavailable: " + str(exc)
     runner = runner or U.run
