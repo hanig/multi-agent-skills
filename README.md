@@ -57,6 +57,13 @@ beyond that transport bound, run
 `python3 skills/hanig-project/scripts/agent_diagnostics.py --json` directly.
 The legacy helper `--doctor-json` option retains its 48,000-byte cap for older
 callers. Doctor's process deadlines and ordinary log-tail bound are unchanged.
+If the private file cannot be set up (including a Perl installation without
+`JSON::PP`), doctor uses a summary capped at 48,000 bytes and validates it with
+a separate bounded Python child. `detail: "summary"` identifies this fallback:
+it retains per-agent states, versions, certification, verification, next steps,
+root paths, and payload ownership/state counts; full per-payload and per-skill
+records remain available through the direct `--json` command. An oversized
+summary still returns an explicit truncation record.
 
 Then, on a cluster, in an empty directory or a half-finished repo:
 

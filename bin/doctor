@@ -118,7 +118,7 @@ if ($json_result) {
         fcntl($result_reader, F_SETFL, $flags | O_NONBLOCK)
             or die "result pipe nonblocking mode: $!";
         1;
-    } or answer("unknown", 127, "JSON result file setup");
+    } or answer("summary-required", 127, "JSON result file setup");
 }
 
 # Configure every pipe before fork. A setup failure therefore cannot leave a
@@ -467,6 +467,7 @@ bounded() {
   PROBE_OUT=${PROBE_OUT%"$_nl"__DOCTOR_END__}
   case "$PROBE_STATE" in
     answered) PROBE_WHY= ;;
+    summary-required) PROBE_WHY="the full JSON transport is unavailable" ;;
     timeout)  PROBE_WHY="it timed out; termination was attempted" ;;
     setup-error)
               PROBE_STATE=unknown
@@ -496,6 +497,30 @@ if [ "$DOCTOR_JSON" -eq 1 ]; then
       bounded "$PROBE_RUN_SECONDS" --json-result python3 "$DIAGNOSTICS" --json --claude-prefix "$PREFIX"
     else
       bounded "$PROBE_RUN_SECONDS" --json-result python3 "$DIAGNOSTICS" --json
+    fi
+    if [ "$PROBE_STATE" = summary-required ]; then
+      # Older/minimal Perl may lack JSON::PP; temporary storage can also be
+      # unavailable. Retain useful health facts within the original tail cap.
+      if [ "$PREFIX_EXPLICIT" -eq 1 ]; then
+        bounded "$PROBE_RUN_SECONDS" python3 "$DIAGNOSTICS" --doctor-summary --claude-prefix "$PREFIX"
+      else
+        bounded "$PROBE_RUN_SECONDS" python3 "$DIAGNOSTICS" --doctor-summary
+      fi
+      if [ "$PROBE_STATE:$PROBE_RC" = answered:0 ]; then
+        # Validate through the already required Python, under its own command
+        # deadline. The summary producer caps its ASCII JSON at 48000 bytes,
+        # so this argument fits the old transport and normal exec limits.
+        bounded "$RUN_SECONDS" python3 -c '
+import json, sys
+value = json.loads(sys.argv[1])
+if not isinstance(value, dict):
+    raise SystemExit(1)
+encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
+if len(encoded.encode("utf-8")) > 48000:
+    raise SystemExit(1)
+print(encoded)
+' "$PROBE_OUT"
+      fi
     fi
     if [ "$PROBE_STATE:$PROBE_RC" = answered:0 ]; then
       printf '%s\n' "$PROBE_OUT"
