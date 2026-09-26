@@ -334,6 +334,9 @@ Child diagnostic text never determines completion. Existing `fail` receipts
 retain their meaning, including historical timeout receipts.
 A failure already observed before timeout cleanup remains `fail`, including
 when a descendant keeps a capture pipe open after the verifier exits.
+A nonzero exit reaped during cleanup also remains `fail` when the coordinator's
+SIGKILL could not have caused that status; finishing between the initial poll
+and the kill does not erase the failure.
 
 The designated `merge-precondition` verifier runs
 `python3 -m unittest discover -s tests` in the candidate tree. Its policy and

@@ -906,6 +906,12 @@ def _observe_execution(argv, timeout, cwd):
                         stream.close()
     outcome = {"exit_code": child.returncode if child is not None else None,
                "stdout": (out or "")[-4000:], "stderr": (err or "")[-2000:]}
+    if (reason and completed_failure is None
+            and outcome["exit_code"] not in (None, 0, -signal.SIGKILL)):
+        # The child can finish between poll and killpg. SIGKILL cannot produce
+        # a positive exit or a different terminating signal, so that observed
+        # nonzero status is still a completed failure, however late it arrived.
+        completed_failure = outcome["exit_code"]
     if completed_failure is not None:
         outcome["exit_code"] = completed_failure
         outcome["stderr"] = (outcome["stderr"] + "\n" + reason)[-2000:]

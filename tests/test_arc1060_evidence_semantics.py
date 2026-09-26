@@ -39,7 +39,7 @@ class TestEvidenceSemantics(unittest.TestCase):
                 % (str(self.started), str(self.release), str(self.release)))
 
     def fault_after_barrier(self, stability=False, transport=False, intent=False,
-                            wait_for_exit=False):
+                            wait_for_exit=False, exit_before_kill=False):
         """Fault after the real child starts; load cannot race a short deadline.
 
         The real communicate timeout then kills the running process group.
@@ -48,15 +48,25 @@ class TestEvidenceSemantics(unittest.TestCase):
         site = self.f.directory / "fault-site"
         site.mkdir()
         (site / "sitecustomize.py").write_text(
-            "import json, pathlib, subprocess, time\n"
+            "import json, os, pathlib, subprocess, time\n"
             "original = subprocess.Popen.communicate\n"
+            "active = None\n"
+            "original_killpg = os.killpg\n"
+            "def killpg(pid, sig):\n"
+            "    if %r and active is not None and active.pid == pid:\n"
+            "        pathlib.Path(%r).touch()\n"
+            "        active.wait(timeout=45)\n"
+            "    return original_killpg(pid, sig)\n"
+            "os.killpg = killpg\n"
             "def communicate(self, *args, **kwargs):\n"
+            "    global active\n"
             "    command = self.args\n"
             "    if (isinstance(command, list) and command\n"
             "            and pathlib.Path(command[0]).name == 'verifier'\n"
             "            and ('--merge-base' in command) == %r\n"
             "            and not getattr(self, '_faulted', False)):\n"
             "        self._faulted = True\n"
+            "        active = self\n"
             "        deadline = time.monotonic() + 45\n"
             "        while not pathlib.Path(%r).exists():\n"
             "            if (self.poll() is not None and not %r) or time.monotonic() >= deadline:\n"
@@ -72,7 +82,8 @@ class TestEvidenceSemantics(unittest.TestCase):
             "            kwargs['timeout'] = 0\n"
             "    return original(self, *args, **kwargs)\n"
             "subprocess.Popen.communicate = communicate\n"
-            % (stability, str(self.started), wait_for_exit, wait_for_exit, intent,
+            % (exit_before_kill, str(self.release), stability, str(self.started),
+               wait_for_exit, wait_for_exit, intent,
                str(self.f.state_dir / 'merge-unit-during-run.json'),
                str(self.release), transport))
         self.f.env["PYTHONPATH"] = str(site)
@@ -197,6 +208,22 @@ class TestEvidenceSemantics(unittest.TestCase):
         self.assertEqual((row["claim"], row["result"]), (V.STABILITY_CLAIM, "fail"))
         self.assertIn("missing or malformed", row["stderr_tail"])
         self.f.assert_refused(self.f.invoke())
+
+    def test_completed_failure_in_poll_to_kill_window_remains_fail(self):
+        fail = self.f.directory / "fail-first"
+        fail.touch()
+        self.integration_program(self.barrier() +
+                                 "raise SystemExit(int(Path(%r).exists()))\n" % str(fail))
+        self.fault_after_barrier(exit_before_kill=True)
+        self.assertNotEqual(self.verify().returncode, 0)
+        first = self.rows()[-1]
+        fail.unlink()
+        self.f.env.pop("PYTHONPATH")
+        self.assertEqual(self.verify().returncode, 0)
+        result = self.f.invoke()
+        self.f.assert_refused(result)
+        self.assertIn("FAIL", result.stderr)
+        self.assertEqual((first["result"], first["exit_code"]), ("fail", 1))
 
     def assert_fail_then_pass(self, claim, legacy=False):
         self.shared.install_policy()
