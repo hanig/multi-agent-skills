@@ -84,22 +84,19 @@ KINDS = U.KINDS
 DEFAULT_AGENT_PROVIDER = "codex/gpt-6-astra"
 DEFAULT_AGENT_THINKING = "high"
 
-# Reasoning effort belongs to the MODEL, not to the project. One project-wide
-# value was wrong the moment the roster held more than one model: on `bus
-# models`' measured intelligence luna sits well below sol and opus, so it is
-# asked for xhigh to compensate while the two leaders run at high. Asking the
-# leaders for xhigh buys latency, not quality.
+# Reasoning effort belongs to the MODEL, not to the project. The owner
+# upgraded Sol and Luna on 2026-09-25 while retaining their dispatch intent:
+# Sol at high, Luna at xhigh. Gate effort is configured separately in
+# reviewers.json. API probes there do not establish Paseo dispatch behavior.
 #
-# Every id here was read off a live agent on 2026-09-04, not guessed, because
-# paseo answers an unknown thinking id with an ERRORED agent. Two results are
-# worth keeping: `high` resolves on claude, whose bare default is `auto`, so
-# the value that looks like a no-op is the one that silently changes the run;
-# and `claude/opus` is an alias paseo expands to `claude-opus-5`, which is why
-# both spellings are keys.
+# Measured on 2026-09-04: high resolves on claude, whose bare default is auto,
+# and claude/opus expands to claude-opus-5, hence both spellings below.
+# The 6-series Sol/Luna dispatch defaults have not been measured here;
+# pass the intended effort explicitly and inspect the launched agent.
 THINKING_BY_MODEL = {
     "codex/gpt-6-astra": "high",
-    "codex/gpt-5.6-sol": "high",
-    "codex/gpt-5.6-luna": "xhigh",
+    "codex/gpt-6-sol": "high",
+    "codex/gpt-6-luna": "xhigh",
     "claude/opus": "high",
     "claude/claude-opus-5": "high",
 }

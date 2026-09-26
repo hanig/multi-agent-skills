@@ -2038,7 +2038,7 @@ def author_argument(value):
         raise argparse.ArgumentTypeError(
             "author must be PROVIDER/MODEL without whitespace or control "
             "characters, using ASCII token components (at most 256 characters); "
-            "pass e.g. codex/gpt-5.6-sol")
+            "pass e.g. codex/gpt-6-sol")
     return value
 
 

@@ -38,7 +38,7 @@
   {
    "name": "luna",
    "provider": "openai",
-   "model": "gpt-5.6-luna",
+   "model": "gpt-6-luna",
    "effort": "high",
    "profiles": [
     "committee",
@@ -53,16 +53,31 @@
     "out": 1.2
    },
    "max_output_tokens": 128000,
-   "_max_output_tokens": "PRE-EMPTIVE, not measured as starving. Raised with the sibling sweep for ARC-689 rather than after its own incident, because the shared 64000 default is what starved glm-5.3 and kimi-k2.7-code and leaving a reviewer on it is what let the defect recur. That the provider ACCEPTS 128000 is measured; see _max_output_tokens_accepted.",
+   "_max_output_tokens": "MEASURED for the 6-series upgrade through review._post at the configured effort and unchanged 128000 cap; completed with usable output. Prior model acceptance remains in _max_output_tokens_history. The minimal probe establishes budget acceptance, not capacity for every review.",
    "_max_output_tokens_accepted": {
-    "date": "2026-09-21",
+    "date": "2026-09-26",
     "max_output_tokens": 128000,
     "provider": "openai",
-    "model": "gpt-5.6-luna",
+    "model": "gpt-6-luna",
+    "effort": "high",
     "outcome": "completed",
-    "output_tokens": 9713,
-    "observed_in": "gate run, PR #39 fresh-cycle round 1"
-   }
+    "input_tokens": 11,
+    "output_tokens": 17,
+    "reasoning_tokens": 10,
+    "response_id": "resp_082927cf167aefba006ab72343852087d084ed351be11a0a58",
+    "observed_in": "2026-09-25 owner upgrade; real review._post Responses probe, input: Reply with exactly OK.; returned OK. Timestamp is UTC; this measures budget acceptance, not capacity for every review."
+   },
+   "_max_output_tokens_history": [
+    {
+     "date": "2026-09-21",
+     "max_output_tokens": 128000,
+     "provider": "openai",
+     "model": "gpt-5.6-luna",
+     "outcome": "completed",
+     "output_tokens": 9713,
+     "observed_in": "gate run, PR #39 fresh-cycle round 1"
+    }
+   ]
   },
   {
    "name": "kimi-k2.7-code",
@@ -117,28 +132,43 @@
   {
    "name": "sol",
    "provider": "openai",
-   "model": "gpt-5.6-sol",
+   "model": "gpt-6-sol",
    "effort": "xhigh",
    "profiles": [
     "deep"
    ],
    "enabled": true,
    "max_output_tokens": 128000,
-   "_max_output_tokens": "MEASURED before re-enabling, as _output_budget_rule requires: acceptance is per model, so astra completing at 128000 said nothing about sol. Re-enabled 2026-09-24 when sol took astra's deep-tier seat.",
+   "_max_output_tokens": "MEASURED for the 6-series upgrade through review._post at the configured effort and unchanged 128000 cap; completed with usable output. Prior model acceptance remains in _max_output_tokens_history. The minimal probe establishes budget acceptance, not capacity for every review.",
    "_max_output_tokens_accepted": {
-    "date": "2026-09-24",
+    "date": "2026-09-26",
     "max_output_tokens": 128000,
     "provider": "openai",
-    "model": "gpt-5.6-sol",
+    "model": "gpt-6-sol",
+    "effort": "xhigh",
     "outcome": "completed",
-    "output_tokens": 4172,
-    "observed_in": "gate run, routing/astra-drives measurement pass, --only sol --quorum 1, 61.0s, 5844 in"
+    "input_tokens": 11,
+    "output_tokens": 5,
+    "reasoning_tokens": 0,
+    "response_id": "resp_084cd15d6d01929c006ab72343854c87d087366255b5d69202",
+    "observed_in": "2026-09-25 owner upgrade; real review._post Responses probe, input: Reply with exactly OK.; returned OK. Timestamp is UTC; this measures budget acceptance, not capacity for every review."
    },
    "_cost": {
     "in": 2.0,
     "out": 10.0
    },
-   "_note": "deep-tier reviewer since 2026-09-24. Owner decision: astra became the code driver, so it left the deep tier (an author does not review itself) and sol, which had been disabled only because IT was the driver, took the seat. The ladder reaches deep both when the cheaper tiers came up clean and when they could not fill quorum, and skips it only when a finding already has quorum behind it."
+   "_note": "deep-tier reviewer since 2026-09-24. Owner decision: astra became the code driver, so it left the deep tier (an author does not review itself) and sol, which had been disabled only because IT was the driver, took the seat. The ladder reaches deep both when the cheaper tiers came up clean and when they could not fill quorum, and skips it only when a finding already has quorum behind it.",
+   "_max_output_tokens_history": [
+    {
+     "date": "2026-09-24",
+     "max_output_tokens": 128000,
+     "provider": "openai",
+     "model": "gpt-5.6-sol",
+     "outcome": "completed",
+     "output_tokens": 4172,
+     "observed_in": "gate run, routing/astra-drives measurement pass, --only sol --quorum 1, 61.0s, 5844 in"
+    }
+   ]
   },
   {
    "name": "kimi-k3",
@@ -207,5 +237,5 @@
   }
  ],
  "_effort_null_is_deliberate": "Measured 2026-09-19, three samples per cell against a real 120-line diff at a 16000 cap: glm-5.3 at effort=high burned the ENTIRE budget on reasoning and returned zero characters in 3 of 3 samples, at effort=low in 2 of 3, and at effort=null returned a 4581-character review for $0.016 in 3 of 3. kimi-k2.7-code spends ~12k completion tokens at every level, so effort changes nothing but price: high cost 83% more and returned slightly LESS answer. A null effort here is therefore deliberate and load-bearing, not an omission. Setting one on either reviewer makes the gate pay more for less, and on glm-5.3 for nothing at all.",
- "_output_budget_rule": "Every ENABLED reviewer must declare max_output_tokens explicitly and must carry a STRUCTURED _max_output_tokens_accepted record: date, max_output_tokens, provider, model, outcome and a positive output_tokens. tests/test_reviewer_budgets.py compares those typed fields to the reviewer's own configuration by exact equality. It was free text matched by substring for one round, and the gate refused that correctly: \"completed a 1280000-token request via openrouterx for z-ai/glm-5.3-variant\" satisfied substring checks for 128000, openrouter and z-ai/glm-5.3. English commentary belongs in _max_output_tokens, not in the thing a test parses. The rule exists because the 64000 shared default is not a safe default for a reasoning model -- it silently starved glm-5.3 and then kimi-k2.7-code (ARC-689). ARC-689 now records a starved reviewer as REVIEW_INCOMPLETE and gives it no judgment; it still spends resource budget and prevents a pass. Inheriting the default is therefore not permitted for an enabled reviewer, which is why sol and kimi-k3 must be measured before they are re-enabled. Acceptance is per MODEL: 128000 completing for gpt-6-astra says nothing about gpt-5.6-sol. output_tokens is required and must be positive because a provider ACCEPTING a budget is not the same fact as a reviewer RETURNING usable output, and it was the second fact that motivated this change. STILL OWED, and not claimed here: these records are transcribed by hand from measured runs. Nothing generates them from the probe, so the test checks that a record is well formed and self-consistent, never that the run happened."
+ "_output_budget_rule": "Every ENABLED reviewer must declare max_output_tokens explicitly and must carry a STRUCTURED _max_output_tokens_accepted record: date, max_output_tokens, provider, model, outcome and a positive output_tokens. tests/test_reviewer_budgets.py compares those typed fields to the reviewer's own configuration by exact equality. It was free text matched by substring for one round, and the gate refused that correctly: \"completed a 1280000-token request via openrouterx for z-ai/glm-5.3-variant\" satisfied substring checks for 128000, openrouter and z-ai/glm-5.3. English commentary belongs in _max_output_tokens, not in the thing a test parses. The rule exists because the 64000 shared default is not a safe default for a reasoning model -- it silently starved glm-5.3 and then kimi-k2.7-code (ARC-689). ARC-689 now records a starved reviewer as REVIEW_INCOMPLETE and gives it no judgment; it still spends resource budget and prevents a pass. Inheriting the default is therefore not permitted for an enabled reviewer, which is why sol and kimi-k3 must be measured before they are re-enabled. Acceptance is per MODEL: 128000 completing for gpt-6-astra says nothing about gpt-6-sol. output_tokens is required and must be positive because a provider ACCEPTING a budget is not the same fact as a reviewer RETURNING usable output, and it was the second fact that motivated this change. STILL OWED, and not claimed here: these records are transcribed by hand from measured runs. Nothing generates them from the probe, so the test checks that a record is well formed and self-consistent, never that the run happened."
 }

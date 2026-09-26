@@ -102,37 +102,34 @@ class CodeUnitCase(unittest.TestCase):
 
 
 class TestEffortIsPerModelNotPerProject(unittest.TestCase):
-    """One project-wide thinking id was wrong once the roster held more than
-    one model. luna sits below sol and opus on measured intelligence and is
-    asked for xhigh to compensate; the leaders run at high, because asking
-    them for xhigh buys latency and not quality.
+    """Dispatch effort remains per model across the 2026-09-25 upgrade.
 
-    Every id was read off a live agent, not guessed: paseo answers an unknown
-    thinking id with an ERRORED agent, so a wrong value here fails at dispatch
-    rather than downgrading the work quietly."""
+    These assert the configured intent, not a live Paseo measurement.
+    Unknown models retain the fallback and explicit unit choices still win.
+    """
 
     def test_the_two_leaders_run_at_high(self):
         self.assertEqual(S.default_thinking_for({}), "high")
         self.assertEqual(
-            S.default_thinking_for({"provider": "codex/gpt-5.6-sol"}), "high")
+            S.default_thinking_for({"provider": "codex/gpt-6-sol"}), "high")
         self.assertEqual(
             S.default_thinking_for({"provider": "claude/opus"}), "high")
 
     def test_luna_runs_at_xhigh(self):
         self.assertEqual(
-            S.default_thinking_for({"provider": "codex/gpt-5.6-luna"}),
+            S.default_thinking_for({"provider": "codex/gpt-6-luna"}),
             "xhigh")
 
     def test_a_separate_model_field_resolves_the_same_way(self):
-        """`provider: codex, model: gpt-5.6-luna` reaches paseo identically to
-        `provider: codex/gpt-5.6-luna`, so the mapping must not apply to one
+        """`provider: codex, model: gpt-6-luna` reaches paseo identically to
+        `provider: codex/gpt-6-luna`, so the mapping must not apply to one
         plan and miss its equivalent."""
         self.assertEqual(
             S.default_thinking_for({"provider": "codex",
-                                    "model": "gpt-5.6-luna"}), "xhigh")
+                                    "model": "gpt-6-luna"}), "xhigh")
         self.assertEqual(
             S.default_thinking_for({"provider": "codex",
-                                    "model": "gpt-5.6-sol"}), "high")
+                                    "model": "gpt-6-sol"}), "high")
 
     def test_the_opus_alias_and_its_expansion_agree(self):
         """paseo expands claude/opus to claude-opus-5, so a plan written
@@ -149,14 +146,14 @@ class TestEffortIsPerModelNotPerProject(unittest.TestCase):
             S.DEFAULT_AGENT_THINKING)
 
     def test_a_unit_still_overrides_the_mapping(self):
-        u = {"provider": "codex/gpt-5.6-luna", "thinking": "low"}
+        u = {"provider": "codex/gpt-6-luna", "thinking": "low"}
         self.assertEqual(u.get("thinking", S.default_thinking_for(u)), "low")
 
     def test_an_explicit_empty_thinking_still_switches_it_off(self):
         """The mapping must not resurrect the flag for a provider that has no
         thinking option."""
         for off in (None, ""):
-            u = {"provider": "codex/gpt-5.6-luna", "thinking": off}
+            u = {"provider": "codex/gpt-6-luna", "thinking": off}
             self.assertFalse(u.get("thinking", S.default_thinking_for(u)))
 
 
@@ -826,7 +823,7 @@ class TestModeAdviceMatchesTheProvider(CodeUnitCase):
             {"id": "c", "kind": "code", "repo": "/r",
              "target_branch": "main",
              "prompt": "work", "outputs": ["x"],
-             "provider": "codex/gpt-5.6-sol"})
+             "provider": "codex/gpt-6-sol"})
         self.assertIn("full-access", msg)
         self.assertNotIn("bypass", msg)
 
