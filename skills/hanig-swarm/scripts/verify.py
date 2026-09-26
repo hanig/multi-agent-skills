@@ -904,7 +904,7 @@ def outcome_result(outcome):
     return {"result": "pass" if outcome["exit_code"] == 0 else "fail"}
 
 
-def _observe_execution(argv, timeout, cwd, launch_config=None):
+def _observe_execution(argv, timeout, cwd, launch_config=None, launch_prefix=()):
     """Observe merge-verifier completion without unit.run's overloaded exit 127.
 
     Only our timeout or a launch/transport exception is incomplete. Every
@@ -936,7 +936,11 @@ def _observe_execution(argv, timeout, cwd, launch_config=None):
                 "except OSError as error:\n"
                 "    os.write(fd, (str(error) or type(error).__name__).encode('utf-8', 'replace')[:1000])\n"
                 "    os._exit(125)\n")
-            argv = [python, "-c", launcher, str(launch_write), bindir, git, child_python] + argv
+            # Apply a Python shebang's env options before installing the
+            # coordinator's selected tools. In particular env -i must not
+            # discard the declared interpreter or its child-tool selection.
+            argv = list(launch_prefix) + [python, "-c", launcher, str(launch_write),
+                                          bindir, git, child_python] + argv
             pass_fds = (launch_write,)
         child = subprocess.Popen(
             argv, cwd=cwd, env=CE.child_env(), stdin=subprocess.DEVNULL,
@@ -1025,27 +1029,50 @@ def run_pinned(runner, path, expect_digest, args=None, timeout=900,
         if observe_completion:
             argv = [copy] + list(args or [])
             launch_config = None
+            launch_prefix = []
             if executables is not None:
                 # The pinned programs and their subprocesses share declared
                 # executables. A candidate's cwd/PATH never supplies either.
                 first_line = Path(copy).read_bytes().split(b"\n", 1)[0]
-                select_python = (executables["python"].get("declared", True)
-                                 or not first_line.startswith(b"#!"))
-                if not first_line.startswith(b"#!"):
+                select_python = executables["python"].get("declared", True)
+                if select_python and not first_line.startswith(b"#!"):
                     argv.insert(0, executables["python"]["path"])
                 elif select_python:
                     # Only target-authorized bytes select this rule. The
                     # filename says nothing about the program's language.
-                    words = first_line[2:].decode("utf-8", "replace").split()
+                    declaration = first_line[2:].decode("utf-8", "replace").strip()
+                    words = declaration.split()
+                    env_prefix = []
                     if words and posixpath.basename(words[0]) == "env":
+                        env_program = words[0]
                         words = words[1:]
                         if words and words[0] == "-S":
                             try:
-                                words = shlex.split(" ".join(words[1:]))
+                                words = shlex.split(declaration.split(None, 2)[2])
                             except ValueError:
                                 return None, "invalid pinned verifier env -S shebang"
+                        # Keep env's options and assignments, including values
+                        # named python3; only its actual command names a language.
+                        index = 0
+                        while index < len(words):
+                            word = words[index]
+                            if word == "--":
+                                index += 1
+                                break
+                            if word in ("-u", "--unset", "-P", "-C", "--chdir",
+                                        "-a", "--argv0"):
+                                index += 2
+                            elif word.startswith("-"):
+                                index += 1
+                            else:
+                                break
+                        while index < len(words) and "=" in words[index]:
+                            index += 1
+                        env_prefix = [env_program] + words[:index]
+                        words = words[index:]
                     if select_python and words and re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?",
                                               posixpath.basename(words[0])):
+                        launch_prefix = env_prefix
                         argv = [executables["python"]["path"]] + words[1:] + argv
                 bindir = Path(tmpdir) / "bin"
                 bindir.mkdir()
@@ -1057,7 +1084,7 @@ def run_pinned(runner, path, expect_digest, args=None, timeout=900,
                 launch_config = (str(bindir), executables["git"]["path"],
                                  executables["python"]["path"],
                                  executables["python"]["path"] if select_python else "")
-            return _observe_execution(argv, timeout, cwd, launch_config), None
+            return _observe_execution(argv, timeout, cwd, launch_config, launch_prefix), None
         # No before/after dance here any more. `run_in_checkout` gives this a
         # worktree the agent is not working in, so there is nothing to drift.
         rc, out, errout = runner([copy] + list(args or []), timeout=timeout,

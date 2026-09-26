@@ -394,11 +394,14 @@ in the incomplete receipt.
 The shipped verifier programs reuse the selected Python and Git for subprocesses.
 For merge verification, an explicitly declared Python replaces a Python shebang
 naming `python`, `python3`, or a numeric version such as `python3.10` (directly,
-through `env`, or `env -S`). Python shebang arguments are retained. Remote policy
+through `env`, or `env -S`). Python shebang arguments, environment options and
+assignments are retained; the selected tools are installed after those options
+are applied. Remote policy
 always declares Python. With no local Python declaration, the authorized
 shebang and its native Python child selection are preserved; the receipt marks
-the operator Python as `launcher`, not the verifier interpreter. Programs
-without a shebang use the selected operator Python. Other shebangs run through their own
+the operator Python as `launcher`, not the verifier interpreter. An explicit Python
+declaration also selects Python for programs without a shebang. Without that
+declaration, native launch failures remain incomplete. Other shebangs run through their own
 interpreter, regardless of the filename extension. Only the target-authorized,
 digest-pinned bytes supply this choice; a PR cannot select its own interpreter.
 Their updated digest pins must land on the target before their new behavior is
