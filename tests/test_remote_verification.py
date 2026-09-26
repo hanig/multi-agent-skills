@@ -190,6 +190,12 @@ class TestRemoteVerification(unittest.TestCase):
             '    subprocess.run = capture\n' % needle)
         self.f.env['PYTHONPATH'] = str(site)
 
+    def legacy_prefix(self):
+        row = dict(self.f.record_integration(), schema_version=1, execution=None)
+        raw = json.dumps(row).encode() + b'\n'
+        self.journal.write_bytes(raw)
+        return raw
+
     def save_policy(self):
         (self.f.state_dir / RV.POLICY).write_text(json.dumps(self.policy))
 
@@ -922,10 +928,11 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertEqual(self.merges(), [])
 
     def test_direct_bundle_runs_pinned_program_and_records_full_binding(self):
+        legacy = self.legacy_prefix()
         target = self.program()
         result = self.verify()
         self.assert_ok(result)
-        row, = self.rows()
+        _, row = self.rows()
         self.assertEqual(row['subject_head'], self.f.head)
         self.assertEqual(row['target_commit'], target)
         basis, error = V.candidate_merge_basis(self.f.verifier_runner, self.f.repo, self.f.head, target)
@@ -942,9 +949,15 @@ class TestRemoteVerification(unittest.TestCase):
             self.assertTrue(execution['executables'][name]['version'])
         self.assertTrue(self.witness.exists())
         self.assert_clean()
+        saved = self.rows()
+        self.assert_ok(self.verify('--retrieve-remote-evidence'))
+        self.assertEqual(self.rows(), saved)
+        self.assertEqual(self.ssh_launches(), 1)
+        self.assertTrue(self.journal.read_bytes().startswith(legacy))
         self.assertEqual(self.admitted().returncode, 0)
 
     def test_completed_fail_survives_ssh_255_and_poisoning(self):
+        legacy = self.legacy_prefix()
         self.program('raise SystemExit(125 * int(Path(%r).read_text() != "pass"))\n'
                      % str(self.mode))
         self.mode.write_text('ssh-complete-255')
@@ -955,6 +968,7 @@ class TestRemoteVerification(unittest.TestCase):
         refused = self.admitted()
         self.f.assert_refused(refused)
         self.assertIn('FAIL', refused.stderr)
+        self.assertTrue(self.journal.read_bytes().startswith(legacy))
 
     def test_completed_pass_survives_ssh_255(self):
         self.program()

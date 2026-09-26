@@ -770,7 +770,8 @@ def verify_integration(args, repo, snapshot):
             # repeated retrieval of the same completed claim does not append.
             identity = evidence.get("execution", {}).get("launch_id")
             repeated = identity and any(
-                r.get("execution", {}).get("launch_id") == identity
+                isinstance(r.get("execution"), dict)
+                and r["execution"].get("launch_id") == identity
                 and r.get("claim") == evidence["claim"]
                 and r.get("result") == evidence["result"]
                 and r.get("exit_code") == evidence["exit_code"] for r in previous)
