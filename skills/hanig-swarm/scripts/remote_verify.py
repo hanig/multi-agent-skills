@@ -42,6 +42,8 @@ def absolute(value, label):
 def read_policy(state_dir):
     """Only the caller's already-validated external state directory is read."""
     path = Path(state_dir) / POLICY
+    if path.is_symlink():
+        raise ValueError("execution policy must be a coordinator file, not a symlink")
     try:
         raw = path.read_bytes()
     except FileNotFoundError:

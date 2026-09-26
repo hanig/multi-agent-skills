@@ -278,6 +278,17 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertEqual(self.rows()[-1]['execution']['ssh_alias'], 'fixture-host')
         self.assert_clean()
 
+    def test_execution_policy_symlink_into_candidate_is_refused(self):
+        self.shared.candidate({RV.POLICY: json.dumps(self.policy)})
+        path = self.f.state_dir / RV.POLICY
+        path.unlink()
+        path.symlink_to(self.f.repo / RV.POLICY)
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('not a symlink', result.stderr)
+        self.assertEqual(self.rows(), [])
+        self.assertFalse(Path(self.f.env['REMOTE_LOG']).exists())
+
     def test_local_default_and_declared_executable_evidence(self):
         self.policy.pop('remote')
         self.save_policy()
