@@ -200,7 +200,9 @@ class TestRemoteVerification(unittest.TestCase):
         result = self.verify('--verification-timeout', '1')
         self.assertNotEqual(result.returncode, 0)
         row, = self.rows()
-        self.assertEqual(row['result'], 'incomplete')
+        expected = 'incomplete' if mode == 'slurm-pending' else 'pass'
+        self.assertEqual(row['result'], expected)
+        self.assertIs(row['execution']['evidence_reconciled'], False)
         execution = row['execution']
         self.assertEqual(execution['job_id'], '321')
         self.assertEqual(execution['cancellation'], 'unconfirmed')
@@ -483,6 +485,29 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.rows()[-1]['result'], 'pass')
         self.assert_clean()
+
+    def test_completed_failure_in_timeout_capture_is_still_evidence(self):
+        self.program('raise SystemExit(125)\n')
+        self.mode.write_text('cleanup-ssh-fail')
+        site = self.f.directory / 'transport-timeout'
+        site.mkdir()
+        (site / 'sitecustomize.py').write_text(
+            'import pathlib, subprocess, sys\n'
+            'if sys.argv[0].endswith("merge_unit.py"):\n'
+            '    original = subprocess.run\n'
+            '    def capture(argv, *args, **kwargs):\n'
+            '        result = original(argv, *args, **kwargs)\n'
+            '        if pathlib.Path(argv[0]).name == "ssh" and "tarfile" in argv[-1]:\n'
+            '            raise subprocess.TimeoutExpired(argv, 1, output=result.stdout.encode(), stderr=b"")\n'
+            '        return result\n'
+            '    subprocess.run = capture\n')
+        self.f.env['PYTHONPATH'] = str(site)
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        row, = self.rows()
+        self.assertEqual((row['result'], row['exit_code']), ('fail', 125))
+        self.assertEqual(row['execution']['cleanup'], 'unconfirmed')
+        self.assertTrue(Path(row['execution']['stage'], 'claim-0.json').exists())
 
     def test_unretrievable_launch_blocks_rerun_then_retrieves_failure(self):
         self.program('raise SystemExit(125 * int(Path(%r).read_text() != "pass"))\n'

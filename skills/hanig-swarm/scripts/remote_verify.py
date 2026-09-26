@@ -764,6 +764,18 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
             ingest(run, response)
             publish(path, ledger)
 
+        def receive_timeout(exc):
+            # communicate() may have captured a complete JSON response before
+            # timing out on the transport. Those bytes are still evidence.
+            if isinstance(exc, subprocess.TimeoutExpired) and exc.stdout:
+                captured = exc.stdout
+                if isinstance(captured, bytes):
+                    captured = captured.decode("utf-8", "replace")
+                try:
+                    receive(subprocess.CompletedProcess([], 255, captured, "transport capture timed out"))
+                except (OSError, ValueError):
+                    pass
+
         if not retry:
             # Bundle/transfer construction is pre-launch and can safely fail.
             with tempfile.TemporaryDirectory(prefix="verification-transfer-") as tmp:
@@ -787,6 +799,7 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
                             timeout=timeout * len(checks) + 120)
                         receive(proc)
                     except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                        receive_timeout(exc)
                         error = "remote transport incomplete: " + str(exc)
         # Lost stdout is recoverable without executing another verifier.
         if not run["reconciled"] and prefix:
@@ -796,6 +809,7 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
             try:
                 receive(remote_call(prefix, remote, code))
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                receive_timeout(exc)
                 error = "remote retrieval incomplete: " + str(exc)
         if error:
             run["transport_error"] = error
