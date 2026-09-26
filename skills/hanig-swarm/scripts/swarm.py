@@ -6165,6 +6165,16 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
                       "verifier a receipt names cannot be checked against "
                       "anything. Refusing rather than taking the receipt's "
                       "word for which verifier ran.")
+    if runner is None and claim == V.INTEGRATION_CLAIM:
+        try:
+            execution_policy, _ = V.RV.read_policy(state_dir)
+            for executable in execution_policy.get("local", {}).values():
+                if CP._inside(executable, repo):
+                    return None, "verification executable is inside the operated repository"
+            runner = V.RV.GitRunner(
+                U.run, V.RV.resolve_executables(execution_policy.get("local")))
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            return None, "verification executables unavailable: " + str(exc)
     runner = runner or U.run
     integration_basis = None
     if claim == V.INTEGRATION_CLAIM:
@@ -9711,12 +9721,29 @@ def cmd_verify(args):
             f"not recover a basis from another attempt, its receipt, or the "
             f"current branch.\n")
         return EXIT_USAGE
-    basis_problem = W.validate_pinned_head(U.run, launch_facts, produced)
+    runner = U.run
+    executables = None
+    if args.claim == V.INTEGRATION_CLAIM:
+        try:
+            execution_policy, execution_digest = V.RV.read_policy(args.state_dir)
+            if execution_policy.get("remote"):
+                sys.stderr.write("error: remote merge verification requires merge_unit.py --verify-integration\n")
+                return EXIT_USAGE
+            for executable in execution_policy.get("local", {}).values():
+                if CP._inside(executable, repo):
+                    sys.stderr.write("error: verification executable is inside the operated repository\n")
+                    return EXIT_USAGE
+            executables = V.RV.resolve_executables(execution_policy.get("local"))
+            runner = V.RV.GitRunner(U.run, executables)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            sys.stderr.write("error: verification executables unavailable: {}\n".format(exc))
+            return EXIT_USAGE
+    basis_problem = W.validate_pinned_head(runner, launch_facts, produced)
     if basis_problem:
         sys.stderr.write(f"error: {basis_problem}\n")
         return EXIT_USAGE
 
-    policy, policy_digest, perr = V.read_policy(U.run, repo, base)
+    policy, policy_digest, perr = V.read_policy(runner, repo, base)
     if perr:
         sys.stderr.write(f"error: {perr}\n")
         return EXIT_USAGE
@@ -9732,7 +9759,7 @@ def cmd_verify(args):
         return EXIT_USAGE
 
     corpus_evidence, refusal = V.corpus_evidence(
-        U.run, repo, base, produced, entry)
+        runner, repo, base, produced, entry)
     if refusal:
         sys.stderr.write(f"error: {refusal}\n")
         return EXIT_USAGE
@@ -9750,17 +9777,8 @@ def cmd_verify(args):
                 "that commit's Git object locally; this command never "
                 "contacts a forge.\n")
             return EXIT_USAGE
-        execution_policy, execution_digest = V.RV.read_policy(args.state_dir)
-        if execution_policy.get("remote"):
-            sys.stderr.write("error: remote merge verification requires merge_unit.py --verify-integration\n")
-            return EXIT_USAGE
-        for executable in execution_policy.get("local", {}).values():
-            if CP._inside(executable, repo):
-                sys.stderr.write("error: verification executable is inside the operated repository\n")
-                return EXIT_USAGE
-        executables = V.RV.resolve_executables(execution_policy.get("local"))
         outcome, merge_evidence, rerr = V.run_in_candidate_merge(
-            U.run, repo, produced, target_commit, args.path, digest,
+            runner, repo, produced, target_commit, args.path, digest,
             args=args.arg, timeout=args.timeout, executables=executables)
         if V.RV.read_policy(args.state_dir)[1] != execution_digest:
             sys.stderr.write("error: execution policy changed during verification\n")
