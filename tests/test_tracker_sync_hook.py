@@ -1498,6 +1498,21 @@ class TrackerSyncHookProvenance(unittest.TestCase):
         self.assertIn("total 0", self.context("gh pr merge 7 --repo example/project"))
         self.assertIn("total 0", self.context())
 
+    def test_ancestor_refspec_and_routing_shaped_options(self):
+        for refspec in ("HEAD~1:feature", "HEAD^:feature", "+HEAD~2:feature"):
+            self.assertIn("total 0", self.context("git push origin " + refspec))
+        for option in ("--hostname other.example.invalid", "--hostname=other.example.invalid"):
+            self.assertNotIn("total 0", self.context("gh pr merge 7 --repo example/project " + option))
+
+    def test_git_rewrite_is_resolved_before_comparing_identity(self):
+        for setting in ("insteadOf", "pushInsteadOf"):
+            with self.subTest(setting=setting):
+                key = "url.https://github.com/other/." + setting
+                subprocess.run(["git", "-C", self.repo, "config", key,
+                                "https://github.com/example/"], check=True)
+                self.assertNotIn("total 0", self.context())
+                subprocess.run(["git", "-C", self.repo, "config", "--unset", key], check=True)
+
     def test_relative_state_locator_resolves_once(self):
         fake_repo("""
             import json, sys

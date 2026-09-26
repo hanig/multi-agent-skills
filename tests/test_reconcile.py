@@ -38,6 +38,9 @@ assert 'states:MERGED' in args[args.index('-f') + 1], args
 with open(os.environ['CALLS'], 'a') as output:
     output.write(json.dumps(args) + '\\n')
 pages = json.loads(Path(os.environ['FORGE']).read_text())
+if isinstance(pages, dict) and 'raw' in pages:
+    print(pages['raw'])
+    sys.exit(0)
 if isinstance(pages, dict) and 'exit' in pages:
     print('forge unavailable', file=sys.stderr)
     sys.exit(pages['exit'])
@@ -175,6 +178,36 @@ print(json.dumps(pages[int(cursor)]))
                 self.write_state()
         (self.state / R.S.OUTBOX).mkdir()
         self.assertEqual(self.run_cli()[0], 2)
+
+    def test_deep_json_in_every_reader_is_unreadable(self):
+        nested = "[" * 10000 + "0" + "]" * 10000
+        for name in (R.S.STATE_FILE, R.S.OUTBOX, R.S.RECEIPTS, "merge-unit-deep.json"):
+            with self.subTest(name=name):
+                path = self.state / name
+                path.write_text(nested)
+                code, report = self.run_cli()
+                self.assertEqual(code, 2, report)
+                self.assertEqual(report["status"], "UNREADABLE")
+                path.unlink()
+                self.write_state()
+        self.forge.write_text(json.dumps({"raw": '{"data":' + nested + '}'}))
+        code, report = self.run_cli()
+        self.assertEqual(code, 2, report)
+        self.assertEqual(report["errors"][0]["source"], "forge")
+        self.assertIn("recursion", report["errors"][0]["detail"])
+
+    def test_special_files_in_every_state_reader_are_unreadable(self):
+        for name in (R.S.STATE_FILE, R.S.OUTBOX, R.S.RECEIPTS, "merge-unit-fifo.json"):
+            with self.subTest(name=name):
+                path = self.state / name
+                if path.exists():
+                    path.unlink()
+                os.mkfifo(str(path))
+                code, report = self.run_cli()
+                self.assertEqual(code, 2, report)
+                self.assertEqual(report["status"], "UNREADABLE")
+                path.unlink()
+                self.write_state()
 
     def test_forge_failure_never_clean(self):
         for payload in ({"exit": 1}, [{"errors": ["unavailable"]}], [{"data": {"repository": None}}]):
