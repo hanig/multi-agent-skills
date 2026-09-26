@@ -246,6 +246,34 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertTrue(execution['executables']['git']['version'].startswith('git version'))
         self.assertFalse(Path(self.f.env['REMOTE_LOG']).exists())
 
+    def test_declared_executables_are_used_for_checkout_and_verifier_children(self):
+        log = self.f.directory / 'executables.log'
+        for name in ('python', 'git'):
+            actual = self.policy['remote'][name]
+            wrapper = self.f.directory / ('declared-' + name)
+            wrapper.write_text('#!' + sys.executable + '\nimport json, os, sys\n'
+                               'with open(%r, "a") as log: log.write(json.dumps([%r] + sys.argv[1:]) + "\\n")\n'
+                               'os.execv(%r, [%r] + sys.argv[1:])\n'
+                               % (str(log), name, actual, actual))
+            wrapper.chmod(0o755)
+            self.policy['local'][name] = str(wrapper)
+            self.policy['remote'][name] = str(wrapper)
+        self.save_policy()
+        self.shared.install_policy(repetitions=1)
+        self.shared.candidate({'tests/test_executables.py': self.shared.counter_test()})
+        result = self.verify()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertTrue(any(c[0] == 'python' and any('verifier' in a for a in c[1:]) for c in calls))
+        self.assertTrue(any(c[0] == 'git' and 'checkout' in c for c in calls))
+        self.assertTrue(any(c[0] == 'git' and 'diff' in c for c in calls))
+        for row in self.rows():
+            for name in ('python', 'git'):
+                executable = row['execution']['executables'][name]
+                self.assertEqual(executable['path'], self.policy['remote'][name])
+                self.assertTrue(executable['version'])
+        self.assert_clean()
+
     def test_changed_remote_module_without_handshake_fails(self):
         self.shared.install_policy(repetitions=2)
         self.shared.candidate({'tests/test_exit.py': 'raise SystemExit(0)\n'})

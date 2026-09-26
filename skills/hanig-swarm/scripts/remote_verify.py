@@ -49,7 +49,8 @@ def read_policy(state_dir):
     if len(raw) > 65536:
         raise ValueError("execution policy is oversized")
     policy = json.loads(raw)
-    if (not isinstance(policy, dict) or policy.get("schema_version") != 1
+    if (not isinstance(policy, dict) or type(policy.get("schema_version")) is not int
+            or policy["schema_version"] != 1
             or set(policy) - {"schema_version", "local", "remote"}):
         raise ValueError("invalid execution policy schema")
     local = policy.get("local", {})
@@ -126,6 +127,8 @@ def execution_problem(receipt):
         return None
     if not isinstance(execution.get("executables"), dict):
         return "missing declared executable evidence"
+    if type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 0:
+        return "passing execution evidence lacks a zero verifier exit"
     for name in ("python", "git"):
         item = execution["executables"].get(name, {})
         if (not isinstance(item, dict) or not isinstance(item.get("path"), str)
@@ -332,7 +335,9 @@ def run_remote(runner, tree, basis, checks, remote, timeout):
     stage = remote["workdir_root"].rstrip("/") + "/verify-" + uuid.uuid4().hex
     ssh = shutil.which("ssh")  # coordinator environment, resolved before candidate execution
     execution = {"location": "remote", "executor": remote["executor"],
-                 "ssh_alias": remote["ssh_alias"]}
+                 "ssh_alias": remote["ssh_alias"], "host_identity": None,
+                 "executables": {key: {"path": remote[key], "version": None}
+                                 for key in ("python", "git")}}
     result = None
     error = None
     cleanup_error = None
@@ -371,7 +376,7 @@ def run_remote(runner, tree, basis, checks, remote, timeout):
                             or observed.get("executor") != remote["executor"]
                             or observed.get("ssh_alias") != remote["ssh_alias"]):
                         raise ValueError("remote execution identity mismatch")
-                    execution = observed
+                    execution.update(observed)
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 error = "remote transport incomplete: " + str(exc)
             finally:
@@ -410,7 +415,7 @@ def run_remote(runner, tree, basis, checks, remote, timeout):
             outcomes[index] = incomplete("invalid remote completion")
             continue
         problem = execution_problem(dict(candidate_tree=basis["candidate_tree"],
-                                          execution=execution, result="pass"))
+                                          execution=execution, result="pass", exit_code=0))
         if outcome.get("exit_code") == 0 and (problem or cleanup_error):
             outcomes[index] = incomplete(problem or cleanup_error)
     return outcomes, execution

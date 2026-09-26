@@ -657,7 +657,7 @@ def candidate_merge_basis(runner, repo, produced_head, target_commit):
 
 
 def run_in_candidate_merge(runner, repo, produced_head, target_commit, path,
-                           expect_digest, args=None, timeout=900):
+                           expect_digest, args=None, timeout=900, executables=None):
     """Run pinned verifier bytes in a disposable candidate-merge checkout.
 
     The checkout starts at the exact target commit and receives the produced
@@ -665,6 +665,8 @@ def run_in_candidate_merge(runner, repo, produced_head, target_commit, path,
     result is evidence unavailability, not permission to test either branch.
     Returns ``(outcome, basis, error)``.
     """
+    executables = executables or RV.resolve_executables()
+    runner = RV.GitRunner(runner, executables)
     tmp, tree, basis, error = _candidate_checkout(
         runner, repo, produced_head, target_commit)
     if error:
@@ -672,7 +674,9 @@ def run_in_candidate_merge(runner, repo, produced_head, target_commit, path,
     try:
         outcome, run_error = run_pinned(
             runner, path, expect_digest, args=args, timeout=timeout, cwd=tree,
-            observe_completion=True)
+            observe_completion=True, executables=executables)
+        if outcome is not None:
+            outcome["execution"] = RV.local_execution(executables)
         return outcome, basis, run_error
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -977,7 +981,9 @@ def run_pinned(runner, path, expect_digest, args=None, timeout=900,
             if executables is not None:
                 # The pinned programs and their subprocesses share declared
                 # executables. A candidate's cwd/PATH never supplies either.
-                argv.insert(0, executables["python"]["path"])
+                first_line = Path(copy).read_bytes().split(b"\n", 1)[0]
+                if str(path).endswith(".py") or b"python" in first_line:
+                    argv.insert(0, executables["python"]["path"])
                 bindir = Path(tmpdir) / "bin"
                 bindir.mkdir()
                 for name, key in (("python3", "python"), ("git", "git")):
