@@ -85,13 +85,14 @@ def read_policy(state_dir):
     return policy, hashlib.sha256(raw).hexdigest()
 
 
-def resolve_executables(declaration=None):
+def resolve_executables(declaration=None, names=("python", "git")):
     """Resolve once outside candidate cwd; Git defaults deliberately ignore PATH."""
     declaration = declaration or {}
     paths = {"python": declaration.get("python", sys.executable),
              "git": declaration.get("git") or shutil.which("git", path=os.defpath)}
     result = {}
-    for name, path in paths.items():
+    for name in names:
+        path = paths[name]
         absolute(path, name)
         path = os.path.realpath(path)
         run = subprocess.run([path, "--version"], stdin=subprocess.DEVNULL,
