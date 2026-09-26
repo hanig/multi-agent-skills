@@ -1344,7 +1344,7 @@ def repository_is_bound(payload, command, state):
                 words = words[2:]
             if words[:2] != ["push", "origin"]:
                 return False
-            if any(not re.fullmatch(r"[A-Za-z0-9_./:+@^-]+", word) for word in words[2:]):
+            if any(not re.fullmatch(r"[A-Za-z0-9_./:+@^~-]+", word) for word in words[2:]):
                 return False
             # --repo is a push option that can override the positional remote.
             if any(word.startswith("-") for word in words[2:]):
@@ -1364,7 +1364,7 @@ def repository_is_bound(payload, command, state):
             locator = words[index + 1]
             rest = words[1:index] + words[index + 2:]
             if (len(rest) < 2 or rest[0] not in ("pr", "issue")
-                    or any("--repo" in word or word.startswith("-R") or "://" in word for word in rest)):
+                    or any("--repo" in word or word.startswith(("-R", "--hostname")) or "://" in word for word in rest)):
                 return False
             if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", locator):
                 locator = "https://" + (os.environ.get("GH_HOST") or "github.com") + "/" + locator

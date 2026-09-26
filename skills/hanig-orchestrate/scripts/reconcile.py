@@ -7,11 +7,13 @@ records, never authority. Unbound or unreadable state cannot certify clean.
 """
 
 import argparse
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 
@@ -56,8 +58,30 @@ def command(argv):
     return result.stdout
 
 
+@contextmanager
+def regular_input(path, optional=False):
+    """Refuse special files before reading, including a FIFO with no writer.
+
+    The strict coordinator readers own journal parsing; their preflight here
+    only validates file type. Atomic trusted-writer replacements stay regular.
+    This is not a boundary against concurrent hostile same-UID replacement.
+    """
+    try:
+        fd = os.open(str(path), os.O_RDONLY | os.O_NONBLOCK)
+    except FileNotFoundError:
+        if not optional or path.is_symlink():
+            raise
+        yield None
+        return
+    with os.fdopen(fd, "r", encoding="utf-8") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise ValueError("input is not a regular file: " + str(path))
+        yield handle
+
+
 def object_at(path):
-    value = json.loads(path.read_text(encoding="utf-8"))
+    with regular_input(path) as handle:
+        value = json.load(handle)
     if not isinstance(value, dict):
         raise ValueError("expected object at " + str(path))
     return value
@@ -209,6 +233,9 @@ def reconcile(args):
             else:
                 source["status"] = "read"
             local_records = merge_records(path)
+            for name in (S.OUTBOX, S.RECEIPTS):
+                with regular_input(path / name, optional=True):
+                    pass
             intents = S.load_outbox_contract(path)
             statuses, problems = S.acknowledgment_status(path)
             if problems:
@@ -223,7 +250,7 @@ def reconcile(args):
                 if status == S.UNACKNOWLEDGED:
                     report["findings"].append({"kind": "UNACKNOWLEDGED OBLIGATION", "state_dir": str(path),
                                                "key": key, "operation": intent["envelope"]["requested_operation"]})
-        except (OSError, ValueError, TypeError, KeyError, S.OutboxError) as exc:
+        except (OSError, ValueError, TypeError, KeyError, RecursionError, S.OutboxError) as exc:
             source["status"] = "unreadable"
             report["errors"].append({"source": str(path), "detail": str(exc)})
     try:
@@ -233,7 +260,7 @@ def reconcile(args):
             if not covers(records, route, args.branch, pr):
                 report["findings"].append({"kind": "UNMEDIATED MERGE", "pr": pr["number"],
                                            "url": pr["url"], "merged_as": pr["mergeCommit"]["oid"]})
-    except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, TypeError, KeyError, RecursionError, subprocess.SubprocessError) as exc:
         report["errors"].append({"source": "forge", "detail": str(exc)})
     return report
 
