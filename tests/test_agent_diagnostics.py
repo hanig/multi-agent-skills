@@ -661,7 +661,7 @@ class TestDoctorAndSurveyAgentOutput(unittest.TestCase):
         self.assertEqual(len(value["agents"]["claude"]["installation"]["roots"][0]["payloads"]), 13)
 
     def _fixture_json_result(self, directory, body, deadline=DOCTOR_SECONDS,
-                             without_perl_json=False):
+                             without_perl_json=False, validator_body=None):
         """Drive doctor itself with arbitrary child output and private scratch."""
         bindir = directory / "bin"
         bindir.mkdir()
@@ -670,8 +670,13 @@ class TestDoctorAndSurveyAgentOutput(unittest.TestCase):
         child = directory / "result.py"
         child.write_text(body)
         python = bindir / "python3"
+        validator_args = ' "$@"'
+        if validator_body is not None:
+            validator = directory / "validator.py"
+            validator.write_text(validator_body)
+            validator_args = ' ' + shlex.quote(str(validator))
         python.write_text('#!/bin/sh\nif [ "$1" = -c ]; then exec ' +
-                          shlex.quote(sys.executable) + ' "$@"; fi\nexec ' +
+                          shlex.quote(sys.executable) + validator_args + '; fi\nexec ' +
                           shlex.quote(sys.executable) + " " +
                           shlex.quote(str(child)) + "\n")
         python.chmod(0o755)
@@ -756,6 +761,82 @@ class TestDoctorAndSurveyAgentOutput(unittest.TestCase):
                 value = self._fixture_json_result(
                     Path(raw), "print(" + repr(output) + ")\n", without_perl_json=True)
                 self.assertEqual(value["state"], state)
+
+    def test_doctor_summary_stays_out_of_the_exec_argument_budget(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            env = self._populated_env(directory)
+            self._without_perl_json(directory, env)
+            # Leave room for the supervisor's fixed code and ordinary command
+            # arguments, but not another copy of the report. The assertions
+            # exercise actual exec and doctor output, not this source text.
+            supervisor = DOCTOR.read_text().split("SUPERVISOR_PERL='", 1)[1].split(
+                "'\n\n# bounded SECONDS", 1)[0]
+            environment_bytes = sum(len(os.fsencode(k)) + len(os.fsencode(v)) + 2
+                                    for k, v in env.items())
+            padding = (os.sysconf("SC_ARG_MAX") - len(supervisor.encode()) -
+                       environment_bytes - 6000)
+            self.assertGreater(padding, 0)
+            for offset in range(0, padding, 60000):
+                env["DOCTOR_FIXTURE_PADDING_" + str(offset)] = "x" * min(60000, padding - offset)
+            control = subprocess.run([str(directory / "bin" / "python3"),
+                                      str(SCRIPTS / "agent_diagnostics.py"), "--doctor-summary"],
+                                     env=env, capture_output=True, text=True,
+                                     timeout=WATCHDOG_SECONDS)
+            self.assertEqual(control.returncode, 0, control.stderr)
+            self.assertGreater(len(control.stdout.encode()), 6000)
+            expected = json.loads(control.stdout)
+            result = subprocess.run([str(DOCTOR), "--json"], env=env,
+                                    capture_output=True, text=True, timeout=WATCHDOG_SECONDS)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            value = json.loads(result.stdout)
+            self.assertNotEqual(value.get("state"), "unknown", (value, result.stderr))
+            self.assertNotIn("truncated", value)
+            self.assertEqual(value["detail"], "summary")
+            self.assertEqual(set(value["agents"]), {"claude", "codex", "opencode", "pi"})
+            for name, agent in value["agents"].items():
+                self.assertEqual(agent["installation"], expected["agents"][name]["installation"])
+                self.assertEqual(agent["agent_present"]["state"], "executable_found")
+
+    def test_doctor_summary_stdin_is_bounded_and_requires_the_whole_document(self):
+        for size in (48000, 48001):
+            with self.subTest(size=size), tempfile.TemporaryDirectory() as raw:
+                body = ("import json\n"
+                        "value = {'padding': ''}\n"
+                        "base = json.dumps(value, separators=(',', ':'))\n"
+                        f"value['padding'] = 'x' * ({size} - len(base))\n"
+                        "print(json.dumps(value, separators=(',', ':')))\n")
+                value = self._fixture_json_result(Path(raw), body, without_perl_json=True)
+                if size == 48000:
+                    self.assertEqual(len(json.dumps(value, separators=(",", ":"))), size)
+                    self.assertNotIn("truncated", value)
+                else:
+                    self.assertEqual(value["state"], "unknown")
+        for output in ('noise\n{}', '{}\n{}', '{"text":"\u03bb"}'):
+            with self.subTest(output=output), tempfile.TemporaryDirectory() as raw:
+                value = self._fixture_json_result(Path(raw), "print(" + repr(output) + ")\n",
+                                                  without_perl_json=True)
+                self.assertEqual(value["state"], "unknown")
+
+    def test_doctor_summary_preserves_producer_failure_and_bounds_both_stages(self):
+        for stage in ("producer-failed", "producer-stalled", "validator-stalled"):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as raw:
+                body = "print('{\"state\":\"ready\"}', flush=True)\n"
+                validator_body = None
+                deadline = DOCTOR_SECONDS
+                if stage == "producer-failed":
+                    body += "raise SystemExit(7)\n"
+                else:
+                    deadline = 1
+                    if stage == "producer-stalled":
+                        body += "import time; time.sleep(600)\n"
+                    else:
+                        validator_body = "import sys, time\nsys.stdin.buffer.read()\ntime.sleep(600)\n"
+                value = self._fixture_json_result(Path(raw), body, deadline=deadline,
+                                                  without_perl_json=True,
+                                                  validator_body=validator_body)
+                self.assertEqual(value["state"], "unknown")
+                self.assertNotIn("truncated", value)
 
     def test_doctor_json_result_boundary_and_stderr_are_independent(self):
         # Exact bytes include the newline. The payload also carries escaped

@@ -501,25 +501,34 @@ if [ "$DOCTOR_JSON" -eq 1 ]; then
     if [ "$PROBE_STATE" = summary-required ]; then
       # Older/minimal Perl may lack JSON::PP; temporary storage can also be
       # unavailable. Retain useful health facts within the original tail cap.
-      if [ "$PREFIX_EXPLICIT" -eq 1 ]; then
-        bounded "$PROBE_RUN_SECONDS" python3 "$DIAGNOSTICS" --doctor-summary --claude-prefix "$PREFIX"
-      else
-        bounded "$PROBE_RUN_SECONDS" python3 "$DIAGNOSTICS" --doctor-summary
-      fi
-      if [ "$PROBE_STATE:$PROBE_RC" = answered:0 ]; then
-        # Validate through the already required Python, under its own command
-        # deadline. The summary producer caps its ASCII JSON at 48000 bytes,
-        # so this argument fits the old transport and normal exec limits.
-        bounded "$RUN_SECONDS" python3 -c '
+      # Report bytes stay inside this supervised group, never in exec argv or
+      # the environment. The trusted producer caps its output at 48000 bytes;
+      # the validator independently bounds and checks the serialized document.
+      SUMMARY_VALIDATOR='
 import json, sys
-value = json.loads(sys.argv[1])
+raw = sys.stdin.buffer.read(48001)
+if len(raw) > 48000:
+    raise SystemExit(1)
+value = json.loads(raw.decode("ascii"))
 if not isinstance(value, dict):
     raise SystemExit(1)
 encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
 if len(encoded.encode("utf-8")) > 48000:
     raise SystemExit(1)
 print(encoded)
-' "$PROBE_OUT"
+'
+      SUMMARY_PIPE='
+validator=$1
+shift
+summary=$("$@") || exit $?
+printf "%s" "$summary" | python3 -c "$validator"
+'
+      # Both stages and their inner pipe waits share one deadline and cleanup
+      # group. Preserve the former producer-plus-validator run allowance.
+      if [ "$PREFIX_EXPLICIT" -eq 1 ]; then
+        bounded "$((PROBE_RUN_SECONDS + RUN_SECONDS))" /bin/sh -c "$SUMMARY_PIPE" doctor-summary "$SUMMARY_VALIDATOR" python3 "$DIAGNOSTICS" --doctor-summary --claude-prefix "$PREFIX"
+      else
+        bounded "$((PROBE_RUN_SECONDS + RUN_SECONDS))" /bin/sh -c "$SUMMARY_PIPE" doctor-summary "$SUMMARY_VALIDATOR" python3 "$DIAGNOSTICS" --doctor-summary
       fi
     fi
     if [ "$PROBE_STATE:$PROBE_RC" = answered:0 ]; then
