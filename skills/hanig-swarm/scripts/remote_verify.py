@@ -7,6 +7,7 @@ an OS isolation boundary. No forge writes or credential provisioning occur.
 """
 import argparse
 import base64
+from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
@@ -75,13 +76,8 @@ def read_policy(state_dir):
         if remote["executor"] not in ("direct", "slurm"):
             raise ValueError("remote executor must be direct or slurm")
         if remote["executor"] == "slurm":
-            cfg = remote.get("slurm")
-            if not isinstance(cfg, dict) or set(cfg) != {"partition", "mem", "time"}:
-                raise ValueError("slurm requires partition, mem and time")
-            for key, value in cfg.items():
-                if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_:.-]+", value):
-                    raise ValueError("invalid slurm " + key)
-        elif "slurm" in remote:
+            raise ValueError("executor: slurm is disabled; enablement is tracked in ARC-1103")
+        if "slurm" in remote:
             raise ValueError("direct executor cannot declare slurm options")
     return policy, hashlib.sha256(raw).hexdigest()
 
@@ -186,10 +182,133 @@ def make_bundle(runner, tree, basis, destination):
     _git(runner, tree, "bundle", "create", str(destination), BUNDLE_REF)
 
 
-def publish(path, record):
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(record), encoding="utf-8")
-    os.replace(str(temporary), str(path))
+def encoded(record):
+    return json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def record_digest(record):
+    return hashlib.sha256(encoded(record)).hexdigest()
+
+
+def publish(path, record, once=False):
+    """Fsync bytes, atomically publish, then fsync the directory.
+
+    Hard-link publication never replaces an existing completion receipt. A
+    repeated identical write is idempotent; different bytes are a conflict.
+    """
+    temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+    data = encoded(record)
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if once:
+            try:
+                os.link(str(temporary), str(path))
+            except FileExistsError:
+                if path.read_bytes() != data:
+                    raise ValueError("conflicting write-once evidence at " + str(path))
+        else:
+            os.replace(str(temporary), str(path))
+        fd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def ledger_path(state_dir, unit, basis):
+    return Path(state_dir) / "remote-verifications" / (record_digest(
+        {"unit": unit, "basis": basis}) + ".json")
+
+
+def load_ledger(path, unit, basis):
+    if not path.exists():
+        return {"unit": unit, "basis": basis, "runs": []}
+    value = json.loads(path.read_text())
+    if (not isinstance(value, dict) or value.get("unit") != unit
+            or value.get("basis") != basis or not isinstance(value.get("runs"), list)):
+        raise ValueError("invalid remote evidence ledger at " + str(path))
+    return value
+
+
+def unresolved(run):
+    return not run.get("reconciled") or not run.get("published")
+
+
+def unresolved_message(run):
+    return "unresolved remote evidence at {}:{}; retrieve or resolve it first".format(
+        run["remote"]["ssh_alias"], run["stage"])
+
+
+def pending_problem(state_dir, unit, basis):
+    if state_dir is None:
+        return None
+    path = ledger_path(state_dir, unit, basis)
+    ledger = load_ledger(path, unit, basis)
+    for run in ledger["runs"]:
+        if unresolved(run):
+            return unresolved_message(run)
+    return None
+
+
+@contextmanager
+def binding_lock(state_dir, unit, basis):
+    path = ledger_path(state_dir, unit, basis)
+    path.parent.mkdir(exist_ok=True)
+    with path.with_suffix(".lock").open("a") as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError("verification for this binding is already in progress; retrieve evidence later")
+        yield path
+
+
+def acknowledge(state_dir, unit, basis, launch_id):
+    """Called only after the operator's observation fence and receipt fsync."""
+    with binding_lock(state_dir, unit, basis) as path:
+        ledger = load_ledger(path, unit, basis)
+        for run in ledger["runs"]:
+            if run["launch_id"] == launch_id:
+                run["published"] = True
+                publish(path, ledger)
+                return
+        raise ValueError("unknown remote evidence launch")
+
+
+def collect(stage):
+    """Read immutable per-claim evidence even without a worker/supervisor result."""
+    request = json.loads((stage / "request.json").read_text())
+    result = {"basis": request["basis"], "launch_id": request["launch_id"],
+              "receipts": {}, "final": None, "supervision": None}
+    for index in range(len(request["checks"])):
+        try:
+            result["receipts"][str(index)] = json.loads(
+                (stage / ("claim-{}.json".format(index))).read_text())
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as exc:
+            result.setdefault("errors", []).append(str(exc))
+    for field, name in (("final", "worker-complete"), ("supervision", "supervision-finished")):
+        try:
+            result[field] = json.loads((stage / name).read_text())
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as exc:
+            result.setdefault("errors", []).append(str(exc))
+    return result
+
+
+def completion_receipt(request, check, outcome, execution):
+    return {"launch_id": request["launch_id"], "basis": request["basis"],
+            "claim_binding": check["binding"], "outcome": outcome,
+            "completion": {"verifier_returned": True, "exit_code": outcome["exit_code"],
+                           "pinned_sha256": check["digest"]},
+            "execution": dict(execution)}
 
 
 def worker(stage):
@@ -203,6 +322,7 @@ def worker(stage):
         # A site can force requeue despite --no-requeue. Never overwrite a
         # previous worker's completed FAIL or partially collected evidence.
         return 0
+    receipts = {}
     result = {"basis": basis, "outcomes": [], "execution": {
         "location": "remote", "executor": remote["executor"],
         "ssh_alias": remote["ssh_alias"], "host_identity": platform.node()}}
@@ -232,11 +352,19 @@ def worker(stage):
                 timeout=request["timeout"], cwd=str(tree), observe_completion=True,
                 executables=executables)
             result["outcomes"].append(outcome if not error else incomplete(error))
-            # Preserve a completed failure if a subsequent verifier/job is lost.
+            if not error and not outcome.get("incomplete_reason"):
+                receipt = completion_receipt(request, check, outcome, result["execution"])
+                publish(stage / ("claim-{}.json".format(index)), receipt, once=True)
+                receipts[str(index)] = record_digest(receipt)
             publish(stage / "result.json", result)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         result["error"] = str(exc)
+    while len(result["outcomes"]) < len(request["checks"]):
+        result["outcomes"].append(incomplete(result.get("error", "worker did not complete")))
     publish(stage / "result.json", result)
+    publish(stage / "worker-complete", {
+        "launch_id": request["launch_id"], "basis": basis, "receipts": receipts,
+        "outcomes": result["outcomes"], "execution": result["execution"]}, once=True)
     return 0
 
 
@@ -309,11 +437,9 @@ def supervise(stage):
             job_id=job, sacct_state=state[0] if state else None,
                                    sacct_exit_code=state[1] if state else None)
         if state != ("COMPLETED", "0:0"):
-            reason = "Slurm verification did not reach terminal success"
-            result["error"] = reason
-            result["outcomes"] = [o if not o.get("incomplete_reason")
-                                  and o.get("exit_code") not in (None, 0)
-                                  else incomplete(reason) for o in result["outcomes"]]
+            result["error"] = "Slurm verification did not reach terminal success"
+        # Scheduler status is transport/lifecycle evidence, never a verifier
+        # result. Independently completed claims are collected below.
     return result
 
 
@@ -365,7 +491,7 @@ def publish_cleanup(path, evidence):
     publish(path, evidence)
 
 
-def cleanup(stage):
+def cleanup(stage, reconciled=None):
     """Serialize recovery; preserve evidence until supervision and job are done.
 
     Four attempts and 64 KiB bound the journal. An intent is published before
@@ -394,6 +520,14 @@ def cleanup(stage):
         finished = json.loads((stage / "supervision-finished").read_text())
         if not isinstance(finished, dict):
             raise ValueError("invalid supervision marker; stage retained")
+        marker_job = finished.get("job_id")
+        if marker_job is not None:
+            if not isinstance(marker_job, str) or not re.fullmatch(r"[0-9]+", marker_job):
+                raise ValueError("invalid supervision job identity; stage retained")
+            if job and marker_job != job:
+                raise ValueError("conflicting job identities; stage retained")
+            job = marker_job
+            evidence["job_id"] = job
         history = stage / "cleanup.json"
         if history.exists():
             with history.open("rb") as handle:
@@ -440,6 +574,10 @@ def cleanup(stage):
             else:
                 evidence["cancellation"] = "not-required"
             evidence["cleanup_sacct_state"] = state[0]
+        collected = collect(stage)
+        if (not reconciled or reconciled != record_digest(collected)
+                or not collected.get("final") or not collected.get("supervision")):
+            raise ValueError("remote evidence is not quiescent and reconciled; stage retained")
         shutil.rmtree(stage, ignore_errors=False)
         evidence["cleanup"] = "removed"
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
@@ -450,120 +588,225 @@ def cleanup(stage):
     return evidence
 
 
-def run_remote(runner, tree, basis, checks, remote, timeout, repo):
-    """Transport errors are incomplete, never a verifier's completed FAIL."""
-    stage = remote["workdir_root"].rstrip("/") + "/verify-" + uuid.uuid4().hex
-    ssh = coordinator_ssh(repo, tree)
-    execution = {"location": "remote", "executor": remote["executor"],
-                 "ssh_alias": remote["ssh_alias"], "host_identity": None,
-                 "stage": stage, "job_id": None, "ssh_program": ssh,
-                 "executables": {key: {"path": remote[key], "version": None}
-                                 for key in ("python", "git")}}
-    result = None
-    error = None
-    cleanup_error = None
-    if not ssh:
-        return [incomplete("ssh is unavailable") for _ in checks], execution
-    prefix = [ssh, "-oBatchMode=yes", "-oConnectTimeout=15", remote["ssh_alias"]]
-    command = shlex.join([remote["python"], "-c", BOOTSTRAP, stage])
-    with tempfile.TemporaryDirectory(prefix="verification-transfer-") as tmp:
-        tmp = Path(tmp)
-        make_bundle(runner, tree, basis, tmp / "candidate.bundle")
-        request = {"basis": basis, "checks": checks, "verification_host": remote, "timeout": timeout}
-        (tmp / "request.json").write_text(json.dumps(request))
-        for name in FILES[2:]:
-            shutil.copyfile(Path(__file__).with_name(name), tmp / name)
-        with tempfile.TemporaryFile() as transfer:
-            with tarfile.open(fileobj=transfer, mode="w") as archive:
-                for name in FILES:
-                    archive.add(str(tmp / name), arcname=name, recursive=False)
-            transfer.seek(0)
-            try:
-                proc = subprocess.run(prefix + [command], stdin=transfer,
-                                      capture_output=True, text=True, env=CE.child_env(),
-                                      timeout=timeout * len(checks) + 120)
-                if proc.returncode:
-                    raise ValueError("ssh/remote transport exited {}: {}".format(
-                        proc.returncode, proc.stderr[-2000:]))
-                if len(proc.stdout) > 100000:
-                    raise ValueError("oversized remote response")
-                result = json.loads(proc.stdout)
-                if not isinstance(result, dict) or result.get("basis") != basis:
-                    raise ValueError("remote response binding mismatch")
-                observed = result.get("execution")
-                if observed is not None:
-                    if (not isinstance(observed, dict)
-                            or observed.get("location") != "remote"
-                            or observed.get("executor") != remote["executor"]
-                            or observed.get("ssh_alias") != remote["ssh_alias"]):
-                        raise ValueError("remote execution identity mismatch")
-                    execution.update(observed)
-            except (OSError, ValueError, subprocess.SubprocessError) as exc:
-                error = "remote transport incomplete: " + str(exc)
-            finally:
-                # Confirmed cleanup is monotonic: an unnecessary second
-                # connection cannot invalidate evidence already received.
-                if error or execution.get("cleanup") != "removed":
-                    # A second connection covers interrupted bootstrap/transport.
-                    # Normal supervision has already removed the directory.
-                    code = ("import json, pathlib, sys; p=pathlib.Path(%r); "
-                            "sys.path.insert(0, str(p)); "
-                            "from remote_verify import cleanup; "
-                            "print(json.dumps(cleanup(p)))") % stage
-                    # No harness remains after a successful first cleanup.
-                    code = ("import json, pathlib; p=pathlib.Path(%r)\n"
-                            "if not p.exists(): print(json.dumps({'cleanup': 'removed'}))\n"
-                            "else:\n    exec(%r)\n") % (stage, code)
-                    try:
-                        proc = subprocess.run(prefix + [shlex.join([remote["python"], "-c", code])],
-                                              stdin=subprocess.DEVNULL, capture_output=True,
-                                              text=True, env=CE.child_env(), timeout=45)
-                        if proc.returncode:
-                            raise ValueError("cleanup transport exited {}: {}".format(
-                                proc.returncode, proc.stderr[-2000:]))
-                        cleaned = json.loads(proc.stdout)
-                        if not isinstance(cleaned, dict) or cleaned.get("cleanup") not in (
-                                "removed", "unconfirmed"):
-                            raise ValueError("invalid remote cleanup response")
-                        if (execution.get("job_id") and cleaned.get("job_id")
-                                and execution["job_id"] != cleaned["job_id"]):
-                            raise ValueError("cleanup job identity mismatch")
-                        execution.update(cleaned)
-                    except (OSError, ValueError, subprocess.SubprocessError) as exc:
-                        execution["cleanup"] = "unconfirmed"
-                        execution["cleanup_error"] = str(exc)[-2000:]
-    if execution.get("cleanup") != "removed" or execution.get("cancellation") == "unconfirmed":
-        cleanup_error = "remote cleanup/cancellation could not be confirmed"
-        execution["cleanup"] = "unconfirmed"
-        if remote["executor"] == "slurm":
-            execution.setdefault("cancellation", "unconfirmed")
-        print("WARNING: {} for job {}; inspect and cancel if still active; "
-              "recovery files {}/job-id and {}/cleanup.json".format(
-                  cleanup_error, execution.get("job_id") or "unknown", stage, stage),
-              file=sys.stderr)
-    if error:
-        return [incomplete(error) for _ in checks], execution
-    outcomes = result.get("outcomes", [])
-    if not isinstance(outcomes, list) or len(outcomes) > len(checks):
-        outcomes = []
-        error = "invalid remote outcomes"
-    while len(outcomes) < len(checks):
-        outcomes.append(incomplete(error or result.get("error") or "missing remote completion"))
-    for index, outcome in enumerate(outcomes):
-        if (not isinstance(outcome, dict)
-                or not isinstance(outcome.get("stdout"), str)
-                or not isinstance(outcome.get("stderr"), str)
-                or len(outcome["stdout"]) > 4000 or len(outcome["stderr"]) > 2000
-                or (type(outcome.get("exit_code")) is not int
-                    and not (isinstance(outcome.get("incomplete_reason"), str)
-                             and outcome["incomplete_reason"]))):
-            outcomes[index] = incomplete("invalid remote completion")
+def validate_receipt(receipt, request, index):
+    check = request["checks"][index]
+    if (not isinstance(receipt, dict) or receipt.get("launch_id") != request["launch_id"]
+            or receipt.get("basis") != request["basis"]
+            or receipt.get("claim_binding") != check["binding"]):
+        raise ValueError("remote claim receipt binding mismatch")
+    outcome = receipt.get("outcome")
+    if (not isinstance(outcome, dict) or type(outcome.get("exit_code")) is not int
+            or outcome.get("incomplete_reason")
+            or not isinstance(outcome.get("stdout"), str) or len(outcome["stdout"]) > 4000
+            or not isinstance(outcome.get("stderr"), str) or len(outcome["stderr"]) > 2000
+            or receipt.get("completion") != {"verifier_returned": True,
+                 "exit_code": outcome["exit_code"], "pinned_sha256": check["digest"]}):
+        raise ValueError("invalid remote completion handshake")
+    execution = receipt.get("execution", {})
+    remote = request["verification_host"]
+    if (execution.get("ssh_alias") != remote["ssh_alias"]
+            or execution.get("executor") != remote["executor"]):
+        raise ValueError("remote execution identity mismatch")
+    # Completion is independent of scheduler/transport status, including PASS.
+    # Validate the execution facts without requiring Slurm terminal success.
+    checked = dict(execution, executor="direct")
+    problem = execution_problem(dict(candidate_tree=request["basis"]["candidate_tree"],
+                                     execution=checked, result="pass", exit_code=0))
+    if problem:
+        raise ValueError(problem)
+
+
+def ingest(run, response):
+    request = run["request"]
+    if (not isinstance(response, dict) or response.get("basis") != request["basis"]
+            or response.get("launch_id") != run["launch_id"]
+            or not isinstance(response.get("receipts"), dict)):
+        raise ValueError("remote response binding mismatch")
+    problems = list(response.get("errors", []))
+    for index in range(len(request["checks"])):
+        key = str(index)
+        if key not in response["receipts"]:
             continue
-        problem = execution_problem(dict(candidate_tree=basis["candidate_tree"],
-                                          execution=execution, result="pass", exit_code=0))
-        if outcome.get("exit_code") == 0 and (problem or cleanup_error):
-            outcomes[index] = incomplete(problem or cleanup_error)
-    return outcomes, execution
+        try:
+            receipt = response["receipts"][key]
+            validate_receipt(receipt, request, index)
+            previous = run["receipts"].get(key)
+            if previous is not None and previous != receipt:
+                raise ValueError("conflicting completed remote receipt")
+            if previous is None:
+                run["published"] = False
+            run["receipts"][key] = receipt
+        except (ValueError, TypeError, AttributeError) as exc:
+            problems.append(str(exc))
+    final, supervision = response.get("final"), response.get("supervision")
+    if final is not None:
+        digests = {key: record_digest(value) for key, value in run["receipts"].items()}
+        if (not isinstance(final, dict) or final.get("launch_id") != run["launch_id"]
+                or final.get("basis") != request["basis"] or final.get("receipts") != digests
+                or not isinstance(final.get("outcomes"), list)
+                or len(final["outcomes"]) != len(request["checks"])):
+            problems.append("invalid remote final completion marker")
+        else:
+            for index, outcome in enumerate(final["outcomes"]):
+                receipt = run["receipts"].get(str(index))
+                if receipt is not None:
+                    if outcome != receipt["outcome"]:
+                        problems.append("final outcome conflicts with completed receipt")
+                elif not isinstance(outcome, dict) or not outcome.get("incomplete_reason"):
+                    problems.append("missing completed remote claim receipt")
+            if run.get("final") is not None and run["final"] != final:
+                problems.append("conflicting remote final completion marker")
+            elif not problems:
+                if run.get("final") is None:
+                    run["published"] = False
+                run["final"] = final
+    run["reconciled"] = bool(not problems and run.get("final") and
+        isinstance(supervision, dict) and supervision.get("launch_id") == run["launch_id"])
+    if request["verification_host"]["executor"] == "slurm":
+        run["reconciled"] = bool(run["reconciled"] and supervision.get("job_id")
+                                 and supervision.get("sacct_state") in TERMINAL)
+    if run["reconciled"]:
+        run["ack"] = record_digest(response)
+    if problems:
+        run["error"] = "; ".join(problems)
+    return run["reconciled"]
+
+
+def remote_call(prefix, remote, code, timeout=45):
+    return subprocess.run(prefix + [shlex.join([remote["python"], "-c", code])],
+                          stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                          env=CE.child_env(), timeout=timeout)
+
+
+def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, unit):
+    """Persist intent before launch and ingest completed receipts monotonically.
+
+    A pending invocation only retrieves its original stage, even if the caller
+    changes the execution host. The coordinator ledger survives publication
+    fence failures and crashes. It is separate from agent-writable audit files.
+    """
+    if state_dir is None:
+        raise ValueError("remote verification requires coordinator evidence storage")
+    with binding_lock(state_dir, unit, basis) as path:
+        ledger = load_ledger(path, unit, basis)
+        pending = [run for run in ledger["runs"] if unresolved(run)]
+        retry = bool(pending)
+        if pending:
+            run = pending[0]
+            remote = run["remote"]
+            if run["request"]["checks"] != checks:
+                # Paths are temporary; compare the content-bound declarations.
+                old = [{k: v for k, v in c.items() if k != "path"}
+                       for c in run["request"]["checks"]]
+                new = [{k: v for k, v in c.items() if k != "path"} for c in checks]
+                if old != new:
+                    raise ValueError(unresolved_message(run) + "; claim binding changed")
+        else:
+            if remote is None:
+                return None, None
+            launch_id = uuid.uuid4().hex
+            stage = remote["workdir_root"].rstrip("/") + "/verify-" + launch_id
+            request = {"basis": basis, "checks": checks, "verification_host": remote,
+                       "timeout": timeout, "launch_id": launch_id}
+            run = {"launch_id": launch_id, "stage": stage, "remote": remote,
+                   "request": request, "receipts": {}, "reconciled": False, "published": False}
+            ledger["runs"].append(run)
+        stage = run["stage"]
+        ssh = coordinator_ssh(repo, tree)
+        execution = run.setdefault("execution", {
+            "location": "remote", "executor": remote["executor"],
+            "ssh_alias": remote["ssh_alias"], "host_identity": None,
+            "stage": stage, "job_id": None, "ssh_program": ssh,
+            "launch_id": run["launch_id"], "cleanup": "unconfirmed",
+            "executables": {key: {"path": remote[key], "version": None}
+                            for key in ("python", "git")}})
+        prefix = [ssh, "-oBatchMode=yes", "-oConnectTimeout=15", remote["ssh_alias"]] if ssh else None
+        error = None
+
+        def receive(proc):
+            # Parse a complete payload before interpreting SSH's own status.
+            nonlocal error
+            if proc.returncode:
+                error = "ssh/remote transport exited {}: {}".format(proc.returncode, proc.stderr[-2000:])
+            if len(proc.stdout) > 100000:
+                raise ValueError("oversized remote response")
+            response = json.loads(proc.stdout)
+            ingest(run, response)
+            publish(path, ledger)
+
+        if not retry:
+            # Bundle/transfer construction is pre-launch and can safely fail.
+            with tempfile.TemporaryDirectory(prefix="verification-transfer-") as tmp:
+                tmp = Path(tmp)
+                make_bundle(runner, tree, basis, tmp / "candidate.bundle")
+                (tmp / "request.json").write_text(json.dumps(run["request"]))
+                for name in FILES[2:]:
+                    shutil.copyfile(Path(__file__).with_name(name), tmp / name)
+                with tempfile.TemporaryFile() as transfer:
+                    with tarfile.open(fileobj=transfer, mode="w") as archive:
+                        for name in FILES:
+                            archive.add(str(tmp / name), arcname=name, recursive=False)
+                    transfer.seek(0)
+                    publish(path, ledger)  # MUST precede the first possible remote launch.
+                    try:
+                        if not prefix:
+                            raise ValueError("ssh is unavailable")
+                        command = shlex.join([remote["python"], "-c", BOOTSTRAP, stage])
+                        proc = subprocess.run(prefix + [command], stdin=transfer,
+                            capture_output=True, text=True, env=CE.child_env(),
+                            timeout=timeout * len(checks) + 120)
+                        receive(proc)
+                    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                        error = "remote transport incomplete: " + str(exc)
+        # Lost stdout is recoverable without executing another verifier.
+        if not run["reconciled"] and prefix:
+            code = ("import json, pathlib, sys; p=pathlib.Path(%r); "
+                    "sys.path.insert(0, str(p)); from remote_verify import collect; "
+                    "print(json.dumps(collect(p)))") % stage
+            try:
+                receive(remote_call(prefix, remote, code))
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                error = "remote retrieval incomplete: " + str(exc)
+        if error:
+            run["transport_error"] = error
+        # Raw evidence is durable before authorizing remote removal. This is
+        # reconciliation, not publication under the operator observation fence.
+        publish(path, ledger)
+        if run["reconciled"] and execution.get("cleanup") != "removed" and prefix:
+            code = ("import json, pathlib, sys; p=pathlib.Path(%r); "
+                    "sys.path.insert(0, str(p)); from remote_verify import cleanup; "
+                    "print(json.dumps(cleanup(p, %r)))") % (stage, run["ack"])
+            try:
+                proc = remote_call(prefix, remote, code)
+                cleaned = json.loads(proc.stdout)
+                if (not isinstance(cleaned, dict) or cleaned.get("stage") != stage
+                        or cleaned.get("cleanup") not in ("removed", "unconfirmed")):
+                    raise ValueError("invalid remote cleanup response")
+                execution.update(cleaned)
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                execution["cleanup_error"] = str(exc)[-2000:]
+        outcomes = []
+        final = run.get("final")
+        for index in range(len(checks)):
+            receipt = run["receipts"].get(str(index))
+            if receipt:
+                outcomes.append(dict(receipt["outcome"]))
+                execution.update(receipt["execution"])
+            else:
+                reason = (final["outcomes"][index].get("incomplete_reason") if final else None)
+                outcomes.append(incomplete(reason or run.get("error") or error or "missing remote completion"))
+        if final:
+            # Failure before any claim still has truthful tree/probe diagnostics.
+            execution.update(final.get("execution", {}))
+        execution["evidence_reconciled"] = run["reconciled"]
+        if not run["reconciled"]:
+            print("WARNING: " + unresolved_message(run), file=sys.stderr)
+        if execution.get("cleanup") != "removed":
+            print("WARNING: remote cleanup unconfirmed for job {}; recovery files {}/job-id "
+                  "and {}/cleanup.json; retain the stage".format(
+                      execution.get("job_id") or "unknown", stage, stage), file=sys.stderr)
+        publish(path, ledger)
+        return outcomes, dict(execution)
 
 
 def main():
@@ -575,23 +818,18 @@ def main():
     stage = Path(args.worker or args.supervise)
     if args.worker:
         return worker(stage)
+    request = json.loads((stage / "request.json").read_text())
+    result = {}
     try:
         result = supervise(stage)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        request = json.loads((stage / "request.json").read_text())
-        result = {"basis": request["basis"], "outcomes": [], "error": str(exc)}
-    finally:
-        # No future submission or job-ID publication by this supervisor is
-        # possible. A secondary connection without this marker retains staging.
-        execution = result.setdefault("execution", {})
-        try:
-            publish(stage / "supervision-finished", {
-                key: execution.get(key) for key in
-                ("job_id", "sacct_state", "sacct_exit_code")})
-            execution.update(cleanup(stage))
-        except OSError as exc:
-            execution.update(cleanup="unconfirmed", stage=str(stage), cleanup_error=str(exc))
-    print(json.dumps(result))
+        result = {"error": str(exc)}
+    execution = result.get("execution", {})
+    publish(stage / "supervision-finished", dict(
+        {key: execution.get(key) for key in ("job_id", "sacct_state", "sacct_exit_code")},
+        launch_id=request["launch_id"]), once=True)
+    # No cleanup here: the coordinator has not durably ingested anything yet.
+    print(json.dumps(collect(stage)))
     return 0
 
 

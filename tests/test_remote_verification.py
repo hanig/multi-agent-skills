@@ -42,7 +42,7 @@ if "tarfile" in command:
         raw = dst.getvalue()
     result = subprocess.run(['/bin/sh', '-c', command], input=raw,
                             stdout=subprocess.DEVNULL if mode in ('ssh-lost-response', 'ssh-lost-both') else None)
-    if mode in ('ssh-lost-response', 'ssh-lost-both'): raise SystemExit(255)
+    if mode in ('ssh-lost-response', 'ssh-lost-both', 'ssh-complete-255'): raise SystemExit(255)
 else:
     if pathlib.Path(os.environ['REMOTE_MODE']).read_text() in ('cleanup-ssh-fail', 'ssh-lost-both'):
         raise SystemExit(255)
@@ -408,6 +408,59 @@ class TestRemoteVerification(unittest.TestCase):
             self.assertTrue(execution['executables'][name]['version'])
         self.assertTrue(self.witness.exists())
         self.assert_clean()
+
+    def test_completed_fail_survives_ssh_255_and_poisoning(self):
+        self.program('raise SystemExit(125 * int(Path(%r).read_text() != "pass"))\n'
+                     % str(self.mode))
+        self.mode.write_text('ssh-complete-255')
+        self.assertNotEqual(self.verify().returncode, 0)
+        self.assertEqual((self.rows()[-1]['result'], self.rows()[-1]['exit_code']), ('fail', 125))
+        self.mode.write_text('pass')
+        self.assertEqual(self.verify().returncode, 0)
+        refused = self.admitted()
+        self.f.assert_refused(refused)
+        self.assertIn('FAIL', refused.stderr)
+
+    def test_completed_pass_survives_ssh_255(self):
+        self.program()
+        self.mode.write_text('ssh-complete-255')
+        result = self.verify()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.rows()[-1]['result'], 'pass')
+        self.assert_clean()
+
+    def test_unretrievable_launch_blocks_rerun_then_retrieves_failure(self):
+        self.program('raise SystemExit(125 * int(Path(%r).read_text() != "pass"))\n'
+                     % str(self.mode))
+        self.mode.write_text('ssh-lost-both')
+        self.assertNotEqual(self.verify().returncode, 0)
+        self.assertEqual(self.rows()[-1]['result'], 'incomplete')
+        stage = Path(self.rows()[-1]['execution']['stage'])
+        self.assertTrue(stage.exists())
+        blocked = self.verify()
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn('unresolved remote evidence at', blocked.stderr)
+        self.assertIn(str(stage), blocked.stderr)
+        self.assertEqual(list(self.remote_root.iterdir()), [stage])
+        # Reconnection retrieves the old failure; it never runs a green trial.
+        self.mode.write_text('pass')
+        retrieved = self.verify()
+        self.assertNotEqual(retrieved.returncode, 0)
+        self.assertEqual((self.rows()[-1]['result'], self.rows()[-1]['exit_code']), ('fail', 125))
+        calls = [json.loads(line) for line in Path(self.f.env['REMOTE_LOG']).read_text().splitlines()]
+        self.assertEqual(sum('tarfile' in call[-1] for call in calls), 1)
+        self.f.assert_refused(self.admitted())
+        self.assert_clean()
+
+    def test_slurm_policy_is_disabled_before_transport(self):
+        self.policy['verification_host'].update(executor='slurm', slurm={
+            'partition': 'fixture-cpu', 'mem': '2G', 'time': '00:05:00'})
+        self.save_policy()
+        result = self.f.invoke('--verify-integration')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('ARC-1103', result.stderr)
+        self.assertFalse(Path(self.f.env['REMOTE_LOG']).exists())
+        self.assertEqual(self.rows(), [])
         self.assertEqual(self.admitted().returncode, 0)
 
     def test_slurm_runs_both_claims_with_target_repetitions_and_handshake(self):
