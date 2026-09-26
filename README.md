@@ -325,7 +325,13 @@ an interrupted cleanup cannot revive a committed request; they cannot resolve
 a successor operation's request. A crash before marker publication remains
 conservatively unresolved.
 A red run for the same exact binding cannot be
-hidden by an earlier pass.
+hidden by an earlier or later pass. Coordinator-observed timeouts and
+launch/capture failures are recorded as `incomplete`, with an
+`incomplete_reason`; they neither admit nor poison that binding. A later
+completed pass may supply the missing evidence. Returned nonzero child statuses,
+including exit 127 and signals not sent by the coordinator, remain `fail`.
+Child diagnostic text never determines completion. Existing `fail` receipts
+retain their meaning, including historical timeout receipts.
 
 The designated `merge-precondition` verifier runs
 `python3 -m unittest discover -s tests` in the candidate tree. Its policy and
@@ -360,6 +366,15 @@ No changed test modules is a successful no-op. The target's
 verifier entry can set a positive integer `repetitions`; candidate policy and
 program edits cannot change that count or the pinned program used for this PR.
 Repeated passes sample stability; they do not prove a test cannot flake later.
+If the coordinator times out and kills the verifier and its repetition, the
+claim is `incomplete`; a child that exits on its own without the handshake still
+fails. A process killed outside the coordinator's observation cannot safely be
+distinguished from candidate-caused termination and is conservatively a failure.
+The declaration is the unique policy entry named `changed-tests-stable` or
+listing that claim. Its own name is used consistently for authorization and
+receipts, while the program path and digest pin remain designated by the
+coordinator. Multiple declarations or duplicate selected names refuse;
+malformed claims never grant authority.
 
 Bootstrap follows target authorization: a target without the new declaration
 keeps the original single-claim rule, so the PR introducing it is checked under
@@ -372,6 +387,16 @@ legacy intents require readable target policy to establish the claim list.
 An unreadable legacy policy or missing required stability claim corrects any
 incorrect persisted integration label to `integration-unverified` and withholds
 advancement for human intervention. Unreadable policy never means no requirement.
+Retained reconciliation also reads the current verification journal. A later
+exact-binding `fail` for either retained claim, or an unreadable journal,
+corrects the intent, merge receipt and any matching saved receipt label to
+`integration-unverified` and withholds advancement. The journal remains
+append-only; old results are not rewritten. `swarm.py verify --claim
+integration-tests` checks coordinator merge-intent files under the lease both
+before running and before publishing evidence. Any intent for that unit refuses
+this generic path; use the connected operator, which understands cancellation
+and abandonment, for subsequent verification. The lease remains released during
+execution.
 
 After a merge, the operator compares its actual parent with the checked
 target. A race is recorded as `integration-unverified` in the intent and merge
