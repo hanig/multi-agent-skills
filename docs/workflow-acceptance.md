@@ -6,6 +6,9 @@ workflow seam: the repository installer copies `hanig-project` and its declared
 staging source is removed before validate → run → advance → report executes
 from a separate project directory through `HANIG_SWARM_DIR` and
 `HANIG_PROJECT_DIR`.
+If the ambient temporary parent is inside the checkout, the fixture chooses
+an external writable system temporary parent; a subprocess regression runs the
+honest control with a checkout-local `TMPDIR` to exercise this placement.
 
 The fixture replaces PATH with a closed shell worker, shell, Python interpreter,
 and sleep for a bounded startup handshake. Isolated Python processes have no

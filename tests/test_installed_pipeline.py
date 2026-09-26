@@ -21,9 +21,23 @@ SKILLS = ("hanig-project", "hanig-swarm")
 OUTPUTS = ["result.txt", "details.txt"]
 
 
+def outside_checkout_temp():
+    """Keep the project/store outside the forbidden source even with TMPDIR."""
+    errors = []
+    for parent in (Path(tempfile.gettempdir()), Path("/tmp"), Path("/var/tmp")):
+        resolved = parent.resolve()
+        if resolved == ROOT or ROOT in resolved.parents:
+            continue
+        try:
+            return tempfile.TemporaryDirectory(prefix="installed-pipeline-", dir=parent)
+        except OSError as exc:
+            errors.append(str(exc))
+    raise OSError("no writable temporary parent outside checkout: " + "; ".join(errors))
+
+
 class InstalledPipeline(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="installed-pipeline-")
+        self.temp = outside_checkout_temp()
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name).resolve()
         self.home = self.base / "home"
@@ -246,6 +260,19 @@ class InstalledPipeline(unittest.TestCase):
             # a bounded timeout if the test process is killed.
             release.touch()
         self.assertGreaterEqual(len(observations), 2)
+
+    def test_050_tmpdir_inside_checkout_still_runs_an_external_honest_project(self):
+        with tempfile.TemporaryDirectory(prefix="pipeline-temp-parent-", dir=ROOT) as parent:
+            # A fresh interpreter avoids tempfile's process-wide cached parent.
+            # Its HOME remains disposable; only this owned temp parent is
+            # created in the checkout and it is removed on every exit path.
+            result = subprocess.run([
+                sys.executable, "-I", "-S", str(Path(__file__).resolve()),
+                "InstalledPipeline.test_010_honest_worker_is_done", "-v"],
+                cwd=self.project, env=dict(self.env, TMPDIR=parent),
+                capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(list(Path(parent).iterdir()), [])
 
 
 if __name__ == "__main__":
