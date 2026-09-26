@@ -1,0 +1,422 @@
+#!/usr/bin/env python3
+"""Coordinator-owned execution policy and disposable SSH/Slurm verification.
+
+Transport carries a local candidate Git bundle and coordinator harness bytes,
+never candidate-selected programs. Same-UID writers and hostile tests are not
+an OS isolation boundary. No forge writes or credential provisioning occur.
+"""
+import argparse
+import base64
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import uuid
+
+import child_environment as CE
+
+POLICY = "verification-execution.json"
+BUNDLE_REF = "refs/heads/verification-candidate"
+FILES = ("candidate.bundle", "request.json", "remote_verify.py", "verify.py",
+         "child_environment.py")
+TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY",
+            "NODE_FAIL", "PREEMPTED", "BOOT_FAIL", "DEADLINE", "REVOKED"}
+
+
+def absolute(value, label):
+    if (not isinstance(value, str) or not value.startswith("/")
+            or any(c in value for c in "\x00\r\n")):
+        raise ValueError(label + " must be an absolute path")
+    return value
+
+
+def read_policy(state_dir):
+    """Only the caller's already-validated external state directory is read."""
+    path = Path(state_dir) / POLICY
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return {}, None
+    if len(raw) > 65536:
+        raise ValueError("execution policy is oversized")
+    policy = json.loads(raw)
+    if (not isinstance(policy, dict) or policy.get("schema_version") != 1
+            or set(policy) - {"schema_version", "local", "remote"}):
+        raise ValueError("invalid execution policy schema")
+    local = policy.get("local", {})
+    if not isinstance(local, dict) or set(local) - {"python", "git"}:
+        raise ValueError("invalid local executable declaration")
+    for key, value in local.items():
+        absolute(value, "local " + key)
+    remote = policy.get("remote")
+    if remote is not None:
+        required = {"ssh_alias", "executor", "workdir_root", "python", "git"}
+        if (not isinstance(remote, dict) or not required.issubset(remote)
+                or set(remote) - required - {"slurm"}):
+            raise ValueError("invalid remote execution declaration")
+        if not isinstance(remote["ssh_alias"], str) or not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_.@-]*", remote["ssh_alias"]):
+            raise ValueError("invalid ssh alias")
+        for key in ("python", "git", "workdir_root"):
+            absolute(remote[key], "remote " + key)
+        if remote["executor"] not in ("direct", "slurm"):
+            raise ValueError("remote executor must be direct or slurm")
+        if remote["executor"] == "slurm":
+            cfg = remote.get("slurm")
+            if not isinstance(cfg, dict) or set(cfg) != {"partition", "mem", "time"}:
+                raise ValueError("slurm requires partition, mem and time")
+            for key, value in cfg.items():
+                if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_:.-]+", value):
+                    raise ValueError("invalid slurm " + key)
+        elif "slurm" in remote:
+            raise ValueError("direct executor cannot declare slurm options")
+    return policy, hashlib.sha256(raw).hexdigest()
+
+
+def resolve_executables(declaration=None):
+    """Resolve once outside candidate cwd; Git defaults deliberately ignore PATH."""
+    declaration = declaration or {}
+    paths = {"python": declaration.get("python", sys.executable),
+             "git": declaration.get("git") or shutil.which("git", path=os.defpath)}
+    result = {}
+    for name, path in paths.items():
+        absolute(path, name)
+        path = os.path.realpath(path)
+        run = subprocess.run([path, "--version"], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             env=CE.child_env(), cwd=os.path.dirname(__file__),
+                             text=True, timeout=30, check=True)
+        version = (run.stdout or run.stderr).strip()
+        if not version or len(version) > 1024:
+            raise ValueError("invalid " + name + " version response")
+        result[name] = {"path": path, "version": version}
+    return result
+
+
+class GitRunner:
+    def __init__(self, runner, executables):
+        self.runner = runner
+        self.git_program = executables["git"]["path"]
+
+    def __call__(self, argv, **kwargs):
+        if argv and argv[0] == "git":
+            argv = [self.git_program] + list(argv[1:])
+        return self.runner(argv, **kwargs)
+
+
+def execution_problem(receipt):
+    """Legacy local records remain admissible; declared remote passes need proof."""
+    execution = receipt.get("execution")
+    if execution is None:
+        return None
+    if not isinstance(execution, dict):
+        return "invalid execution evidence"
+    if execution.get("location") not in ("local", "remote"):
+        return "invalid execution location"
+    if receipt.get("result") != "pass":
+        return None
+    for name in ("python", "git"):
+        item = execution.get("executables", {}).get(name, {})
+        if (not isinstance(item, dict) or not isinstance(item.get("path"), str)
+                or not item["path"].startswith("/") or not item.get("version")):
+            return "missing declared executable evidence"
+    if not execution.get("host_identity"):
+        return "missing verification host identity"
+    if execution["location"] == "remote":
+        if (execution.get("verified_tree") != receipt.get("candidate_tree")
+                or not execution.get("verified_tree")):
+            return "remote candidate tree digest was not verified"
+        if execution.get("executor") not in ("direct", "slurm"):
+            return "invalid remote executor evidence"
+        if execution["executor"] == "slurm" and (
+                not execution.get("job_id") or execution.get("sacct_state") != "COMPLETED"
+                or execution.get("sacct_exit_code") != "0:0"):
+            return "remote Slurm verification lacks terminal success"
+    return None
+
+
+def local_execution(executables):
+    return {"location": "local", "executor": "direct",
+            "host_identity": platform.node(), "executables": executables}
+
+
+def incomplete(reason):
+    return {"exit_code": None, "stdout": "", "stderr": "",
+            "incomplete_reason": reason}
+
+
+def _command(argv, cwd=None, timeout=60):
+    run = subprocess.run(argv, cwd=cwd, env=CE.child_env(), stdin=subprocess.DEVNULL,
+                         capture_output=True, text=True, timeout=timeout)
+    return run.returncode, run.stdout, run.stderr
+
+
+def _git(runner, tree, *args):
+    import verify as V
+    rc, out, err = V._isolated_git(runner, tree, *args, timeout=300)
+    if rc:
+        raise ValueError("remote/bundle Git operation failed: " + err[-2000:])
+    return out.strip()
+
+
+def make_bundle(runner, tree, basis, destination):
+    candidate = _git(runner, tree, "-c", "user.name=verification", "-c",
+                     "user.email=verification@invalid", "commit-tree", basis["candidate_tree"],
+                     "-p", basis["target_commit"], "-p", basis["produced_head"],
+                     "-m", "Disposable verification candidate")
+    _git(runner, tree, "update-ref", BUNDLE_REF, candidate)
+    _git(runner, tree, "bundle", "create", str(destination), BUNDLE_REF)
+
+
+def publish(path, record):
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(record), encoding="utf-8")
+    os.replace(str(temporary), str(path))
+
+
+def worker(stage):
+    """Runs inside the allocation for Slurm, including executable/version probes."""
+    import verify as V
+    request = json.loads((stage / "request.json").read_text())
+    remote, basis = request["remote"], request["basis"]
+    result = {"basis": basis, "outcomes": [], "execution": {
+        "location": "remote", "executor": remote["executor"],
+        "ssh_alias": remote["ssh_alias"], "host_identity": platform.node()}}
+    try:
+        executables = resolve_executables(remote)
+        result["execution"]["executables"] = executables
+        runner = GitRunner(_command, executables)
+        tree = stage / "tree"
+        tree.mkdir()
+        init = ["init", "--quiet", "--template="]
+        if len(basis["candidate_tree"]) == 64:
+            init.append("--object-format=sha256")
+        _git(runner, tree, *init)
+        _git(runner, tree, "fetch", "--no-tags", str(stage / "candidate.bundle"), BUNDLE_REF)
+        _git(runner, tree, "-c", "core.hooksPath=/dev/null", "checkout", "--detach", "FETCH_HEAD")
+        # Hash the checked-out bytes into a fresh index, not just HEAD metadata.
+        _git(runner, tree, "add", "--all")
+        actual_tree = _git(runner, tree, "write-tree")
+        if actual_tree != basis["candidate_tree"]:
+            raise ValueError("remote candidate tree digest mismatch")
+        result["execution"]["verified_tree"] = actual_tree
+        for index, check in enumerate(request["checks"]):
+            path = stage / ("pinned-{}.py".format(index))
+            path.write_bytes(base64.b64decode(check["program"], validate=True))
+            outcome, error = V.run_pinned(
+                runner, path, check["digest"], args=check["args"],
+                timeout=request["timeout"], cwd=str(tree), observe_completion=True,
+                executables=executables)
+            result["outcomes"].append(outcome if not error else incomplete(error))
+            # Preserve a completed failure if a subsequent verifier/job is lost.
+            publish(stage / "result.json", result)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        result["error"] = str(exc)
+    publish(stage / "result.json", result)
+    return 0
+
+
+def scheduler_state(job):
+    rc, out, err = _command(["sacct", "-n", "-P", "-j", job,
+                              "--format=JobIDRaw,State,ExitCode"])
+    if rc:
+        return None
+    matches = [line.split("|") for line in out.splitlines()
+               if line.split("|", 1)[0] == job]
+    if len(matches) != 1 or len(matches[0]) < 3:
+        return None
+    _, state, code = matches[0][:3]
+    # Slurm CANCELLED can carry ' by uid'; this is state parsing, never identity.
+    state = state.split(" ", 1)[0].rstrip("+")
+    return (state, code) if state in TERMINAL else None
+
+
+def supervise(stage):
+    request = json.loads((stage / "request.json").read_text())
+    remote = request["remote"]
+    deadline = time.monotonic() + request["timeout"] * len(request["checks"]) + 60
+    job = None
+    state = None
+    try:
+        if remote["executor"] == "direct":
+            worker(stage)
+        else:
+            cfg = remote["slurm"]
+            script = stage / "job.sh"
+            script.write_text("#!/bin/sh\nexec " + shlex.join([
+                remote["python"], str(stage / "remote_verify.py"),
+                "--worker", str(stage)]) + "\n")
+            rc, out, err = _command([
+                "sbatch", "--parsable", "--partition=" + cfg["partition"],
+                "--mem=" + cfg["mem"], "--time=" + cfg["time"],
+                "--output=" + str(stage / "job.out"), "--error=" + str(stage / "job.err"),
+                str(script)])
+            if rc or not re.fullmatch(r"[0-9]+(?:;[A-Za-z0-9_.-]+)?\n?", out):
+                raise ValueError("Slurm submission unavailable: " + err[-1000:])
+            job = out.strip().split(";")[0]
+            (stage / "job-id").write_text(job)
+            while time.monotonic() < deadline:
+                state = scheduler_state(job)
+                if state:
+                    break
+                time.sleep(0.2)
+        try:
+            result = json.loads((stage / "result.json").read_text())
+        except (OSError, ValueError):
+            result = {"basis": request["basis"], "outcomes": [], "execution": {
+                "location": "remote", "ssh_alias": remote["ssh_alias"],
+                "executor": remote["executor"]}, "error": "remote worker did not complete"}
+        if job:
+            result["execution"].update(job_id=job, sacct_state=state[0] if state else None,
+                                       sacct_exit_code=state[1] if state else None)
+            if state != ("COMPLETED", "0:0"):
+                reason = "Slurm verification did not reach terminal success"
+                result["error"] = reason
+                result["outcomes"] = [o if not o.get("incomplete_reason")
+                                      and o.get("exit_code") not in (None, 0)
+                                      else incomplete(reason) for o in result["outcomes"]]
+        return result
+    finally:
+        if job and state is None:
+            _command(["scancel", job], timeout=30)
+
+
+# The fixed bootstrap reads only this allowlist, never tar-supplied paths/modes.
+# It executes the coordinator harness outside the transferred candidate tree.
+BOOTSTRAP = """import os, pathlib, sys, tarfile
+stage = pathlib.Path(sys.argv[1])
+stage.mkdir(parents=False, exist_ok=False)
+with tarfile.open(fileobj=sys.stdin.buffer, mode='r|') as archive:
+    seen = set()
+    for member in archive:
+        if member.name not in %r or member.name in seen or not member.isfile():
+            raise SystemExit('invalid verification transfer')
+        seen.add(member.name)
+        with archive.extractfile(member) as source, (stage / member.name).open('wb') as dest:
+            import shutil
+            shutil.copyfileobj(source, dest)
+    if seen != set(%r): raise SystemExit('incomplete verification transfer')
+os.execv(sys.executable, [sys.executable, str(stage / 'remote_verify.py'), '--supervise', str(stage)])
+""" % (FILES, FILES)
+
+
+def cleanup(stage):
+    try:
+        job = (stage / "job-id").read_text()
+    except FileNotFoundError:
+        job = None
+    if job and re.fullmatch(r"[0-9]+", job) and scheduler_state(job) is None:
+        _command(["scancel", job], timeout=30)
+    shutil.rmtree(stage, ignore_errors=False)
+
+
+def run_remote(runner, tree, basis, checks, remote, timeout):
+    """Transport errors are incomplete, never a verifier's completed FAIL."""
+    stage = remote["workdir_root"].rstrip("/") + "/verify-" + uuid.uuid4().hex
+    ssh = shutil.which("ssh")  # coordinator environment, resolved before candidate execution
+    execution = {"location": "remote", "executor": remote["executor"],
+                 "ssh_alias": remote["ssh_alias"]}
+    result = None
+    error = None
+    cleanup_error = None
+    if not ssh:
+        return [incomplete("ssh is unavailable") for _ in checks], execution
+    prefix = [ssh, "-oBatchMode=yes", "-oConnectTimeout=15", remote["ssh_alias"]]
+    command = shlex.join([remote["python"], "-c", BOOTSTRAP, stage])
+    with tempfile.TemporaryDirectory(prefix="verification-transfer-") as tmp:
+        tmp = Path(tmp)
+        make_bundle(runner, tree, basis, tmp / "candidate.bundle")
+        request = {"basis": basis, "checks": checks, "remote": remote, "timeout": timeout}
+        (tmp / "request.json").write_text(json.dumps(request))
+        for name in FILES[2:]:
+            shutil.copyfile(Path(__file__).with_name(name), tmp / name)
+        with tempfile.TemporaryFile() as transfer:
+            with tarfile.open(fileobj=transfer, mode="w") as archive:
+                for name in FILES:
+                    archive.add(str(tmp / name), arcname=name, recursive=False)
+            transfer.seek(0)
+            try:
+                proc = subprocess.run(prefix + [command], stdin=transfer,
+                                      capture_output=True, text=True, env=CE.child_env(),
+                                      timeout=timeout * len(checks) + 120)
+                if proc.returncode:
+                    raise ValueError("ssh/remote transport exited {}: {}".format(
+                        proc.returncode, proc.stderr[-2000:]))
+                if len(proc.stdout) > 100000:
+                    raise ValueError("oversized remote response")
+                result = json.loads(proc.stdout)
+                if not isinstance(result, dict) or result.get("basis") != basis:
+                    raise ValueError("remote response binding mismatch")
+                execution = result.get("execution", execution)
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                error = "remote transport incomplete: " + str(exc)
+            finally:
+                # A second connection covers interrupted bootstrap/transport.
+                # Normal supervision has already removed the directory.
+                code = ("import pathlib, shutil, subprocess; p=pathlib.Path(%r); "
+                        "j=p/'job-id'; job=j.read_text() if j.exists() else ''; "
+                        "subprocess.run(['scancel',job],stdout=subprocess.DEVNULL,"
+                        "stderr=subprocess.DEVNULL,timeout=30) if job.isdigit() else None; "
+                        "shutil.rmtree(p) if p.exists() else None") % stage
+                try:
+                    proc = subprocess.run(prefix + [shlex.join([remote["python"], "-c", code])],
+                                          stdin=subprocess.DEVNULL, capture_output=True,
+                                          env=CE.child_env(), timeout=45)
+                    if proc.returncode:
+                        cleanup_error = "remote cleanup could not be confirmed"
+                except (OSError, subprocess.SubprocessError):
+                    cleanup_error = "remote cleanup could not be confirmed"
+    execution["cleanup"] = cleanup_error or "removed"
+    if error:
+        return [incomplete(error) for _ in checks], execution
+    outcomes = result.get("outcomes", [])
+    if not isinstance(outcomes, list) or len(outcomes) > len(checks):
+        outcomes = []
+        error = "invalid remote outcomes"
+    while len(outcomes) < len(checks):
+        outcomes.append(incomplete(error or result.get("error") or "missing remote completion"))
+    for index, outcome in enumerate(outcomes):
+        if (not isinstance(outcome, dict) or type(outcome.get("exit_code")) is not int
+                and not outcome.get("incomplete_reason")):
+            outcomes[index] = incomplete("invalid remote completion")
+            continue
+        problem = execution_problem(dict(candidate_tree=basis["candidate_tree"],
+                                          execution=execution, result="pass"))
+        if outcome.get("exit_code") == 0 and (problem or cleanup_error):
+            outcomes[index] = incomplete(problem or cleanup_error)
+    return outcomes, execution
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--worker")
+    group.add_argument("--supervise")
+    args = parser.parse_args()
+    stage = Path(args.worker or args.supervise)
+    if args.worker:
+        return worker(stage)
+    try:
+        result = supervise(stage)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        request = json.loads((stage / "request.json").read_text())
+        result = {"basis": request["basis"], "outcomes": [], "error": str(exc)}
+    finally:
+        cleanup(stage)
+    print(json.dumps(result))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
