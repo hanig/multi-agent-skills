@@ -193,6 +193,12 @@ def worker(stage):
     import verify as V
     request = json.loads((stage / "request.json").read_text())
     remote, basis = request["remote"], request["basis"]
+    try:
+        (stage / "worker-started").mkdir()
+    except FileExistsError:
+        # A site can force requeue despite --no-requeue. Never overwrite a
+        # previous worker's completed FAIL or partially collected evidence.
+        return 0
     result = {"basis": basis, "outcomes": [], "execution": {
         "location": "remote", "executor": remote["executor"],
         "ssh_alias": remote["ssh_alias"], "host_identity": platform.node()}}
@@ -233,7 +239,7 @@ def worker(stage):
 def scheduler_state(job):
     try:
         rc, out, err = _command(["sacct", "-n", "-P", "-j", job,
-                                  "--format=JobIDRaw,State,ExitCode"])
+                                  "--format=JobIDRaw,State%40,ExitCode"])
     except (OSError, subprocess.SubprocessError):
         return None
     if rc:
