@@ -391,6 +391,12 @@ remote receipts also retain the coordinator's construction executables. A
 worker that cannot start leaves its host identity and versions unavailable
 in the incomplete receipt.
 The shipped verifier programs reuse the selected Python and Git for subprocesses.
+For merge verification, the coordinator selects the declared Python when the
+authorized program has no shebang or its shebang names `python`, `python3`, or
+a numeric version such as `python3.10` (directly, through `env`, or `env -S`).
+Python shebang arguments are retained. Other shebangs run through their own
+interpreter, regardless of the filename extension. Only the target-authorized,
+digest-pinned bytes supply this choice; a PR cannot select its own interpreter.
 Their updated digest pins must land on the target before their new behavior is
 authorized; candidate changes cannot update the programs used to check themselves.
 Ordinary generic verifier scripts retain their existing executable semantics.
@@ -416,7 +422,13 @@ verifier failure remains `fail`, including a retained failure before a later job
 failure. Output tails are bounded. Remote directories are removed on completion;
 a second SSH cleanup attempts cancellation and removal after transport failure.
 If connectivity prevents confirmation, the receipt records that cleanup is
-unconfirmed. A disconnected job can remain until its declared time limit; this
+unconfirmed. Cancellation is recorded separately: `requested` means `scancel`
+accepted the request, not that termination was observed. A failed cancellation
+records `unconfirmed`, the job ID and bounded diagnostics, retains the stage for
+the second cleanup attempt, and prints an operator warning naming the job ID
+if still unconfirmed. A successful retry retains both cancellation attempts.
+An incomplete verification remains incomplete after cleanup. A disconnected job
+can remain until its declared time limit; this
 is not a remote process sandbox or a guarantee against same-UID writers.
 
 The designated `merge-precondition` verifier runs
