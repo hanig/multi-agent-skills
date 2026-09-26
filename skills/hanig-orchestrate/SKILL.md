@@ -193,3 +193,5 @@ delivery, or that a configured review price equals a completed round's cost.
 Coordinator judgment and closure stay in `hanig-swarm`; review semantics stay in
 `hanig-review-gate`; run reports stay in `hanig-project`; pointer capture stays
 in `hanig-portable-handoff`.
+
+Run `scripts/reconcile.py` in the hourly loop for read-only bypass and pending-obligation detection; see [the operating loop](references/operating-loop.md#hourly-read-only-bypass-check).
