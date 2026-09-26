@@ -1488,6 +1488,13 @@ class TrackerSyncHookProvenance(unittest.TestCase):
         os.mkfifo(path)
         self.assertNotIn("total 0", self.context())
 
+    def test_deep_identity_json_delivers_repository_specific_unknown(self):
+        with open(os.path.join(self.state, "swarm-state.json"), "w") as handle:
+            handle.write("[" * 10000 + "0" + "]" * 10000)
+        context = self.context()
+        self.assertIn("Cannot confirm tracker state for this repository", context)
+        self.assertNotIn("total 0", context)
+
     def test_explicit_repo_and_cwd_redirects_do_not_reuse_another_source(self):
         for command in ("gh pr merge 7 --repo other/repo", "gh pr merge https://github.com/other/repo/pull/7 --repo example/project",
                         "cd /elsewhere && git push origin HEAD", "git -C /missing push origin HEAD",

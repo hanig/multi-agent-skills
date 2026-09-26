@@ -165,6 +165,28 @@ print(json.dumps(pages[int(cursor)]))
         self.assertEqual(code, 1)
         self.assertIn("UNMEDIATED MERGE", self.kinds(report))
 
+    def test_foreign_source_obligations_are_not_attributed_to_requested_repo(self):
+        self.write_state("https://github.com/other/repository")
+        key = R.S.emit_intent(self.state, "foreign", "u", "SUBMITTED",
+                             {"attempt_dir": "/attempt/a1"}, kind="code")
+        self.assertIsNotNone(key)
+        code, report = self.run_cli()
+        self.assertEqual(code, 1, report)
+        self.assertEqual(self.kinds(report), ["MISMATCHED SOURCE"])
+        # Reading every source still matters: a foreign corrupt journal is
+        # unreadable, rather than silently skipped after identity mismatch.
+        (self.state / R.S.RECEIPTS).write_text("{}\n")
+        self.assertEqual(self.run_cli()[0], 2)
+
+    def test_historical_pr_head_is_distinct_from_current_branch_target(self):
+        # Mirrors the observed GitHub field distinction, e.g. cpython PR 154042.
+        # No network: the forge stub supplies a later live branch target.
+        pr = self.pr()
+        pr["headRef"] = {"target": {"oid": "c" * 40}}
+        self.set_pages([pr])
+        self.record()
+        self.assertEqual(self.run_cli()[0], 0)
+
     def test_bad_state_outbox_receipts_and_merge_journal_are_unreadable(self):
         for name, content in ((R.S.STATE_FILE, '{}'), (R.S.OUTBOX, '{bad}\n'),
                               (R.S.RECEIPTS, '{}\n'), ('merge-unit-bad.json', '{}')):
