@@ -794,7 +794,7 @@ def run_merge_preconditions(runner, repo, produced_head, target_commit,
                              "args": args, "program": base64.b64encode(
                                  Path(policy_tree, path).read_bytes()).decode("ascii")})
             extras.append(extra)
-        remote = execution_policy.get("remote")
+        remote = execution_policy.get("verification_host")
         if remote:
             outcomes, execution = RV.run_remote(
                 runner, tree, basis, programs, remote, timeout)

@@ -53,14 +53,14 @@ def read_policy(state_dir):
     policy = json.loads(raw)
     if (not isinstance(policy, dict) or type(policy.get("schema_version")) is not int
             or policy["schema_version"] != 1
-            or set(policy) - {"schema_version", "local", "remote"}):
+            or set(policy) - {"schema_version", "local", "verification_host"}):
         raise ValueError("invalid execution policy schema")
     local = policy.get("local", {})
     if not isinstance(local, dict) or set(local) - {"python", "git"}:
         raise ValueError("invalid local executable declaration")
     for key, value in local.items():
         absolute(value, "local " + key)
-    remote = policy.get("remote")
+    remote = policy.get("verification_host")
     if remote is not None:
         required = {"ssh_alias", "executor", "workdir_root", "python", "git"}
         if (not isinstance(remote, dict) or not required.issubset(remote)
@@ -195,7 +195,7 @@ def worker(stage):
     """Runs inside the allocation for Slurm, including executable/version probes."""
     import verify as V
     request = json.loads((stage / "request.json").read_text())
-    remote, basis = request["remote"], request["basis"]
+    remote, basis = request["verification_host"], request["basis"]
     try:
         (stage / "worker-started").mkdir()
     except FileExistsError:
@@ -269,7 +269,7 @@ def output_tail(path, limit):
 
 def supervise(stage):
     request = json.loads((stage / "request.json").read_text())
-    remote = request["remote"]
+    remote = request["verification_host"]
     deadline = time.monotonic() + request["timeout"] * len(request["checks"])
     job = None
     state = None
@@ -370,7 +370,7 @@ def run_remote(runner, tree, basis, checks, remote, timeout):
     with tempfile.TemporaryDirectory(prefix="verification-transfer-") as tmp:
         tmp = Path(tmp)
         make_bundle(runner, tree, basis, tmp / "candidate.bundle")
-        request = {"basis": basis, "checks": checks, "remote": remote, "timeout": timeout}
+        request = {"basis": basis, "checks": checks, "verification_host": remote, "timeout": timeout}
         (tmp / "request.json").write_text(json.dumps(request))
         for name in FILES[2:]:
             shutil.copyfile(Path(__file__).with_name(name), tmp / name)
