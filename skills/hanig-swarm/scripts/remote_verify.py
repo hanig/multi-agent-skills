@@ -210,7 +210,7 @@ def worker(stage):
         actual_tree = _git(runner, tree, "write-tree")
         if actual_tree != basis["candidate_tree"]:
             raise ValueError("remote candidate tree digest mismatch")
-        result["execution"]["verified_tree"] = actual_tree
+        result["execution"]["verified_tree"] = basis["candidate_tree"]
         for index, check in enumerate(request["checks"]):
             path = stage / ("pinned-{}.py".format(index))
             path.write_bytes(base64.b64decode(check["program"], validate=True))
