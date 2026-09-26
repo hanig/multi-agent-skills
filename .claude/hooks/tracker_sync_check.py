@@ -1331,7 +1331,7 @@ def repository_is_bound(payload, command, state):
         if len(command) > _COMMAND_LEX_LIMIT or re.search(r"[$`;\n&|<>(){}*?\\]", command):
             return False
         words = shlex.split(command)
-        cwd = payload.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR")
+        cwd = payload.get("cwd")
         if not isinstance(cwd, str) or not os.path.isabs(cwd):
             return False
         # These can override Git routing outside the literal command.

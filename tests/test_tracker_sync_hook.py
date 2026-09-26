@@ -1447,6 +1447,31 @@ class TrackerSyncHookProvenance(unittest.TestCase):
         self.assertIn("Cannot confirm tracker state for this repository", context)
         self.assertNotIn("total 0", context)
 
+    def test_missing_or_malformed_command_cwd_cannot_borrow_project_identity(self):
+        # The wired hook's code comes from CLAUDE_PROJECT_DIR, but the command
+        # ran in a different repository. Only the harness event locates it.
+        remote = subprocess.check_output(
+            ["git", "-C", REPO_ROOT, "remote", "get-url", "--push", "origin"],
+            text=True).strip()
+        with open(os.path.join(self.state, "swarm-state.json"), "w") as handle:
+            json.dump({"units": {"u": {"attempt_launch_facts": {
+                "a1": {"repository_remote": remote}}}}}, handle)
+        env = dict(os.environ, **self.env, CLAUDE_PROJECT_DIR=REPO_ROOT)
+        env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env.get("PATH", "")
+        for cwd in (None, "", False, 0, [], "relative"):
+            with self.subTest(cwd=cwd):
+                payload = {"tool_input": {"command": "git push origin HEAD"}}
+                if cwd is not None:
+                    payload["cwd"] = cwd
+                proc = subprocess.run(["/bin/sh", "-c", wired_commands()[0]],
+                                      input=json.dumps(payload), env=env, cwd=self.repo,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      text=True, timeout=10)
+                context = injected_context(proc.stdout)
+                self.assertIsNotNone(context, proc.stdout)
+                self.assertIn("Cannot confirm tracker state for this repository", context)
+                self.assertNotIn("total 0", context)
+
     def test_identity_requires_valid_coordinator_anchors(self):
         path = os.path.join(self.state, "swarm-state.json")
         for value in (None, [], {}, {"units": []}, {"units": {"u": None}},
