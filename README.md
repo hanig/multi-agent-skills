@@ -387,21 +387,19 @@ PATH directories. Git/SSH exclude relative entries and symlinks into operated
 repositories/candidate trees; external wrappers are allowed. Receipts record
 paths, versions and host identity; missing worker probes stay unavailable.
 
-Explicit Python handles shebangless programs and pinned Python shebangs (direct
-or `env`/`env -S`, including numeric versions). Other shebangs run natively.
-Undeclared local Python preserves native shebang/child selection (role
-`launcher`); remote Python is explicit. Generic script semantics are unchanged.
-The bounded env selector preserves supported arguments, assignments, cwd and
-argv0, then restores selected tools. Unsupported or malformed selectors are
-incomplete; supported options still require host env support. Only the helper
-uses harness `-I -S`; verifier startup remains native. Shipped verifiers reuse
-selected Python/Git. New digest pins must land on the target before authorization.
+Explicit Python handles shebangless programs and pinned Python shebangs, direct
+or via `env`/`env -S`. Other shebangs and undeclared local Python remain native;
+remote Python is explicit. Generic scripts retain their semantics. The bounded
+env selector preserves supported arguments, environment, cwd and argv0 before
+restoring tools; malformed/unsupported selectors are incomplete. Only the helper
+uses `-I -S`. Shipped verifiers reuse selected tools and require target-authorized
+digest pins; a candidate cannot authorize itself.
 
-Local candidate construction sends a bundle and coordinator harness over batch
-SSH without forge writes. The worker rehashes its checkout before both claims,
-preserving repetitions, handshakes and exact bindings. Publication reacquires the
-lease and rechecks observation fences, including execution policy. Invalid
-retained execution/tree evidence corrects verified labels and blocks advancement.
+The coordinator sends a local candidate bundle and harness over batch SSH,
+without forge writes. The worker rehashes the checkout before both claims.
+Publication reacquires the lease and applies existing observation fences,
+including execution policy. Invalid retained execution/tree evidence corrects
+verified labels and blocks advancement.
 
 Each completed claim becomes a write-once `claim-N.json` before the next claim;
 then come `worker-complete` and the separate supervision marker. Receipts bind
