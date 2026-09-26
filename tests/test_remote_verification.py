@@ -359,6 +359,17 @@ class TestRemoteVerification(unittest.TestCase):
         calls = [json.loads(line) for line in log.read_text().splitlines()]
         self.assertGreater(sum('checkout' in c for c in calls), before)
 
+    def test_local_verifier_preserves_other_declared_host_path_tools(self):
+        self.policy.pop('remote')
+        self.save_policy()
+        helper = self.f.bin / 'fixture-host-helper'
+        helper.write_text('#!' + sys.executable + '\nprint("HOST_HELPER_RAN")\n')
+        helper.chmod(0o755)
+        self.program('import subprocess\nsubprocess.run(["fixture-host-helper"], check=True)\n')
+        result = self.verify()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('HOST_HELPER_RAN', self.rows()[-1]['stdout_tail'])
+
     def test_changed_remote_module_without_handshake_fails(self):
         self.shared.install_policy(repetitions=2)
         self.shared.candidate({'tests/test_exit.py': 'raise SystemExit(0)\n'})

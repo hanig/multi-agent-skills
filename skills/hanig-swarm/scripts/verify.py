@@ -986,10 +986,10 @@ def run_pinned(runner, path, expect_digest, args=None, timeout=900,
                     argv.insert(0, executables["python"]["path"])
                 bindir = Path(tmpdir) / "bin"
                 bindir.mkdir()
-                for name, key in (("python3", "python"), ("git", "git")):
+                for name, key in (("python3", "python"), ("python", "python"), ("git", "git")):
                     (bindir / name).symlink_to(executables[key]["path"])
                 env = CE.child_env()
-                env["PATH"] = str(bindir) + os.pathsep + os.defpath
+                env["PATH"] = str(bindir) + os.pathsep + env.get("PATH", os.defpath)
                 env["HANIG_VERIFICATION_GIT"] = executables["git"]["path"]
                 env["HANIG_VERIFICATION_PYTHON"] = executables["python"]["path"]
             return _observe_execution(argv, timeout, cwd, env=env), None
