@@ -273,54 +273,47 @@ def supervise(stage):
     deadline = time.monotonic() + request["timeout"] * len(request["checks"])
     job = None
     state = None
+    if remote["executor"] == "direct":
+        worker(stage)
+    else:
+        cfg = remote["slurm"]
+        script = stage / "job.sh"
+        script.write_text("#!/bin/sh\nexec " + shlex.join([
+            remote["python"], str(stage / "remote_verify.py"),
+            "--worker", str(stage)]) + "\n")
+        rc, out, err = _command([
+            "sbatch", "--parsable", "--no-requeue", "--partition=" + cfg["partition"],
+            "--mem=" + cfg["mem"], "--time=" + cfg["time"],
+            "--output=" + str(stage / "job.out"), "--error=" + str(stage / "job.err"),
+            str(script)])
+        if rc or not re.fullmatch(r"[0-9]+(?:;[A-Za-z0-9_.-]+)?\n?", out):
+            raise ValueError("Slurm submission unavailable: " + err[-1000:])
+        job = out.strip().split(";")[0]
+        (stage / "job-id").write_text(job)
+        while True:
+            state = scheduler_state(job)
+            if state or time.monotonic() >= deadline:
+                break
+            time.sleep(min(2, max(0, deadline - time.monotonic())))
     try:
-        if remote["executor"] == "direct":
-            worker(stage)
-        else:
-            cfg = remote["slurm"]
-            script = stage / "job.sh"
-            script.write_text("#!/bin/sh\nexec " + shlex.join([
-                remote["python"], str(stage / "remote_verify.py"),
-                "--worker", str(stage)]) + "\n")
-            rc, out, err = _command([
-                "sbatch", "--parsable", "--no-requeue", "--partition=" + cfg["partition"],
-                "--mem=" + cfg["mem"], "--time=" + cfg["time"],
-                "--output=" + str(stage / "job.out"), "--error=" + str(stage / "job.err"),
-                str(script)])
-            if rc or not re.fullmatch(r"[0-9]+(?:;[A-Za-z0-9_.-]+)?\n?", out):
-                raise ValueError("Slurm submission unavailable: " + err[-1000:])
-            job = out.strip().split(";")[0]
-            (stage / "job-id").write_text(job)
-            while True:
-                state = scheduler_state(job)
-                if state or time.monotonic() >= deadline:
-                    break
-                time.sleep(min(2, max(0, deadline - time.monotonic())))
-        try:
-            result = json.loads((stage / "result.json").read_text())
-        except (OSError, ValueError):
-            result = {"basis": request["basis"], "outcomes": [], "execution": {
-                "location": "remote", "ssh_alias": remote["ssh_alias"],
-                "executor": remote["executor"]}, "error": "remote worker did not complete"}
-        if job:
-            result["execution"].update(
-                scheduler_stdout_tail=output_tail(stage / "job.out", 4000),
-                scheduler_stderr_tail=output_tail(stage / "job.err", 2000),
-                job_id=job, sacct_state=state[0] if state else None,
-                                       sacct_exit_code=state[1] if state else None)
-            if state != ("COMPLETED", "0:0"):
-                reason = "Slurm verification did not reach terminal success"
-                result["error"] = reason
-                result["outcomes"] = [o if not o.get("incomplete_reason")
-                                      and o.get("exit_code") not in (None, 0)
-                                      else incomplete(reason) for o in result["outcomes"]]
-        return result
-    finally:
-        if job and state is None:
-            try:
-                _command(["scancel", job], timeout=30)
-            except (OSError, subprocess.SubprocessError):
-                pass  # cleanup retries cancellation and reports any failure
+        result = json.loads((stage / "result.json").read_text())
+    except (OSError, ValueError):
+        result = {"basis": request["basis"], "outcomes": [], "execution": {
+            "location": "remote", "ssh_alias": remote["ssh_alias"],
+            "executor": remote["executor"]}, "error": "remote worker did not complete"}
+    if job:
+        result["execution"].update(
+            scheduler_stdout_tail=output_tail(stage / "job.out", 4000),
+            scheduler_stderr_tail=output_tail(stage / "job.err", 2000),
+            job_id=job, sacct_state=state[0] if state else None,
+                                   sacct_exit_code=state[1] if state else None)
+        if state != ("COMPLETED", "0:0"):
+            reason = "Slurm verification did not reach terminal success"
+            result["error"] = reason
+            result["outcomes"] = [o if not o.get("incomplete_reason")
+                                  and o.get("exit_code") not in (None, 0)
+                                  else incomplete(reason) for o in result["outcomes"]]
+    return result
 
 
 # The fixed bootstrap reads only this allowlist, never tar-supplied paths/modes.
@@ -343,13 +336,40 @@ os.execv(sys.executable, [sys.executable, str(stage / 'remote_verify.py'), '--su
 
 
 def cleanup(stage):
+    """Report cancellation separately; retain a stage when scancel fails.
+
+    A zero scancel status confirms an accepted request, not job termination.
+    Keeping failed stages lets the second connection retry with the same job ID.
+    """
+    evidence = {"cleanup": "unconfirmed", "stage": str(stage)}
     try:
-        job = (stage / "job-id").read_text()
-    except FileNotFoundError:
-        job = None
-    if job and re.fullmatch(r"[0-9]+", job) and scheduler_state(job) is None:
-        _command(["scancel", job], timeout=30)
-    shutil.rmtree(stage, ignore_errors=False)
+        try:
+            job = (stage / "job-id").read_text()
+        except FileNotFoundError:
+            job = None
+        if job and re.fullmatch(r"[0-9]+", job):
+            evidence["job_id"] = job
+            if scheduler_state(job) is None:
+                attempt = {"job_id": job, "exit_code": None}
+                try:
+                    rc, out, err = _command(["scancel", job], timeout=30)
+                    attempt.update(exit_code=rc, stdout_tail=out[-2000:],
+                                   stderr_tail=err[-2000:])
+                except (OSError, subprocess.SubprocessError) as exc:
+                    attempt["error"] = str(exc)[-2000:]
+                evidence["cancellation_attempts"] = [attempt]
+                evidence["cancellation"] = ("requested" if attempt["exit_code"] == 0
+                                            else "unconfirmed")
+                if evidence["cancellation"] == "unconfirmed":
+                    return evidence
+            else:
+                evidence["cancellation"] = "not-required"
+        if stage.exists():
+            shutil.rmtree(stage, ignore_errors=False)
+        evidence["cleanup"] = "removed"
+    except (OSError, subprocess.SubprocessError) as exc:
+        evidence["cleanup_error"] = str(exc)[-2000:]
+    return evidence
 
 
 def run_remote(runner, tree, basis, checks, remote, timeout):
@@ -404,20 +424,38 @@ def run_remote(runner, tree, basis, checks, remote, timeout):
             finally:
                 # A second connection covers interrupted bootstrap/transport.
                 # Normal supervision has already removed the directory.
-                code = ("import pathlib, shutil, subprocess; p=pathlib.Path(%r); "
-                        "j=p/'job-id'; job=j.read_text() if j.exists() else ''; "
-                        "subprocess.run(['scancel',job],stdout=subprocess.DEVNULL,"
-                        "stderr=subprocess.DEVNULL,timeout=30) if job.isdigit() else None; "
-                        "shutil.rmtree(p) if p.exists() else None") % stage
+                code = ("import json, pathlib, sys; p=pathlib.Path(%r); "
+                        "sys.path.insert(0, str(p)); "
+                        "from remote_verify import cleanup; "
+                        "print(json.dumps(cleanup(p)))") % stage
+                # No harness remains after a successful first cleanup.
+                code = ("import json, pathlib; p=pathlib.Path(%r)\n"
+                        "if not p.exists(): print(json.dumps({'cleanup': 'removed'}))\n"
+                        "else:\n    exec(%r)\n") % (stage, code)
                 try:
                     proc = subprocess.run(prefix + [shlex.join([remote["python"], "-c", code])],
                                           stdin=subprocess.DEVNULL, capture_output=True,
-                                          env=CE.child_env(), timeout=45)
+                                          text=True, env=CE.child_env(), timeout=45)
                     if proc.returncode:
-                        cleanup_error = "remote cleanup could not be confirmed"
-                except (OSError, subprocess.SubprocessError):
-                    cleanup_error = "remote cleanup could not be confirmed"
-    execution["cleanup"] = cleanup_error or "removed"
+                        raise ValueError("cleanup transport exited {}: {}".format(
+                            proc.returncode, proc.stderr[-2000:]))
+                    cleaned = json.loads(proc.stdout)
+                    if not isinstance(cleaned, dict) or cleaned.get("cleanup") not in (
+                            "removed", "unconfirmed"):
+                        raise ValueError("invalid remote cleanup response")
+                    attempts = execution.get("cancellation_attempts", [])
+                    attempts = attempts + cleaned.pop("cancellation_attempts", [])
+                    execution.update(cleaned)
+                    if attempts:
+                        execution["cancellation_attempts"] = attempts
+                except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                    execution["cleanup"] = "unconfirmed"
+                    execution["cleanup_error"] = str(exc)[-2000:]
+    if execution.get("cleanup") != "removed" or execution.get("cancellation") == "unconfirmed":
+        cleanup_error = "remote cleanup/cancellation could not be confirmed"
+        execution["cleanup"] = "unconfirmed"
+        print("WARNING: {} for job {}; inspect and cancel if still active; stage {}".format(
+            cleanup_error, execution.get("job_id", "unknown"), stage), file=sys.stderr)
     if error:
         return [incomplete(error) for _ in checks], execution
     outcomes = result.get("outcomes", [])
@@ -458,10 +496,7 @@ def main():
         request = json.loads((stage / "request.json").read_text())
         result = {"basis": request["basis"], "outcomes": [], "error": str(exc)}
     finally:
-        try:
-            cleanup(stage)
-        except (OSError, subprocess.SubprocessError) as exc:
-            result.setdefault("execution", {})["cleanup"] = str(exc)
+        result.setdefault("execution", {}).update(cleanup(stage))
     print(json.dumps(result))
     return 0
 
