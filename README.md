@@ -360,7 +360,7 @@ and the kill does not erase the failure.
 
 The optional `verification-execution.json` belongs directly in the external
 coordinator state directory. It is never read from the plan, PR or candidate
-checkout. Without it verification stays local. Local defaults select the
+checkout; a symlink policy is refused. Without it verification stays local. Local defaults select the
 operator's Python and Git from `os.defpath`; explicit paths replace those
 defaults. A declaration can select a remote SSH alias and either `direct` or
 `slurm` execution:
