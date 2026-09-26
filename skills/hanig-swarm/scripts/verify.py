@@ -794,6 +794,7 @@ def run_merge_preconditions(runner, repo, produced_head, target_commit,
         if remote:
             outcomes, execution = RV.run_remote(
                 runner, tree, basis, programs, remote, timeout)
+            execution["coordinator_executables"] = executables
         else:
             outcomes = []
             execution = RV.local_execution(executables)
@@ -815,7 +816,7 @@ def run_merge_preconditions(runner, repo, produced_head, target_commit,
                 **outcome_result(outcome),
                 "exit_code": outcome["exit_code"],
                 "stdout_tail": outcome["stdout"], "stderr_tail": outcome["stderr"],
-                "schema_version": 1,
+                "schema_version": 2,
             })
             receipts.append(receipt)
         return receipts, None
