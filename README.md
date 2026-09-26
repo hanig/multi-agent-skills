@@ -403,6 +403,9 @@ Ordinary generic verifier scripts retain their existing executable semantics.
 
 Candidate construction remains local. The operator sends a self-contained Git
 bundle and its own harness over batch-mode SSH, without pushing to a forge.
+The SSH client is resolved once from absolute operator PATH directories outside
+the operated repository and disposable candidate tree; directory and executable
+symlinks into those trees are excluded. External operator wrappers remain valid.
 The remote worker checks out the bundle and rehashes the checkout before running
 any pinned program. Both claims use that same checkout, with the target's
 repetition count and completion handshake. Receipts retain the existing head,
@@ -420,13 +423,24 @@ wait, is that timeout multiplied by the number of claims. SSH, launch, timeout,
 missing result and nonterminal scheduler outcomes are `incomplete`. A completed
 verifier failure remains `fail`, including a retained failure before a later job
 failure. Output tails are bounded. Remote directories are removed on completion;
-a second SSH cleanup attempts cancellation and removal after transport failure.
+a second SSH cleanup attempts cancellation and removal after transport failure
+or unconfirmed cleanup. A valid first response confirming removal needs no
+second connection; a redundant connection cannot invalidate confirmed cleanup.
 If connectivity prevents confirmation, the receipt records that cleanup is
 unconfirmed. Cancellation is recorded separately: `requested` means `scancel`
-accepted the request, not that termination was observed. A failed cancellation
+accepted the request, not that termination was observed. Removal requires terminal
+accounting for the exact job. A failed cancellation
 records `unconfirmed`, the job ID and bounded diagnostics, retains the stage for
 the second cleanup attempt, and prints an operator warning naming the job ID
 if still unconfirmed. A successful retry retains both cancellation attempts.
+Cancellation intent and outcome are saved atomically in `cleanup.json` under a
+per-stage cleanup lock, bounded to four attempts and 64 KiB. Reaching either
+bound or failing to save the journal retains the stage. Secondary cleanup also
+retains a stage without the supervisor's finished marker, so it cannot remove
+files while a job submission or job-ID publication is still possible.
+If both SSH responses are unavailable, the local receipt records an unknown
+job ID and the remote stage path; its warning names `job-id` and `cleanup.json`
+for recovery when connectivity returns. An unseen job ID is never inferred.
 An incomplete verification remains incomplete after cleanup. A disconnected job
 can remain until its declared time limit; this
 is not a remote process sandbox or a guarantee against same-UID writers.

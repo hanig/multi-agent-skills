@@ -7,6 +7,7 @@ an OS isolation boundary. No forge writes or credential provisioning occur.
 """
 import argparse
 import base64
+import fcntl
 import hashlib
 import json
 import os
@@ -335,49 +336,127 @@ os.execv(sys.executable, [sys.executable, str(stage / 'remote_verify.py'), '--su
 """ % (FILES, FILES)
 
 
-def cleanup(stage):
-    """Report cancellation separately; retain a stage when scancel fails.
+def coordinator_ssh(repo, tree):
+    """Keep operator PATH wrappers, excluding both operated Git trees."""
+    roots = [os.path.realpath(str(path)) for path in (repo, tree)]
 
-    A zero scancel status confirms an accepted request, not job termination.
-    Keeping failed stages lets the second connection retry with the same job ID.
+    def excluded(path):
+        return any(os.path.commonpath([root, candidate]) == root
+                   for root in roots
+                   for candidate in (os.path.abspath(path), os.path.realpath(path)))
+
+    for directory in os.get_exec_path():
+        if not os.path.isabs(directory) or excluded(directory):
+            continue
+        program = shutil.which("ssh", path=directory)
+        if program and not excluded(program):
+            return os.path.realpath(program)
+    return None
+
+
+def cancellation_tail(text):
+    # Diagnostic rendering only, after the unmodified status decides the result.
+    return text.encode("utf-8", "replace")[-1000:].decode("utf-8", "replace")
+
+
+def publish_cleanup(path, evidence):
+    if len(json.dumps(evidence).encode("utf-8")) > 65536:
+        raise ValueError("cancellation history exceeds 64 KiB; stage retained")
+    publish(path, evidence)
+
+
+def cleanup(stage):
+    """Serialize recovery; preserve evidence until supervision and job are done.
+
+    Four attempts and 64 KiB bound the journal. An intent is published before
+    scancel so a lost process leaves an unknown outcome, never invented success.
+    A zero scancel status confirms a request; only terminal accounting allows
+    removal. Unknown supervision, journal failure or exhaustion retains the stage.
     """
     evidence = {"cleanup": "unconfirmed", "stage": str(stage)}
+    lock = None
     try:
+        if not stage.exists():
+            return dict(evidence, cleanup="removed")
         try:
             job = (stage / "job-id").read_text()
         except FileNotFoundError:
             job = None
         if job and re.fullmatch(r"[0-9]+", job):
             evidence["job_id"] = job
-            if scheduler_state(job) is None:
+        else:
+            job = None
+        if not (stage / "supervision-finished").is_file():
+            evidence["cleanup_error"] = "supervision may still submit or publish a job ID"
+            return evidence
+        lock = (stage / "cleanup.lock").open("a")
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finished = json.loads((stage / "supervision-finished").read_text())
+        if not isinstance(finished, dict):
+            raise ValueError("invalid supervision marker; stage retained")
+        history = stage / "cleanup.json"
+        if history.exists():
+            with history.open("rb") as handle:
+                raw = handle.read(65537)
+            if len(raw) > 65536:
+                raise ValueError("cancellation history exceeds 64 KiB; stage retained")
+            previous = json.loads(raw)
+            if not isinstance(previous, dict):
+                raise ValueError("invalid cancellation history; stage retained")
+            attempts = previous.get("cancellation_attempts", [])
+            if (previous.get("job_id") != job or not isinstance(attempts, list)
+                    or len(attempts) > 4 or any(not isinstance(a, dict) for a in attempts)):
+                raise ValueError("invalid cancellation history; stage retained")
+            evidence["cancellation_attempts"] = attempts
+        if job:
+            state = None
+            if (finished.get("job_id") == job
+                    and finished.get("sacct_state") in TERMINAL):
+                state = (finished["sacct_state"], finished.get("sacct_exit_code"))
+            state = state or scheduler_state(job)
+            if state is None:
+                attempts = evidence.setdefault("cancellation_attempts", [])
+                if len(attempts) >= 4:
+                    raise ValueError("cancellation attempt limit reached; stage retained")
                 attempt = {"job_id": job, "exit_code": None}
+                attempts.append(attempt)
+                evidence["cancellation"] = "unconfirmed"
+                publish_cleanup(history, evidence)
                 try:
                     rc, out, err = _command(["scancel", job], timeout=30)
-                    attempt.update(exit_code=rc, stdout_tail=out[-2000:],
-                                   stderr_tail=err[-2000:])
+                    attempt.update(exit_code=rc, stdout_tail=cancellation_tail(out),
+                                   stderr_tail=cancellation_tail(err))
                 except (OSError, subprocess.SubprocessError) as exc:
-                    attempt["error"] = str(exc)[-2000:]
-                evidence["cancellation_attempts"] = [attempt]
+                    attempt["error"] = cancellation_tail(str(exc))
                 evidence["cancellation"] = ("requested" if attempt["exit_code"] == 0
                                             else "unconfirmed")
+                publish_cleanup(history, evidence)
                 if evidence["cancellation"] == "unconfirmed":
+                    return evidence
+                state = scheduler_state(job)
+                if state is None:
+                    evidence["cleanup_error"] = "cancellation requested; job termination unconfirmed"
                     return evidence
             else:
                 evidence["cancellation"] = "not-required"
-        if stage.exists():
-            shutil.rmtree(stage, ignore_errors=False)
+            evidence["cleanup_sacct_state"] = state[0]
+        shutil.rmtree(stage, ignore_errors=False)
         evidence["cleanup"] = "removed"
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
         evidence["cleanup_error"] = str(exc)[-2000:]
+    finally:
+        if lock is not None:
+            lock.close()
     return evidence
 
 
-def run_remote(runner, tree, basis, checks, remote, timeout):
+def run_remote(runner, tree, basis, checks, remote, timeout, repo):
     """Transport errors are incomplete, never a verifier's completed FAIL."""
     stage = remote["workdir_root"].rstrip("/") + "/verify-" + uuid.uuid4().hex
-    ssh = shutil.which("ssh")  # coordinator environment, resolved before candidate execution
+    ssh = coordinator_ssh(repo, tree)
     execution = {"location": "remote", "executor": remote["executor"],
                  "ssh_alias": remote["ssh_alias"], "host_identity": None,
+                 "stage": stage, "job_id": None, "ssh_program": ssh,
                  "executables": {key: {"path": remote[key], "version": None}
                                  for key in ("python", "git")}}
     result = None
@@ -422,40 +501,46 @@ def run_remote(runner, tree, basis, checks, remote, timeout):
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 error = "remote transport incomplete: " + str(exc)
             finally:
-                # A second connection covers interrupted bootstrap/transport.
-                # Normal supervision has already removed the directory.
-                code = ("import json, pathlib, sys; p=pathlib.Path(%r); "
-                        "sys.path.insert(0, str(p)); "
-                        "from remote_verify import cleanup; "
-                        "print(json.dumps(cleanup(p)))") % stage
-                # No harness remains after a successful first cleanup.
-                code = ("import json, pathlib; p=pathlib.Path(%r)\n"
-                        "if not p.exists(): print(json.dumps({'cleanup': 'removed'}))\n"
-                        "else:\n    exec(%r)\n") % (stage, code)
-                try:
-                    proc = subprocess.run(prefix + [shlex.join([remote["python"], "-c", code])],
-                                          stdin=subprocess.DEVNULL, capture_output=True,
-                                          text=True, env=CE.child_env(), timeout=45)
-                    if proc.returncode:
-                        raise ValueError("cleanup transport exited {}: {}".format(
-                            proc.returncode, proc.stderr[-2000:]))
-                    cleaned = json.loads(proc.stdout)
-                    if not isinstance(cleaned, dict) or cleaned.get("cleanup") not in (
-                            "removed", "unconfirmed"):
-                        raise ValueError("invalid remote cleanup response")
-                    attempts = execution.get("cancellation_attempts", [])
-                    attempts = attempts + cleaned.pop("cancellation_attempts", [])
-                    execution.update(cleaned)
-                    if attempts:
-                        execution["cancellation_attempts"] = attempts
-                except (OSError, ValueError, subprocess.SubprocessError) as exc:
-                    execution["cleanup"] = "unconfirmed"
-                    execution["cleanup_error"] = str(exc)[-2000:]
+                # Confirmed cleanup is monotonic: an unnecessary second
+                # connection cannot invalidate evidence already received.
+                if error or execution.get("cleanup") != "removed":
+                    # A second connection covers interrupted bootstrap/transport.
+                    # Normal supervision has already removed the directory.
+                    code = ("import json, pathlib, sys; p=pathlib.Path(%r); "
+                            "sys.path.insert(0, str(p)); "
+                            "from remote_verify import cleanup; "
+                            "print(json.dumps(cleanup(p)))") % stage
+                    # No harness remains after a successful first cleanup.
+                    code = ("import json, pathlib; p=pathlib.Path(%r)\n"
+                            "if not p.exists(): print(json.dumps({'cleanup': 'removed'}))\n"
+                            "else:\n    exec(%r)\n") % (stage, code)
+                    try:
+                        proc = subprocess.run(prefix + [shlex.join([remote["python"], "-c", code])],
+                                              stdin=subprocess.DEVNULL, capture_output=True,
+                                              text=True, env=CE.child_env(), timeout=45)
+                        if proc.returncode:
+                            raise ValueError("cleanup transport exited {}: {}".format(
+                                proc.returncode, proc.stderr[-2000:]))
+                        cleaned = json.loads(proc.stdout)
+                        if not isinstance(cleaned, dict) or cleaned.get("cleanup") not in (
+                                "removed", "unconfirmed"):
+                            raise ValueError("invalid remote cleanup response")
+                        if (execution.get("job_id") and cleaned.get("job_id")
+                                and execution["job_id"] != cleaned["job_id"]):
+                            raise ValueError("cleanup job identity mismatch")
+                        execution.update(cleaned)
+                    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                        execution["cleanup"] = "unconfirmed"
+                        execution["cleanup_error"] = str(exc)[-2000:]
     if execution.get("cleanup") != "removed" or execution.get("cancellation") == "unconfirmed":
         cleanup_error = "remote cleanup/cancellation could not be confirmed"
         execution["cleanup"] = "unconfirmed"
-        print("WARNING: {} for job {}; inspect and cancel if still active; stage {}".format(
-            cleanup_error, execution.get("job_id", "unknown"), stage), file=sys.stderr)
+        if remote["executor"] == "slurm":
+            execution.setdefault("cancellation", "unconfirmed")
+        print("WARNING: {} for job {}; inspect and cancel if still active; "
+              "recovery files {}/job-id and {}/cleanup.json".format(
+                  cleanup_error, execution.get("job_id") or "unknown", stage, stage),
+              file=sys.stderr)
     if error:
         return [incomplete(error) for _ in checks], execution
     outcomes = result.get("outcomes", [])
@@ -496,7 +581,16 @@ def main():
         request = json.loads((stage / "request.json").read_text())
         result = {"basis": request["basis"], "outcomes": [], "error": str(exc)}
     finally:
-        result.setdefault("execution", {}).update(cleanup(stage))
+        # No future submission or job-ID publication by this supervisor is
+        # possible. A secondary connection without this marker retains staging.
+        execution = result.setdefault("execution", {})
+        try:
+            publish(stage / "supervision-finished", {
+                key: execution.get(key) for key in
+                ("job_id", "sacct_state", "sacct_exit_code")})
+            execution.update(cleanup(stage))
+        except OSError as exc:
+            execution.update(cleanup="unconfirmed", stage=str(stage), cleanup_error=str(exc))
     print(json.dumps(result))
     return 0
 

@@ -1,5 +1,6 @@
 """Remote verification through the real operator, Git bundle, SSH and Slurm shims."""
 import hashlib
+import fcntl
 import io
 import json
 import os
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import tarfile
 import unittest
+from unittest import mock
 
 from tests import test_arc683_shared_guard as fixtures
 
@@ -70,6 +72,7 @@ SACCT = r'''
 import os, pathlib
 mode = pathlib.Path(os.environ['REMOTE_MODE']).read_text()
 print('321|PENDING|0:0' if mode == 'slurm-pending' else
+      '321|CANCELLED|0:0' if mode == 'slurm-cancelled' else
       '321|FAILED|1:0' if mode in ('slurm-missing', 'slurm-completed-fail') else '321|COMPLETED|0:0')
 '''
 
@@ -88,7 +91,9 @@ class TestRemoteVerification(unittest.TestCase):
         self.f.env.update(REMOTE_LOG=str(self.f.directory / 'ssh.log'),
                           REMOTE_MODE=str(self.mode), SCHED_LOG=str(self.f.directory / 'scheduler.log'))
         for name, body in (('ssh', SSH), ('sbatch', SBATCH), ('sacct', SACCT),
-                           ('scancel', 'raise SystemExit(0)\n')):
+                           ('scancel', 'import os\nfrom pathlib import Path\n'
+                            'p=Path(os.environ["REMOTE_MODE"])\n'
+                            'if p.read_text() == "slurm-pending": p.write_text("slurm-cancelled")\n')):
             program = self.f.bin / name
             program.write_text('#!' + sys.executable + '\n' + body)
             program.chmod(0o755)
@@ -159,22 +164,29 @@ class TestRemoteVerification(unittest.TestCase):
                     self.assertIn('pinned-verifier-', log.read_text())
                     self.assert_clean()
 
-    def cancellation_fixture(self, mode='slurm-pending', retry_succeeds=False):
+    def cancellation_fixture(self, mode='slurm-pending', retry_succeeds=False,
+                             terminal_on_success=True):
         self.policy['verification_host'].update(executor='slurm', slurm={
             'partition': 'fixture-cpu', 'mem': '2G', 'time': '00:05:00'})
         self.save_policy()
         self.program()
         self.mode.write_text(mode)
         # These transport modes also leave the scheduler pending.
-        (self.f.bin / 'sacct').write_text('#!' + sys.executable + '\nprint("321|PENDING|0:0")\n')
         witness = self.f.directory / 'cancellation-calls'
+        terminal = self.f.directory / 'cancelled'
+        (self.f.bin / 'sacct').write_text(
+            '#!' + sys.executable + '\nfrom pathlib import Path\n'
+            'print("321|CANCELLED|0:0" if Path(%r).exists() else "321|PENDING|0:0")\n'
+            % str(terminal))
         (self.f.bin / 'scancel').write_text(
             '#!' + sys.executable + '\nfrom pathlib import Path\nimport sys\n'
             'p=Path(%r)\n'
             'p.write_text((p.read_text() if p.exists() else "") + "attempt\\n")\n'
             'print("fixture cancellation denied", file=sys.stderr)\n'
-            'raise SystemExit(0 if %r and len(p.read_text().splitlines()) > 1 else 1)\n'
-            % (str(witness), retry_succeeds))
+            'success = %r and len(p.read_text().splitlines()) > 1\n'
+            'if success and %r: Path(%r).write_text("terminal")\n'
+            'raise SystemExit(0 if success else 1)\n'
+            % (str(witness), retry_succeeds, terminal_on_success, str(terminal)))
         return witness
 
     def assert_unconfirmed_cancellation(self, mode):
@@ -218,9 +230,10 @@ class TestRemoteVerification(unittest.TestCase):
         execution = row['execution']
         self.assertEqual(execution['cleanup'], 'unconfirmed')
         self.assertEqual(execution['cancellation'], 'unconfirmed')
-        self.assertNotIn('job_id', execution, 'an unseen job ID cannot be invented')
+        self.assertIsNone(execution['job_id'], 'an unseen job ID cannot be invented')
         stage, = self.remote_root.iterdir()
         self.assertEqual(execution['stage'], str(stage))
+        self.assertTrue((stage / 'cleanup.json').is_file())
         retained = json.loads((stage / 'cleanup.json').read_text())
         self.assertEqual(retained['job_id'], '321')
         self.assertEqual(retained['cancellation'], 'unconfirmed')
@@ -265,6 +278,68 @@ class TestRemoteVerification(unittest.TestCase):
                 self.assertEqual(self.rows()[-1]['result'], 'pass')
                 self.assert_clean()
 
+    def cleanup_stage(self):
+        stage = self.remote_root / 'cleanup-stage'
+        stage.mkdir()
+        (stage / 'job-id').write_text('321')
+        (stage / 'supervision-finished').write_text('{}')
+        return stage
+
+    def test_secondary_cleanup_cannot_remove_stage_before_submission_finishes(self):
+        stage = self.remote_root / 'submission-in-progress'
+        stage.mkdir()
+        with mock.patch.object(RV, '_command', return_value=(1, '', 'denied')) as command:
+            execution = RV.cleanup(stage)
+        self.assertEqual(execution['cleanup'], 'unconfirmed')
+        self.assertTrue(stage.exists())
+        command.assert_not_called()
+
+    def test_cleanup_lock_prevents_overlapping_cancellation(self):
+        stage = self.cleanup_stage()
+        with (stage / 'cleanup.lock').open('a') as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with mock.patch.object(RV, 'scheduler_state', return_value=None), \
+                    mock.patch.object(RV, '_command', return_value=(1, '', 'denied')) as command:
+                execution = RV.cleanup(stage)
+            self.assertEqual(execution['cleanup'], 'unconfirmed')
+            self.assertTrue(stage.exists())
+            command.assert_not_called()
+
+    def test_cleanup_attempt_bound_retains_history_and_stage(self):
+        stage = self.cleanup_stage()
+        with mock.patch.object(RV, 'scheduler_state', return_value=None), \
+                mock.patch.object(RV, '_command', return_value=(1, '', 'denied')) as command:
+            for _ in range(5):
+                execution = RV.cleanup(stage)
+        self.assertEqual(command.call_count, 4)
+        self.assertEqual(execution['cleanup'], 'unconfirmed')
+        retained = json.loads((stage / 'cleanup.json').read_text())
+        self.assertEqual(len(retained['cancellation_attempts']), 4)
+        self.assertLessEqual((stage / 'cleanup.json').stat().st_size, 65536)
+        self.assertTrue((stage / 'job-id').exists())
+
+    def test_cleanup_persistence_failure_refuses_cancellation_and_removal(self):
+        stage = self.cleanup_stage()
+        with mock.patch.object(RV, 'scheduler_state', return_value=None), \
+                mock.patch.object(RV, 'publish', side_effect=OSError('journal unavailable')), \
+                mock.patch.object(RV, '_command', return_value=(1, '', 'denied')) as command:
+            execution = RV.cleanup(stage)
+        self.assertEqual(execution['cleanup'], 'unconfirmed')
+        self.assertIn('journal unavailable', execution['cleanup_error'])
+        self.assertTrue((stage / 'job-id').exists())
+        command.assert_not_called()
+
+    def test_cleanup_oversized_history_is_retained_without_cancellation(self):
+        stage = self.cleanup_stage()
+        path = stage / 'cleanup.json'
+        before = ' ' * 65537
+        path.write_text(before)
+        with mock.patch.object(RV, '_command', return_value=(1, '', 'denied')) as command:
+            execution = RV.cleanup(stage)
+        self.assertEqual(execution['cleanup'], 'unconfirmed')
+        self.assertEqual(path.read_text(), before)
+        command.assert_not_called()
+
     def test_failed_secondary_transport_keeps_first_cancellation_diagnostic(self):
         witness, execution = self.assert_unconfirmed_cancellation('cleanup-ssh-fail')
         self.assertEqual(len(witness.read_text().splitlines()), 1)
@@ -280,9 +355,24 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertEqual(execution['cancellation'], 'requested')
         self.assertIsNone(execution['sacct_state'])
         self.assertEqual(execution['cleanup'], 'removed')
+        self.assertEqual(execution['cleanup_sacct_state'], 'CANCELLED')
         self.assertEqual([a['exit_code'] for a in execution['cancellation_attempts']], [1, 0])
         self.assertNotIn('WARNING:', result.stderr)
         self.assert_clean()
+
+    def test_accepted_cancellation_without_terminal_job_retains_stage(self):
+        self.cancellation_fixture(retry_succeeds=True, terminal_on_success=False)
+        result = self.verify('--verification-timeout', '1')
+        self.assertNotEqual(result.returncode, 0)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'incomplete')
+        execution = row['execution']
+        self.assertEqual(execution['cancellation'], 'requested')
+        self.assertEqual(execution['cleanup'], 'unconfirmed')
+        self.assertIsNone(execution['sacct_state'])
+        self.assertTrue(Path(execution['stage'], 'job-id').is_file())
+        self.assertRegex(result.stderr, r'WARNING: .*job 321')
+        self.assertEqual(self.f.calls(['pr', 'merge']), [])
 
     def verify(self, *extra):
         return self.f.invoke('--verify-integration', *extra)
