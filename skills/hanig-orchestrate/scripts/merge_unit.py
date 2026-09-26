@@ -266,9 +266,8 @@ def declared_execution(state_dir, repo):
 
 def execution_runner(state_dir, repo):
     policy, _digest = declared_execution(state_dir, repo)
-    if policy.get("local"):
-        return RV.GitRunner(S.U.run, RV.resolve_executables(policy["local"], names=("git",)))
-    return S.U.run
+    return RV.GitRunner(S.U.run, RV.resolve_executables(
+        policy.get("local"), names=("git",)))
 
 
 def integration_evidence(state_dir, binding, repo, target):
