@@ -39,10 +39,10 @@ if "tarfile" in command:
                 dest.addfile(member, io.BytesIO(data))
         raw = dst.getvalue()
     result = subprocess.run(['/bin/sh', '-c', command], input=raw,
-                            stdout=subprocess.DEVNULL if mode == 'ssh-lost-response' else None)
-    if mode == 'ssh-lost-response': raise SystemExit(255)
+                            stdout=subprocess.DEVNULL if mode in ('ssh-lost-response', 'ssh-lost-both') else None)
+    if mode in ('ssh-lost-response', 'ssh-lost-both'): raise SystemExit(255)
 else:
-    if pathlib.Path(os.environ['REMOTE_MODE']).read_text() == 'cleanup-ssh-fail':
+    if pathlib.Path(os.environ['REMOTE_MODE']).read_text() in ('cleanup-ssh-fail', 'ssh-lost-both'):
         raise SystemExit(255)
     result = subprocess.run(['/bin/sh', '-c', command])
 raise SystemExit(result.returncode)
@@ -207,7 +207,63 @@ class TestRemoteVerification(unittest.TestCase):
     def test_secondary_cleanup_retains_cancellation_after_lost_response(self):
         witness, execution = self.assert_unconfirmed_cancellation('ssh-lost-response')
         self.assertEqual(len(witness.read_text().splitlines()), 2)
-        self.assertEqual(len(execution['cancellation_attempts']), 1)
+        self.assertEqual(len(execution['cancellation_attempts']), 2)
+
+    def test_lost_connections_preserve_remote_cancellation_evidence_and_recovery_path(self):
+        self.cancellation_fixture('ssh-lost-both')
+        result = self.verify('--verification-timeout', '1')
+        self.assertNotEqual(result.returncode, 0)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'incomplete')
+        execution = row['execution']
+        self.assertEqual(execution['cleanup'], 'unconfirmed')
+        self.assertEqual(execution['cancellation'], 'unconfirmed')
+        self.assertNotIn('job_id', execution, 'an unseen job ID cannot be invented')
+        stage, = self.remote_root.iterdir()
+        self.assertEqual(execution['stage'], str(stage))
+        retained = json.loads((stage / 'cleanup.json').read_text())
+        self.assertEqual(retained['job_id'], '321')
+        self.assertEqual(retained['cancellation'], 'unconfirmed')
+        self.assertIn('fixture cancellation denied', retained['cancellation_attempts'][0]['stderr_tail'])
+        self.assertIn(str(stage / 'job-id'), result.stderr)
+        self.assertIn(str(stage / 'cleanup.json'), result.stderr)
+        self.assertEqual(self.f.calls(['pr', 'merge']), [])
+
+    def test_confirmed_removal_does_not_need_a_second_connection(self):
+        self.program()
+        self.mode.write_text('cleanup-ssh-fail')
+        result = self.verify()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'pass')
+        self.assertEqual(row['execution']['cleanup'], 'removed')
+        self.assertTrue(self.witness.exists())
+        self.assertEqual(len(Path(self.f.env['REMOTE_LOG']).read_text().splitlines()), 1)
+        self.assert_clean()
+
+    def test_candidate_ssh_is_excluded_from_relative_absolute_and_symlink_path(self):
+        self.program()
+        marker = self.f.directory / 'candidate-ssh-ran'
+        self.shared.candidate({'ssh': '#!' + sys.executable + '\nfrom pathlib import Path\n'
+                               'Path(%r).write_text("candidate ssh executed")\n'
+                               'raise SystemExit(59)\n' % str(marker)})
+        (self.f.repo / 'ssh').chmod(0o755)
+        self.shared.candidate({'record-mode.txt': 'commit executable mode\n'})
+        linked = self.f.directory / 'external-path'
+        linked.mkdir()
+        (linked / 'ssh').symlink_to(self.f.repo / 'ssh')
+        original_path = self.f.env['PATH']
+        for prefix in ('.', str(self.f.repo), str(linked)):
+            with self.subTest(prefix=prefix):
+                if self.witness.exists():
+                    self.witness.unlink()
+                self.f.env['PATH'] = prefix + os.pathsep + original_path
+                result = self.verify()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertFalse(marker.exists())
+                self.assertTrue(self.witness.exists())
+                self.assertEqual(self.rows()[-1]['result'], 'pass')
+                self.assert_clean()
 
     def test_failed_secondary_transport_keeps_first_cancellation_diagnostic(self):
         witness, execution = self.assert_unconfirmed_cancellation('cleanup-ssh-fail')
