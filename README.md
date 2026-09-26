@@ -400,7 +400,8 @@ any pinned program. Both claims use that same checkout, with the target's
 repetition count and completion handshake. Receipts retain the existing head,
 target, merge-base, candidate-tree and verifier bindings, plus the independently
 checked remote tree, host identity and executor. Slurm receipts also require the
-exact job's terminal `COMPLETED` / `0:0` accounting row for a pass. The execution
+exact job's terminal `COMPLETED` / `0:0` accounting row for a pass. Jobs disable
+automatic requeue so a restarted worker cannot replace a completed result. The execution
 policy digest is rechecked with the existing observation fence before publication.
 Retained remote evidence is checked again during reconciliation; missing tree or
 execution evidence corrects an old verified label and withholds advancement.
