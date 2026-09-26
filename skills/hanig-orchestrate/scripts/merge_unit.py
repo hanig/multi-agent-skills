@@ -32,6 +32,7 @@ import child_environment as CE
 import coordinator_paths as CP
 import swarm as S
 import verify as V
+import remote_verify as RV
 
 
 SWARM = str(_SWARM_DIR / "scripts" / "swarm.py")
@@ -257,17 +258,22 @@ def validate_scope_report(report, code, binding):
 
 def integration_evidence(state_dir, binding, repo, target):
     """Admit coordinator evidence under the exact observed target's policy."""
+    execution_policy, _ = RV.read_policy(state_dir)
+    runner = S.U.run
+    if execution_policy.get("local"):
+        runner = RV.GitRunner(runner, RV.resolve_executables(execution_policy["local"]))
     policy, policy_digest, _digest, error = V.merge_precondition_policy(
-        S.U.run, repo, target)
+        runner, repo, target)
     if error:
         return None, error
     admitted, error = S.admit_verification(
         state_dir, binding["unit"], V.INTEGRATION_CLAIM, binding["head"],
-        policy_digest, policy, repo=repo, base_commit=target, target_commit=target)
+        policy_digest, policy, repo=repo, base_commit=target, target_commit=target,
+        runner=runner)
     if error:
         return None, error
     stability, error = V.admit_stability(
-        S.U.run, repo, target, admitted, binding["unit"],
+        runner, repo, target, admitted, binding["unit"],
         S.load_verifications(state_dir)[0])
     if error:
         return None, error
@@ -312,6 +318,9 @@ def retained_integration_problem(preconditions, evidence, binding, repo, target,
         return "retained integration journal is unreadable: " + str(exc)
     for claim in required:
         retained = evidence if claim == V.INTEGRATION_CLAIM else evidence[claim]
+        problem = RV.execution_problem(retained)
+        if problem:
+            return problem
         problem = V.merge_failure_problem(receipts, retained)
         if problem:
             return problem
@@ -530,12 +539,18 @@ def reconcile(args, plan):
             raise Refusal("verification requires an OPEN PR with no unresolved merge intent")
         S.load_verifications(state_dir)
         target = observed_target(cmd["target"], binding["target"])
+        execution_policy, execution_digest = RV.read_policy(state_dir)
+        for executable in execution_policy.get("local", {}).values():
+            if CP._inside(executable, repo):
+                raise Refusal("verification executable is inside the operated repository")
         # Return only coordinator/forge inputs captured under the lease. The
         # caller releases it before running the disposable candidate verifier.
         return repo, {"binding": binding, "scope_binding": scope_binding,
                       "state_dir": state_dir, "root": root,
                       "operation_id": operation_id, "target": target,
-                      "plan_digest": S.plan_digest(plan)}
+                      "plan_digest": S.plan_digest(plan),
+                      "execution_policy": execution_policy,
+                      "execution_policy_digest": execution_digest}
     observation = {"approver": args.approver, "already_merged": pr["state"] == "MERGED",
                    "scope_exit": scope.returncode, "scope": scope_report,
                    "scope_stdout": scope.stdout, "scope_stderr": scope.stderr}
@@ -669,7 +684,7 @@ def verify_integration(args, repo, snapshot):
     binding, target = snapshot["binding"], snapshot["target"]
     evidences, error = V.run_merge_preconditions(
         S.U.run, repo, binding["head"], target,
-        timeout=args.verification_timeout)
+        timeout=args.verification_timeout, execution_policy=snapshot["execution_policy"])
     if error and not evidences:
         raise Refusal(error + ". " + verification_hint(args))
 
@@ -684,6 +699,9 @@ def verify_integration(args, repo, snapshot):
             plan = read_object(args.plan)
             if S.plan_digest(plan) != snapshot["plan_digest"]:
                 raise Refusal("plan changed during verification")
+            _, execution_digest = RV.read_policy(args.state_dir)
+            if execution_digest != snapshot["execution_policy_digest"]:
+                raise Refusal("execution policy changed during verification")
             current = authority(args, plan)
             state_dir, root, fresh, host, repo_path, scope_binding, fresh_repo = current
             for key, value in binding.items():

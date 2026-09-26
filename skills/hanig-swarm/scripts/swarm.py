@@ -6149,7 +6149,7 @@ def load_verifications(state_dir):
 
 def admit_verification(state_dir, unit, claim, produced, policy_digest,
                        policy, repo=None, base_commit=None,
-                       target_commit=None):
+                       target_commit=None, runner=None):
     """(receipt, refusal) for one required claim.
 
     Four bindings, and all of them must hold. Any one missing turns the
@@ -6168,6 +6168,7 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
                       "verifier a receipt names cannot be checked against "
                       "anything. Refusing rather than taking the receipt's "
                       "word for which verifier ran.")
+    runner = runner or U.run
     integration_basis = None
     if claim == V.INTEGRATION_CLAIM:
         if not target_commit:
@@ -6176,7 +6177,7 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
                 "commit to bind to. Record the target commit in the merge "
                 "attestation; branch-local evidence cannot substitute for it.")
         integration_basis, basis_error = V.candidate_merge_basis(
-            U.run, repo, produced, target_commit)
+            runner, repo, produced, target_commit)
         if basis_error:
             return None, basis_error
     recs, _p = load_verifications(state_dir)
@@ -6222,7 +6223,7 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
             unauthorized.append(refusal)
             continue
         evidence, refusal = V.corpus_evidence(
-            U.run, repo, base_commit, produced, entry)
+            runner, repo, base_commit, produced, entry)
         if refusal:
             corpus_refusals.append(refusal)
             continue
@@ -6237,6 +6238,10 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
                 f"and produced commit for claim {claim!r}")
             continue
         if claim == V.INTEGRATION_CLAIM:
+            problem = V.RV.execution_problem(r)
+            if problem:
+                corpus_refusals.append(problem)
+                continue
             problem = V.merge_failure_problem(recs, r)
             if problem:
                 return None, problem
