@@ -55,6 +55,10 @@ assert '--time=00:05:00' in sys.argv
 if pathlib.Path(os.environ['REMOTE_MODE']).read_text() not in ('slurm-missing', 'slurm-pending'):
     result = subprocess.run(['/bin/sh', sys.argv[-1]], capture_output=True)
     assert result.returncode == 0, result.stderr
+    if pathlib.Path(os.environ['REMOTE_MODE']).read_text() == 'slurm-forced-requeue':
+        pathlib.Path(os.environ['REMOTE_MODE']).write_text('pass')
+        result = subprocess.run(['/bin/sh', sys.argv[-1]], capture_output=True)
+        assert result.returncode == 0, result.stderr
 print('321')
 '''
 
@@ -227,6 +231,25 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertEqual(row['result'], 'fail')
         self.assertEqual(row['execution']['sacct_state'], 'FAILED')
         self.mode.write_text('pass')
+        result = self.verify()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = self.admitted()
+        self.f.assert_refused(result)
+        self.assertIn('FAIL', result.stderr)
+        self.assert_clean()
+
+    def test_forced_scheduler_restart_cannot_overwrite_completed_failure(self):
+        self.policy['remote'].update(executor='slurm', slurm={
+            'partition': 'fixture-cpu', 'mem': '2G', 'time': '00:05:00'})
+        self.save_policy()
+        self.program('raise SystemExit(int(Path(%r).read_text() == "slurm-forced-requeue"))\n'
+                     % str(self.mode))
+        self.mode.write_text('slurm-forced-requeue')
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'fail')
+        self.assertEqual(self.mode.read_text(), 'pass')
         result = self.verify()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         result = self.admitted()
