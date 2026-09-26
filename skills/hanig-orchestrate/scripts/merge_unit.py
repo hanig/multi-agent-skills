@@ -274,7 +274,47 @@ def integration_evidence(state_dir, binding, repo, target):
                     "unit", "claim", "verifier", "verifier_sha256", "policy_sha256",
                     "subject_head", "produced_head", "target_commit", "merge_base", "candidate_tree"))):
             return None, "the candidate merge verifier returned FAIL for this exact binding"
+    stability, error = V.admit_stability(
+        S.U.run, repo, target, admitted, binding["unit"],
+        S.load_verifications(state_dir)[0])
+    if error:
+        return None, error
+    if stability is not None:
+        admitted = dict(admitted, **{V.STABILITY_CLAIM: stability})
     return admitted, None
+
+
+def retained_integration_problem(preconditions, evidence, binding, repo, target):
+    """Validate retained claims, consulting target policy for legacy intents.
+
+    New intents retain their requirements across Git cleanup. Older intents
+    lack that list, so an unreadable target policy cannot establish which
+    claims were required and must withhold verified status and advancement.
+    """
+    required = preconditions.get("required_merge_claims")
+    if required is None:
+        policy, _pd, error = V.read_policy(
+            S.U.run, repo, target, source="target commit")
+        if error:
+            return "retained merge target policy is unreadable: " + error
+        required = [V.INTEGRATION_CLAIM]
+        if V.stability_declarations(policy):
+            required.append(V.STABILITY_CLAIM)
+    if required not in ([V.INTEGRATION_CLAIM], [V.INTEGRATION_CLAIM, V.STABILITY_CLAIM]):
+        return "invalid retained merge claim requirements"
+    if V.STABILITY_CLAIM in required:
+        shared = evidence.get(V.STABILITY_CLAIM)
+        if not isinstance(shared, dict):
+            return "retained integration evidence lacks changed-tests-stable"
+        if (shared.get("result") != "pass" or shared.get("exit_code") != 0
+                or shared.get("claim") != V.STABILITY_CLAIM
+                or shared.get("verifier") != V.STABILITY_CLAIM
+                or shared.get("authorization_commit") != target
+                or shared.get("unit") != binding["unit"]
+                or any(shared.get(k) != evidence.get(k) for k in (
+                    "subject_head", "policy_sha256") + V.MERGE_BASIS_FIELDS)):
+            return "retained changed-tests-stable does not match the integration candidate"
+    return None
 
 
 def verification_hint(args):
@@ -443,10 +483,11 @@ def reconcile(args, plan):
         print("+ " + shlex.join(cmd["view"]))
         print("+ " + shlex.join(cmd["target"]))
         print("require target-authorized integration-tests at exact head, target, "
-              "merge base and candidate tree; no override")
+              "merge base and candidate tree, plus changed-tests-stable when declared "
+              "by target policy; no override")
         if args.verify_integration:
             print("run the target's pinned verifier in a disposable candidate merge; "
-                  "record coordinator evidence only")
+                  "record all target-required claims as coordinator evidence only")
             return None
         if args.abandon_intent:
             print("if OPEN at judged head: persist abandonment record and resolve {}; "
@@ -523,7 +564,9 @@ def reconcile(args, plan):
             raise Refusal("PR or target moved during preflight; rerun against the current target. "
                           + verification_hint(args))
         observation.update({"allow_unchecked_scope": args.allow_unchecked_scope,
-                            "checks": checks, "integration": evidence})
+                            "checks": checks, "integration": evidence,
+                            "required_merge_claims": [V.INTEGRATION_CLAIM] +
+                            ([V.STABILITY_CLAIM] if V.STABILITY_CLAIM in evidence else [])})
         intent = {"schema_version": 1, "operation_id": operation_id,
                   "binding": binding, "root": root, "phase": "merge_requested",
                   "preconditions": observation, "target_before_request": target}
@@ -558,7 +601,8 @@ def reconcile(args, plan):
     if commit.get("sha") != merged or not isinstance(parents, list) or len(parents) != 1:
         raise Refusal("squash reconciliation requires the observed single-parent merge commit")
     target = oid(parents[0].get("sha"))
-    # An already-admitted precondition survives crashes and local Git cleanup.
+    # Captured claim requirements survive crashes and local Git cleanup;
+    # legacy preconditions still require a readable target policy.
     # Its target must be the actual parent, not PR metadata or today's ref tip.
     evidence = (intent or {}).get("preconditions", {}).get("integration")
     integration_problem = None
@@ -568,6 +612,9 @@ def reconcile(args, plan):
             integration_problem = "target moved between integration check and merge"
         elif evidence.get("subject_head") != binding["head"] or evidence.get("result") != "pass":
             integration_problem = "retained integration evidence does not match the judged head"
+        else:
+            integration_problem = retained_integration_problem(
+                intent["preconditions"], evidence, binding, repo, target)
     else:
         evidence, integration_problem = integration_evidence(state_dir, binding, repo, target)
     integration_status = ("integration-unverified" if integration_problem else "candidate-verified")
@@ -619,10 +666,10 @@ def verify_integration(args, repo, snapshot):
     explicit argument; it introduces no repository-key reader of its own.
     """
     binding, target = snapshot["binding"], snapshot["target"]
-    evidence, error = V.run_merge_precondition(
+    evidences, error = V.run_merge_preconditions(
         S.U.run, repo, binding["head"], target,
         timeout=args.verification_timeout)
-    if error:
+    if error and not evidences:
         raise Refusal(error + ". " + verification_hint(args))
 
     ok, holder = S.acquire_lease(args.state_dir)
@@ -670,17 +717,23 @@ def verify_integration(args, repo, snapshot):
                 CP.PathPolicyError) as exc:
             raise Refusal("verification evidence not recorded: {}. Rerun verification. {}".format(
                 exc, verification_hint(args))) from exc
-        evidence.update({"unit": binding["unit"], "by": args.approver,
-                         "at": datetime.now(timezone.utc).isoformat()})
-        problem = S._verify_shape_problem(evidence)
-        if problem:
-            raise Refusal(problem)
-        S._fsync_append(state_dir / S.VERIFY_RECEIPTS, evidence)
+        for evidence in evidences:
+            evidence.update({"unit": binding["unit"], "by": args.approver,
+                             "at": datetime.now(timezone.utc).isoformat()})
+            problem = S._verify_shape_problem(evidence)
+            if problem:
+                raise Refusal(problem)
+        for evidence in evidences:
+            S._fsync_append(state_dir / S.VERIFY_RECEIPTS, evidence)
     finally:
         S.release_lease(args.state_dir)
-    print("integration-tests: {} for head {} into target {} (no merge requested)".format(
-        evidence["result"].upper(), evidence["subject_head"], evidence["target_commit"]))
-    if evidence["result"] != "pass":
+    for evidence in evidences:
+        print("{}: {} for head {} into target {} (no merge requested)".format(
+            evidence["claim"], evidence["result"].upper(),
+            evidence["subject_head"], evidence["target_commit"]))
+    if error:
+        raise Refusal(error + ". " + verification_hint(args))
+    if any(evidence["result"] != "pass" for evidence in evidences):
         raise Refusal("candidate merge verifier failed; repair the candidate")
 
 
@@ -723,7 +776,7 @@ def main(argv=None):
     parser.add_argument("--root")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--verify-integration", action="store_true",
-                        help="run target-authorized integration verifier and record evidence; never merge")
+                        help="run all target-authorized merge verifiers and record evidence; never merge")
     parser.add_argument("--verification-timeout", type=int, default=900)
     parser.add_argument("--allow-unchecked-scope", type=nonempty, metavar="REASON")
     parser.add_argument("--abandon-intent", type=nonempty, metavar="OPERATION_ID")

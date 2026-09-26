@@ -278,7 +278,8 @@ host scheduler repeats it; the orchestrating session performs connected review,
 merge, tracker, and reporting work around those passes.
 
 The connected `merge_unit.py` operator requires passing `integration-tests`
-evidence for the exact judged head and observed target commit, including the
+and, when declared by the target policy, `changed-tests-stable` evidence
+for the exact judged head and observed target commit, including the
 rederived merge base and candidate tree. The target comes from the anchored
 remote's `refs/heads/<target>` through the forge ref API; a PR's `baseRefOid`
 or `base.sha` can be stale and supplies no current-tip evidence. CI must also be green. There is no
@@ -292,10 +293,10 @@ python3 "$HANIG_ORCHESTRATE_DIR/scripts/merge_unit.py" plan.json \
   --verify-integration --verification-timeout 1800
 ```
 
-This mode runs no merge. It reads `verifiers.json` and the pinned
-`verifiers/integration_tests.py` from the observed target commit, runs those
-bytes in the existing disposable candidate-merge checkout, and records the
-result in the external coordinator verification journal. Supply both Git
+This mode runs no merge. It reads `verifiers.json` and the pinned verifier
+programs from the observed target commit, runs both in the same disposable
+candidate-merge checkout, and records each result in the external coordinator
+verification journal. Supply both Git
 objects locally first; the verifier never fetches. The coordinator lease is
 released while the candidate verifier runs. Before appending evidence, the
 operator reacquires it and rechecks the exact unit, attempt, judged head,
@@ -334,6 +335,43 @@ predate installation use the new precondition without allowing a candidate
 to authorize itself. This merge-only authorization leaves ordinary
 anchored-base verification unchanged. Candidate tests remain candidate bytes;
 this policy does not promise an immutable test corpus.
+
+The second designated verifier, `changed-tests-stable`, runs
+`verifiers/changed_tests_stable.py`. It selects added or modified `test_*.py`
+files under `tests/` from the PR's merge-base-to-head diff (renames count as
+delete/add), then runs each module in a fresh host `python3` process five times.
+Each invocation loads that module by its dotted name, retaining package
+identities for relative imports and the integration runner's `tests/` helper
+import path. Package-level `load_tests` hooks cannot replace the module's
+suite; the module's own hook, including supervised delegation, is honored.
+Any failure, error, or unexpected success fails the claim; a selected module
+that executes zero tests also fails, even if its suite reports a positive size
+or another module ran tests. Every repetition must exit zero AND deliver a
+complete result through a fresh anonymous file descriptor outside the candidate
+tree. The verifier's runner writes counts only after unittest returns; the
+parent checks those counts, completion, and the original child PID independently
+of stdout and exit status. Missing, malformed, partial, zero-test, stopped, or
+unsuccessful results fail, including early successful exits and a forked
+descendant returning after its parent exits. No result pathname is supplied to
+candidate code, and the descriptor is closed across exec into delegates. This
+guards accidental termination within the existing trusted-writer model; it is
+not protection from hostile in-process introspection or same-UID writes.
+No changed test modules is a successful no-op. The target's
+verifier entry can set a positive integer `repetitions`; candidate policy and
+program edits cannot change that count or the pinned program used for this PR.
+Repeated passes sample stability; they do not prove a test cannot flake later.
+
+Bootstrap follows target authorization: a target without the new declaration
+keeps the original single-claim rule, so the PR introducing it is checked under
+the already-merged policy. Once the declaration lands, later merge requests
+require both claims with no waiver. Missing or invalid declared verifier bytes,
+policy, or evidence refuse. A retained failure for either claim at the exact
+binding cannot be hidden by another pass. New merge intents retain the required
+claim list and both admitted receipts for reconciliation after Git cleanup;
+legacy intents require readable target policy to establish the claim list.
+An unreadable legacy policy or missing required stability claim corrects any
+incorrect persisted integration label to `integration-unverified` and withholds
+advancement for human intervention. Unreadable policy never means no requirement.
 
 After a merge, the operator compares its actual parent with the checked
 target. A race is recorded as `integration-unverified` in the intent and merge
