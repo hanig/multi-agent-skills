@@ -3,8 +3,8 @@
 Only coordinator status and the installed report determine the run's grade.
 The scripted worker and its stdout supply no verdict. See workflow-acceptance.md.
 """
+import ast
 import json
-import os
 from pathlib import Path
 import shlex
 import shutil
@@ -176,21 +176,48 @@ class InstalledPipeline(unittest.TestCase):
         self.assertEqual(set(report["units"][0]["outputs"]), set(OUTPUTS))
         self.assertFalse(report["units"][0]["missing_outputs"])
 
+    def ignore_missing_outputs(self, predicate):
+        tree = ast.parse(predicate.read_text())
+        calls = [node for node in ast.walk(tree)
+                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                 and node.func.id == "_pipeline_state"]
+        self.assertEqual(len(calls), 1, "pipeline mutation target is ambiguous")
+        self.assertEqual(len(calls[0].args), 5, "pipeline call signature changed")
+        self.assertFalse(calls[0].keywords)
+        calls[0].args[3] = ast.List(elts=[], ctx=ast.Load())
+        predicate.write_text(ast.unparse(tree) + "\n")
+
     def test_020_missing_output_mutation_is_caught_by_hollow_grader(self):
         mutant = self.home / "mutant skills"
         shutil.copytree(self.store, mutant)
         predicate = mutant / "hanig-swarm" / "scripts" / "unit.py"
-        original = predicate.read_text()
-        before = "return judged(_pipeline_state(unit_dir, spec, present, missing, notes))"
-        after = "return judged(_pipeline_state(unit_dir, spec, present, [], notes))"
-        self.assertEqual(original.count(before), 1, "mutation target drifted")
-        predicate.write_text(original.replace(before, after))
+        self.ignore_missing_outputs(predicate)
         self.select_store(mutant)
         status, report = self.exercise("hollow")
         self.assertEqual(status["units"][0]["state"], "DONE", status)
         self.assertEqual(report["units"][0]["state"], "DONE", report)
         with self.assertRaisesRegex(AssertionError, "hollow coordinator reached DONE"):
             self.grade_hollow(status, report)
+
+    def test_030_mutation_survives_formatting_and_local_name_changes(self):
+        reformatted = self.home / "reformatted skills"
+        shutil.copytree(self.store, reformatted)
+        predicate = reformatted / "hanig-swarm" / "scripts" / "unit.py"
+        tree = ast.parse(predicate.read_text())
+        check = next(n for n in tree.body
+                     if isinstance(n, ast.FunctionDef) and n.name == "check_unit")
+        renamed = 0
+        for node in ast.walk(check):
+            if isinstance(node, ast.Name) and node.id == "missing":
+                node.id = "absent_outputs"
+                renamed += 1
+        self.assertGreater(renamed, 0)
+        # Parenthesized definitions/calls permit a newline after the opening
+        # parenthesis. Only the disposable store gets this harmless refactor.
+        predicate.write_text(ast.unparse(tree).replace(
+            "_pipeline_state(", "_pipeline_state(\n    ") + "\n")
+        self.select_store(reformatted)
+        self.test_020_missing_output_mutation_is_caught_by_hollow_grader()
 
 
 if __name__ == "__main__":
