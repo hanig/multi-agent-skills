@@ -156,7 +156,7 @@ def local_execution(executables):
 
 def incomplete(reason):
     return {"exit_code": None, "stdout": "", "stderr": "",
-            "incomplete_reason": reason}
+            "incomplete_reason": str(reason)[-2000:] or "remote execution incomplete"}
 
 
 def _command(argv, cwd=None, timeout=60):
@@ -248,6 +248,16 @@ def scheduler_state(job):
     return (state, code) if state in TERMINAL else None
 
 
+def output_tail(path, limit):
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - limit))
+            return handle.read(limit).decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
 def supervise(stage):
     request = json.loads((stage / "request.json").read_text())
     remote = request["remote"]
@@ -284,7 +294,10 @@ def supervise(stage):
                 "location": "remote", "ssh_alias": remote["ssh_alias"],
                 "executor": remote["executor"]}, "error": "remote worker did not complete"}
         if job:
-            result["execution"].update(job_id=job, sacct_state=state[0] if state else None,
+            result["execution"].update(
+                scheduler_stdout_tail=output_tail(stage / "job.out", 4000),
+                scheduler_stderr_tail=output_tail(stage / "job.err", 2000),
+                job_id=job, sacct_state=state[0] if state else None,
                                        sacct_exit_code=state[1] if state else None)
             if state != ("COMPLETED", "0:0"):
                 reason = "Slurm verification did not reach terminal success"
