@@ -62,7 +62,7 @@ class TestEvidenceSemantics(unittest.TestCase):
             "    global active\n"
             "    command = self.args\n"
             "    if (isinstance(command, list) and command\n"
-            "            and pathlib.Path(command[0]).name == 'verifier'\n"
+            "            and any(pathlib.Path(arg).name == 'verifier' for arg in command)\n"
             "            and ('--merge-base' in command) == %r\n"
             "            and not getattr(self, '_faulted', False)):\n"
             "        self._faulted = True\n"
@@ -146,18 +146,24 @@ class TestEvidenceSemantics(unittest.TestCase):
         self.assert_timeout_rerun(V.STABILITY_CLAIM)
 
     def test_launch_failure_then_same_binding_pass_is_admitted(self):
-        interpreter = self.f.directory / "initially-unavailable-python"
-        program = "#!" + str(interpreter) + "\nraise SystemExit(0)\n"
-        policy = dict(self.f.policy, verifiers=[dict(
-            self.f.policy["verifiers"][0], sha256=hashlib.sha256(program.encode()).hexdigest())])
-        self.shared.precondition.target_commit({
-            V.MERGE_VERIFIER_PATH: program, V.POLICY_FILE: json.dumps(policy)})
+        self.integration_program("raise SystemExit(0)\n")
+        site = self.f.directory / "launch-fault"
+        site.mkdir()
+        (site / "sitecustomize.py").write_text(
+            "import pathlib, subprocess\n"
+            "original = subprocess.Popen.__init__\n"
+            "def launch(self, args, *a, **kw):\n"
+            "    if isinstance(args, list) and any(pathlib.Path(arg).name == 'verifier' for arg in args):\n"
+            "        raise FileNotFoundError('injected declared interpreter launch failure')\n"
+            "    original(self, args, *a, **kw)\n"
+            "subprocess.Popen.__init__ = launch\n")
+        self.f.env["PYTHONPATH"] = str(site)
         result = self.verify()
         self.assertNotEqual(result.returncode, 0)
         receipt = self.rows()[-1]
         self.assertEqual(receipt["result"], "incomplete")
         self.assertIn("could not launch", receipt["incomplete_reason"])
-        interpreter.symlink_to(sys.executable)
+        del self.f.env["PYTHONPATH"]
         self.assertEqual(self.verify().returncode, 0)
         merged = self.f.invoke()
         self.assertEqual(merged.returncode, 0, merged.stdout + merged.stderr)
