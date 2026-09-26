@@ -799,7 +799,7 @@ def run_merge_preconditions(runner, repo, produced_head, target_commit,
         remote = execution_policy.get("verification_host")
         if remote:
             outcomes, execution = RV.run_remote(
-                runner, tree, basis, programs, remote, timeout)
+                runner, tree, basis, programs, remote, timeout, repo)
             execution["coordinator_executables"] = executables
         else:
             outcomes = []
