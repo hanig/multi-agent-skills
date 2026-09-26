@@ -839,8 +839,10 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
         if not run["reconciled"]:
             print("WARNING: " + unresolved_message(run), file=sys.stderr)
         if execution.get("cleanup") != "removed":
+            if remote["executor"] == "slurm":
+                execution.setdefault("cancellation", "unconfirmed")
             print("WARNING: remote cleanup unconfirmed for job {}; recovery files {}/job-id "
-                  "and {}/cleanup.json; retain the stage".format(
+                  "and {}/cleanup.json; inspect cancellation and retain the stage".format(
                       execution.get("job_id") or "unknown", stage, stage), file=sys.stderr)
         publish(path, ledger)
         return outcomes, dict(execution)
