@@ -257,6 +257,94 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertIn('could not exec verifier', row['incomplete_reason'])
         self.assertNotIn('SyntaxError', row['stderr_tail'])
 
+    def test_declared_python_preserves_final_process_argv0(self):
+        expected = 'verifier-process-name'
+        body = ('import os, subprocess, sys\n'
+                'command = subprocess.check_output(["/bin/ps", "-p", str(os.getpid()), "-o", "command="], text=True).strip()\n'
+                'assert command.startswith(%r + " "), command\n'
+                'assert sys.version_info[:2] == %r, sys.version\n'
+                % (expected, sys.version_info[:2]))
+        # Independent real exec control: process argv0 is not Python sys.argv[0].
+        control = self.f.directory / 'argv0-control.py'
+        control.write_text(body)
+        result = subprocess.run([sys.executable, '-c',
+            'import os,sys;os.execv(sys.argv[1],[sys.argv[2],sys.argv[3]])',
+            sys.executable, expected, str(control)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for location in ('remote', 'local'):
+            if location == 'local':
+                self.policy.pop('verification_host')
+                self.save_policy()
+            for option in ('-a ' + expected, '-a' + expected,
+                           '--argv0=' + expected, '-a ignored --argv0 ' + expected):
+                with self.subTest(location=location, option=option):
+                    self.authorize_program('#!/usr/bin/env -S ' + option + ' python3 -u\n' + body)
+                    result = self.verify()
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual(self.rows()[-1]['result'], 'pass')
+                    self.assert_clean()
+
+    def test_malformed_explicit_env_selectors_finish_incomplete(self):
+        for location in ('remote', 'local'):
+            if location == 'local':
+                self.policy.pop('verification_host')
+                self.save_policy()
+            for declaration in ('-S', '-S -a', '-S -u', '-S -a "" python3',
+                                '-S "unterminated', '-S --unknown python3', '-S python3 \\c ignored'):
+                with self.subTest(location=location, declaration=declaration):
+                    self.authorize_program('#!/usr/bin/env ' + declaration + '\nprint("must not run")\n')
+                    result = self.verify()
+                    self.assertNotEqual(result.returncode, 0)
+                    row = self.rows()[-1]
+                    self.assertEqual(row['result'], 'incomplete')
+                    self.assertNotIn('Traceback', result.stderr)
+                    self.assertNotIn('unresolved remote evidence', result.stderr)
+                    self.assertNotIn('must not run', row['stdout_tail'])
+                    self.assert_clean()
+
+    def test_env_operand_and_assignment_do_not_select_python(self):
+        self.policy.pop('verification_host')
+        self.save_policy()
+        (self.f.bin / 'sh').symlink_to('/bin/sh')
+        for prefix in ('-u python3 ', '-- '):
+            with self.subTest(prefix=prefix):
+                self.authorize_program('#!/usr/bin/env -S ' + prefix +
+                    'python3=an-assignment sh\n'
+                    'test "$python3" = an-assignment || exit 76\n'
+                    'printf "native shell selected\\n"\n')
+                result = self.verify()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('native shell selected', self.rows()[-1]['stdout_tail'])
+
+    def test_env_changes_cwd_before_declared_tools_are_restored(self):
+        directory = self.f.directory / 'env-fixture'
+        directory.mkdir()
+        env = directory / 'env'
+        cwd = directory / 'selected cwd'
+        cwd.mkdir()
+        env.write_text('#!' + sys.executable + '\nimport os,sys\n'
+            'a=sys.argv[1:]\n'
+            'assert a[:8] == %r, a\n'
+            'os.chdir(a[2]);os.environ.clear();os.environ["VERIFIER_VALUE"]="two  words"\n'
+            'os.execve(a[8], a[8:], os.environ)\n'
+            % ['-i', '-C', str(cwd), '-P', '/absent', '-u', 'python3', 'VERIFIER_VALUE=two  words'])
+        env.chmod(0o755)
+        self.authorize_program('#!' + str(env) + ' -S -i -C ' + shlex.quote(str(cwd)) +
+            ' -P /absent -u python3 VERIFIER_VALUE="two  words" python3 -u\n'
+            'import os,subprocess,sys\n'
+            'assert os.getcwd() == %r\n'
+            'assert os.environ["VERIFIER_VALUE"] == "two  words"\n'
+            'assert os.environ["HANIG_VERIFICATION_GIT"] == %r\n'
+            'assert os.path.realpath(os.environ["HANIG_VERIFICATION_PYTHON"]) == %r\n'
+            'child=subprocess.check_output(["python3","-c","import os,sys;print(os.path.realpath(sys.executable))"],text=True)\n'
+            'assert child.strip() == %r\n'
+            % (str(cwd), str((self.f.bin / 'git').resolve()), os.path.realpath(sys.executable),
+               os.path.realpath(sys.executable)))
+        result = self.verify()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.rows()[-1]['result'], 'pass')
+        self.assert_clean()
+
     def cancellation_fixture(self, mode='slurm-pending', retry_succeeds=False,
                              terminal_on_success=True):
         self.policy['verification_host'].update(executor='slurm', slurm={
