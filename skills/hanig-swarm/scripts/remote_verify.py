@@ -229,13 +229,69 @@ def ledger_path(state_dir, unit, basis):
         {"unit": unit, "basis": basis}) + ".json")
 
 
-def load_ledger(path, unit, basis):
-    if not path.exists():
-        return {"unit": unit, "basis": basis, "runs": []}
-    value = json.loads(path.read_text())
+def launch_witness(unit, basis, run):
+    return dict(unit=unit, basis=basis, **{key: run[key] for key in (
+        "launch_id", "stage", "verification_host", "request")})
+
+
+def publish_launch_witness(path, unit, basis, run):
+    directory = path.with_suffix(".launches")
+    directory.mkdir(exist_ok=True)
+    publish(directory / (run["launch_id"] + ".json"),
+            launch_witness(unit, basis, run), once=True)
+    # publish fsyncs the witness directory; persist its own directory entry too.
+    fd = os.open(str(directory.parent), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def load_ledger(path, unit, basis, journal_entries=None):
+    """Missing state is fresh only without surviving launch evidence.
+
+    Witnesses and coordinator journal rows are negative evidence of a launch,
+    never proof of reconciliation. A restored ledger must account for every
+    surviving launch, including launches omitted by an older backup.
+    """
+    value = (json.loads(path.read_text()) if path.exists()
+             else {"unit": unit, "basis": basis, "runs": []})
     if (not isinstance(value, dict) or value.get("unit") != unit
             or value.get("basis") != basis or not isinstance(value.get("runs"), list)):
         raise ValueError("invalid remote evidence ledger at " + str(path))
+    runs = {}
+    for run in value["runs"]:
+        if (not isinstance(run, dict) or not isinstance(run.get("launch_id"), str)
+                or not re.fullmatch(r"[0-9a-f]{32}", run["launch_id"])
+                or run["launch_id"] in runs):
+            raise ValueError("invalid remote launch identity at " + str(path))
+        runs[run["launch_id"]] = run
+    witnesses = {}
+    for marker in path.with_suffix(".launches").glob("*.json"):
+        witness = json.loads(marker.read_text())
+        if (not isinstance(witness, dict) or witness.get("unit") != unit
+                or witness.get("basis") != basis
+                or marker.name != str(witness.get("launch_id")) + ".json"):
+            raise ValueError("invalid remote launch witness at " + str(marker))
+        run = runs.get(witness["launch_id"])
+        if run is None or launch_witness(unit, basis, run) != witness:
+            raise ValueError(unresolved_message(witness) + "; restore the matching coordinator ledger")
+        witnesses[run["launch_id"]] = witness
+    for launch_id, run in runs.items():
+        if run.get("witness_required") and launch_id not in witnesses:
+            raise ValueError(unresolved_message(run) + "; restore the required launch witness")
+    for row in journal_entries or ():
+        execution = row.get("execution", {})
+        if (row.get("unit") != unit or any(row.get(k) != v for k, v in basis.items())
+                or not isinstance(execution, dict) or execution.get("location") != "remote"
+                or not execution.get("launch_id")):
+            continue
+        run = runs.get(execution["launch_id"])
+        if (run is None or execution.get("stage") != run.get("stage")
+                or execution.get("ssh_alias") != run.get("verification_host", {}).get("ssh_alias")):
+            raise ValueError("unresolved remote evidence at {}:{}; retrieve or resolve it first; "
+                             "restore the matching coordinator ledger".format(
+                                 execution.get("ssh_alias"), execution.get("stage")))
     return value
 
 
@@ -248,11 +304,16 @@ def unresolved_message(run):
         run["verification_host"]["ssh_alias"], run["stage"])
 
 
-def pending_problem(state_dir, unit, basis):
+def pending_problem(state_dir, unit, basis, journal_entries):
     if state_dir is None:
         return None
+    if journal_entries is None:
+        return "coordinator verification journal is required for remote evidence checks"
     path = ledger_path(state_dir, unit, basis)
-    ledger = load_ledger(path, unit, basis)
+    try:
+        ledger = load_ledger(path, unit, basis, journal_entries)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        return str(exc)
     for run in ledger["runs"]:
         if unresolved(run):
             return unresolved_message(run)
@@ -713,7 +774,7 @@ def remote_call(prefix, remote, code, timeout=45):
 
 
 def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, unit,
-               retrieve_only=False):
+               journal_entries, retrieve_only=False):
     """Persist intent before launch and ingest completed receipts monotonically.
 
     A pending invocation only retrieves its original stage, even if the caller
@@ -722,8 +783,10 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
     """
     if state_dir is None:
         raise ValueError("remote verification requires coordinator evidence storage")
+    if journal_entries is None:
+        raise ValueError("remote verification requires coordinator journal entries")
     with binding_lock(state_dir, unit, basis) as path:
-        ledger = load_ledger(path, unit, basis)
+        ledger = load_ledger(path, unit, basis, journal_entries)
         pending = [run for run in ledger["runs"] if unresolved(run)]
         if retrieve_only and not pending:
             if not ledger["runs"]:
@@ -748,7 +811,8 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
             request = {"basis": basis, "checks": checks, "verification_host": remote,
                        "timeout": timeout, "launch_id": launch_id}
             run = {"launch_id": launch_id, "stage": stage, "verification_host": remote,
-                   "request": request, "receipts": {}, "reconciled": False, "published": False}
+                   "request": request, "receipts": {}, "reconciled": False, "published": False,
+                   "witness_required": True}
             ledger["runs"].append(run)
         stage = run["stage"]
         ssh = coordinator_ssh(repo, tree)
@@ -805,6 +869,7 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
                             archive.add(str(tmp / name), arcname=name, recursive=False)
                     transfer.seek(0)
                     publish(path, ledger)  # MUST precede the first possible remote launch.
+                    publish_launch_witness(path, unit, basis, run)
                     try:
                         if not prefix:
                             raise ValueError("ssh is unavailable")

@@ -461,7 +461,20 @@ same verification command to retrieve it. Add `--retrieve-remote-evidence` to
 `--verify-integration` for an explicitly idempotent retrieval: it uses the
 existing launch even after reconciliation and never starts a new verifier. If a launch or its stage cannot be
 accounted for, operator investigation is required; deleting the coordinator
-ledger is not resolution. A missing local SSH client is a preflight failure and records no launch; fixing
+ledger is not resolution. Before SSH, each new launch also publishes a write-once
+coordinator witness in a sibling `<binding>.launches/` directory. New ledger
+runs require their witnesses, and every surviving witness and coordinator
+journalled launch must match a run in the ledger. Missing or inconsistent state
+blocks admission and another launch, including local execution and retained
+merge reconciliation. Restore the exact saved ledger/witness before retrieval;
+a passing receipt cannot reconstruct reconciliation authority. An older backup
+that omits a surviving launch is refused. A deduplicated receipt's old
+`evidence_reconciled: false` flag does not permanently block a subsequently
+reconciled and published run. Existing pre-witness remote records use surviving
+journal rows as the backstop; an unjournalled legacy launch whose sole ledger
+was lost cannot be detected retrospectively. Loss of all independent coordinator
+evidence is outside this storage guarantee.
+A missing local SSH client is a preflight failure and records no launch; fixing
 the client allows a retry. Once SSH has been attempted, even a connection failure
 before visible execution can leave an uncertain launch and block retries. Changing the execution host or
 switching to local mode cannot bypass that block.

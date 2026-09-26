@@ -660,7 +660,7 @@ def candidate_merge_basis(runner, repo, produced_head, target_commit):
 
 def run_in_candidate_merge(runner, repo, produced_head, target_commit, path,
                            expect_digest, args=None, timeout=900, executables=None,
-                           state_dir=None, unit=None):
+                           state_dir=None, unit=None, journal_entries=None):
     """Run pinned verifier bytes in a disposable candidate-merge checkout.
 
     The checkout starts at the exact target commit and receives the produced
@@ -675,7 +675,7 @@ def run_in_candidate_merge(runner, repo, produced_head, target_commit, path,
     if error:
         return None, basis, error
     try:
-        pending = RV.pending_problem(state_dir, unit, basis)
+        pending = RV.pending_problem(state_dir, unit, basis, journal_entries)
         if pending:
             return None, basis, pending
         outcome, run_error = run_pinned(
@@ -751,7 +751,7 @@ def run_merge_precondition(runner, repo, produced_head, target_commit,
 def run_merge_preconditions(runner, repo, produced_head, target_commit,
                             timeout=900, claims=(INTEGRATION_CLAIM, STABILITY_CLAIM),
                             execution_policy=None, state_dir=None, unit=None,
-                            retrieve_remote=False):
+                            retrieve_remote=False, journal_entries=None):
     """Run target-pinned claims in one disposable candidate merge.
 
     Return receipts plus any execution error. A completed FAIL remains evidence
@@ -805,10 +805,10 @@ def run_merge_preconditions(runner, repo, produced_head, target_commit,
                                  policy_sha256=policy_digest, authorization_commit=target_commit)})
             extras.append(extra)
         remote = execution_policy.get("verification_host")
-        if remote or retrieve_remote or RV.pending_problem(state_dir, unit, basis):
+        if remote or retrieve_remote or RV.pending_problem(state_dir, unit, basis, journal_entries):
             outcomes, execution = RV.run_remote(
                 runner, tree, basis, programs, remote, timeout, repo, state_dir, unit,
-                retrieve_only=retrieve_remote)
+                journal_entries, retrieve_only=retrieve_remote)
             execution["coordinator_executables"] = executables
         else:
             outcomes = []
