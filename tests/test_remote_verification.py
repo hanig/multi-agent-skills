@@ -287,6 +287,34 @@ class TestRemoteVerification(unittest.TestCase):
         self.f.assert_refused(result)
         self.assertIn('missing execution evidence', result.stderr)
 
+    def test_retained_remote_digest_loss_corrects_persisted_verified_labels(self):
+        result = self.verify()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.f.forge['queued'] = True
+        self.f.save()
+        self.assertNotEqual(self.admitted().returncode, 0)
+        intent = self.f.intent()
+        intent['preconditions']['integration']['execution'].pop('verified_tree')
+        intent['integration_status'] = 'candidate-verified'
+        path = self.f.state_dir / ('merge-unit-' + intent['operation_id'] + '.json')
+        path.write_text(json.dumps(intent))
+        self.f.forge['pr'].update(state='MERGED', mergeCommit={'oid': self.f.merged})
+        self.f.us['merge_receipt'] = {
+            'unit': 'u', 'repo': self.f.remote, 'pr': self.f.remote + '/pull/7',
+            'target': 'main', 'head': self.f.head, 'merged_as': self.f.merged,
+            'target_commit': self.f.base, 'integration_status': 'candidate-verified'}
+        self.f.save()
+        result = self.admitted()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.f.intent()['integration_status'], 'integration-unverified')
+        self.assertEqual(self.f.receipts()[-1]['integration_status'], 'integration-unverified')
+        saved = json.loads((self.f.state_dir / S.STATE_FILE).read_text())
+        self.assertEqual(saved['units']['u']['merge_receipt']['integration_status'],
+                         'integration-unverified')
+        self.assertEqual(saved['units']['u']['state'], 'READY_FOR_PR')
+        self.assertNotIn(' advance ', result.stdout)
+        self.assertEqual(len(self.f.calls(['pr', 'merge'])), 1)
+
     def test_remote_receipt_cannot_lose_verified_digest_on_admission(self):
         result = self.verify()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
