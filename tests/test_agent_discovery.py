@@ -65,7 +65,9 @@ def real_discovery(env):
     Callers await the Future before releasing any fixture barrier. Cleanup
     uses the owned supervisor, independently of the production kill helper.
     The worker timestamps discovery's return so a delayed observer cannot add
-    time after completion to the measured latency.
+    time after completion to the measured latency. Fixture timestamps use the
+    OS CLOCK_MONOTONIC directly: time.monotonic() on macOS Python 3.9 has a
+    per-process origin and cannot be compared with the fake CLI's timestamp.
     """
     answer = Future()
     processes = []
@@ -79,7 +81,7 @@ def real_discovery(env):
     def run():
         try:
             report = discovery.discover(env, timeout=REAL_PROBE_SECONDS)
-            answer.set_result((report, time.monotonic()))
+            answer.set_result((report, time.clock_gettime(time.CLOCK_MONOTONIC)))
         except BaseException as error:
             answer.set_exception(error)
 
@@ -267,7 +269,7 @@ class TestAgentDiscovery(unittest.TestCase):
                 # Exercise the real timeout branch only after the CLI is
                 # blocked. Zero readiness comes from the OS, not a fake report.
                 self.assertGreater(timeout, 0)
-                expired_at = time.monotonic()
+                expired_at = time.clock_gettime(time.CLOCK_MONOTONIC)
                 return select.select(readers, writers, errors, 0)
 
             try:
@@ -351,7 +353,7 @@ class TestAgentDiscovery(unittest.TestCase):
                 "os.close(notify)",
                 "assert os.read(ready, 1) == b'R'",
                 "os.close(ready)",
-                "pathlib.Path(%r).write_text(str(time.monotonic()))" % str(released_at),
+                "pathlib.Path(%r).write_text(str(time.clock_gettime(time.CLOCK_MONOTONIC)))" % str(released_at),
                 "print('2.1.261')",
             ]))
             peer = None
