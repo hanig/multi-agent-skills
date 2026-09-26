@@ -328,6 +328,37 @@ class TestRemoteVerification(unittest.TestCase):
                 self.assertTrue(executable['version'])
         self.assert_clean()
 
+    def test_generic_integration_policy_reads_and_admission_use_declared_git(self):
+        self.policy.pop('remote')
+        log = self.f.directory / 'generic-git.log'
+        actual = self.policy['local']['git']
+        wrapper = self.f.directory / 'generic-git'
+        wrapper.write_text('#!' + sys.executable + '\nimport json, os, sys\n'
+                           'with open(%r, "a") as log: log.write(json.dumps(sys.argv[1:]) + "\\n")\n'
+                           'os.execv(%r, [%r] + sys.argv[1:])\n' % (str(log), actual, actual))
+        wrapper.chmod(0o755)
+        self.policy['local']['git'] = str(wrapper)
+        self.save_policy()
+        result = subprocess.run([
+            sys.executable, S.__file__, 'verify', '--state-dir', str(self.f.state_dir),
+            '--unit', 'u', '--attempt', str(self.f.attempt), '--claim', V.INTEGRATION_CLAIM,
+            '--target-commit', self.f.base, '--verifier', V.MERGE_VERIFIER,
+            '--path', str(self.f.repo / V.MERGE_VERIFIER_PATH)],
+            cwd=self.f.repo, env=self.f.env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertTrue(any('show' in c and self.f.base + ':' + V.POLICY_FILE in c for c in calls))
+        before = sum('checkout' in c for c in calls)
+        row, = self.rows()
+        receipt, error = S.admit_verification(
+            self.f.state_dir, 'u', V.INTEGRATION_CLAIM, self.f.head,
+            row['policy_sha256'], self.f.policy, repo=self.f.repo,
+            base_commit=self.f.base, target_commit=self.f.base)
+        self.assertIsNone(error, error)
+        self.assertEqual(receipt['execution']['executables']['git']['path'], str(wrapper))
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertGreater(sum('checkout' in c for c in calls), before)
+
     def test_changed_remote_module_without_handshake_fails(self):
         self.shared.install_policy(repetitions=2)
         self.shared.candidate({'tests/test_exit.py': 'raise SystemExit(0)\n'})
