@@ -3627,7 +3627,14 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(_FixtureTestCase):
     def test_a_continuously_noisy_child_cannot_starve_its_deadline(self):
         """An unbounded drain-until-EAGAIN loop can stay inside drain forever
         when several writers keep the pipe readable. Each drain quantum must
-        yield to the monotonic state machine while retaining the 64 KiB tail."""
+        yield to the monotonic state machine while retaining the 64 KiB tail.
+
+        Prime the real pipe before arming the fixture's run/grace windows.
+        Timestamp readiness and completion in the supervisor, so neither
+        writer startup nor a late Python observer consumes the latency bound.
+        Separate startup and collection watchdogs contain a broken fixture;
+        the completion timestamp alone measures post-readiness latency.
+        """
         with self._fixture_directory() as d:
             script = Path(d) / "noisy"
             pidfile = Path(d) / "noisy.pid"
@@ -3642,20 +3649,97 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(_FixtureTestCase):
             script.write_text(self._fixture_scope(d).shell_script(
                 script.read_text()))
             script.chmod(0o755)
-            proc = self._fixture_scope(d).launch(FixtureSpec(tuple([shutil.which("perl"), "-e", self._supervisor_source(),
-                 "1", "1", str(script)])))
-            child = None
+            ready = Path(d) / "noisy.ready"
+            completed = Path(d) / "noisy.completed"
+            source = self._supervisor_source()
+            loop = "while (1) {\n    drain();"
+            answer_end = "    exit 0;"
+            timing_start = "my $started = "
+            timing_end = 'my $state = "RUNNING";'
+            self.assertEqual(source.count(loop), 1)
+            self.assertEqual(source.count(answer_end), 1)
+            self.assertEqual(source.count(timing_start), 1)
+            self.assertEqual(source.count(timing_end), 1)
+            start = source.index(timing_start)
+            end = source.index(timing_end, start)
+            timing = source[start:end]
+            source = source[:start] + source[end:]
+            # Only the extracted fixture gains a startup barrier. Execute the
+            # shipped timing expressions too: copying them here could conceal
+            # a regression in the supervisor's deadline initialization.
+            prime = '''
+while (length($tail) < 65536) { drain(); sleep 0.001; }
+''' + timing + '''
+open(my $ready, ">", $ENV{HANIG_NOISY_READY}) or die $!;
+print $ready "$started\\n";
+close $ready or die $!;
+'''
+            source = source.replace(loop, prime + loop)
+            source = source.replace(answer_end, '''
+    my $completed = clock_gettime(CLOCK_MONOTONIC);
+    open(my $stamp, ">", $ENV{HANIG_NOISY_COMPLETED}) or die $!;
+    print $stamp "$completed\\n";
+    close $stamp or die $!;
+''' + answer_end)
+            env = dict(os.environ, HANIG_NOISY_READY=str(ready),
+                       HANIG_NOISY_COMPLETED=str(completed))
+            run_seconds, reap_seconds = 1, 1
+            watchdog = time.monotonic() + 60
+            proc = self._fixture_scope(d).launch(FixtureSpec(
+                (shutil.which("perl"), "-e", source, str(run_seconds),
+                 str(reap_seconds), str(script)), environment=tuple(env.items())))
             try:
-                joined = self._fixture_answer(proc, timeout=5)
+                while not ready.exists() or not ready.read_text().endswith("\n"):
+                    self.assertLess(time.monotonic(), watchdog,
+                                    "noisy pipe did not reach readiness")
+                    if proc.join(0).state is not JoinState.TIMED_OUT:
+                        # The observer may have paused since checking ready.
+                        # Completion publishes readiness first; re-read it
+                        # before diagnosing an early exit from an old look.
+                        self.assertTrue(
+                            ready.exists() and ready.read_text().endswith("\n"),
+                            "supervisor exited before noisy readiness")
+                    time.sleep(0.01)
+                ready_at = float(ready.read_text())
+                joined = self._fixture_answer(proc, timeout=60)
                 out, err = joined.stdout, joined.stderr
                 self.assertEqual(joined.returncode, 0, err)
+                self.assertLess(
+                    float(completed.read_text()) - ready_at,
+                    run_seconds + reap_seconds + 3,
+                    "continuous output exceeded the post-readiness deadline")
                 lines = out.splitlines()
                 self.assertEqual(lines[:2], ["timeout", "124"], out[:200])
                 self.assertEqual(len(lines[2]), 65536,
                                  "the retained output tail is not 64 KiB")
                 self.assertEqual(set(lines[2]), {"0"})
+                self.assertEqual(lines[3:], ["__DOCTOR_END__"],
+                                 "unexpected records after the retained tail")
             except subprocess.TimeoutExpired:
                 self.fail("continuous output starved the monotonic deadline")
+
+    def test_noisy_deadline_allows_delayed_writer_startup(self):
+        from unittest import mock
+
+        shell_script = FixtureProcesses.shell_script
+        injected = []
+
+        def stopped_start(scope, source):
+            if "writer()" in source:
+                # Deschedule the producer beyond the old 1s run + 1s grace.
+                # The tracked resumer belongs to the same fixture session.
+                anchor = "trap '' TERM\n"
+                self.assertEqual(source.count(anchor), 1,
+                                 "delayed-start trap anchor changed")
+                source = source.replace(
+                    anchor, anchor +
+                    '(sleep 3; kill -CONT "$$") &\nkill -STOP "$$"\n', 1)
+                injected.append(True)
+            return shell_script(scope, source)
+
+        with mock.patch.object(FixtureProcesses, "shell_script", stopped_start):
+            self.test_a_continuously_noisy_child_cannot_starve_its_deadline()
+        self.assertEqual(injected, [True], "writer delay was not injected once")
 
     def test_group_setup_and_wait_errors_fail_closed(self):
         """This is structural/code-inspection coverage: setpgid/waitpid
