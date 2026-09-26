@@ -700,7 +700,8 @@ def verify_integration(args, repo, snapshot):
     evidences, error = V.run_merge_preconditions(
         S.U.run, repo, binding["head"], target,
         timeout=args.verification_timeout, execution_policy=snapshot["execution_policy"],
-        state_dir=args.state_dir, unit=binding["unit"])
+        state_dir=args.state_dir, unit=binding["unit"],
+        retrieve_remote=getattr(args, "retrieve_remote_evidence", False))
     if error and not evidences:
         raise Refusal(error + ". " + verification_hint(args))
 
@@ -773,7 +774,8 @@ def verify_integration(args, repo, snapshot):
         if evidences and evidences[0].get("execution", {}).get("launch_id"):
             RV.acknowledge(state_dir, binding["unit"],
                            {k: evidences[0][k] for k in V.MERGE_BASIS_FIELDS},
-                           evidences[0]["execution"]["launch_id"])
+                           evidences[0]["execution"]["launch_id"],
+                           evidences[0]["execution"]["publication_digest"])
     finally:
         S.release_lease(args.state_dir)
     for evidence in evidences:
@@ -833,12 +835,16 @@ def main(argv=None):
     parser.add_argument("--verify-integration", action="store_true",
                         help="run all target-authorized merge verifiers and record evidence; never merge")
     parser.add_argument("--verification-timeout", type=int, default=900)
+    parser.add_argument("--retrieve-remote-evidence", action="store_true",
+                        help="retrieve the existing remote launch for this binding without launching a verifier")
     parser.add_argument("--allow-unchecked-scope", type=nonempty, metavar="REASON")
     parser.add_argument("--abandon-intent", type=nonempty, metavar="OPERATION_ID")
     parser.add_argument("--reason", type=nonempty)
     args = parser.parse_args(argv)
     if args.verify_integration and args.abandon_intent:
         parser.error("--verify-integration cannot abandon an intent")
+    if args.retrieve_remote_evidence and not args.verify_integration:
+        parser.error("--retrieve-remote-evidence requires --verify-integration")
     if args.verification_timeout <= 0:
         parser.error("--verification-timeout must be positive")
     if args.pr <= 0:

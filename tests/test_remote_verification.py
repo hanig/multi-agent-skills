@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import unittest
 from unittest import mock
 
@@ -27,6 +28,10 @@ command = args[3]
 with open(os.environ['REMOTE_LOG'], 'a') as log:
     log.write(json.dumps(args) + '\n')
 if "tarfile" in command:
+    records = list(pathlib.Path(os.environ['REMOTE_LEDGER_DIR']).glob('*.json'))
+    assert records, 'coordinator launch must be durable before SSH'
+    assert any(any(run['stage'] in command for run in json.loads(p.read_text())['runs'])
+               for p in records), 'SSH launch must have its exact saved locator'
     mode = pathlib.Path(os.environ['REMOTE_MODE']).read_text()
     if mode == 'ssh-fail': raise SystemExit(255)
     raw = sys.stdin.buffer.read()
@@ -89,7 +94,8 @@ class TestRemoteVerification(unittest.TestCase):
         self.remote_root.mkdir()
         self.witness = self.f.directory / 'verifier-ran'
         self.f.env.update(REMOTE_LOG=str(self.f.directory / 'ssh.log'),
-                          REMOTE_MODE=str(self.mode), SCHED_LOG=str(self.f.directory / 'scheduler.log'))
+                          REMOTE_MODE=str(self.mode), SCHED_LOG=str(self.f.directory / 'scheduler.log'),
+                          REMOTE_LEDGER_DIR=str(self.f.state_dir / 'remote-verifications'))
         for name, body in (('ssh', SSH), ('sbatch', SBATCH), ('sacct', SACCT),
                            ('scancel', 'import os\nfrom pathlib import Path\n'
                             'p=Path(os.environ["REMOTE_MODE"])\n'
@@ -242,16 +248,15 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertIn(str(stage / 'cleanup.json'), result.stderr)
         self.assertEqual(self.f.calls(['pr', 'merge']), [])
 
-    def test_confirmed_removal_does_not_need_a_second_connection(self):
+    def test_confirmed_removal_requires_reconciliation_acknowledgment(self):
         self.program()
-        self.mode.write_text('cleanup-ssh-fail')
         result = self.verify()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         row, = self.rows()
         self.assertEqual(row['result'], 'pass')
         self.assertEqual(row['execution']['cleanup'], 'removed')
         self.assertTrue(self.witness.exists())
-        self.assertEqual(len(Path(self.f.env['REMOTE_LOG']).read_text().splitlines()), 1)
+        self.assertEqual(len(Path(self.f.env['REMOTE_LOG']).read_text().splitlines()), 2)
         self.assert_clean()
 
     def test_candidate_ssh_is_excluded_from_relative_absolute_and_symlink_path(self):
@@ -293,6 +298,19 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertEqual(execution['cleanup'], 'unconfirmed')
         self.assertTrue(stage.exists())
         command.assert_not_called()
+
+    def test_missing_job_id_cannot_remove_a_pending_stage(self):
+        stage = self.cleanup_stage()
+        (stage / 'job-id').unlink()
+        (stage / 'supervision-finished').write_text(json.dumps({
+            'job_id': '321', 'sacct_state': None}))
+        with mock.patch.object(RV, 'scheduler_state', return_value=None) as state, \
+                mock.patch.object(RV, '_command', return_value=(1, '', 'denied')):
+            execution = RV.cleanup(stage)
+        self.assertEqual(execution['cleanup'], 'unconfirmed')
+        self.assertEqual(execution['job_id'], '321')
+        self.assertTrue(stage.exists())
+        state.assert_called_once_with('321')
 
     def test_cleanup_lock_prevents_overlapping_cancellation(self):
         stage = self.cleanup_stage()
@@ -374,13 +392,47 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertRegex(result.stderr, r'WARNING: .*job 321')
         self.assertEqual(self.f.calls(['pr', 'merge']), [])
 
+    def invoke_disabled_slurm(self, *extra):
+        """Exercise retained internals with fixture tools, bypassing ONLY policy
+        enablement in this test process. Production validation has its own
+        refusal test; no production enablement flag exists.
+        """
+        wrapper = self.f.directory / 'disabled-slurm-operator.py'
+        wrapper.write_text(
+            'import hashlib, json, sys\nfrom pathlib import Path\nfrom unittest import mock\n'
+            'sys.path.insert(0, %r)\nimport merge_unit as M\n'
+            'original = M.RV.read_policy\n'
+            'def fixture_policy(state):\n'
+            '    p = Path(state) / M.RV.POLICY\n'
+            '    raw = p.read_bytes()\n'
+            '    policy = json.loads(raw)\n'
+            '    if policy.get("verification_host", {}).get("executor") != "slurm": return original(state)\n'
+            '    valid = json.loads(raw)\n'
+            '    valid["verification_host"]["executor"] = "direct"\n'
+            '    valid["verification_host"].pop("slurm")\n'
+            '    read = Path.read_bytes\n'
+            '    def fixture_bytes(path): return json.dumps(valid).encode() if path == p else read(path)\n'
+            '    with mock.patch.object(Path, "read_bytes", fixture_bytes): original(state)\n'
+            '    return policy, hashlib.sha256(raw).hexdigest()\n'
+            'M.RV.read_policy = fixture_policy\n'
+            'raise SystemExit(M.main())\n' % str(self.f.operator.parent))
+        command = [sys.executable, str(wrapper), str(self.f.plan_path),
+                   '--state-dir', str(self.f.state_dir), '--unit', 'u', '--pr', '7',
+                   '--approver', 'Operator']
+        return subprocess.run(command + list(extra), cwd=self.f.repo, env=self.f.env,
+                              capture_output=True, text=True, timeout=60)
+
     def verify(self, *extra):
+        if self.policy.get('verification_host', {}).get('executor') == 'slurm':
+            return self.invoke_disabled_slurm('--verify-integration', *extra)
         return self.f.invoke('--verify-integration', *extra)
 
     def rows(self):
         return S.load_verifications(self.f.state_dir)[0]
 
     def admitted(self):
+        if self.policy.get('verification_host', {}).get('executor') == 'slurm':
+            return self.invoke_disabled_slurm()
         return self.f.invoke()
 
     def assert_clean(self):
@@ -408,6 +460,7 @@ class TestRemoteVerification(unittest.TestCase):
             self.assertTrue(execution['executables'][name]['version'])
         self.assertTrue(self.witness.exists())
         self.assert_clean()
+        self.assertEqual(self.admitted().returncode, 0)
 
     def test_completed_fail_survives_ssh_255_and_poisoning(self):
         self.program('raise SystemExit(125 * int(Path(%r).read_text() != "pass"))\n'
@@ -452,6 +505,68 @@ class TestRemoteVerification(unittest.TestCase):
         self.f.assert_refused(self.admitted())
         self.assert_clean()
 
+    def test_partial_failure_survives_later_worker_loss_and_blocks_local_escape(self):
+        first = '#!' + sys.executable + '\nraise SystemExit(125)\n'
+        second = ('#!' + sys.executable + '\nimport os, signal\n'
+                  'os.kill(os.getppid(), signal.SIGKILL)\n')
+        self.shared.install_policy(repetitions=1)
+        policy = self.shared.policy
+        policy['verifiers'][0]['sha256'] = hashlib.sha256(first.encode()).hexdigest()
+        policy['verifiers'][1]['sha256'] = hashlib.sha256(second.encode()).hexdigest()
+        self.shared.precondition.target_commit({V.MERGE_VERIFIER_PATH: first,
+            V.STABILITY_VERIFIER_PATH: second, V.POLICY_FILE: json.dumps(policy)})
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        first_row, later = self.rows()
+        self.assertEqual((first_row['result'], first_row['exit_code']), ('fail', 125))
+        self.assertEqual(later['result'], 'incomplete')
+        stage = Path(first_row['execution']['stage'])
+        self.assertTrue((stage / 'claim-0.json').exists())
+        self.assertFalse((stage / 'worker-complete').exists())
+        before = (stage / 'claim-0.json').read_bytes()
+        self.policy.pop('verification_host')
+        self.save_policy()
+        retry = self.verify()
+        self.assertNotEqual(retry.returncode, 0)
+        self.assertIn('unresolved remote evidence at', retry.stderr)
+        self.assertEqual((stage / 'claim-0.json').read_bytes(), before)
+        self.assertEqual(len(self.rows()), 2, 'retrieval must be idempotent')
+        self.f.assert_refused(self.admitted())
+        calls = [json.loads(line) for line in Path(self.f.env['REMOTE_LOG']).read_text().splitlines()]
+        self.assertEqual(sum('tarfile' in call[-1] for call in calls), 1)
+
+    def test_completed_receipts_survive_missing_aggregate_and_cleanup_disconnect(self):
+        self.program('raise SystemExit(125)\n')
+        self.mode.write_text('ssh-lost-both')
+        self.assertNotEqual(self.verify().returncode, 0)
+        stage = Path(self.rows()[-1]['execution']['stage'])
+        (stage / 'result.json').unlink()
+        self.mode.write_text('pass')
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.rows()[-1]['result'], self.rows()[-1]['exit_code']), ('fail', 125))
+        self.assertFalse(stage.exists())
+
+    def test_cleanup_disconnect_does_not_downgrade_completed_pass(self):
+        self.program()
+        self.mode.write_text('cleanup-ssh-fail')
+        result = self.verify()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'pass')
+        self.assertEqual(row['execution']['cleanup'], 'unconfirmed')
+        stage = Path(row['execution']['stage'])
+        self.assertTrue((stage / 'claim-0.json').exists())
+        self.assertTrue((stage / 'worker-complete').exists())
+        self.mode.write_text('pass')
+        for _ in range(2):
+            result = self.verify('--retrieve-remote-evidence')
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.rows()), 1)
+        self.assertFalse(stage.exists())
+        calls = [json.loads(line) for line in Path(self.f.env['REMOTE_LOG']).read_text().splitlines()]
+        self.assertEqual(sum('tarfile' in call[-1] for call in calls), 1)
+
     def test_slurm_policy_is_disabled_before_transport(self):
         self.policy['verification_host'].update(executor='slurm', slurm={
             'partition': 'fixture-cpu', 'mem': '2G', 'time': '00:05:00'})
@@ -461,7 +576,6 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertIn('ARC-1103', result.stderr)
         self.assertFalse(Path(self.f.env['REMOTE_LOG']).exists())
         self.assertEqual(self.rows(), [])
-        self.assertEqual(self.admitted().returncode, 0)
 
     def test_slurm_runs_both_claims_with_target_repetitions_and_handshake(self):
         self.policy['verification_host'].update(executor='slurm', slurm={
@@ -518,8 +632,19 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertEqual(admitted.returncode, 0, admitted.stdout + admitted.stderr)
         self.assertEqual(incomplete['result'], 'incomplete')
 
-    def test_ssh_failure_then_pass_for_same_binding_is_admitted(self):
-        self.assert_retry_admits('ssh-fail')
+    def test_ssh_failure_without_retrievable_stage_blocks_rerun(self):
+        self.program()
+        self.mode.write_text('ssh-fail')
+        self.assertNotEqual(self.verify().returncode, 0)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'incomplete')
+        self.mode.write_text('pass')
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('unresolved remote evidence at', result.stderr)
+        self.assertFalse(self.witness.exists())
+        self.assertEqual(self.rows(), [row])
+        self.f.assert_refused(self.admitted())
 
     def test_remote_timeout_then_pass_for_same_binding_is_admitted(self):
         tail = ('import time\nif Path(%r).read_text() == "timeout": time.sleep(30)\n'
@@ -777,6 +902,12 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertIn('execution policy changed during verification', result.stderr)
         self.assertEqual(self.rows(), [])
         self.assert_clean()
+        self.save_policy()
+        retrieved = self.verify('--retrieve-remote-evidence')
+        self.assertEqual(retrieved.returncode, 0, retrieved.stdout + retrieved.stderr)
+        self.assertEqual(self.rows()[-1]['result'], 'pass')
+        calls = [json.loads(line) for line in Path(self.f.env['REMOTE_LOG']).read_text().splitlines()]
+        self.assertEqual(sum('tarfile' in call[-1] for call in calls), 1)
 
     def test_candidate_executable_path_in_coordinator_policy_is_refused(self):
         self.policy['local']['python'] = str(self.f.repo / 'python3')
@@ -852,6 +983,21 @@ class TestRemoteVerification(unittest.TestCase):
         result = self.admitted()
         self.f.assert_refused(result)
         self.assertIn('tree digest', result.stderr)
+
+
+class TestWriteOnceRemoteEvidence(unittest.TestCase):
+    def test_completed_receipt_cannot_be_replaced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'claim-0.json'
+            failure = {'exit_code': 125, 'completion': True}
+            RV.publish(path, failure, once=True)
+            before, inode = path.read_bytes(), path.stat().st_ino
+            RV.publish(path, failure, once=True)
+            self.assertEqual(path.stat().st_ino, inode)
+            with self.assertRaisesRegex(ValueError, 'conflicting write-once'):
+                RV.publish(path, {'exit_code': 0, 'completion': True}, once=True)
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(list(Path(directory).iterdir()), [path])
 
 
 if __name__ == '__main__':
