@@ -207,10 +207,11 @@ class TestRemoteVerification(unittest.TestCase):
         self.assert_retry_admits('timeout', tail)
 
     def test_completed_remote_fail_poisoning_survives_later_pass(self):
-        self.program('raise SystemExit(int(Path(%r).read_text() == "fail"))\n' % str(self.mode))
+        self.program('raise SystemExit(125 * int(Path(%r).read_text() == "fail"))\n' % str(self.mode))
         self.mode.write_text('fail')
         self.assertNotEqual(self.verify().returncode, 0)
         self.assertEqual(self.rows()[-1]['result'], 'fail')
+        self.assertEqual(self.rows()[-1]['exit_code'], 125)
         self.mode.write_text('pass')
         result = self.verify()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -388,6 +389,52 @@ class TestRemoteVerification(unittest.TestCase):
         result = self.verify()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('HOST_HELPER_RAN', self.rows()[-1]['stdout_tail'])
+
+    def test_child_launcher_exec_failure_is_incomplete_and_retryable(self):
+        self.policy.pop('remote')
+        self.save_policy()
+        self.program()
+        site = self.f.directory / 'launcher-fault'
+        site.mkdir()
+        (site / 'sitecustomize.py').write_text(
+            'import os, sys\n'
+            'original = os.execv\n'
+            'def launch(path, args):\n'
+            '    if sys.argv[0] == "-c" and any("pinned-verifier-" in x for x in sys.argv[1:]):\n'
+            '        raise OSError("injected child launcher exec failure")\n'
+            '    return original(path, args)\n'
+            'os.execv = launch\n')
+        self.f.env['PYTHONPATH'] = str(site)
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.witness.exists())
+        self.assertEqual(self.rows()[-1]['result'], 'incomplete')
+        self.assertIn('child launcher', self.rows()[-1]['incomplete_reason'])
+        self.f.env.pop('PYTHONPATH')
+        result = self.verify()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = self.admitted()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_verifier_cannot_report_a_launcher_error(self):
+        self.policy.pop('remote')
+        self.save_policy()
+        self.program(
+            'import os, stat\n'
+            'for name in os.listdir("/dev/fd"):\n'
+            '    fd = int(name)\n'
+            '    if fd <= 2: continue\n'
+            '    try:\n'
+            '        if stat.S_ISFIFO(os.fstat(fd).st_mode):\n'
+            '            os.write(fd, b"verifier must not attest a launcher error")\n'
+            '    except OSError: pass\n'
+            'raise SystemExit(125)\n')
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        row, = self.rows()
+        self.assertEqual((row['result'], row['exit_code']), ('fail', 125))
+        self.assertNotIn('incomplete_reason', row)
+        self.f.assert_refused(self.admitted())
 
     def test_changed_remote_module_without_handshake_fails(self):
         self.shared.install_policy(repetitions=2)
