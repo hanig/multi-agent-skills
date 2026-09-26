@@ -3479,6 +3479,16 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(_FixtureTestCase):
         return src.split("SUPERVISOR_PERL='", 1)[1].split(
             "'\n\n# bounded SECONDS", 1)[0]
 
+    def _assert_supervisor_anchor(self, source, anchor):
+        # The shipped supervisor has no instrumentation API. Keep these
+        # test-only seams fail-closed rather than adding a production hook.
+        self.assertEqual(
+            source.count(anchor), 1,
+            "bin/doctor supervisor refactor changed instrumentation anchor "
+            "%r; update the test-only instrumentation in tests/test_project.py "
+            "to match the supervisor, preserving its deadline and output "
+            "assertions" % anchor)
+
     # --- the four states, which are two facts and not one -------------------
 
     def test_the_cli_on_PATH_is_reported_as_the_path_it_was_found_at(self):
@@ -3630,10 +3640,12 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(_FixtureTestCase):
         yield to the monotonic state machine while retaining the 64 KiB tail.
 
         Prime the real pipe before arming the fixture's run/grace windows.
-        Timestamp readiness and completion in the supervisor, so neither
-        writer startup nor a late Python observer consumes the latency bound.
+        Publish readiness before arming and timestamping the measured interval,
+        so neither publication nor a late observer consumes the latency bound.
         Separate startup and collection watchdogs contain a broken fixture;
-        the completion timestamp alone measures post-readiness latency.
+        supervisor timestamps measure the entire armed interval. A pause
+        between publication and arming is setup, bounded by the collection
+        watchdog: no deadline or state-machine iteration runs in that gap.
         """
         with self._fixture_directory() as d:
             script = Path(d) / "noisy"
@@ -3656,10 +3668,8 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(_FixtureTestCase):
             answer_end = "    exit 0;"
             timing_start = "my $started = "
             timing_end = 'my $state = "RUNNING";'
-            self.assertEqual(source.count(loop), 1)
-            self.assertEqual(source.count(answer_end), 1)
-            self.assertEqual(source.count(timing_start), 1)
-            self.assertEqual(source.count(timing_end), 1)
+            for anchor in (loop, answer_end, timing_start, timing_end):
+                self._assert_supervisor_anchor(source, anchor)
             start = source.index(timing_start)
             end = source.index(timing_end, start)
             timing = source[start:end]
@@ -3669,16 +3679,21 @@ class TestDoctorSeesThePrerequisitesTheSkillsRefuseWithout(_FixtureTestCase):
             # a regression in the supervisor's deadline initialization.
             prime = '''
 while (length($tail) < 65536) { drain(); sleep 0.001; }
-''' + timing + '''
 open(my $ready, ">", $ENV{HANIG_NOISY_READY}) or die $!;
-print $ready "$started\\n";
+print $ready "ready\\n";
 close $ready or die $!;
+''' + timing + '''
+$noisy_started = $started;
 '''
-            source = source.replace(loop, prime + loop)
+            # Arming and measurement use the very same clock sample, after
+            # publication and before any state-machine work. No extra grace
+            # is added; all work after that sample counts toward five seconds.
+            # Retain the sample in memory so publishing it adds no timed I/O.
+            source = "our $noisy_started;\n" + source.replace(loop, prime + loop)
             source = source.replace(answer_end, '''
     my $completed = clock_gettime(CLOCK_MONOTONIC);
     open(my $stamp, ">", $ENV{HANIG_NOISY_COMPLETED}) or die $!;
-    print $stamp "$completed\\n";
+    print $stamp "$noisy_started\\n$completed\\n";
     close $stamp or die $!;
 ''' + answer_end)
             env = dict(os.environ, HANIG_NOISY_READY=str(ready),
@@ -3700,12 +3715,13 @@ close $ready or die $!;
                             ready.exists() and ready.read_text().endswith("\n"),
                             "supervisor exited before noisy readiness")
                     time.sleep(0.01)
-                ready_at = float(ready.read_text())
                 joined = self._fixture_answer(proc, timeout=60)
                 out, err = joined.stdout, joined.stderr
                 self.assertEqual(joined.returncode, 0, err)
+                started_at, completed_at = map(
+                    float, completed.read_text().splitlines())
                 self.assertLess(
-                    float(completed.read_text()) - ready_at,
+                    completed_at - started_at,
                     run_seconds + reap_seconds + 3,
                     "continuous output exceeded the post-readiness deadline")
                 lines = out.splitlines()
@@ -3740,6 +3756,27 @@ close $ready or die $!;
         with mock.patch.object(FixtureProcesses, "shell_script", stopped_start):
             self.test_a_continuously_noisy_child_cannot_starve_its_deadline()
         self.assertEqual(injected, [True], "writer delay was not injected once")
+
+    def test_noisy_supervisor_refactor_names_the_instrumentation_to_update(self):
+        from unittest import mock
+
+        source = self._supervisor_source()
+        for old, new in (("$state", "$phase"),
+                         ("while (1) {", "while(1) {"),
+                         ("    exit 0;", "    exit(0);"),
+                         ("my $started = ", "my $started= ")):
+            with self.subTest(refactor=old):
+                refactored = source.replace(old, new)
+                self.assertNotEqual(refactored, source)
+                with mock.patch.object(self, "_supervisor_source",
+                                       return_value=refactored), \
+                        mock.patch.object(FixtureProcesses, "launch") as launch:
+                    with self.assertRaisesRegex(
+                            AssertionError,
+                            r"bin/doctor supervisor refactor.*update the "
+                            r"test-only instrumentation in tests/test_project.py"):
+                        self.test_a_continuously_noisy_child_cannot_starve_its_deadline()
+                    launch.assert_not_called()
 
     def test_group_setup_and_wait_errors_fail_closed(self):
         """This is structural/code-inspection coverage: setpgid/waitpid
@@ -4070,8 +4107,8 @@ close $ready or die $!;
             'if ($state eq "RUNNING" && !$wait_error '
             '&& $now >= $run_deadline)')
         end_anchor = "\n\n    unless ($direct_reaped || defined $cleanup_deadline)"
-        self.assertEqual(source.count(start_anchor), 1)
-        self.assertEqual(source.count(end_anchor), 1)
+        self._assert_supervisor_anchor(source, start_anchor)
+        self._assert_supervisor_anchor(source, end_anchor)
         start = source.index(start_anchor)
         end = source.index(end_anchor, start)
         transition = source[start:end]
@@ -4137,7 +4174,7 @@ close $ready or die $!;
 
                 source = self._supervisor_source()
                 loop_anchor = "while (1) {\n    drain();"
-                self.assertEqual(source.count(loop_anchor), 1)
+                self._assert_supervisor_anchor(source, loop_anchor)
                 barrier = (
                     "open(my $test_barrier, q(<), "
                     "$ENV{HANIG_TEST_BARRIER_PATH})\n"
