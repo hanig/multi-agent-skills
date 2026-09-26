@@ -358,15 +358,9 @@ A nonzero exit reaped during cleanup also remains `fail` when the coordinator's
 SIGKILL could not have caused that status; finishing between the initial poll
 and the kill does not erase the failure.
 
-The optional `verification-execution.json` belongs directly in the external
-coordinator state directory. It is never read from the plan, PR or candidate
-checkout; a symlink policy is refused. Without it verification stays local. Local
-defaults select the operator's Python for the launcher and prefer Git from
-`os.defpath`. If no system Git is available, absolute operator PATH directories
-outside the operated repository supply the fallback; relative entries and
-symlinks into the repository are excluded. Explicit paths replace those defaults. A declaration can select a remote SSH alias with `direct` execution.
-Policy validation refuses `executor: "slurm"`; its enablement is tracked in
-ARC-1103. The retained Slurm implementation is disabled.
+The optional `verification-execution.json` belongs in the external coordinator
+state directory; plan/PR/candidate policies and symlink policies cannot supply it.
+Without a host declaration, verification stays local.
 
 ```json
 {
@@ -382,120 +376,71 @@ ARC-1103. The retained Slurm implementation is disabled.
 }
 ```
 
-The remote root must already exist. Use only a genuinely quiet execution host
-that the owner has authorized for this work. Direct execution must not bypass
-scheduler policy; never run this suite on a cluster login node. Paths are
-absolute host paths supplied by the operator; no username, home path or host is
-inferred. Declaring a host supplies execution configuration, not authorization.
-Python and Git paths and versions appear in each new merge-verifier receipt;
-remote receipts also retain the coordinator's construction executables. A
-worker that cannot start leaves its host identity and versions unavailable
-in the incomplete receipt.
-The shipped verifier programs reuse the selected Python and Git for subprocesses.
-For merge verification, an explicitly declared Python replaces a Python shebang
-naming `python`, `python3`, or a numeric version such as `python3.10` (directly,
-through `env`, or `env -S`). Python shebang arguments, environment options and
-assignments are retained; the selected tools are installed after those options
-are applied. Process `argv[0]` is carried separately to the final exec, so an
-`env -a` name never becomes an executable path. Explicit selection uses a bounded
-env grammar: `-i`/`-`/`--ignore-environment`, `-v`/`--debug`, operands for
-`-u`/`--unset`, `-P`, `-C`/`--chdir`, and `-a`/`--argv0`, followed by `--` and
-assignments where applicable. Short attached operands and long equals operands
-are supported; repeated argv0 options use the last value, which must be nonempty. Initial
-`-S`/`--split-string` accepts ordinary quoting and whitespace. Backslash escapes,
-expansion, signal options, unknown option clusters, and malformed or ambiguous
-selectors produce an incomplete configuration result. Other env options depend
-on the selected host's env implementation. This grammar does not reinterpret
-implicit local execution. Remote policy
-always declares Python. With no local Python declaration, the authorized
-shebang and its native Python child selection are preserved; the receipt marks
-the operator Python as `launcher`, not the verifier interpreter. An explicit Python
-declaration also selects Python for programs without a shebang. Without that
-declaration, native launch failures remain incomplete. Other shebangs run through their own
-interpreter, regardless of the filename extension. Only the target-authorized,
-digest-pinned bytes supply this choice; a PR cannot select its own interpreter.
-Their updated digest pins must land on the target before their new behavior is
-authorized; candidate changes cannot update the programs used to check themselves.
-Ordinary generic verifier scripts retain their existing executable semantics.
+Use direct SSH only on a quiet host authorized by the owner; never bypass a
+scheduler or run this suite on a cluster login node. The remote root must exist.
+All paths are absolute operator declarations, with no inferred host or username.
+Configuration does not grant authorization. Policy validation refuses
+`executor: "slurm"` pending ARC-1103; its implementation and tests remain.
 
-Candidate construction remains local. The operator sends a self-contained Git
-bundle and its own harness over batch-mode SSH, without pushing to a forge.
-The SSH client is resolved once from absolute operator PATH directories outside
-the operated repository and disposable candidate tree; directory and executable
-symlinks into those trees are excluded. External operator wrappers remain valid.
-The remote worker checks out the bundle and rehashes the checkout before running
-any pinned program. Both claims use that same checkout, with the target's
-repetition count and completion handshake. Receipts retain the existing head,
-target, merge-base, candidate-tree and verifier bindings, plus the independently
-checked remote tree, host identity and executor. The execution policy digest is
-rechecked with the existing observation fence before publication. Retained remote
-evidence is checked again during reconciliation; missing tree or execution
-evidence corrects an old verified label and withholds advancement.
+Local defaults use operator Python and prefer system Git, then absolute operator
+PATH directories. Git/SSH exclude relative entries and symlinks into operated
+repositories/candidate trees; external wrappers are allowed. Receipts record
+paths, versions and host identity; missing worker probes stay unavailable.
 
-Each claim's completed outcome is published remotely in a write-once
-`claim-N.json` receipt before the next verifier starts. The receipt binds the
-launch, candidate, claim, policy and verifier digest, observed verifier exit and
-completion facts. The worker then publishes `worker-complete`; supervision
-publishes a separate finished marker. Output tails remain bounded. The aggregate
-`result.json` is diagnostic and is not required to recover completed claims.
-A completed PASS or FAIL remains that outcome even if SSH exits 255, the later
-claim cannot finish, or cleanup fails. Transport and cleanup diagnostics cannot
-replace completed verifier outcomes.
+Explicit Python handles shebangless programs and pinned Python shebangs (direct
+or `env`/`env -S`, including numeric versions). Other shebangs run natively.
+Undeclared local Python preserves native shebang/child selection (role
+`launcher`); remote Python is explicit. Generic script semantics are unchanged.
+The bounded env selector preserves supported arguments, assignments, cwd and
+argv0, then restores selected tools. Unsupported or malformed selectors are
+incomplete; supported options still require host env support. Only the helper
+uses harness `-I -S`; verifier startup remains native. Shipped verifiers reuse
+selected Python/Git. New digest pins must land on the target before authorization.
 
-Before SSH can launch anything, the coordinator fsyncs a launch record in its
-external `remote-verifications/` directory. It ingests remote receipts
-monotonically there, then publishes ordinary verification receipts only after the
-existing plan, policy, binding, epoch and target rechecks. If that observation
-fence fails, the raw evidence remains recoverable. A later invocation of
-`--verify-integration` retrieves the original launch's evidence; it does not
-start another verifier while any evidence for that binding is unresolved or
-unpublished. Retrieval is idempotent, including after switching host policy or
-removing the remote declaration. The generic local verifier and admission path
-also refuse an unresolved binding. A completed failure continues to poison the
-binding after later passing trials.
+Local candidate construction sends a bundle and coordinator harness over batch
+SSH without forge writes. The worker rehashes its checkout before both claims,
+preserving repetitions, handshakes and exact bindings. Publication reacquires the
+lease and rechecks observation fences, including execution policy. Invalid
+retained execution/tree evidence corrects verified labels and blocks advancement.
 
-Only a claim with no retrievable bound completed receipt is `incomplete`.
-Until final evidence is reconciled, the diagnostic is `unresolved remote evidence
-at HOST:STAGE; retrieve or resolve it first`. Restore connectivity and rerun the
-same verification command to retrieve it. Add `--retrieve-remote-evidence` to
-`--verify-integration` for an explicitly idempotent retrieval: it uses the
-existing launch even after reconciliation and never starts a new verifier. If a launch or its stage cannot be
-accounted for, operator investigation is required; deleting the coordinator
-ledger is not resolution. Before SSH, each new launch also publishes a write-once
-coordinator witness in a sibling `<binding>.launches/` directory. New ledger
-runs require their witnesses, and every surviving witness and coordinator
-journalled launch must match a run in the ledger. Missing or inconsistent state
-blocks admission and another launch, including local execution and retained
-merge reconciliation. Restore the exact saved ledger/witness before retrieval;
-a passing receipt cannot reconstruct reconciliation authority. An older backup
-that omits a surviving launch is refused. A deduplicated receipt's old
-`evidence_reconciled: false` flag does not permanently block a subsequently
-reconciled and published run. Existing pre-witness remote records use surviving
-journal rows as the backstop; an unjournalled legacy launch whose sole ledger
-was lost cannot be detected retrospectively. Loss of all independent coordinator
-evidence is outside this storage guarantee.
-A missing local SSH client is a preflight failure and records no launch; fixing
-the client allows a retry. Once SSH has been attempted, even a connection failure
-before visible execution can leave an uncertain launch and block retries. Changing the execution host or
-switching to local mode cannot bypass that block.
+Each completed claim becomes a write-once `claim-N.json` before the next claim;
+then come `worker-complete` and the separate supervision marker. Receipts bind
+launch, candidate, policy, claim, verifier digest, exit and completion facts.
+`result.json` is diagnostic. Completed PASS/FAIL survives transport, later-claim
+and cleanup failure. Retrieval preserves immutable bytes, using bounded,
+digest-checked chunks when aggregate JSON is unavailable or oversized, and
+fsyncs each claim before later reads. Output tails remain bounded.
 
-Remote cleanup requires quiescence and the coordinator's acknowledgment of the
-exact durably ingested evidence. A stage without its completion markers, with
-unreconciled evidence, or with unknown scheduler liveness is retained. Cleanup
-failure is recorded independently and cannot downgrade a completed outcome.
-A retained stage and its locator remain available for investigation. Completed
-local evidence and execution without a declared host retain their prior behavior.
+Before SSH, the coordinator fsyncs an external `remote-verifications/` ledger
+and write-once `<binding>.launches/` witness. Required witnesses and surviving
+coordinator journal launches must match the ledger. Missing/inconsistent state
+blocks reruns, local fallback and admission, including retained merges. Restore
+exact saved authority; a PASS cannot reconstruct it. Pre-witness records rely
+on surviving journal rows. Total evidence loss, or an unjournalled legacy launch
+losing its sole ledger, cannot be detected retrospectively.
 
-The disabled Slurm internals retain their scheduler and cancellation tests.
-Cancellation intent and outcome are journaled under a per-stage lock, bounded
-to four attempts and 64 KiB. `requested` means the scheduler accepted a
-cancellation request, not that termination was observed. Removal also requires
-terminal accounting for the exact job; a missing or conflicting job identity
-retains the stage. Forced worker restarts cannot replace a write-once receipt.
-Slurm remains unavailable through policy validation until ARC-1103 closes its
-remaining lifecycle cases. This is a same-node trusted-writer convention, not a
-remote process sandbox or a guarantee against hostile same-UID writers or live
-descendants of completed verifiers.
+Only missing retrievable completed claims are `incomplete`. Unresolved or
+unpublished launches block their binding with `unresolved remote evidence at
+HOST:STAGE; retrieve or resolve it first`. Restore connectivity and repeat
+`--verify-integration`; it retrieves the original launch even after changing or
+removing host policy. `--retrieve-remote-evidence` is also idempotent after
+reconciliation and never starts a verifier. Raw receipts survive publication
+fence failures. Deleting authority is not resolution. A stale immutable
+`evidence_reconciled: false` row permits admission after authoritative recovery.
+Generic candidate admission rejects same-basis unresolved/local fallbacks and
+prior FAIL despite later PASS, while distinct valid bindings remain eligible.
+Legacy branch-local semantics remain unchanged.
+
+Missing local SSH is retryable and records no launch. After a possible launch,
+apparent connection failure may require investigation; changing hosts or going
+local cannot escape uncertainty. Cleanup requires quiescence and acknowledgment
+of exact reconciled evidence; otherwise retain the stage and cleanup diagnostic
+independently of verifier outcomes. Disabled Slurm additionally requires exact
+job identity and terminal accounting. Its locked cancellation journal permits
+four attempts/64 KiB; `requested` does not attest termination. Forced worker
+restarts cannot replace receipts. Same-UID writers and live descendants remain
+outside this trusted-writer storage convention.
+
 
 The designated `merge-precondition` verifier runs
 `python3 -m unittest discover -s tests` in the candidate tree. Its policy and
