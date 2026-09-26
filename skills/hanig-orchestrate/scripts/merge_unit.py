@@ -266,14 +266,6 @@ def integration_evidence(state_dir, binding, repo, target):
         policy_digest, policy, repo=repo, base_commit=target, target_commit=target)
     if error:
         return None, error
-    # A retained pass must never mask a later red run of the same candidate.
-    # A repaired head or a different target is a new binding, not a waiver.
-    for receipt in S.load_verifications(state_dir)[0]:
-        if (receipt.get("result") == "fail"
-                and all(receipt.get(k) == admitted.get(k) for k in (
-                    "unit", "claim", "verifier", "verifier_sha256", "policy_sha256",
-                    "subject_head", "produced_head", "target_commit", "merge_base", "candidate_tree"))):
-            return None, "the candidate merge verifier returned FAIL for this exact binding"
     stability, error = V.admit_stability(
         S.U.run, repo, target, admitted, binding["unit"],
         S.load_verifications(state_dir)[0])
@@ -284,7 +276,7 @@ def integration_evidence(state_dir, binding, repo, target):
     return admitted, None
 
 
-def retained_integration_problem(preconditions, evidence, binding, repo, target):
+def retained_integration_problem(preconditions, evidence, binding, repo, target, state_dir):
     """Validate retained claims, consulting target policy for legacy intents.
 
     New intents retain their requirements across Git cleanup. Older intents
@@ -308,12 +300,21 @@ def retained_integration_problem(preconditions, evidence, binding, repo, target)
             return "retained integration evidence lacks changed-tests-stable"
         if (shared.get("result") != "pass" or shared.get("exit_code") != 0
                 or shared.get("claim") != V.STABILITY_CLAIM
-                or shared.get("verifier") != V.STABILITY_CLAIM
+                or not isinstance(shared.get("verifier"), str) or not shared["verifier"].strip()
                 or shared.get("authorization_commit") != target
                 or shared.get("unit") != binding["unit"]
                 or any(shared.get(k) != evidence.get(k) for k in (
                     "subject_head", "policy_sha256") + V.MERGE_BASIS_FIELDS)):
             return "retained changed-tests-stable does not match the integration candidate"
+    try:
+        receipts, _ = S.load_verifications(state_dir)
+    except S.OutboxError as exc:
+        return "retained integration journal is unreadable: " + str(exc)
+    for claim in required:
+        retained = evidence if claim == V.INTEGRATION_CLAIM else evidence[claim]
+        problem = V.merge_failure_problem(receipts, retained)
+        if problem:
+            return problem
     return None
 
 
@@ -614,7 +615,7 @@ def reconcile(args, plan):
             integration_problem = "retained integration evidence does not match the judged head"
         else:
             integration_problem = retained_integration_problem(
-                intent["preconditions"], evidence, binding, repo, target)
+                intent["preconditions"], evidence, binding, repo, target, state_dir)
     else:
         evidence, integration_problem = integration_evidence(state_dir, binding, repo, target)
     integration_status = ("integration-unverified" if integration_problem else "candidate-verified")
@@ -734,7 +735,9 @@ def verify_integration(args, repo, snapshot):
     if error:
         raise Refusal(error + ". " + verification_hint(args))
     if any(evidence["result"] != "pass" for evidence in evidences):
-        raise Refusal("candidate merge verifier failed; repair the candidate")
+        if any(evidence["result"] == "fail" for evidence in evidences):
+            raise Refusal("candidate merge verifier failed; repair the candidate")
+        raise Refusal("candidate merge verification incomplete; rerun verification")
 
 
 def print_pending_close(args, plan):

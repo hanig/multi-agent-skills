@@ -47,6 +47,7 @@ import json
 import os
 import posixpath
 import shutil
+import signal
 import subprocess
 import tempfile
 from pathlib import Path
@@ -667,7 +668,8 @@ def run_in_candidate_merge(runner, repo, produced_head, target_commit, path,
         return None, basis, error
     try:
         outcome, run_error = run_pinned(
-            runner, path, expect_digest, args=args, timeout=timeout, cwd=tree)
+            runner, path, expect_digest, args=args, timeout=timeout, cwd=tree,
+            observe_completion=True)
         return outcome, basis, run_error
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -702,6 +704,14 @@ def merge_precondition_policy(runner, repo, target_commit,
             return dict(policy, verifiers=[]), policy_digest, None, None
         if len(declarations) != 1:
             return None, None, None, "ambiguous changed-tests-stable target policy"
+        name = declarations[0].get("name")
+        if not isinstance(name, str) or not name.strip():
+            return None, None, None, "changed-tests-stable declaration has no verifier name"
+        # Detection and authorization select the same entry. A second entry
+        # with its name is ambiguous even if it declares a different claim.
+        if sum(isinstance(v, dict) and v.get("name") == name
+               for v in policy["verifiers"]) != 1:
+            return None, None, None, "ambiguous changed-tests-stable verifier name"
     digest, _size, error = _digest_base_blob(repo, target_commit, path)
     if error:
         return None, None, None, "merge-precondition target verifier: " + error
@@ -768,7 +778,7 @@ def run_merge_preconditions(runner, repo, produced_head, target_commit,
                         "--repetitions", str(extra["repetitions"])]
             outcome, error = run_pinned(
                 runner, os.path.join(policy_tree, path), digest,
-                args=args, timeout=timeout, cwd=tree)
+                args=args, timeout=timeout, cwd=tree, observe_completion=True)
             if error:
                 return receipts, error
             receipt = dict(corpus, **basis, **extra)
@@ -777,7 +787,7 @@ def run_merge_preconditions(runner, repo, produced_head, target_commit,
                 "verifier_sha256": digest, "policy_sha256": policy_digest,
                 "authorization_commit": target_commit,
                 "subject_head": produced_head,
-                "result": "pass" if outcome["exit_code"] == 0 else "fail",
+                **outcome_result(outcome),
                 "exit_code": outcome["exit_code"],
                 "stdout_tail": outcome["stdout"], "stderr_tail": outcome["stderr"],
                 "schema_version": 1,
@@ -805,7 +815,7 @@ def admit_stability(runner, repo, target, integration, unit, receipts):
         return None, None
     entry = policy["verifiers"][0]
     expected = {field: integration[field] for field in MERGE_BASIS_FIELDS}
-    expected.update(unit=unit, claim=STABILITY_CLAIM, verifier=STABILITY_CLAIM,
+    expected.update(unit=unit, claim=STABILITY_CLAIM, verifier=entry["name"],
                     subject_head=integration["subject_head"],
                     authorization_commit=target, policy_sha256=policy_digest,
                     verifier_sha256=digest, repetitions=entry.get("repetitions", 5))
@@ -826,13 +836,99 @@ def admit_stability(runner, repo, target, integration, unit, receipts):
     return None, "no passing changed-tests-stable receipt for this exact candidate binding"
 
 
+def merge_failure_problem(receipts, evidence):
+    """Reject any FAIL for an admitted claim's exact binding, including legacy FAILs.
+
+    Incomplete runs supply no evidence. Never infer completion from an old
+    receipt's exit code or diagnostic, or reinterpret its stored result.
+    """
+    fields = ("unit", "claim", "verifier", "verifier_sha256", "policy_sha256",
+              "subject_head") + MERGE_BASIS_FIELDS
+    if evidence.get("claim") == STABILITY_CLAIM:
+        fields += ("authorization_commit", "repetitions")
+    for receipt in receipts:
+        if (receipt.get("result") == "fail"
+                and all(receipt.get(k) == evidence.get(k) for k in fields)
+                and (evidence.get("claim") != STABILITY_CLAIM
+                     or type(receipt.get("repetitions")) is int)):
+            return "{} returned FAIL for this exact candidate binding".format(evidence["claim"])
+    return None
+
+
+def outcome_result(outcome):
+    """Receipt result from coordinator execution facts, never child diagnostics."""
+    if outcome.get("incomplete_reason"):
+        return {"result": "incomplete", "incomplete_reason": outcome["incomplete_reason"]}
+    return {"result": "pass" if outcome["exit_code"] == 0 else "fail"}
+
+
+def _observe_execution(argv, timeout, cwd):
+    """Observe merge-verifier completion without unit.run's overloaded exit 127.
+
+    Only our timeout or a launch/transport exception is incomplete. Every
+    returned child status (including 127 or a signal) remains a candidate
+    failure unless zero. In particular a stability child exiting without its
+    handshake is a FAIL from the pinned parent, not an infrastructure timeout.
+    Keep the shared child environment and process-group containment.
+    """
+    child = None
+    completed_failure = None
+    out, err, reason = "", "", None
+    try:
+        child = subprocess.Popen(
+            argv, cwd=cwd, env=CE.child_env(), stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True,
+            encoding="utf-8", errors="replace", start_new_session=True)
+        out, err = child.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        reason = "coordinator timed out after {}s".format(timeout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        reason = "coordinator could not launch or collect verifier: {}".format(exc)
+    finally:
+        if reason and child is not None:
+            # Capture the child's status BEFORE our intervention. A finished
+            # failure is still evidence when a descendant holds a pipe open;
+            # the capture timeout must not launder it into a retryable result.
+            finished = child.poll()
+            if finished is not None and finished != 0:
+                completed_failure = finished
+            # Kill the session even if its leader exited while descendants
+            # kept a capture pipe open. The runner created this process group.
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                out, err = child.communicate(timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                for stream in (child.stdout, child.stderr):
+                    if stream:
+                        stream.close()
+    outcome = {"exit_code": child.returncode if child is not None else None,
+               "stdout": (out or "")[-4000:], "stderr": (err or "")[-2000:]}
+    if (reason and completed_failure is None
+            and outcome["exit_code"] not in (None, 0, -signal.SIGKILL)):
+        # The child can finish between poll and killpg. SIGKILL cannot produce
+        # a positive exit or a different terminating signal, so that observed
+        # nonzero status is still a completed failure, however late it arrived.
+        completed_failure = outcome["exit_code"]
+    if completed_failure is not None:
+        outcome["exit_code"] = completed_failure
+        outcome["stderr"] = (outcome["stderr"] + "\n" + reason)[-2000:]
+    elif reason:
+        outcome["incomplete_reason"] = reason
+    return outcome
+
+
 def run_pinned(runner, path, expect_digest, args=None, timeout=900,
-               cwd=None):
+               cwd=None, observe_completion=False):
     """Execute the bytes that hashed, not the path that was named.
 
     Hashing a file and then executing the path re-reads it, so the bytes that
     ran need never be the bytes that were checked. The verified bytes are
-    copied to a private temporary file and that copy is executed.
+    copied to a private temporary file and that copy is executed. Merge claims
+    use coordinator-local completion observation; their injected runner is
+    used for Git, not to collapse infrastructure errors into child exit codes.
     """
     got, _size, err = digest_file(path)
     if err:
@@ -848,6 +944,8 @@ def run_pinned(runner, path, expect_digest, args=None, timeout=900,
         if err2 or after != expect_digest:
             return None, "the verified bytes changed while being copied"
         os.chmod(copy, 0o500)
+        if observe_completion:
+            return _observe_execution([copy] + list(args or []), timeout, cwd), None
         # No before/after dance here any more. `run_in_checkout` gives this a
         # worktree the agent is not working in, so there is nothing to drift.
         rc, out, errout = runner([copy] + list(args or []), timeout=timeout,
