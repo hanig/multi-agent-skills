@@ -338,6 +338,60 @@ A nonzero exit reaped during cleanup also remains `fail` when the coordinator's
 SIGKILL could not have caused that status; finishing between the initial poll
 and the kill does not erase the failure.
 
+The optional `verification-execution.json` belongs directly in the external
+coordinator state directory. It is never read from the plan, PR or candidate
+checkout. Without it verification stays local. Local defaults select the
+operator's Python and Git from `os.defpath`; explicit paths replace those
+defaults. A declaration can select a remote SSH alias and either `direct` or
+`slurm` execution:
+
+```json
+{
+  "schema_version": 1,
+  "local": {"python": "/absolute/local/python3", "git": "/absolute/local/git"},
+  "remote": {
+    "ssh_alias": "verification-host",
+    "executor": "slurm",
+    "workdir_root": "/absolute/remote/scratch",
+    "python": "/absolute/remote/python3",
+    "git": "/absolute/remote/git",
+    "slurm": {"partition": "cpu", "mem": "4G", "time": "03:00:00"}
+  }
+}
+```
+
+The remote root must already exist. Paths are absolute host paths supplied by
+the operator; no username, home path or host is inferred. Use Slurm on a login
+host. For a dedicated execution host, `executor: "direct"` omits `slurm`.
+Python and Git paths and versions appear in each new merge-verifier receipt;
+remote receipts also retain the coordinator's construction executables.
+The shipped verifier programs reuse the selected Python and Git for subprocesses.
+Their updated digest pins must land on the target before their new behavior is
+authorized; candidate changes cannot update the programs used to check themselves.
+Ordinary generic verifier scripts retain their existing executable semantics.
+
+Candidate construction remains local. The operator sends a self-contained Git
+bundle and its own harness over batch-mode SSH, without pushing to a forge.
+The remote worker checks out the bundle and rehashes the checkout before running
+any pinned program. Both claims use that same checkout, with the target's
+repetition count and completion handshake. Receipts retain the existing head,
+target, merge-base, candidate-tree and verifier bindings, plus the independently
+checked remote tree, host identity and executor. Slurm receipts also require the
+exact job's terminal `COMPLETED` / `0:0` accounting row for a pass. The execution
+policy digest is rechecked with the existing observation fence before publication.
+Retained remote evidence is checked again during reconciliation; missing tree or
+execution evidence corrects an old verified label and withholds advancement.
+
+The timeout covers each verifier; the Slurm supervision budget, including queue
+wait, is that timeout multiplied by the number of claims. SSH, launch, timeout,
+missing result and nonterminal scheduler outcomes are `incomplete`. A completed
+verifier failure remains `fail`, including a retained failure before a later job
+failure. Output tails are bounded. Remote directories are removed on completion;
+a second SSH cleanup attempts cancellation and removal after transport failure.
+If connectivity prevents confirmation, the receipt records that cleanup is
+unconfirmed. A disconnected job can remain until its declared time limit; this
+is not a remote process sandbox or a guarantee against same-UID writers.
+
 The designated `merge-precondition` verifier runs
 `python3 -m unittest discover -s tests` in the candidate tree. Its policy and
 program must first exist on the trusted target; missing policy or mismatched

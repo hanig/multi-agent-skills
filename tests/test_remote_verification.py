@@ -51,7 +51,7 @@ with open(os.environ['SCHED_LOG'], 'a') as log:
 assert '--partition=fixture-cpu' in sys.argv
 assert '--mem=2G' in sys.argv
 assert '--time=00:05:00' in sys.argv
-if pathlib.Path(os.environ['REMOTE_MODE']).read_text() != 'slurm-missing':
+if pathlib.Path(os.environ['REMOTE_MODE']).read_text() not in ('slurm-missing', 'slurm-pending'):
     result = subprocess.run(['/bin/sh', sys.argv[-1]], capture_output=True)
     assert result.returncode == 0, result.stderr
 print('321')
@@ -60,7 +60,8 @@ print('321')
 SACCT = r'''
 import os, pathlib
 mode = pathlib.Path(os.environ['REMOTE_MODE']).read_text()
-print('321|FAILED|1:0' if mode == 'slurm-missing' else '321|COMPLETED|0:0')
+print('321|PENDING|0:0' if mode == 'slurm-pending' else
+      '321|FAILED|1:0' if mode == 'slurm-missing' else '321|COMPLETED|0:0')
 '''
 
 
@@ -219,6 +220,12 @@ class TestRemoteVerification(unittest.TestCase):
         self.save_policy()
         self.assert_retry_admits('slurm-missing')
 
+    def test_slurm_without_terminal_state_is_incomplete_and_retryable(self):
+        self.policy['remote'].update(executor='slurm', slurm={
+            'partition': 'fixture-cpu', 'mem': '2G', 'time': '00:05:00'})
+        self.save_policy()
+        self.assert_retry_admits('slurm-pending')
+
     def test_candidate_policy_cannot_choose_host_or_interpreter(self):
         self.shared.candidate({RV.POLICY: json.dumps({
             'schema_version': 1, 'remote': {'ssh_alias': 'candidate-host'},
@@ -238,6 +245,47 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertEqual(execution['executables']['python']['path'], os.path.realpath(sys.executable))
         self.assertTrue(execution['executables']['git']['version'].startswith('git version'))
         self.assertFalse(Path(self.f.env['REMOTE_LOG']).exists())
+
+    def test_changed_remote_module_without_handshake_fails(self):
+        self.shared.install_policy(repetitions=2)
+        self.shared.candidate({'tests/test_exit.py': 'raise SystemExit(0)\n'})
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        stable = self.rows()[-1]
+        self.assertEqual(stable['claim'], V.STABILITY_CLAIM)
+        self.assertEqual(stable['result'], 'fail')
+        self.assertIn('missing or malformed', stable['stderr_tail'])
+        self.f.assert_refused(self.admitted())
+        self.assert_clean()
+
+    def test_policy_change_during_remote_execution_prevents_publication(self):
+        changed = dict(self.policy, local={})
+        self.program('Path(%r).write_text(%r)\n' % (
+            str(self.f.state_dir / RV.POLICY), json.dumps(changed)))
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('execution policy changed during verification', result.stderr)
+        self.assertEqual(self.rows(), [])
+        self.assert_clean()
+
+    def test_candidate_executable_path_in_coordinator_policy_is_refused(self):
+        self.policy['local']['python'] = str(self.f.repo / 'python3')
+        self.save_policy()
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('inside the operated repository', result.stderr)
+        self.assertFalse(Path(self.f.env['REMOTE_LOG']).exists())
+        self.assertEqual(self.rows(), [])
+
+    def test_missing_remote_execution_evidence_is_not_legacy_local(self):
+        result = self.verify()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        row, = self.rows()
+        row.pop('execution')
+        (self.f.state_dir / S.VERIFY_RECEIPTS).write_text(json.dumps(row) + '\n')
+        result = self.admitted()
+        self.f.assert_refused(result)
+        self.assertIn('missing execution evidence', result.stderr)
 
     def test_remote_receipt_cannot_lose_verified_digest_on_admission(self):
         result = self.verify()
