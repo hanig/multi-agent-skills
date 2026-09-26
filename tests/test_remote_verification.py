@@ -328,6 +328,21 @@ class TestRemoteVerification(unittest.TestCase):
                 self.assertTrue(executable['version'])
         self.assert_clean()
 
+    def test_default_policy_admission_ignores_ambient_git(self):
+        (self.f.state_dir / RV.POLICY).unlink()
+        result = self.verify()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        git = self.f.bin / 'git'
+        actual = str(git.resolve())
+        git.unlink()
+        git.write_text('#!' + sys.executable + '\nimport os, sys\n'
+                       'if "show" in sys.argv and sys.argv[-1].endswith(":verifiers.json"):\n'
+                       '    raise SystemExit("ambient Git must not read policy")\n'
+                       'os.execv(%r, [%r] + sys.argv[1:])\n' % (actual, actual))
+        git.chmod(0o755)
+        result = self.admitted()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_generic_integration_policy_reads_and_admission_use_declared_git(self):
         self.policy.pop('remote')
         log = self.f.directory / 'generic-git.log'
