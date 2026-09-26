@@ -387,7 +387,9 @@ bundle into another node. Paths are absolute host paths supplied by
 the operator; no username, home path or host is inferred. Use Slurm on a login
 host. For a dedicated execution host, `executor: "direct"` omits `slurm`.
 Python and Git paths and versions appear in each new merge-verifier receipt;
-remote receipts also retain the coordinator's construction executables.
+remote receipts also retain the coordinator's construction executables. A
+worker that cannot start leaves its host identity and versions unavailable
+in the incomplete receipt.
 The shipped verifier programs reuse the selected Python and Git for subprocesses.
 Their updated digest pins must land on the target before their new behavior is
 authorized; candidate changes cannot update the programs used to check themselves.
@@ -400,8 +402,9 @@ any pinned program. Both claims use that same checkout, with the target's
 repetition count and completion handshake. Receipts retain the existing head,
 target, merge-base, candidate-tree and verifier bindings, plus the independently
 checked remote tree, host identity and executor. Slurm receipts also require the
-exact job's terminal `COMPLETED` / `0:0` accounting row for a pass. Jobs disable
-automatic requeue so a restarted worker cannot replace a completed result. The execution
+exact job's terminal `COMPLETED` / `0:0` accounting row for a pass. Jobs request
+no automatic requeue; an exclusive worker-start marker also prevents a forced
+restart from replacing a previous worker’s completed or partial results. The execution
 policy digest is rechecked with the existing observation fence before publication.
 Retained remote evidence is checked again during reconciliation; missing tree or
 execution evidence corrects an old verified label and withholds advancement.
