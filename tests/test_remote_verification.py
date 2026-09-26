@@ -90,7 +90,7 @@ class TestRemoteVerification(unittest.TestCase):
             program.chmod(0o755)
         self.policy = {'schema_version': 1,
                        'local': {'python': sys.executable, 'git': str((self.f.bin / 'git').resolve())},
-                       'remote': {'ssh_alias': 'fixture-host', 'executor': 'direct',
+                       'verification_host': {'ssh_alias': 'fixture-host', 'executor': 'direct',
                                   'workdir_root': str(self.remote_root), 'python': sys.executable,
                                   'git': str((self.f.bin / 'git').resolve())}}
         self.save_policy()
@@ -137,14 +137,14 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertEqual(execution['host_identity'], os.uname().nodename)
         for name in ('python', 'git'):
             self.assertEqual(execution['executables'][name]['path'],
-                             os.path.realpath(self.policy['remote'][name]))
+                             os.path.realpath(self.policy['verification_host'][name]))
             self.assertTrue(execution['executables'][name]['version'])
         self.assertTrue(self.witness.exists())
         self.assert_clean()
         self.assertEqual(self.admitted().returncode, 0)
 
     def test_slurm_runs_both_claims_with_target_repetitions_and_handshake(self):
-        self.policy['remote'].update(executor='slurm', slurm={
+        self.policy['verification_host'].update(executor='slurm', slurm={
             'partition': 'fixture-cpu', 'mem': '2G', 'time': '00:05:00'})
         self.save_policy()
         self.shared.install_policy(repetitions=2)
@@ -221,7 +221,7 @@ class TestRemoteVerification(unittest.TestCase):
         self.assert_clean()
 
     def test_completed_verifier_fail_survives_a_failed_slurm_job(self):
-        self.policy['remote'].update(executor='slurm', slurm={
+        self.policy['verification_host'].update(executor='slurm', slurm={
             'partition': 'fixture-cpu', 'mem': '2G', 'time': '00:05:00'})
         self.save_policy()
         self.program('raise SystemExit(int(Path(%r).read_text() == "slurm-completed-fail"))\n'
@@ -240,7 +240,7 @@ class TestRemoteVerification(unittest.TestCase):
         self.assert_clean()
 
     def test_forced_scheduler_restart_cannot_overwrite_completed_failure(self):
-        self.policy['remote'].update(executor='slurm', slurm={
+        self.policy['verification_host'].update(executor='slurm', slurm={
             'partition': 'fixture-cpu', 'mem': '2G', 'time': '00:05:00'})
         self.save_policy()
         self.program('raise SystemExit(int(Path(%r).read_text() == "slurm-forced-requeue"))\n'
@@ -259,20 +259,20 @@ class TestRemoteVerification(unittest.TestCase):
         self.assert_clean()
 
     def test_slurm_without_completed_worker_is_incomplete_and_retryable(self):
-        self.policy['remote'].update(executor='slurm', slurm={
+        self.policy['verification_host'].update(executor='slurm', slurm={
             'partition': 'fixture-cpu', 'mem': '2G', 'time': '00:05:00'})
         self.save_policy()
         self.assert_retry_admits('slurm-missing')
 
     def test_slurm_without_terminal_state_is_incomplete_and_retryable(self):
-        self.policy['remote'].update(executor='slurm', slurm={
+        self.policy['verification_host'].update(executor='slurm', slurm={
             'partition': 'fixture-cpu', 'mem': '2G', 'time': '00:05:00'})
         self.save_policy()
         self.assert_retry_admits('slurm-pending')
 
     def test_candidate_policy_cannot_choose_host_or_interpreter(self):
         self.shared.candidate({RV.POLICY: json.dumps({
-            'schema_version': 1, 'remote': {'ssh_alias': 'candidate-host'},
+            'schema_version': 1, 'verification_host': {'ssh_alias': 'candidate-host'},
             'local': {'python': '/candidate/python'}})})
         result = self.verify()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -291,7 +291,7 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertFalse(Path(self.f.env['REMOTE_LOG']).exists())
 
     def test_local_default_and_declared_executable_evidence(self):
-        self.policy.pop('remote')
+        self.policy.pop('verification_host')
         self.save_policy()
         result = self.verify()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -304,7 +304,7 @@ class TestRemoteVerification(unittest.TestCase):
     def test_declared_executables_are_used_for_checkout_and_verifier_children(self):
         log = self.f.directory / 'executables.log'
         for name in ('python', 'git'):
-            actual = self.policy['remote'][name]
+            actual = self.policy['verification_host'][name]
             wrapper = self.f.directory / ('declared-' + name)
             wrapper.write_text('#!' + sys.executable + '\nimport json, os, sys\n'
                                'with open(%r, "a") as log: log.write(json.dumps([%r] + sys.argv[1:]) + "\\n")\n'
@@ -312,7 +312,7 @@ class TestRemoteVerification(unittest.TestCase):
                                % (str(log), name, actual, actual))
             wrapper.chmod(0o755)
             self.policy['local'][name] = str(wrapper)
-            self.policy['remote'][name] = str(wrapper)
+            self.policy['verification_host'][name] = str(wrapper)
         self.save_policy()
         self.shared.install_policy(repetitions=1)
         self.shared.candidate({'tests/test_executables.py': self.shared.counter_test()})
@@ -325,7 +325,7 @@ class TestRemoteVerification(unittest.TestCase):
         for row in self.rows():
             for name in ('python', 'git'):
                 executable = row['execution']['executables'][name]
-                self.assertEqual(executable['path'], self.policy['remote'][name])
+                self.assertEqual(executable['path'], self.policy['verification_host'][name])
                 self.assertTrue(executable['version'])
         self.assert_clean()
 
@@ -345,7 +345,7 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_generic_integration_policy_reads_and_admission_use_declared_git(self):
-        self.policy.pop('remote')
+        self.policy.pop('verification_host')
         log = self.f.directory / 'generic-git.log'
         actual = self.policy['local']['git']
         wrapper = self.f.directory / 'generic-git'
@@ -376,7 +376,7 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertGreater(sum('checkout' in c for c in calls), before)
 
     def test_local_verifier_preserves_other_declared_host_path_tools(self):
-        self.policy.pop('remote')
+        self.policy.pop('verification_host')
         self.save_policy()
         helper = self.f.bin / 'fixture-host-helper'
         helper.write_text('#!' + sys.executable + '\nprint("HOST_HELPER_RAN")\n')
@@ -391,7 +391,7 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertIn('HOST_HELPER_RAN', self.rows()[-1]['stdout_tail'])
 
     def test_child_launcher_exec_failure_is_incomplete_and_retryable(self):
-        self.policy.pop('remote')
+        self.policy.pop('verification_host')
         self.save_policy()
         self.program()
         site = self.f.directory / 'launcher-fault'
@@ -417,7 +417,7 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_verifier_cannot_report_a_launcher_error(self):
-        self.policy.pop('remote')
+        self.policy.pop('verification_host')
         self.save_policy()
         self.program(
             'import os, stat\n'
@@ -468,7 +468,7 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertEqual(self.rows(), [])
 
     def test_candidate_executable_is_refused_during_receipt_admission(self):
-        self.policy.pop('remote')
+        self.policy.pop('verification_host')
         original = dict(self.policy['local'])
         for name in ('python', 'git'):
             with self.subTest(executable=name):
