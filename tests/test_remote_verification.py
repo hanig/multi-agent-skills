@@ -170,6 +170,35 @@ class TestRemoteVerification(unittest.TestCase):
                     self.assertIn('pinned-verifier-', log.read_text())
                     self.assert_clean()
 
+    def test_local_implicit_python_preserves_native_shebang_and_child_selection(self):
+        self.policy.pop('verification_host')
+        self.policy['local'].pop('python')
+        self.save_policy()
+        # A distinct executable spelling is observable inside the interpreter
+        # and portable across Python versions. Unlike a script interpreter,
+        # a binary symlink also works in a native Darwin shebang.
+        native = self.f.directory / 'native-bin'
+        native.mkdir()
+        python = native / 'python3'
+        python.symlink_to(sys.executable)
+        self.f.env['PATH'] = str(native) + os.pathsep + self.f.env['PATH']
+        for shebang in ('#!' + str(python) + '\n', '#!/usr/bin/env python3\n',
+                        '#!/usr/bin/env -S python3 -u\n'):
+            with self.subTest(shebang=shebang):
+                self.authorize_program(shebang +
+                    'import os, subprocess, sys\n'
+                    'expected = %r\nassert os.path.abspath(sys.executable) == expected, sys.executable\n'
+                    'assert "HANIG_VERIFICATION_PYTHON" not in os.environ\n'
+                    'child = subprocess.check_output(["python3", "-c", "import sys; print(sys.executable)"], text=True)\n'
+                    'assert os.path.abspath(child.strip()) == expected, child\n' % str(python))
+                result = self.verify()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                row = self.rows()[-1]
+                self.assertEqual(row['result'], 'pass')
+                self.assertFalse(row['execution']['executables']['python']['declared'])
+                self.assertEqual(row['execution']['executables']['python']['role'], 'launcher')
+                self.assert_clean()
+
     def cancellation_fixture(self, mode='slurm-pending', retry_succeeds=False,
                              terminal_on_success=True):
         self.policy['verification_host'].update(executor='slurm', slurm={

@@ -360,9 +360,9 @@ and the kill does not erase the failure.
 
 The optional `verification-execution.json` belongs directly in the external
 coordinator state directory. It is never read from the plan, PR or candidate
-checkout; a symlink policy is refused. Without it verification stays local. Local defaults select the
-operator's Python and Git from `os.defpath`; explicit paths replace those
-defaults. A declaration can select a remote SSH alias with `direct` execution.
+checkout; a symlink policy is refused. Without it verification stays local. Local
+defaults select the operator's Python for the launcher and Git from `os.defpath`;
+explicit paths replace those defaults. A declaration can select a remote SSH alias with `direct` execution.
 Policy validation refuses `executor: "slurm"`; its enablement is tracked in
 ARC-1103. The retained Slurm implementation is disabled.
 
@@ -390,10 +390,13 @@ remote receipts also retain the coordinator's construction executables. A
 worker that cannot start leaves its host identity and versions unavailable
 in the incomplete receipt.
 The shipped verifier programs reuse the selected Python and Git for subprocesses.
-For merge verification, the coordinator selects the declared Python when the
-authorized program has no shebang or its shebang names `python`, `python3`, or
-a numeric version such as `python3.10` (directly, through `env`, or `env -S`).
-Python shebang arguments are retained. Other shebangs run through their own
+For merge verification, an explicitly declared Python replaces a Python shebang
+naming `python`, `python3`, or a numeric version such as `python3.10` (directly,
+through `env`, or `env -S`). Python shebang arguments are retained. Remote policy
+always declares Python. With no local Python declaration, the authorized
+shebang and its native Python child selection are preserved; the receipt marks
+the operator Python as `launcher`, not the verifier interpreter. Programs
+without a shebang use the selected operator Python. Other shebangs run through their own
 interpreter, regardless of the filename extension. Only the target-authorized,
 digest-pinned bytes supply this choice; a PR cannot select its own interpreter.
 Their updated digest pins must land on the target before their new behavior is

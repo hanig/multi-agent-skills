@@ -99,7 +99,9 @@ def resolve_executables(declaration=None, names=("python", "git")):
         version = (run.stdout or run.stderr).strip()
         if not version or len(version) > 1024:
             raise ValueError("invalid " + name + " version response")
-        result[name] = {"path": path, "version": version}
+        result[name] = {"path": path, "version": version, "declared": name in declaration}
+        if name == "python":
+            result[name]["role"] = "configured-interpreter" if name in declaration else "launcher"
     return result
 
 

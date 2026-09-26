@@ -920,7 +920,7 @@ def _observe_execution(argv, timeout, cwd, launch_config=None):
     try:
         pass_fds = ()
         if launch_config is not None:
-            bindir, git, python = launch_config
+            bindir, git, python, child_python = launch_config
             launch_read, launch_write = os.pipe()
             os.set_blocking(launch_read, False)
             # This descriptor closes on successful exec: the verifier cannot
@@ -930,12 +930,13 @@ def _observe_execution(argv, timeout, cwd, launch_config=None):
                 "fd = int(sys.argv[1]); os.set_inheritable(fd, False)\n"
                 "os.environ['PATH'] = sys.argv[2] + os.pathsep + os.environ.get('PATH', os.defpath)\n"
                 "os.environ['HANIG_VERIFICATION_GIT'] = sys.argv[3]\n"
-                "os.environ['HANIG_VERIFICATION_PYTHON'] = sys.argv[4]\n"
+                "if sys.argv[4]: os.environ['HANIG_VERIFICATION_PYTHON'] = sys.argv[4]\n"
+                "else: os.environ.pop('HANIG_VERIFICATION_PYTHON', None)\n"
                 "try: os.execv(sys.argv[5], sys.argv[5:])\n"
                 "except OSError as error:\n"
                 "    os.write(fd, (str(error) or type(error).__name__).encode('utf-8', 'replace')[:1000])\n"
                 "    os._exit(125)\n")
-            argv = [python, "-c", launcher, str(launch_write), bindir, git, python] + argv
+            argv = [python, "-c", launcher, str(launch_write), bindir, git, child_python] + argv
             pass_fds = (launch_write,)
         child = subprocess.Popen(
             argv, cwd=cwd, env=CE.child_env(), stdin=subprocess.DEVNULL,
@@ -1028,6 +1029,8 @@ def run_pinned(runner, path, expect_digest, args=None, timeout=900,
                 # The pinned programs and their subprocesses share declared
                 # executables. A candidate's cwd/PATH never supplies either.
                 first_line = Path(copy).read_bytes().split(b"\n", 1)[0]
+                select_python = (executables["python"].get("declared", True)
+                                 or not first_line.startswith(b"#!"))
                 if not first_line.startswith(b"#!"):
                     argv.insert(0, executables["python"]["path"])
                 else:
@@ -1041,17 +1044,19 @@ def run_pinned(runner, path, expect_digest, args=None, timeout=900,
                                 words = shlex.split(" ".join(words[1:]))
                             except ValueError:
                                 return None, "invalid pinned verifier env -S shebang"
-                    if words and re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?",
+                    if select_python and words and re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?",
                                               posixpath.basename(words[0])):
                         argv = [executables["python"]["path"]] + words[1:] + argv
                 bindir = Path(tmpdir) / "bin"
                 bindir.mkdir()
                 for name, key in (("python3", "python"), ("python", "python"), ("git", "git")):
-                    (bindir / name).symlink_to(executables[key]["path"])
+                    if key != "python" or select_python:
+                        (bindir / name).symlink_to(executables[key]["path"])
                 # Add executable configuration only after the ordinary
                 # coordinator spawn's unchanged child_env() boundary.
                 launch_config = (str(bindir), executables["git"]["path"],
-                                 executables["python"]["path"])
+                                 executables["python"]["path"],
+                                 executables["python"]["path"] if select_python else "")
             return _observe_execution(argv, timeout, cwd, launch_config), None
         # No before/after dance here any more. `run_in_checkout` gives this a
         # worktree the agent is not working in, so there is nothing to drift.
