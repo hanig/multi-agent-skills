@@ -183,7 +183,8 @@ class TestRemoteVerification(unittest.TestCase):
         python.symlink_to(sys.executable)
         self.f.env['PATH'] = str(native) + os.pathsep + self.f.env['PATH']
         for shebang in ('#!' + str(python) + '\n', '#!/usr/bin/env python3\n',
-                        '#!/usr/bin/env -S python3 -u\n'):
+                        '#!/usr/bin/env -S python3 -u\n',
+                        '#!/usr/bin/env -S python3 \\c "\n'):
             with self.subTest(shebang=shebang):
                 self.authorize_program(shebang +
                     'import os, subprocess, sys\n'

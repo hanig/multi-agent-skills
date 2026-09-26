@@ -1033,7 +1033,7 @@ def run_pinned(runner, path, expect_digest, args=None, timeout=900,
                                  or not first_line.startswith(b"#!"))
                 if not first_line.startswith(b"#!"):
                     argv.insert(0, executables["python"]["path"])
-                else:
+                elif select_python:
                     # Only target-authorized bytes select this rule. The
                     # filename says nothing about the program's language.
                     words = first_line[2:].decode("utf-8", "replace").split()
