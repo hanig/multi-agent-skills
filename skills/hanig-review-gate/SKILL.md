@@ -438,8 +438,7 @@ their efforts, profile membership and output budgets are unchanged.
 `kimi-k3` remains disabled. Astra drives code and is in no gate tier;
 its `high` seat remains available to an explicitly selected committee and its
 `xhigh` seat serves committee tie-breaks. DeepSeek V4 Pro is a committee member,
-not a gate reviewer. Author exclusion applies to every selected panel.
-Reviewers run in parallel, so wall time is the slowest one.
+not a gate reviewer. Author exclusion applies to every selected panel. Reviewers run in parallel, so wall time is the slowest one.
 
 Transient 5xx and 429 responses are retried with backoff — a gateway hiccup must
 not silently shrink the panel and make the gate weaker than it reports.
