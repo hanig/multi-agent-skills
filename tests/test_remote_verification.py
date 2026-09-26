@@ -401,6 +401,24 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertFalse(Path(self.f.env['REMOTE_LOG']).exists())
         self.assertEqual(self.rows(), [])
 
+    def test_candidate_executable_is_refused_during_receipt_admission(self):
+        self.policy.pop('remote')
+        original = dict(self.policy['local'])
+        for name in ('python', 'git'):
+            with self.subTest(executable=name):
+                program = self.f.repo / ('candidate-' + name)
+                marker = self.f.directory / ('candidate-executed-' + name)
+                program.write_text('#!' + sys.executable + '\nfrom pathlib import Path\n'
+                                   'Path(%r).write_text("executed")\nprint("fixture version")\n' % str(marker))
+                program.chmod(0o755)
+                self.policy['local'] = dict(original, **{name: str(program)})
+                self.save_policy()
+                result = self.admitted()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(marker.exists(), 'admission executed a candidate-supplied executable')
+                self.assertIn('inside the operated repository', result.stderr)
+                self.assertEqual(self.f.calls(['pr', 'merge']), [])
+
     def test_missing_remote_execution_evidence_is_not_legacy_local(self):
         result = self.verify()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
