@@ -85,6 +85,10 @@ use Fcntl qw(F_GETFL F_SETFL F_SETFD O_NONBLOCK FD_CLOEXEC);
 use Errno qw(EINTR);
 
 my ($limit, $reap, @cmd) = @ARGV;
+my $json_result = @cmd && $cmd[0] eq "--json-result";
+shift @cmd if $json_result;
+my $RESULT_BYTES = 262144;
+my ($result_file, $result_size, $result_overflow, $result_error) = (undef, 0, 0, "");
 sub answer {
     my ($state, $rc, $line) = @_;
     $line = "" unless defined $line;
@@ -95,6 +99,20 @@ sub answer {
     # preserves an intentionally empty third field (successful silent child).
     print "$state\n$rc\n$line\n__DOCTOR_END__";
     exit 0;
+}
+
+# JSON is a document, not a log tail. Spool only this mode into a private file
+# owned by the supervisor, with a fixed write/read ceiling. Unlink it before
+# launching the child: the open handle survives, and even SIGKILL leaves no
+# pathname to clean up. No external mktemp/rm process can hold up the watchdog.
+if ($json_result) {
+    eval {
+        require File::Temp;
+        require JSON::PP;
+        $result_file = File::Temp->new(TMPDIR => 1, UNLINK => 1);
+        unlink($result_file->filename) or die "unlink result file: $!";
+        1;
+    } or answer("unknown", 127, "JSON result file setup");
 }
 
 # Configure every pipe before fork. A setup failure therefore cannot leave a
@@ -137,6 +155,7 @@ my $SETUP_EXIT = 125;
 my $pid = fork();
 answer("unknown", 127, "fork") unless defined $pid;
 if ($pid == 0) {
+    close $result_file if $result_file;
     close $reader;
     close $setup_reader;
     my $write_setup = sub {
@@ -213,6 +232,20 @@ sub drain {
         next if !defined($n) && $! == EINTR;
         last unless defined($n) && $n > 0;
         $bytes += $n;
+        if ($result_file && !$result_overflow && !length($result_error)) {
+            if ($n > $RESULT_BYTES - $result_size) {
+                $result_overflow = 1;
+            } else {
+                # A short/error write is indeterminate, never a partial JSON
+                # success. Do not retry I/O without yielding to the deadline.
+                my $written = syswrite($result_file, $chunk);
+                if (!defined($written) || $written != $n) {
+                    $result_error = "JSON result file write";
+                } else {
+                    $result_size += $written;
+                }
+            }
+        }
         $tail .= $chunk;
         $tail = substr($tail, -65536) if length($tail) > 65536;
     }
@@ -332,6 +365,12 @@ while (1) {
     sleep 0.02;
 }
 drain();
+if ($json_result) {
+    # A completed writer may leave more than one log-drain quantum buffered.
+    # Read enough to fill the result ceiling and observe one excess quantum,
+    # never waiting for EOF from a descendant that still holds the pipe.
+    for (1 .. int($RESULT_BYTES / $DRAIN_BYTES)) { drain(); }
+}
 drain_setup();
 if (length $interrupted) {
     answer("supervisor-error", 127,
@@ -353,6 +392,30 @@ if ($state eq "TIMED_OUT") {
 } elsif (defined $status) {
     $rc = WIFEXITED($status) ? WEXITSTATUS($status)
         : WIFSIGNALED($status) ? 128 + WTERMSIG($status) : 127;
+}
+if ($json_result && $state eq "RUNNING" && $rc == 0) {
+    answer("unknown", 127, $result_error) if length $result_error;
+    if ($result_overflow) {
+        answer("answered", 0, JSON::PP::encode_json({
+            schema_version => 1, state => "unknown", truncated => JSON::PP::true(),
+            reason => "agent diagnostics exceed the bounded result file; run agent_diagnostics.py --json directly",
+            limit_bytes => $RESULT_BYTES}));
+    }
+    defined(sysseek($result_file, 0, 0))
+        or answer("unknown", 127, "JSON result file seek");
+    my $document = "";
+    my $read = sysread($result_file, $document, $RESULT_BYTES);
+    answer("unknown", 127, "JSON result file read")
+        unless defined($read) && $read == $result_size;
+    my $value = eval { JSON::PP::decode_json($document) };
+    answer("unknown", 127, "incomplete or invalid JSON result")
+        unless ref($value) eq "HASH";
+    # The helper emits compact single-line JSON. Validate the whole document
+    # before passing it through answer(), which retains only the final line.
+    $document =~ s/\n\z//;
+    answer("unknown", 127, "JSON result is not a single line")
+        if $document =~ /[\r\n\0]/;
+    answer("answered", 0, $document);
 }
 answer($state eq "TIMED_OUT" ? "timeout" : "answered", $rc, $tail);'
 
@@ -414,9 +477,9 @@ if [ "$DOCTOR_JSON" -eq 1 ]; then
     printf '%s\n' '{"schema_version":1,"state":"unknown","reason":"python3 is unavailable"}'
   else
     if [ "$PREFIX_EXPLICIT" -eq 1 ]; then
-      bounded "$PROBE_RUN_SECONDS" python3 "$DIAGNOSTICS" --doctor-json --claude-prefix "$PREFIX"
+      bounded "$PROBE_RUN_SECONDS" --json-result python3 "$DIAGNOSTICS" --json --claude-prefix "$PREFIX"
     else
-      bounded "$PROBE_RUN_SECONDS" python3 "$DIAGNOSTICS" --doctor-json
+      bounded "$PROBE_RUN_SECONDS" --json-result python3 "$DIAGNOSTICS" --json
     fi
     if [ "$PROBE_STATE:$PROBE_RC" = answered:0 ]; then
       printf '%s\n' "$PROBE_OUT"

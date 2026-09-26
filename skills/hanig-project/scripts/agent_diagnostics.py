@@ -26,6 +26,8 @@ SCHEMA_VERSION = 1
 MARKER = ".installed-by-multi-agent-skills"
 MAX_ROOT_ENTRIES = 4_000
 MAX_MARKER_BYTES = 16_384
+# Compatibility for callers still using the original 64 KiB log-tail protocol.
+# Current bin/doctor consumes --json through its own bounded private file.
 DOCTOR_JSON_BYTES = 48_000
 REPOSITORY_ID = "multi-agent-skills"
 LIFECYCLE_SCHEMA = "2"
@@ -380,14 +382,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="emit compact stable JSON")
     parser.add_argument("--doctor-json", action="store_true",
-                        help="emit complete JSON or a bounded truncation record for doctor")
+                        help="emit JSON bounded for the legacy doctor log-tail transport")
     parser.add_argument("--claude-prefix", help="doctor compatibility diagnostic root")
     args = parser.parse_args(argv)
     value = diagnostics(claude_prefix=args.claude_prefix)
     if args.json or args.doctor_json:
         encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
         if args.doctor_json and len(encoded.encode("utf-8")) > DOCTOR_JSON_BYTES:
-            # doctor transports a child result through a fixed 64 KiB tail.
+            # Older doctor versions transport results through a 64 KiB tail.
             # Never emit a clipped JSON document into that protocol.
             encoded = json.dumps({"schema_version": SCHEMA_VERSION, "state": "unknown",
                                   "truncated": True,
