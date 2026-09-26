@@ -221,6 +221,42 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertEqual(result.returncode, 0 if native.returncode == 0 else 1)
         self.assert_clean()
 
+    def test_declared_python_with_env_options_and_assignments(self):
+        self.f.env['REMOVE_FOR_VERIFIER'] = 'must disappear'
+        for location in ('remote', 'local'):
+            if location == 'local':
+                self.policy.pop('verification_host')
+                self.save_policy()
+            for options in ('-i', '-u REMOVE_FOR_VERIFIER', '-uREMOVE_FOR_VERIFIER'):
+                with self.subTest(location=location, options=options):
+                    self.authorize_program(
+                        '#!/usr/bin/env -S ' + options + ' VERIFIER_VALUE="two words" python3 -u\n'
+                        'import os, subprocess, sys\n'
+                        'assert os.path.realpath(sys.executable) == %r, sys.executable\n'
+                        'assert "REMOVE_FOR_VERIFIER" not in os.environ\n'
+                        'assert os.environ["VERIFIER_VALUE"] == "two words"\n'
+                        'assert os.environ["HANIG_VERIFICATION_GIT"] == %r\n'
+                        'child = subprocess.check_output(["python3", "-c", "import os,sys;print(os.path.realpath(sys.executable))"], text=True)\n'
+                        'assert child.strip() == %r, child\n'
+                        % (os.path.realpath(sys.executable), str((self.f.bin / 'git').resolve()),
+                           os.path.realpath(sys.executable)))
+                    result = self.verify()
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual(self.rows()[-1]['result'], 'pass')
+                    self.assert_clean()
+
+    def test_implicit_local_no_shebang_preserves_native_launch_failure(self):
+        self.policy.pop('verification_host')
+        self.policy['local'].pop('python')
+        self.save_policy()
+        self.authorize_program('printf "shell verifier passed\\n"\nexit 0\n')
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'incomplete')
+        self.assertIn('could not exec verifier', row['incomplete_reason'])
+        self.assertNotIn('SyntaxError', row['stderr_tail'])
+
     def cancellation_fixture(self, mode='slurm-pending', retry_succeeds=False,
                              terminal_on_success=True):
         self.policy['verification_host'].update(executor='slurm', slurm={
