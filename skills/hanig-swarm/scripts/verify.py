@@ -47,6 +47,8 @@ import hashlib
 import json
 import os
 import posixpath
+import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -1017,8 +1019,22 @@ def run_pinned(runner, path, expect_digest, args=None, timeout=900,
                 # The pinned programs and their subprocesses share declared
                 # executables. A candidate's cwd/PATH never supplies either.
                 first_line = Path(copy).read_bytes().split(b"\n", 1)[0]
-                if str(path).endswith(".py") or b"python" in first_line:
+                if not first_line.startswith(b"#!"):
                     argv.insert(0, executables["python"]["path"])
+                else:
+                    # Only target-authorized bytes select this rule. The
+                    # filename says nothing about the program's language.
+                    words = first_line[2:].decode("utf-8", "replace").split()
+                    if words and posixpath.basename(words[0]) == "env":
+                        words = words[1:]
+                        if words and words[0] == "-S":
+                            try:
+                                words = shlex.split(" ".join(words[1:]))
+                            except ValueError:
+                                return None, "invalid pinned verifier env -S shebang"
+                    if words and re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?",
+                                              posixpath.basename(words[0])):
+                        argv = [executables["python"]["path"]] + words[1:] + argv
                 bindir = Path(tmpdir) / "bin"
                 bindir.mkdir()
                 for name, key in (("python3", "python"), ("python", "python"), ("git", "git")):

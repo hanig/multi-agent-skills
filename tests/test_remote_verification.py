@@ -38,8 +38,12 @@ if "tarfile" in command:
                     member.size = len(data)
                 dest.addfile(member, io.BytesIO(data))
         raw = dst.getvalue()
-    result = subprocess.run(['/bin/sh', '-c', command], input=raw)
+    result = subprocess.run(['/bin/sh', '-c', command], input=raw,
+                            stdout=subprocess.DEVNULL if mode == 'ssh-lost-response' else None)
+    if mode == 'ssh-lost-response': raise SystemExit(255)
 else:
+    if pathlib.Path(os.environ['REMOTE_MODE']).read_text() == 'cleanup-ssh-fail':
+        raise SystemExit(255)
     result = subprocess.run(['/bin/sh', '-c', command])
 raise SystemExit(result.returncode)
 '''
@@ -99,13 +103,130 @@ class TestRemoteVerification(unittest.TestCase):
     def save_policy(self):
         (self.f.state_dir / RV.POLICY).write_text(json.dumps(self.policy))
 
-    def program(self, tail=''):
-        program = ('#!' + sys.executable + '\nfrom pathlib import Path\n'
-                   'Path(%r).write_text("ran")\n' % str(self.witness)) + tail
+    def authorize_program(self, program):
         policy = dict(self.f.policy, verifiers=[dict(
             self.f.policy['verifiers'][0], sha256=hashlib.sha256(program.encode()).hexdigest())])
         return self.shared.precondition.target_commit({V.MERGE_VERIFIER_PATH: program,
                                                        V.POLICY_FILE: json.dumps(policy)})
+
+    def program(self, tail=''):
+        return self.authorize_program(
+            ('#!' + sys.executable + '\nfrom pathlib import Path\n'
+             'Path(%r).write_text("ran")\n' % str(self.witness)) + tail)
+
+    def test_shell_shebang_in_py_path_runs_without_completed_failure(self):
+        # Both paths materialize authorized bytes under a .py source name.
+        self.authorize_program('#!/bin/sh\nprintf "shell verifier passed\\n"\nexit 0\n')
+        for location in ('remote', 'local'):
+            with self.subTest(location=location):
+                if location == 'local':
+                    self.policy.pop('verification_host')
+                    self.save_policy()
+                result = self.verify()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                row = self.rows()[-1]
+                self.assertEqual(row['result'], 'pass')
+                self.assertIn('shell verifier passed', row['stdout_tail'])
+                self.assertEqual(row['execution']['location'], location)
+                self.assert_clean()
+        self.assertNotIn('fail', [r['result'] for r in self.rows()])
+
+    def test_python_shebang_and_no_shebang_use_declared_interpreter(self):
+        log = self.f.directory / 'python-invocations'
+        wrapper = self.f.directory / 'declared-python'
+        wrapper.write_text('#!' + sys.executable + '\nimport os, sys\n'
+                           'with open(%r, "a") as log: log.write(repr(sys.argv) + "\\n")\n'
+                           'os.execv(%r, [%r] + sys.argv[1:])\n'
+                           % (str(log), sys.executable, sys.executable))
+        wrapper.chmod(0o755)
+        self.policy['local']['python'] = str(wrapper)
+        self.policy['verification_host']['python'] = str(wrapper)
+        self.save_policy()
+        for location in ('remote', 'local'):
+            if location == 'local':
+                self.policy.pop('verification_host')
+                self.save_policy()
+            for shebang in ('#!/absent/python3.10 -u\n', '#!/usr/bin/env python3\n',
+                            '#!/usr/bin/env -S python3 -u\n', ''):
+                with self.subTest(location=location, shebang=shebang):
+                    self.authorize_program(shebang + 'print("declared Python ran")\n')
+                    log.write_text('')
+                    result = self.verify()
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    row = self.rows()[-1]
+                    self.assertEqual(row['result'], 'pass')
+                    self.assertIn('declared Python ran', row['stdout_tail'])
+                    self.assertIn('pinned-verifier-', log.read_text())
+                    self.assert_clean()
+
+    def cancellation_fixture(self, mode='slurm-pending', retry_succeeds=False):
+        self.policy['verification_host'].update(executor='slurm', slurm={
+            'partition': 'fixture-cpu', 'mem': '2G', 'time': '00:05:00'})
+        self.save_policy()
+        self.program()
+        self.mode.write_text(mode)
+        # These transport modes also leave the scheduler pending.
+        (self.f.bin / 'sacct').write_text('#!' + sys.executable + '\nprint("321|PENDING|0:0")\n')
+        witness = self.f.directory / 'cancellation-calls'
+        (self.f.bin / 'scancel').write_text(
+            '#!' + sys.executable + '\nfrom pathlib import Path\nimport sys\n'
+            'p=Path(%r)\n'
+            'p.write_text((p.read_text() if p.exists() else "") + "attempt\\n")\n'
+            'print("fixture cancellation denied", file=sys.stderr)\n'
+            'raise SystemExit(0 if %r and len(p.read_text().splitlines()) > 1 else 1)\n'
+            % (str(witness), retry_succeeds))
+        return witness
+
+    def assert_unconfirmed_cancellation(self, mode):
+        witness = self.cancellation_fixture(mode)
+        result = self.verify('--verification-timeout', '1')
+        self.assertNotEqual(result.returncode, 0)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'incomplete')
+        execution = row['execution']
+        self.assertEqual(execution['job_id'], '321')
+        self.assertEqual(execution['cancellation'], 'unconfirmed')
+        self.assertEqual(execution['cleanup'], 'unconfirmed')
+        self.assertTrue(Path(execution['stage'], 'job-id').exists())
+        self.assertTrue(execution['cancellation_attempts'])
+        for attempt in execution['cancellation_attempts']:
+            self.assertEqual(attempt['job_id'], '321')
+            self.assertEqual(attempt['exit_code'], 1)
+            self.assertIn('fixture cancellation denied', attempt['stderr_tail'])
+        self.assertRegex(result.stderr, r'WARNING: .*job 321')
+        self.assertIn('cancel', result.stderr)
+        self.assertEqual(self.f.calls(['pr', 'merge']), [])
+        return witness, execution
+
+    def test_failed_scancel_is_unconfirmed_with_operator_warning(self):
+        witness, execution = self.assert_unconfirmed_cancellation('slurm-pending')
+        self.assertEqual(len(witness.read_text().splitlines()), 2)
+        self.assertEqual(len(execution['cancellation_attempts']), 2)
+        self.assertIsNone(execution['sacct_state'])
+
+    def test_secondary_cleanup_retains_cancellation_after_lost_response(self):
+        witness, execution = self.assert_unconfirmed_cancellation('ssh-lost-response')
+        self.assertEqual(len(witness.read_text().splitlines()), 2)
+        self.assertEqual(len(execution['cancellation_attempts']), 1)
+
+    def test_failed_secondary_transport_keeps_first_cancellation_diagnostic(self):
+        witness, execution = self.assert_unconfirmed_cancellation('cleanup-ssh-fail')
+        self.assertEqual(len(witness.read_text().splitlines()), 1)
+        self.assertIn('cleanup transport exited 255', execution['cleanup_error'])
+
+    def test_successful_cancellation_retry_records_request_not_termination(self):
+        witness = self.cancellation_fixture(retry_succeeds=True)
+        result = self.verify('--verification-timeout', '1')
+        self.assertNotEqual(result.returncode, 0)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'incomplete')
+        execution = row['execution']
+        self.assertEqual(execution['cancellation'], 'requested')
+        self.assertIsNone(execution['sacct_state'])
+        self.assertEqual(execution['cleanup'], 'removed')
+        self.assertEqual([a['exit_code'] for a in execution['cancellation_attempts']], [1, 0])
+        self.assertNotIn('WARNING:', result.stderr)
+        self.assert_clean()
 
     def verify(self, *extra):
         return self.f.invoke('--verify-integration', *extra)
