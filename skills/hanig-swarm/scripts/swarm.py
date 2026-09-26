@@ -9726,7 +9726,7 @@ def cmd_verify(args):
     if args.claim == V.INTEGRATION_CLAIM:
         try:
             execution_policy, execution_digest = V.RV.read_policy(args.state_dir)
-            if execution_policy.get("remote"):
+            if execution_policy.get("verification_host"):
                 sys.stderr.write("error: remote merge verification requires merge_unit.py --verify-integration\n")
                 return EXIT_USAGE
             for executable in execution_policy.get("local", {}).values():
