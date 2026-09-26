@@ -139,6 +139,9 @@ def merge_records(directory):
 
 
 def covers(records, route, branch, pr):
+    # PullRequest.headRefOid retains the PR head after merge; headRef.target
+    # follows the live branch. Never replace the historical field with that
+    # moving ref when comparing a recorded merge.
     for record_route, record in records:
         binding = record["binding"]
         if (record_route == route and binding["target"] == branch
@@ -247,7 +250,7 @@ def reconcile(args):
                 status = statuses.get(key, (S.UNACKNOWLEDGED, []))[0]
                 if status == S.CONFLICT:
                     raise ValueError("conflicting tracker receipts for " + key)
-                if status == S.UNACKNOWLEDGED:
+                if status == S.UNACKNOWLEDGED and source["status"] == "read":
                     report["findings"].append({"kind": "UNACKNOWLEDGED OBLIGATION", "state_dir": str(path),
                                                "key": key, "operation": intent["envelope"]["requested_operation"]})
         except (OSError, ValueError, TypeError, KeyError, RecursionError, S.OutboxError) as exc:

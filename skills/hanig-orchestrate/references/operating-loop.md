@@ -98,7 +98,7 @@ not an atomic forge snapshot; retry a changed or unreadable page.
   the tracker operation never happened.
 - **MISMATCHED SOURCE:** coordinator launch anchors name another repository (or
   several repositories). Select the correct source; it contributes no merge
-  coverage. State without repository anchors is unreadable for this check.
+  or obligation coverage. State without repository anchors is unreadable for this check.
 
 Exit 0 means every source was read and the selected window has no findings;
 exit 1 means findings; exit 2 means some input could not be read. Never report a
@@ -114,3 +114,6 @@ repository. Its conservative identity check supports a single literal
 `gh ... --repo OWNER/REPO` (`-R` also works). Other routing, compound commands,
 missing anchors and malformed identity inputs produce “cannot confirm tracker
 state for this repository” rather than an all-clear; action detection is unchanged.
+
+The hook preserves hostname spelling when comparing identities; different
+spellings report unknown. It does not case-fold a value before deciding.

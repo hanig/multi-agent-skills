@@ -1395,7 +1395,7 @@ def repository_is_bound(payload, command, state):
                         return False
                     anchors.add(_repository_identity(anchor.get("repository_remote")))
         return anchors == {expected}
-    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+    except (OSError, ValueError, TypeError, RecursionError, subprocess.SubprocessError):
         return False
 
 
