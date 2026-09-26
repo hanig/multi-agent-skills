@@ -8,6 +8,11 @@ entire temporary tree on exit.  It never reads the normal agent homes and it
 never claims that loading a skill or running its helper script is an LLM-driven
 skill invocation.
 
+This harness is scoped to loaders, not end-to-end workflow acceptance. The
+hermetic installed-copy pipeline and its honest/hollow worker controls live in
+tests/test_installed_pipeline.py; docs/workflow-acceptance.md describes that
+grade separately from the live evidence in docs/cross-agent-acceptance.md.
+
 Exit codes:
   0  all four version and native-discovery gates passed (not the LLM gate)
   1  a check that could run produced contradictory or failing evidence
