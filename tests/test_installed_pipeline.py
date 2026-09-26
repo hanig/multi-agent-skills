@@ -200,26 +200,70 @@ class InstalledPipeline(unittest.TestCase):
 
     def ignore_missing_outputs(self, predicate):
         tree = ast.parse(predicate.read_text())
-        calls = [node for node in ast.walk(tree)
-                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                 and node.func.id == "_pipeline_state"]
-        self.assertEqual(len(calls), 1, "pipeline mutation target is ambiguous")
-        self.assertEqual(len(calls[0].args), 5, "pipeline call signature changed")
-        self.assertFalse(calls[0].keywords)
-        calls[0].args[3] = ast.List(elts=[], ctx=ast.Load())
+        functions = [node for node in tree.body
+                     if isinstance(node, ast.FunctionDef) and node.name == "_pipeline_state"]
+        self.assertEqual(len(functions), 1, "pipeline function not found or ambiguous")
+        function = functions[0]
+        parameters = {arg.arg for arg in function.args.posonlyargs +
+                      function.args.args + function.args.kwonlyargs}
+
+        def returns(statement, state):
+            return (isinstance(statement, ast.Return)
+                    and isinstance(statement.value, ast.Constant)
+                    and statement.value.value == state)
+
+        def appends_note(statement):
+            call = statement.value if isinstance(statement, ast.Expr) else None
+            return (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                    and call.func.attr == "append" and isinstance(call.func.value, ast.Name)
+                    and call.func.value.id in parameters)
+
+        # Select the callee's refusal decision, independently of call syntax
+        # and local names. Changed control-flow shape is an explicit refusal.
+        guards = [node for index, node in enumerate(function.body)
+                  if isinstance(node, ast.If) and isinstance(node.test, ast.Name)
+                  and node.test.id in parameters and not node.orelse
+                  and any(returns(item, "INCOMPLETE") for item in node.body)
+                  and any(appends_note(item) for item in node.body)
+                  and any(returns(item, "DONE") for item in function.body[index + 1:])]
+        self.assertTrue(guards, "missing-output guard not identified")
+        self.assertEqual(len(guards), 1, "ambiguous missing-output guards")
+        guards[0].test = ast.Constant(value=False)
         predicate.write_text(ast.unparse(tree) + "\n")
 
     def test_020_missing_output_mutation_is_caught_by_hollow_grader(self):
         mutant = self.home / "mutant skills"
         shutil.copytree(self.store, mutant)
         predicate = mutant / "hanig-swarm" / "scripts" / "unit.py"
+        pristine = self.store / "hanig-swarm" / "scripts" / "unit.py"
+        original = pristine.read_bytes()
+        before = ast.parse(original)
         self.ignore_missing_outputs(predicate)
+        after = ast.parse(predicate.read_text())
+        # Independently restore the one disabled condition in the observed
+        # mutant AST; the complete executable tree must then match the input.
+        function_index = next(i for i, node in enumerate(before.body)
+                              if isinstance(node, ast.FunctionDef)
+                              and node.name == "_pipeline_state")
+        function = after.body[function_index]
+        original_function = before.body[function_index]
+        self.assertEqual(len(function.body), len(original_function.body))
+        disabled = [(i, node) for i, node in enumerate(function.body)
+                    if isinstance(node, ast.If) and isinstance(node.test, ast.Constant)
+                    and node.test.value is False and isinstance(original_function.body[i], ast.If)
+                    and ast.dump(node.test) != ast.dump(original_function.body[i].test)]
+        self.assertEqual(len(disabled), 1)
+        index, guard = disabled[0]
+        guard.test = before.body[function_index].body[index].test
+        self.assertEqual(ast.dump(after), ast.dump(before), "mutation changed other executable code")
         self.select_store(mutant)
         status, report = self.exercise("hollow")
         self.assertEqual(status["units"][0]["state"], "DONE", status)
         self.assertEqual(report["units"][0]["state"], "DONE", report)
+        self.assertEqual(report["units"][0]["missing_outputs"], sorted(OUTPUTS))
         with self.assertRaisesRegex(AssertionError, "hollow coordinator reached DONE"):
             self.grade_hollow(status, report)
+        self.assertEqual(pristine.read_bytes(), original)
 
     def test_030_mutation_survives_formatting_and_local_name_changes(self):
         reformatted = self.home / "reformatted skills"
@@ -228,12 +272,38 @@ class InstalledPipeline(unittest.TestCase):
         tree = ast.parse(predicate.read_text())
         check = next(n for n in tree.body
                      if isinstance(n, ast.FunctionDef) and n.name == "check_unit")
-        renamed = 0
+        callee = next(n for n in tree.body
+                      if isinstance(n, ast.FunctionDef) and n.name == "_pipeline_state")
+        parameters = [arg.arg for arg in callee.args.args]
+        role = next(node.test.id for node in callee.body
+                    if isinstance(node, ast.If) and isinstance(node.test, ast.Name)
+                    and node.test.id in parameters)
+        calls = [node for node in ast.walk(check)
+                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                 and node.func.id == "_pipeline_state"]
+        self.assertEqual(len(calls), 1)
+        call = calls[0]
+        position = parameters.index(role)
+        actual = (call.args[position] if position < len(call.args) else
+                  next(keyword.value for keyword in call.keywords if keyword.arg == role))
+        self.assertIsInstance(actual, ast.Name)
+        local_name = actual.id
         for node in ast.walk(check):
-            if isinstance(node, ast.Name) and node.id == "missing":
-                node.id = "absent_outputs"
-                renamed += 1
-        self.assertGreater(renamed, 0)
+            if isinstance(node, ast.Name) and node.id == local_name:
+                node.id = "refactored_" + local_name
+        for node in ast.walk(callee):
+            if isinstance(node, ast.arg) and node.arg == role:
+                node.arg = "refactored_" + role
+            if isinstance(node, ast.Name) and node.id == role:
+                node.id = "refactored_" + role
+        # This fixture accepts already-keyword calls too; the production
+        # mutation itself never examines or binds a call site's arguments.
+        call.keywords = [ast.keyword(arg=name, value=value)
+                         for name, value in zip(parameters[2:], call.args[2:])] + call.keywords
+        for keyword in call.keywords:
+            if keyword.arg == role:
+                keyword.arg = "refactored_" + role
+        call.args = call.args[:2]
         # Parenthesized definitions/calls permit a newline after the opening
         # parenthesis. Only the disposable store gets this harmless refactor.
         predicate.write_text(ast.unparse(tree).replace(
@@ -273,6 +343,34 @@ class InstalledPipeline(unittest.TestCase):
                 capture_output=True, text=True, timeout=20)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(list(Path(parent).iterdir()), [])
+
+    def test_060_unknown_or_ambiguous_mutation_target_is_refused_without_writing(self):
+        original = (self.store / "hanig-swarm" / "scripts" / "unit.py").read_text()
+        for variant, message in (("renamed", "pipeline function not found"),
+                                 ("absent", "missing-output guard not identified"),
+                                 ("duplicate", "ambiguous missing-output guards")):
+            with self.subTest(variant=variant):
+                tree = ast.parse(original)
+                function = next(n for n in tree.body
+                                if isinstance(n, ast.FunctionDef) and n.name == "_pipeline_state")
+                if variant == "renamed":
+                    function.name = "renamed_pipeline_state"
+                else:
+                    guard = next(n for n in function.body
+                                 if isinstance(n, ast.If) and isinstance(n.test, ast.Name)
+                                 and isinstance(n.body[-1], ast.Return)
+                                 and isinstance(n.body[-1].value, ast.Constant)
+                                 and n.body[-1].value.value == "INCOMPLETE")
+                    if variant == "absent":
+                        function.body.remove(guard)
+                    else:
+                        function.body.insert(function.body.index(guard), guard)
+                predicate = self.home / (variant + ".py")
+                predicate.write_text(ast.unparse(tree) + "\n")
+                unchanged = predicate.read_bytes()
+                with self.assertRaisesRegex(AssertionError, message):
+                    self.ignore_missing_outputs(predicate)
+                self.assertEqual(predicate.read_bytes(), unchanged)
 
 
 if __name__ == "__main__":

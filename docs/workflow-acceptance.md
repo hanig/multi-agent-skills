@@ -23,7 +23,8 @@ worker writes both declared outputs in its fresh attempt root and reaches DONE;
 a hollow worker exits zero without outputs and must not reach DONE. Both print
 the same success claim, which the grader ignores. A mutation in a second
 temporary installed store makes the pipeline predicate ignore missing outputs:
-the hollow unit reaches DONE and the unchanged hollow grader must reject it.
+the hollow unit reaches DONE and the unchanged hollow grader must reject it,
+while the report must still list both outputs as missing.
 The report's additional evidence-mismatch headline can still catch the mutant;
 the mutation specifically tests rejection of the false unit DONE.
 Regressions also exercise the mutation after harmless predicate refactoring and
@@ -32,6 +33,16 @@ observations are not mistaken for a recorded zero exit.
 The fixture hides `/proc` reads as well as omitting `ps`, so unavailable process
 identity is exercised consistently on macOS and Linux. The read guard is
 triggered through `open` on every invocation, including on hosts without `/proc`.
+
+The mutation disables the unique direct missing-output refusal in
+`_pipeline_state`: a formal-parameter truth test with a note append and an
+INCOMPLETE return before the DONE path. Only that condition becomes false;
+the rest of the executable AST and the pristine install are checked unchanged.
+Call formatting, keyword arguments, and consistent local/parameter renames are
+exercised. Renaming the function or changing, extracting, inverting, or duplicating
+the decision requires updating this finite mutation adapter; unknown or ambiguous
+targets refuse before writing. This does not claim invariance under arbitrary
+future predicate redesign.
 
 This covers installed skill composition and the local pipeline boundary. It
 does not certify real agents, model quality, scheduler execution, tracker
