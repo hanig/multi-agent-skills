@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
@@ -26,6 +27,8 @@ SCHEMA_VERSION = 1
 MARKER = ".installed-by-multi-agent-skills"
 MAX_ROOT_ENTRIES = 4_000
 MAX_MARKER_BYTES = 16_384
+# Compatibility for callers still using the original 64 KiB log-tail protocol.
+# Current bin/doctor consumes --json through its own bounded private file.
 DOCTOR_JSON_BYTES = 48_000
 REPOSITORY_ID = "multi-agent-skills"
 LIFECYCLE_SCHEMA = "2"
@@ -376,18 +379,49 @@ def diagnostics(env: Optional[Mapping[str, str]] = None,
             "selection": agent_discovery.select_targets(report)}
 
 
+def doctor_summary(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Preserve health facts without per-payload detail on the legacy transport."""
+    agents = {}
+    for name, agent in value["agents"].items():
+        installation = agent["installation"]
+        roots = []
+        for root in installation["roots"]:
+            payloads = root["payloads"]
+            roots.append({
+                **{key: item for key, item in root.items() if key != "payloads"},
+                "payload_count": len(payloads),
+                "ownership_counts": dict(Counter(item["ownership"] for item in payloads)),
+                "payload_states": dict(Counter(item["state"] for item in payloads)),
+            })
+        workflow = agent["workflow"]
+        agents[name] = {
+            **agent,
+            "installation": {"state": installation["state"], "roots": roots,
+                             "duplicate_name_count": len(installation["duplicate_names"])},
+            "workflow": {
+                **{key: item for key, item in workflow.items() if key != "skills"},
+                "skill_states": dict(Counter(item["state"] for item in workflow["skills"].values())),
+            },
+        }
+    return {**value, "detail": "summary", "agents": agents}
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="emit compact stable JSON")
     parser.add_argument("--doctor-json", action="store_true",
-                        help="emit complete JSON or a bounded truncation record for doctor")
+                        help="emit JSON bounded for the legacy doctor log-tail transport")
+    parser.add_argument("--doctor-summary", action="store_true",
+                        help="emit a bounded health summary for doctor's compatibility transport")
     parser.add_argument("--claude-prefix", help="doctor compatibility diagnostic root")
     args = parser.parse_args(argv)
     value = diagnostics(claude_prefix=args.claude_prefix)
-    if args.json or args.doctor_json:
+    if args.doctor_summary:
+        value = doctor_summary(value)
+    if args.json or args.doctor_json or args.doctor_summary:
         encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
-        if args.doctor_json and len(encoded.encode("utf-8")) > DOCTOR_JSON_BYTES:
-            # doctor transports a child result through a fixed 64 KiB tail.
+        if (args.doctor_json or args.doctor_summary) and len(encoded.encode("utf-8")) > DOCTOR_JSON_BYTES:
+            # Older doctor versions transport results through a 64 KiB tail.
             # Never emit a clipped JSON document into that protocol.
             encoded = json.dumps({"schema_version": SCHEMA_VERSION, "state": "unknown",
                                   "truncated": True,

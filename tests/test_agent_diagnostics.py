@@ -1,6 +1,7 @@
 """Acceptance evidence for separate agent/install/discovery/workflow facts."""
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -472,6 +473,25 @@ class TestDoctorAndSurveyAgentOutput(unittest.TestCase):
                 "agent_discovery.date = FrozenDate\n")
         return env
 
+    def _populated_env(self, directory):
+        env = self._frozen_env(directory, "2.1.261", date(2026, 9, 25))
+        home = Path(env["HOME"])
+        for relative in (".claude/skills", ".agents/skills",
+                         ".config/opencode/skills", ".pi/agent/skills"):
+            for number in range(30):
+                skill = home / relative / f"hanig-fixture-{number:02d}"
+                skill.mkdir(parents=True)
+                (skill / "SKILL.md").write_text("fixture skill\n")
+                (skill / D.MARKER).write_text(TestAgentDiagnostics._record(skill))
+        return env
+
+    @staticmethod
+    def _without_perl_json(directory, env):
+        shadow = directory / "perl-lib" / "JSON"
+        shadow.mkdir(parents=True)
+        (shadow / "PP.pm").write_text('die "fixture: JSON::PP unavailable\\n";\n')
+        env["PERL5LIB"] = str(shadow.parent)
+
     def test_doctor_json_expiry_changes_verification_and_next_step(self):
         for version, deadline in (("2.1.261", date(2026, 10, 5)),
                                   ("2.1.282", date(2026, 10, 25))):
@@ -591,6 +611,40 @@ class TestDoctorAndSurveyAgentOutput(unittest.TestCase):
         self.assertTrue(value.get("truncated"), value)
         self.assertEqual(value["state"], "unknown")
 
+    def test_doctor_json_keeps_realistic_four_agent_host_complete(self):
+        """Exercise the public consumer with detail larger than its old tail."""
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            env = self._populated_env(directory)
+            full = subprocess.run(
+                [str(directory / "bin" / "python3"),
+                 str(SCRIPTS / "agent_diagnostics.py"), "--json"],
+                cwd=directory, env=env, capture_output=True, text=True,
+                timeout=WATCHDOG_SECONDS)
+            self.assertEqual(full.returncode, 0, full.stderr)
+            self.assertGreaterEqual(len(full.stdout.encode("utf-8")), 70_000)
+            result = subprocess.run([str(DOCTOR), "--json"], cwd=directory,
+                                    env=env, text=True, capture_output=True,
+                                    timeout=WATCHDOG_SECONDS)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            value = json.loads(result.stdout)
+            self.assertNotEqual(value.get("state"), "unknown", value)
+            self.assertNotIn("truncated", value)
+            self.assertEqual(set(value["agents"]), {"claude", "codex", "opencode", "pi"})
+            # scandir order and measured probe duration vary between runs.
+            # Compare every other fact exactly.
+            expected = json.loads(full.stdout)
+            for report in (value, expected):
+                for agent in report["agents"].values():
+                    probe = agent["agent_present"]["executable"]
+                    self.assertGreaterEqual(probe.pop("elapsed_seconds"), 0)
+                    for root in agent["installation"]["roots"]:
+                        root["payloads"].sort(key=lambda payload: payload["name"])
+            self.assertEqual(value, expected)
+            for agent in value["agents"].values():
+                self.assertEqual(agent["agent_present"]["state"], "executable_found")
+                self.assertEqual(agent["installation"]["state"], "present")
+
     def test_doctor_json_keeps_an_ordinary_thirteen_skill_install_complete(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
@@ -605,6 +659,262 @@ class TestDoctorAndSurveyAgentOutput(unittest.TestCase):
         value = json.loads(result.stdout)
         self.assertNotIn("truncated", value)
         self.assertEqual(len(value["agents"]["claude"]["installation"]["roots"][0]["payloads"]), 13)
+
+    def _fixture_json_result(self, directory, body, deadline=DOCTOR_SECONDS,
+                             without_perl_json=False, validator_body=None):
+        """Drive doctor itself with arbitrary child output and private scratch."""
+        bindir = directory / "bin"
+        bindir.mkdir()
+        scratch = directory / "scratch"
+        scratch.mkdir()
+        child = directory / "result.py"
+        child.write_text(body)
+        python = bindir / "python3"
+        validator_args = ' "$@"'
+        if validator_body is not None:
+            validator = directory / "validator.py"
+            validator.write_text(validator_body)
+            validator_args = ' ' + shlex.quote(str(validator))
+        python.write_text('#!/bin/sh\nif [ "$1" = -c ]; then exec ' +
+                          shlex.quote(sys.executable) + validator_args + '; fi\nexec ' +
+                          shlex.quote(sys.executable) + " " +
+                          shlex.quote(str(child)) + "\n")
+        python.chmod(0o755)
+        perl = bindir / "perl"
+        perl.write_text(
+            '#!/bin/sh\nsource=$2\nshift 4\nexec ' + shlex.quote(shutil.which("perl")) +
+            f' -e "$source" {deadline} {REAL_REAP_SECONDS} "$@"\n')
+        perl.chmod(0o755)
+        env = {"HOME": str(directory / "home"), "PATH": str(bindir),
+               "TMPDIR": str(scratch), "PYTHONDONTWRITEBYTECODE": "1"}
+        if without_perl_json:
+            self._without_perl_json(directory, env)
+        result = subprocess.run([str(DOCTOR), "--json"], cwd=directory, env=env,
+                                capture_output=True, text=True, timeout=WATCHDOG_SECONDS)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(list(scratch.iterdir()), [], "doctor left its result file behind")
+        self.assertLessEqual(len(result.stdout.encode("utf-8")), 262_145)
+        return json.loads(result.stdout)
+
+    def test_doctor_without_perl_json_keeps_large_host_health_in_summary(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            env = self._populated_env(directory)
+            self._without_perl_json(directory, env)
+            full = subprocess.run([str(directory / "bin" / "python3"),
+                                   str(SCRIPTS / "agent_diagnostics.py"), "--json"],
+                                  env=env, capture_output=True, text=True,
+                                  timeout=WATCHDOG_SECONDS)
+            self.assertEqual(full.returncode, 0, full.stderr)
+            self.assertGreaterEqual(len(full.stdout.encode()), 70_000)
+            result = subprocess.run([str(DOCTOR), "--json"], env=env,
+                                    capture_output=True, text=True, timeout=WATCHDOG_SECONDS)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            summary = json.loads(result.stdout)
+            self.assertNotEqual(summary.get("state"), "unknown", summary)
+            self.assertEqual(summary["detail"], "summary")
+            self.assertNotIn("truncated", summary)
+            self.assertLessEqual(len(result.stdout.encode()), 48_001)
+            expected = json.loads(full.stdout)
+            self.assertEqual(set(summary["agents"]), {"claude", "codex", "opencode", "pi"})
+            self.assertEqual(summary["selection"], expected["selection"])
+            for name, agent in summary["agents"].items():
+                original = expected["agents"][name]
+                for key in ("identity", "discovery", "next_step"):
+                    self.assertEqual(agent[key], original[key])
+                for key in ("state", "version"):
+                    self.assertEqual(agent["agent_present"][key], original["agent_present"][key])
+                self.assertEqual(agent["installation"]["state"], "present")
+                self.assertEqual(agent["workflow"]["state"], original["workflow"]["state"])
+                for root in agent["installation"]["roots"]:
+                    self.assertNotIn("payloads", root)
+                    if root["state"] == "present":
+                        self.assertEqual(root["payload_count"], 30)
+                        self.assertEqual(root["ownership_counts"], {"owned": 30})
+
+    def test_doctor_without_perl_json_still_bounds_an_oversized_summary(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            env = self._frozen_env(directory, "2.1.261", date(2026, 9, 25))
+            self._without_perl_json(directory, env)
+            with (directory / "clock-fixture" / "sitecustomize.py").open("a") as hook:
+                hook.write(
+                    "original_discover = agent_discovery.discover\n"
+                    "def oversized_discover(*args, **kwargs):\n"
+                    "    report = original_discover(*args, **kwargs)\n"
+                    "    report['agents']['claude']['identity'] = 'x' * 50000\n"
+                    "    return report\n"
+                    "agent_discovery.discover = oversized_discover\n")
+            result = subprocess.run([str(DOCTOR), "--json"], env=env,
+                                    capture_output=True, text=True, timeout=WATCHDOG_SECONDS)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            value = json.loads(result.stdout)
+            self.assertEqual(value["state"], "unknown")
+            self.assertTrue(value["truncated"])
+            self.assertGreater(value["estimated_bytes"], 48_000)
+            self.assertLessEqual(len(result.stdout.encode()), 48_001)
+
+    def test_doctor_result_file_io_failures_retain_the_health_summary(self):
+        faults = (
+            ("syswrite", "return undef", 'CORE::syswrite($_[0], $_[1], length($_[1]))'),
+            ("syswrite", "return CORE::syswrite($_[0], $_[1], 1)",
+             'CORE::syswrite($_[0], $_[1], length($_[1]))'),
+            ("sysseek", "return undef", 'CORE::sysseek($_[0], $_[1], $_[2])'),
+            ("sysread", "return undef", 'CORE::sysread($_[0], $_[1], $_[2])'),
+            ("sysread", "return 0", 'CORE::sysread($_[0], $_[1], $_[2])'),
+        )
+        for operation, fault, forward in faults:
+            with self.subTest(operation=operation, fault=fault), tempfile.TemporaryDirectory() as raw:
+                directory = Path(raw)
+                env = self._populated_env(directory)
+                library = directory / "perl-fault"
+                library.mkdir()
+                # Fault only the supervisor-owned regular file. Its setup and
+                # data pipes still perform real I/O through the real consumer.
+                (library / "DoctorFileFault.pm").write_text(
+                    "package DoctorFileFault;\nuse Errno qw(ENOSPC);\nBEGIN {\n"
+                    f"*CORE::GLOBAL::{operation} = sub {{\n"
+                    f'if (ref($_[0]) eq "File::Temp") {{ $! = ENOSPC; {fault}; }}\n'
+                    f"return {forward};\n}};\n}}\n1;\n")
+                env.update(PERL5LIB=str(library), PERL5OPT="-MDoctorFileFault")
+                result = subprocess.run([str(DOCTOR), "--json"], env=env,
+                                        capture_output=True, text=True, timeout=WATCHDOG_SECONDS)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                value = json.loads(result.stdout)
+                self.assertNotEqual(value.get("state"), "unknown", (value, result.stderr))
+                self.assertNotIn("truncated", value)
+                self.assertEqual(value["detail"], "summary")
+                self.assertEqual(set(value["agents"]), {"claude", "codex", "opencode", "pi"})
+                for agent in value["agents"].values():
+                    self.assertEqual(agent["agent_present"]["state"], "executable_found")
+                    self.assertEqual(agent["installation"]["state"], "present")
+                    for root in agent["installation"]["roots"]:
+                        if root["state"] == "present":
+                            self.assertEqual(root["ownership_counts"], {"owned": 30})
+
+    def test_doctor_without_perl_json_validates_the_fallback_document(self):
+        for output, state in (('broken', 'unknown'), ('[]', 'unknown'),
+                              ('{"state":"ready"}', 'ready')):
+            with self.subTest(output=output), tempfile.TemporaryDirectory() as raw:
+                value = self._fixture_json_result(
+                    Path(raw), "print(" + repr(output) + ")\n", without_perl_json=True)
+                self.assertEqual(value["state"], state)
+
+    def test_doctor_summary_stays_out_of_the_exec_argument_budget(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            env = self._populated_env(directory)
+            self._without_perl_json(directory, env)
+            # Leave room for the supervisor's fixed code and ordinary command
+            # arguments, but not another copy of the report. The assertions
+            # exercise actual exec and doctor output, not this source text.
+            supervisor = DOCTOR.read_text().split("SUPERVISOR_PERL='", 1)[1].split(
+                "'\n\n# bounded SECONDS", 1)[0]
+            environment_bytes = sum(len(os.fsencode(k)) + len(os.fsencode(v)) + 2
+                                    for k, v in env.items())
+            padding = (os.sysconf("SC_ARG_MAX") - len(supervisor.encode()) -
+                       environment_bytes - 6000)
+            self.assertGreater(padding, 0)
+            for offset in range(0, padding, 60000):
+                env["DOCTOR_FIXTURE_PADDING_" + str(offset)] = "x" * min(60000, padding - offset)
+            control = subprocess.run([str(directory / "bin" / "python3"),
+                                      str(SCRIPTS / "agent_diagnostics.py"), "--doctor-summary"],
+                                     env=env, capture_output=True, text=True,
+                                     timeout=WATCHDOG_SECONDS)
+            self.assertEqual(control.returncode, 0, control.stderr)
+            self.assertGreater(len(control.stdout.encode()), 6000)
+            expected = json.loads(control.stdout)
+            result = subprocess.run([str(DOCTOR), "--json"], env=env,
+                                    capture_output=True, text=True, timeout=WATCHDOG_SECONDS)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            value = json.loads(result.stdout)
+            self.assertNotEqual(value.get("state"), "unknown", (value, result.stderr))
+            self.assertNotIn("truncated", value)
+            self.assertEqual(value["detail"], "summary")
+            self.assertEqual(set(value["agents"]), {"claude", "codex", "opencode", "pi"})
+            for name, agent in value["agents"].items():
+                self.assertEqual(agent["installation"], expected["agents"][name]["installation"])
+                self.assertEqual(agent["agent_present"]["state"], "executable_found")
+
+    def test_doctor_summary_stdin_is_bounded_and_requires_the_whole_document(self):
+        for size in (48000, 48001):
+            with self.subTest(size=size), tempfile.TemporaryDirectory() as raw:
+                body = ("import json\n"
+                        "value = {'padding': ''}\n"
+                        "base = json.dumps(value, separators=(',', ':'))\n"
+                        f"value['padding'] = 'x' * ({size} - len(base))\n"
+                        "print(json.dumps(value, separators=(',', ':')))\n")
+                value = self._fixture_json_result(Path(raw), body, without_perl_json=True)
+                if size == 48000:
+                    self.assertEqual(len(json.dumps(value, separators=(",", ":"))), size)
+                    self.assertNotIn("truncated", value)
+                else:
+                    self.assertEqual(value["state"], "unknown")
+        for output in ('noise\n{}', '{}\n{}', '{"text":"\u03bb"}'):
+            with self.subTest(output=output), tempfile.TemporaryDirectory() as raw:
+                value = self._fixture_json_result(Path(raw), "print(" + repr(output) + ")\n",
+                                                  without_perl_json=True)
+                self.assertEqual(value["state"], "unknown")
+
+    def test_doctor_summary_preserves_producer_failure_and_bounds_both_stages(self):
+        for stage in ("producer-failed", "producer-stalled", "validator-stalled"):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as raw:
+                body = "print('{\"state\":\"ready\"}', flush=True)\n"
+                validator_body = None
+                deadline = DOCTOR_SECONDS
+                if stage == "producer-failed":
+                    body += "raise SystemExit(7)\n"
+                else:
+                    deadline = 1
+                    if stage == "producer-stalled":
+                        body += "import time; time.sleep(600)\n"
+                    else:
+                        validator_body = "import sys, time\nsys.stdin.buffer.read()\ntime.sleep(600)\n"
+                value = self._fixture_json_result(Path(raw), body, deadline=deadline,
+                                                  without_perl_json=True,
+                                                  validator_body=validator_body)
+                self.assertEqual(value["state"], "unknown")
+                self.assertNotIn("truncated", value)
+
+    def test_doctor_json_result_boundary_and_stderr_are_independent(self):
+        # Exact bytes include the newline. The payload also carries escaped
+        # Unicode and newlines, which must survive the single-line protocol.
+        for size in (262_144, 262_145):
+            with self.subTest(size=size), tempfile.TemporaryDirectory() as raw:
+                body = (
+                    "import json, sys\n"
+                    "value = {'text': '\\u03bb\\n', 'padding': ''}\n"
+                    "base = json.dumps(value, separators=(',', ':'))\n"
+                    f"value['padding'] = 'x' * ({size} - len(base) - 1)\n"
+                    "sys.stderr.write('diagnostic warning\\n' * 20000)\n"
+                    "print(json.dumps(value, separators=(',', ':')))\n")
+                value = self._fixture_json_result(Path(raw), body)
+                if size == 262_144:
+                    self.assertNotIn("truncated", value)
+                    self.assertEqual(value["text"], "\u03bb\n")
+                    self.assertEqual(len(json.dumps(value, separators=(",", ":"))) + 1, size)
+                else:
+                    self.assertTrue(value["truncated"])
+                    self.assertEqual(value["state"], "unknown")
+                    self.assertEqual(value["limit_bytes"], 262_144)
+
+    def test_doctor_json_rejects_invalid_document_even_with_valid_final_line(self):
+        for output in ('{"unfinished":', 'broken\n{}\n', '[1,2]', ''):
+            with self.subTest(output=output), tempfile.TemporaryDirectory() as raw:
+                value = self._fixture_json_result(
+                    Path(raw), "import sys\nsys.stdout.write(" + repr(output) + ")\n")
+                self.assertEqual(value["state"], "unknown")
+                self.assertNotIn("truncated", value)
+
+    def test_doctor_json_does_not_accept_success_output_after_timeout_or_nonzero_exit(self):
+        for end, deadline in (("raise SystemExit(7)", DOCTOR_SECONDS),
+                              ("import time; time.sleep(600)", 1)):
+            with self.subTest(end=end), tempfile.TemporaryDirectory() as raw:
+                value = self._fixture_json_result(
+                    Path(raw), "print('{\"state\":\"ready\"}', flush=True)\n" + end + "\n",
+                    deadline=deadline)
+                self.assertEqual(value["state"], "unknown")
+                self.assertNotIn("truncated", value)
 
     def test_survey_preserves_existing_keys_and_adds_agent_diagnostics_without_claude(self):
         with tempfile.TemporaryDirectory() as tmp:

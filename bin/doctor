@@ -85,6 +85,11 @@ use Fcntl qw(F_GETFL F_SETFL F_SETFD O_NONBLOCK FD_CLOEXEC);
 use Errno qw(EINTR);
 
 my ($limit, $reap, @cmd) = @ARGV;
+my $json_result = @cmd && $cmd[0] eq "--json-result";
+shift @cmd if $json_result;
+my $RESULT_BYTES = 262144;
+my ($result_file, $result_size, $result_overflow, $result_error) = (undef, 0, 0, "");
+my ($result_reader, $result_writer);
 sub answer {
     my ($state, $rc, $line) = @_;
     $line = "" unless defined $line;
@@ -95,6 +100,25 @@ sub answer {
     # preserves an intentionally empty third field (successful silent child).
     print "$state\n$rc\n$line\n__DOCTOR_END__";
     exit 0;
+}
+
+# JSON is a document, not a log tail. Spool only this mode into a private file
+# owned by the supervisor, with a fixed write/read ceiling. Unlink it before
+# launching the child: the open handle survives, and even SIGKILL leaves no
+# pathname to clean up. No external mktemp/rm process can hold up the watchdog.
+if ($json_result) {
+    eval {
+        require File::Temp;
+        require JSON::PP;
+        $result_file = File::Temp->new(TMPDIR => 1, UNLINK => 1);
+        unlink($result_file->filename) or die "unlink result file: $!";
+        pipe($result_reader, $result_writer) or die "result pipe: $!";
+        my $flags = fcntl($result_reader, F_GETFL, 0);
+        defined($flags) or die "result pipe flags: $!";
+        fcntl($result_reader, F_SETFL, $flags | O_NONBLOCK)
+            or die "result pipe nonblocking mode: $!";
+        1;
+    } or answer("summary-required", 127, "JSON result file setup");
 }
 
 # Configure every pipe before fork. A setup failure therefore cannot leave a
@@ -137,6 +161,8 @@ my $SETUP_EXIT = 125;
 my $pid = fork();
 answer("unknown", 127, "fork") unless defined $pid;
 if ($pid == 0) {
+    close $result_file if $result_file;
+    close $result_reader if $result_reader;
     close $reader;
     close $setup_reader;
     my $write_setup = sub {
@@ -162,7 +188,7 @@ if ($pid == 0) {
         $write_setup->("error:setpgid");
         _exit($SETUP_EXIT);
     }
-    unless (open STDOUT, ">&", $writer) {
+    unless (open STDOUT, ">&", ($json_result ? $result_writer : $writer)) {
         $write_setup->("error:stdout");
         _exit($SETUP_EXIT);
     }
@@ -171,6 +197,7 @@ if ($pid == 0) {
         _exit($SETUP_EXIT);
     }
     close $writer;
+    close $result_writer if $result_writer;
     # A command can execute only after this complete handshake. Thus absence
     # of ready is a setup failure without reserving any command exit status.
     $write_setup->("ready") or _exit($SETUP_EXIT);
@@ -180,6 +207,7 @@ if ($pid == 0) {
     };
 }
 close $writer;
+close $result_writer if $result_writer;
 close $setup_writer;
 $active_pid = $pid;
 unless (sigprocmask(SIG_SETMASK, $old_signal_mask)) {
@@ -202,20 +230,41 @@ my $wait_error = "";
 my $cleanup_deadline;
 my $DRAIN_READS = 8;
 my $DRAIN_BYTES = 65536;
-sub drain {
+sub drain_stream {
+    my ($source, $is_result) = @_;
     my ($reads, $bytes) = (0, 0);
     while ($reads < $DRAIN_READS && $bytes < $DRAIN_BYTES) {
         $reads++;
         my $chunk = "";
         my $want = $DRAIN_BYTES - $bytes;
         $want = 8192 if $want > 8192;
-        my $n = sysread($reader, $chunk, $want);
+        my $n = sysread($source, $chunk, $want);
         next if !defined($n) && $! == EINTR;
         last unless defined($n) && $n > 0;
         $bytes += $n;
-        $tail .= $chunk;
-        $tail = substr($tail, -65536) if length($tail) > 65536;
+        if ($is_result && !$result_overflow && !length($result_error)) {
+            if ($n > $RESULT_BYTES - $result_size) {
+                $result_overflow = 1;
+            } else {
+                # A short/error write is indeterminate, never a partial JSON
+                # success. Do not retry I/O without yielding to the deadline.
+                my $written = syswrite($result_file, $chunk);
+                if (!defined($written) || $written != $n) {
+                    $result_error = "JSON result file write";
+                } else {
+                    $result_size += $written;
+                }
+            }
+        }
+        unless ($is_result) {
+            $tail .= $chunk;
+            $tail = substr($tail, -65536) if length($tail) > 65536;
+        }
     }
+}
+sub drain {
+    drain_stream($reader, 0);
+    drain_stream($result_reader, 1) if $json_result;
 }
 sub drain_setup {
     for (1 .. 4) {
@@ -332,6 +381,12 @@ while (1) {
     sleep 0.02;
 }
 drain();
+if ($json_result) {
+    # A completed writer may leave more than one log-drain quantum buffered.
+    # Read enough to fill the result ceiling and observe one excess quantum,
+    # never waiting for EOF from a descendant that still holds the pipe.
+    for (1 .. int($RESULT_BYTES / $DRAIN_BYTES)) { drain(); }
+}
 drain_setup();
 if (length $interrupted) {
     answer("supervisor-error", 127,
@@ -353,6 +408,30 @@ if ($state eq "TIMED_OUT") {
 } elsif (defined $status) {
     $rc = WIFEXITED($status) ? WEXITSTATUS($status)
         : WIFSIGNALED($status) ? 128 + WTERMSIG($status) : 127;
+}
+if ($json_result && $state eq "RUNNING" && $rc == 0) {
+    answer("summary-required", 127, $result_error) if length $result_error;
+    if ($result_overflow) {
+        answer("answered", 0, JSON::PP::encode_json({
+            schema_version => 1, state => "unknown", truncated => JSON::PP::true(),
+            reason => "agent diagnostics exceed the bounded result file; run agent_diagnostics.py --json directly",
+            limit_bytes => $RESULT_BYTES}));
+    }
+    defined(sysseek($result_file, 0, 0))
+        or answer("summary-required", 127, "JSON result file seek");
+    my $document = "";
+    my $read = sysread($result_file, $document, $RESULT_BYTES);
+    answer("summary-required", 127, "JSON result file read")
+        unless defined($read) && $read == $result_size;
+    my $value = eval { JSON::PP::decode_json($document) };
+    answer("unknown", 127, "incomplete or invalid JSON result")
+        unless ref($value) eq "HASH";
+    # The helper emits compact single-line JSON. Validate the whole document
+    # before passing it through answer(), which retains only the final line.
+    $document =~ s/\n\z//;
+    answer("unknown", 127, "JSON result is not a single line")
+        if $document =~ /[\r\n\0]/;
+    answer("answered", 0, $document);
 }
 answer($state eq "TIMED_OUT" ? "timeout" : "answered", $rc, $tail);'
 
@@ -388,6 +467,7 @@ bounded() {
   PROBE_OUT=${PROBE_OUT%"$_nl"__DOCTOR_END__}
   case "$PROBE_STATE" in
     answered) PROBE_WHY= ;;
+    summary-required) PROBE_WHY="the full JSON transport is unavailable" ;;
     timeout)  PROBE_WHY="it timed out; termination was attempted" ;;
     setup-error)
               PROBE_STATE=unknown
@@ -414,9 +494,42 @@ if [ "$DOCTOR_JSON" -eq 1 ]; then
     printf '%s\n' '{"schema_version":1,"state":"unknown","reason":"python3 is unavailable"}'
   else
     if [ "$PREFIX_EXPLICIT" -eq 1 ]; then
-      bounded "$PROBE_RUN_SECONDS" python3 "$DIAGNOSTICS" --doctor-json --claude-prefix "$PREFIX"
+      bounded "$PROBE_RUN_SECONDS" --json-result python3 "$DIAGNOSTICS" --json --claude-prefix "$PREFIX"
     else
-      bounded "$PROBE_RUN_SECONDS" python3 "$DIAGNOSTICS" --doctor-json
+      bounded "$PROBE_RUN_SECONDS" --json-result python3 "$DIAGNOSTICS" --json
+    fi
+    if [ "$PROBE_STATE" = summary-required ]; then
+      # Older/minimal Perl may lack JSON::PP; temporary storage can also be
+      # unavailable. Retain useful health facts within the original tail cap.
+      # Report bytes stay inside this supervised group, never in exec argv or
+      # the environment. The trusted producer caps its output at 48000 bytes;
+      # the validator independently bounds and checks the serialized document.
+      SUMMARY_VALIDATOR='
+import json, sys
+raw = sys.stdin.buffer.read(48001)
+if len(raw) > 48000:
+    raise SystemExit(1)
+value = json.loads(raw.decode("ascii"))
+if not isinstance(value, dict):
+    raise SystemExit(1)
+encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
+if len(encoded.encode("utf-8")) > 48000:
+    raise SystemExit(1)
+print(encoded)
+'
+      SUMMARY_PIPE='
+validator=$1
+shift
+summary=$("$@") || exit $?
+printf "%s" "$summary" | python3 -c "$validator"
+'
+      # Both stages and their inner pipe waits share one deadline and cleanup
+      # group. Preserve the former producer-plus-validator run allowance.
+      if [ "$PREFIX_EXPLICIT" -eq 1 ]; then
+        bounded "$((PROBE_RUN_SECONDS + RUN_SECONDS))" /bin/sh -c "$SUMMARY_PIPE" doctor-summary "$SUMMARY_VALIDATOR" python3 "$DIAGNOSTICS" --doctor-summary --claude-prefix "$PREFIX"
+      else
+        bounded "$((PROBE_RUN_SECONDS + RUN_SECONDS))" /bin/sh -c "$SUMMARY_PIPE" doctor-summary "$SUMMARY_VALIDATOR" python3 "$DIAGNOSTICS" --doctor-summary
+      fi
     fi
     if [ "$PROBE_STATE:$PROBE_RC" = answered:0 ]; then
       printf '%s\n' "$PROBE_OUT"

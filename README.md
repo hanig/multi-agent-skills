@@ -47,6 +47,26 @@ cd multi-agent-skills
 ./bin/doctor --json                # installed skills, provenance, and health
 ```
 
+Doctor keeps the complete agent diagnostics document in a private temporary
+file, bounded to 256 KiB, instead of passing it through the 64 KiB diagnostic
+log tail. The supervisor creates and unlinks the file before launching the
+helper, retains its open handle until exit, and reads the result only after a
+successful bounded child. Oversized results report `state: "unknown"` and
+`truncated: true`; incomplete or invalid JSON reports unknown. For full detail
+beyond that transport bound, run
+`python3 skills/hanig-project/scripts/agent_diagnostics.py --json` directly.
+The legacy helper `--doctor-json` option retains its 48,000-byte cap for older
+callers. Doctor's process deadlines and ordinary log-tail bound are unchanged.
+If the private file cannot be set up (including a Perl installation without
+`JSON::PP`), written, or read, doctor uses a summary capped at 48,000 bytes and validates it through
+Python's stdin inside the same supervised process group. These two stages share
+a nine-second run deadline and the existing two-second cleanup grace; report
+bytes never travel in command-line arguments. `detail: "summary"` identifies this fallback:
+it retains per-agent states, versions, certification, verification, next steps,
+root paths, and payload ownership/state counts; full per-payload and per-skill
+records remain available through the direct `--json` command. An oversized
+summary still returns an explicit truncation record.
+
 Then, on a cluster, in an empty directory or a half-finished repo:
 
 ```
