@@ -574,18 +574,28 @@ class TestRemoteVerification(unittest.TestCase):
 
     def test_declared_python_preserves_final_process_argv0(self):
         expected = 'verifier-process-name'
-        body = ('import os, subprocess, sys\n'
-                'command = subprocess.check_output(["/bin/ps", "-p", str(os.getpid()), "-o", "command="], text=True).strip()\n'
-                'assert command.startswith(%r + " "), command\n'
-                'assert sys.version_info[:2] == %r, sys.version\n'
-                % (expected, sys.version_info[:2]))
+        observe = ('import os, subprocess, sys\n'
+                   'command = subprocess.check_output(["/bin/ps", "-p", str(os.getpid()), "-o", "command="], text=True).strip()\n')
         # Independent real exec control: process argv0 is not Python sys.argv[0].
+        # Framework stubs may re-exec Python.app and replace argv0 themselves.
+        # Compare that native behavior; still demand the requested name wherever
+        # the interpreter preserves it. Both paths execute every harness case.
         control = self.f.directory / 'argv0-control.py'
-        control.write_text(body)
+        control.write_text(observe +
+            'suffix = " -u " + sys.argv[0]\n'
+            'assert command.endswith(suffix), command\n'
+            'print(command[:-len(suffix)])\n')
         result = subprocess.run([sys.executable, '-c',
-            'import os,sys;os.execv(sys.argv[1],[sys.argv[2],sys.argv[3]])',
+            'import os,sys;os.execv(sys.argv[1],[sys.argv[2],"-u",sys.argv[3]])',
             sys.executable, expected, str(control)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+        native_argv0 = result.stdout.rstrip('\n')
+        self.assertTrue(native_argv0, result.stdout)
+        assertion = ('assert command.startswith(%r + " "), command\n' % expected
+                     if native_argv0 == expected else
+                     'assert command == %r + " -u " + sys.argv[0], command\n' % native_argv0)
+        body = observe + assertion + ('assert sys.version_info[:2] == %r, sys.version\n'
+                                      % (sys.version_info[:2],))
         for location in self.locations():
             for option in ('-a ' + expected, '-a' + expected,
                            '--argv0=' + expected, '-a ignored --argv0 ' + expected):
