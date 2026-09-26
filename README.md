@@ -349,7 +349,7 @@ defaults. A declaration can select a remote SSH alias and either `direct` or
 {
   "schema_version": 1,
   "local": {"python": "/absolute/local/python3", "git": "/absolute/local/git"},
-  "remote": {
+  "verification_host": {
     "ssh_alias": "verification-host",
     "executor": "slurm",
     "workdir_root": "/absolute/remote/scratch",
