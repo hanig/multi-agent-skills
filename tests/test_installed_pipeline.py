@@ -155,6 +155,7 @@ class InstalledPipeline(unittest.TestCase):
         scripts = set()
         for trace in traces:
             self.assertTrue(trace["source_guard_exercised"])
+            self.assertTrue(trace["proc_guard_exercised"])
             modules = trace["modules"]
             self.assertTrue(Path(modules["__main__"]).is_relative_to(self.store))
             scripts.add(Path(modules["__main__"]).name)

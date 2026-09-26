@@ -20,6 +20,8 @@ def main():
             raise RuntimeError("network is forbidden in installed-pipeline tests")
         if event == "open" and isinstance(args[0], (str, bytes, os.PathLike)):
             path = Path(os.fsdecode(args[0])).resolve()
+            if path == Path("/proc") or Path("/proc") in path.parents:
+                raise FileNotFoundError("fixture hides process identity")
             if any(path == root or root in path.parents for root in forbidden):
                 raise RuntimeError("source checkout is unavailable: " + str(path))
 
@@ -32,6 +34,16 @@ def main():
             pass
         else:
             raise AssertionError("source read guard did not fire")
+    # /proc on Linux would otherwise identify the live worker even without
+    # ps. Exercise the actual open consumer and require our fixture's error
+    # (a native missing-file error on macOS must not satisfy this assertion).
+    try:
+        open("/proc/uptime", "rb")
+    except FileNotFoundError as exc:
+        if str(exc) != "fixture hides process identity":
+            raise AssertionError("process identity guard did not fire") from exc
+    else:
+        raise AssertionError("process identity guard did not fire")
 
     script = Path(sys.argv[1]).resolve()
     if store not in script.parents:
@@ -51,7 +63,8 @@ def main():
                  and not m.__file__.startswith("<")}
         trace = Path(os.environ["PIPELINE_TRACES"]) / (str(os.getpid()) + ".json")
         trace.write_text(json.dumps({"argv": sys.argv, "modules": paths,
-                                     "source_guard_exercised": True}))
+                                     "source_guard_exercised": True,
+                                     "proc_guard_exercised": True}))
 
 
 if __name__ == "__main__":

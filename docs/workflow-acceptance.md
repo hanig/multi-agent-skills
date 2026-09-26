@@ -9,7 +9,8 @@ from a separate project directory through `HANIG_SWARM_DIR` and
 
 The fixture replaces PATH with a closed shell worker, shell, Python interpreter,
 and sleep for a bounded startup handshake. Isolated Python processes have no
-PYTHONPATH or site configuration; the fixture refuses source-checkout reads and socket operations,
+PYTHONPATH or site configuration; the fixture refuses source-checkout reads and
+socket operations,
 and records actual CLI and imported module `__file__` paths under the store,
 including the coordinator's predicate subprocess and the report's sibling
 imports. This is regression isolation, not an OS security boundary.
@@ -25,6 +26,9 @@ the mutation specifically tests rejection of the false unit DONE.
 Regressions also exercise the mutation after harmless predicate refactoring and
 hold a worker until the first report to ensure transient INCOMPLETE liveness
 observations are not mistaken for a recorded zero exit.
+The fixture hides `/proc` reads as well as omitting `ps`, so unavailable process
+identity is exercised consistently on macOS and Linux. The read guard is
+triggered through `open` on every invocation, including on hosts without `/proc`.
 
 This covers installed skill composition and the local pipeline boundary. It
 does not certify real agents, model quality, scheduler execution, tracker
