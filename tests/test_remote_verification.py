@@ -32,6 +32,16 @@ if "tarfile" in command:
     assert records, 'coordinator launch must be durable before SSH'
     assert any(any(run['stage'] in command for run in json.loads(p.read_text())['runs'])
                for p in records), 'SSH launch must have its exact saved locator'
+    for record in records:
+        ledger = json.loads(record.read_text())
+        for run in ledger['runs']:
+            if run['stage'] in command:
+                marker = record.with_suffix('.launches') / (run['launch_id'] + '.json')
+                witness = json.loads(marker.read_text())
+                assert run['witness_required'] is True
+                assert witness['unit'] == ledger['unit'] and witness['basis'] == ledger['basis']
+                assert all(witness[key] == run[key] for key in
+                           ('launch_id', 'stage', 'verification_host', 'request'))
     mode = pathlib.Path(os.environ['REMOTE_MODE']).read_text()
     if mode == 'ssh-fail': raise SystemExit(255)
     raw = sys.stdin.buffer.read()
@@ -737,6 +747,130 @@ class TestRemoteVerification(unittest.TestCase):
         calls = [json.loads(line) for line in Path(self.f.env['REMOTE_LOG']).read_text().splitlines()]
         self.assertEqual(sum('tarfile' in call[-1] for call in calls), 1)
 
+    def test_missing_ledger_blocks_unresolved_pass_and_restoration_recovers(self):
+        target = self.program()
+        self.mode.write_text('ssh-lost-response')
+        old = "    if mode in ('ssh-lost-response', 'ssh-lost-both', 'ssh-complete-255'): raise SystemExit(255)"
+        new = ("    for marker in list(pathlib.Path(os.environ['REMOTE_ROOT']).glob('verify-*/*')):\n"
+               "        if marker.name in ('worker-complete', 'supervision-finished'):\n"
+               "            marker.rename(marker.with_name(marker.name + '.saved'))\n") + old
+        self.assertIn(old, SSH)
+        (self.f.bin / 'ssh').write_text('#!' + sys.executable + '\n' + SSH.replace(old, new))
+        self.f.env['REMOTE_ROOT'] = str(self.remote_root)
+        self.assertNotEqual(self.verify().returncode, 0)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'pass')
+        self.assertIs(row['execution']['evidence_reconciled'], False)
+        stage = Path(row['execution']['stage'])
+        ledger, = (self.f.state_dir / 'remote-verifications').glob('*.json')
+        saved = ledger.read_bytes()
+        ledger.unlink()
+        for operation in (self.admitted, self.verify):
+            refused = operation()
+            self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+            self.assertIn('unresolved remote evidence at', refused.stderr)
+            self.assertIn(str(stage), refused.stderr)
+        self.policy.pop('verification_host')
+        self.save_policy()
+        refused = self.verify()
+        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+        self.assertIn('unresolved remote evidence at', refused.stderr)
+        generic = subprocess.run([
+            sys.executable, S.__file__, 'verify', '--state-dir', str(self.f.state_dir),
+            '--unit', 'u', '--attempt', str(self.f.attempt), '--claim', V.INTEGRATION_CLAIM,
+            '--target-commit', target, '--verifier', V.MERGE_VERIFIER,
+            '--path', str(self.f.repo / V.MERGE_VERIFIER_PATH)],
+            cwd=self.f.repo, env=self.f.env, capture_output=True, text=True, timeout=60)
+        self.assertNotEqual(generic.returncode, 0, generic.stdout + generic.stderr)
+        self.assertIn('unresolved remote evidence at', generic.stderr)
+        self.assertEqual(self.f.calls(['pr', 'merge']), [])
+        self.assertTrue(stage.exists())
+        ledger.write_bytes(saved)
+        for marker in stage.glob('*.saved'):
+            marker.rename(marker.with_name(marker.name[:-6]))
+        self.mode.write_text('pass')
+        retrieved = self.verify('--retrieve-remote-evidence')
+        self.assertEqual(retrieved.returncode, 0, retrieved.stdout + retrieved.stderr)
+        # The original row is immutable; admission must consult recovered
+        # authority, not permanently reject its now-stale reconciliation flag.
+        self.assertEqual(len(self.rows()), 1)
+        self.assertIs(self.rows()[0]['execution']['evidence_reconciled'], False)
+        self.assertFalse(stage.exists())
+        admitted = self.admitted()
+        self.assertEqual(admitted.returncode, 0, admitted.stdout + admitted.stderr)
+        calls = [json.loads(line) for line in Path(self.f.env['REMOTE_LOG']).read_text().splitlines()]
+        self.assertEqual(sum('tarfile' in call[-1] for call in calls), 1)
+        self.assertEqual(len(self.f.calls(['pr', 'merge'])), 1)
+
+    def test_missing_ledger_cannot_escape_unretrieved_failure(self):
+        self.program('raise SystemExit(125 * int(Path(%r).read_text() != "pass"))\n'
+                     % str(self.mode))
+        self.mode.write_text('ssh-lost-both')
+        self.assertNotEqual(self.verify().returncode, 0)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'incomplete')
+        stage = Path(row['execution']['stage'])
+        ledger, = (self.f.state_dir / 'remote-verifications').glob('*.json')
+        saved = ledger.read_bytes()
+        ledger.unlink()
+        self.mode.write_text('pass')
+        refused = self.verify()
+        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+        self.assertIn('unresolved remote evidence at', refused.stderr)
+        self.assertTrue(stage.exists())
+        ledger.write_bytes(saved)
+        retrieved = self.verify('--retrieve-remote-evidence')
+        self.assertNotEqual(retrieved.returncode, 0)
+        self.assertEqual((self.rows()[-1]['result'], self.rows()[-1]['exit_code']), ('fail', 125))
+        self.f.assert_refused(self.admitted())
+        calls = [json.loads(line) for line in Path(self.f.env['REMOTE_LOG']).read_text().splitlines()]
+        self.assertEqual(sum('tarfile' in call[-1] for call in calls), 1)
+
+    def test_retained_merge_reconciliation_refuses_lost_remote_ledger(self):
+        self.program()
+        result = self.verify()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        ledger, = (self.f.state_dir / 'remote-verifications').glob('*.json')
+        saved = ledger.read_bytes()
+        self.f.forge['fail_view_once'] = True
+        self.f.save()
+        self.assertNotEqual(self.admitted().returncode, 0)
+        self.assertEqual(len(self.f.calls(['pr', 'merge'])), 1)
+        ledger.unlink()
+        refused = self.admitted()
+        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+        self.assertEqual(self.f.intent()['integration_status'], 'integration-unverified')
+        self.assertIn('unresolved remote evidence at', refused.stderr)
+        self.assertEqual(len(self.f.calls(['pr', 'merge'])), 1)
+        ledger.write_bytes(saved)
+        restored = self.admitted()
+        self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+        self.assertEqual(self.f.intent()['integration_status'], 'candidate-verified')
+        self.assertEqual(len(self.f.calls(['pr', 'merge'])), 1)
+
+    def test_lost_launch_ledger_before_receipt_publication_blocks_new_run(self):
+        changed = dict(self.policy, local={})
+        self.program('Path(%r).write_text(%r)\n' % (
+            str(self.f.state_dir / RV.POLICY), json.dumps(changed)))
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('execution policy changed during verification', result.stderr)
+        self.assertEqual(self.rows(), [])
+        self.save_policy()
+        ledger, = (self.f.state_dir / 'remote-verifications').glob('*.json')
+        saved = ledger.read_bytes()
+        ledger.unlink()
+        refused = self.verify()
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn('unresolved remote evidence at', refused.stderr)
+        calls = [json.loads(line) for line in Path(self.f.env['REMOTE_LOG']).read_text().splitlines()]
+        self.assertEqual(sum('tarfile' in call[-1] for call in calls), 1)
+        ledger.write_bytes(saved)
+        self.save_policy()
+        retrieved = self.verify('--retrieve-remote-evidence')
+        self.assertEqual(retrieved.returncode, 0, retrieved.stdout + retrieved.stderr)
+        self.assertEqual(self.rows()[-1]['result'], 'pass')
+
     def test_completed_receipts_survive_missing_aggregate_and_cleanup_disconnect(self):
         self.program('raise SystemExit(125)\n')
         self.mode.write_text('ssh-lost-both')
@@ -748,6 +882,60 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((self.rows()[-1]['result'], self.rows()[-1]['exit_code']), ('fail', 125))
         self.assertFalse(stage.exists())
+
+    def test_older_ledger_and_missing_required_witness_refuse_admission(self):
+        self.program()
+        self.assertEqual(self.verify().returncode, 0)
+        ledger, = (self.f.state_dir / 'remote-verifications').glob('*.json')
+        older = ledger.read_bytes()
+        self.assertEqual(self.verify().returncode, 0)
+        saved = ledger.read_bytes()
+        current = json.loads(saved)
+        empty = dict(current, runs=[])
+        for damaged in (older, json.dumps(empty).encode()):
+            ledger.write_bytes(damaged)
+            refused = self.admitted()
+            self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+            self.assertIn('unresolved remote evidence at', refused.stderr)
+            self.assertEqual(self.f.calls(['pr', 'merge']), [])
+        ledger.write_bytes(saved)
+        witness = ledger.with_suffix('.launches') / (current['runs'][-1]['launch_id'] + '.json')
+        original = witness.read_bytes()
+        witness.unlink()
+        for operation in (self.admitted, self.verify):
+            refused = operation()
+            self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+            self.assertIn('restore the required launch witness', refused.stderr)
+        witness.write_bytes(original)
+        admitted = self.admitted()
+        self.assertEqual(admitted.returncode, 0, admitted.stdout + admitted.stderr)
+        calls = [json.loads(line) for line in Path(self.f.env['REMOTE_LOG']).read_text().splitlines()]
+        self.assertEqual(sum('tarfile' in call[-1] for call in calls), 2)
+
+    def test_legacy_remote_journal_blocks_loss_of_pre_witness_ledger(self):
+        self.program('raise SystemExit(125 * int(Path(%r).read_text() != "pass"))\n'
+                     % str(self.mode))
+        self.mode.write_text('ssh-lost-both')
+        self.assertNotEqual(self.verify().returncode, 0)
+        ledger, = (self.f.state_dir / 'remote-verifications').glob('*.json')
+        legacy = json.loads(ledger.read_text())
+        for run in legacy['runs']:
+            run.pop('witness_required')
+        shutil.rmtree(ledger.with_suffix('.launches'))
+        # Simulate the persisted pre-witness layout, retaining its real row.
+        ledger.write_text(json.dumps(legacy))
+        self.assertNotEqual(self.verify().returncode, 0)
+        ledger.unlink()
+        self.mode.write_text('pass')
+        refused = self.verify()
+        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+        self.assertIn('restore the matching coordinator ledger', refused.stderr)
+        ledger.write_text(json.dumps(legacy))
+        self.assertNotEqual(self.verify('--retrieve-remote-evidence').returncode, 0)
+        self.assertEqual((self.rows()[-1]['result'], self.rows()[-1]['exit_code']), ('fail', 125))
+        self.f.assert_refused(self.admitted())
+        calls = [json.loads(line) for line in Path(self.f.env['REMOTE_LOG']).read_text().splitlines()]
+        self.assertEqual(sum('tarfile' in call[-1] for call in calls), 1)
 
     def test_cleanup_disconnect_does_not_downgrade_completed_pass(self):
         self.program()

@@ -334,6 +334,10 @@ def retained_integration_problem(preconditions, evidence, binding, repo, target,
         receipts, _ = S.load_verifications(state_dir)
     except S.OutboxError as exc:
         return "retained integration journal is unreadable: " + str(exc)
+    problem = RV.pending_problem(state_dir, binding["unit"],
+                                 {k: evidence.get(k) for k in V.MERGE_BASIS_FIELDS}, receipts)
+    if problem:
+        return problem
     for claim in required:
         retained = evidence if claim == V.INTEGRATION_CLAIM else evidence[claim]
         problem = RV.execution_problem(retained)
@@ -701,7 +705,8 @@ def verify_integration(args, repo, snapshot):
         S.U.run, repo, binding["head"], target,
         timeout=args.verification_timeout, execution_policy=snapshot["execution_policy"],
         state_dir=args.state_dir, unit=binding["unit"],
-        retrieve_remote=getattr(args, "retrieve_remote_evidence", False))
+        retrieve_remote=getattr(args, "retrieve_remote_evidence", False),
+        journal_entries=S.load_verifications(args.state_dir)[0])
     if error and not evidences:
         raise Refusal(error + ". " + verification_hint(args))
 
