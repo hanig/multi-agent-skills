@@ -8,7 +8,6 @@ an OS isolation boundary. No forge writes or credential provisioning occur.
 import argparse
 import base64
 import hashlib
-import io
 import json
 import os
 from pathlib import Path
@@ -16,7 +15,6 @@ import platform
 import re
 import shlex
 import shutil
-import signal
 import subprocess
 import sys
 import tarfile
@@ -119,15 +117,17 @@ def execution_problem(receipt):
     """Legacy local records remain admissible; declared remote passes need proof."""
     execution = receipt.get("execution")
     if execution is None:
-        return None
+        return "missing execution evidence" if receipt.get("schema_version") == 2 else None
     if not isinstance(execution, dict):
         return "invalid execution evidence"
     if execution.get("location") not in ("local", "remote"):
         return "invalid execution location"
     if receipt.get("result") != "pass":
         return None
+    if not isinstance(execution.get("executables"), dict):
+        return "missing declared executable evidence"
     for name in ("python", "git"):
-        item = execution.get("executables", {}).get(name, {})
+        item = execution["executables"].get(name, {})
         if (not isinstance(item, dict) or not isinstance(item.get("path"), str)
                 or not item["path"].startswith("/") or not item.get("version")):
             return "missing declared executable evidence"
@@ -228,8 +228,11 @@ def worker(stage):
 
 
 def scheduler_state(job):
-    rc, out, err = _command(["sacct", "-n", "-P", "-j", job,
-                              "--format=JobIDRaw,State,ExitCode"])
+    try:
+        rc, out, err = _command(["sacct", "-n", "-P", "-j", job,
+                                  "--format=JobIDRaw,State,ExitCode"])
+    except (OSError, subprocess.SubprocessError):
+        return None
     if rc:
         return None
     matches = [line.split("|") for line in out.splitlines()
@@ -245,7 +248,7 @@ def scheduler_state(job):
 def supervise(stage):
     request = json.loads((stage / "request.json").read_text())
     remote = request["remote"]
-    deadline = time.monotonic() + request["timeout"] * len(request["checks"]) + 60
+    deadline = time.monotonic() + request["timeout"] * len(request["checks"])
     job = None
     state = None
     try:
@@ -266,9 +269,9 @@ def supervise(stage):
                 raise ValueError("Slurm submission unavailable: " + err[-1000:])
             job = out.strip().split(";")[0]
             (stage / "job-id").write_text(job)
-            while time.monotonic() < deadline:
+            while True:
                 state = scheduler_state(job)
-                if state:
+                if state or time.monotonic() >= deadline:
                     break
                 time.sleep(0.2)
         try:
@@ -289,7 +292,10 @@ def supervise(stage):
         return result
     finally:
         if job and state is None:
-            _command(["scancel", job], timeout=30)
+            try:
+                _command(["scancel", job], timeout=30)
+            except (OSError, subprocess.SubprocessError):
+                pass  # cleanup retries cancellation and reports any failure
 
 
 # The fixed bootstrap reads only this allowlist, never tar-supplied paths/modes.
@@ -358,7 +364,14 @@ def run_remote(runner, tree, basis, checks, remote, timeout):
                 result = json.loads(proc.stdout)
                 if not isinstance(result, dict) or result.get("basis") != basis:
                     raise ValueError("remote response binding mismatch")
-                execution = result.get("execution", execution)
+                observed = result.get("execution")
+                if observed is not None:
+                    if (not isinstance(observed, dict)
+                            or observed.get("location") != "remote"
+                            or observed.get("executor") != remote["executor"]
+                            or observed.get("ssh_alias") != remote["ssh_alias"]):
+                        raise ValueError("remote execution identity mismatch")
+                    execution = observed
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 error = "remote transport incomplete: " + str(exc)
             finally:
@@ -387,8 +400,13 @@ def run_remote(runner, tree, basis, checks, remote, timeout):
     while len(outcomes) < len(checks):
         outcomes.append(incomplete(error or result.get("error") or "missing remote completion"))
     for index, outcome in enumerate(outcomes):
-        if (not isinstance(outcome, dict) or type(outcome.get("exit_code")) is not int
-                and not outcome.get("incomplete_reason")):
+        if (not isinstance(outcome, dict)
+                or not isinstance(outcome.get("stdout"), str)
+                or not isinstance(outcome.get("stderr"), str)
+                or len(outcome["stdout"]) > 4000 or len(outcome["stderr"]) > 2000
+                or (type(outcome.get("exit_code")) is not int
+                    and not (isinstance(outcome.get("incomplete_reason"), str)
+                             and outcome["incomplete_reason"]))):
             outcomes[index] = incomplete("invalid remote completion")
             continue
         problem = execution_problem(dict(candidate_tree=basis["candidate_tree"],
@@ -413,7 +431,10 @@ def main():
         request = json.loads((stage / "request.json").read_text())
         result = {"basis": request["basis"], "outcomes": [], "error": str(exc)}
     finally:
-        cleanup(stage)
+        try:
+            cleanup(stage)
+        except (OSError, subprocess.SubprocessError) as exc:
+            result.setdefault("execution", {})["cleanup"] = str(exc)
     print(json.dumps(result))
     return 0
 
