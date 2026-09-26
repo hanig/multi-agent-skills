@@ -380,7 +380,11 @@ class TestRemoteVerification(unittest.TestCase):
         helper = self.f.bin / 'fixture-host-helper'
         helper.write_text('#!' + sys.executable + '\nprint("HOST_HELPER_RAN")\n')
         helper.chmod(0o755)
-        self.program('import subprocess\nsubprocess.run(["fixture-host-helper"], check=True)\n')
+        self.f.env.update(OPENAI_API_KEY='fixture-secret', SSH_AUTH_SOCK='fixture-agent')
+        self.program('import os, subprocess\n'
+                     'assert "OPENAI_API_KEY" not in os.environ\n'
+                     'assert "SSH_AUTH_SOCK" not in os.environ\n'
+                     'subprocess.run(["fixture-host-helper"], check=True)\n')
         result = self.verify()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('HOST_HELPER_RAN', self.rows()[-1]['stdout_tail'])

@@ -893,7 +893,7 @@ def outcome_result(outcome):
     return {"result": "pass" if outcome["exit_code"] == 0 else "fail"}
 
 
-def _observe_execution(argv, timeout, cwd, env=None):
+def _observe_execution(argv, timeout, cwd):
     """Observe merge-verifier completion without unit.run's overloaded exit 127.
 
     Only our timeout or a launch/transport exception is incomplete. Every
@@ -907,7 +907,7 @@ def _observe_execution(argv, timeout, cwd, env=None):
     out, err, reason = "", "", None
     try:
         child = subprocess.Popen(
-            argv, cwd=cwd, env=env if env is not None else CE.child_env(), stdin=subprocess.DEVNULL,
+            argv, cwd=cwd, env=CE.child_env(), stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True,
             encoding="utf-8", errors="replace", start_new_session=True)
         out, err = child.communicate(timeout=timeout)
@@ -977,7 +977,6 @@ def run_pinned(runner, path, expect_digest, args=None, timeout=900,
         os.chmod(copy, 0o500)
         if observe_completion:
             argv = [copy] + list(args or [])
-            env = None
             if executables is not None:
                 # The pinned programs and their subprocesses share declared
                 # executables. A candidate's cwd/PATH never supplies either.
@@ -988,11 +987,19 @@ def run_pinned(runner, path, expect_digest, args=None, timeout=900,
                 bindir.mkdir()
                 for name, key in (("python3", "python"), ("python", "python"), ("git", "git")):
                     (bindir / name).symlink_to(executables[key]["path"])
-                env = CE.child_env()
-                env["PATH"] = str(bindir) + os.pathsep + env.get("PATH", os.defpath)
-                env["HANIG_VERIFICATION_GIT"] = executables["git"]["path"]
-                env["HANIG_VERIFICATION_PYTHON"] = executables["python"]["path"]
-            return _observe_execution(argv, timeout, cwd, env=env), None
+                # The coordinator spawn receives child_env() unchanged. This
+                # fixed child launcher adds only executable configuration,
+                # after credential containment, without widening that API.
+                launcher = (
+                    "import os, sys; "
+                    "os.environ['PATH'] = sys.argv[1] + os.pathsep + os.environ.get('PATH', os.defpath); "
+                    "os.environ['HANIG_VERIFICATION_GIT'] = sys.argv[2]; "
+                    "os.environ['HANIG_VERIFICATION_PYTHON'] = sys.argv[3]; "
+                    "os.execv(sys.argv[4], sys.argv[4:])")
+                argv = [executables["python"]["path"], "-c", launcher,
+                        str(bindir), executables["git"]["path"],
+                        executables["python"]["path"]] + argv
+            return _observe_execution(argv, timeout, cwd), None
         # No before/after dance here any more. `run_in_checkout` gives this a
         # worktree the agent is not working in, so there is nothing to drift.
         rc, out, errout = runner([copy] + list(args or []), timeout=timeout,
