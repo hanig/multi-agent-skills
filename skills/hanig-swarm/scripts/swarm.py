@@ -6085,8 +6085,12 @@ def _verify_shape_problem(rec):
     for f in _VERIFY_REQUIRED:
         if not str(rec.get(f) or "").strip():
             return f"no {f}"
-    if rec.get("result") not in ("pass", "fail"):
-        return f"result {rec.get('result')!r} is not 'pass' or 'fail'"
+    if rec.get("result") not in ("pass", "fail", "incomplete"):
+        return f"result {rec.get('result')!r} is not 'pass', 'fail' or 'incomplete'"
+    if rec.get("result") == "incomplete" and (
+            not isinstance(rec.get("incomplete_reason"), str)
+            or not rec["incomplete_reason"].strip()):
+        return "incomplete receipt has no coordinator reason"
     if rec.get("claim") == V.INTEGRATION_CLAIM:
         for field in ("produced_head", "target_commit", "merge_base",
                       "candidate_tree"):
@@ -6185,6 +6189,7 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
                       f"--verifier NAME --path PATH")
     stale, moved_target, wrong_policy, failed, unauthorized = [], [], [], [], []
     corpus_refusals = []
+    incomplete = []
     for r in mine:
         if str(r.get("subject_head")) != str(produced):
             stale.append(str(r.get("subject_head"))[:12])
@@ -6199,6 +6204,9 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
                 continue
         if policy_digest and r.get("policy_sha256") != policy_digest:
             wrong_policy.append(str(r.get("policy_sha256"))[:12])
+            continue
+        if r.get("result") == "incomplete":
+            incomplete.append(r)
             continue
         if r.get("result") != "pass":
             failed.append(r)
@@ -6228,6 +6236,10 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
                 f"receipt corpus evidence does not match the anchored base "
                 f"and produced commit for claim {claim!r}")
             continue
+        if claim == V.INTEGRATION_CLAIM:
+            problem = V.merge_failure_problem(recs, r)
+            if problem:
+                return None, problem
         return r, None
     if failed:
         subject = ("the candidate merge" if claim == V.INTEGRATION_CLAIM
@@ -6254,6 +6266,8 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
                       f"{', '.join(sorted(set(wrong_policy)))}, but this "
                       f"attempt was anchored to {str(policy_digest)[:12]}. "
                       f"The rules changed after the check.")
+    if incomplete:
+        return None, f"verification for {unit!r} is incomplete; no passing receipt for {claim!r}"
     return None, (f"verification for {unit!r} names head(s) "
                   f"{', '.join(sorted(set(stale)))}, but this attempt "
                   f"produced {produced[:12]}. A pass for another commit is "
@@ -9616,6 +9630,36 @@ def cmd_scope_check(args):
     return code
 
 
+def _integration_verification_fence(state_dir, unit, receipt=None):
+    """Check coordinator merge intents under the lease, optionally publishing.
+
+    The generic verifier does not interpret resolution chains. Once this unit
+    has a merge intent, use the connected operator to resolve it and verify.
+    Check both before execution and at publication, never holding the lease
+    across the verifier. No connected/network module enters the coordinator.
+    """
+    ok, holder = acquire_lease(state_dir)
+    if not ok:
+        return "integration verification cannot acquire coordinator lock: " + str(holder)
+    try:
+        for path in sorted(Path(state_dir).glob("merge-unit-*.json")):
+            intent, error = U.read_json(path)
+            if (error or not isinstance(intent, dict)
+                    or not isinstance(intent.get("binding"), dict)
+                    or not isinstance(intent["binding"].get("unit"), str)):
+                return "integration verification cannot read merge intent: " + str(path)
+            if intent["binding"]["unit"] == unit:
+                return "integration verification refused: merge intent exists for unit " + unit
+        if receipt is not None:
+            load_verifications(state_dir)
+            _fsync_append(Path(state_dir) / VERIFY_RECEIPTS, receipt)
+    except (OSError, OutboxError) as exc:
+        return "integration verification publication refused: " + str(exc)
+    finally:
+        release_lease(state_dir)
+    return None
+
+
 def cmd_verify(args):
     """Run an authorized, content-pinned verifier and record what it said.
 
@@ -9625,6 +9669,11 @@ def cmd_verify(args):
     bytes ran, and the head it ran against is the one this attempt produced.
     """
     _prepare_command_paths(args)
+    if args.claim == V.INTEGRATION_CLAIM:
+        problem = _integration_verification_fence(args.state_dir, args.unit)
+        if problem:
+            sys.stderr.write(f"error: {problem}\n")
+            return EXIT_CONFLICT
     state = load_state(args.state_dir) or {}
     launch_facts = trusted_launch_facts(
         state, args.unit, args.attempt)
@@ -9719,7 +9768,7 @@ def cmd_verify(args):
     rec = {"unit": args.unit, "claim": args.claim, "verifier": args.verifier,
            "verifier_sha256": digest, "policy_sha256": policy_digest,
            "subject_head": produced,
-           "result": "pass" if outcome["exit_code"] == 0 else "fail",
+           **V.outcome_result(outcome),
            "exit_code": outcome["exit_code"],
            "stdout_tail": outcome["stdout"], "stderr_tail": outcome["stderr"],
            "by": os.environ.get("USER") or "?",
@@ -9730,7 +9779,13 @@ def cmd_verify(args):
     if bad:
         sys.stderr.write(f"error: this would not be admissible: {bad}\n")
         return EXIT_USAGE
-    _fsync_append(Path(args.state_dir) / VERIFY_RECEIPTS, rec)
+    if args.claim == V.INTEGRATION_CLAIM:
+        problem = _integration_verification_fence(args.state_dir, args.unit, rec)
+        if problem:
+            sys.stderr.write(f"error: {problem}\n")
+            return EXIT_CONFLICT
+    else:
+        _fsync_append(Path(args.state_dir) / VERIFY_RECEIPTS, rec)
     print(f"  {args.claim}: {rec['result'].upper()} (exit "
           f"{outcome['exit_code']}) for {produced[:12]}")
     print(f"  verifier {args.verifier} {digest[:12]}, policy "
