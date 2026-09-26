@@ -372,11 +372,13 @@ class TestRemoteVerification(unittest.TestCase):
         execution = row['execution']
         self.assertEqual(execution['cancellation'], 'requested')
         self.assertIsNone(execution['sacct_state'])
-        self.assertEqual(execution['cleanup'], 'removed')
+        self.assertEqual(execution['cleanup'], 'unconfirmed')
         self.assertEqual(execution['cleanup_sacct_state'], 'CANCELLED')
         self.assertEqual([a['exit_code'] for a in execution['cancellation_attempts']], [1, 0])
-        self.assertNotIn('WARNING:', result.stderr)
-        self.assert_clean()
+        self.assertIn('unresolved remote evidence at', result.stderr)
+        self.assertTrue(Path(execution['stage'], 'job-id').exists())
+        self.assertFalse(Path(execution['stage'], 'worker-complete').exists())
+        self.assertEqual(self.f.calls(['pr', 'merge']), [])
 
     def test_accepted_cancellation_without_terminal_job_retains_stage(self):
         self.cancellation_fixture(retry_succeeds=True, terminal_on_success=False)
@@ -703,17 +705,35 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertIn('FAIL', result.stderr)
         self.assert_clean()
 
-    def test_slurm_without_completed_worker_is_incomplete_and_retryable(self):
-        self.policy['verification_host'].update(executor='slurm', slurm={
-            'partition': 'fixture-cpu', 'mem': '2G', 'time': '00:05:00'})
-        self.save_policy()
-        self.assert_retry_admits('slurm-missing')
+    def assert_disabled_slurm_unresolved(self, mode):
+        self.program()
+        self.mode.write_text(mode)
+        result = self.verify('--verification-timeout', '1')
+        self.assertNotEqual(result.returncode, 0)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'incomplete')
+        stage = Path(row['execution']['stage'])
+        self.assertTrue(stage.exists())
+        self.mode.write_text('pass')
+        retry = self.verify('--verification-timeout', '1')
+        self.assertNotEqual(retry.returncode, 0)
+        self.assertIn('unresolved remote evidence at', retry.stderr)
+        self.assertEqual(self.rows(), [row])
+        self.assertTrue(stage.exists())
+        calls = [json.loads(line) for line in Path(self.f.env['SCHED_LOG']).read_text().splitlines()]
+        self.assertEqual(sum(call[0] == 'sbatch' for call in calls), 1)
 
-    def test_slurm_without_terminal_state_is_incomplete_and_retryable(self):
+    def test_disabled_slurm_without_completed_worker_retains_evidence_and_blocks_retry(self):
         self.policy['verification_host'].update(executor='slurm', slurm={
             'partition': 'fixture-cpu', 'mem': '2G', 'time': '00:05:00'})
         self.save_policy()
-        self.assert_retry_admits('slurm-pending')
+        self.assert_disabled_slurm_unresolved('slurm-missing')
+
+    def test_disabled_slurm_without_terminal_state_retains_evidence_and_blocks_retry(self):
+        self.policy['verification_host'].update(executor='slurm', slurm={
+            'partition': 'fixture-cpu', 'mem': '2G', 'time': '00:05:00'})
+        self.save_policy()
+        self.assert_disabled_slurm_unresolved('slurm-pending')
 
     def test_candidate_policy_cannot_choose_host_or_interpreter(self):
         self.shared.candidate({RV.POLICY: json.dumps({
