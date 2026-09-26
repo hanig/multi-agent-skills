@@ -380,7 +380,10 @@ defaults. A declaration can select a remote SSH alias and either `direct` or
 }
 ```
 
-The remote root must already exist. Paths are absolute host paths supplied by
+The remote root must already exist and, for Slurm, be visible at the same path
+on the login host and allocated compute node (normally shared storage).
+Node-local temporary storage on the login host cannot carry the transferred
+bundle into another node. Paths are absolute host paths supplied by
 the operator; no username, home path or host is inferred. Use Slurm on a login
 host. For a dedicated execution host, `executor: "direct"` omits `slurm`.
 Python and Git paths and versions appear in each new merge-verifier receipt;
