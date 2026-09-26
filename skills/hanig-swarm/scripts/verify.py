@@ -659,7 +659,8 @@ def candidate_merge_basis(runner, repo, produced_head, target_commit):
 
 
 def run_in_candidate_merge(runner, repo, produced_head, target_commit, path,
-                           expect_digest, args=None, timeout=900, executables=None):
+                           expect_digest, args=None, timeout=900, executables=None,
+                           state_dir=None, unit=None):
     """Run pinned verifier bytes in a disposable candidate-merge checkout.
 
     The checkout starts at the exact target commit and receives the produced
@@ -674,6 +675,9 @@ def run_in_candidate_merge(runner, repo, produced_head, target_commit, path,
     if error:
         return None, basis, error
     try:
+        pending = RV.pending_problem(state_dir, unit, basis)
+        if pending:
+            return None, basis, pending
         outcome, run_error = run_pinned(
             runner, path, expect_digest, args=args, timeout=timeout, cwd=tree,
             observe_completion=True, executables=executables)
@@ -746,7 +750,7 @@ def run_merge_precondition(runner, repo, produced_head, target_commit,
 
 def run_merge_preconditions(runner, repo, produced_head, target_commit,
                             timeout=900, claims=(INTEGRATION_CLAIM, STABILITY_CLAIM),
-                            execution_policy=None):
+                            execution_policy=None, state_dir=None, unit=None):
     """Run target-pinned claims in one disposable candidate merge.
 
     Return receipts plus any execution error. A completed FAIL remains evidence
@@ -794,12 +798,15 @@ def run_merge_preconditions(runner, repo, produced_head, target_commit,
                         "--repetitions", str(extra["repetitions"])]
             programs.append({"path": os.path.join(policy_tree, path), "digest": digest,
                              "args": args, "program": base64.b64encode(
-                                 Path(policy_tree, path).read_bytes()).decode("ascii")})
+                                 Path(policy_tree, path).read_bytes()).decode("ascii"),
+                             "binding": dict(corpus, **extra, claim=claim,
+                                 verifier=entry["name"], verifier_sha256=digest,
+                                 policy_sha256=policy_digest, authorization_commit=target_commit)})
             extras.append(extra)
         remote = execution_policy.get("verification_host")
-        if remote:
+        if remote or RV.pending_problem(state_dir, unit, basis):
             outcomes, execution = RV.run_remote(
-                runner, tree, basis, programs, remote, timeout, repo)
+                runner, tree, basis, programs, remote, timeout, repo, state_dir, unit)
             execution["coordinator_executables"] = executables
         else:
             outcomes = []

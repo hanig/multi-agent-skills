@@ -6187,6 +6187,9 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
             runner, repo, produced, target_commit)
         if basis_error:
             return None, basis_error
+        pending = V.RV.pending_problem(state_dir, unit, integration_basis)
+        if pending:
+            return None, pending
     recs, _p = load_verifications(state_dir)
     mine = [r for r in recs if r.get("unit") == unit
             and r.get("claim") == claim]
@@ -9779,7 +9782,8 @@ def cmd_verify(args):
             return EXIT_USAGE
         outcome, merge_evidence, rerr = V.run_in_candidate_merge(
             runner, repo, produced, target_commit, args.path, digest,
-            args=args.arg, timeout=args.timeout, executables=executables)
+            args=args.arg, timeout=args.timeout, executables=executables,
+            state_dir=args.state_dir, unit=args.unit)
         if V.RV.read_policy(args.state_dir)[1] != execution_digest:
             sys.stderr.write("error: execution policy changed during verification\n")
             return EXIT_CONFLICT

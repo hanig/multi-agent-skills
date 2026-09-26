@@ -699,7 +699,8 @@ def verify_integration(args, repo, snapshot):
     binding, target = snapshot["binding"], snapshot["target"]
     evidences, error = V.run_merge_preconditions(
         S.U.run, repo, binding["head"], target,
-        timeout=args.verification_timeout, execution_policy=snapshot["execution_policy"])
+        timeout=args.verification_timeout, execution_policy=snapshot["execution_policy"],
+        state_dir=args.state_dir, unit=binding["unit"])
     if error and not evidences:
         raise Refusal(error + ". " + verification_hint(args))
 
@@ -757,8 +758,22 @@ def verify_integration(args, repo, snapshot):
             problem = S._verify_shape_problem(evidence)
             if problem:
                 raise Refusal(problem)
+        previous, _ = S.load_verifications(state_dir)
         for evidence in evidences:
-            S._fsync_append(state_dir / S.VERIFY_RECEIPTS, evidence)
+            # Retrieval is idempotent. Incomplete -> complete appends evidence;
+            # repeated retrieval of the same completed claim does not append.
+            identity = evidence.get("execution", {}).get("launch_id")
+            repeated = identity and any(
+                r.get("execution", {}).get("launch_id") == identity
+                and r.get("claim") == evidence["claim"]
+                and r.get("result") == evidence["result"]
+                and r.get("exit_code") == evidence["exit_code"] for r in previous)
+            if not repeated:
+                S._fsync_append(state_dir / S.VERIFY_RECEIPTS, evidence)
+        if evidences and evidences[0].get("execution", {}).get("launch_id"):
+            RV.acknowledge(state_dir, binding["unit"],
+                           {k: evidences[0][k] for k in V.MERGE_BASIS_FIELDS},
+                           evidences[0]["execution"]["launch_id"])
     finally:
         S.release_lease(args.state_dir)
     for evidence in evidences:
@@ -767,6 +782,10 @@ def verify_integration(args, repo, snapshot):
             evidence["subject_head"], evidence["target_commit"]))
     if error:
         raise Refusal(error + ". " + verification_hint(args))
+    if any(e.get("execution", {}).get("evidence_reconciled") is False for e in evidences):
+        execution = evidences[0]["execution"]
+        raise Refusal("unresolved remote evidence at {}:{}; retrieve or resolve it first".format(
+            execution["ssh_alias"], execution["stage"]))
     if any(evidence["result"] != "pass" for evidence in evidences):
         if any(evidence["result"] == "fail" for evidence in evidences):
             raise Refusal("candidate merge verifier failed; repair the candidate")
