@@ -9750,9 +9750,21 @@ def cmd_verify(args):
                 "that commit's Git object locally; this command never "
                 "contacts a forge.\n")
             return EXIT_USAGE
+        execution_policy, execution_digest = V.RV.read_policy(args.state_dir)
+        if execution_policy.get("remote"):
+            sys.stderr.write("error: remote merge verification requires merge_unit.py --verify-integration\n")
+            return EXIT_USAGE
+        for executable in execution_policy.get("local", {}).values():
+            if CP._inside(executable, repo):
+                sys.stderr.write("error: verification executable is inside the operated repository\n")
+                return EXIT_USAGE
+        executables = V.RV.resolve_executables(execution_policy.get("local"))
         outcome, merge_evidence, rerr = V.run_in_candidate_merge(
             U.run, repo, produced, target_commit, args.path, digest,
-            args=args.arg, timeout=args.timeout)
+            args=args.arg, timeout=args.timeout, executables=executables)
+        if V.RV.read_policy(args.state_dir)[1] != execution_digest:
+            sys.stderr.write("error: execution policy changed during verification\n")
+            return EXIT_CONFLICT
     else:
         if getattr(args, "target_commit", None):
             sys.stderr.write(
@@ -9777,6 +9789,8 @@ def cmd_verify(args):
            "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "schema_version": 1}
     rec.update(corpus_evidence)
     rec.update(merge_evidence)
+    if outcome.get("execution") is not None:
+        rec.update(execution=outcome["execution"], schema_version=2)
     bad = _verify_shape_problem(rec)
     if bad:
         sys.stderr.write(f"error: this would not be admissible: {bad}\n")
