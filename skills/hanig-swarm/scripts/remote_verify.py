@@ -242,7 +242,7 @@ def unresolved(run):
 
 def unresolved_message(run):
     return "unresolved remote evidence at {}:{}; retrieve or resolve it first".format(
-        run["remote"]["ssh_alias"], run["stage"])
+        run["verification_host"]["ssh_alias"], run["stage"])
 
 
 def pending_problem(state_dir, unit, basis):
@@ -268,12 +268,18 @@ def binding_lock(state_dir, unit, basis):
         yield path
 
 
-def acknowledge(state_dir, unit, basis, launch_id):
+def publication_digest(run):
+    return record_digest({"receipts": run["receipts"], "final": run.get("final")})
+
+
+def acknowledge(state_dir, unit, basis, launch_id, digest):
     """Called only after the operator's observation fence and receipt fsync."""
     with binding_lock(state_dir, unit, basis) as path:
         ledger = load_ledger(path, unit, basis)
         for run in ledger["runs"]:
             if run["launch_id"] == launch_id:
+                if publication_digest(run) != digest:
+                    raise ValueError("remote evidence changed before publication acknowledgment; retrieve it again")
                 run["published"] = True
                 publish(path, ledger)
                 return
@@ -300,7 +306,16 @@ def collect(stage):
             pass
         except (OSError, ValueError) as exc:
             result.setdefault("errors", []).append(str(exc))
+    try:
+        result["lifecycle"] = json.loads((stage / "cleanup.json").read_text())
+    except (OSError, ValueError):
+        pass
     return result
+
+
+def evidence_digest(response):
+    # Cleanup diagnostics can evolve without changing the immutable evidence.
+    return record_digest({k: v for k, v in response.items() if k != "lifecycle"})
 
 
 def completion_receipt(request, check, outcome, execution):
@@ -503,7 +518,7 @@ def cleanup(stage, reconciled=None):
     lock = None
     try:
         if not stage.exists():
-            return dict(evidence, cleanup="removed")
+            return dict(evidence, cleanup="removed" if reconciled else "unconfirmed")
         try:
             job = (stage / "job-id").read_text()
         except FileNotFoundError:
@@ -575,7 +590,10 @@ def cleanup(stage, reconciled=None):
                 evidence["cancellation"] = "not-required"
             evidence["cleanup_sacct_state"] = state[0]
         collected = collect(stage)
-        if (not reconciled or reconciled != record_digest(collected)
+        request = json.loads((stage / "request.json").read_text())
+        if request["verification_host"]["executor"] == "slurm" and not job:
+            raise ValueError("Slurm job identity unresolved; stage retained")
+        if (not reconciled or reconciled != evidence_digest(collected)
                 or not collected.get("final") or not collected.get("supervision")):
             raise ValueError("remote evidence is not quiescent and reconciled; stage retained")
         shutil.rmtree(stage, ignore_errors=False)
@@ -665,8 +683,15 @@ def ingest(run, response):
     if request["verification_host"]["executor"] == "slurm":
         run["reconciled"] = bool(run["reconciled"] and supervision.get("job_id")
                                  and supervision.get("sacct_state") in TERMINAL)
+    if isinstance(supervision, dict):
+        for key in ("job_id", "sacct_state", "sacct_exit_code"):
+            if key in supervision:
+                run["execution"][key] = supervision[key]
+    lifecycle = response.get("lifecycle")
+    if isinstance(lifecycle, dict) and lifecycle.get("stage") == run["stage"]:
+        run["execution"].update(lifecycle)
     if run["reconciled"]:
-        run["ack"] = record_digest(response)
+        run["ack"] = evidence_digest(response)
     if problems:
         run["error"] = "; ".join(problems)
     return run["reconciled"]
@@ -678,7 +703,8 @@ def remote_call(prefix, remote, code, timeout=45):
                           env=CE.child_env(), timeout=timeout)
 
 
-def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, unit):
+def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, unit,
+               retrieve_only=False):
     """Persist intent before launch and ingest completed receipts monotonically.
 
     A pending invocation only retrieves its original stage, even if the caller
@@ -690,10 +716,14 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
     with binding_lock(state_dir, unit, basis) as path:
         ledger = load_ledger(path, unit, basis)
         pending = [run for run in ledger["runs"] if unresolved(run)]
+        if retrieve_only and not pending:
+            if not ledger["runs"]:
+                raise ValueError("no remote launch exists for this binding to retrieve")
+            pending = ledger["runs"][-1:]
         retry = bool(pending)
         if pending:
             run = pending[0]
-            remote = run["remote"]
+            remote = run["verification_host"]
             if run["request"]["checks"] != checks:
                 # Paths are temporary; compare the content-bound declarations.
                 old = [{k: v for k, v in c.items() if k != "path"}
@@ -708,7 +738,7 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
             stage = remote["workdir_root"].rstrip("/") + "/verify-" + launch_id
             request = {"basis": basis, "checks": checks, "verification_host": remote,
                        "timeout": timeout, "launch_id": launch_id}
-            run = {"launch_id": launch_id, "stage": stage, "remote": remote,
+            run = {"launch_id": launch_id, "stage": stage, "verification_host": remote,
                    "request": request, "receipts": {}, "reconciled": False, "published": False}
             ledger["runs"].append(run)
         stage = run["stage"]
@@ -772,12 +802,18 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
         # Raw evidence is durable before authorizing remote removal. This is
         # reconciliation, not publication under the operator observation fence.
         publish(path, ledger)
-        if run["reconciled"] and execution.get("cleanup") != "removed" and prefix:
+        if execution.get("cleanup") != "removed" and prefix:
             code = ("import json, pathlib, sys; p=pathlib.Path(%r); "
                     "sys.path.insert(0, str(p)); from remote_verify import cleanup; "
-                    "print(json.dumps(cleanup(p, %r)))") % (stage, run["ack"])
+                    "print(json.dumps(cleanup(p, %r)))") % (stage, run.get("ack") if run["reconciled"] else None)
+            if run["reconciled"]:
+                code = ("import json, pathlib; p=pathlib.Path(%r)\n"
+                        "if not p.exists(): print(json.dumps({'stage': str(p), 'cleanup': 'removed'}))\n"
+                        "else:\n    exec(%r)\n") % (stage, code)
             try:
                 proc = remote_call(prefix, remote, code)
+                if proc.returncode:
+                    raise ValueError("cleanup transport exited {}: {}".format(proc.returncode, proc.stderr[-2000:]))
                 cleaned = json.loads(proc.stdout)
                 if (not isinstance(cleaned, dict) or cleaned.get("stage") != stage
                         or cleaned.get("cleanup") not in ("removed", "unconfirmed")):
@@ -799,6 +835,7 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
             # Failure before any claim still has truthful tree/probe diagnostics.
             execution.update(final.get("execution", {}))
         execution["evidence_reconciled"] = run["reconciled"]
+        execution["publication_digest"] = publication_digest(run)
         if not run["reconciled"]:
             print("WARNING: " + unresolved_message(run), file=sys.stderr)
         if execution.get("cleanup") != "removed":
@@ -828,7 +865,11 @@ def main():
     publish(stage / "supervision-finished", dict(
         {key: execution.get(key) for key in ("job_id", "sacct_state", "sacct_exit_code")},
         launch_id=request["launch_id"]), once=True)
-    # No cleanup here: the coordinator has not durably ingested anything yet.
+    if request["verification_host"]["executor"] == "slurm":
+        # Disabled executor retains cancellation support. No acknowledgment is
+        # available yet, so cleanup may cancel but cannot remove the evidence.
+        cleanup(stage)
+    # Direct stages await durable coordinator reconciliation before cleanup.
     print(json.dumps(collect(stage)))
     return 0
 

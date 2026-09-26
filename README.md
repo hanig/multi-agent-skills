@@ -362,8 +362,9 @@ The optional `verification-execution.json` belongs directly in the external
 coordinator state directory. It is never read from the plan, PR or candidate
 checkout; a symlink policy is refused. Without it verification stays local. Local defaults select the
 operator's Python and Git from `os.defpath`; explicit paths replace those
-defaults. A declaration can select a remote SSH alias and either `direct` or
-`slurm` execution:
+defaults. A declaration can select a remote SSH alias with `direct` execution.
+Policy validation refuses `executor: "slurm"`; its enablement is tracked in
+ARC-1103. The retained Slurm implementation is disabled.
 
 ```json
 {
@@ -371,21 +372,19 @@ defaults. A declaration can select a remote SSH alias and either `direct` or
   "local": {"python": "/absolute/local/python3", "git": "/absolute/local/git"},
   "verification_host": {
     "ssh_alias": "verification-host",
-    "executor": "slurm",
+    "executor": "direct",
     "workdir_root": "/absolute/remote/scratch",
     "python": "/absolute/remote/python3",
-    "git": "/absolute/remote/git",
-    "slurm": {"partition": "cpu", "mem": "4G", "time": "03:00:00"}
+    "git": "/absolute/remote/git"
   }
 }
 ```
 
-The remote root must already exist and, for Slurm, be visible at the same path
-on the login host and allocated compute node (normally shared storage).
-Node-local temporary storage on the login host cannot carry the transferred
-bundle into another node. Paths are absolute host paths supplied by
-the operator; no username, home path or host is inferred. Use Slurm on a login
-host. For a dedicated execution host, `executor: "direct"` omits `slurm`.
+The remote root must already exist. Use only a genuinely quiet execution host
+that the owner has authorized for this work. Direct execution must not bypass
+scheduler policy; never run this suite on a cluster login node. Paths are
+absolute host paths supplied by the operator; no username, home path or host is
+inferred. Declaring a host supplies execution configuration, not authorization.
 Python and Git paths and versions appear in each new merge-verifier receipt;
 remote receipts also retain the coordinator's construction executables. A
 worker that cannot start leaves its host identity and versions unavailable
@@ -410,40 +409,61 @@ The remote worker checks out the bundle and rehashes the checkout before running
 any pinned program. Both claims use that same checkout, with the target's
 repetition count and completion handshake. Receipts retain the existing head,
 target, merge-base, candidate-tree and verifier bindings, plus the independently
-checked remote tree, host identity and executor. Slurm receipts also require the
-exact job's terminal `COMPLETED` / `0:0` accounting row for a pass. Jobs request
-no automatic requeue; an exclusive worker-start marker also prevents a forced
-restart from replacing a previous worker’s completed or partial results. The execution
-policy digest is rechecked with the existing observation fence before publication.
-Retained remote evidence is checked again during reconciliation; missing tree or
-execution evidence corrects an old verified label and withholds advancement.
+checked remote tree, host identity and executor. The execution policy digest is
+rechecked with the existing observation fence before publication. Retained remote
+evidence is checked again during reconciliation; missing tree or execution
+evidence corrects an old verified label and withholds advancement.
 
-The timeout covers each verifier; the Slurm supervision budget, including queue
-wait, is that timeout multiplied by the number of claims. SSH, launch, timeout,
-missing result and nonterminal scheduler outcomes are `incomplete`. A completed
-verifier failure remains `fail`, including a retained failure before a later job
-failure. Output tails are bounded. Remote directories are removed on completion;
-a second SSH cleanup attempts cancellation and removal after transport failure
-or unconfirmed cleanup. A valid first response confirming removal needs no
-second connection; a redundant connection cannot invalidate confirmed cleanup.
-If connectivity prevents confirmation, the receipt records that cleanup is
-unconfirmed. Cancellation is recorded separately: `requested` means `scancel`
-accepted the request, not that termination was observed. Removal requires terminal
-accounting for the exact job. A failed cancellation
-records `unconfirmed`, the job ID and bounded diagnostics, retains the stage for
-the second cleanup attempt, and prints an operator warning naming the job ID
-if still unconfirmed. A successful retry retains both cancellation attempts.
-Cancellation intent and outcome are saved atomically in `cleanup.json` under a
-per-stage cleanup lock, bounded to four attempts and 64 KiB. Reaching either
-bound or failing to save the journal retains the stage. Secondary cleanup also
-retains a stage without the supervisor's finished marker, so it cannot remove
-files while a job submission or job-ID publication is still possible.
-If both SSH responses are unavailable, the local receipt records an unknown
-job ID and the remote stage path; its warning names `job-id` and `cleanup.json`
-for recovery when connectivity returns. An unseen job ID is never inferred.
-An incomplete verification remains incomplete after cleanup. A disconnected job
-can remain until its declared time limit; this
-is not a remote process sandbox or a guarantee against same-UID writers.
+Each claim's completed outcome is published remotely in a write-once
+`claim-N.json` receipt before the next verifier starts. The receipt binds the
+launch, candidate, claim, policy and verifier digest, observed verifier exit and
+completion facts. The worker then publishes `worker-complete`; supervision
+publishes a separate finished marker. Output tails remain bounded. The aggregate
+`result.json` is diagnostic and is not required to recover completed claims.
+A completed PASS or FAIL remains that outcome even if SSH exits 255, the later
+claim cannot finish, or cleanup fails. Transport and cleanup diagnostics cannot
+replace completed verifier outcomes.
+
+Before SSH can launch anything, the coordinator fsyncs a launch record in its
+external `remote-verifications/` directory. It ingests remote receipts
+monotonically there, then publishes ordinary verification receipts only after the
+existing plan, policy, binding, epoch and target rechecks. If that observation
+fence fails, the raw evidence remains recoverable. A later invocation of
+`--verify-integration` retrieves the original launch's evidence; it does not
+start another verifier while any evidence for that binding is unresolved or
+unpublished. Retrieval is idempotent, including after switching host policy or
+removing the remote declaration. The generic local verifier and admission path
+also refuse an unresolved binding. A completed failure continues to poison the
+binding after later passing trials.
+
+Only a claim with no retrievable bound completed receipt is `incomplete`.
+Until final evidence is reconciled, the diagnostic is `unresolved remote evidence
+at HOST:STAGE; retrieve or resolve it first`. Restore connectivity and rerun the
+same verification command to retrieve it. Add `--retrieve-remote-evidence` to
+`--verify-integration` for an explicitly idempotent retrieval: it uses the
+existing launch even after reconciliation and never starts a new verifier. If a launch or its stage cannot be
+accounted for, operator investigation is required; deleting the coordinator
+ledger is not resolution. Even a connection failure before visible execution
+can leave an uncertain launch and block retries. Changing the execution host or
+switching to local mode cannot bypass that block.
+
+Remote cleanup requires quiescence and the coordinator's acknowledgment of the
+exact durably ingested evidence. A stage without its completion markers, with
+unreconciled evidence, or with unknown scheduler liveness is retained. Cleanup
+failure is recorded independently and cannot downgrade a completed outcome.
+A retained stage and its locator remain available for investigation. Completed
+local evidence and execution without a declared host retain their prior behavior.
+
+The disabled Slurm internals retain their scheduler and cancellation tests.
+Cancellation intent and outcome are journaled under a per-stage lock, bounded
+to four attempts and 64 KiB. `requested` means the scheduler accepted a
+cancellation request, not that termination was observed. Removal also requires
+terminal accounting for the exact job; a missing or conflicting job identity
+retains the stage. Forced worker restarts cannot replace a write-once receipt.
+Slurm remains unavailable through policy validation until ARC-1103 closes its
+remaining lifecycle cases. This is a same-node trusted-writer convention, not a
+remote process sandbox or a guarantee against hostile same-UID writers or live
+descendants of completed verifiers.
 
 The designated `merge-precondition` verifier runs
 `python3 -m unittest discover -s tests` in the candidate tree. Its policy and
