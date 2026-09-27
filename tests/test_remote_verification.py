@@ -76,25 +76,41 @@ import json, os, pathlib, subprocess, sys
 with open(os.environ['SCHED_LOG'], 'a') as log:
     log.write(json.dumps(['sbatch'] + sys.argv[1:]) + '\n')
 assert '--no-requeue' in sys.argv
+request = json.loads((pathlib.Path(sys.argv[-1]).parent / 'request.json').read_text())
+import hashlib
+assert '--job-name=verify-' + hashlib.sha256(request['launch_id'].encode()).hexdigest() in sys.argv
+assert '--worker' in pathlib.Path(sys.argv[-1]).read_text()
 assert '--partition=fixture-cpu' in sys.argv
 assert '--mem=2G' in sys.argv
 assert '--time=00:05:00' in sys.argv
-if pathlib.Path(os.environ['REMOTE_MODE']).read_text() not in ('slurm-missing', 'slurm-pending'):
+if pathlib.Path(os.environ['REMOTE_MODE']).read_text() not in ('slurm-missing', 'slurm-pending', 'slurm-running', 'slurm-lost-job-id'):
     result = subprocess.run(['/bin/sh', sys.argv[-1]], capture_output=True)
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 0 or pathlib.Path(os.environ['REMOTE_MODE']).read_text() == 'slurm-worker-died', result.stderr
     if pathlib.Path(os.environ['REMOTE_MODE']).read_text() == 'slurm-forced-requeue':
         pathlib.Path(os.environ['REMOTE_MODE']).write_text('pass')
         result = subprocess.run(['/bin/sh', sys.argv[-1]], capture_output=True)
         assert result.returncode == 0, result.stderr
-print('321')
+print('accepted-with-lost-response' if pathlib.Path(os.environ['REMOTE_MODE']).read_text() == 'slurm-lost-job-id' else '321')
 '''
 
 SACCT = r'''
-import os, pathlib
+import json, os, pathlib, sys
+if '--name' in sys.argv:
+    print('321|' + sys.argv[sys.argv.index('--name') + 1])
+    raise SystemExit(0)
 mode = pathlib.Path(os.environ['REMOTE_MODE']).read_text()
-print('321|PENDING|0:0' if mode == 'slurm-pending' else
+print('321|PENDING|0:0' if mode in ('slurm-pending', 'slurm-lost-job-id') else
+      '321|RUNNING|0:0' if mode == 'slurm-running' else
       '321|CANCELLED|0:0' if mode == 'slurm-cancelled' else
-      '321|FAILED|1:0' if mode in ('slurm-missing', 'slurm-completed-fail') else '321|COMPLETED|0:0')
+      '321|FAILED|1:0' if mode in ('slurm-missing', 'slurm-completed-fail', 'slurm-worker-died') else '321|COMPLETED|0:0')
+'''
+
+
+SQUEUE = r'''
+import subprocess, sys
+state = subprocess.check_output(['sacct', '-j', '321'], text=True).split('|')[1]
+if state in ('PENDING', 'RUNNING', 'COMPLETING'):
+    print('321|' + sys.argv[sys.argv.index('--name') + 1])
 '''
 
 
@@ -113,7 +129,7 @@ class TestRemoteVerification(unittest.TestCase):
         self.f.env.update(REMOTE_LOG=str(self.f.directory / 'ssh.log'),
                           REMOTE_MODE=str(self.mode), SCHED_LOG=str(self.f.directory / 'scheduler.log'),
                           REMOTE_LEDGER_DIR=str(self.f.state_dir / 'remote-verifications'))
-        for name, body in (('ssh', SSH), ('sbatch', SBATCH), ('sacct', SACCT),
+        for name, body in (('ssh', SSH), ('sbatch', SBATCH), ('sacct', SACCT), ('squeue', SQUEUE),
                            ('scancel', 'import os\nfrom pathlib import Path\n'
                             'p=Path(os.environ["REMOTE_MODE"])\n'
                             'if p.read_text() == "slurm-pending": p.write_text("slurm-cancelled")\n')):
@@ -142,7 +158,7 @@ class TestRemoteVerification(unittest.TestCase):
         self.local_only()
         yield 'local'
 
-    def disabled_slurm_policy(self):
+    def slurm_policy(self):
         self.policy['verification_host'].update(executor='slurm', slurm={
             'partition': 'fixture-cpu', 'mem': '2G', 'time': '00:05:00'})
         self.save_policy()
@@ -665,13 +681,15 @@ class TestRemoteVerification(unittest.TestCase):
 
     def cancellation_fixture(self, mode='slurm-pending', retry_succeeds=False,
                              terminal_on_success=True):
-        self.disabled_slurm_policy()
+        self.slurm_policy()
         self.program()
         self.mode.write_text(mode)
         witness = self.f.directory / 'cancellation-calls'
         terminal = self.f.directory / 'cancelled'
         (self.f.bin / 'sacct').write_text(
-            PYTHON + 'from pathlib import Path\n'
+            PYTHON + 'from pathlib import Path\nimport sys\n'
+            'if "--name" in sys.argv:\n'
+            '    print("321|" + sys.argv[sys.argv.index("--name") + 1]); raise SystemExit(0)\n'
             'print("321|CANCELLED|0:0" if Path(%r).exists() else "321|PENDING|0:0")\n'
             % str(terminal))
         (self.f.bin / 'scancel').write_text(
@@ -886,51 +904,17 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertRegex(result.stderr, r'WARNING: .*job 321')
         self.assertEqual(self.merges(), [])
 
-    def invoke_disabled_slurm(self, *extra):
-        """Exercise retained internals with fixture tools, bypassing ONLY policy
-        enablement in this test process. Production validation has its own
-        refusal test; no production enablement flag exists.
-        """
-        wrapper = self.f.directory / 'disabled-slurm-operator.py'
-        wrapper.write_text(
-            'import hashlib, json, sys\nfrom pathlib import Path\nfrom unittest import mock\n'
-            'sys.path.insert(0, %r)\nimport merge_unit as M\n'
-            'original = M.RV.read_policy\n'
-            'def fixture_policy(state):\n'
-            '    p = Path(state) / M.RV.POLICY\n'
-            '    raw = p.read_bytes()\n'
-            '    policy = json.loads(raw)\n'
-            '    if policy.get("verification_host", {}).get("executor") != "slurm": return original(state)\n'
-            '    valid = json.loads(raw)\n'
-            '    valid["verification_host"]["executor"] = "direct"\n'
-            '    valid["verification_host"].pop("slurm")\n'
-            '    read = Path.read_bytes\n'
-            '    def fixture_bytes(path): return json.dumps(valid).encode() if path == p else read(path)\n'
-            '    with mock.patch.object(Path, "read_bytes", fixture_bytes): original(state)\n'
-            '    return policy, hashlib.sha256(raw).hexdigest()\n'
-            'M.RV.read_policy = fixture_policy\n'
-            'raise SystemExit(M.main())\n' % str(self.f.operator.parent))
-        command = [sys.executable, str(wrapper), str(self.f.plan_path),
-                   '--state-dir', str(self.f.state_dir), '--unit', 'u', '--pr', '7',
-                   '--approver', 'Operator']
-        return subprocess.run(command + list(extra), cwd=self.f.repo, env=self.f.env,
-                              capture_output=True, text=True, timeout=60)
-
     def ssh_launches(self):
         calls = [json.loads(line) for line in Path(self.f.env['REMOTE_LOG']).read_text().splitlines()]
         return sum('tarfile' in call[-1] for call in calls)
 
     def verify(self, *extra):
-        if self.policy.get('verification_host', {}).get('executor') == 'slurm':
-            return self.invoke_disabled_slurm('--verify-integration', *extra)
         return self.f.invoke('--verify-integration', *extra)
 
     def rows(self):
         return S.load_verifications(self.f.state_dir)[0]
 
     def admitted(self):
-        if self.policy.get('verification_host', {}).get('executor') == 'slurm':
-            return self.invoke_disabled_slurm()
         return self.f.invoke()
 
     def assert_clean(self):
@@ -1046,6 +1030,15 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertEqual(len(self.rows()), 2, 'retrieval must be idempotent')
         self.f.assert_refused(self.admitted())
         self.assertEqual(self.ssh_launches(), 1)
+
+    def test_slurm_partial_failure_survives_later_worker_loss_and_blocks_rerun(self):
+        self.slurm_policy()
+        self.mode.write_text('slurm-worker-died')
+        self.test_partial_failure_survives_later_worker_loss_and_blocks_local_escape()
+        first, later = self.rows()
+        self.assertEqual(first['execution']['job_id'], '321')
+        self.assertEqual(first['execution']['cleanup'], 'unconfirmed')
+        self.assertEqual(first['execution']['sacct_state'], 'FAILED')
 
     def test_missing_ledger_blocks_unresolved_pass_and_restoration_recovers(self):
         target = self.program()
@@ -1238,16 +1231,18 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertFalse(stage.exists())
         self.assertEqual(self.ssh_launches(), 1)
 
-    def test_slurm_policy_is_disabled_before_transport(self):
-        self.disabled_slurm_policy()
+    def test_slurm_policy_without_mem_is_refused_before_transport(self):
+        self.slurm_policy()
+        del self.policy['verification_host']['slurm']['mem']
+        self.save_policy()
         result = self.f.invoke('--verify-integration')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('ARC-1103', result.stderr)
+        self.assertIn('slurm requires partition, mem and time', result.stderr)
         self.assertFalse(Path(self.f.env['REMOTE_LOG']).exists())
         self.assertEqual(self.rows(), [])
 
     def test_slurm_runs_both_claims_with_target_repetitions_and_handshake(self):
-        self.disabled_slurm_policy()
+        self.slurm_policy()
         self.shared.install_policy(repetitions=2)
         self.shared.candidate({'tests/test_remote.py': self.shared.counter_test()})
         result = self.verify()
@@ -1332,7 +1327,7 @@ class TestRemoteVerification(unittest.TestCase):
         self.assert_clean()
 
     def test_completed_verifier_fail_survives_a_failed_slurm_job(self):
-        self.disabled_slurm_policy()
+        self.slurm_policy()
         self.program('raise SystemExit(int(Path(%r).read_text() == "slurm-completed-fail"))\n'
                      % str(self.mode))
         self.mode.write_text('slurm-completed-fail')
@@ -1349,7 +1344,7 @@ class TestRemoteVerification(unittest.TestCase):
         self.assert_clean()
 
     def test_forced_scheduler_restart_cannot_overwrite_completed_failure(self):
-        self.disabled_slurm_policy()
+        self.slurm_policy()
         self.program('raise SystemExit(int(Path(%r).read_text() == "slurm-forced-requeue"))\n'
                      % str(self.mode))
         self.mode.write_text('slurm-forced-requeue')
@@ -1365,7 +1360,7 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertIn('FAIL', result.stderr)
         self.assert_clean()
 
-    def assert_disabled_slurm_unresolved(self, mode):
+    def assert_slurm_unresolved(self, mode):
         self.program()
         self.mode.write_text(mode)
         result = self.verify('--verification-timeout', '1')
@@ -1382,13 +1377,32 @@ class TestRemoteVerification(unittest.TestCase):
         calls = [json.loads(line) for line in Path(self.f.env['SCHED_LOG']).read_text().splitlines()]
         self.assertEqual(sum(call[0] == 'sbatch' for call in calls), 1)
 
-    def test_disabled_slurm_without_completed_worker_retains_evidence_and_blocks_retry(self):
-        self.disabled_slurm_policy()
-        self.assert_disabled_slurm_unresolved('slurm-missing')
+    def test_slurm_without_completed_worker_retains_evidence_and_blocks_retry(self):
+        self.slurm_policy()
+        self.assert_slurm_unresolved('slurm-missing')
 
-    def test_disabled_slurm_without_terminal_state_retains_evidence_and_blocks_retry(self):
-        self.disabled_slurm_policy()
-        self.assert_disabled_slurm_unresolved('slurm-pending')
+    def test_slurm_without_terminal_state_retains_evidence_and_blocks_retry(self):
+        self.slurm_policy()
+        self.assert_slurm_unresolved('slurm-pending')
+
+    def test_slurm_running_at_timeout_retains_stage_and_blocks_retry(self):
+        self.slurm_policy()
+        self.assert_slurm_unresolved('slurm-running')
+        row, = self.rows()
+        self.assertEqual(row['execution']['job_id'], '321')
+        self.assertEqual(row['execution']['cleanup'], 'unconfirmed')
+
+    def test_slurm_lost_submission_response_discovers_pending_job(self):
+        self.slurm_policy()
+        self.assert_slurm_unresolved('slurm-lost-job-id')
+        row, = self.rows()
+        stage = Path(row['execution']['stage'])
+        self.assertFalse((stage / 'job-id').exists())
+        self.assertEqual(row['execution']['job_id'], '321')
+        self.assertEqual(row['execution']['job_ids'], ['321'])
+        self.assertEqual(row['execution']['cleanup'], 'unconfirmed')
+        self.assertFalse(row['execution']['quiescent'])
+        self.assertIn('job_name', row['execution'])
 
     def test_candidate_policy_cannot_choose_host_or_interpreter(self):
         self.shared.candidate({RV.POLICY: json.dumps({
@@ -1723,6 +1737,223 @@ class TestWriteOnceRemoteEvidence(unittest.TestCase):
                 RV.publish(path, {'exit_code': 0, 'completion': True}, once=True)
             self.assertEqual(path.read_bytes(), before)
             self.assertEqual(list(Path(directory).iterdir()), [path])
+
+
+class TestSlurmLifecycle(unittest.TestCase):
+    """Fast scheduler processes on a replaced PATH; no SSH or real scheduler."""
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.stage = self.root / 'stage'
+        self.stage.mkdir()
+        self.bin = self.root / 'bin'
+        self.bin.mkdir()
+        self.state = self.root / 'scheduler.json'
+        self.log = self.root / 'calls.jsonl'
+        self.launch = 'fixture-launch'
+        self.name = 'verify-' + hashlib.sha256(self.launch.encode()).hexdigest()
+        self.request = {'launch_id': self.launch, 'basis': {'candidate_tree': 'a' * 40},
+                        'checks': [], 'verification_host': {'executor': 'slurm'}}
+        RV.publish(self.stage / 'request.json', self.request)
+        RV.publish(self.stage / 'supervision-finished', {'launch_id': self.launch, 'job_id': None})
+        RV.publish(self.stage / 'worker-complete', {'launch_id': self.launch})
+        body = r"""
+import json, pathlib, sys
+state_path, log_path = pathlib.Path(STATE), pathlib.Path(LOG)
+state = json.loads(state_path.read_text())
+command = pathlib.Path(sys.argv[0]).name
+with log_path.open('a') as log: log.write(json.dumps([command] + sys.argv[1:]) + '\n')
+if state.get('unavailable') == command: raise SystemExit(1)
+if command == 'scancel':
+    if state.get('cancel_exit', 1): raise SystemExit(state['cancel_exit'])
+    if state.get('cancel_terminal'):
+        state['jobs'][sys.argv[1]] = 'CANCELLED'
+        state_path.write_text(json.dumps(state))
+elif command == 'squeue':
+    for job, status in state['jobs'].items():
+        if status in ('PENDING', 'RUNNING', 'COMPLETING') and not state.get('empty_queue'):
+            print(job + '|' + NAME)
+elif '--name' in sys.argv:
+    assert sys.argv[sys.argv.index('--name') + 1] == NAME
+    assert '--starttime' in sys.argv
+    for job in state['jobs']: print(job + '|' + NAME)
+else:
+    job = sys.argv[sys.argv.index('-j') + 1]
+    if job in state['jobs']: print(job + '|' + state['jobs'][job] + '|0:0')
+""".replace('STATE', repr(str(self.state))).replace('LOG', repr(str(self.log))).replace('NAME', repr(self.name))
+        for command in ('sbatch', 'squeue', 'sacct', 'scancel'):
+            path = self.bin / command
+            path.write_text(PYTHON + body)
+            path.chmod(0o755)
+        env = mock.patch.dict(os.environ, {'PATH': str(self.bin)})
+        env.start()
+        self.addCleanup(env.stop)
+        self.configure({'321': 'PENDING'})
+
+    def configure(self, jobs, **options):
+        self.state.write_text(json.dumps(dict(jobs=jobs, cancel_exit=1, **options)))
+
+    def ack(self):
+        return RV.evidence_digest(RV.collect(self.stage))
+
+    def test_missing_job_id_discovers_pending_job_and_retains_stage(self):
+        result = RV.cleanup(self.stage, self.ack())
+        self.assertEqual(result['cleanup'], 'unconfirmed')
+        self.assertTrue(self.stage.exists())
+        self.assertEqual(result['job_id'], '321')
+        self.assertEqual(result['job_ids'], ['321'])
+        self.assertEqual(result['job_name'], self.name)
+        self.assertFalse(result['quiescent'])
+        self.assertEqual(read_json(self.stage / 'cleanup.json'), result)
+
+    def test_missing_job_id_unqueryable_scheduler_retains_stage(self):
+        for command in ('squeue', 'sacct'):
+            with self.subTest(command=command):
+                self.configure({'321': 'PENDING'}, unavailable=command)
+                result = RV.cleanup(self.stage, self.ack())
+                self.assertEqual(result['cleanup'], 'unconfirmed')
+                self.assertTrue(self.stage.exists())
+                self.assertIn(command, result['cleanup_error'])
+                self.assertFalse(result['quiescent'])
+
+    def test_nonterminal_accounting_cannot_authorize_removal(self):
+        for status in ('PENDING', 'RUNNING', 'COMPLETING'):
+            with self.subTest(status=status):
+                self.configure({'321': status})
+                result = RV.cleanup(self.stage, self.ack())
+                self.assertEqual(result['cleanup'], 'unconfirmed')
+                self.assertTrue(self.stage.exists())
+                self.assertFalse(result['quiescent'])
+
+    def test_nonterminal_accounting_with_empty_queue_retains_stage(self):
+        self.configure({'321': 'PENDING'}, empty_queue=True)
+        result = RV.cleanup(self.stage, self.ack())
+        self.assertEqual(result['cleanup'], 'unconfirmed')
+        self.assertTrue(self.stage.exists())
+        self.assertFalse(result['quiescent'])
+
+    def test_all_jobs_need_terminal_accounting(self):
+        self.configure({'321': 'COMPLETED', '322': 'RUNNING'})
+        result = RV.cleanup(self.stage, self.ack())
+        self.assertEqual(result['job_ids'], ['321', '322'])
+        self.assertEqual(result['cleanup'], 'unconfirmed')
+        self.assertTrue(self.stage.exists())
+
+    def test_terminal_jobs_still_require_reconciliation(self):
+        self.configure({'321': 'COMPLETED'})
+        result = RV.cleanup(self.stage)
+        self.assertEqual(result['cleanup'], 'unconfirmed')
+        self.assertTrue(result['quiescent'])
+        self.assertTrue(self.stage.exists())
+        result = RV.cleanup(self.stage, self.ack())
+        self.assertEqual(result['cleanup'], 'removed')
+        self.assertFalse(self.stage.exists())
+
+    def test_dead_supervisor_still_reports_discovered_job(self):
+        (self.stage / 'supervision-finished').unlink()
+        result = RV.cleanup(self.stage)
+        self.assertEqual(result['job_id'], '321')
+        self.assertEqual(result['cleanup'], 'unconfirmed')
+        self.assertTrue(self.stage.exists())
+
+    def test_unreadable_job_id_uses_scheduler_identity(self):
+        (self.stage / 'job-id').mkdir()
+        result = RV.cleanup(self.stage, self.ack())
+        self.assertEqual(result['job_id'], '321')
+        self.assertEqual(result['cleanup'], 'unconfirmed')
+        self.assertTrue(self.stage.exists())
+
+    def completed_claims(self):
+        self.request['verification_host']['ssh_alias'] = 'fixture-host'
+        self.request['checks'] = [{'binding': {'claim': str(i)}, 'digest': str(i) * 64}
+                                  for i in range(2)]
+        execution = {'location': 'remote', 'executor': 'slurm', 'ssh_alias': 'fixture-host',
+                     'host_identity': 'fixture-node', 'verified_tree': 'a' * 40,
+                     'executables': {key: {'path': '/fixture/' + key, 'version': 'fixture'}
+                                     for key in ('python', 'git')}}
+        receipts, outcomes = {}, []
+        for i, check in enumerate(self.request['checks']):
+            outcome = {'exit_code': 125 if i == 0 else 0, 'stdout': '', 'stderr': ''}
+            receipt = RV.completion_receipt(self.request, check, outcome, execution)
+            RV.publish(self.stage / ('claim-%s.json' % i), receipt, once=True)
+            receipts[str(i)] = RV.record_digest(receipt)
+            outcomes.append(outcome)
+        RV.publish(self.stage / 'request.json', self.request)
+        RV.publish(self.stage / 'worker-complete', {'launch_id': self.launch,
+                   'basis': self.request['basis'], 'receipts': receipts, 'outcomes': outcomes})
+
+    def test_completed_fail_survives_every_scheduler_state(self):
+        self.completed_claims()
+        original = (self.stage / 'claim-0.json').read_bytes()
+        for status in ('PENDING', 'RUNNING', 'FAILED', 'TIMEOUT', 'NODE_FAIL', 'OUT_OF_MEMORY', 'COMPLETED'):
+            with self.subTest(status=status):
+                self.configure({'321': status})
+                result = RV.cleanup(self.stage)
+                self.assertEqual(result['cleanup'], 'unconfirmed')
+                self.assertTrue(self.stage.exists())
+                run = {'request': self.request, 'launch_id': self.launch,
+                       'stage': str(self.stage), 'receipts': {}, 'execution': {}}
+                RV.ingest(run, RV.collect(self.stage))
+                self.assertEqual(run['receipts']['0']['outcome']['exit_code'], 125)
+                self.assertNotIn('incomplete_reason', run['receipts']['0']['outcome'])
+                self.assertEqual(run['reconciled'], status in RV.TERMINAL)
+                self.assertEqual((self.stage / 'claim-0.json').read_bytes(), original)
+
+    def test_zero_scancel_does_not_mean_terminal(self):
+        self.state.write_text(json.dumps({'jobs': {'321': 'RUNNING'}, 'cancel_exit': 0}))
+        result = RV.cleanup(self.stage, self.ack())
+        self.assertEqual(result['cleanup'], 'unconfirmed')
+        self.assertEqual(result['cancellation'], 'requested')
+        self.assertFalse(result['quiescent'])
+        self.assertTrue(self.stage.exists())
+        self.assertEqual(read_json(self.stage / 'cleanup.json'), result)
+
+    def test_confirmed_cancellation_and_ack_allow_removal(self):
+        self.state.write_text(json.dumps({'jobs': {'321': 'RUNNING'}, 'cancel_exit': 0,
+                                         'cancel_terminal': True}))
+        result = RV.cleanup(self.stage, self.ack())
+        self.assertEqual(result['cleanup'], 'removed')
+        self.assertEqual(result['cancellation'], 'requested')
+        self.assertEqual(result['cleanup_sacct_states'], {'321': ['CANCELLED', '0:0']})
+        self.assertFalse(self.stage.exists())
+
+    def test_empty_discovery_is_unresolved(self):
+        self.configure({})
+        result = RV.cleanup(self.stage, self.ack())
+        self.assertEqual(result['cleanup'], 'unconfirmed')
+        self.assertFalse(result['quiescent'])
+        self.assertTrue(self.stage.exists())
+
+
+class TestSlurmPolicy(unittest.TestCase):
+    def test_slurm_requires_all_plain_tokens(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            policy = {'schema_version': 1, 'verification_host': {
+                'executor': 'slurm', 'ssh_alias': 'fixture-host', 'python': '/fixture/python',
+                'git': '/fixture/git', 'workdir_root': '/fixture/stage',
+                'slurm': {'partition': 'fixture-cpu', 'mem': '2G', 'time': '00:05:00'}}}
+            path = Path(tmp) / RV.POLICY
+            path.write_text(json.dumps(policy))
+            self.assertEqual(RV.read_policy(tmp)[0], policy)
+            original = dict(policy['verification_host']['slurm'])
+            for key in original:
+                for value in (None, '', 2, [], 'has space', 'line\n', '--option', '$(cmd)', 'x;y'):
+                    with self.subTest(key=key, value=value):
+                        cfg = dict(original)
+                        if value is None:
+                            del cfg[key]
+                        else:
+                            cfg[key] = value
+                        policy['verification_host']['slurm'] = cfg
+                        path.write_text(json.dumps(policy))
+                        with self.assertRaises(ValueError):
+                            RV.read_policy(tmp)
+            policy['verification_host']['slurm'] = original
+            policy['verification_host']['executor'] = 'direct'
+            path.write_text(json.dumps(policy))
+            with self.assertRaisesRegex(ValueError, 'direct executor'):
+                RV.read_policy(tmp)
 
 
 if __name__ == '__main__':

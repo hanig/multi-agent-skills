@@ -38,6 +38,25 @@ Forge routing supports standard HTTP(S) and SSH remotes without explicit ports a
 
 The command never resubmits an unresolved merge request: a queued request, a lost response, or a crash between intent persistence and transmission leaves a durable operation for inspection. Rerun after GitHub reports MERGED to record and advance, or explicitly abandon the investigated OPEN request using the recorded path above. Neither action deletes the intent. Abandonment attests an OPEN observation; it cannot prove an earlier queued request will never execute, so the named operator retains responsibility for investigating that uncertainty. The intent and abandonment journals retain the same-node trusted-writer boundary. The local coordinator lease is released before advance acquires it; advancement can still halt or retain a unit for its existing verification policy. A successful advance does not assert that every unit closed. <!-- declaration: limit.merge-command -->
 
+## Declaring a Slurm verification host
+
+In the external coordinator state's `verification-execution.json`, declare
+`verification_host` with `ssh_alias`, `executor: "slurm"`, absolute `workdir_root`,
+`python` and `git` paths, and a `slurm` object containing `partition`, `mem` and
+`time`. These three values must be plain string tokens; **mem is required**.
+Keep actual host and resource values in that private policy. The remote root
+must exist. The supervisor submits and polls; only the allocated worker runs
+verification.
+
+A cleanup-unconfirmed warning means the stage was retained. Inspect the reported
+job IDs, launch job name and `cleanup.json`; a successful cancellation request
+alone does not establish termination. Cleanup needs terminal accounting for all
+launch jobs, finished supervision and acknowledged claim evidence. Missing job
+IDs are recovered by name from `squeue` and `sacct`; unavailable or empty discovery
+cannot authorize removal. Restore access and retrieve the original launch with
+`--verify-integration --retrieve-remote-evidence`. Retain unresolved stages and
+receipts; do not submit a replacement to bypass the evidence block.
+
 ## Drain the post-merge close intent
 
 After receipt recording and successful advancement, `merge_unit.py` displays the current attempt's pending close intent with its key and `tracker` issue, or `no tracker declared`, followed by the acknowledgment command. It performs no tracker call. If no unacknowledged close intent exists, it says so; that message establishes neither tracker delivery nor unit closure. <!-- declaration: tracker.drain -->
