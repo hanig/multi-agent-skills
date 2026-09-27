@@ -1469,14 +1469,17 @@ class TrackerSyncHookProvenance(unittest.TestCase):
     def test_missing_or_malformed_command_cwd_cannot_borrow_project_identity(self):
         # The wired hook's code comes from CLAUDE_PROJECT_DIR, but the command
         # ran in a different repository. Only the harness event locates it.
-        remote = subprocess.check_output(
-            ["git", "-C", REPO_ROOT, "remote", "get-url", "--push", "origin"],
-            text=True).strip()
+        project = os.path.join(self.tmp.name, "hook-project")
+        remote = "https://github.com/example/hook-project"
+        subprocess.run(["git", "init", "-q", project], check=True)
+        subprocess.run(["git", "-C", project, "config", "remote.origin.url", remote],
+                       check=True)
+        shutil.copytree(os.path.join(REPO_ROOT, ".claude", "hooks"),
+                        os.path.join(project, ".claude", "hooks"))
         with open(os.path.join(self.state, "swarm-state.json"), "w") as handle:
             json.dump({"units": {"u": {"attempt_launch_facts": {
                 "a1": {"repository_remote": remote}}}}}, handle)
-        env = dict(os.environ, **self.env, CLAUDE_PROJECT_DIR=REPO_ROOT)
-        env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env.get("PATH", "")
+        env = dict(os.environ, **self.env, CLAUDE_PROJECT_DIR=project)
         for cwd in (None, "", False, 0, [], "relative"):
             with self.subTest(cwd=cwd):
                 payload = {"tool_input": {"command": "git push origin HEAD"}}
