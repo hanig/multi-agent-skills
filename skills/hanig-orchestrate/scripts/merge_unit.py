@@ -768,13 +768,16 @@ def verify_integration(args, repo, snapshot):
         for evidence in evidences:
             # Retrieval is idempotent. Incomplete -> complete appends evidence;
             # repeated retrieval of the same completed claim does not append.
+            # Late Slurm terminal evidence can make an earlier PASS admissible:
+            # append that enrichment without rewriting the original observation.
             identity = evidence.get("execution", {}).get("launch_id")
             repeated = identity and any(
                 isinstance(r.get("execution"), dict)
                 and r["execution"].get("launch_id") == identity
                 and r.get("claim") == evidence["claim"]
                 and r.get("result") == evidence["result"]
-                and r.get("exit_code") == evidence["exit_code"] for r in previous)
+                and r.get("exit_code") == evidence["exit_code"]
+                and RV.execution_problem(r) == RV.execution_problem(evidence) for r in previous)
             if not repeated:
                 S._fsync_append(state_dir / S.VERIFY_RECEIPTS, evidence)
         if evidences and evidences[0].get("execution", {}).get("launch_id"):

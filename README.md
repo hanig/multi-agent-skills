@@ -379,8 +379,12 @@ Without a host declaration, verification stays local.
 Use direct SSH only on a quiet host authorized by the owner; never bypass a
 scheduler or run this suite on a cluster login node. The remote root must exist.
 All paths are absolute operator declarations, with no inferred host or username.
-Configuration does not grant authorization. Policy validation refuses
-`executor: "slurm"` pending ARC-1103; its implementation and tests remain.
+Configuration does not grant authorization. To use a scheduler, set
+`executor: "slurm"` and add a `slurm` object with `partition`, `mem` and `time`.
+All three are required plain string tokens; `mem` has no implicit default.
+For example, use `{"partition": "fixture-cpu", "mem": "2G", "time": "00:05:00"}`
+with operator-selected values in the private coordinator policy. The supervisor
+only submits and polls; the worker runs inside the allocation.
 
 Local defaults use operator Python and prefer system Git, then absolute operator
 PATH directories. Git/SSH exclude relative entries and symlinks into operated
@@ -433,8 +437,14 @@ Missing local SSH is retryable and records no launch. After a possible launch,
 apparent connection failure may require investigation; changing hosts or going
 local cannot escape uncertainty. Cleanup requires quiescence and acknowledgment
 of exact reconciled evidence; otherwise retain the stage and cleanup diagnostic
-independently of verifier outcomes. Disabled Slurm additionally requires exact
-job identity and terminal accounting. Its locked cancellation journal permits
+independently of verifier outcomes. Slurm discovers launch jobs by a deterministic
+job name through both `squeue` and `sacct`, even when `job-id` is missing or unreadable.
+Removal requires terminal accounting for every discovered or previously known job,
+no live queue rows, finished supervision, and reconciled evidence. Empty or failed
+discovery retains the stage. Cleanup-unconfirmed output names known job IDs and
+recovery files: inspect them, restore scheduler access, and retrieve evidence;
+do not delete the stage or launch a replacement to bypass unresolved evidence.
+Its locked cancellation journal permits
 four attempts/64 KiB; `requested` does not attest termination. Forced worker
 restarts cannot replace receipts. Same-UID writers and live descendants remain
 outside this trusted-writer storage convention.
