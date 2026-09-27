@@ -39,23 +39,24 @@ The command never resubmits an unresolved merge request: a queued request, a los
 
 ## Declaring a Slurm verification host
 
-The external coordinator state's `verification-execution.json` records
+In the external coordinator state's `verification-execution.json`, declare
 `verification_host` with `ssh_alias`, `executor: "slurm"`, absolute `workdir_root`,
 `python` and `git` paths, and a `slurm` object containing `partition`, `mem` and
 `time`. The parser accepts these three values as plain string tokens and rejects
-a missing `mem`. Actual host and resource values live in that private policy.
-The remote root is an existing directory. The supervisor submits and polls;
-verification runs inside the allocated worker.
+a missing `mem`. Keep actual host and resource values in that private policy.
+The remote root exists before launch. The supervisor submits and polls;
+verification runs exclusively inside the allocated worker.
 
-A cleanup-unconfirmed warning means removal was not confirmed. The surviving
-stage, reported job IDs, launch job name and `cleanup.json` provide investigation
-evidence; a successful cancellation request alone is insufficient to establish
-termination. Cleanup checks terminal accounting for all launch jobs, finished
+A cleanup-unconfirmed warning means removal was not confirmed; retain any
+surviving stage. Inspect the reported job IDs, launch job name and `cleanup.json`;
+a successful cancellation request alone is insufficient to establish termination.
+Cleanup is conditional on terminal accounting for all launch jobs, finished
 supervision and acknowledged claim evidence. Missing job IDs are recovered by
 name from `squeue` and `sacct`; unavailable or empty discovery leaves the stage
-intact. After access is restored, `--verify-integration --retrieve-remote-evidence`
-retrieves the original launch. Unresolved stages and receipts remain preserved;
-a replacement submission leaves the evidence block unresolved.
+intact. Restore access and retrieve the original launch with
+`--verify-integration --retrieve-remote-evidence`. Retain unresolved stages and
+receipts; the binding blocks replacement submissions and admission until its
+evidence is resolved, and reruns retrieve the original launch.
 
 Cleanup finishes scheduler observation with accounting by name followed by the
 live queue, after every individual accounting/cancellation operation, and records
