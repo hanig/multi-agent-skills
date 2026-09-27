@@ -1031,6 +1031,27 @@ class TestRemoteVerification(unittest.TestCase):
         self.f.assert_refused(self.admitted())
         self.assertEqual(self.ssh_launches(), 1)
 
+    def test_slurm_late_terminal_accounting_appends_admissible_evidence(self):
+        self.cancellation_fixture('pass')
+        self.assert_pending(self.verify('--verification-timeout', '1'))
+        original = self.journal.read_bytes()
+        first, = self.rows()
+        self.assertEqual(first['result'], 'pass')
+        self.assertIsNone(first['execution']['sacct_state'])
+        (self.f.bin / 'sacct').write_text(PYTHON + 'import sys\n'
+            'print("321|" + sys.argv[sys.argv.index("--name")+1] '
+            'if "--name" in sys.argv else "321|COMPLETED|0:0")\n')
+        self.verify('--retrieve-remote-evidence')  # refresh lifecycle observation
+        self.assert_ok(self.verify('--retrieve-remote-evidence'))
+        self.assertEqual(self.ssh_launches(), 1)
+        self.assertEqual(len(self.rows()), 2)
+        self.assertTrue(self.journal.read_bytes().startswith(original))
+        self.assertEqual(self.rows()[-1]['execution']['sacct_state'], 'COMPLETED')
+        self.assert_ok(self.verify('--retrieve-remote-evidence'))
+        self.assertEqual(len(self.rows()), 2, 'terminal retrieval remains idempotent')
+        self.assert_ok(self.admitted())
+        self.assertFalse(Path(first['execution']['stage']).exists())
+
     def test_slurm_partial_failure_survives_later_worker_loss_and_blocks_rerun(self):
         self.slurm_policy()
         self.mode.write_text('slurm-worker-died')
@@ -1861,6 +1882,46 @@ else:
         (self.stage / 'job-id').mkdir()
         result = RV.cleanup(self.stage, self.ack())
         self.assertEqual(result['job_id'], '321')
+        self.assertEqual(result['cleanup'], 'unconfirmed')
+        self.assertTrue(self.stage.exists())
+
+    def test_slurm_cleanup_lock_prevents_scheduler_mutation(self):
+        with (self.stage / 'cleanup.lock').open('a') as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with mock.patch.object(RV, '_command') as command:
+                result = RV.cleanup(self.stage, self.ack())
+            command.assert_not_called()
+        self.assertEqual(result['cleanup'], 'unconfirmed')
+        self.assertFalse((self.stage / 'cleanup.json').exists())
+        self.assertTrue(self.stage.exists())
+
+    def test_slurm_cancellation_requires_durable_intent(self):
+        with mock.patch.object(RV, 'publish', side_effect=OSError('journal unavailable')):
+            result = RV.cleanup(self.stage, self.ack())
+        self.assertEqual(result['cleanup'], 'unconfirmed')
+        self.assertIn('journal unavailable', result['cleanup_error'])
+        self.assertTrue(self.stage.exists())
+        calls = [json.loads(line)[0] for line in self.log.read_text().splitlines()]
+        self.assertNotIn('scancel', calls)
+
+    def test_slurm_cancellation_attempt_bound_retains_evidence(self):
+        for _ in range(5):
+            result = RV.cleanup(self.stage, self.ack())
+        self.assertEqual(result['cleanup'], 'unconfirmed')
+        self.assertEqual(len(result['cancellation_attempts']), 4)
+        calls = [json.loads(line)[0] for line in self.log.read_text().splitlines()]
+        self.assertEqual(calls.count('scancel'), 4)
+        self.assertEqual(read_json(self.stage / 'cleanup.json'), result)
+        self.assertTrue(self.stage.exists())
+
+    def test_slurm_oversized_cancellation_history_is_retained(self):
+        path = self.stage / 'cleanup.json'
+        original = ' ' * 65537
+        path.write_text(original)
+        with mock.patch.object(RV, '_command') as command:
+            result = RV.cleanup(self.stage, self.ack())
+        command.assert_not_called()
+        self.assertEqual(path.read_text(), original)
         self.assertEqual(result['cleanup'], 'unconfirmed')
         self.assertTrue(self.stage.exists())
 
