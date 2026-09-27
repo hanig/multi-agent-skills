@@ -286,6 +286,10 @@ def load_ledger(path, unit, basis, journal_entries=None):
     for launch_id, run in runs.items():
         if run.get("witness_required") and launch_id not in witnesses:
             raise ValueError(unresolved_message(run) + "; restore the required launch witness")
+        if run.get("recovery_authority") is not None:
+            recovered(run)
+        elif run.get("execution", {}).get("recovery_authority_sha256"):
+            raise ValueError("restore the coordinator recovery authority")
     for row in journal_entries or ():
         execution = row.get("execution", {})
         if (row.get("unit") != unit or any(row.get(k) != v for k, v in basis.items())
@@ -351,6 +355,70 @@ def binding_lock(state_dir, unit, basis):
 
 def publication_digest(run):
     return record_digest({"receipts": run["receipts"], "final": run.get("final")})
+
+
+def recovery_binding(run):
+    return {"launch_id": run["launch_id"], "stage": run["stage"],
+            "request_sha256": record_digest(run["request"]),
+            "receipts_sha256": record_digest(run["receipts"])}
+
+
+def validate_recovery_attestation(attestation, run):
+    """Explicit operator testimony, never a probe or inferred liveness result."""
+    if (not isinstance(attestation, dict)
+            or set(attestation) != {"binding", "supervisor", "jobs", "privileged_requeue"}
+            or attestation["binding"] != recovery_binding(run)):
+        raise ValueError("recovery attestation does not bind the exact launch and completed receipts")
+    for subject in ("supervisor", "jobs", "privileged_requeue"):
+        proof = attestation[subject]
+        if (not isinstance(proof, dict) or set(proof) != {"status", "evidence"}
+                or proof["status"] != "fenced"
+                or not isinstance(proof["evidence"], str) or not proof["evidence"].strip()):
+            raise ValueError("recovery requires attested fencing of " + subject
+                             + "; unreachable or missing evidence is not proof")
+
+
+def recovery_complete(run):
+    """Revalidate existing bytes; authority never creates a completion receipt."""
+    checks = run["request"]["checks"]
+    if (not checks or set(run["receipts"]) != {str(i) for i in range(len(checks))}
+            or run.get("error")):
+        raise ValueError("recovery requires every complete bound receipt without evidence conflicts")
+    for index in range(len(checks)):
+        receipt = run["receipts"][str(index)]
+        validate_receipt(receipt, run["request"], index)
+        # An attestation supplies lifecycle authority, never Slurm success.
+        if receipt["outcome"]["exit_code"] == 0:
+            execution = dict(receipt["execution"])
+            for key in ("job_id", "sacct_state", "sacct_exit_code"):
+                if key in run["execution"]:
+                    execution[key] = run["execution"][key]
+            problem = execution_problem(dict(result="pass", exit_code=0,
+                candidate_tree=run["request"]["basis"]["candidate_tree"], execution=execution))
+            if problem:
+                raise ValueError(problem)
+
+
+def recovered(run):
+    proof = run.get("recovery_authority")
+    if proof is None:
+        return False
+    if (not isinstance(proof, dict) or proof.get("evidence_class") != "attested"
+            or not isinstance(proof.get("by"), str) or not proof["by"].strip()
+            or not isinstance(proof.get("at"), str) or not proof["at"]):
+        raise ValueError("invalid coordinator recovery authority")
+    validate_recovery_attestation(proof.get("attestation"), run)
+    recovery_complete(run)
+    return True
+
+
+def apply_recovery(run):
+    # Called only after the authority has been fsynced in the coordinator ledger.
+    run["reconciled"] = True
+    run.pop("ack", None)  # No remote cleanup acknowledgment is minted.
+    run["execution"].update(quiescent=True, evidence_reconciled=True,
+                            recovery_evidence_class="attested",
+                            recovery_authority_sha256=record_digest(run["recovery_authority"]))
 
 
 def acknowledge(state_dir, unit, basis, launch_id, digest):
@@ -708,6 +776,15 @@ def cleanup_slurm(stage, request, reconciled):
         if not evidence["scheduler_confirmed"]:
             raise ValueError(evidence["discovery_error"])
         if not finished:
+            # Read-only diagnosis: terminal success can survive supervisor loss,
+            # but it grants neither quiescence nor cancellation/cleanup authority.
+            states = {j: scheduler_state(j) for j in jobs}
+            evidence.update(discover_slurm_jobs(request, jobs))
+            if (evidence["scheduler_confirmed"] and evidence["queued_job_ids"] == []
+                    and jobs and set(evidence["job_ids"]) == set(states)
+                    and all(s == ("COMPLETED", "0:0") for s in states.values())
+                    and collect(stage).get("final")):
+                evidence.update(sacct_state="COMPLETED", sacct_exit_code="0:0")
             raise ValueError("supervision may still submit or publish a job ID; stage retained")
         if not jobs:
             raise ValueError("Slurm job identity unresolved; stage retained")
@@ -1106,7 +1183,7 @@ def retrieve_records(run, call, save):
 
 
 def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, unit,
-               journal_entries, retrieve_only=False):
+               journal_entries, retrieve_only=False, recovery=None):
     """Persist intent before launch and ingest completed receipts monotonically.
 
     A pending invocation only retrieves its original stage, even if the caller
@@ -1119,6 +1196,8 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
         raise ValueError("remote verification requires coordinator journal entries")
     with binding_lock(state_dir, unit, basis) as path:
         ledger = load_ledger(path, unit, basis, journal_entries)
+        if recovery is not None and not retrieve_only:
+            raise ValueError("recovery requires retrieval of an existing launch")
         for previous_run in ledger["runs"]:
             if revoke_negative_observation(previous_run):
                 publish(path, ledger)
@@ -1158,13 +1237,33 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
             "launch_id": run["launch_id"], "cleanup": "unconfirmed",
             "executables": {key: {"path": remote[key], "version": None}
                             for key in ("python", "git")}})
+        if recovery is not None:
+            attestation, approver = recovery
+            if not isinstance(approver, str) or not approver.strip():
+                raise ValueError("recovery requires a named operator")
+            validate_recovery_attestation(attestation, run)
+            recovery_complete(run)
+            if run.get("recovery_authority") is not None:
+                if run["recovery_authority"]["attestation"] != attestation:
+                    raise ValueError("conflicting recovery authority")
+            else:
+                run["recovery_authority"] = dict(evidence_class="attested", by=approver,
+                    at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    attestation=attestation)
+                run["published"] = False
+                publish(path, ledger)  # Authority durable BEFORE changing disposition.
+        recovery_active = recovered(run)
+        if recovery_active:
+            apply_recovery(run)
+            publish(path, ledger)
         if not retry and not ssh:
             # No transport was attempted. A missing local client cannot create
             # unresolved remote evidence or require retrieval from a fake stage.
             execution.pop("launch_id")
             execution.update(stage=None, cleanup="not-created")
             return [incomplete("ssh is unavailable") for _ in checks], execution
-        prefix = [ssh, "-oBatchMode=yes", "-oConnectTimeout=15", remote["ssh_alias"]] if ssh else None
+        prefix = ([ssh, "-oBatchMode=yes", "-oConnectTimeout=15", remote["ssh_alias"]]
+                  if ssh and not recovery_active else None)
         error = None
 
         def receive(proc):
