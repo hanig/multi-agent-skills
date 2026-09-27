@@ -33,10 +33,15 @@ class ReconcileTests(unittest.TestCase):
         (self.bin / "gh").write_text("#!" + sys.executable + "\n" + '''import json, os, sys
 from pathlib import Path
 args = sys.argv[1:]
-assert args[:2] == ['api', 'graphql'], args
-assert 'states:MERGED' in args[args.index('-f') + 1], args
 with open(os.environ['CALLS'], 'a') as output:
     output.write(json.dumps(args) + '\\n')
+if args[:2] == ['repo', 'view']:
+    assert args[3:] == ['--json', 'url'], args
+    print(os.environ.get('GH_REPO_RAW', json.dumps({'url': os.environ.get(
+        'GH_RESOLVED_URL', 'https://github.com/example/project')})))
+    sys.exit(int(os.environ.get('GH_REPO_EXIT', '0')))
+assert args[:2] == ['api', 'graphql'], args
+assert 'states:MERGED' in args[args.index('-f') + 1], args
 pages = json.loads(Path(os.environ['FORGE']).read_text())
 if isinstance(pages, dict) and 'raw' in pages:
     print(pages['raw'])
@@ -254,6 +259,35 @@ print(json.dumps(pages[int(cursor)]))
         self.write_state("git@github.com:example/project.git")
         self.assertEqual(self.run_cli()[0], 0)
         self.assertEqual(self.run_cli("--repo", "example/project")[0], 0)
+
+    def test_shorthand_uses_gh_resolved_host_without_changing_source(self):
+        self.remote = "https://github.example.invalid/example/project"
+        self.env["GH_RESOLVED_URL"] = self.remote
+        self.write_state()
+        self.record()
+        self.set_pages([self.pr()])
+        before = {p.name: p.read_bytes() for p in self.state.iterdir()}
+        code, report = self.run_cli("--repo", "example/project")
+        self.assertEqual(code, 0, report)
+        self.assertEqual(report["status"], "CLEAN")
+        self.assertEqual(report["merged_prs_checked"], 1)
+        self.assertEqual(report["repository"], "github.example.invalid/example/project")
+        self.assertEqual(before, {p.name: p.read_bytes() for p in self.state.iterdir()})
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+        self.assertEqual(calls[0], ["repo", "view", "example/project", "--json", "url"])
+        self.assertEqual(calls[1][calls[1].index("--hostname") + 1], "github.example.invalid")
+
+    def test_shorthand_resolution_failure_is_unreadable(self):
+        for raw in ("garbage", "[]", "{}", '{"url": 1}', '{"url": "example/project"}',
+                    "[" * 10000 + "0" + "]" * 10000):
+            with self.subTest(raw=raw[:40]):
+                self.env["GH_REPO_RAW"] = raw
+                code, report = self.run_cli("--repo", "example/project")
+                self.assertEqual(code, 2, report)
+                self.assertEqual(report["status"], "UNREADABLE")
+        self.env.pop("GH_REPO_RAW")
+        self.env["GH_REPO_EXIT"] = "1"
+        self.assertEqual(self.run_cli("--repo", "example/project")[0], 2)
 
     def test_unknown_anchor_and_invalid_timestamp_are_errors(self):
         self.assertEqual(self.run_cli("--since", "yesterday")[0], 2)
