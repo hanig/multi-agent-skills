@@ -10,6 +10,7 @@ import base64
 from contextlib import contextmanager
 import fcntl
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -717,6 +718,34 @@ def slurm_quiescent(evidence, request):
                 and state[0] in TERMINAL for state in states.values()))
 
 
+def observe_slurm_success(request, known=()):
+    """Read-only execution evidence; never grants launch quiescence."""
+    evidence = discover_slurm_jobs(request, known)
+    states = {j: scheduler_state(j) for j in evidence["job_ids"]} if evidence["scheduler_confirmed"] else {}
+    evidence.update(discover_slurm_jobs(request, evidence["job_ids"]))
+    evidence.update(launch_id=request["launch_id"], cleanup_sacct_states=states)
+    if (slurm_quiescent(evidence, request)
+            and all(tuple(state) == ("COMPLETED", "0:0") for state in states.values())):
+        evidence.update(job_id=evidence["job_ids"][0], sacct_state="COMPLETED", sacct_exit_code="0:0")
+    return evidence
+
+
+def slurm_success_probe(run):
+    # Send current coordinator code without rewriting an older staged harness.
+    known = list(run["execution"].get("job_ids", []))
+    if run["execution"].get("job_id") is not None:
+        known.append(run["execution"]["job_id"])
+    if any(not isinstance(j, str) or not re.fullmatch(r"[0-9]+", j) for j in known):
+        raise ValueError("invalid saved Slurm job identity")
+    code = ("import hashlib, json, re, subprocess, sys, time\n"
+            "sys.path.insert(0, %r)\nimport child_environment as CE\n"
+            "TERMINAL = %r\n") % (run["stage"], TERMINAL)
+    for function in (_command, scheduler_state, slurm_job_name, discover_slurm_jobs,
+                     slurm_quiescent, observe_slurm_success):
+        code += inspect.getsource(function) + "\n"
+    return code + "print(json.dumps(observe_slurm_success(%r, %r)))\n" % ({"launch_id": run["launch_id"]}, known)
+
+
 def cleanup_slurm(stage, request, reconciled):
     """Require every launch job terminal, supervision finished, and an exact ack.
 
@@ -776,15 +805,6 @@ def cleanup_slurm(stage, request, reconciled):
         if not evidence["scheduler_confirmed"]:
             raise ValueError(evidence["discovery_error"])
         if not finished:
-            # Read-only diagnosis: terminal success can survive supervisor loss,
-            # but it grants neither quiescence nor cancellation/cleanup authority.
-            states = {j: scheduler_state(j) for j in jobs}
-            evidence.update(discover_slurm_jobs(request, jobs))
-            if (evidence["scheduler_confirmed"] and evidence["queued_job_ids"] == []
-                    and jobs and set(evidence["job_ids"]) == set(states)
-                    and all(s == ("COMPLETED", "0:0") for s in states.values())
-                    and collect(stage).get("final")):
-                evidence.update(sacct_state="COMPLETED", sacct_exit_code="0:0")
             raise ValueError("supervision may still submit or publish a job ID; stage retained")
         if not jobs:
             raise ValueError("Slurm job identity unresolved; stage retained")
@@ -1333,6 +1353,25 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
                     error = "ssh/remote transport exited {}: {}".format(proc.returncode, proc.stderr[-2000:])
                 return proc.stdout
             retrieve_records(run, frame_call, lambda: publish(path, ledger))
+        if (prefix and remote["executor"] == "slurm" and checks
+                and len(run["receipts"]) == len(checks)
+                and (execution.get("sacct_state"), execution.get("sacct_exit_code")) != ("COMPLETED", "0:0")):
+            # Old supervisors can die before saving terminal success. Observe it
+            # using current coordinator code; neither this probe nor its absence
+            # can reconcile the launch. Ordinary cleanup still observes last.
+            try:
+                proc = remote_call(prefix, remote, slurm_success_probe(run))
+                if proc.returncode or len(proc.stdout) > 100000:
+                    raise ValueError("terminal-success observation unavailable")
+                observed = json.loads(proc.stdout)
+                if (slurm_quiescent(observed, run["request"])
+                        and all(tuple(s) == ("COMPLETED", "0:0")
+                                for s in observed["cleanup_sacct_states"].values())):
+                    execution.update(job_id=observed["job_ids"][0], sacct_state="COMPLETED",
+                        sacct_exit_code="0:0", recovery_success_observed_at=observed["scheduler_observed_at"])
+                    publish(path, ledger)
+            except (OSError, ValueError, TypeError, AttributeError, KeyError, subprocess.SubprocessError) as exc:
+                execution["recovery_observation_error"] = str(exc)[-2000:]
         if error:
             run["transport_error"] = error
         # Raw evidence is durable before authorizing remote removal. This is

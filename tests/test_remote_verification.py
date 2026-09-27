@@ -1105,6 +1105,39 @@ class TestRemoteVerification(unittest.TestCase):
         self.assert_ok(self.verify('--retrieve-remote-evidence'))
         self.assert_ok(self.admitted())  # Uses only the fixture gh on replaced PATH.
 
+    def test_old_staged_harness_recovers_without_receipt_or_harness_rewrite(self):
+        self.slurm_policy()
+        self.authorize_both(PYTHON + 'raise SystemExit(0)\n')
+        self.mode.write_text('slurm-supervisor-died')
+        # Retain the original missing-marker cleanup behavior, with no current
+        # coordinator observation helpers available in the staged harness.
+        base = (Path(RV.__file__).read_text() + '\n').encode()
+        original = b'        if not finished:\n            raise ValueError("supervision may still submit or publish a job ID; stage retained")'
+        self.assertIn(original, base)
+        text = base.decode()
+        start = text.index('def observe_slurm_success(')
+        end = text.index('def cleanup_slurm(', start)
+        base = (text[:start] + text[end:]).encode()
+        self.f.env['LEGACY_HARNESS'] = str(self.f.directory / 'legacy-harness.py')
+        Path(self.f.env['LEGACY_HARNESS']).write_bytes(base)
+        fixture = SSH.replace("if mode in ('tamper', 'direct-supervisor-died'):",
+                              "if mode in ('tamper', 'direct-supervisor-died', 'slurm-supervisor-died'):")
+        needle = '                dest.addfile(member, io.BytesIO(data))'
+        fixture = fixture.replace(needle,
+            "                if member.name == 'remote_verify.py' and mode == 'slurm-supervisor-died':\n"
+            "                    data = pathlib.Path(os.environ['LEGACY_HARNESS']).read_bytes()\n"
+            "                    member.size = len(data)\n" + needle)
+        self.write_ssh(fixture)
+        self.assert_pending(self.verify())
+        path, before, proof = self.recovery_proof()
+        staged = Path(before['stage']) / 'remote_verify.py'
+        self.assertEqual(staged.read_bytes(), base)
+        self.assertEqual(before['execution']['sacct_state'], 'COMPLETED')
+        self.assert_ok(self.resolve_remote(proof))
+        self.assertEqual(staged.read_bytes(), base)
+        self.assertEqual(read_json(path)['runs'][-1]['receipts'], before['receipts'])
+        self.assert_ok(self.admitted())
+
     def test_supervisor_loss_recovery_preserves_completed_fail(self):
         self.slurm_policy()
         self.authorize_both(PYTHON + 'raise SystemExit(7)\n')
