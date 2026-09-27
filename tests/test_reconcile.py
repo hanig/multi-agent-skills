@@ -223,6 +223,46 @@ print(json.dumps(pages[int(cursor)]))
         self.assertEqual(report["errors"][0]["source"], "forge")
         self.assertIn("recursion", report["errors"][0]["detail"])
 
+    def test_nonstandard_constants_at_owned_json_boundaries_are_unreadable(self):
+        for constant in (float("nan"), float("inf"), float("-inf")):
+            for source in ("state", "merge", "forge", "repository"):
+                with self.subTest(constant=constant, source=source):
+                    self.write_state()
+                    self.set_pages([])
+                    extra = []
+                    path = None
+                    if source in ("state", "merge"):
+                        if source == "merge":
+                            self.record()
+                        path = self.state / (R.S.STATE_FILE if source == "state" else "merge-unit-test.json")
+                        data = json.loads(path.read_text())
+                        data["ignored"] = constant
+                        path.write_text(json.dumps(data))
+                    elif source == "forge":
+                        data = json.loads(self.forge.read_text())[0]
+                        data["ignored"] = constant
+                        self.forge.write_text(json.dumps({"raw": json.dumps(data)}))
+                    else:
+                        self.env["GH_REPO_RAW"] = json.dumps({"url": self.remote, "ignored": constant})
+                        extra = ["--repo", "example/project"]
+                    try:
+                        code, report = self.run_cli(*extra)
+                        self.assertEqual(code, 2, report)
+                        self.assertEqual(report["status"], "UNREADABLE")
+                    finally:
+                        self.env.pop("GH_REPO_RAW", None)
+                        if source == "merge":
+                            path.unlink()
+
+    def test_json_strings_and_large_numbers_remain_readable(self):
+        for raw in ('"NaN"', '"Infinity"', "1e999", "-1e999"):
+            with self.subTest(raw=raw):
+                self.write_state()
+                path = self.state / R.S.STATE_FILE
+                path.write_text(path.read_text()[:-1] + ', "ignored": ' + raw + '}')
+                code, report = self.run_cli()
+                self.assertEqual(code, 0, report)
+
     def test_special_files_in_every_state_reader_are_unreadable(self):
         for name in (R.S.STATE_FILE, R.S.OUTBOX, R.S.RECEIPTS, "merge-unit-fifo.json"):
             with self.subTest(name=name):
