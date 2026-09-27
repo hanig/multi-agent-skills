@@ -2253,6 +2253,36 @@ else:
         self.assertEqual(read_json(self.stage / 'cleanup.json'), result)
         self.assert_queue_last(result)
 
+    def test_probe_late_completion_is_retryable_and_keeps_queue_last(self):
+        self.configure({'321': 'RUNNING'})
+        scheduler = self.bin / 'sacct'
+        source = scheduler.read_text()
+        emit = "        print(job + '|' + ('COMPLETED' if state.get('stale_terminal') else state['jobs'][job]) + '|0:0')"
+        self.assertIn(emit, source)
+        scheduler.write_text(source.replace(emit, emit +
+            "\n        state['jobs'][job] = 'COMPLETED'"
+            "\n        state_path.write_text(json.dumps(state))"))
+        shutil.copyfile(Path(RV.__file__).with_name('child_environment.py'),
+                        self.stage / 'child_environment.py')
+        run = dict(launch_id=self.launch, stage=str(self.stage), execution={},
+                   request=self.request)
+        code = RV.slurm_success_probe(run)
+        results = []
+        for _ in range(2):
+            probe = subprocess.run([sys.executable, '-c', code], capture_output=True,
+                                   text=True, check=True, timeout=30)
+            result = json.loads(probe.stdout)
+            results.append(result)
+            self.assert_queue_last(result)
+        first, later = results
+        # Discovery supplies identities and a queue snapshot, never fresh states.
+        # A nonterminal accounting read cannot become success from an empty queue.
+        self.assertEqual(first['cleanup_sacct_states'], {'321': None})
+        self.assertFalse(RV.slurm_quiescent(first, self.request))
+        self.assertNotIn('sacct_state', first)
+        self.assertEqual((later['sacct_state'], later['sacct_exit_code']), ('COMPLETED', '0:0'))
+        self.assertNotIn('quiescent', later, 'scheduler success is not launch authority')
+
     def test_final_new_identity_retains_then_recovers_from_saved_identity(self):
         self.configure({'321': 'COMPLETED'}, final_new_id=True)
         ack = self.ack()
