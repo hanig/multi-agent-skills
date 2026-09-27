@@ -302,7 +302,18 @@ def load_ledger(path, unit, basis, journal_entries=None):
 
 
 def unresolved(run):
-    return not run.get("reconciled") or not run.get("published")
+    return (not run.get("reconciled") or not run.get("published")
+            or run.get("execution", {}).get("quiescent") is False)
+
+
+def revoke_negative_observation(run):
+    """Repair mutable flags, never receipts; callers persist under binding_lock."""
+    if run.get("execution", {}).get("quiescent") is False:
+        run.update(reconciled=False, published=False)
+        run.pop("ack", None)
+        run["execution"]["evidence_reconciled"] = False
+        return True
+    return False
 
 
 def unresolved_message(run):
@@ -351,6 +362,7 @@ def acknowledge(state_dir, unit, basis, launch_id, digest):
                 if publication_digest(run) != digest:
                     raise ValueError("remote evidence changed before publication acknowledgment; retrieve it again")
                 run["published"] = True
+                revoke_negative_observation(run)
                 publish(path, ledger)
                 return
         raise ValueError("unknown remote evidence launch")
@@ -600,10 +612,11 @@ def discover_slurm_jobs(request, known=()):
     jobs, queued, errors = set(known), set(), []
     # Widthless -o fields use the full value without padding (squeue(1));
     # adding display widths or normalizing returned identities would lose this.
+    # sacct -P is parsable2 (no trailing delimiter), unlike lowercase -p.
     queries = [
-        ("squeue", ["squeue", "-h", "--name", name, "--format=%i|%j"]),
         ("sacct", ["sacct", "-n", "-P", "-X", "--name", name,
-                   "--starttime", "1970-01-01", "--format=JobIDRaw,JobName%80"])]
+                   "--starttime", "1970-01-01", "--format=JobIDRaw,JobName%80"]),
+        ("squeue", ["squeue", "-h", "--name", name, "--format=%i|%j"])]
     for source, argv in queries:
         try:
             rc, out, err = _command(argv)
@@ -619,7 +632,8 @@ def discover_slurm_jobs(request, known=()):
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             errors.append(source + ": " + str(exc))
     return {"job_name": name, "job_ids": sorted(jobs), "queued_job_ids": sorted(queued),
-            "scheduler_confirmed": not errors, "discovery_error": "; ".join(errors)}
+            "scheduler_confirmed": not errors, "discovery_error": "; ".join(errors),
+            "scheduler_observed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 
 
 def slurm_quiescent(evidence, request):
@@ -697,7 +711,7 @@ def cleanup_slurm(stage, request, reconciled):
             raise ValueError("supervision may still submit or publish a job ID; stage retained")
         if not jobs:
             raise ValueError("Slurm job identity unresolved; stage retained")
-        states, cancelled = {}, False
+        states = {}
         for job in jobs:
             state = scheduler_state(job)
             # Resolve a changing snapshot before cancelling a just-finished job.
@@ -725,12 +739,15 @@ def cleanup_slurm(stage, request, reconciled):
                 publish_cleanup(history, evidence)
                 # Even a failed scancel can race with normal job completion.
                 # Its exit never substitutes for fresh terminal accounting.
-                cancelled = True
                 state = scheduler_state(job)
             if state is not None:
                 states[job] = list(state)
-        if cancelled:
-            evidence.update(discover_slurm_jobs(request, jobs))
+        # Finite observation contract: accounting by name, then the live queue,
+        # always after all individual accounting/cancellation calls. New IDs
+        # retain the stage for the next retrieval; do not query them after this
+        # snapshot. A privileged requeue after it remains possible: --no-requeue
+        # and worker-started protect receipts, not an atomic scheduler fence.
+        evidence.update(discover_slurm_jobs(request, evidence["job_ids"]))
         evidence["cleanup_sacct_states"] = states
         evidence["quiescent"] = slurm_quiescent(evidence, request)
         if not evidence["quiescent"]:
@@ -962,6 +979,7 @@ def ingest(run, response):
     lifecycle = response.get("lifecycle")
     if isinstance(lifecycle, dict) and lifecycle.get("stage") == run["stage"]:
         run["execution"].update(lifecycle)
+        revoke_negative_observation(run)
     if run["reconciled"]:
         run["ack"] = evidence_digest(response)
     if problems:
@@ -1101,6 +1119,9 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
         raise ValueError("remote verification requires coordinator journal entries")
     with binding_lock(state_dir, unit, basis) as path:
         ledger = load_ledger(path, unit, basis, journal_entries)
+        for previous_run in ledger["runs"]:
+            if revoke_negative_observation(previous_run):
+                publish(path, ledger)
         pending = [run for run in ledger["runs"] if unresolved(run)]
         if retrieve_only and not pending:
             if not ledger["runs"]:
@@ -1235,6 +1256,8 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
                         or cleaned.get("cleanup") not in ("removed", "unconfirmed")):
                     raise ValueError("invalid remote cleanup response")
                 execution.update(cleaned)
+                if revoke_negative_observation(run):
+                    publish(path, ledger)
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 execution["cleanup_error"] = str(exc)[-2000:]
         outcomes = []
