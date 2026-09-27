@@ -1879,11 +1879,46 @@ else:
         self.assertTrue(self.stage.exists())
 
     def test_unreadable_job_id_uses_scheduler_identity(self):
-        (self.stage / 'job-id').mkdir()
+        path = self.stage / 'job-id'
+        for kind in ('directory', 'invalid-utf8'):
+            with self.subTest(kind=kind):
+                if kind == 'directory':
+                    path.mkdir()
+                else:
+                    path.rmdir()
+                    path.write_bytes(b'\xff')
+                result = RV.cleanup(self.stage, self.ack())
+                self.assertEqual(result['job_id'], '321')
+                self.assertEqual(result['cleanup'], 'unconfirmed')
+                self.assertTrue(self.stage.exists())
+
+    def test_job_finishing_after_queue_snapshot_needs_no_cancellation(self):
+        (self.bin / 'squeue').write_text(PYTHON + 'import json\nfrom pathlib import Path\n'
+            'p=Path(%r)\ns=json.loads(p.read_text())\n'
+            'if s["jobs"]["321"] != "COMPLETED":\n'
+            ' print("321|" + %r)\n'
+            ' s["jobs"]["321"]="COMPLETED"\n p.write_text(json.dumps(s))\n'
+            % (str(self.state), self.name))
         result = RV.cleanup(self.stage, self.ack())
-        self.assertEqual(result['job_id'], '321')
-        self.assertEqual(result['cleanup'], 'unconfirmed')
-        self.assertTrue(self.stage.exists())
+        self.assertEqual(result['cleanup'], 'removed')
+        self.assertTrue(result['quiescent'])
+        self.assertEqual(result['cancellation'], 'not-required')
+        calls = [json.loads(line)[0] for line in self.log.read_text().splitlines()]
+        self.assertNotIn('scancel', calls)
+        self.assertFalse(self.stage.exists())
+
+    def test_failed_scancel_racing_with_completion_uses_terminal_evidence(self):
+        (self.bin / 'scancel').write_text(PYTHON + 'import json\nfrom pathlib import Path\n'
+            'p=Path(%r)\ns=json.loads(p.read_text())\n'
+            's["jobs"]["321"]="COMPLETED"\np.write_text(json.dumps(s))\n'
+            'raise SystemExit(1)\n' % str(self.state))
+        result = RV.cleanup(self.stage, self.ack())
+        self.assertEqual(result['cleanup'], 'removed')
+        self.assertTrue(result['quiescent'])
+        self.assertEqual(result['cancellation'], 'unconfirmed')
+        self.assertEqual(result['cancellation_attempts'][0]['exit_code'], 1)
+        self.assertEqual(result['cleanup_sacct_states'], {'321': ['COMPLETED', '0:0']})
+        self.assertFalse(self.stage.exists())
 
     def test_slurm_cleanup_lock_prevents_scheduler_mutation(self):
         with (self.stage / 'cleanup.lock').open('a') as lock:

@@ -583,7 +583,6 @@ def publish_cleanup(path, evidence):
     publish(path, evidence)
 
 
-
 def slurm_job_name(request):
     """Stable across loss of the supervisor's job-id file; no host information."""
     return "verify-" + hashlib.sha256(request["launch_id"].encode("utf-8")).hexdigest()
@@ -599,6 +598,8 @@ def discover_slurm_jobs(request, known=()):
     """
     name = slurm_job_name(request)
     jobs, queued, errors = set(known), set(), []
+    # Widthless -o fields use the full value without padding (squeue(1));
+    # adding display widths or normalizing returned identities would lose this.
     queries = [
         ("squeue", ["squeue", "-h", "--name", name, "--format=%i|%j"]),
         ("sacct", ["sacct", "-n", "-P", "-X", "--name", name,
@@ -653,7 +654,7 @@ def cleanup_slurm(stage, request, reconciled):
             if re.fullmatch(r"[0-9]+", raw_job):
                 job = raw_job
                 known.add(job)
-        except OSError:
+        except (OSError, UnicodeError):
             pass
         finished = None
         try:
@@ -699,7 +700,13 @@ def cleanup_slurm(stage, request, reconciled):
         states, cancelled = {}, False
         for job in jobs:
             state = scheduler_state(job)
-            # A live queue row overrides stale terminal accounting (e.g. requeue).
+            # Resolve a changing snapshot before cancelling a just-finished job.
+            # A still-live row overrides terminal accounting (e.g. requeue).
+            if state is not None and job in evidence["queued_job_ids"]:
+                evidence.update(discover_slurm_jobs(request, evidence["job_ids"]))
+                if not evidence["scheduler_confirmed"]:
+                    raise ValueError(evidence["discovery_error"])
+                state = scheduler_state(job)
             if state is None or job in evidence["queued_job_ids"]:
                 if len(attempts) >= 4:
                     raise ValueError("cancellation attempt limit reached; stage retained")
@@ -716,8 +723,8 @@ def cleanup_slurm(stage, request, reconciled):
                 evidence["cancellation"] = ("requested" if attempt["exit_code"] == 0
                                             else "unconfirmed")
                 publish_cleanup(history, evidence)
-                if attempt["exit_code"] != 0:
-                    raise ValueError("cancellation unconfirmed; stage retained")
+                # Even a failed scancel can race with normal job completion.
+                # Its exit never substitutes for fresh terminal accounting.
                 cancelled = True
                 state = scheduler_state(job)
             if state is not None:
@@ -1272,8 +1279,7 @@ def main():
         {key: execution.get(key) for key in ("job_id", "sacct_state", "sacct_exit_code")},
         launch_id=request["launch_id"]), once=True)
     if request["verification_host"]["executor"] == "slurm":
-        # No acknowledgment is
-        # available yet, so cleanup may cancel but cannot remove the evidence.
+        # No acknowledgment is available yet: cancellation cannot remove evidence.
         cleanup(stage)
     # Direct stages await durable coordinator reconciliation before cleanup.
     print(json.dumps(collect(stage)))
