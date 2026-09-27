@@ -112,19 +112,23 @@ class TestReleaseValidationWorkflow(unittest.TestCase):
     def assert_regression_timeout(self, workflow):
         jobs_block = mapping_block(workflow, "jobs", 0)
         regression_block = mapping_block(jobs_block, "regression", 2)
-        self.assertGreaterEqual(
-            int(yaml_scalar(regression_block, "timeout-minutes", 4)), 40
-        )
+        timeout = yaml_scalar(regression_block, "timeout-minutes", 4)
+        # Keep this workflow's timeout a plain integer, without coercing strings.
+        self.assertIs(type(timeout), int)
+        self.assertGreaterEqual(timeout, 40)
 
     def test_regression_timeout_allows_full_suite_to_finish(self):
         self.assert_regression_timeout(self.workflow)
 
-    def test_timeout_policy_accepts_quotes_and_inline_comments(self):
-        for value in ('"45"', "'45'", "45 # headroom", '"45" # headroom'):
+    def test_timeout_policy_requires_plain_integer_at_least_40(self):
+        workflow = "jobs:\n  regression:\n    timeout-minutes: "
+        for value in ("40", "45", "45 # headroom"):
             with self.subTest(value=value):
-                self.assert_regression_timeout(
-                    "jobs:\n  regression:\n    timeout-minutes: " + value
-                )
+                self.assert_regression_timeout(workflow + value)
+        for value in ("25", '"45"'):
+            with self.subTest(value=value):
+                with self.assertRaises(AssertionError):
+                    self.assert_regression_timeout(workflow + value)
 
     def test_policy_accepts_equivalent_block_style_sequences(self):
         block_style = self.workflow.replace(
