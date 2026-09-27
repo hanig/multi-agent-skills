@@ -48,8 +48,8 @@ Keep actual host and resource values in that private policy. The remote root
 must exist. The supervisor submits and polls; only the allocated worker runs
 verification.
 
-A cleanup-unconfirmed warning means the stage was retained. Inspect the reported
-job IDs, launch job name and `cleanup.json`; a successful cancellation request
+A cleanup-unconfirmed warning means removal was not confirmed; retain any
+surviving stage. Inspect the reported job IDs, launch job name and `cleanup.json`; a successful cancellation request
 alone does not establish termination. Cleanup needs terminal accounting for all
 launch jobs, finished supervision and acknowledged claim evidence. Missing job
 IDs are recovered by name from `squeue` and `sacct`; unavailable or empty discovery

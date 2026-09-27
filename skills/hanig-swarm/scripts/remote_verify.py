@@ -772,14 +772,19 @@ def cleanup(stage, reconciled=None):
     A zero scancel status confirms a request; only terminal accounting allows
     removal. Unknown supervision, journal failure or exhaustion retains the stage.
     """
+    evidence = {"cleanup": "unconfirmed", "stage": str(stage)}
+    if not stage.exists():
+        return dict(evidence, cleanup="removed" if reconciled else "unconfirmed")
     try:
         request = json.loads((stage / "request.json").read_text())
-        if request["verification_host"]["executor"] == "slurm":
-            return cleanup_slurm(stage, request, reconciled)
-    except (OSError, ValueError, KeyError, TypeError):
-        # The existing path below still requires collect() before removal.
-        pass
-    evidence = {"cleanup": "unconfirmed", "stage": str(stage)}
+        executor = request["verification_host"]["executor"]
+        if executor not in ("direct", "slurm"):
+            raise ValueError("invalid cleanup executor")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        # Unknown policy must never route a Slurm stage through direct cleanup.
+        return dict(evidence, cleanup_error="cannot read cleanup request: " + str(exc)[-2000:])
+    if executor == "slurm":
+        return cleanup_slurm(stage, request, reconciled)
     lock = None
     try:
         if not stage.exists():

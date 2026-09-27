@@ -798,6 +798,10 @@ class TestRemoteVerification(unittest.TestCase):
         stage.mkdir()
         (stage / 'job-id').write_text('321')
         (stage / 'supervision-finished').write_text('{}')
+        # Exercise the legacy cleanup plumbing; TestSlurmLifecycle below uses
+        # a real Slurm request and scheduler processes for the discovery path.
+        (stage / 'request.json').write_text(json.dumps({
+            'verification_host': {'executor': 'direct'}}))
         return stage
 
     def test_secondary_cleanup_cannot_remove_stage_before_submission_finishes(self):
@@ -1919,6 +1923,28 @@ else:
         self.assertEqual(result['cancellation_attempts'][0]['exit_code'], 1)
         self.assertEqual(result['cleanup_sacct_states'], {'321': ['COMPLETED', '0:0']})
         self.assertFalse(self.stage.exists())
+
+    def test_transient_request_error_cannot_bypass_slurm_discovery(self):
+        (self.stage / 'job-id').write_text('321')
+        RV.publish(self.stage / 'supervision-finished', {
+            'launch_id': self.launch, 'job_id': '321',
+            'sacct_state': 'COMPLETED', 'sacct_exit_code': '0:0'})
+        ack = self.ack()
+        original, failed = Path.read_text, []
+        def transient(path, *args, **kwargs):
+            if path == self.stage / 'request.json' and not failed:
+                failed.append(True)
+                raise OSError('transient request read')
+            return original(path, *args, **kwargs)
+        with mock.patch.object(Path, 'read_text', transient):
+            result = RV.cleanup(self.stage, ack)
+        self.assertEqual(result['cleanup'], 'unconfirmed')
+        self.assertTrue(self.stage.exists())
+        self.assertIn('cannot read cleanup request', result['cleanup_error'])
+        recovered = RV.cleanup(self.stage, ack)
+        self.assertEqual(recovered['job_id'], '321')
+        self.assertEqual(recovered['cleanup'], 'unconfirmed')
+        self.assertFalse(recovered['quiescent'])
 
     def test_slurm_cleanup_lock_prevents_scheduler_mutation(self):
         with (self.stage / 'cleanup.lock').open('a') as lock:
