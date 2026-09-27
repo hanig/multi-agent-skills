@@ -1319,6 +1319,31 @@ def _repository_identity(value):
     return (match.group(1) or match.group(2), match.group(3))
 
 
+def _gh_repository_identity(locator, cwd):
+    """Let gh resolve its own default host; validate its read-only reply."""
+    proc = subprocess.Popen(["gh", "repo", "view", locator, "--json", "url"],
+                            cwd=cwd, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            start_new_session=True)
+    incomplete = None
+    try:
+        raw, incomplete = _read_bounded(proc)
+        if incomplete or raw is None:
+            raise ValueError("incomplete repository probe")
+        proc.wait(timeout=REAP_GRACE_S)
+        if proc.returncode:
+            raise ValueError("repository probe failed")
+        data = json.loads(raw.decode("utf-8"), parse_constant=_reject_constant)
+        if not isinstance(data, dict):
+            raise ValueError("repository probe is not an object")
+        return _repository_identity(data.get("url"))
+    finally:
+        if incomplete or proc.poll() is None:
+            _reap(proc)
+        else:
+            proc.stdout.close()
+
+
 def repository_is_bound(payload, command, state):
     """Validate source provenance independently of a parseable empty probe.
 
@@ -1366,9 +1391,7 @@ def repository_is_bound(payload, command, state):
             if (len(rest) < 2 or rest[0] not in ("pr", "issue")
                     or any("--repo" in word or word.startswith(("-R", "--hostname")) or "://" in word for word in rest)):
                 return False
-            if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", locator):
-                locator = "https://" + (os.environ.get("GH_HOST") or "github.com") + "/" + locator
-            expected = _repository_identity(locator)
+            expected = _gh_repository_identity(locator, cwd)
         else:
             return False
         # Nonblocking open plus a regular-file check also refuses FIFO input.
