@@ -34,7 +34,6 @@ Remove `--dry-run` to execute after inspecting the preview. The operator must su
 
 Before a new merge, at least one CI check must exist and every check must report `SUCCESS`; failed or unavailable reads also refuse. An exit-0 scope report must be an object with in_scope status, matching unit/attempt/head, a valid base ID, a scope list of strings, and empty outside/deletion lists; malformed success cannot be waived. Scope exits 1 and 2 require `--allow-unchecked-scope "reason"`, recorded with the approver and scope result (or verbatim malformed stdout/stderr on a nonzero exit) in a durable `merge-unit-OPERATION.json` in the state directory. An already merged matching PR is reconciled without reapplying current CI or scope policy; a different head or target refuses. New intents retain captured scope stdout/stderr in addition to the parsed report; legacy intents lacking raw fields retain their original observations without reconstructing lost text. Original precondition observations remain in an existing intent, while a newly observed historical merge does not fabricate them. An exact existing receipt is reused, and an older receipt with the wrong repository spelling is supplemented by the correct anchored URL. Dry-run prints the conditional command sequence with placeholders for the unobserved PR URL and commit IDs, performs no forge calls or state writes, and exits 2. Ordinary exit 0 means the receipt exists and advance returned success. To resolve an investigated uncertain request, pass `--abandon-intent OPERATION_ID --approver "Operator" --reason "Investigation outcome"`. The named operation must be the current unresolved intent for this attempt and PR. OPEN at the judged head records abandonment and exits 0 without merging or advancing; MERGED at that head reconciles instead, while a different head or target refuses. The atomic, fsynced `merge-abandonment-OPERATION.json` beside the retained intent records the original intent, who, why, the observed PR, and UTC observation time. The intent is marked `resolved_by_abandonment`; a crash between record publication and marking is repaired from the record on the next invocation. The next ordinary call can create one successor intent with a new operation ID and rechecks scope and CI. A second abandonment of the old ID refuses, including after a successor was created. <!-- declaration: code.merge-command -->
 
-Forge routing supports standard HTTP(S) and SSH remotes without explicit ports and keeps the observed HTTP(S) PR URL; ports are refused rather than silently discarded. Reconciliation requires a single-parent squash result; merge observations and the squash method remain attested. The actual merge parent's SHA supplies `--target-commit`, including when the target moved after the original observation. Head matching does not atomically freeze CI reruns or concurrent PR retargeting, and a one-parent result alone does not distinguish squash from a one-commit rebase by another operator. <!-- declaration: limit.merge-command -->
 
 The command never resubmits an unresolved merge request: a queued request, a lost response, or a crash between intent persistence and transmission leaves a durable operation for inspection. Rerun after GitHub reports MERGED to record and advance, or explicitly abandon the investigated OPEN request using the recorded path above. Neither action deletes the intent. Abandonment attests an OPEN observation; it cannot prove an earlier queued request will never execute, so the named operator retains responsibility for investigating that uncertainty. The intent and abandonment journals retain the same-node trusted-writer boundary. The local coordinator lease is released before advance acquires it; advancement can still halt or retain a unit for its existing verification policy. A successful advance does not assert that every unit closed. <!-- declaration: limit.merge-command -->
 
@@ -56,7 +55,6 @@ The receipt is an attestation, not independently verified tracker state. Without
 
 The tracker mirrors coordinator state, and GitHub's pull-request attachment does not perform the issue transition. <!-- declaration: tracker.authority -->
 
-The sweep examines every in-progress issue regardless of age and repeats after each dispatch, push, merge, and close. A dispatch immediately records the tracker event that moves every covered issue to in progress with its unit; the connector applies it when available, while an outage leaves pending synchronization without blocking unrelated dispatch. A stopped attempt that did not ship similarly records its state and preservation ref. <!-- declaration: tracker.reconcile -->
 
 Blocking relationships are recorded as tracker relations, established at filing and at dispatch, and dispatch order is read from the resulting graph. A dependency stated only in an issue's prose is not traversable, so no query surfaces what a piece of work is waiting on. <!-- declaration: tracker.dag -->
 
@@ -68,52 +66,17 @@ The reporting order incorporates the still-open pull request 60 source material:
 
 The order and the dispatch action are part of the decision surface rather than a pointer-only recommendation. Before the report is written, step-three dispatches reach the tracker or the report names their pending synchronization when the connector is unavailable. <!-- declaration: report.three-parts -->
 
-## Hourly read-only bypass check
+## Hourly reconciliation
 
-Run this alongside the hourly loop, supplying every coordinator state directory
-for the repository and a window that overlaps the preceding successful check:
+The hourly loop includes this comparison, with every coordinator state directory for the repository and a window overlapping the preceding successful observation:
 
 ```bash
 python3 "$HANIG_ORCHESTRATE_DIR/scripts/reconcile.py" \
   --state-dir "$STATE" --since 2026-09-26T00:00:00Z --json
 ```
 
-`--repo OWNER/REPO` (or a forge URL) defaults to the checkout's origin;
-`--branch` defaults to `main`. Repeat `--state-dir` for older runs. Supply
-`--since` with a timezone and/or `--limit N` for the most recently merged N PRs.
-With both, the limit applies within the inclusive time window. Pagination uses
-update time as an upper bound on unseen merge times, so a comment on an old PR
-does not substitute that PR for a newer merge. This is a live observation,
-not an atomic forge snapshot; retry a changed or unreadable page.
+The sweep examines every in-progress issue regardless of age and repeats after each dispatch, push, merge, and close. A dispatch immediately records the tracker event that moves every covered issue to in progress with its unit; the connector applies it when available, while an outage leaves pending synchronization without blocking unrelated dispatch. A stopped attempt that did not ship similarly records its state and preservation ref. The read-only reconciler defaults to the checkout origin and branch `main`; `--repo OWNER/REPO` (or a forge URL) and `--branch` select alternatives. Repeated `--state-dir` includes older runs. Its window is an inclusive timezone-bearing `--since`, the most recently merged `--limit N` PRs, or both. UNMEDIATED MERGE means no matching record accounts for the PR, repository, target and historical head/merge; the operator investigates bypass and reconciles evidence and tracker obligations. UNACKNOWLEDGED OBLIGATION means a matching source's outbox intent lacks a receipt; the operator resolves ambiguity by receiver read-back or deduplication before draining and attesting. MISMATCHED SOURCE means coordinator anchors name another repository or several; the operator selects the correct source, while the mismatched source contributes neither merge nor obligation coverage. Missing anchors are unreadable. Exit 0 means all sources were read without findings; exit 1 means findings; exit 2 means unreadable input and precludes a clean report. The command changes no forge, tracker or coordinator state. <!-- declaration: tracker.reconcile -->
 
-- **UNMEDIATED MERGE:** no matching merge-unit record was found for the PR,
-  repository, target and head/merge. Investigate the bypass and reconcile its
-  evidence and tracker obligations through the authorized operating procedure.
-  A pending merge request accounts for a lost response; a cancelled or abandoned
-  request does not account for a later merge. A historical reconciliation record
-  establishes only that the merge was recorded, not who executed it.
-- **UNACKNOWLEDGED OBLIGATION:** an outbox intent lacks a receipt. Resolve an
-  ambiguous operation by receiver read-back or deduplication, then drain and
-  attest it through the existing procedure. Absence of a receipt does not mean
-  the tracker operation never happened.
-- **MISMATCHED SOURCE:** coordinator launch anchors name another repository (or
-  several repositories). Select the correct source; it contributes no merge
-  or obligation coverage. State without repository anchors is unreadable for this check.
+Forge routing supports standard HTTP(S) and SSH remotes without explicit ports and keeps the observed HTTP(S) PR URL; ports are refused rather than silently discarded. Reconciliation requires a single-parent squash result; merge observations and the squash method remain attested. The actual merge parent's SHA supplies `--target-commit`, including when the target moved after the original observation. Head matching does not atomically freeze CI reruns or concurrent PR retargeting, and a one-parent result alone does not distinguish squash from a one-commit rebase by another operator. The same credential can bypass `merge_unit.py`. This detects bypass after the fact; it does not prevent it. Coverage is limited to supplied directories and the merged-PR window, so a direct push without a merged PR is outside the comparison. A pending request accounts for a lost response; cancelled or abandoned requests do not account for later merges. Historical reconciliation attests recording, not who executed the merge. A matching pending record cannot distinguish a lost response from a later direct merge of the same PR and head; this check establishes record presence, never execution attribution. The observation is not an atomic forge snapshot; a changed or unreadable page calls for a retry. <!-- declaration: limit.merge-command -->
 
-Exit 0 means every source was read and the selected window has no findings;
-exit 1 means findings; exit 2 means some input could not be read. Never report a
-clean check after exit 2. The command changes no forge, tracker or coordinator
-state. Its coverage is limited to the supplied directories and merged PR window;
-a direct push without a merged PR is outside this comparison.
-
-`merge_unit.py` can be bypassed with the same credential. This detects bypass
-after the fact; it does not prevent it. The hook also remains a reminder: it
-reports counts only when coordinator launch anchors match the command's
-repository. Its conservative identity check supports a single literal
-`git [-C DIR] push origin ...` without push options, or an explicit
-`gh ... --repo OWNER/REPO` (`-R` also works). Other routing, compound commands,
-missing anchors and malformed identity inputs produce “cannot confirm tracker
-state for this repository” rather than an all-clear; action detection is unchanged.
-
-The hook preserves hostname spelling when comparing identities; different
-spellings report unknown. It does not case-fold a value before deciding.
+The hook resolves a supported `gh` locator through a bounded `gh repo view` read, then reports counts after exact anchor matching for a single literal `git [-C DIR] push origin ...` without push options, or explicit `gh ... --repo OWNER/REPO` (`-R` also works). Other routing, compound commands, malformed inputs, missing anchors and differing hostname spellings produce repository-specific uncertainty. Hostname spelling is preserved in the comparison, and action detection is unchanged.

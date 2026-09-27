@@ -115,7 +115,8 @@ def run_hook(command, env_overrides=None, timeout=60):
         raise AssertionError(
             "expected exactly one wired tracker-sync command, got %r" % (commands,))
     env["CLAUDE_PROJECT_DIR"] = REPO_ROOT
-    env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env.get("PATH", "")
+    if not env_overrides or "PATH" not in env_overrides:
+        env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env.get("PATH", "")
     proc = subprocess.run(
         ["/bin/sh", "-c", commands[0]],
         input=payload.encode("utf-8"),
@@ -1430,7 +1431,25 @@ class TrackerSyncHookProvenance(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.repo = fake_repo(PROBE_EMPTY, os.path.join(self.tmp.name, "repo"))
         self.state = os.path.join(self.tmp.name, "state")
-        self.env = {"HANIG_TRACKER_REPO": self.repo, "HANIG_TRACKER_STATE_DIR": self.state}
+        self.bin = os.path.join(self.tmp.name, "bin")
+        os.mkdir(self.bin)
+        os.symlink(sys.executable, os.path.join(self.bin, "python3"))
+        os.symlink(shutil.which("git"), os.path.join(self.bin, "git"))
+        gh = os.path.join(self.bin, "gh")
+        with open(gh, "w") as handle:
+            handle.write("#!" + sys.executable + "\n" + textwrap.dedent("""
+                import json, os, sys
+                assert sys.argv[1:3] == ['repo', 'view'], sys.argv
+                assert sys.argv[4:] == ['--json', 'url'], sys.argv
+                locator = sys.argv[3]
+                host = os.environ.get('GH_HOST') or os.environ.get('HOOK_GH_DEFAULT_HOST', 'github.com')
+                url = locator if '://' in locator else 'https://' + host + '/' + locator
+                print(os.environ.get('HOOK_GH_OUTPUT', json.dumps({'url': url})))
+                sys.exit(int(os.environ.get('HOOK_GH_EXIT', '0')))
+            """))
+        os.chmod(gh, 0o755)
+        self.env = {"HANIG_TRACKER_REPO": self.repo, "HANIG_TRACKER_STATE_DIR": self.state,
+                    "PATH": self.bin, "GH_HOST": "github.com"}
 
     def context(self, command="git push origin HEAD"):
         code, output, error = run_hook(command, self.env)
@@ -1519,6 +1538,27 @@ class TrackerSyncHookProvenance(unittest.TestCase):
                                 "https://github.com/example/"], check=True)
                 self.assertNotIn("total 0", self.context())
                 subprocess.run(["git", "-C", self.repo, "config", "--unset", key], check=True)
+
+    def test_gh_default_host_is_resolved_by_gh_not_guessed(self):
+        self.env["GH_HOST"] = None
+        self.env["HOOK_GH_DEFAULT_HOST"] = "github.example.invalid"
+        command = "gh pr merge 7 --repo example/project"
+        self.assertNotIn("total 0", self.context(command))
+        with open(os.path.join(self.state, "swarm-state.json"), "w") as handle:
+            json.dump({"units": {"u": {"attempt_launch_facts": {
+                "a1": {"repository_remote": "https://github.example.invalid/example/project"}}}}}, handle)
+        self.assertIn("total 0", self.context(command))
+
+    def test_gh_identity_reply_requires_success_and_valid_shape(self):
+        for payload in ("garbage", "[]", "{}", '{"url": 1}', '{"url": "https://github.com/example/project", "extra": NaN}'):
+            with self.subTest(payload=payload):
+                self.env["HOOK_GH_OUTPUT"] = payload
+                context = self.context("gh pr merge 7 --repo example/project")
+                self.assertIn("Cannot confirm tracker state for this repository", context)
+                self.assertNotIn("total 0", context)
+        self.env["HOOK_GH_OUTPUT"] = '{"url": "https://github.com/example/project"}'
+        self.env["HOOK_GH_EXIT"] = "1"
+        self.assertNotIn("total 0", self.context("gh pr merge 7 --repo example/project"))
 
     def test_relative_state_locator_resolves_once(self):
         fake_repo("""
