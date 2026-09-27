@@ -78,7 +78,8 @@ never to silence, because the conditions that silence it are the ones
 during which the tracker is most likely adrift. And "total 0" is the most
 reassuring sentence available here, so it must be the hardest to reach by
 accident: it requires a probe that started, exited zero, produced strict
-UTF-8, parsed as standard JSON, and matched the outbox shape.
+UTF-8, parsed as standard JSON, matched the outbox shape, and was bound through coordinator launch anchors
+to the repository the command addressed. Unsupported routing is unknown.
 
 ## The second recurrence: coverage instead of depth
 
@@ -169,6 +170,7 @@ import re
 import select
 import shlex
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1305,6 +1307,121 @@ def read_outbox(repo, state):
                len(pending))), None
 
 
+def _repository_identity(value):
+    """Accept only unambiguous forge locators; strip syntax, never truncate."""
+    if not isinstance(value, str):
+        raise ValueError("missing repository identity")
+    match = re.fullmatch(
+        r"(?:(?:https?://|ssh://git@)([A-Za-z0-9.-]+)/|git@([A-Za-z0-9.-]+):)"
+        r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?", value)
+    if not match:
+        raise ValueError("unsupported repository identity")
+    return (match.group(1) or match.group(2), match.group(3))
+
+
+def _gh_repository_identity(locator, cwd):
+    """Let gh resolve its own default host; validate its read-only reply."""
+    proc = subprocess.Popen(["gh", "repo", "view", locator, "--json", "url"],
+                            cwd=cwd, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            start_new_session=True)
+    incomplete = None
+    try:
+        raw, incomplete = _read_bounded(proc)
+        if incomplete or raw is None:
+            raise ValueError("incomplete repository probe")
+        proc.wait(timeout=REAP_GRACE_S)
+        if proc.returncode:
+            raise ValueError("repository probe failed")
+        data = json.loads(raw.decode("utf-8"), parse_constant=_reject_constant)
+        if not isinstance(data, dict):
+            raise ValueError("repository probe is not an object")
+        return _repository_identity(data.get("url"))
+    finally:
+        if incomplete or proc.poll() is None:
+            _reap(proc)
+        else:
+            proc.stdout.close()
+
+
+def repository_is_bound(payload, command, state):
+    """Validate source provenance independently of a parseable empty probe.
+
+    Counts are available for a single literal `git [-C DIR] push origin ...`
+    or an explicit `gh ... --repo OWNER/REPO` command. Other shell/routing
+    forms still get the reminder, but identity is unknown. No shell is run.
+    Coordinator launch anchors must all name the command's forge repository.
+    """
+    try:
+        if len(command) > _COMMAND_LEX_LIMIT or re.search(r"[$`;\n&|<>(){}*?\\]", command):
+            return False
+        words = shlex.split(command)
+        cwd = payload.get("cwd")
+        if not isinstance(cwd, str) or not os.path.isabs(cwd):
+            return False
+        # These can override Git routing outside the literal command.
+        if any(name in os.environ for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")):
+            return False
+        if words and words[0] == "git":
+            words = words[1:]
+            if words[:1] == ["-C"] and len(words) >= 3:
+                cwd = os.path.abspath(os.path.join(cwd, words[1]))
+                words = words[2:]
+            if words[:2] != ["push", "origin"]:
+                return False
+            if any(not re.fullmatch(r"[A-Za-z0-9_./:+@^~-]+", word) for word in words[2:]):
+                return False
+            # --repo is a push option that can override the positional remote.
+            if any(word.startswith("-") for word in words[2:]):
+                return False
+            result = subprocess.run(["git", "remote", "get-url", "--push", "--all", "origin"],
+                                    cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    timeout=5, check=True)
+            remotes = result.stdout.decode("utf-8").splitlines()
+            if len(remotes) != 1:
+                return False
+            expected = _repository_identity(remotes[0])
+        elif words and words[0] == "gh":
+            selectors = [i for i, word in enumerate(words) if word in ("--repo", "-R")]
+            if len(selectors) != 1 or selectors[0] + 1 >= len(words):
+                return False
+            index = selectors[0]
+            locator = words[index + 1]
+            rest = words[1:index] + words[index + 2:]
+            if (len(rest) < 2 or rest[0] not in ("pr", "issue")
+                    or any("--repo" in word or word.startswith(("-R", "--hostname")) or "://" in word for word in rest)):
+                return False
+            expected = _gh_repository_identity(locator, cwd)
+        else:
+            return False
+        # Nonblocking open plus a regular-file check also refuses FIFO input.
+        fd = os.open(os.path.join(state, "swarm-state.json"), os.O_RDONLY | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return False
+            raw = handle.read(_OUTPUT_LIMIT + 1)
+        if len(raw) > _OUTPUT_LIMIT:
+            return False
+        value = json.loads(raw.decode("utf-8"), parse_constant=_reject_constant)
+        if not isinstance(value, dict) or not isinstance(value.get("units"), dict):
+            return False
+        anchors = set()
+        for unit in value["units"].values():
+            if not isinstance(unit, dict):
+                return False
+            for field in ("attempt_launch_facts", "attempt_launch_intents"):
+                attempts = unit.get(field, {})
+                if not isinstance(attempts, dict):
+                    return False
+                for anchor in attempts.values():
+                    if not isinstance(anchor, dict):
+                        return False
+                    anchors.add(_repository_identity(anchor.get("repository_remote")))
+        return anchors == {expected}
+    except (OSError, ValueError, TypeError, RecursionError, subprocess.SubprocessError):
+        return False
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
@@ -1345,10 +1462,15 @@ def main():
                       "%s." % repo + unknown_suffix)
         return 0
 
+    state = os.path.abspath(state)
     report, problem = read_outbox(repo, state)
     if report is None:
         emit(prefix + "%s Could not read the outbox at %s."
              % (problem, state) + unknown_suffix)
+        return 0
+    if not repository_is_bound(payload, command, state):
+        emit(prefix + "Cannot confirm tracker state for this repository: "
+             "the command and coordinator source could not be bound." + unknown_suffix)
         return 0
     emit(prefix + report + ". If it did run, reflect it in Linear now; the "
          "issue comment is part of the action, not a follow-up. Draining is "
