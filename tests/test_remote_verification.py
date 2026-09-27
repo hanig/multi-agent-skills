@@ -1,0 +1,1729 @@
+"""Remote verification through the real operator, Git bundle, SSH and Slurm shims."""
+import base64
+import hashlib
+import fcntl
+import io
+import json
+import os
+from pathlib import Path
+import shlex
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import unittest
+from unittest import mock
+
+from tests import test_arc683_shared_guard as fixtures
+
+S, V = fixtures.S, fixtures.V
+RV = V.RV
+PYTHON = '#!' + sys.executable + '\n'
+
+def read_json(path):
+    return json.loads(path.read_text())
+
+
+SSH = r'''
+import io, json, os, pathlib, subprocess, sys, tarfile
+args = sys.argv[1:]
+assert args[:2] == ['-oBatchMode=yes', '-oConnectTimeout=15']
+assert args[2] == 'fixture-host'
+command = args[3]
+with open(os.environ['REMOTE_LOG'], 'a') as log:
+    log.write(json.dumps(args) + '\n')
+if "tarfile" in command:
+    records = list(pathlib.Path(os.environ['REMOTE_LEDGER_DIR']).glob('*.json'))
+    assert records, 'coordinator launch must be durable before SSH'
+    assert any(any(run['stage'] in command for run in json.loads(p.read_text())['runs'])
+               for p in records), 'SSH launch must have its exact saved locator'
+    for record in records:
+        ledger = json.loads(record.read_text())
+        for run in ledger['runs']:
+            if run['stage'] in command:
+                marker = record.with_suffix('.launches') / (run['launch_id'] + '.json')
+                witness = json.loads(marker.read_text())
+                assert run['witness_required'] is True
+                assert witness['unit'] == ledger['unit'] and witness['basis'] == ledger['basis']
+                assert all(witness[key] == run[key] for key in
+                           ('launch_id', 'stage', 'verification_host', 'request'))
+    mode = pathlib.Path(os.environ['REMOTE_MODE']).read_text()
+    if mode == 'ssh-fail': raise SystemExit(255)
+    raw = sys.stdin.buffer.read()
+    if mode == 'tamper':
+        dst = io.BytesIO()
+        with tarfile.open(fileobj=io.BytesIO(raw)) as source, tarfile.open(fileobj=dst, mode='w') as dest:
+            for member in source:
+                data = source.extractfile(member).read()
+                if member.name == 'candidate.bundle':
+                    data = pathlib.Path(os.environ['TAMPER_BUNDLE']).read_bytes()
+                    member.size = len(data)
+                dest.addfile(member, io.BytesIO(data))
+        raw = dst.getvalue()
+    result = subprocess.run(['/bin/sh', '-c', command], input=raw,
+                            stdout=subprocess.DEVNULL if mode in ('ssh-lost-response', 'ssh-lost-both') else None)
+    if mode in ('ssh-lost-response', 'ssh-lost-both', 'ssh-complete-255'): raise SystemExit(255)
+else:
+    if pathlib.Path(os.environ['REMOTE_MODE']).read_text() in ('cleanup-ssh-fail', 'ssh-lost-both'):
+        raise SystemExit(255)
+    result = subprocess.run(['/bin/sh', '-c', command])
+raise SystemExit(result.returncode)
+'''
+
+SBATCH = r'''
+import json, os, pathlib, subprocess, sys
+with open(os.environ['SCHED_LOG'], 'a') as log:
+    log.write(json.dumps(['sbatch'] + sys.argv[1:]) + '\n')
+assert '--no-requeue' in sys.argv
+assert '--partition=fixture-cpu' in sys.argv
+assert '--mem=2G' in sys.argv
+assert '--time=00:05:00' in sys.argv
+if pathlib.Path(os.environ['REMOTE_MODE']).read_text() not in ('slurm-missing', 'slurm-pending'):
+    result = subprocess.run(['/bin/sh', sys.argv[-1]], capture_output=True)
+    assert result.returncode == 0, result.stderr
+    if pathlib.Path(os.environ['REMOTE_MODE']).read_text() == 'slurm-forced-requeue':
+        pathlib.Path(os.environ['REMOTE_MODE']).write_text('pass')
+        result = subprocess.run(['/bin/sh', sys.argv[-1]], capture_output=True)
+        assert result.returncode == 0, result.stderr
+print('321')
+'''
+
+SACCT = r'''
+import os, pathlib
+mode = pathlib.Path(os.environ['REMOTE_MODE']).read_text()
+print('321|PENDING|0:0' if mode == 'slurm-pending' else
+      '321|CANCELLED|0:0' if mode == 'slurm-cancelled' else
+      '321|FAILED|1:0' if mode in ('slurm-missing', 'slurm-completed-fail') else '321|COMPLETED|0:0')
+'''
+
+
+class TestRemoteVerification(unittest.TestCase):
+    def setUp(self):
+        self.shared = fixtures.TestSharedGuard()
+        self.shared.setUp()
+        self.addCleanup(self.shared.doCleanups)
+        self.f = self.shared.f
+        self.journal = self.f.state_dir / S.VERIFY_RECEIPTS
+        self.mode = self.f.directory / 'remote-mode'
+        self.mode.write_text('pass')
+        self.remote_root = self.f.directory / 'remote-root'
+        self.remote_root.mkdir()
+        self.witness = self.f.directory / 'verifier-ran'
+        self.f.env.update(REMOTE_LOG=str(self.f.directory / 'ssh.log'),
+                          REMOTE_MODE=str(self.mode), SCHED_LOG=str(self.f.directory / 'scheduler.log'),
+                          REMOTE_LEDGER_DIR=str(self.f.state_dir / 'remote-verifications'))
+        for name, body in (('ssh', SSH), ('sbatch', SBATCH), ('sacct', SACCT),
+                           ('scancel', 'import os\nfrom pathlib import Path\n'
+                            'p=Path(os.environ["REMOTE_MODE"])\n'
+                            'if p.read_text() == "slurm-pending": p.write_text("slurm-cancelled")\n')):
+            program = self.f.bin / name
+            program.write_text(PYTHON + body)
+            program.chmod(0o755)
+        self.policy = {'schema_version': 1,
+                       'local': {'python': sys.executable, 'git': str((self.f.bin / 'git').resolve())},
+                       'verification_host': {'ssh_alias': 'fixture-host', 'executor': 'direct',
+                                  'workdir_root': str(self.remote_root), 'python': sys.executable,
+                                  'git': str((self.f.bin / 'git').resolve())}}
+        self.save_policy()
+        self.journal.unlink()
+
+    def assert_ok(self, result):
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def assert_failed(self, result):
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def write_ssh(self, body):
+        (self.f.bin / 'ssh').write_text(PYTHON + body)
+
+    def locations(self):
+        yield 'remote'
+        self.local_only()
+        yield 'local'
+
+    def disabled_slurm_policy(self):
+        self.policy['verification_host'].update(executor='slurm', slurm={
+            'partition': 'fixture-cpu', 'mem': '2G', 'time': '00:05:00'})
+        self.save_policy()
+
+    def generic_verify(self, target):
+        return subprocess.run([
+            sys.executable, S.__file__, 'verify', '--state-dir', str(self.f.state_dir),
+            '--unit', 'u', '--attempt', str(self.f.attempt), '--claim', V.INTEGRATION_CLAIM,
+            '--target-commit', target, '--verifier', V.MERGE_VERIFIER,
+            '--path', str(self.f.repo / V.MERGE_VERIFIER_PATH)],
+            cwd=self.f.repo, env=self.f.env, capture_output=True, text=True, timeout=60)
+
+    def empty_system_path(self):
+        empty = self.f.directory / 'empty-defpath'
+        empty.mkdir()
+        (empty / 'env').symlink_to(shutil.which('env', path=os.defpath))
+        site = self.f.directory / 'default-git-probe'
+        site.mkdir()
+        (site / 'sitecustomize.py').write_text('import os\nos.defpath = %r\n' % str(empty))
+        self.f.env['PYTHONPATH'] = str(site)
+
+    def assert_pending(self, result):
+        self.assert_failed(result)
+        self.assertIn('unresolved remote evidence at', result.stderr)
+
+    def merges(self):
+        return self.f.calls(['pr', 'merge'])
+
+    def local_only(self):
+        self.policy.pop('verification_host')
+        self.save_policy()
+
+    def capture_timeout(self, needle):
+        site = self.f.directory / 'transport-timeout'
+        site.mkdir()
+        (site / 'sitecustomize.py').write_text(
+            'import pathlib, subprocess, sys\n'
+            'if sys.argv[0].endswith("merge_unit.py"):\n'
+            '    original = subprocess.run\n'
+            '    def capture(argv, *args, **kwargs):\n'
+            '        result = original(argv, *args, **kwargs)\n'
+            '        if pathlib.Path(argv[0]).name == "ssh" and %r in argv[-1]:\n'
+            '            raise subprocess.TimeoutExpired(argv, 1, output=result.stdout.encode(), stderr=b"")\n'
+            '        return result\n'
+            '    subprocess.run = capture\n' % needle)
+        self.f.env['PYTHONPATH'] = str(site)
+
+    def legacy_prefix(self):
+        row = dict(self.f.record_integration(), schema_version=1, execution=None)
+        raw = json.dumps(row).encode() + b'\n'
+        self.journal.write_bytes(raw)
+        return raw
+
+    def save_policy(self):
+        (self.f.state_dir / RV.POLICY).write_text(json.dumps(self.policy))
+
+    def authorize_program(self, program):
+        policy = dict(self.f.policy, verifiers=[dict(
+            self.f.policy['verifiers'][0], sha256=hashlib.sha256(program.encode()).hexdigest())])
+        return self.shared.precondition.target_commit({V.MERGE_VERIFIER_PATH: program,
+                                                       V.POLICY_FILE: json.dumps(policy)})
+
+    def program(self, tail=''):
+        return self.authorize_program(
+            (PYTHON + 'from pathlib import Path\n'
+             'Path(%r).write_text("ran")\n' % str(self.witness)) + tail)
+
+    def test_launcher_does_not_repeat_verifier_python_startup(self):
+        site = self.f.directory / 'verifier-site'
+        site.mkdir()
+        counter = self.f.directory / 'startup-count'
+        (site / 'sitecustomize.py').write_text(
+            'from pathlib import Path\np=Path(%r)\n'
+            'p.write_text(str(int(p.read_text())+1) if p.exists() else "1")\n' % str(counter))
+        wrapper = self.f.directory / 'declared-python-wrapper'
+        wrapper.write_text(PYTHON + 'import os,sys\n'
+                           'os.execv(%r, [%r]+sys.argv[1:])\n' % (sys.executable, sys.executable))
+        wrapper.chmod(0o755)
+        original = json.loads(json.dumps(self.policy))
+        for selected, expected in ((sys.executable, 1), (str(wrapper), 2)):
+            program = ('#!/usr/bin/env -S PYTHONHOME=' + sys.base_prefix + ' PYTHONPATH=' + str(site) + ' python3\n'
+                       'from pathlib import Path\nimport os,sys\n'
+                       'assert sys.flags.isolated == 0 and sys.flags.no_site == 0\n'
+                       'assert os.environ["PYTHONPATH"] == %r\n'
+                       'count=Path(%r).read_text()\nprint("startup count="+count)\n'
+                       'assert count == %r, count\n' % (str(site), str(counter), str(expected)))
+            control = self.f.directory / 'startup-control'
+            control.write_text(program)
+            if counter.exists():
+                counter.unlink()
+            native = subprocess.run([selected, str(control)],
+                                    env=dict(self.f.env, PYTHONPATH=str(site), PYTHONHOME=sys.base_prefix),
+                                    capture_output=True, text=True, timeout=10)
+            self.assert_ok(native)
+            self.authorize_program(program)
+            self.policy = json.loads(json.dumps(original))
+            self.policy['local']['python'] = selected
+            self.policy['verification_host']['python'] = selected
+            self.save_policy()
+            for location in ('remote', 'local'):
+                with self.subTest(selected=selected, location=location):
+                    if location == 'local':
+                        self.local_only()
+                    counter.unlink()
+                    result = self.verify()
+                    self.assert_ok(result)
+                    row = self.rows()[-1]
+                    self.assertEqual(row['result'], 'pass')
+                    self.assertEqual(counter.read_text(), str(expected))
+                    self.assertEqual(row['stdout_tail'], native.stdout)
+                    self.assertEqual(row['execution']['executables']['python']['path'],
+                                     os.path.realpath(selected))
+                    self.assert_clean()
+
+    def authorize_both(self, program):
+        self.shared.install_policy(repetitions=1, program=program)
+        policy = self.shared.policy
+        policy['verifiers'][0]['sha256'] = hashlib.sha256(program.encode()).hexdigest()
+        return self.shared.precondition.target_commit({V.MERGE_VERIFIER_PATH: program,
+                                                       V.POLICY_FILE: json.dumps(policy)})
+
+    def admit_stable(self, target):
+        row = next(r for r in self.rows() if r['claim'] == V.STABILITY_CLAIM)
+        return S.admit_verification(self.f.state_dir, 'u', V.STABILITY_CLAIM, self.f.head,
+                                   row['policy_sha256'], self.shared.policy, repo=self.f.repo,
+                                   base_commit=target, runner=self.f.verifier_runner)
+
+    def test_generic_admission_blocks_same_basis_but_allows_distinct_binding(self):
+        first = self.authorize_both(PYTHON + 'print("pass")\n')
+        host = self.policy.pop('verification_host')
+        self.save_policy()
+        self.assertEqual(self.verify().returncode, 0)
+        self.policy['verification_host'] = host
+        self.save_policy()
+        self.mode.write_text('ssh-lost-response')
+        old = "    if mode in ('ssh-lost-response', 'ssh-lost-both', 'ssh-complete-255'): raise SystemExit(255)"
+        new = ("    for marker in pathlib.Path(os.environ['REMOTE_ROOT']).glob('verify-*/supervision-finished'):\n"
+               "        marker.unlink()\n") + old
+        self.f.env['REMOTE_ROOT'] = str(self.remote_root)
+        self.write_ssh(SSH.replace(old, new))
+        self.assertNotEqual(self.verify().returncode, 0)
+        admitted, error = self.admit_stable(first)
+        self.assertIsNone(admitted, 'an earlier local PASS must not escape the same pending basis')
+        self.assertIn('unresolved remote evidence at', error)
+        journal = self.f.state_dir / S.VERIFY_RECEIPTS
+        saved = journal.read_bytes()
+        partial = next(r for r in self.rows() if r['claim'] == V.STABILITY_CLAIM)
+        partial.pop('candidate_tree')
+        journal.write_text(json.dumps(partial) + '\n')
+        admitted, error = self.admit_stable(first)
+        self.assertIsNone(admitted)
+        self.assertIn('basis', error)
+        journal.write_bytes(saved)
+        second = self.shared.precondition.target_commit({'other-target.txt': 'distinct binding\n'})
+        self.local_only()
+        self.mode.write_text('pass')
+        result = self.verify()
+        self.assert_ok(result)
+        admitted, error = self.admit_stable(second)
+        self.assertIsNone(error, error)
+        self.assertEqual(admitted['target_commit'], second)
+        legacy = dict(admitted, schema_version=1)
+        for key in V.MERGE_BASIS_FIELDS + ('execution',):
+            legacy.pop(key)
+        for optional in ({}, {'execution': None}):
+            journal.write_text(json.dumps(dict(legacy, **optional)) + '\n')
+            admitted, error = self.admit_stable(second)
+            self.assertIsNone(error, error)
+            self.assertEqual(admitted['schema_version'], 1)
+        self.assertEqual(self.merges(), [])
+
+    def test_generic_stability_completed_failure_poisons_later_pass(self):
+        verdict = self.f.directory / 'stable-verdict'
+        verdict.write_text('fail')
+        target = self.authorize_both(PYTHON + 'from pathlib import Path\n'
+                                    'raise SystemExit(125 if Path(%r).read_text() == "fail" else 0)\n'
+                                    % str(verdict))
+        self.assertNotEqual(self.verify().returncode, 0)
+        verdict.write_text('pass')
+        self.assertEqual(self.verify().returncode, 0)
+        admitted, error = self.admit_stable(target)
+        self.assertIsNone(admitted)
+        self.assertIn('FAIL', error)
+
+    def test_large_old_receipts_retrieve_without_reexecution_or_harness_upgrade(self):
+        for character, code in (('x', 0), ('\U0001f642', 0), ('\U0001f642', 125), ('\x00', 0), ('\x00', 125)):
+            with self.subTest(character=repr(character), exit_code=code):
+                self.authorize_both(PYTHON + 'import sys\n'
+                                    'sys.stdout.write(%r * 5000)\nsys.stderr.write(%r * 3000)\n'
+                                    'raise SystemExit(%d)\n' % (character, character, code))
+                self.mode.write_text('ssh-lost-both')
+                self.assertNotEqual(self.verify().returncode, 0)
+                stage = Path(self.rows()[-1]['execution']['stage'])
+                originals = {p.name: p.read_bytes() for p in stage.iterdir() if p.is_file()}
+                for name in ('remote_verify.py', 'verify.py'):
+                    (stage / name).unlink()
+                before = self.ssh_launches()
+                self.mode.write_text('pass')
+                retrieved = self.verify('--retrieve-remote-evidence')
+                self.assertEqual(retrieved.returncode, 0 if code == 0 else 1,
+                                 retrieved.stdout + retrieved.stderr)
+                for row in self.rows()[-2:]:
+                    self.assertEqual((row['result'], row['exit_code']),
+                                     ('pass' if code == 0 else 'fail', code))
+                    self.assertEqual(row['stdout_tail'], character * 4000)
+                    self.assertEqual(row['stderr_tail'], character * 2000)
+                    self.assertTrue(row['execution']['evidence_reconciled'])
+                    self.assertEqual(row['execution']['cleanup'], 'unconfirmed')
+                ledger = RV.load_ledger(RV.ledger_path(self.f.state_dir, 'u',
+                    {k: self.rows()[-1][k] for k in V.MERGE_BASIS_FIELDS}), 'u',
+                    {k: self.rows()[-1][k] for k in V.MERGE_BASIS_FIELDS}, self.rows())
+                run = ledger['runs'][-1]
+                for index in range(2):
+                    name = 'claim-%d.json' % index
+                    self.assertEqual((stage / name).read_bytes(), originals[name])
+                    self.assertEqual(run['receipts'][str(index)], json.loads(originals[name]))
+                self.assertEqual(self.ssh_launches(), before)
+                for name in ('remote_verify.py', 'verify.py'):
+                    (stage / name).write_bytes(originals[name])
+                count = len(self.rows())
+                self.verify('--retrieve-remote-evidence')
+                self.assertEqual(len(self.rows()), count)
+                self.assertFalse(stage.exists())
+                self.assertEqual(self.ssh_launches(), before)
+                self.assertEqual(self.merges(), [])
+
+    def test_chunk_frames_survive_transport_failure_and_later_claim_loss(self):
+        self.authorize_both(PYTHON + 'import sys\n'
+                            'sys.stdout.write("\\U0001f642" * 5000)\nraise SystemExit(125)\n')
+        self.mode.write_text('ssh-lost-both')
+        self.assertNotEqual(self.verify().returncode, 0)
+        stage = Path(self.rows()[-1]['execution']['stage'])
+        second = (stage / 'claim-1.json').read_bytes()
+        header = (stage / 'request.json').read_bytes()
+        (stage / 'claim-1.json').unlink()
+        (stage / 'request.json').unlink()
+        # Every frame is complete but its SSH process exits 255; the later
+        # missing claim/header must not erase the first completed failure.
+        old = "    result = subprocess.run(['/bin/sh', '-c', command])"
+        self.assertIn(old, SSH)
+        persisted = self.f.directory / 'claim-fsynced'
+        audit = ("if \"'claim-1.json', 0,\" in __import__('shlex').split(command)[-1]:\n"
+                 "    records = pathlib.Path(os.environ['REMOTE_LEDGER_DIR']).glob('*.json')\n"
+                 "    assert any('0' in r['receipts'] for p in records for r in json.loads(p.read_text())['runs'])\n"
+                 "    pathlib.Path(%r).write_text('saved')\n" % str(persisted))
+        self.write_ssh(SSH.replace(old, old + '\n    raise SystemExit(255)').replace(
+            'if "tarfile" in command:', audit + 'if "tarfile" in command:'))
+        self.mode.write_text('pass')
+        result = self.verify('--retrieve-remote-evidence')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(persisted.exists(), 'claim 0 must be durable before claim 1 retrieval')
+        row = next(r for r in self.rows() if r['result'] == 'fail')
+        self.assertEqual((row['claim'], row['exit_code']), (V.INTEGRATION_CLAIM, 125))
+        self.assertFalse(row['execution']['evidence_reconciled'])
+        self.assertTrue(stage.exists())
+        self.assertIn('unresolved remote evidence', result.stderr)
+        (stage / 'claim-1.json').write_bytes(second)
+        (stage / 'request.json').write_bytes(header)
+        self.write_ssh(SSH)
+        self.capture_timeout('stage, name, offset')
+        recovered = self.verify('--retrieve-remote-evidence')
+        self.assertNotEqual(recovered.returncode, 0)
+        self.assertEqual(self.rows()[-1]['result'], 'fail')
+        self.assertEqual(self.rows()[-1]['claim'], V.STABILITY_CLAIM)
+        self.assertTrue(self.rows()[-1]['execution']['evidence_reconciled'])
+        self.assertEqual(self.ssh_launches(), 1)
+        self.assert_clean()
+
+    def test_remote_frames_validate_size_identity_digest_and_budgets(self):
+        stage = self.remote_root / 'frames'
+        stage.mkdir()
+        value = {'output': '\U0001f642' * 6000}
+        original = RV.encoded(value)
+        (stage / 'claim-0.json').write_bytes(original)
+        prefix = [str(self.f.bin / 'ssh'), '-oBatchMode=yes', '-oConnectTimeout=15', 'fixture-host']
+        def call(code):
+            with mock.patch.dict(os.environ, self.f.env, clear=True):
+                proc = RV.remote_call(prefix, self.policy['verification_host'], code)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertLessEqual(len(proc.stdout), 100000)
+            return proc.stdout
+        limit = len(original) + 100
+        self.assertEqual(RV.read_remote_record(call, str(stage), 'claim-0.json', limit, 100,
+                         {'bytes': limit, 'calls': 3}), value)
+        def corrupted(kind):
+            calls = []
+            def inner(code):
+                frame = json.loads(call(code)); calls.append(frame)
+                if kind == 'oversized': frame['padding'] = ' ' * 100001
+                if kind == 'identity': frame['name'] = 'claim-1.json'
+                if kind == 'offset': frame['offset'] += 1
+                if kind == 'size': frame['size'] = limit + 1
+                if kind == 'digest': frame['sha256'] = '0' * 64
+                if kind == 'changed' and len(calls) == 2: frame['sha256'] = '0' * 64
+                if kind == 'length': frame['data'] = base64.b64encode(original).decode('ascii')
+                return json.dumps(frame)
+            return inner
+        for kind in ('oversized', 'identity', 'offset', 'size', 'digest', 'changed', 'length'):
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                RV.read_remote_record(corrupted(kind), str(stage), 'claim-0.json', limit, 100,
+                                      {'bytes': limit, 'calls': 3})
+        for budget in ({'bytes': 0, 'calls': 3}, {'bytes': limit, 'calls': 0}):
+            with self.subTest(budget=budget), self.assertRaisesRegex(ValueError, 'budget'):
+                RV.read_remote_record(call, str(stage), 'claim-0.json', limit, 100, budget)
+        with self.assertRaisesRegex(ValueError, 'file budget'):
+            RV.read_remote_record(call, str(stage), 'claim-0.json', 10, 100,
+                                  {'bytes': limit, 'calls': 3})
+        self.assertEqual((stage / 'claim-0.json').read_bytes(), original)
+
+    def test_shell_shebang_in_py_path_runs_without_completed_failure(self):
+        self.authorize_program('#!/bin/sh\nprintf "shell verifier passed\\n"\nexit 0\n')
+        for location in ('remote', 'local'):
+            with self.subTest(location=location):
+                if location == 'local':
+                    self.local_only()
+                result = self.verify()
+                self.assert_ok(result)
+                row = self.rows()[-1]
+                self.assertEqual(row['result'], 'pass')
+                self.assertIn('shell verifier passed', row['stdout_tail'])
+                self.assertEqual(row['execution']['location'], location)
+                self.assert_clean()
+        self.assertNotIn('fail', [r['result'] for r in self.rows()])
+
+    def test_python_shebang_and_no_shebang_use_declared_interpreter(self):
+        log = self.f.directory / 'python-invocations'
+        wrapper = self.f.directory / 'declared-python'
+        wrapper.write_text(PYTHON + 'import os, sys\n'
+                           'with open(%r, "a") as log: log.write(repr(sys.argv) + "\\n")\n'
+                           'os.execv(%r, [%r] + sys.argv[1:])\n'
+                           % (str(log), sys.executable, sys.executable))
+        wrapper.chmod(0o755)
+        self.policy['local']['python'] = str(wrapper)
+        self.policy['verification_host']['python'] = str(wrapper)
+        self.save_policy()
+        for location in self.locations():
+            for shebang in ('#!/absent/python3.10 -u\n', '#!/usr/bin/env python3\n',
+                            '#!/usr/bin/env -S python3 -u\n', ''):
+                with self.subTest(location=location, shebang=shebang):
+                    self.authorize_program(shebang + 'print("declared Python ran")\n')
+                    log.write_text('')
+                    result = self.verify()
+                    self.assert_ok(result)
+                    row = self.rows()[-1]
+                    self.assertEqual(row['result'], 'pass')
+                    self.assertIn('declared Python ran', row['stdout_tail'])
+                    self.assertIn('pinned-verifier-', log.read_text())
+                    self.assert_clean()
+
+    def test_local_implicit_python_preserves_native_shebang_and_child_selection(self):
+        self.policy.pop('verification_host')
+        self.policy['local'].pop('python')
+        self.save_policy()
+        # A binary symlink works in native Darwin shebangs and preserves spelling.
+        native = self.f.directory / 'native-bin'
+        native.mkdir()
+        python = native / 'python3'
+        python.symlink_to(sys.executable)
+        self.f.env['PATH'] = str(native) + os.pathsep + self.f.env['PATH']
+        for shebang in ('#!' + str(python) + '\n', '#!/usr/bin/env python3\n',
+                        '#!/usr/bin/env -S python3 -u\n'):
+            with self.subTest(shebang=shebang):
+                self.authorize_program(shebang +
+                    'import os, subprocess, sys\n'
+                    'expected = %r\nassert os.path.abspath(sys.executable) == expected, sys.executable\n'
+                    'assert "HANIG_VERIFICATION_PYTHON" not in os.environ\n'
+                    'child = subprocess.check_output(["python3", "-c", "import sys; print(sys.executable)"], text=True)\n'
+                    'assert os.path.abspath(child.strip()) == expected, child\n' % str(python))
+                result = self.verify()
+                self.assert_ok(result)
+                row = self.rows()[-1]
+                self.assertEqual(row['result'], 'pass')
+                self.assertFalse(row['execution']['executables']['python']['declared'])
+                self.assertEqual(row['execution']['executables']['python']['role'], 'launcher')
+                self.assert_clean()
+
+    def test_local_implicit_shebang_preserves_native_parser_outcome(self):
+        self.policy.pop('verification_host')
+        self.policy['local'].pop('python')
+        self.save_policy()
+        program = '#!/usr/bin/env -S python3 \\c "\nprint("native split")\n'
+        control = self.f.directory / 'native-control'
+        control.write_text(program)
+        control.chmod(0o755)
+        native = subprocess.run([str(control)], cwd=self.f.repo, env=self.f.env,
+                                capture_output=True, text=True, timeout=10)
+        # Preserve the native result, including kernel-specific shebang splitting.
+        self.authorize_program(program)
+        result = self.verify()
+        row, = self.rows()
+        self.assertEqual(row['exit_code'], native.returncode)
+        self.assertEqual(row['result'], 'pass' if native.returncode == 0 else 'fail')
+        self.assertNotIn('incomplete_reason', row)
+        self.assertEqual(result.returncode, 0 if native.returncode == 0 else 1)
+        self.assert_clean()
+
+    def test_declared_python_with_env_options_and_assignments(self):
+        self.f.env['REMOVE_FOR_VERIFIER'] = 'must disappear'
+        for location in self.locations():
+            for options in ('-i', '-u REMOVE_FOR_VERIFIER', '-uREMOVE_FOR_VERIFIER'):
+                with self.subTest(location=location, options=options):
+                    self.authorize_program(
+                        '#!/usr/bin/env -S ' + options + ' VERIFIER_VALUE="two words" python3 -u\n'
+                        'import os, subprocess, sys\n'
+                        'assert os.path.realpath(sys.executable) == %r, sys.executable\n'
+                        'assert "REMOVE_FOR_VERIFIER" not in os.environ\n'
+                        'assert os.environ["VERIFIER_VALUE"] == "two words"\n'
+                        'assert os.environ["HANIG_VERIFICATION_GIT"] == %r\n'
+                        'child = subprocess.check_output(["python3", "-c", "import os,sys;print(os.path.realpath(sys.executable))"], text=True)\n'
+                        'assert child.strip() == %r, child\n'
+                        % (os.path.realpath(sys.executable), str((self.f.bin / 'git').resolve()),
+                           os.path.realpath(sys.executable)))
+                    result = self.verify()
+                    self.assert_ok(result)
+                    self.assertEqual(self.rows()[-1]['result'], 'pass')
+                    self.assert_clean()
+
+    def test_implicit_local_no_shebang_preserves_native_launch_failure(self):
+        self.policy.pop('verification_host')
+        self.policy['local'].pop('python')
+        self.save_policy()
+        self.authorize_program('printf "shell verifier passed\\n"\nexit 0\n')
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'incomplete')
+        self.assertIn('could not exec verifier', row['incomplete_reason'])
+        self.assertNotIn('SyntaxError', row['stderr_tail'])
+
+    def test_declared_python_preserves_final_process_argv0(self):
+        expected = 'verifier-process-name'
+        observe = ('import os, subprocess, sys\n'
+                   'command = subprocess.check_output(["/bin/ps", "-p", str(os.getpid()), "-o", "command="], text=True).strip()\n')
+        # Independent real exec control: process argv0 is not Python sys.argv[0].
+        # Framework stubs may re-exec Python.app and replace argv0 themselves.
+        # Compare that native behavior; still demand the requested name wherever
+        # the interpreter preserves it. Both paths execute every harness case.
+        control = self.f.directory / 'argv0-control.py'
+        control.write_text(observe +
+            'suffix = " -u " + sys.argv[0]\n'
+            'assert command.endswith(suffix), command\n'
+            'print(command[:-len(suffix)])\n')
+        result = subprocess.run([sys.executable, '-c',
+            'import os,sys;os.execv(sys.argv[1],[sys.argv[2],"-u",sys.argv[3]])',
+            sys.executable, expected, str(control)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        native_argv0 = result.stdout.rstrip('\n')
+        self.assertTrue(native_argv0, result.stdout)
+        assertion = ('assert command.startswith(%r + " "), command\n' % expected
+                     if native_argv0 == expected else
+                     'assert command == %r + " -u " + sys.argv[0], command\n' % native_argv0)
+        body = observe + assertion + ('assert sys.version_info[:2] == %r, sys.version\n'
+                                      % (sys.version_info[:2],))
+        for location in self.locations():
+            for option in ('-a ' + expected, '-a' + expected,
+                           '--argv0=' + expected, '-a ignored --argv0 ' + expected):
+                with self.subTest(location=location, option=option):
+                    self.authorize_program('#!/usr/bin/env -S ' + option + ' python3 -u\n' + body)
+                    result = self.verify()
+                    self.assert_ok(result)
+                    self.assertEqual(self.rows()[-1]['result'], 'pass')
+                    self.assert_clean()
+
+    def test_malformed_explicit_env_selectors_finish_incomplete(self):
+        for location in self.locations():
+            for declaration in ('-S', '-S -a', '-S -u', '-S -a "" python3',
+                                '-S "unterminated', '-S --unknown python3', '-S python3 \\c ignored'):
+                with self.subTest(location=location, declaration=declaration):
+                    self.authorize_program('#!/usr/bin/env ' + declaration + '\nprint("must not run")\n')
+                    result = self.verify()
+                    self.assertNotEqual(result.returncode, 0)
+                    row = self.rows()[-1]
+                    self.assertEqual(row['result'], 'incomplete')
+                    self.assertNotIn('Traceback', result.stderr)
+                    self.assertNotIn('unresolved remote evidence', result.stderr)
+                    self.assertNotIn('must not run', row['stdout_tail'])
+                    self.assert_clean()
+
+    def test_env_operand_and_assignment_do_not_select_python(self):
+        self.local_only()
+        (self.f.bin / 'sh').symlink_to('/bin/sh')
+        for prefix in ('-u python3 ', '-- '):
+            with self.subTest(prefix=prefix):
+                self.authorize_program('#!/usr/bin/env -S ' + prefix +
+                    'python3=an-assignment sh\n'
+                    'test "$python3" = an-assignment || exit 76\n'
+                    'printf "native shell selected\\n"\n')
+                result = self.verify()
+                self.assert_ok(result)
+                self.assertIn('native shell selected', self.rows()[-1]['stdout_tail'])
+
+    def test_env_changes_cwd_before_declared_tools_are_restored(self):
+        directory = self.f.directory / 'env-fixture'
+        directory.mkdir()
+        env = directory / 'env'
+        cwd = directory / 'selected cwd'
+        cwd.mkdir()
+        env.write_text(PYTHON + 'import os,sys\n'
+            'a=sys.argv[1:]\n'
+            'assert a[:8] == %r, a\n'
+            'os.chdir(a[2]);os.environ.clear();os.environ["VERIFIER_VALUE"]="two  words"\n'
+            'os.execve(a[8], a[8:], os.environ)\n'
+            % ['-i', '-C', str(cwd), '-P', '/absent', '-u', 'python3', 'VERIFIER_VALUE=two  words'])
+        env.chmod(0o755)
+        self.authorize_program('#!' + str(env) + ' -S -i -C ' + shlex.quote(str(cwd)) +
+            ' -P /absent -u python3 VERIFIER_VALUE="two  words" python3 -u\n'
+            'import os,subprocess,sys\n'
+            'assert os.getcwd() == %r\n'
+            'assert os.environ["VERIFIER_VALUE"] == "two  words"\n'
+            'assert os.environ["HANIG_VERIFICATION_GIT"] == %r\n'
+            'assert os.path.realpath(os.environ["HANIG_VERIFICATION_PYTHON"]) == %r\n'
+            'child=subprocess.check_output(["python3","-c","import os,sys;print(os.path.realpath(sys.executable))"],text=True)\n'
+            'assert child.strip() == %r\n'
+            % (str(cwd), str((self.f.bin / 'git').resolve()), os.path.realpath(sys.executable),
+               os.path.realpath(sys.executable)))
+        result = self.verify()
+        self.assert_ok(result)
+        self.assertEqual(self.rows()[-1]['result'], 'pass')
+        self.assert_clean()
+
+    def cancellation_fixture(self, mode='slurm-pending', retry_succeeds=False,
+                             terminal_on_success=True):
+        self.disabled_slurm_policy()
+        self.program()
+        self.mode.write_text(mode)
+        witness = self.f.directory / 'cancellation-calls'
+        terminal = self.f.directory / 'cancelled'
+        (self.f.bin / 'sacct').write_text(
+            PYTHON + 'from pathlib import Path\n'
+            'print("321|CANCELLED|0:0" if Path(%r).exists() else "321|PENDING|0:0")\n'
+            % str(terminal))
+        (self.f.bin / 'scancel').write_text(
+            PYTHON + 'from pathlib import Path\nimport sys\n'
+            'p=Path(%r)\n'
+            'p.write_text((p.read_text() if p.exists() else "") + "attempt\\n")\n'
+            'print("fixture cancellation denied", file=sys.stderr)\n'
+            'success = %r and len(p.read_text().splitlines()) > 1\n'
+            'if success and %r: Path(%r).write_text("terminal")\n'
+            'raise SystemExit(0 if success else 1)\n'
+            % (str(witness), retry_succeeds, terminal_on_success, str(terminal)))
+        return witness
+
+    def assert_unconfirmed_cancellation(self, mode):
+        witness = self.cancellation_fixture(mode)
+        result = self.verify('--verification-timeout', '1')
+        self.assertNotEqual(result.returncode, 0)
+        row, = self.rows()
+        expected = 'incomplete' if mode == 'slurm-pending' else 'pass'
+        self.assertEqual(row['result'], expected)
+        self.assertIs(row['execution']['evidence_reconciled'], False)
+        execution = row['execution']
+        self.assertEqual(execution['job_id'], '321')
+        self.assertEqual(execution['cancellation'], 'unconfirmed')
+        self.assertEqual(execution['cleanup'], 'unconfirmed')
+        self.assertTrue(Path(execution['stage'], 'job-id').exists())
+        self.assertTrue(execution['cancellation_attempts'])
+        for attempt in execution['cancellation_attempts']:
+            self.assertEqual(attempt['job_id'], '321')
+            self.assertEqual(attempt['exit_code'], 1)
+            self.assertIn('fixture cancellation denied', attempt['stderr_tail'])
+        self.assertRegex(result.stderr, r'WARNING: .*job 321')
+        self.assertIn('cancel', result.stderr)
+        self.assertEqual(self.merges(), [])
+        return witness, execution
+
+    def test_failed_scancel_is_unconfirmed_with_operator_warning(self):
+        witness, execution = self.assert_unconfirmed_cancellation('slurm-pending')
+        self.assertEqual(len(witness.read_text().splitlines()), 2)
+        self.assertEqual(len(execution['cancellation_attempts']), 2)
+        self.assertIsNone(execution['sacct_state'])
+
+    def test_secondary_cleanup_retains_cancellation_after_lost_response(self):
+        witness, execution = self.assert_unconfirmed_cancellation('ssh-lost-response')
+        self.assertEqual(len(witness.read_text().splitlines()), 2)
+        self.assertEqual(len(execution['cancellation_attempts']), 2)
+
+    def test_lost_connections_preserve_remote_cancellation_evidence_and_recovery_path(self):
+        self.cancellation_fixture('ssh-lost-both')
+        result = self.verify('--verification-timeout', '1')
+        self.assertNotEqual(result.returncode, 0)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'incomplete')
+        execution = row['execution']
+        self.assertEqual(execution['cleanup'], 'unconfirmed')
+        self.assertEqual(execution['cancellation'], 'unconfirmed')
+        self.assertIsNone(execution['job_id'], 'an unseen job ID cannot be invented')
+        stage, = self.remote_root.iterdir()
+        self.assertEqual(execution['stage'], str(stage))
+        self.assertTrue((stage / 'cleanup.json').is_file())
+        retained = read_json(stage / 'cleanup.json')
+        self.assertEqual(retained['job_id'], '321')
+        self.assertEqual(retained['cancellation'], 'unconfirmed')
+        self.assertIn('fixture cancellation denied', retained['cancellation_attempts'][0]['stderr_tail'])
+        self.assertIn(str(stage / 'job-id'), result.stderr)
+        self.assertIn(str(stage / 'cleanup.json'), result.stderr)
+        self.assertEqual(self.merges(), [])
+
+    def test_confirmed_removal_requires_reconciliation_acknowledgment(self):
+        self.program()
+        result = self.verify()
+        self.assert_ok(result)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'pass')
+        self.assertEqual(row['execution']['cleanup'], 'removed')
+        self.assertTrue(self.witness.exists())
+        self.assertEqual(len(Path(self.f.env['REMOTE_LOG']).read_text().splitlines()), 2)
+        self.assert_clean()
+
+    def test_candidate_ssh_is_excluded_from_relative_absolute_and_symlink_path(self):
+        self.program()
+        marker = self.f.directory / 'candidate-ssh-ran'
+        self.shared.candidate({'ssh': PYTHON + 'from pathlib import Path\n'
+                               'Path(%r).write_text("candidate ssh executed")\n'
+                               'raise SystemExit(59)\n' % str(marker)})
+        (self.f.repo / 'ssh').chmod(0o755)
+        self.shared.candidate({'record-mode.txt': 'commit executable mode\n'})
+        linked = self.f.directory / 'external-path'
+        linked.mkdir()
+        (linked / 'ssh').symlink_to(self.f.repo / 'ssh')
+        original_path = self.f.env['PATH']
+        for prefix in ('.', str(self.f.repo), str(linked)):
+            with self.subTest(prefix=prefix):
+                if self.witness.exists():
+                    self.witness.unlink()
+                self.f.env['PATH'] = prefix + os.pathsep + original_path
+                result = self.verify()
+                self.assert_ok(result)
+                self.assertFalse(marker.exists())
+                self.assertTrue(self.witness.exists())
+                self.assertEqual(self.rows()[-1]['result'], 'pass')
+                self.assert_clean()
+
+    def cleanup_stage(self):
+        stage = self.remote_root / 'cleanup-stage'
+        stage.mkdir()
+        (stage / 'job-id').write_text('321')
+        (stage / 'supervision-finished').write_text('{}')
+        return stage
+
+    def test_secondary_cleanup_cannot_remove_stage_before_submission_finishes(self):
+        stage = self.remote_root / 'submission-in-progress'
+        stage.mkdir()
+        with mock.patch.object(RV, '_command', return_value=(1, '', 'denied')) as command:
+            execution = RV.cleanup(stage)
+        self.assertEqual(execution['cleanup'], 'unconfirmed')
+        self.assertTrue(stage.exists())
+        command.assert_not_called()
+
+    def test_missing_job_id_cannot_remove_a_pending_stage(self):
+        stage = self.cleanup_stage()
+        (stage / 'job-id').unlink()
+        (stage / 'supervision-finished').write_text(json.dumps({
+            'job_id': '321', 'sacct_state': None}))
+        with mock.patch.object(RV, 'scheduler_state', return_value=None) as state, \
+                mock.patch.object(RV, '_command', return_value=(1, '', 'denied')):
+            execution = RV.cleanup(stage)
+        self.assertEqual(execution['cleanup'], 'unconfirmed')
+        self.assertEqual(execution['job_id'], '321')
+        self.assertTrue(stage.exists())
+        state.assert_called_once_with('321')
+
+    def test_cleanup_lock_prevents_overlapping_cancellation(self):
+        stage = self.cleanup_stage()
+        with (stage / 'cleanup.lock').open('a') as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with mock.patch.object(RV, 'scheduler_state', return_value=None), \
+                    mock.patch.object(RV, '_command', return_value=(1, '', 'denied')) as command:
+                execution = RV.cleanup(stage)
+            self.assertEqual(execution['cleanup'], 'unconfirmed')
+            self.assertTrue(stage.exists())
+            command.assert_not_called()
+
+    def test_cleanup_attempt_bound_retains_history_and_stage(self):
+        stage = self.cleanup_stage()
+        with mock.patch.object(RV, 'scheduler_state', return_value=None), \
+                mock.patch.object(RV, '_command', return_value=(1, '', 'denied')) as command:
+            for _ in range(5):
+                execution = RV.cleanup(stage)
+        self.assertEqual(command.call_count, 4)
+        self.assertEqual(execution['cleanup'], 'unconfirmed')
+        retained = read_json(stage / 'cleanup.json')
+        self.assertEqual(len(retained['cancellation_attempts']), 4)
+        self.assertLessEqual((stage / 'cleanup.json').stat().st_size, 65536)
+        self.assertTrue((stage / 'job-id').exists())
+
+    def test_cleanup_persistence_failure_refuses_cancellation_and_removal(self):
+        stage = self.cleanup_stage()
+        with mock.patch.object(RV, 'scheduler_state', return_value=None), \
+                mock.patch.object(RV, 'publish', side_effect=OSError('journal unavailable')), \
+                mock.patch.object(RV, '_command', return_value=(1, '', 'denied')) as command:
+            execution = RV.cleanup(stage)
+        self.assertEqual(execution['cleanup'], 'unconfirmed')
+        self.assertIn('journal unavailable', execution['cleanup_error'])
+        self.assertTrue((stage / 'job-id').exists())
+        command.assert_not_called()
+
+    def test_cleanup_oversized_history_is_retained_without_cancellation(self):
+        stage = self.cleanup_stage()
+        path = stage / 'cleanup.json'
+        before = ' ' * 65537
+        path.write_text(before)
+        with mock.patch.object(RV, '_command', return_value=(1, '', 'denied')) as command:
+            execution = RV.cleanup(stage)
+        self.assertEqual(execution['cleanup'], 'unconfirmed')
+        self.assertEqual(path.read_text(), before)
+        command.assert_not_called()
+
+    def test_failed_secondary_transport_keeps_first_cancellation_diagnostic(self):
+        witness, execution = self.assert_unconfirmed_cancellation('cleanup-ssh-fail')
+        self.assertEqual(len(witness.read_text().splitlines()), 1)
+        self.assertIn('cleanup transport exited 255', execution['cleanup_error'])
+
+    def test_successful_cancellation_retry_records_request_not_termination(self):
+        witness = self.cancellation_fixture(retry_succeeds=True)
+        result = self.verify('--verification-timeout', '1')
+        self.assertNotEqual(result.returncode, 0)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'incomplete')
+        execution = row['execution']
+        self.assertEqual(execution['cancellation'], 'requested')
+        self.assertIsNone(execution['sacct_state'])
+        self.assertEqual(execution['cleanup'], 'unconfirmed')
+        self.assertEqual(execution['cleanup_sacct_state'], 'CANCELLED')
+        self.assertEqual([a['exit_code'] for a in execution['cancellation_attempts']], [1, 0])
+        self.assertIn('unresolved remote evidence at', result.stderr)
+        self.assertTrue(Path(execution['stage'], 'job-id').exists())
+        self.assertFalse(Path(execution['stage'], 'worker-complete').exists())
+        self.assertEqual(self.merges(), [])
+
+    def test_accepted_cancellation_without_terminal_job_retains_stage(self):
+        self.cancellation_fixture(retry_succeeds=True, terminal_on_success=False)
+        result = self.verify('--verification-timeout', '1')
+        self.assertNotEqual(result.returncode, 0)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'incomplete')
+        execution = row['execution']
+        self.assertEqual(execution['cancellation'], 'requested')
+        self.assertEqual(execution['cleanup'], 'unconfirmed')
+        self.assertIsNone(execution['sacct_state'])
+        self.assertTrue(Path(execution['stage'], 'job-id').is_file())
+        self.assertRegex(result.stderr, r'WARNING: .*job 321')
+        self.assertEqual(self.merges(), [])
+
+    def invoke_disabled_slurm(self, *extra):
+        """Exercise retained internals with fixture tools, bypassing ONLY policy
+        enablement in this test process. Production validation has its own
+        refusal test; no production enablement flag exists.
+        """
+        wrapper = self.f.directory / 'disabled-slurm-operator.py'
+        wrapper.write_text(
+            'import hashlib, json, sys\nfrom pathlib import Path\nfrom unittest import mock\n'
+            'sys.path.insert(0, %r)\nimport merge_unit as M\n'
+            'original = M.RV.read_policy\n'
+            'def fixture_policy(state):\n'
+            '    p = Path(state) / M.RV.POLICY\n'
+            '    raw = p.read_bytes()\n'
+            '    policy = json.loads(raw)\n'
+            '    if policy.get("verification_host", {}).get("executor") != "slurm": return original(state)\n'
+            '    valid = json.loads(raw)\n'
+            '    valid["verification_host"]["executor"] = "direct"\n'
+            '    valid["verification_host"].pop("slurm")\n'
+            '    read = Path.read_bytes\n'
+            '    def fixture_bytes(path): return json.dumps(valid).encode() if path == p else read(path)\n'
+            '    with mock.patch.object(Path, "read_bytes", fixture_bytes): original(state)\n'
+            '    return policy, hashlib.sha256(raw).hexdigest()\n'
+            'M.RV.read_policy = fixture_policy\n'
+            'raise SystemExit(M.main())\n' % str(self.f.operator.parent))
+        command = [sys.executable, str(wrapper), str(self.f.plan_path),
+                   '--state-dir', str(self.f.state_dir), '--unit', 'u', '--pr', '7',
+                   '--approver', 'Operator']
+        return subprocess.run(command + list(extra), cwd=self.f.repo, env=self.f.env,
+                              capture_output=True, text=True, timeout=60)
+
+    def ssh_launches(self):
+        calls = [json.loads(line) for line in Path(self.f.env['REMOTE_LOG']).read_text().splitlines()]
+        return sum('tarfile' in call[-1] for call in calls)
+
+    def verify(self, *extra):
+        if self.policy.get('verification_host', {}).get('executor') == 'slurm':
+            return self.invoke_disabled_slurm('--verify-integration', *extra)
+        return self.f.invoke('--verify-integration', *extra)
+
+    def rows(self):
+        return S.load_verifications(self.f.state_dir)[0]
+
+    def admitted(self):
+        if self.policy.get('verification_host', {}).get('executor') == 'slurm':
+            return self.invoke_disabled_slurm()
+        return self.f.invoke()
+
+    def assert_clean(self):
+        self.assertEqual(list(self.remote_root.iterdir()), [])
+        self.assertEqual(self.merges(), [])
+
+    def test_direct_bundle_runs_pinned_program_and_records_full_binding(self):
+        legacy = self.legacy_prefix()
+        target = self.program()
+        result = self.verify()
+        self.assert_ok(result)
+        _, row = self.rows()
+        self.assertEqual(row['subject_head'], self.f.head)
+        self.assertEqual(row['target_commit'], target)
+        basis, error = V.candidate_merge_basis(self.f.verifier_runner, self.f.repo, self.f.head, target)
+        self.assertIsNone(error)
+        for key, value in basis.items():
+            self.assertEqual(row[key], value)
+        execution = row['execution']
+        self.assertEqual(execution['verified_tree'], row['candidate_tree'])
+        self.assertEqual(execution['executor'], 'direct')
+        self.assertEqual(execution['host_identity'], os.uname().nodename)
+        for name in ('python', 'git'):
+            self.assertEqual(execution['executables'][name]['path'],
+                             os.path.realpath(self.policy['verification_host'][name]))
+            self.assertTrue(execution['executables'][name]['version'])
+        self.assertTrue(self.witness.exists())
+        self.assert_clean()
+        saved = self.rows()
+        self.assert_ok(self.verify('--retrieve-remote-evidence'))
+        self.assertEqual(self.rows(), saved)
+        self.assertEqual(self.ssh_launches(), 1)
+        self.assertTrue(self.journal.read_bytes().startswith(legacy))
+        self.assertEqual(self.admitted().returncode, 0)
+
+    def test_completed_fail_survives_ssh_255_and_poisoning(self):
+        legacy = self.legacy_prefix()
+        self.program('raise SystemExit(125 * int(Path(%r).read_text() != "pass"))\n'
+                     % str(self.mode))
+        self.mode.write_text('ssh-complete-255')
+        self.assertNotEqual(self.verify().returncode, 0)
+        self.assertEqual((self.rows()[-1]['result'], self.rows()[-1]['exit_code']), ('fail', 125))
+        self.mode.write_text('pass')
+        self.assertEqual(self.verify().returncode, 0)
+        refused = self.admitted()
+        self.f.assert_refused(refused)
+        self.assertIn('FAIL', refused.stderr)
+        self.assertTrue(self.journal.read_bytes().startswith(legacy))
+
+    def test_completed_pass_survives_ssh_255(self):
+        self.program()
+        self.mode.write_text('ssh-complete-255')
+        result = self.verify()
+        self.assert_ok(result)
+        self.assertEqual(self.rows()[-1]['result'], 'pass')
+        self.assert_clean()
+
+    def test_completed_failure_in_timeout_capture_is_still_evidence(self):
+        self.program('raise SystemExit(125)\n')
+        self.mode.write_text('cleanup-ssh-fail')
+        self.capture_timeout('tarfile')
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        row, = self.rows()
+        self.assertEqual((row['result'], row['exit_code']), ('fail', 125))
+        self.assertEqual(row['execution']['cleanup'], 'unconfirmed')
+        self.assertTrue(Path(row['execution']['stage'], 'claim-0.json').exists())
+
+    def test_unretrievable_launch_blocks_rerun_then_retrieves_failure(self):
+        self.program('raise SystemExit(125 * int(Path(%r).read_text() != "pass"))\n'
+                     % str(self.mode))
+        self.mode.write_text('ssh-lost-both')
+        self.assertNotEqual(self.verify().returncode, 0)
+        self.assertEqual(self.rows()[-1]['result'], 'incomplete')
+        stage = Path(self.rows()[-1]['execution']['stage'])
+        self.assertTrue(stage.exists())
+        blocked = self.verify()
+        self.assert_pending(blocked)
+        self.assertIn(str(stage), blocked.stderr)
+        self.assertEqual(list(self.remote_root.iterdir()), [stage])
+        # Reconnection retrieves the old failure; it never runs a green trial.
+        self.mode.write_text('pass')
+        retrieved = self.verify()
+        self.assertNotEqual(retrieved.returncode, 0)
+        self.assertEqual((self.rows()[-1]['result'], self.rows()[-1]['exit_code']), ('fail', 125))
+        self.assertEqual(self.ssh_launches(), 1)
+        self.f.assert_refused(self.admitted())
+        self.assert_clean()
+
+    def test_partial_failure_survives_later_worker_loss_and_blocks_local_escape(self):
+        first = PYTHON + 'raise SystemExit(125)\n'
+        second = (PYTHON + 'import os, signal\n'
+                  'os.kill(os.getppid(), signal.SIGKILL)\n')
+        self.shared.install_policy(repetitions=1)
+        policy = self.shared.policy
+        policy['verifiers'][0]['sha256'] = hashlib.sha256(first.encode()).hexdigest()
+        policy['verifiers'][1]['sha256'] = hashlib.sha256(second.encode()).hexdigest()
+        self.shared.precondition.target_commit({V.MERGE_VERIFIER_PATH: first,
+            V.STABILITY_VERIFIER_PATH: second, V.POLICY_FILE: json.dumps(policy)})
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        first_row, later = self.rows()
+        self.assertEqual((first_row['result'], first_row['exit_code']), ('fail', 125))
+        self.assertEqual(later['result'], 'incomplete')
+        stage = Path(first_row['execution']['stage'])
+        self.assertTrue((stage / 'claim-0.json').exists())
+        self.assertFalse((stage / 'worker-complete').exists())
+        before = (stage / 'claim-0.json').read_bytes()
+        self.local_only()
+        retry = self.verify()
+        self.assert_pending(retry)
+        self.assertEqual((stage / 'claim-0.json').read_bytes(), before)
+        self.assertEqual(len(self.rows()), 2, 'retrieval must be idempotent')
+        self.f.assert_refused(self.admitted())
+        self.assertEqual(self.ssh_launches(), 1)
+
+    def test_missing_ledger_blocks_unresolved_pass_and_restoration_recovers(self):
+        target = self.program()
+        self.mode.write_text('ssh-lost-response')
+        old = "    if mode in ('ssh-lost-response', 'ssh-lost-both', 'ssh-complete-255'): raise SystemExit(255)"
+        new = ("    for marker in list(pathlib.Path(os.environ['REMOTE_ROOT']).glob('verify-*/*')):\n"
+               "        if marker.name in ('worker-complete', 'supervision-finished'):\n"
+               "            marker.rename(marker.with_name(marker.name + '.saved'))\n") + old
+        self.assertIn(old, SSH)
+        self.write_ssh(SSH.replace(old, new))
+        self.f.env['REMOTE_ROOT'] = str(self.remote_root)
+        self.assertNotEqual(self.verify().returncode, 0)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'pass')
+        self.assertIs(row['execution']['evidence_reconciled'], False)
+        stage = Path(row['execution']['stage'])
+        ledger, = (self.f.state_dir / 'remote-verifications').glob('*.json')
+        saved = ledger.read_bytes()
+        ledger.unlink()
+        for operation in (self.admitted, self.verify):
+            refused = operation()
+            self.assert_pending(refused)
+            self.assertIn(str(stage), refused.stderr)
+        self.local_only()
+        refused = self.verify()
+        self.assert_pending(refused)
+        generic = self.generic_verify(target)
+        self.assert_pending(generic)
+        self.assertEqual(self.merges(), [])
+        self.assertTrue(stage.exists())
+        ledger.write_bytes(saved)
+        for marker in stage.glob('*.saved'):
+            marker.rename(marker.with_name(marker.name[:-6]))
+        self.mode.write_text('pass')
+        retrieved = self.verify('--retrieve-remote-evidence')
+        self.assert_ok(retrieved)
+        # The original row is immutable; admission must consult recovered
+        # authority, not permanently reject its now-stale reconciliation flag.
+        self.assertEqual(len(self.rows()), 1)
+        self.assertIs(self.rows()[0]['execution']['evidence_reconciled'], False)
+        self.assertFalse(stage.exists())
+        admitted = self.admitted()
+        self.assert_ok(admitted)
+        self.assertEqual(self.ssh_launches(), 1)
+        self.assertEqual(len(self.merges()), 1)
+
+    def test_missing_ledger_cannot_escape_unretrieved_failure(self):
+        self.program('raise SystemExit(125 * int(Path(%r).read_text() != "pass"))\n'
+                     % str(self.mode))
+        self.mode.write_text('ssh-lost-both')
+        self.assertNotEqual(self.verify().returncode, 0)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'incomplete')
+        stage = Path(row['execution']['stage'])
+        ledger, = (self.f.state_dir / 'remote-verifications').glob('*.json')
+        saved = ledger.read_bytes()
+        ledger.unlink()
+        self.mode.write_text('pass')
+        refused = self.verify()
+        self.assert_pending(refused)
+        self.assertTrue(stage.exists())
+        ledger.write_bytes(saved)
+        retrieved = self.verify('--retrieve-remote-evidence')
+        self.assertNotEqual(retrieved.returncode, 0)
+        self.assertEqual((self.rows()[-1]['result'], self.rows()[-1]['exit_code']), ('fail', 125))
+        self.f.assert_refused(self.admitted())
+        self.assertEqual(self.ssh_launches(), 1)
+
+    def test_retained_merge_reconciliation_refuses_lost_remote_ledger(self):
+        self.program()
+        result = self.verify()
+        self.assert_ok(result)
+        ledger, = (self.f.state_dir / 'remote-verifications').glob('*.json')
+        saved = ledger.read_bytes()
+        self.f.forge['fail_view_once'] = True
+        self.f.save()
+        self.assertNotEqual(self.admitted().returncode, 0)
+        self.assertEqual(len(self.merges()), 1)
+        ledger.unlink()
+        refused = self.admitted()
+        self.assert_failed(refused)
+        self.assertEqual(self.f.intent()['integration_status'], 'integration-unverified')
+        self.assertIn('unresolved remote evidence at', refused.stderr)
+        self.assertEqual(len(self.merges()), 1)
+        ledger.write_bytes(saved)
+        restored = self.admitted()
+        self.assert_ok(restored)
+        self.assertEqual(self.f.intent()['integration_status'], 'candidate-verified')
+        self.assertEqual(len(self.merges()), 1)
+
+    def test_lost_launch_ledger_before_receipt_publication_blocks_new_run(self):
+        changed = dict(self.policy, local={})
+        self.program('Path(%r).write_text(%r)\n' % (
+            str(self.f.state_dir / RV.POLICY), json.dumps(changed)))
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('execution policy changed during verification', result.stderr)
+        self.assertEqual(self.rows(), [])
+        self.save_policy()
+        ledger, = (self.f.state_dir / 'remote-verifications').glob('*.json')
+        saved = ledger.read_bytes()
+        ledger.unlink()
+        refused = self.verify()
+        self.assert_pending(refused)
+        self.assertEqual(self.ssh_launches(), 1)
+        ledger.write_bytes(saved)
+        self.save_policy()
+        retrieved = self.verify('--retrieve-remote-evidence')
+        self.assert_ok(retrieved)
+        self.assertEqual(self.rows()[-1]['result'], 'pass')
+
+    def test_completed_receipts_survive_missing_aggregate_and_cleanup_disconnect(self):
+        self.program('raise SystemExit(125)\n')
+        self.mode.write_text('ssh-lost-both')
+        self.assertNotEqual(self.verify().returncode, 0)
+        stage = Path(self.rows()[-1]['execution']['stage'])
+        (stage / 'result.json').unlink()
+        self.mode.write_text('pass')
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.rows()[-1]['result'], self.rows()[-1]['exit_code']), ('fail', 125))
+        self.assertFalse(stage.exists())
+
+    def test_older_ledger_and_missing_required_witness_refuse_admission(self):
+        self.program()
+        self.assertEqual(self.verify().returncode, 0)
+        ledger, = (self.f.state_dir / 'remote-verifications').glob('*.json')
+        older = ledger.read_bytes()
+        self.assertEqual(self.verify().returncode, 0)
+        saved = ledger.read_bytes()
+        current = json.loads(saved)
+        empty = dict(current, runs=[])
+        for damaged in (older, json.dumps(empty).encode()):
+            ledger.write_bytes(damaged)
+            refused = self.admitted()
+            self.assert_pending(refused)
+            self.assertEqual(self.merges(), [])
+        ledger.write_bytes(saved)
+        witness = ledger.with_suffix('.launches') / (current['runs'][-1]['launch_id'] + '.json')
+        original = witness.read_bytes()
+        witness.unlink()
+        for operation in (self.admitted, self.verify):
+            refused = operation()
+            self.assert_failed(refused)
+            self.assertIn('restore the required launch witness', refused.stderr)
+        witness.write_bytes(original)
+        admitted = self.admitted()
+        self.assert_ok(admitted)
+        self.assertEqual(self.ssh_launches(), 2)
+
+    def test_legacy_remote_journal_blocks_loss_of_pre_witness_ledger(self):
+        self.program('raise SystemExit(125 * int(Path(%r).read_text() != "pass"))\n'
+                     % str(self.mode))
+        self.mode.write_text('ssh-lost-both')
+        self.assertNotEqual(self.verify().returncode, 0)
+        ledger, = (self.f.state_dir / 'remote-verifications').glob('*.json')
+        legacy = read_json(ledger)
+        for run in legacy['runs']:
+            run.pop('witness_required')
+        shutil.rmtree(ledger.with_suffix('.launches'))
+        ledger.write_text(json.dumps(legacy))
+        self.assertNotEqual(self.verify().returncode, 0)
+        ledger.unlink()
+        self.mode.write_text('pass')
+        refused = self.verify()
+        self.assert_failed(refused)
+        self.assertIn('restore the matching coordinator ledger', refused.stderr)
+        ledger.write_text(json.dumps(legacy))
+        self.assertNotEqual(self.verify('--retrieve-remote-evidence').returncode, 0)
+        self.assertEqual((self.rows()[-1]['result'], self.rows()[-1]['exit_code']), ('fail', 125))
+        self.f.assert_refused(self.admitted())
+        self.assertEqual(self.ssh_launches(), 1)
+
+    def test_cleanup_disconnect_does_not_downgrade_completed_pass(self):
+        self.program()
+        self.mode.write_text('cleanup-ssh-fail')
+        result = self.verify()
+        self.assert_ok(result)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'pass')
+        self.assertEqual(row['execution']['cleanup'], 'unconfirmed')
+        stage = Path(row['execution']['stage'])
+        self.assertTrue((stage / 'claim-0.json').exists())
+        self.assertTrue((stage / 'worker-complete').exists())
+        self.mode.write_text('pass')
+        for _ in range(2):
+            result = self.verify('--retrieve-remote-evidence')
+            self.assert_ok(result)
+        self.assertEqual(len(self.rows()), 1)
+        self.assertFalse(stage.exists())
+        self.assertEqual(self.ssh_launches(), 1)
+
+    def test_slurm_policy_is_disabled_before_transport(self):
+        self.disabled_slurm_policy()
+        result = self.f.invoke('--verify-integration')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('ARC-1103', result.stderr)
+        self.assertFalse(Path(self.f.env['REMOTE_LOG']).exists())
+        self.assertEqual(self.rows(), [])
+
+    def test_slurm_runs_both_claims_with_target_repetitions_and_handshake(self):
+        self.disabled_slurm_policy()
+        self.shared.install_policy(repetitions=2)
+        self.shared.candidate({'tests/test_remote.py': self.shared.counter_test()})
+        result = self.verify()
+        self.assert_ok(result)
+        integration, stable = self.rows()
+        self.assertEqual(self.shared.counter.read_text(), '2')
+        self.assertEqual(stable['repetitions'], 2)
+        for row in (integration, stable):
+            self.assertEqual(row['execution']['job_id'], '321')
+            self.assertEqual(row['execution']['sacct_state'], 'COMPLETED')
+            self.assertEqual(row['execution']['sacct_exit_code'], '0:0')
+            self.assertEqual(row['candidate_tree'], row['execution']['verified_tree'])
+        self.assert_clean()
+        self.assertEqual(self.admitted().returncode, 0)
+
+    def test_tampered_bundle_refuses_before_any_verifier_runs(self):
+        self.program()
+        self.f.git('checkout', '-q', '--detach', self.f.head)
+        (self.f.repo / 'change.txt').write_text('tampered\n')
+        self.f.git('commit', '-qam', 'tampered transfer fixture')
+        self.f.git('update-ref', RV.BUNDLE_REF, 'HEAD')
+        bundle = self.f.directory / 'tampered.bundle'
+        self.f.git('bundle', 'create', str(bundle), RV.BUNDLE_REF)
+        self.f.git('checkout', '-q', 'swarm-a1')
+        self.f.env['TAMPER_BUNDLE'] = str(bundle)
+        self.mode.write_text('tamper')
+        result = self.verify()
+        self.assert_failed(result)
+        self.assertFalse(self.witness.exists())
+        row, = self.rows()
+        self.assertEqual(row['result'], 'incomplete')
+        self.assertIn('tree digest mismatch', row['incomplete_reason'])
+        self.assert_clean()
+
+    def assert_retry_admits(self, mode, tail=''):
+        self.program(tail)
+        self.mode.write_text(mode)
+        first = self.verify('--verification-timeout', '1')
+        self.assert_failed(first)
+        incomplete = self.rows()[-1]
+        self.f.assert_refused(self.admitted())
+        self.mode.write_text('pass')
+        second = self.verify('--verification-timeout', '10')
+        self.assert_ok(second)
+        for field in V.MERGE_BASIS_FIELDS:
+            self.assertEqual(incomplete[field], self.rows()[-1][field])
+        self.assert_clean()
+        admitted = self.admitted()
+        self.assert_ok(admitted)
+        self.assertEqual(incomplete['result'], 'incomplete')
+
+    def test_ssh_failure_without_retrievable_stage_blocks_rerun(self):
+        self.program()
+        self.mode.write_text('ssh-fail')
+        self.assertNotEqual(self.verify().returncode, 0)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'incomplete')
+        self.mode.write_text('pass')
+        result = self.verify()
+        self.assert_pending(result)
+        self.assertFalse(self.witness.exists())
+        self.assertEqual(self.rows(), [row])
+        self.f.assert_refused(self.admitted())
+
+    def test_remote_timeout_then_pass_for_same_binding_is_admitted(self):
+        tail = ('import time\nif Path(%r).read_text() == "timeout": time.sleep(30)\n'
+                % str(self.mode))
+        self.assert_retry_admits('timeout', tail)
+
+    def test_completed_remote_fail_poisoning_survives_later_pass(self):
+        self.program('raise SystemExit(125 * int(Path(%r).read_text() == "fail"))\n' % str(self.mode))
+        self.mode.write_text('fail')
+        self.assertNotEqual(self.verify().returncode, 0)
+        self.assertEqual(self.rows()[-1]['result'], 'fail')
+        self.assertEqual(self.rows()[-1]['exit_code'], 125)
+        self.mode.write_text('pass')
+        result = self.verify()
+        self.assert_ok(result)
+        refused = self.admitted()
+        self.f.assert_refused(refused)
+        self.assertIn('FAIL', refused.stderr)
+        self.assert_clean()
+
+    def test_completed_verifier_fail_survives_a_failed_slurm_job(self):
+        self.disabled_slurm_policy()
+        self.program('raise SystemExit(int(Path(%r).read_text() == "slurm-completed-fail"))\n'
+                     % str(self.mode))
+        self.mode.write_text('slurm-completed-fail')
+        self.assertNotEqual(self.verify().returncode, 0)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'fail')
+        self.assertEqual(row['execution']['sacct_state'], 'FAILED')
+        self.mode.write_text('pass')
+        result = self.verify()
+        self.assert_ok(result)
+        result = self.admitted()
+        self.f.assert_refused(result)
+        self.assertIn('FAIL', result.stderr)
+        self.assert_clean()
+
+    def test_forced_scheduler_restart_cannot_overwrite_completed_failure(self):
+        self.disabled_slurm_policy()
+        self.program('raise SystemExit(int(Path(%r).read_text() == "slurm-forced-requeue"))\n'
+                     % str(self.mode))
+        self.mode.write_text('slurm-forced-requeue')
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'fail')
+        self.assertEqual(self.mode.read_text(), 'pass')
+        result = self.verify()
+        self.assert_ok(result)
+        result = self.admitted()
+        self.f.assert_refused(result)
+        self.assertIn('FAIL', result.stderr)
+        self.assert_clean()
+
+    def assert_disabled_slurm_unresolved(self, mode):
+        self.program()
+        self.mode.write_text(mode)
+        result = self.verify('--verification-timeout', '1')
+        self.assertNotEqual(result.returncode, 0)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'incomplete')
+        stage = Path(row['execution']['stage'])
+        self.assertTrue(stage.exists())
+        self.mode.write_text('pass')
+        retry = self.verify('--verification-timeout', '1')
+        self.assert_pending(retry)
+        self.assertEqual(self.rows(), [row])
+        self.assertTrue(stage.exists())
+        calls = [json.loads(line) for line in Path(self.f.env['SCHED_LOG']).read_text().splitlines()]
+        self.assertEqual(sum(call[0] == 'sbatch' for call in calls), 1)
+
+    def test_disabled_slurm_without_completed_worker_retains_evidence_and_blocks_retry(self):
+        self.disabled_slurm_policy()
+        self.assert_disabled_slurm_unresolved('slurm-missing')
+
+    def test_disabled_slurm_without_terminal_state_retains_evidence_and_blocks_retry(self):
+        self.disabled_slurm_policy()
+        self.assert_disabled_slurm_unresolved('slurm-pending')
+
+    def test_candidate_policy_cannot_choose_host_or_interpreter(self):
+        self.shared.candidate({RV.POLICY: json.dumps({
+            'schema_version': 1, 'verification_host': {'ssh_alias': 'candidate-host'},
+            'local': {'python': '/candidate/python'}})})
+        result = self.verify()
+        self.assert_ok(result)
+        self.assertEqual(self.rows()[-1]['execution']['ssh_alias'], 'fixture-host')
+        self.assert_clean()
+
+    def test_execution_policy_symlink_into_candidate_is_refused(self):
+        self.shared.candidate({RV.POLICY: json.dumps(self.policy)})
+        path = self.f.state_dir / RV.POLICY
+        path.unlink()
+        path.symlink_to(self.f.repo / RV.POLICY)
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('not a symlink', result.stderr)
+        self.assertEqual(self.rows(), [])
+        self.assertFalse(Path(self.f.env['REMOTE_LOG']).exists())
+
+    def test_local_default_and_declared_executable_evidence(self):
+        self.local_only()
+        result = self.verify()
+        self.assert_ok(result)
+        execution = self.rows()[-1]['execution']
+        self.assertEqual(execution['location'], 'local')
+        self.assertEqual(execution['executables']['python']['path'], os.path.realpath(sys.executable))
+        self.assertTrue(execution['executables']['git']['version'].startswith('git version'))
+        self.assertFalse(Path(self.f.env['REMOTE_LOG']).exists())
+
+    def test_declared_executables_are_used_for_checkout_and_verifier_children(self):
+        log = self.f.directory / 'executables.log'
+        for name in ('python', 'git'):
+            actual = self.policy['verification_host'][name]
+            wrapper = self.f.directory / ('declared-' + name)
+            wrapper.write_text(PYTHON + 'import json, os, sys\n'
+                               'with open(%r, "a") as log: log.write(json.dumps([%r] + sys.argv[1:]) + "\\n")\n'
+                               'os.execv(%r, [%r] + sys.argv[1:])\n'
+                               % (str(log), name, actual, actual))
+            wrapper.chmod(0o755)
+            self.policy['local'][name] = str(wrapper)
+            self.policy['verification_host'][name] = str(wrapper)
+        self.save_policy()
+        self.shared.install_policy(repetitions=1)
+        self.shared.candidate({'tests/test_executables.py': self.shared.counter_test()})
+        result = self.verify()
+        self.assert_ok(result)
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertTrue(any(c[0] == 'python' and any('verifier' in a for a in c[1:]) for c in calls))
+        self.assertTrue(any(c[0] == 'git' and 'checkout' in c for c in calls))
+        self.assertTrue(any(c[0] == 'git' and 'diff' in c for c in calls))
+        for row in self.rows():
+            for name in ('python', 'git'):
+                executable = row['execution']['executables'][name]
+                self.assertEqual(executable['path'], self.policy['verification_host'][name])
+                self.assertTrue(executable['version'])
+        self.assert_clean()
+
+    def test_default_policy_admission_ignores_ambient_git(self):
+        (self.f.state_dir / RV.POLICY).unlink()
+        result = self.verify()
+        self.assert_ok(result)
+
+        git = self.f.bin / 'git'
+        actual = str(git.resolve())
+        git.unlink()
+        git.write_text(PYTHON + 'import os, sys\n'
+                       'if "show" in sys.argv and sys.argv[-1].endswith(":verifiers.json"):\n'
+                       '    raise SystemExit("ambient Git must not read policy")\n'
+                       'os.execv(%r, [%r] + sys.argv[1:])\n' % (actual, actual))
+        git.chmod(0o755)
+        result = self.admitted()
+        self.assert_ok(result)
+
+    def test_default_git_falls_back_to_external_operator_path(self):
+        (self.f.state_dir / RV.POLICY).unlink()
+        self.empty_system_path()
+        result = self.verify()
+        self.assert_ok(result)
+        row, = self.rows()
+        self.assertEqual(row['execution']['executables']['git']['path'],
+                         str((self.f.bin / 'git').resolve()))
+        result = self.admitted()
+        self.assert_ok(result)
+
+    def test_fallback_git_excludes_candidate_and_external_symlink(self):
+        (self.f.state_dir / RV.POLICY).unlink()
+        marker = self.f.directory / 'candidate-git-selected'
+        actual = str((self.f.bin / 'git').resolve())
+        program = (PYTHON + 'import os, sys\nfrom pathlib import Path\n'
+                   'if "--version" in sys.argv or ("show" in sys.argv and sys.argv[-1].endswith(":verifiers.json")):\n'
+                   '    Path(%r).write_text("candidate policy tool selected")\n'
+                   'os.execv(%r, [%r] + sys.argv[1:])\n' % (str(marker), actual, actual))
+        self.shared.candidate({'git': program})
+        (self.f.repo / 'git').chmod(0o755)
+        self.shared.candidate({'git-mode.txt': 'record executable mode\n'})
+        linked = self.f.directory / 'linked-tools'
+        linked.mkdir()
+        (linked / 'git').symlink_to(self.f.repo / 'git')
+        self.empty_system_path()
+        self.f.env['PATH'] = os.pathsep.join(('.', str(self.f.repo), str(linked), self.f.env['PATH']))
+        result = self.verify()
+        self.assert_ok(result)
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.rows()[-1]['execution']['executables']['git']['path'], actual)
+        generic = self.generic_verify(self.f.base)
+        self.assert_ok(generic)
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.rows()[-1]['execution']['executables']['git']['path'], actual)
+        result = self.admitted()
+        self.assert_ok(result)
+        self.assertFalse(marker.exists())
+
+    def test_absent_ssh_client_does_not_create_an_unresolved_launch(self):
+        self.program()
+        ssh = self.f.bin / 'ssh'
+        content = ssh.read_bytes()
+        ssh.unlink()
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'incomplete')
+        self.assertIn('ssh is unavailable', row['incomplete_reason'])
+        self.assertEqual(list((self.f.state_dir / 'remote-verifications').glob('*.json')), [])
+        self.assertFalse(Path(self.f.env['REMOTE_LOG']).exists())
+        ssh.write_bytes(content)
+        ssh.chmod(0o755)
+        result = self.verify()
+        self.assert_ok(result)
+        self.assertEqual(self.rows()[-1]['result'], 'pass')
+        self.assert_clean()
+    def test_generic_integration_policy_reads_and_admission_use_declared_git(self):
+        self.policy.pop('verification_host')
+        log = self.f.directory / 'generic-git.log'
+        actual = self.policy['local']['git']
+        wrapper = self.f.directory / 'generic-git'
+        wrapper.write_text(PYTHON + 'import json, os, sys\n'
+                           'with open(%r, "a") as log: log.write(json.dumps(sys.argv[1:]) + "\\n")\n'
+                           'os.execv(%r, [%r] + sys.argv[1:])\n' % (str(log), actual, actual))
+        wrapper.chmod(0o755)
+        self.policy['local']['git'] = str(wrapper)
+        self.save_policy()
+        result = self.generic_verify(self.f.base)
+        self.assert_ok(result)
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertTrue(any('show' in c and self.f.base + ':' + V.POLICY_FILE in c for c in calls))
+        before = sum('checkout' in c for c in calls)
+        row, = self.rows()
+        receipt, error = S.admit_verification(
+            self.f.state_dir, 'u', V.INTEGRATION_CLAIM, self.f.head,
+            row['policy_sha256'], self.f.policy, repo=self.f.repo,
+            base_commit=self.f.base, target_commit=self.f.base)
+        self.assertIsNone(error, error)
+        self.assertEqual(receipt['execution']['executables']['git']['path'], str(wrapper))
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertGreater(sum('checkout' in c for c in calls), before)
+
+    def test_local_verifier_preserves_other_declared_host_path_tools(self):
+        self.local_only()
+        helper = self.f.bin / 'fixture-host-helper'
+        helper.write_text(PYTHON + 'print("HOST_HELPER_RAN")\n')
+        helper.chmod(0o755)
+        self.f.env.update(OPENAI_API_KEY='fixture-secret', SSH_AUTH_SOCK='fixture-agent')
+        self.program('import os, subprocess\n'
+                     'assert "OPENAI_API_KEY" not in os.environ\n'
+                     'assert "SSH_AUTH_SOCK" not in os.environ\n'
+                     'subprocess.run(["fixture-host-helper"], check=True)\n')
+        result = self.verify()
+        self.assert_ok(result)
+        self.assertIn('HOST_HELPER_RAN', self.rows()[-1]['stdout_tail'])
+
+    def test_child_launcher_exec_failure_is_incomplete_and_retryable(self):
+        self.local_only()
+        self.program()
+        site = self.f.directory / 'launcher-fault'
+        site.mkdir()
+        (site / 'sitecustomize.py').write_text(
+            'import subprocess, sys\n'
+            'if sys.argv[0].endswith("merge_unit.py"):\n'
+            '    original = subprocess.Popen\n'
+            '    def launch(argv, *args, **kwargs):\n'
+            '        if "-c" in argv and any("pinned-verifier-" in x for x in argv):\n'
+            '            argv = list(argv)\n'
+            '            argv[argv.index("-c") + 6] = "/missing-fixture-executable"\n'
+            '        return original(argv, *args, **kwargs)\n'
+            '    subprocess.Popen = launch\n')
+        self.f.env['PYTHONPATH'] = str(site)
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.witness.exists())
+        self.assertEqual(self.rows()[-1]['result'], 'incomplete')
+        self.assertIn('child launcher', self.rows()[-1]['incomplete_reason'])
+        self.f.env.pop('PYTHONPATH')
+        result = self.verify()
+        self.assert_ok(result)
+        result = self.admitted()
+        self.assert_ok(result)
+
+    def test_verifier_cannot_report_a_launcher_error(self):
+        self.local_only()
+        self.program(
+            'import os, stat\n'
+            'for name in os.listdir("/dev/fd"):\n'
+            '    fd = int(name)\n'
+            '    if fd <= 2: continue\n'
+            '    try:\n'
+            '        if stat.S_ISFIFO(os.fstat(fd).st_mode):\n'
+            '            os.write(fd, b"verifier must not attest a launcher error")\n'
+            '    except OSError: pass\n'
+            'raise SystemExit(125)\n')
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        row, = self.rows()
+        self.assertEqual((row['result'], row['exit_code']), ('fail', 125))
+        self.assertNotIn('incomplete_reason', row)
+        self.f.assert_refused(self.admitted())
+
+    def test_changed_remote_module_without_handshake_fails(self):
+        self.shared.install_policy(repetitions=2)
+        self.shared.candidate({'tests/test_exit.py': 'raise SystemExit(0)\n'})
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        stable = self.rows()[-1]
+        self.assertEqual(stable['claim'], V.STABILITY_CLAIM)
+        self.assertEqual(stable['result'], 'fail')
+        self.assertIn('missing or malformed', stable['stderr_tail'])
+        self.f.assert_refused(self.admitted())
+        self.assert_clean()
+
+    def test_policy_change_during_remote_execution_prevents_publication(self):
+        changed = dict(self.policy, local={})
+        self.program('Path(%r).write_text(%r)\n' % (
+            str(self.f.state_dir / RV.POLICY), json.dumps(changed)))
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('execution policy changed during verification', result.stderr)
+        self.assertEqual(self.rows(), [])
+        self.assert_clean()
+        self.save_policy()
+        retrieved = self.verify('--retrieve-remote-evidence')
+        self.assert_ok(retrieved)
+        self.assertEqual(self.rows()[-1]['result'], 'pass')
+        self.assertEqual(self.ssh_launches(), 1)
+
+    def test_candidate_executable_path_in_coordinator_policy_is_refused(self):
+        self.policy['local']['python'] = str(self.f.repo / 'python3')
+        self.save_policy()
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('inside the operated repository', result.stderr)
+        self.assertFalse(Path(self.f.env['REMOTE_LOG']).exists())
+        self.assertEqual(self.rows(), [])
+
+    def test_candidate_executable_is_refused_during_receipt_admission(self):
+        self.policy.pop('verification_host')
+        original = dict(self.policy['local'])
+        for name in ('python', 'git'):
+            with self.subTest(executable=name):
+                program = self.f.repo / ('candidate-' + name)
+                marker = self.f.directory / ('candidate-executed-' + name)
+                program.write_text(PYTHON + 'from pathlib import Path\n'
+                                   'Path(%r).write_text("executed")\nprint("fixture version")\n' % str(marker))
+                program.chmod(0o755)
+                self.policy['local'] = dict(original, **{name: str(program)})
+                self.save_policy()
+                result = self.admitted()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(marker.exists(), 'admission executed a candidate-supplied executable')
+                self.assertIn('inside the operated repository', result.stderr)
+                self.assertEqual(self.merges(), [])
+
+    def test_missing_remote_execution_evidence_is_not_legacy_local(self):
+        result = self.verify()
+        self.assert_ok(result)
+        row, = self.rows()
+        row.pop('execution')
+        self.journal.write_text(json.dumps(row) + '\n')
+        result = self.admitted()
+        self.f.assert_refused(result)
+        self.assertIn('missing execution evidence', result.stderr)
+
+    def test_retained_remote_digest_loss_corrects_persisted_verified_labels(self):
+        result = self.verify()
+        self.assert_ok(result)
+        self.f.forge['queued'] = True
+        self.f.save()
+        self.assertNotEqual(self.admitted().returncode, 0)
+        intent = self.f.intent()
+        intent['preconditions']['integration']['execution'].pop('verified_tree')
+        intent['integration_status'] = 'candidate-verified'
+        path = self.f.state_dir / ('merge-unit-' + intent['operation_id'] + '.json')
+        path.write_text(json.dumps(intent))
+        self.f.forge['pr'].update(state='MERGED', mergeCommit={'oid': self.f.merged})
+        self.f.us['merge_receipt'] = {
+            'unit': 'u', 'repo': self.f.remote, 'pr': self.f.remote + '/pull/7',
+            'target': 'main', 'head': self.f.head, 'merged_as': self.f.merged,
+            'target_commit': self.f.base, 'integration_status': 'candidate-verified'}
+        self.f.save()
+        result = self.admitted()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.f.intent()['integration_status'], 'integration-unverified')
+        self.assertEqual(self.f.receipts()[-1]['integration_status'], 'integration-unverified')
+        saved = read_json(self.f.state_dir / S.STATE_FILE)
+        self.assertEqual(saved['units']['u']['merge_receipt']['integration_status'],
+                         'integration-unverified')
+        self.assertEqual(saved['units']['u']['state'], 'READY_FOR_PR')
+        self.assertNotIn(' advance ', result.stdout)
+        self.assertEqual(len(self.merges()), 1)
+
+    def test_remote_receipt_cannot_lose_verified_digest_on_admission(self):
+        result = self.verify()
+        self.assert_ok(result)
+        row, = self.rows()
+        row['execution'].pop('verified_tree')
+        self.journal.write_text(json.dumps(row) + '\n')
+        result = self.admitted()
+        self.f.assert_refused(result)
+        self.assertIn('tree digest', result.stderr)
+
+
+class TestWriteOnceRemoteEvidence(unittest.TestCase):
+    def test_completed_receipt_cannot_be_replaced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'claim-0.json'
+            failure = {'exit_code': 125, 'completion': True}
+            RV.publish(path, failure, once=True)
+            before, inode = path.read_bytes(), path.stat().st_ino
+            RV.publish(path, failure, once=True)
+            self.assertEqual(path.stat().st_ino, inode)
+            with self.assertRaisesRegex(ValueError, 'conflicting write-once'):
+                RV.publish(path, {'exit_code': 0, 'completion': True}, once=True)
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(list(Path(directory).iterdir()), [path])
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -32,6 +32,7 @@ import child_environment as CE
 import coordinator_paths as CP
 import swarm as S
 import verify as V
+import remote_verify as RV
 
 
 SWARM = str(_SWARM_DIR / "scripts" / "swarm.py")
@@ -255,19 +256,38 @@ def validate_scope_report(report, code, binding):
         raise Refusal("scope-check returned an invalid scope report path lists")
 
 
+def declared_execution(state_dir, repo):
+    policy, digest = RV.read_policy(state_dir)
+    for executable in policy.get("local", {}).values():
+        if CP._inside(executable, repo):
+            raise Refusal("verification executable is inside the operated repository")
+    return policy, digest
+
+
+def execution_runner(state_dir, repo):
+    policy, _digest = declared_execution(state_dir, repo)
+    return RV.GitRunner(S.U.run, RV.resolve_executables(
+        policy.get("local"), names=("git",), excluded_roots=(repo,)))
+
+
 def integration_evidence(state_dir, binding, repo, target):
     """Admit coordinator evidence under the exact observed target's policy."""
+    try:
+        runner = execution_runner(state_dir, repo)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return None, "verification executable policy unavailable: " + str(exc)
     policy, policy_digest, _digest, error = V.merge_precondition_policy(
-        S.U.run, repo, target)
+        runner, repo, target)
     if error:
         return None, error
     admitted, error = S.admit_verification(
         state_dir, binding["unit"], V.INTEGRATION_CLAIM, binding["head"],
-        policy_digest, policy, repo=repo, base_commit=target, target_commit=target)
+        policy_digest, policy, repo=repo, base_commit=target, target_commit=target,
+        runner=runner)
     if error:
         return None, error
     stability, error = V.admit_stability(
-        S.U.run, repo, target, admitted, binding["unit"],
+        runner, repo, target, admitted, binding["unit"],
         S.load_verifications(state_dir)[0])
     if error:
         return None, error
@@ -285,8 +305,12 @@ def retained_integration_problem(preconditions, evidence, binding, repo, target,
     """
     required = preconditions.get("required_merge_claims")
     if required is None:
+        try:
+            runner = execution_runner(state_dir, repo)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            return "retained merge target policy is unreadable: " + str(exc)
         policy, _pd, error = V.read_policy(
-            S.U.run, repo, target, source="target commit")
+            runner, repo, target, source="target commit")
         if error:
             return "retained merge target policy is unreadable: " + error
         required = [V.INTEGRATION_CLAIM]
@@ -310,8 +334,15 @@ def retained_integration_problem(preconditions, evidence, binding, repo, target,
         receipts, _ = S.load_verifications(state_dir)
     except S.OutboxError as exc:
         return "retained integration journal is unreadable: " + str(exc)
+    problem = RV.pending_problem(state_dir, binding["unit"],
+                                 {k: evidence.get(k) for k in V.MERGE_BASIS_FIELDS}, receipts)
+    if problem:
+        return problem
     for claim in required:
         retained = evidence if claim == V.INTEGRATION_CLAIM else evidence[claim]
+        problem = RV.execution_problem(retained)
+        if problem:
+            return problem
         problem = V.merge_failure_problem(receipts, retained)
         if problem:
             return problem
@@ -530,12 +561,15 @@ def reconcile(args, plan):
             raise Refusal("verification requires an OPEN PR with no unresolved merge intent")
         S.load_verifications(state_dir)
         target = observed_target(cmd["target"], binding["target"])
+        execution_policy, execution_digest = declared_execution(state_dir, repo)
         # Return only coordinator/forge inputs captured under the lease. The
         # caller releases it before running the disposable candidate verifier.
         return repo, {"binding": binding, "scope_binding": scope_binding,
                       "state_dir": state_dir, "root": root,
                       "operation_id": operation_id, "target": target,
-                      "plan_digest": S.plan_digest(plan)}
+                      "plan_digest": S.plan_digest(plan),
+                      "execution_policy": execution_policy,
+                      "execution_policy_digest": execution_digest}
     observation = {"approver": args.approver, "already_merged": pr["state"] == "MERGED",
                    "scope_exit": scope.returncode, "scope": scope_report,
                    "scope_stdout": scope.stdout, "scope_stderr": scope.stderr}
@@ -669,7 +703,10 @@ def verify_integration(args, repo, snapshot):
     binding, target = snapshot["binding"], snapshot["target"]
     evidences, error = V.run_merge_preconditions(
         S.U.run, repo, binding["head"], target,
-        timeout=args.verification_timeout)
+        timeout=args.verification_timeout, execution_policy=snapshot["execution_policy"],
+        state_dir=args.state_dir, unit=binding["unit"],
+        retrieve_remote=getattr(args, "retrieve_remote_evidence", False),
+        journal_entries=S.load_verifications(args.state_dir)[0])
     if error and not evidences:
         raise Refusal(error + ". " + verification_hint(args))
 
@@ -684,6 +721,9 @@ def verify_integration(args, repo, snapshot):
             plan = read_object(args.plan)
             if S.plan_digest(plan) != snapshot["plan_digest"]:
                 raise Refusal("plan changed during verification")
+            _, execution_digest = RV.read_policy(args.state_dir)
+            if execution_digest != snapshot["execution_policy_digest"]:
+                raise Refusal("execution policy changed during verification")
             current = authority(args, plan)
             state_dir, root, fresh, host, repo_path, scope_binding, fresh_repo = current
             for key, value in binding.items():
@@ -724,8 +764,24 @@ def verify_integration(args, repo, snapshot):
             problem = S._verify_shape_problem(evidence)
             if problem:
                 raise Refusal(problem)
+        previous, _ = S.load_verifications(state_dir)
         for evidence in evidences:
-            S._fsync_append(state_dir / S.VERIFY_RECEIPTS, evidence)
+            # Retrieval is idempotent. Incomplete -> complete appends evidence;
+            # repeated retrieval of the same completed claim does not append.
+            identity = evidence.get("execution", {}).get("launch_id")
+            repeated = identity and any(
+                isinstance(r.get("execution"), dict)
+                and r["execution"].get("launch_id") == identity
+                and r.get("claim") == evidence["claim"]
+                and r.get("result") == evidence["result"]
+                and r.get("exit_code") == evidence["exit_code"] for r in previous)
+            if not repeated:
+                S._fsync_append(state_dir / S.VERIFY_RECEIPTS, evidence)
+        if evidences and evidences[0].get("execution", {}).get("launch_id"):
+            RV.acknowledge(state_dir, binding["unit"],
+                           {k: evidences[0][k] for k in V.MERGE_BASIS_FIELDS},
+                           evidences[0]["execution"]["launch_id"],
+                           evidences[0]["execution"]["publication_digest"])
     finally:
         S.release_lease(args.state_dir)
     for evidence in evidences:
@@ -734,6 +790,10 @@ def verify_integration(args, repo, snapshot):
             evidence["subject_head"], evidence["target_commit"]))
     if error:
         raise Refusal(error + ". " + verification_hint(args))
+    if any(e.get("execution", {}).get("evidence_reconciled") is False for e in evidences):
+        execution = evidences[0]["execution"]
+        raise Refusal("unresolved remote evidence at {}:{}; retrieve or resolve it first".format(
+            execution["ssh_alias"], execution["stage"]))
     if any(evidence["result"] != "pass" for evidence in evidences):
         if any(evidence["result"] == "fail" for evidence in evidences):
             raise Refusal("candidate merge verifier failed; repair the candidate")
@@ -781,12 +841,16 @@ def main(argv=None):
     parser.add_argument("--verify-integration", action="store_true",
                         help="run all target-authorized merge verifiers and record evidence; never merge")
     parser.add_argument("--verification-timeout", type=int, default=900)
+    parser.add_argument("--retrieve-remote-evidence", action="store_true",
+                        help="retrieve the existing remote launch for this binding without launching a verifier")
     parser.add_argument("--allow-unchecked-scope", type=nonempty, metavar="REASON")
     parser.add_argument("--abandon-intent", type=nonempty, metavar="OPERATION_ID")
     parser.add_argument("--reason", type=nonempty)
     args = parser.parse_args(argv)
     if args.verify_integration and args.abandon_intent:
         parser.error("--verify-integration cannot abandon an intent")
+    if args.retrieve_remote_evidence and not args.verify_integration:
+        parser.error("--retrieve-remote-evidence requires --verify-integration")
     if args.verification_timeout <= 0:
         parser.error("--verification-timeout must be positive")
     if args.pr <= 0:

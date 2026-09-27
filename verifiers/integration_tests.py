@@ -6,7 +6,8 @@ Tests and implementation are the candidate tree's bytes; this is integration
 validation, not an immutable test-corpus guarantee or an OS security boundary.
 """
 import os
+import sys
 
 
 if __name__ == "__main__":
-    os.execvp("python3", ["python3", "-m", "unittest", "discover", "-s", "tests"])
+    os.execv(sys.executable, [sys.executable, "-m", "unittest", "discover", "-s", "tests"])

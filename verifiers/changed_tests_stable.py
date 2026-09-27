@@ -91,7 +91,7 @@ def run_repetition(name, module, top):
     # Read it only after waiting for the exact child; stdout is never evidence.
     with tempfile.TemporaryFile() as completion:
         child = subprocess.Popen(
-            ['python3', '-c', RUN_MODULE, name, module, top, str(completion.fileno())],
+            [sys.executable, '-c', RUN_MODULE, name, module, top, str(completion.fileno())],
             pass_fds=(completion.fileno(),))
         code = child.wait()
         completion.seek(0)
@@ -120,7 +120,7 @@ def main():
     env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
                GIT_CONFIG_SYSTEM=os.devnull, GIT_CONFIG_COUNT="0",
                GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0")
-    git = shutil.which("git", path=os.defpath)
+    git = os.environ.get("HANIG_VERIFICATION_GIT") or shutil.which("git", path=os.defpath)
     if not git:
         raise SystemExit("system git is unavailable")
     diff = subprocess.run(

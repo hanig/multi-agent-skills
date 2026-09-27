@@ -6146,7 +6146,7 @@ def load_verifications(state_dir):
 
 def admit_verification(state_dir, unit, claim, produced, policy_digest,
                        policy, repo=None, base_commit=None,
-                       target_commit=None):
+                       target_commit=None, runner=None):
     """(receipt, refusal) for one required claim.
 
     Four bindings, and all of them must hold. Any one missing turns the
@@ -6165,6 +6165,18 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
                       "verifier a receipt names cannot be checked against "
                       "anything. Refusing rather than taking the receipt's "
                       "word for which verifier ran.")
+    if runner is None and claim == V.INTEGRATION_CLAIM:
+        try:
+            execution_policy, _ = V.RV.read_policy(state_dir)
+            for executable in execution_policy.get("local", {}).values():
+                if CP._inside(executable, repo):
+                    return None, "verification executable is inside the operated repository"
+            runner = V.RV.GitRunner(
+                U.run, V.RV.resolve_executables(execution_policy.get("local"), names=("git",),
+                                              excluded_roots=(repo,)))
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            return None, "verification executables unavailable: " + str(exc)
+    runner = runner or U.run
     integration_basis = None
     if claim == V.INTEGRATION_CLAIM:
         if not target_commit:
@@ -6173,10 +6185,15 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
                 "commit to bind to. Record the target commit in the merge "
                 "attestation; branch-local evidence cannot substitute for it.")
         integration_basis, basis_error = V.candidate_merge_basis(
-            U.run, repo, produced, target_commit)
+            runner, repo, produced, target_commit)
         if basis_error:
             return None, basis_error
-    recs, _p = load_verifications(state_dir)
+        recs, _p = load_verifications(state_dir)
+        pending = V.RV.pending_problem(state_dir, unit, integration_basis, recs)
+        if pending:
+            return None, pending
+    else:
+        recs, _p = load_verifications(state_dir)
     mine = [r for r in recs if r.get("unit") == unit
             and r.get("claim") == claim]
     if not mine:
@@ -6185,7 +6202,7 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
                       f"it:\n  swarm.py verify --unit {unit} --claim {claim} "
                       f"--verifier NAME --path PATH")
     stale, moved_target, wrong_policy, failed, unauthorized = [], [], [], [], []
-    corpus_refusals = []
+    corpus_refusals, candidate_refusals = [], []
     incomplete = []
     for r in mine:
         if str(r.get("subject_head")) != str(produced):
@@ -6219,7 +6236,7 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
             unauthorized.append(refusal)
             continue
         evidence, refusal = V.corpus_evidence(
-            U.run, repo, base_commit, produced, entry)
+            runner, repo, base_commit, produced, entry)
         if refusal:
             corpus_refusals.append(refusal)
             continue
@@ -6233,11 +6250,31 @@ def admit_verification(state_dir, unit, claim, produced, policy_digest,
                 f"receipt corpus evidence does not match the anchored base "
                 f"and produced commit for claim {claim!r}")
             continue
-        if claim == V.INTEGRATION_CLAIM:
+        problem = V.RV.execution_problem(r)
+        if problem:
+            corpus_refusals.append(problem)
+            continue
+        candidate = (any(k in r for k in V.MERGE_BASIS_FIELDS[1:])
+                     or (r.get("execution") or {}).get("location") == "remote")
+        if candidate:
+            basis = {k: r.get(k) for k in V.MERGE_BASIS_FIELDS}
+            if (any(not isinstance(v, str) or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", v)
+                    for v in basis.values()) or basis["produced_head"] != r["subject_head"]):
+                candidate_refusals.append("incomplete or invalid candidate basis in verification receipt")
+                continue
+            problem = V.RV.pending_problem(state_dir, unit, basis, recs)
+            if problem:
+                candidate_refusals.append(problem)
+                continue
             problem = V.merge_failure_problem(recs, r)
             if problem:
-                return None, problem
+                if claim == V.INTEGRATION_CLAIM:
+                    return None, problem
+                candidate_refusals.append(problem)
+                continue
         return r, None
+    if candidate_refusals:
+        return None, candidate_refusals[0]
     if failed:
         subject = ("the candidate merge" if claim == V.INTEGRATION_CLAIM
                    else "the produced commit")
@@ -9706,12 +9743,29 @@ def cmd_verify(args):
             f"not recover a basis from another attempt, its receipt, or the "
             f"current branch.\n")
         return EXIT_USAGE
-    basis_problem = W.validate_pinned_head(U.run, launch_facts, produced)
+    runner = U.run
+    executables = None
+    if args.claim == V.INTEGRATION_CLAIM:
+        try:
+            execution_policy, execution_digest = V.RV.read_policy(args.state_dir)
+            if execution_policy.get("verification_host"):
+                sys.stderr.write("error: remote merge verification requires merge_unit.py --verify-integration\n")
+                return EXIT_USAGE
+            for executable in execution_policy.get("local", {}).values():
+                if CP._inside(executable, repo):
+                    sys.stderr.write("error: verification executable is inside the operated repository\n")
+                    return EXIT_USAGE
+            executables = V.RV.resolve_executables(execution_policy.get("local"), excluded_roots=(repo,))
+            runner = V.RV.GitRunner(U.run, executables)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            sys.stderr.write("error: verification executables unavailable: {}\n".format(exc))
+            return EXIT_USAGE
+    basis_problem = W.validate_pinned_head(runner, launch_facts, produced)
     if basis_problem:
         sys.stderr.write(f"error: {basis_problem}\n")
         return EXIT_USAGE
 
-    policy, policy_digest, perr = V.read_policy(U.run, repo, base)
+    policy, policy_digest, perr = V.read_policy(runner, repo, base)
     if perr:
         sys.stderr.write(f"error: {perr}\n")
         return EXIT_USAGE
@@ -9727,7 +9781,7 @@ def cmd_verify(args):
         return EXIT_USAGE
 
     corpus_evidence, refusal = V.corpus_evidence(
-        U.run, repo, base, produced, entry)
+        runner, repo, base, produced, entry)
     if refusal:
         sys.stderr.write(f"error: {refusal}\n")
         return EXIT_USAGE
@@ -9746,8 +9800,13 @@ def cmd_verify(args):
                 "contacts a forge.\n")
             return EXIT_USAGE
         outcome, merge_evidence, rerr = V.run_in_candidate_merge(
-            U.run, repo, produced, target_commit, args.path, digest,
-            args=args.arg, timeout=args.timeout)
+            runner, repo, produced, target_commit, args.path, digest,
+            args=args.arg, timeout=args.timeout, executables=executables,
+            state_dir=args.state_dir, unit=args.unit,
+            journal_entries=load_verifications(args.state_dir)[0])
+        if V.RV.read_policy(args.state_dir)[1] != execution_digest:
+            sys.stderr.write("error: execution policy changed during verification\n")
+            return EXIT_CONFLICT
     else:
         if getattr(args, "target_commit", None):
             sys.stderr.write(
@@ -9772,6 +9831,8 @@ def cmd_verify(args):
            "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "schema_version": 1}
     rec.update(corpus_evidence)
     rec.update(merge_evidence)
+    if outcome.get("execution") is not None:
+        rec.update(execution=outcome["execution"], schema_version=2)
     bad = _verify_shape_problem(rec)
     if bad:
         sys.stderr.write(f"error: this would not be admissible: {bad}\n")

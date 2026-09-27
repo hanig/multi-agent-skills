@@ -42,17 +42,22 @@ what the receipts have always said about isolation.
 
 Python 3.8+, standard library only.
 """
+import base64
 import hashlib
 import json
 import os
 import posixpath
+import re
+import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 import child_environment as CE
+import remote_verify as RV
 
 POLICY_FILE = "verifiers.json"
 INTEGRATION_CLAIM = "integration-tests"
@@ -95,7 +100,7 @@ def _isolated_git(runner, repo, *args, timeout=60):
         "GIT_ATTRIBUTES_FILE", "GIT_TEMPLATE_DIR",
     )
     env_program = shutil.which("env", path=os.defpath)
-    git_program = shutil.which("git", path=os.defpath)
+    git_program = getattr(runner, "git_program", None) or shutil.which("git", path=os.defpath)
     if not env_program or not git_program:
         return 127, "", "system env or git executable is unavailable"
     argv = [env_program]
@@ -295,7 +300,7 @@ def declared_corpus(entry):
     return paths, None
 
 
-def _digest_base_blob(repo, base_commit, path):
+def _digest_base_blob(repo, base_commit, path, git_program="git"):
     """(sha256, size, error) for exact blob bytes at the anchored base.
 
     A blob is not necessarily a regular file: a symlink is a blob containing
@@ -310,10 +315,10 @@ def _digest_base_blob(repo, base_commit, path):
     environment, and Python hashes those bytes.
     """
     spec = f"{base_commit}:{path}"
-    argv = ["git", "-C", str(repo), "--no-replace-objects", "cat-file"]
+    argv = [git_program, "-C", str(repo), "--no-replace-objects", "cat-file"]
     try:
         entry = subprocess.run(
-            ["git", "-C", str(repo), "--no-replace-objects", "ls-tree",
+            [git_program, "-C", str(repo), "--no-replace-objects", "ls-tree",
              "-z", "--full-tree", str(base_commit), "--",
              f":(literal){path}"],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -428,7 +433,8 @@ def corpus_evidence(runner, repo, base_commit, subject_commit, entry):
     changed = sorted(p for p in out.split("\x00") if p)
     digests, total = {}, 0
     for path in corpus:
-        digest, size, derr = _digest_base_blob(repo, base_commit, path)
+        digest, size, derr = _digest_base_blob(
+            repo, base_commit, path, getattr(runner, "git_program", "git"))
         if derr:
             return None, derr
         total += size
@@ -654,7 +660,8 @@ def candidate_merge_basis(runner, repo, produced_head, target_commit):
 
 
 def run_in_candidate_merge(runner, repo, produced_head, target_commit, path,
-                           expect_digest, args=None, timeout=900):
+                           expect_digest, args=None, timeout=900, executables=None,
+                           state_dir=None, unit=None, journal_entries=None):
     """Run pinned verifier bytes in a disposable candidate-merge checkout.
 
     The checkout starts at the exact target commit and receives the produced
@@ -662,14 +669,21 @@ def run_in_candidate_merge(runner, repo, produced_head, target_commit, path,
     result is evidence unavailability, not permission to test either branch.
     Returns ``(outcome, basis, error)``.
     """
+    executables = executables or RV.resolve_executables(excluded_roots=(repo,))
+    runner = RV.GitRunner(runner, executables)
     tmp, tree, basis, error = _candidate_checkout(
         runner, repo, produced_head, target_commit)
     if error:
         return None, basis, error
     try:
+        pending = RV.pending_problem(state_dir, unit, basis, journal_entries)
+        if pending:
+            return None, basis, pending
         outcome, run_error = run_pinned(
             runner, path, expect_digest, args=args, timeout=timeout, cwd=tree,
-            observe_completion=True)
+            observe_completion=True, executables=executables)
+        if outcome is not None:
+            outcome["execution"] = RV.local_execution(executables)
         return outcome, basis, run_error
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -712,7 +726,8 @@ def merge_precondition_policy(runner, repo, target_commit,
         if sum(isinstance(v, dict) and v.get("name") == name
                for v in policy["verifiers"]) != 1:
             return None, None, None, "ambiguous changed-tests-stable verifier name"
-    digest, _size, error = _digest_base_blob(repo, target_commit, path)
+    digest, _size, error = _digest_base_blob(
+        repo, target_commit, path, getattr(runner, "git_program", "git"))
     if error:
         return None, None, None, "merge-precondition target verifier: " + error
     entry, error = authorized(policy, name, digest, claim)
@@ -735,13 +750,18 @@ def run_merge_precondition(runner, repo, produced_head, target_commit,
 
 
 def run_merge_preconditions(runner, repo, produced_head, target_commit,
-                            timeout=900, claims=(INTEGRATION_CLAIM, STABILITY_CLAIM)):
+                            timeout=900, claims=(INTEGRATION_CLAIM, STABILITY_CLAIM),
+                            execution_policy=None, state_dir=None, unit=None,
+                            retrieve_remote=False, journal_entries=None):
     """Run target-pinned claims in one disposable candidate merge.
 
     Return receipts plus any execution error. A completed FAIL remains evidence
     even if a later verifier cannot execute; the caller must publish completed
     receipts under its original observation fence before reporting the error.
     """
+    execution_policy = execution_policy or {}
+    executables = RV.resolve_executables(execution_policy.get("local"), excluded_roots=(repo,))
+    runner = RV.GitRunner(runner, executables)
     checks = []
     for claim in claims:
         policy, policy_digest, digest, error = merge_precondition_policy(
@@ -769,6 +789,8 @@ def run_merge_preconditions(runner, repo, produced_head, target_commit,
             runner, repo, produced_head, target_commit)
         if error:
             return [], error
+        programs = []
+        extras = []
         for claim, entry, policy_digest, digest, corpus in checks:
             path, args, extra = MERGE_VERIFIER_PATH, [], {}
             if claim == STABILITY_CLAIM:
@@ -776,12 +798,32 @@ def run_merge_preconditions(runner, repo, produced_head, target_commit,
                 extra = {"repetitions": entry.get("repetitions", 5)}
                 args = ["--merge-base", basis["merge_base"], "--head", produced_head,
                         "--repetitions", str(extra["repetitions"])]
-            outcome, error = run_pinned(
-                runner, os.path.join(policy_tree, path), digest,
-                args=args, timeout=timeout, cwd=tree, observe_completion=True)
-            if error:
-                return receipts, error
+            programs.append({"path": os.path.join(policy_tree, path), "digest": digest,
+                             "args": args, "program": base64.b64encode(
+                                 Path(policy_tree, path).read_bytes()).decode("ascii"),
+                             "binding": dict(corpus, **extra, claim=claim,
+                                 verifier=entry["name"], verifier_sha256=digest,
+                                 policy_sha256=policy_digest, authorization_commit=target_commit)})
+            extras.append(extra)
+        remote = execution_policy.get("verification_host")
+        if remote or retrieve_remote or RV.pending_problem(state_dir, unit, basis, journal_entries):
+            outcomes, execution = RV.run_remote(
+                runner, tree, basis, programs, remote, timeout, repo, state_dir, unit,
+                journal_entries, retrieve_only=retrieve_remote)
+            execution["coordinator_executables"] = executables
+        else:
+            outcomes = []
+            execution = RV.local_execution(executables)
+            for program in programs:
+                outcome, error = run_pinned(
+                    runner, program["path"], program["digest"], args=program["args"],
+                    timeout=timeout, cwd=tree, observe_completion=True,
+                    executables=executables)
+                outcomes.append(outcome if not error else RV.incomplete(error))
+        for check, extra, outcome in zip(checks, extras, outcomes):
+            claim, entry, policy_digest, digest, corpus = check
             receipt = dict(corpus, **basis, **extra)
+            receipt["execution"] = execution
             receipt.update({
                 "claim": claim, "verifier": entry["name"],
                 "verifier_sha256": digest, "policy_sha256": policy_digest,
@@ -790,7 +832,7 @@ def run_merge_preconditions(runner, repo, produced_head, target_commit,
                 **outcome_result(outcome),
                 "exit_code": outcome["exit_code"],
                 "stdout_tail": outcome["stdout"], "stderr_tail": outcome["stderr"],
-                "schema_version": 1,
+                "schema_version": 2,
             })
             receipts.append(receipt)
         return receipts, None
@@ -831,7 +873,8 @@ def admit_stability(runner, repo, target, integration, unit, receipts):
     if any(r.get("result") == "fail" for r in matching):
         return None, "changed-tests-stable returned FAIL for this exact candidate binding"
     for receipt in matching:
-        if receipt.get("result") == "pass" and receipt.get("exit_code") == 0:
+        if (receipt.get("result") == "pass" and receipt.get("exit_code") == 0
+                and not RV.execution_problem(receipt)):
             return receipt, None
     return None, "no passing changed-tests-stable receipt for this exact candidate binding"
 
@@ -862,7 +905,8 @@ def outcome_result(outcome):
     return {"result": "pass" if outcome["exit_code"] == 0 else "fail"}
 
 
-def _observe_execution(argv, timeout, cwd):
+def _observe_execution(argv, timeout, cwd, launch_config=None, launch_prefix=(),
+                       final_argv0=None):
     """Observe merge-verifier completion without unit.run's overloaded exit 127.
 
     Only our timeout or a launch/transport exception is incomplete. Every
@@ -874,17 +918,51 @@ def _observe_execution(argv, timeout, cwd):
     child = None
     completed_failure = None
     out, err, reason = "", "", None
+    launch_read, launch_write, launch_error = None, None, ""
     try:
+        pass_fds = ()
+        if launch_config is not None:
+            bindir, git, python, child_python = launch_config
+            launch_read, launch_write = os.pipe()
+            os.set_blocking(launch_read, False)
+            # This descriptor closes on successful exec: the verifier cannot
+            # turn its own completed failure into a launcher error.
+            launcher = (
+                "import os, sys\n"
+                "fd = int(sys.argv[1]); os.set_inheritable(fd, False)\n"
+                "os.environ['PATH'] = sys.argv[2] + os.pathsep + os.environ.get('PATH', os.defpath)\n"
+                "os.environ['HANIG_VERIFICATION_GIT'] = sys.argv[3]\n"
+                "if sys.argv[4]: os.environ['HANIG_VERIFICATION_PYTHON'] = sys.argv[4]\n"
+                "else: os.environ.pop('HANIG_VERIFICATION_PYTHON', None)\n"
+                "try: os.execv(sys.argv[5], sys.argv[6:])\n"
+                "except OSError as error:\n"
+                "    os.write(fd, (str(error) or type(error).__name__).encode('utf-8', 'replace')[:1000])\n"
+                "    os._exit(125)\n")
+            # Apply a Python shebang's env options before installing the
+            # coordinator's selected tools. In particular env -i must not
+            # discard the declared interpreter or its child-tool selection.
+            executable = argv[0]
+            verifier_argv = [executable if final_argv0 is None else final_argv0] + argv[1:]
+            # Verifier startup hooks belong to the final interpreter only.
+            # Use the actual harness, even when the declared Python is a wrapper.
+            argv = list(launch_prefix) + [sys.executable, "-I", "-S", "-c", launcher, str(launch_write),
+                                          bindir, git, child_python, executable] + verifier_argv
+            pass_fds = (launch_write,)
         child = subprocess.Popen(
             argv, cwd=cwd, env=CE.child_env(), stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True,
-            encoding="utf-8", errors="replace", start_new_session=True)
+            encoding="utf-8", errors="replace", start_new_session=True, pass_fds=pass_fds)
+        if launch_write is not None:
+            os.close(launch_write)
+            launch_write = None
         out, err = child.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         reason = "coordinator timed out after {}s".format(timeout)
     except (OSError, subprocess.SubprocessError) as exc:
         reason = "coordinator could not launch or collect verifier: {}".format(exc)
     finally:
+        if launch_write is not None:
+            os.close(launch_write)
         if reason and child is not None:
             # Capture the child's status BEFORE our intervention. A finished
             # failure is still evidence when a descendant holds a pipe open;
@@ -904,8 +982,18 @@ def _observe_execution(argv, timeout, cwd):
                 for stream in (child.stdout, child.stderr):
                     if stream:
                         stream.close()
+        if launch_read is not None:
+            try:
+                launch_error = os.read(launch_read, 1000).decode("utf-8", "replace")
+            except BlockingIOError:
+                pass
+            finally:
+                os.close(launch_read)
     outcome = {"exit_code": child.returncode if child is not None else None,
                "stdout": (out or "")[-4000:], "stderr": (err or "")[-2000:]}
+    if launch_error:
+        outcome["incomplete_reason"] = "coordinator child launcher could not exec verifier: " + launch_error
+        return outcome
     if (reason and completed_failure is None
             and outcome["exit_code"] not in (None, 0, -signal.SIGKILL)):
         # The child can finish between poll and killpg. SIGKILL cannot produce
@@ -920,8 +1008,86 @@ def _observe_execution(argv, timeout, cwd):
     return outcome
 
 
+def _python_selector(first_line):
+    """Return a bounded explicit-Python launch description, or native None.
+
+    Only pinned bytes supply the language. Env splits accept ordinary quoting,
+    not backslash escapes or expansion. Unknown options cannot guess a command.
+    Native implicit execution never calls this parser.
+    """
+    declaration = os.fsdecode(first_line[2:]).strip()
+    parts = declaration.split(None, 1)
+    if not parts:
+        raise ValueError("missing shebang interpreter")
+    prefix, argv0 = [], None
+    words = declaration.split()
+    if posixpath.basename(parts[0]) == "env":
+        prefix = [parts[0]]
+        raw = parts[1] if len(parts) == 2 else ""
+        split = False
+        split_parts = raw.split(None, 1)
+        if split_parts and split_parts[0] in ("-S", "--split-string"):
+            raw = split_parts[1] if len(split_parts) == 2 else ""
+            split = True
+        elif raw.startswith("-S"):
+            raw = raw[2:]
+            split = True
+        elif raw.startswith("--split-string="):
+            raw = raw[len("--split-string="):]
+            split = True
+        if split:
+            if not raw or "\\" in raw or "$" in raw:
+                raise ValueError("empty or unsupported env split string")
+            words = shlex.split(raw)
+        else:
+            words = raw.split()
+        index = 0
+        required = ("-u", "--unset", "-P", "-C", "--chdir", "-a", "--argv0")
+        while index < len(words):
+            word = words[index]
+            if word == "--":
+                prefix.append(word)
+                index += 1
+                break
+            if word in ("-", "-i", "--ignore-environment", "-v", "--debug"):
+                prefix.append(word)
+                index += 1
+                continue
+            option, value, consumed = word, None, 1
+            if word in required:
+                if index + 1 >= len(words):
+                    raise ValueError("missing env operand for " + word)
+                value, consumed = words[index + 1], 2
+            elif word.startswith("--") and "=" in word:
+                option, value = word.split("=", 1)
+                if option not in required:
+                    raise ValueError("unsupported env option " + option)
+            elif len(word) > 2 and word[:2] in ("-u", "-P", "-C", "-a"):
+                option, value = word[:2], word[2:]
+            elif word.startswith("-"):
+                raise ValueError("unsupported env option " + word)
+            else:
+                break
+            if option in ("-a", "--argv0"):
+                argv0 = value
+            else:
+                prefix.extend(words[index:index + consumed])
+            index += consumed
+        while index < len(words) and "=" in words[index]:
+            prefix.append(words[index])
+            index += 1
+        words = words[index:]
+    if not words or not words[0]:
+        raise ValueError("missing shebang command")
+    if not re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?", posixpath.basename(words[0])):
+        return None
+    if argv0 == "":
+        raise ValueError("empty process argv0 is unsupported")
+    return {"prefix": prefix, "argv0": argv0, "args": words[1:]}
+
+
 def run_pinned(runner, path, expect_digest, args=None, timeout=900,
-               cwd=None, observe_completion=False):
+               cwd=None, observe_completion=False, executables=None):
     """Execute the bytes that hashed, not the path that was named.
 
     Hashing a file and then executing the path re-reads it, so the bytes that
@@ -945,7 +1111,40 @@ def run_pinned(runner, path, expect_digest, args=None, timeout=900,
             return None, "the verified bytes changed while being copied"
         os.chmod(copy, 0o500)
         if observe_completion:
-            return _observe_execution([copy] + list(args or []), timeout, cwd), None
+            argv = [copy] + list(args or [])
+            launch_config = None
+            launch_prefix = []
+            final_argv0 = None
+            if executables is not None:
+                # The pinned programs and their subprocesses share declared
+                # executables. A candidate's cwd/PATH never supplies either.
+                first_line = Path(copy).read_bytes().split(b"\n", 1)[0]
+                select_python = executables["python"].get("declared", True)
+                if select_python and not first_line.startswith(b"#!"):
+                    argv.insert(0, executables["python"]["path"])
+                elif select_python:
+                    # Only target-authorized bytes select this rule. The
+                    # filename says nothing about the program's language.
+                    try:
+                        selection = _python_selector(first_line)
+                    except ValueError as exc:
+                        return None, "invalid pinned verifier selector: " + str(exc)
+                    if selection is not None:
+                        launch_prefix = selection["prefix"]
+                        final_argv0 = selection["argv0"]
+                        argv = [executables["python"]["path"]] + selection["args"] + argv
+                bindir = Path(tmpdir) / "bin"
+                bindir.mkdir()
+                for name, key in (("python3", "python"), ("python", "python"), ("git", "git")):
+                    if key != "python" or select_python:
+                        (bindir / name).symlink_to(executables[key]["path"])
+                # Add executable configuration only after the ordinary
+                # coordinator spawn's unchanged child_env() boundary.
+                launch_config = (str(bindir), executables["git"]["path"],
+                                 executables["python"]["path"],
+                                 executables["python"]["path"] if select_python else "")
+            return _observe_execution(argv, timeout, cwd, launch_config,
+                                      launch_prefix, final_argv0), None
         # No before/after dance here any more. `run_in_checkout` gives this a
         # worktree the agent is not working in, so there is nothing to drift.
         rc, out, errout = runner([copy] + list(args or []), timeout=timeout,

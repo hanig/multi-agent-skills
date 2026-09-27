@@ -3,14 +3,14 @@
   "verifiers": [
     {
       "name": "merge-precondition",
-      "sha256": "25651a2aa6e810316275267671403aada5692263bef5b652ab27b862f18c7a5c",
+      "sha256": "b3f2bfff7c4ff4839c4fd617a83c6321265ad5b999e3810bae413053aede0c8e",
       "claims": [
         "integration-tests"
       ]
     },
     {
       "name": "changed-tests-stable",
-      "sha256": "a4bcba1e9f3e0e78cd7a195540dd5e9605d6ae298631b993c43f1b463c12fcc7",
+      "sha256": "1ac35d774dd0d446041a0e4e12eab1e8ba6c29fdede91e5f6381b18a29c29588",
       "claims": [
         "changed-tests-stable"
       ],
