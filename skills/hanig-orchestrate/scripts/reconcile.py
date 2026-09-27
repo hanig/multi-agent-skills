@@ -49,11 +49,16 @@ def repository(value):
     return M.forge_route(value)
 
 
+def reject_constant(value):
+    raise ValueError("non-standard JSON constant: " + value)
+
+
 def requested_repository(value):
     if value is None:
         value = command(["git", "remote", "get-url", "origin"]).strip()
     elif re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value):
-        payload = json.loads(command(["gh", "repo", "view", value, "--json", "url"]))
+        payload = json.loads(command(["gh", "repo", "view", value, "--json", "url"]),
+                             parse_constant=reject_constant)
         if not isinstance(payload, dict):
             raise ValueError("repository probe is not an object")
         value = payload.get("url")
@@ -91,7 +96,7 @@ def regular_input(path, optional=False):
 
 def object_at(path):
     with regular_input(path) as handle:
-        value = json.load(handle)
+        value = json.load(handle, parse_constant=reject_constant)
     if not isinstance(value, dict):
         raise ValueError("expected object at " + str(path))
     return value
@@ -182,7 +187,7 @@ def merged_prs(route, branch, since, limit):
                 "-f", "owner=" + owner, "-f", "name=" + name, "-f", "branch=" + branch]
         if cursor is not None:
             argv += ["-f", "cursor=" + cursor]
-        payload = json.loads(command(argv))
+        payload = json.loads(command(argv), parse_constant=reject_constant)
         if not isinstance(payload, dict) or payload.get("errors"):
             raise ValueError("forge returned GraphQL errors or invalid response")
         connection = payload["data"]["repository"]["pullRequests"]
