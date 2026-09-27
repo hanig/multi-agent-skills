@@ -56,6 +56,19 @@ cannot authorize removal. Restore access and retrieve the original launch with
 `--verify-integration --retrieve-remote-evidence`. Retain unresolved stages and
 receipts; do not submit a replacement to bypass the evidence block.
 
+Cleanup finishes scheduler observation with accounting by name followed by the
+live queue, after every individual accounting/cancellation operation, and records
+`scheduler_observed_at` in UTC. A live row, failed or ambiguous query, or newly
+discovered ID lacking already-collected terminal accounting retains the stage.
+New IDs are saved for the next bounded retrieval, never queried after that final
+queue observation. An observed negative result resets the coordinator's stale
+reconciliation/publication flags and acknowledgment; transport failure alone does
+not. Admission also refuses persisted negative lifecycle evidence despite stale
+flags. Later positive observations can reconcile the original immutable receipts.
+This finite acceptance contract cannot prevent a privileged requeue after the
+final observation; `--no-requeue` and the worker-started guard protect against
+ordinary restarts and receipt replacement, without an atomic scheduler fence.
+
 ## Drain the post-merge close intent
 
 After receipt recording and successful advancement, `merge_unit.py` displays the current attempt's pending close intent with its key and `tracker` issue, or `no tracker declared`, followed by the acknowledgment command. It performs no tracker call. If no unacknowledged close intent exists, it says so; that message establishes neither tracker delivery nor unit closure. <!-- declaration: tracker.drain -->

@@ -444,6 +444,15 @@ no live queue rows, finished supervision, and reconciled evidence. Empty or fail
 discovery retains the stage. Cleanup-unconfirmed output names known job IDs and
 recovery files: inspect them, restore scheduler access, and retrieve evidence;
 do not delete the stage or launch a replacement to bypass unresolved evidence.
+After individual accounting/cancellation calls, cleanup always queries accounting
+by launch name and then the live queue, recording `scheduler_observed_at` in UTC.
+Any live row, query error, ambiguity, or newly discovered ID without previously
+collected terminal accounting retains the stage for the next bounded retrieval.
+A negative cleanup observation revokes stale reconciliation and publication flags;
+transport failure alone does not. Later positive observations can reconcile the
+same immutable receipts. This is a finite observation contract: a privileged
+requeue after the last queue observation remains possible, and `--no-requeue`
+and the worker-started guard do not provide an atomic scheduler/filesystem fence.
 Its locked cancellation journal permits
 four attempts/64 KiB; `requested` does not attest termination. Forced worker
 restarts cannot replace receipts. Same-UID writers and live descendants remain
