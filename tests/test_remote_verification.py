@@ -1203,6 +1203,34 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertTrue(Path(before['stage']).exists())
         self.assert_ok(self.admitted())
 
+    def test_null_marker_cannot_erase_recorded_success_before_accounting_expiry(self):
+        self.cancellation_fixture('pass')
+        self.authorize_both(PYTHON + 'raise SystemExit(0)\n')
+        self.assert_pending(self.verify('--verification-timeout', '1'))
+        path, initial, proof = self.recovery_proof()
+        stage = Path(initial['stage'])
+        marker = read_json(stage / 'supervision-finished')
+        self.assertIsNone(marker['sacct_state'])
+        (self.f.bin / 'sacct').write_text(PYTHON + SACCT)
+        self.write_ssh(SSH.replace("else:\n    if pathlib.Path",
+            "else:\n    if 'from remote_verify import cleanup' in command: raise SystemExit(255)\n    if pathlib.Path"))
+        self.assert_pending(self.verify('--retrieve-remote-evidence'))
+        observed = read_json(path)['runs'][-1]
+        self.assertEqual(observed['execution']['sacct_state'], 'COMPLETED')
+        self.write_ssh(SSH)
+        (self.f.bin / 'sacct').write_text(PYTHON + 'raise SystemExit(0)\n')
+        (self.f.bin / 'squeue').write_text(PYTHON + 'raise SystemExit(0)\n')
+        self.assert_pending(self.verify('--retrieve-remote-evidence'))
+        self.assert_pending(self.admitted())
+        (self.f.bin / 'ssh').unlink()  # Recovery and publication use only saved evidence.
+        self.assert_ok(self.resolve_remote(proof))
+        saved = read_json(path)['runs'][-1]
+        self.assertEqual(saved['receipts'], initial['receipts'])
+        self.assertTrue(saved['published'])
+        self.assertTrue(stage.exists())
+        self.assertEqual(read_json(stage / 'supervision-finished'), marker)
+        self.assert_ok(self.admitted())
+
     def test_slurm_negative_cleanup_blocks_operator_admission_and_recovers(self):
         self.slurm_policy()
         self.program()
@@ -2468,6 +2496,89 @@ class TestSlurmReconciliation(unittest.TestCase):
         for subject in ('supervisor', 'jobs', 'privileged_requeue'):
             proof[subject] = {'status': 'fenced', 'evidence': subject + ' permanently fenced by operator'}
         return proof, 'fixture-operator'
+
+    def retain_probe_success(self):
+        (self.f.stage / 'supervision-finished').unlink()
+        (self.f.stage / 'cleanup.json').unlink()
+        self.run['execution'].pop('sacct_state')
+        RV.publish(self.path, self.ledger)
+        self.retrieve()
+        run = read_json(self.path)['runs'][0]
+        self.assertIn('probe_terminal_success', run)
+        self.assertFalse(run['reconciled'])
+        return run
+
+    def assert_probe_contradiction(self, states):
+        before = self.retain_probe_success()
+        self.f.configure(states)
+        self.retrieve()
+        contradicted = read_json(self.path)['runs'][0]
+        self.f.configure({})
+        self.retrieve()  # Missing/stale later evidence cannot erase the blocker.
+        with self.assertRaisesRegex(ValueError, 'superseded'):
+            self.retrieve(recovery=self.recovery())
+        self.assertTrue(contradicted['probe_terminal_success']['contradiction'])
+        self.assert_revoked()
+        saved = read_json(self.path)['runs'][0]
+        self.assertEqual(saved['receipts'], before['receipts'])
+        self.assertNotIn('recovery_authority', saved)
+        # A fresh full success observation can cover every retained job identity.
+        self.f.configure({j: 'COMPLETED' for j in states})
+        self.retrieve()
+        self.retrieve(recovery=self.recovery())
+        self.assertTrue(read_json(self.path)['runs'][0]['reconciled'])
+
+    def test_new_job_cannot_disappear_from_recovery_success_evidence(self):
+        self.assert_probe_contradiction({'321': 'COMPLETED', '322': 'RUNNING'})
+
+    def test_failed_job_blocks_old_recovery_success_even_after_expiry(self):
+        self.assert_probe_contradiction({'321': 'FAILED'})
+
+    def test_live_job_blocks_old_recovery_success_even_after_expiry(self):
+        self.assert_probe_contradiction({'321': 'RUNNING'})
+
+    def test_fresh_negative_identical_to_cached_pre_probe_bytes_blocks_recovery(self):
+        (self.f.stage / 'supervision-finished').unlink()
+        self.run['execution'].pop('sacct_state')
+        self.run.update(reconciled=False, published=False)
+        RV.publish(self.path, self.ledger)
+        with mock.patch.object(RV.time, 'strftime', return_value='2026-09-27T22:40:00Z'):
+            self.f.configure({'321': 'RUNNING'})
+            cached = RV.cleanup(self.f.stage)
+            def transition(prefix, remote, code, timeout=45):
+                if 'def observe_slurm_success' in code:
+                    self.f.configure({'321': 'COMPLETED'})
+                    result = self.remote_call(prefix, remote, code, timeout)
+                    self.f.configure({'321': 'RUNNING'})
+                    return result
+                return self.remote_call(prefix, remote, code, timeout)
+            self.retrieve(call=transition)
+            self.assertEqual(read_json(self.f.stage / 'cleanup.json'), cached)
+            with self.assertRaisesRegex(ValueError, 'superseded'):
+                self.retrieve(recovery=self.recovery())
+            self.assert_revoked()
+
+    def test_recovery_success_observation_is_bound_and_validated(self):
+        self.retain_probe_success()
+        original = self.path.read_bytes()
+        for defect in ('binding', 'job-set', 'state', 'queue', 'missing'):
+            with self.subTest(defect=defect):
+                ledger = json.loads(original)
+                proof = ledger['runs'][0]['probe_terminal_success']
+                if defect == 'binding':
+                    proof['binding']['request_sha256'] = '0' * 64
+                elif defect == 'job-set':
+                    proof['known_job_ids'].append('322')
+                elif defect == 'state':
+                    proof['observation']['cleanup_sacct_states']['321'] = ['FAILED', '1:0']
+                elif defect == 'queue':
+                    proof['observation']['queued_job_ids'] = ['321']
+                else:
+                    proof['observation'] = {}
+                RV.publish(self.path, ledger)
+                with self.assertRaisesRegex(ValueError, 'invalid or superseded'):
+                    self.retrieve(recovery=self.recovery())
+                self.assertNotIn('recovery_authority', read_json(self.path)['runs'][0])
 
     def test_recovery_authority_is_durable_before_use_and_repairs_interruption(self):
         self.f.configure({})  # Purged accounting, retained immutable receipts.

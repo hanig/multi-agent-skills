@@ -379,8 +379,63 @@ def validate_recovery_attestation(attestation, run):
                              + "; unreachable or missing evidence is not proof")
 
 
+def observe_recovery_evidence(run, evidence, source, fresh=False):
+    """Keep contrary observations monotonic; cached pre-probe bytes are stale."""
+    digest = record_digest(evidence)
+    proof = run.get("probe_terminal_success")
+    if proof and (fresh or digest != proof["preceding_sources"].get(source)):
+        jobs = set(proof["known_job_ids"])
+        incoming = list(evidence.get("job_ids", [])) + list(evidence.get("queued_job_ids", []))
+        if evidence.get("job_id") is not None:
+            incoming.append(evidence["job_id"])
+        states = evidence.get("cleanup_sacct_states", {})
+        incoming.extend(states)
+        jobs.update(j for j in incoming if isinstance(j, str) and re.fullmatch(r"[0-9]+", j))
+        proof["known_job_ids"] = sorted(jobs)
+        contrary = (jobs != set(proof["observation"]["job_ids"])
+                    or bool(evidence.get("queued_job_ids"))
+                    or any(state is not None and tuple(state) != ("COMPLETED", "0:0")
+                           for state in states.values())
+                    or (evidence.get("sacct_state") is not None and
+                        (evidence.get("sacct_state"), evidence.get("sacct_exit_code")) != ("COMPLETED", "0:0")))
+        if contrary:
+            proof["contradiction"] = True
+    run.setdefault("recovery_source_digests", {})[source] = digest
+
+
+def record_recovery_success(run, observation):
+    """Persist a whole successful snapshot, covering every previously known job."""
+    if (not slurm_quiescent(observation, run["request"])
+            or any(tuple(state) != ("COMPLETED", "0:0")
+                   for state in observation["cleanup_sacct_states"].values())):
+        return False
+    previous = run.get("probe_terminal_success", {})
+    if not set(previous.get("known_job_ids", [])).issubset(observation["job_ids"]):
+        return False
+    run["probe_terminal_success"] = dict(binding=recovery_binding(run),
+        observation=observation, known_job_ids=list(observation["job_ids"]),
+        preceding_sources=dict(run.get("recovery_source_digests", {})), contradiction=False)
+    return True
+
+
+def recovery_success(run):
+    """Historical execution evidence is usable only with explicit fencing."""
+    proof = run.get("probe_terminal_success")
+    if proof is None:
+        return {}
+    observation = proof.get("observation", {})
+    if (proof.get("binding") != recovery_binding(run) or proof.get("contradiction") is not False
+            or not slurm_quiescent(observation, run["request"])
+            or set(proof.get("known_job_ids", [])) != set(observation["job_ids"])
+            or any(tuple(state) != ("COMPLETED", "0:0")
+                   for state in observation["cleanup_sacct_states"].values())):
+        raise ValueError("coordinator terminal-success observation is invalid or superseded")
+    return dict(job_id=observation["job_ids"][0], sacct_state="COMPLETED", sacct_exit_code="0:0")
+
+
 def recovery_complete(run):
     """Revalidate existing bytes; authority never creates a completion receipt."""
+    success = recovery_success(run)
     checks = run["request"]["checks"]
     if (not checks or set(run["receipts"]) != {str(i) for i in range(len(checks))}
             or run.get("error")):
@@ -394,6 +449,7 @@ def recovery_complete(run):
             for key in ("job_id", "sacct_state", "sacct_exit_code"):
                 if key in run["execution"]:
                     execution[key] = run["execution"][key]
+            execution.update(success)
             problem = execution_problem(dict(result="pass", exit_code=0,
                 candidate_tree=run["request"]["basis"]["candidate_tree"], execution=execution))
             if problem:
@@ -415,6 +471,7 @@ def recovered(run):
 
 def apply_recovery(run):
     # Called only after the authority has been fsynced in the coordinator ledger.
+    run["execution"].update(recovery_success(run))
     run["reconciled"] = True
     run.pop("ack", None)  # No remote cleanup acknowledgment is minted.
     run["execution"].update(quiescent=True, evidence_reconciled=True,
@@ -733,6 +790,7 @@ def observe_slurm_success(request, known=()):
 def slurm_success_probe(run):
     # Send current coordinator code without rewriting an older staged harness.
     known = list(run["execution"].get("job_ids", []))
+    known.extend(run.get("probe_terminal_success", {}).get("known_job_ids", []))
     if run["execution"].get("job_id") is not None:
         known.append(run["execution"]["job_id"])
     if any(not isinstance(j, str) or not re.fullmatch(r"[0-9]+", j) for j in known):
@@ -1070,11 +1128,13 @@ def ingest(run, response):
                                  and lifecycle.get("stage") == run["stage"]
                                  and slurm_quiescent(lifecycle, request))
     if isinstance(supervision, dict):
+        observe_recovery_evidence(run, supervision, "supervision")
         for key in ("job_id", "sacct_state", "sacct_exit_code"):
             if key in supervision:
                 run["execution"][key] = supervision[key]
     lifecycle = response.get("lifecycle")
     if isinstance(lifecycle, dict) and lifecycle.get("stage") == run["stage"]:
+        observe_recovery_evidence(run, lifecycle, "lifecycle")
         run["execution"].update(lifecycle)
         revoke_negative_observation(run)
     if run["reconciled"]:
@@ -1355,7 +1415,8 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
             retrieve_records(run, frame_call, lambda: publish(path, ledger))
         if (prefix and remote["executor"] == "slurm" and checks
                 and len(run["receipts"]) == len(checks)
-                and (execution.get("sacct_state"), execution.get("sacct_exit_code")) != ("COMPLETED", "0:0")):
+                and ((execution.get("sacct_state"), execution.get("sacct_exit_code")) != ("COMPLETED", "0:0")
+                     or run.get("probe_terminal_success"))):
             # Old supervisors can die before saving terminal success. Observe it
             # using current coordinator code; neither this probe nor its absence
             # can reconcile the launch. Ordinary cleanup still observes last.
@@ -1364,9 +1425,8 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
                 if proc.returncode or len(proc.stdout) > 100000:
                     raise ValueError("terminal-success observation unavailable")
                 observed = json.loads(proc.stdout)
-                if (slurm_quiescent(observed, run["request"])
-                        and all(tuple(s) == ("COMPLETED", "0:0")
-                                for s in observed["cleanup_sacct_states"].values())):
+                observe_recovery_evidence(run, observed, "probe", fresh=True)
+                if record_recovery_success(run, observed):
                     execution.update(job_id=observed["job_ids"][0], sacct_state="COMPLETED",
                         sacct_exit_code="0:0", recovery_success_observed_at=observed["scheduler_observed_at"])
                     publish(path, ledger)
@@ -1393,6 +1453,7 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
                 if (not isinstance(cleaned, dict) or cleaned.get("stage") != stage
                         or cleaned.get("cleanup") not in ("removed", "unconfirmed")):
                     raise ValueError("invalid remote cleanup response")
+                observe_recovery_evidence(run, cleaned, "lifecycle", fresh=True)
                 execution.update(cleaned)
                 if revoke_negative_observation(run):
                     publish(path, ledger)
@@ -1411,6 +1472,8 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
         if final:
             # Failure before any claim still has truthful tree/probe diagnostics.
             execution.update(final.get("execution", {}))
+        if recovery_active:
+            execution.update(recovery_success(run))
         execution["evidence_reconciled"] = run["reconciled"]
         execution["publication_digest"] = publication_digest(run)
         if not run["reconciled"]:
