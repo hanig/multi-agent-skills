@@ -630,6 +630,15 @@ committee that plans, then reviews its own plan's implementation
 `review.py` rather than left to memory, because these rules were written down
 once and drifted anyway.
 
+Never tell the panel what a previous round decided. A round's `--context`
+describes what changed, not how the last round went; every `--file` follows
+the same rule. The guard strips the exact opening ARC-720 rerun annotation
+and whole matched JSON gate-report values, not arbitrary prose or quoted state
+names. Prompt and receipt notices identify each removal; unmatched allegations,
+commands and outputs remain unchanged. Paraphrases and embedded receipts remain
+blind spots. Synthetic receipts are stripped too: the loss is visible, but the
+removed material cannot be assessed. See the skill's declared input limitations.
+
 ### hanig-portable-handoff
 
 ```sh

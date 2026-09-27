@@ -142,6 +142,42 @@ reviewers are finding things about my last fix."
 
 ## Verify a finding before acting on it
 
+Never tell the panel what a previous round decided. A round's context
+describes what changed, not how the last round went. The same rule covers
+every `--file`: do not disclose previous verdicts, pass/fail summaries, tiers,
+quorum outcomes, or reviewer-attributed opinions. Names quoted as documentation
+or code examples are not themselves assertions about a previous decision.
+
+Carry disputed code allegations forward with locations, reproduction commands
+and outputs, without reviewer attribution or panel decisions. A measurement
+that an allegation did not reproduce is not a round outcome. Before dispatch,
+the guard strips the exact ARC-720 opening rerun annotation and whole matched
+JSON gate-report values. Leading whitespace/BOMs and all unmatched character
+ranges remain unchanged. Consecutive opening signatures are each removed.
+Ordinary prose, standalone state names, documentation tables, JSON Schemas,
+unrelated nested state data and the supplied live dispute fixtures are untouched.
+
+Removal is visible in the prompt, stderr, result receipt and audit record:
+each event names its input, signature kind, original decoded-character offsets
+and removed character count. Removed outcomes are not echoed in those notices.
+Original files are not rewritten. An entirely removed subject still reaches
+the panel with the warning that removed material cannot be assessed; removal
+is neither a configuration failure nor evidence of correctness.
+
+Exact synthetic receipts cannot be distinguished from history and are stripped
+too, including facts inside the matched JSON value. This avoids rejecting the
+honest fixture, but the panel cannot evaluate what was removed. A notice exposes
+that loss rather than repairing it. No recognized signature needs a refusal
+fallback; unreadable, oversized or otherwise invalid inputs retain their
+configuration errors. Deliberately supplying history is still prohibited, even
+though the action is now visible stripping rather than rejection.
+
+This deliberately narrow rule misses paraphrased verdicts, attributed opinions,
+nested/fenced receipts, other languages and encoded disclosures. Diffs, claims
+and threat-model text remain unscanned caller-trusted review subjects. None
+of these blind spots permits disclosure of previous decisions. The caller
+must remove that history; an accepted input is not proof of independence.
+
 A CONFIRMED finding is a reviewer's claim, not a fact. Check the code it names
 before you change anything.
 
@@ -183,6 +219,12 @@ the reason must be one non-empty line. Every `not-reproduced` summary is copied
 verbatim into the next round's prompt so disagreement cannot be silently
 filtered. The invocation cannot independently know whether the map omitted a
 prior finding; completeness of the supplied map remains caller-attested.
+
+If a disputed entry contains reviewer attribution or a panel decision, remove
+that framing, not the code allegation or measurements. Recompute the finding
+digest when its location or summary changes; the original audit record remains
+unchanged. Literal decision examples that are themselves the code change
+belong in its diff, not auxiliary context.
 
 ## Convergence
 
