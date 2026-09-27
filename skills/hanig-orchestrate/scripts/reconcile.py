@@ -45,9 +45,19 @@ def timestamp(value):
 
 
 def repository(value):
-    if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value):
-        value = "https://github.com/" + value
+    # Persisted anchors must name their host; only the CLI accepts shorthand.
     return M.forge_route(value)
+
+
+def requested_repository(value):
+    if value is None:
+        value = command(["git", "remote", "get-url", "origin"]).strip()
+    elif re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value):
+        payload = json.loads(command(["gh", "repo", "view", value, "--json", "url"]))
+        if not isinstance(payload, dict):
+            raise ValueError("repository probe is not an object")
+        value = payload.get("url")
+    return repository(value)
 
 
 def command(argv):
@@ -216,10 +226,10 @@ def reconcile(args):
               "repository": None, "branch": args.branch, "findings": [], "errors": [],
               "sources": [], "merged_prs_checked": 0}
     try:
-        route = repository(args.repo or command(["git", "remote", "get-url", "origin"]).strip())
+        route = requested_repository(args.repo)
         report["repository"] = "/".join(route)
         since = timestamp(args.since) if args.since else None
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, RecursionError, subprocess.SubprocessError) as exc:
         report["errors"].append({"source": "input", "detail": str(exc)})
         return report
     records = []
@@ -277,7 +287,7 @@ def positive(value):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo", help="OWNER/REPO or forge remote; default: checkout origin")
+    parser.add_argument("--repo", help="OWNER/REPO resolved by gh, or forge remote; default: checkout origin")
     parser.add_argument("--branch", default="main")
     parser.add_argument("--state-dir", action="append", required=True)
     parser.add_argument("--since", help="inclusive ISO-8601 timestamp with timezone")
