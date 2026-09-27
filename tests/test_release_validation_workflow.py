@@ -109,12 +109,22 @@ class TestReleaseValidationWorkflow(unittest.TestCase):
     def test_main_push_and_supported_python_versions_are_covered(self):
         self.assert_trigger_and_python_matrices(self.workflow)
 
-    def test_regression_timeout_allows_full_suite_to_finish(self):
-        jobs_block = mapping_block(self.workflow, "jobs", 0)
+    def assert_regression_timeout(self, workflow):
+        jobs_block = mapping_block(workflow, "jobs", 0)
         regression_block = mapping_block(jobs_block, "regression", 2)
         self.assertGreaterEqual(
-            yaml_scalar(regression_block, "timeout-minutes", 4), 40
+            int(yaml_scalar(regression_block, "timeout-minutes", 4)), 40
         )
+
+    def test_regression_timeout_allows_full_suite_to_finish(self):
+        self.assert_regression_timeout(self.workflow)
+
+    def test_timeout_policy_accepts_quotes_and_inline_comments(self):
+        for value in ('"45"', "'45'", "45 # headroom", '"45" # headroom'):
+            with self.subTest(value=value):
+                self.assert_regression_timeout(
+                    "jobs:\n  regression:\n    timeout-minutes: " + value
+                )
 
     def test_policy_accepts_equivalent_block_style_sequences(self):
         block_style = self.workflow.replace(
