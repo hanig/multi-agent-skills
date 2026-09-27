@@ -37,6 +37,41 @@ Before a new merge, at least one CI check must exist and every check must report
 
 The command never resubmits an unresolved merge request: a queued request, a lost response, or a crash between intent persistence and transmission leaves a durable operation for inspection. Rerun after GitHub reports MERGED to record and advance, or explicitly abandon the investigated OPEN request using the recorded path above. Neither action deletes the intent. Abandonment attests an OPEN observation; it cannot prove an earlier queued request will never execute, so the named operator retains responsibility for investigating that uncertainty. The intent and abandonment journals retain the same-node trusted-writer boundary. The local coordinator lease is released before advance acquires it; advancement can still halt or retain a unit for its existing verification policy. A successful advance does not assert that every unit closed. <!-- declaration: limit.merge-command -->
 
+## Declaring a Slurm verification host
+
+In the external coordinator state's `verification-execution.json`, declare
+`verification_host` with `ssh_alias`, `executor: "slurm"`, absolute `workdir_root`,
+`python` and `git` paths, and a `slurm` object containing `partition`, `mem` and
+`time`. The parser accepts these three values as plain string tokens and rejects
+a missing `mem`. Keep actual host and resource values in that private policy.
+The remote root exists before launch. The supervisor submits and polls;
+verification runs exclusively inside the allocated worker.
+
+A cleanup-unconfirmed warning means removal was not confirmed; retain any
+surviving stage. Inspect the reported job IDs, launch job name and `cleanup.json`;
+a successful cancellation request alone is insufficient to establish termination.
+Cleanup is conditional on terminal accounting for all launch jobs, finished
+supervision and acknowledged claim evidence. Missing job IDs are recovered by
+name from `squeue` and `sacct`; unavailable or empty discovery leaves the stage
+intact. Restore access and retrieve the original launch with
+`--verify-integration --retrieve-remote-evidence`. Retain unresolved stages and
+receipts; the binding blocks replacement submissions and admission until its
+evidence is resolved, and reruns retrieve the original launch.
+
+Cleanup finishes scheduler observation with accounting by name followed by the
+live queue, after every individual accounting/cancellation operation, and records
+`scheduler_observed_at` in UTC. A live row, failed or ambiguous query, or newly
+discovered ID lacking already-collected terminal accounting retains the stage.
+New IDs are saved for the next bounded retrieval; the final queue observation
+ends the current scheduler queries. An observed negative result resets the
+coordinator's stale reconciliation/publication flags and acknowledgment;
+a transport failure alone leaves them unchanged. Admission also blocks persisted
+negative lifecycle evidence despite stale flags. Later positive observations can
+reconcile the original immutable receipts.
+A privileged requeue remains possible after the final observation;
+`--no-requeue` and the worker-started guard protect against
+ordinary restarts and receipt replacement, without an atomic scheduler fence.
+
 ## Drain the post-merge close intent
 
 After receipt recording and successful advancement, `merge_unit.py` displays the current attempt's pending close intent with its key and `tracker` issue, or `no tracker declared`, followed by the acknowledgment command. It performs no tracker call. If no unacknowledged close intent exists, it says so; that message establishes neither tracker delivery nor unit closure. <!-- declaration: tracker.drain -->
