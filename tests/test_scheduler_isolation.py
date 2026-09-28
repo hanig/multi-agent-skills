@@ -41,6 +41,16 @@ esac
 
 
 class OrdinaryTools(unittest.TestCase):
+    def test_empty_path_still_resolves_named_system_tools(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.dict(os.environ, {"PATH": ""}):
+                path = closed_bin(Path(directory) / "closed", tools=("sh",))
+            result = subprocess.run(["sh", "-c", "printf fixture-ok"],
+                                    env=dict(os.environ, PATH=path),
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "fixture-ok")
+
     def test_relative_path_tool_still_runs_from_another_cwd(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

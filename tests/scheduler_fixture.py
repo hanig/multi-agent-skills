@@ -25,7 +25,9 @@ def closed_bin(directory, tools=TOOLS):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     for name in tools:
-        target = shutil.which(name)
+        # Resolve only named ordinary tools from system defaults when the
+        # launching PATH omits them; never append those directories to PATH.
+        target = shutil.which(name) or shutil.which(name, path=os.defpath)
         if target and not (directory / name).exists():
             (directory / name).symlink_to(os.path.abspath(target))
     for name in ("python", "python3"):
