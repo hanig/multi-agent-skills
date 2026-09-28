@@ -102,6 +102,26 @@ class LifecycleTest(unittest.TestCase):
                         self.assertEqual(copied.stat().st_mode, mode & ~0o022,
                                          str(copied))
 
+    def test_unreadable_staged_tree_is_not_published_with_source_modes(self):
+        source = self.source()
+        source.chmod(0o777)
+        target = self.target(source=source)
+        original_scandir = os.scandir
+
+        def deny_stage_scan(path):
+            # copytree scans the source, while hardening must scan the stage.
+            # Leave rmtree's descriptor-based cleanup available.
+            if not isinstance(path, int) and ".stage-" in os.fspath(path):
+                raise PermissionError("fixture staged enumeration denied")
+            return original_scandir(path)
+
+        with mock.patch.object(os, "scandir", side_effect=deny_stage_scan):
+            result = lifecycle.install([target])[0]
+        self.assertEqual(result.status, "failed", result.detail)
+        self.assertIn("fixture staged enumeration denied", result.detail)
+        self.assertFalse(target.destination.exists())
+        self.assertFalse(list(target.destination.parent.glob("*.stage-*")))
+
     def test_permission_failure_retains_previous_install(self):
         target = self.target()
         self.assertEqual(lifecycle.install([target])[0].status, "installed")

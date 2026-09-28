@@ -468,7 +468,11 @@ def _secure_payload(root: Path) -> None:
     002. Keep its read/execute bits, leave source and external link targets
     untouched, and fail staging if any chmod fails.
     """
-    for directory, directories, files in os.walk(root, followlinks=False):
+    def unreadable(error):
+        raise error
+
+    for directory, directories, files in os.walk(
+            root, followlinks=False, onerror=unreadable):
         for path in [Path(directory)] + [Path(directory) / name for name in files]:
             if not path.is_symlink():
                 path.chmod(path.stat().st_mode & ~0o022)
