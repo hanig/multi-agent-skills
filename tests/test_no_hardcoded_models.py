@@ -21,9 +21,11 @@ ROOT = Path(__file__).resolve().parents[1]
 # the non-hanig skill bundles and the vendored fleet tools in bin/.
 VENDORED_BIN = {"bus", "agent-manager", "agent-view"}
 SKIPPED_TOP = {"tests", "docs", "examples"}
-# Hidden top-level directories are tool state (.git, .venv, .tox), except the
-# repo's own hooks. Any virtualenv or installed-package tree is third-party.
-TRACKED_HIDDEN = {".claude"}
+# Tool state, never authored: version control, caches and environments.
+# Every other hidden directory (.claude, .github, ...) is swept, and any
+# virtualenv or installed-package tree is third-party wherever it sits.
+TOOL_STATE = {".git", ".venv", ".tox", ".nox", ".mypy_cache", ".pytest_cache",
+              ".ruff_cache", ".cache", ".eggs"}
 THIRD_PARTY = {"site-packages", "node_modules", "__pycache__"}
 
 
@@ -44,7 +46,7 @@ def authored_python(root=ROOT):
         rel = path.relative_to(root)
         top = rel.parts[0]
         if (not path.is_file() or top in SKIPPED_TOP
-                or (top.startswith(".") and top not in TRACKED_HIDDEN)
+                or top in TOOL_STATE
                 or THIRD_PARTY.intersection(rel.parts)
                 or any((root.joinpath(*rel.parts[:i]) / "pyvenv.cfg").exists()
                        for i in range(1, len(rel.parts)))):
@@ -116,7 +118,8 @@ class TestNoHardcodedModels(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             swept = [root / "scripts" / "route.py", root / "bin" / "route",
-                     root / "skills" / "hanig-x" / "scripts" / "a.py"]
+                     root / "skills" / "hanig-x" / "scripts" / "a.py",
+                     root / ".github" / "route.py"]
             skipped = [root / "tests" / "t.py", root / "bin" / "bus",
                        root / "skills" / "paseo" / "scripts" / "v.py",
                        root / "bin" / "notes", root / ".venv" / "lib" / "x.py",
