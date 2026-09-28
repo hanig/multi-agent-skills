@@ -54,7 +54,8 @@ a successful cancellation request alone is insufficient to establish termination
 Before deleting stage contents, cleanup persists its final evidence beside the
 stage and closes the in-stage lock while retaining an external cleanup lock.
 The stage directory is removed last; `cleanup: removed` reports confirmed absence.
-Final cleanup evidence remains outside the removed stage and in coordinator state.
+Final cleanup evidence stays beside the removed stage until its exact receipt is
+durable in coordinator state; acknowledgment then retires the auxiliary files.
 Cleanup is conditional on terminal accounting for all launch jobs, finished
 supervision and acknowledged claim evidence. Missing job IDs are recovered by
 name from `squeue` and `sacct`; unavailable or empty discovery leaves the stage
