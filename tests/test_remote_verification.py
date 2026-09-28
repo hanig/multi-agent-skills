@@ -2514,11 +2514,17 @@ class TestSlurmReconciliation(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'already in progress'):
             with RV.binding_lock(self.state_dir, 'u', self.ledger['basis']):
                 self.fail('coordinator lock was released during retrieval')
-        if 'from remote_verify import cleanup' in code:
+        if 'from remote_verify import cleanup' in code and self.f.stage.exists():
             saved = read_json(self.path)['runs'][0]
             response = RV.cleanup(self.f.stage, saved.get('ack') if saved['reconciled'] else None)
             output = json.dumps(response)
         else:
+            if 'history.unlink()' in code:
+                saved = read_json(self.path)['runs'][0]
+                outside = self.f.stage.with_name(self.f.stage.name + '.cleanup.json')
+                if outside.exists():
+                    self.assertEqual(saved['cleanup_receipt'], read_json(outside))
+                self.assertFalse(self.f.stage.exists())
             output = io.StringIO()
             with redirect_stdout(output):
                 exec(code, {})
@@ -2544,6 +2550,41 @@ class TestSlurmReconciliation(unittest.TestCase):
         self.assertIn('unresolved remote evidence', RV.pending_problem(
             self.state_dir, 'u', self.ledger['basis'], []))
         return run
+
+    def test_cleanup_evidence_retirement_waits_for_durable_receipt_and_retries(self):
+        def disconnect(prefix, remote, code, timeout=45):
+            if 'history.unlink()' in code:
+                return subprocess.CompletedProcess([], 255, '', 'connection lost')
+            return self.remote_call(prefix, remote, code, timeout)
+        self.retrieve(disconnect)
+        outside = self.f.stage.with_name(self.f.stage.name + '.cleanup.json')
+        saved = read_json(self.path)['runs'][0]
+        self.assertFalse(self.f.stage.exists())
+        self.assertEqual(saved['cleanup_receipt'], read_json(outside))
+        self.assertEqual(saved['execution']['cleanup'], 'removed')
+        self.assertTrue(saved['reconciled'])
+        self.assertIn('cleanup_evidence_error', saved['execution'])
+        self.retrieve()
+        self.assertFalse(outside.exists())
+        self.assertFalse(self.f.stage.with_name(self.f.stage.name + '.cleanup.lock').exists())
+        self.assertEqual(read_json(self.path)['runs'][0]['receipts'], saved['receipts'])
+
+    def test_lost_removal_response_recovers_retained_cleanup_snapshot(self):
+        def lose_response(prefix, remote, code, timeout=45):
+            result = self.remote_call(prefix, remote, code, timeout)
+            if 'from remote_verify import cleanup' in code:
+                return subprocess.CompletedProcess([], 255, '', 'response lost')
+            return result
+        self.retrieve(lose_response)
+        outside = self.f.stage.with_name(self.f.stage.name + '.cleanup.json')
+        retained = read_json(outside)
+        self.assertFalse(self.f.stage.exists())
+        self.assertEqual(read_json(self.path)['runs'][0]['execution']['cleanup'], 'unconfirmed')
+        self.retrieve()
+        saved = read_json(self.path)['runs'][0]
+        self.assertEqual(saved['cleanup_receipt'], retained)
+        self.assertEqual(saved['execution']['cleanup'], 'removed')
+        self.assertFalse(outside.exists())
 
     def first_observation_during_cleanup(self, second_transport_failure=False):
         self.run.update(reconciled=False, published=False)
