@@ -224,7 +224,7 @@
     "output_tokens": 5,
     "reasoning_tokens": 0,
     "response_id": "resp_084cd15d6d01929c006ab72343854c87d087366255b5d69202",
-    "observed_in": "2026-09-25 owner upgrade; real review._post Responses probe, input: Reply with exactly OK.; returned OK. Timestamp is UTC; this measures budget acceptance, not capacity for every review."
+    "observed_in": "Copy of the sol reviewer's probe: run 2026-09-26 UTC for the owner's 2026-09-25 upgrade, through review._post's Responses request, input: Reply with exactly OK.; returned OK. Measures budget acceptance, not capacity for every question."
    }
   }
  ],

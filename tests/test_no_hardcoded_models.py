@@ -11,14 +11,46 @@ routing) and fails on any model id those three files declare.
 
 import ast
 import json
+import tempfile
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCES = (sorted((ROOT / "skills").glob("hanig-*/scripts/*.py"))
-           + sorted((ROOT / "lib").glob("*.py"))
-           + sorted((ROOT / ".claude" / "hooks").glob("*.py")))
+# Upstream code this repo carries verbatim and must not edit (CLAUDE.md):
+# the non-hanig skill bundles and the vendored fleet tools in bin/.
+VENDORED_BIN = {"bus", "agent-manager", "agent-view"}
+SKIPPED_TOP = {".git", "tests", "docs", "examples"}
+
+
+def is_python(path):
+    if path.suffix == ".py":
+        return True
+    if path.suffix or not path.is_file():
+        return False
+    with path.open("rb") as handle:
+        first = handle.readline(200)
+    return first.startswith(b"#!") and b"python" in first
+
+
+def authored_python(root=ROOT):
+    """Every Python file outside tests, docs and vendored upstream code."""
+    found = []
+    for path in sorted(root.rglob("*")):
+        rel = path.relative_to(root)
+        if (not path.is_file() or rel.parts[0] in SKIPPED_TOP
+                or "__pycache__" in rel.parts):
+            continue
+        if rel.parts[0] == "skills" and not rel.parts[1].startswith("hanig-"):
+            continue
+        if rel.parts[0] == "bin" and rel.name in VENDORED_BIN:
+            continue
+        if is_python(path):
+            found.append(path)
+    return found
+
+
+SOURCES = authored_python()
 
 
 def declared_model_ids():
@@ -62,9 +94,27 @@ class TestNoHardcodedModels(unittest.TestCase):
     def test_the_sweep_covers_the_code_that_routes(self):
         names = {path.name for path in SOURCES}
         for expected in ("swarm.py", "committee.py", "review.py",
-                         "skill_installer.py", "tracker_sync_check.py"):
+                         "skill_installer.py", "tracker_sync_check.py",
+                         "integration_tests.py", "changed_tests_stable.py"):
             self.assertIn(expected, names)
         self.assertIn("gpt-6-sol", declared_model_ids())
+        for vendored in VENDORED_BIN:
+            self.assertTrue((ROOT / "bin" / vendored).is_file(), vendored)
+
+    def test_new_scripts_are_swept_without_listing_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            swept = [root / "scripts" / "route.py", root / "bin" / "route",
+                     root / "skills" / "hanig-x" / "scripts" / "a.py"]
+            skipped = [root / "tests" / "t.py", root / "bin" / "bus",
+                       root / "skills" / "paseo" / "scripts" / "v.py",
+                       root / "bin" / "notes"]
+            for path in swept + skipped:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                body = "no shebang\n" if path.name == "notes" else (
+                    "#!/usr/bin/env python3\nMODEL = 'x'\n")
+                path.write_text(body, encoding="utf-8")
+            self.assertEqual(authored_python(root), sorted(swept))
 
     def test_no_authored_string_literal_names_a_declared_model(self):
         ids = declared_model_ids()
