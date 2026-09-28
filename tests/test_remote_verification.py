@@ -1467,6 +1467,26 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertEqual(self.rows(), [])
 
     def test_slurm_first_cleanup_observation_reconciles_in_one_operator_call(self):
+        self.assert_first_cleanup_reconciles()
+
+    def test_slurm_complete_reingest_frames_with_transport_error_still_admit(self):
+        write_ssh = self.write_ssh
+        def transport_after_frames(script):
+            call = "    result = subprocess.run(['/bin/sh', '-c', command])"
+            disconnect = ("\n    if 'request-header' in command:\n"
+                          "        for record in pathlib.Path(os.environ['REMOTE_LEDGER_DIR']).glob('*.json'):\n"
+                          "            for run in json.loads(record.read_text())['runs']:\n"
+                          "                history = pathlib.Path(run['stage']) / 'cleanup.json'\n"
+                          "                if history.is_file() and json.loads(history.read_text()).get('quiescent') is True:\n"
+                          "                    raise SystemExit(255)\n")
+            self.assertEqual(script.count(call), 1)
+            write_ssh(script.replace(call, call + disconnect))
+        with mock.patch.object(self, 'write_ssh', side_effect=transport_after_frames):
+            run = self.assert_first_cleanup_reconciles()
+        self.assertIn('transport_error', run)
+        self.assertIn('255', run['transport_error'])
+
+    def assert_first_cleanup_reconciles(self):
         self.slurm_policy()
         self.authorize_both(PYTHON + 'raise SystemExit(0)\n')
         # Model an older supervisor that publishes completion but leaves the
@@ -1502,6 +1522,7 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertTrue(run['reconciled'])
         self.assertTrue(run['published'])
         self.assertEqual(set(run['receipts']), {'0', '1'})
+        return run
 
     def test_slurm_runs_both_claims_with_target_repetitions_and_handshake(self):
         self.slurm_policy()
@@ -2380,6 +2401,24 @@ else:
                 self.assertTrue(self.stage.exists())
                 self.assert_queue_last(result)
 
+    def test_oversized_final_cleanup_snapshot_is_refused_before_stage_deletion(self):
+        self.configure({'321': 'COMPLETED'})
+        jobs = [str(job) for job in range(321, 2821)]
+        discovery = dict(RV.discover_slurm_jobs(self.request, {'321'}),
+                         job_ids=jobs, queued_job_ids=[], scheduler_confirmed=True)
+        outside = self.stage.with_name(self.stage.name + '.cleanup.json')
+        before = {p.name: p.read_bytes() for p in self.stage.iterdir()}
+        with mock.patch.object(RV, 'discover_slurm_jobs', return_value=discovery), \
+                mock.patch.object(RV, 'scheduler_state', return_value=('COMPLETED', '0:0')):
+            result = RV.cleanup(self.stage, self.ack())
+        self.assertGreater(len(RV.encoded(result)), 65536)
+        self.assertIn('exceeds 64 KiB', result['cleanup_error'])
+        self.assertEqual(result['cleanup'], 'unconfirmed')
+        self.assertTrue(result['quiescent'])
+        self.assertFalse(outside.exists())
+        for name, data in before.items():
+            self.assertEqual((self.stage / name).read_bytes(), data)
+
     def test_removal_persists_final_cleanup_evidence_outside_stage(self):
         self.configure({'321': 'COMPLETED'})
         outside = self.stage.with_name(self.stage.name + '.cleanup.json')
@@ -2697,12 +2736,12 @@ class TestSlurmReconciliation(unittest.TestCase):
     def test_empty_stage_recovery_retains_child_created_before_rmdir(self):
         self.strand_empty_stage()
         late = self.f.stage / 'late-output'
-        rmdir = os.rmdir
+        rmdir = Path.rmdir
         def create_child(path, *args, **kwargs):
             if Path(path) == self.f.stage:
                 late.write_bytes(b'late write survives atomic rmdir refusal')
             return rmdir(path, *args, **kwargs)
-        with mock.patch.object(RV.os, 'rmdir', side_effect=create_child):
+        with mock.patch.object(Path, 'rmdir', create_child):
             self.retrieve()
         saved = read_json(self.path)['runs'][0]
         self.assertEqual(late.read_bytes(), b'late write survives atomic rmdir refusal')
