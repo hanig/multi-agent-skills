@@ -2710,6 +2710,58 @@ class TestSlurmReconciliation(unittest.TestCase):
         self.assertEqual(saved['receipts'], receipts)
         self.assertFalse(self.f.stage.with_name(self.f.stage.name + '.cleanup.json').exists())
 
+    def test_empty_stage_recovery_validates_journal_before_removal(self):
+        self.strand_empty_stage()
+        outside = self.f.stage.with_name(self.f.stage.name + '.cleanup.json')
+        original = outside.read_bytes()
+        snapshot = json.loads(original)
+        for field, value, error in (
+                ('stage', str(self.f.root / 'different-stage'), 'binding mismatch'),
+                ('launch_id', 'e' * 32, 'binding mismatch'),
+                ('extra', 'changed after receipt', 'digest mismatch')):
+            with self.subTest(field=field):
+                changed = dict(snapshot, **{field: value})
+                RV.publish(outside, changed)
+                self.retrieve()
+                saved = read_json(self.path)['runs'][0]
+                self.assertEqual(saved['execution']['cleanup'], 'unconfirmed')
+                self.assertIn(error, saved['execution']['cleanup_evidence_error'])
+                self.assertTrue(self.f.stage.is_dir())
+                self.assertEqual(list(self.f.stage.iterdir()), [])
+                self.assertEqual(read_json(outside), changed)
+                self.assertEqual(saved['receipts'], self.run['receipts'])
+        outside.write_bytes(original)
+        self.retrieve()
+        self.assertFalse(self.f.stage.exists())
+        self.assertEqual(read_json(self.path)['runs'][0]['execution']['cleanup'], 'removed')
+
+    def test_empty_stage_recovery_retains_stage_on_unreadable_journal(self):
+        self.strand_empty_stage()
+        outside = self.f.stage.with_name(self.f.stage.name + '.cleanup.json')
+        original = outside.read_bytes()
+        for content in (None, b'{invalid', b'x' * 65537):
+            with self.subTest(content=None if content is None else len(content)):
+                if content is None:
+                    outside.unlink()
+                else:
+                    outside.write_bytes(content)
+                self.retrieve()
+                saved = read_json(self.path)['runs'][0]
+                self.assertEqual(saved['execution']['cleanup'], 'unconfirmed')
+                self.assertIn('cleanup_evidence_error', saved['execution'])
+                self.assertTrue(self.f.stage.is_dir())
+                self.assertEqual(list(self.f.stage.iterdir()), [])
+        outside.write_bytes(original)
+        self.retrieve()
+        self.assertFalse(self.f.stage.exists())
+
+    def test_empty_stage_recovery_confirms_absence_after_rmdir(self):
+        self.strand_empty_stage()
+        with mock.patch.object(Path, 'rmdir'):
+            self.retrieve()
+        self.assertTrue(self.f.stage.is_dir())
+        self.assertEqual(read_json(self.path)['runs'][0]['execution']['cleanup'], 'unconfirmed')
+
     def test_empty_stage_recovery_retains_dangling_symlink(self):
         self.strand_empty_stage()
         self.f.stage.rmdir()
@@ -2795,7 +2847,18 @@ class TestSlurmReconciliation(unittest.TestCase):
         self.assertTrue(saved['reconciled'])
         self.assertTrue(saved['ack'])
         self.assertNotIn('cleanup_receipt', saved)
-        self.retrieve()
+        observations = []
+        outside = self.f.stage.with_name(self.f.stage.name + '.cleanup.json')
+        path_rmdir = Path.rmdir
+        def check_saved_snapshot(path):
+            if path == self.f.stage:
+                receipt = read_json(self.path)['runs'][0]['cleanup_receipt']
+                observations.append(receipt)
+                self.assertEqual(receipt['retained_cleanup'], read_json(outside))
+            return path_rmdir(path)
+        with mock.patch.object(Path, 'rmdir', check_saved_snapshot):
+            self.retrieve()
+        self.assertEqual(len(observations), 1)
         self.assertFalse(self.f.stage.exists())
         self.assertEqual(read_json(self.path)['runs'][0]['receipts'], saved['receipts'])
 

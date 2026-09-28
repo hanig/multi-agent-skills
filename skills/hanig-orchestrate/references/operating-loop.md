@@ -62,6 +62,11 @@ and positive lifecycle state permit completion of an empty or absent stage.
 Completion uses atomic `rmdir` under the external lock, imports no staged harness,
 and runs no verifier or scheduler. Any remaining files stay subject to normal
 cleanup guards; a partially deleted nonempty stage with no harness stays retained.
+Before `rmdir`, completion checks the adjacent journal's stage, launch identity,
+and digest against its saved receipt. An unreadable or mismatched journal leaves
+the stage intact and reports cleanup unconfirmed. A lost cleanup response causes
+retrieval to save the bound snapshot first, then check its digest and finish
+within the same invocation. Removed status follows an actual absence check.
 External snapshots remain nested audit data, separate from fresh lifecycle
 observations. Retrieval preserves their exact contents in coordinator state
 before retirement, including after an interrupted final write. When the journal
