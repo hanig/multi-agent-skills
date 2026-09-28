@@ -814,7 +814,14 @@ def cleanup_slurm(stage, request, reconciled):
     evidence = {"cleanup": "unconfirmed", "stage": str(stage),
                 "launch_id": request["launch_id"], "quiescent": False}
     history, lock = stage / "cleanup.json", None
+    removal_history = stage.with_name(stage.name + ".cleanup.json")
+    removal_lock, removal_locked = None, False
+    retained_cleanup = None
     try:
+        # This lock survives removal of the stage and its legacy lock file.
+        removal_lock = stage.with_name(stage.name + ".cleanup.lock").open("a")
+        fcntl.flock(removal_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        removal_locked = True
         lock = (stage / "cleanup.lock").open("a")
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         known, job = set(), None
@@ -919,20 +926,51 @@ def cleanup_slurm(stage, request, reconciled):
         if (not reconciled or reconciled != evidence_digest(collected)
                 or not collected.get("final") or not collected.get("supervision")):
             raise ValueError("remote evidence is not quiescent and reconciled; stage retained")
+        # Save the final observation outside the tree BEFORE deleting any of
+        # its evidence. A failed final rmdir must not repopulate the stage.
+        publish_cleanup(removal_history, evidence)
+        retained_cleanup = dict(evidence)
+        history = removal_history
+        # Keep the external lock until completion, but close the in-stage file
+        # before unlinking it (an open unlinked file can retain a network stage).
+        lock.close()
+        lock = None
         shutil.rmtree(stage, ignore_errors=False)
+        if (stage.exists() or stage.is_symlink()):
+            raise ValueError("stage removal unconfirmed")
         evidence["cleanup"] = "removed"
     except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError) as exc:
         evidence["cleanup_error"] = str(exc)[-2000:]
     finally:
-        if lock is not None:
-            # A lock refusal must not overwrite another cleanup's journal.
-            if stage.exists() and evidence.get("cancellation_attempts") is not None:
-                try:
-                    publish_cleanup(history, evidence)
-                except (OSError, ValueError) as exc:
-                    evidence.update(cleanup="unconfirmed", quiescent=False,
+        # A lock refusal must not overwrite another cleanup's journal.
+        if ((history == removal_history or (stage.exists() or stage.is_symlink()))
+                and evidence.get("cancellation_attempts") is not None):
+            try:
+                publish_cleanup(history, evidence)
+            except (OSError, ValueError) as exc:
+                if history == removal_history and not (stage.exists() or stage.is_symlink()):
+                    # Failed audit publication is not a negative scheduler
+                    # observation. Preserve the exact pre-removal snapshot so
+                    # the coordinator can acknowledge it after saving this fact.
+                    evidence.update(cleanup="removed", retained_cleanup=retained_cleanup,
                                     cleanup_error=str(exc)[-2000:])
+                else:
+                    # Audit failure supplies no new scheduler observation,
+                    # including when rmdir left an empty directory behind.
+                    evidence.update(cleanup="unconfirmed", cleanup_error=str(exc)[-2000:])
+                    if history == removal_history:
+                        evidence["retained_cleanup"] = retained_cleanup
+        if removal_locked and history != removal_history:
+            # The legacy lock still guards a retained stage. No deletion began,
+            # so no external lock or removal evidence needs to survive this call.
+            try:
+                stage.with_name(stage.name + ".cleanup.lock").unlink()
+            except OSError:
+                pass
+        if lock is not None:
             lock.close()
+        if removal_lock is not None:
+            removal_lock.close()
     return evidence
 
 
@@ -945,7 +983,7 @@ def cleanup(stage, reconciled=None):
     removal. Unknown supervision, journal failure or exhaustion retains the stage.
     """
     evidence = {"cleanup": "unconfirmed", "stage": str(stage)}
-    if not stage.exists():
+    if not (stage.exists() or stage.is_symlink()):
         return dict(evidence, cleanup="removed" if reconciled else "unconfirmed")
     try:
         request = json.loads((stage / "request.json").read_text())
@@ -959,7 +997,7 @@ def cleanup(stage, reconciled=None):
         return cleanup_slurm(stage, request, reconciled)
     lock = None
     try:
-        if not stage.exists():
+        if not (stage.exists() or stage.is_symlink()):
             return dict(evidence, cleanup="removed" if reconciled else "unconfirmed")
         try:
             job = (stage / "job-id").read_text()
@@ -1046,6 +1084,63 @@ def cleanup(stage, reconciled=None):
         if lock is not None:
             lock.close()
     return evidence
+
+
+def can_finish_empty_stage(run):
+    """Use ordinary coordinator authority, never an auxiliary cleanup snapshot."""
+    request, execution = run["request"], run.get("execution", {})
+    ack = run.get("ack")
+    return bool(run.get("reconciled") is True and isinstance(ack, str)
+        and re.fullmatch(r"[0-9a-f]{64}", ack)
+        and request.get("launch_id") == run["launch_id"]
+        and request["verification_host"]["executor"] == "slurm"
+        and execution.get("stage") == run["stage"]
+        and execution.get("launch_id") == run["launch_id"]
+        and execution.get("quiescent") is not False
+        and slurm_quiescent(execution, request))
+
+
+def finish_empty_stage(stage, launch_id, snapshot_sha256=None):
+    """Coordinator-emitted completion; delete no contents or lifecycle evidence.
+
+    The caller establishes durable ordinary authority before sending this code.
+    Return None for a nonempty stage, which still needs normal guarded cleanup.
+    Without a pinned digest, return the snapshot for durable acknowledgment;
+    a second call validates it before removing the empty directory.
+    """
+    history = stage.with_name(stage.name + ".cleanup.json")
+    lock = stage.with_name(stage.name + ".cleanup.lock")
+    with lock.open("a") as guard:
+        fcntl.flock(guard.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if (stage.exists() or stage.is_symlink()) and any(stage.iterdir()):
+            return None
+        result = {"stage": str(stage), "launch_id": launch_id, "cleanup": "unconfirmed"}
+        try:
+            with history.open("rb") as handle:
+                raw = handle.read(65537)
+            if len(raw) > 65536:
+                raise ValueError("retained cleanup snapshot exceeds 64 KiB")
+            snapshot = json.loads(raw)
+            if (not isinstance(snapshot, dict) or snapshot.get("stage") != str(stage)
+                    or snapshot.get("launch_id") != launch_id):
+                raise ValueError("retained cleanup snapshot binding mismatch")
+            digest = hashlib.sha256(json.dumps(snapshot, sort_keys=True,
+                separators=(",", ":")).encode("utf-8")).hexdigest()
+            if snapshot_sha256 is not None and digest != snapshot_sha256:
+                raise ValueError("retained cleanup snapshot digest mismatch")
+            result["retained_cleanup"] = snapshot
+        except (OSError, ValueError) as exc:
+            result["cleanup_evidence_error"] = str(exc)[-2000:]
+            return result
+        if snapshot_sha256 is None:
+            return dict(result, cleanup_snapshot_pending=True)
+        if (stage.exists() or stage.is_symlink()):
+            # The kernel refuses a late child even after the empty listing.
+            stage.rmdir()
+        if (stage.exists() or stage.is_symlink()):
+            return dict(result, cleanup_error="stage removal unconfirmed")
+        result["cleanup"] = "removed"
+        return result
 
 
 def validate_receipt(receipt, request, index):
@@ -1397,21 +1492,21 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
                         error = "remote transport incomplete: " + str(exc)
         # Bounded retrieval also works when the original aggregate or staged
         # harness is unavailable. Never rerun a verifier to recover its result.
+        def frame_call(code):
+            nonlocal error
+            try:
+                proc = remote_call(prefix, remote, code)
+            except subprocess.TimeoutExpired as exc:
+                if not exc.stdout:
+                    raise
+                captured = exc.stdout
+                if isinstance(captured, bytes):
+                    captured = captured.decode("utf-8", "replace")
+                proc = subprocess.CompletedProcess([], 255, captured, "transport capture timed out")
+            if proc.returncode:
+                error = "ssh/remote transport exited {}: {}".format(proc.returncode, proc.stderr[-2000:])
+            return proc.stdout
         if not run["reconciled"] and prefix:
-            def frame_call(code):
-                nonlocal error
-                try:
-                    proc = remote_call(prefix, remote, code)
-                except subprocess.TimeoutExpired as exc:
-                    if not exc.stdout:
-                        raise
-                    captured = exc.stdout
-                    if isinstance(captured, bytes):
-                        captured = captured.decode("utf-8", "replace")
-                    proc = subprocess.CompletedProcess([], 255, captured, "transport capture timed out")
-                if proc.returncode:
-                    error = "ssh/remote transport exited {}: {}".format(proc.returncode, proc.stderr[-2000:])
-                return proc.stdout
             retrieve_records(run, frame_call, lambda: publish(path, ledger))
         if (prefix and remote["executor"] == "slurm" and checks
                 and len(run["receipts"]) == len(checks)
@@ -1437,28 +1532,110 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
         # Raw evidence is durable before authorizing remote removal. This is
         # reconciliation, not publication under the operator observation fence.
         publish(path, ledger)
-        if execution.get("cleanup") != "removed" and prefix:
+        # One observation can unlock reconciliation; at most one acknowledged
+        # cleanup follows it, all under the existing binding lock.
+        for cleanup_pass in range(2):
+            if execution.get("cleanup") == "removed" or not prefix:
+                break
+            was_reconciled = run["reconciled"]
             code = ("import json, pathlib, sys; p=pathlib.Path(%r); "
                     "sys.path.insert(0, str(p)); from remote_verify import cleanup; "
                     "print(json.dumps(cleanup(p, %r)))") % (stage, run.get("ack") if run["reconciled"] else None)
-            if run["reconciled"]:
+            normal_cleanup = code
+            if can_finish_empty_stage(run):
+                # The ordinary ack and positive lifecycle are durable BEFORE
+                # any empty-directory completion, including a lost response.
+                publish(path, ledger)
+                receipt = run.get("cleanup_receipt", {})
+                snapshot = receipt.get("retained_cleanup", receipt)
+                snapshot_sha256 = (record_digest(snapshot) if
+                    snapshot.get("stage") == stage
+                    and snapshot.get("launch_id") == run["launch_id"]
+                    and snapshot.get("quiescent") is True else None)
+                code = ("import fcntl, hashlib, json\nfrom pathlib import Path\n"
+                        + inspect.getsource(finish_empty_stage)
+                        + ("\np = Path(%r)\nfinished = finish_empty_stage(p, %r, %r)\n"
+                           "if finished is None:\n"
+                           "    print(json.dumps({'stage': str(p), 'cleanup': 'unconfirmed', 'cleanup_stage_nonempty': True}))\n"
+                           "else:\n    print(json.dumps(finished))\n") % (
+                               stage, run["launch_id"], snapshot_sha256))
+            elif run["reconciled"] and remote["executor"] == "direct":
                 code = ("import json, pathlib; p=pathlib.Path(%r)\n"
-                        "if not p.exists(): print(json.dumps({'stage': str(p), 'cleanup': 'removed'}))\n"
+                        "if not (p.exists() or p.is_symlink()): print(json.dumps({'stage': str(p), 'cleanup': 'removed'}))\n"
                         "else:\n    exec(%r)\n") % (stage, code)
             try:
-                proc = remote_call(prefix, remote, code)
-                if proc.returncode:
-                    raise ValueError("cleanup transport exited {}: {}".format(proc.returncode, proc.stderr[-2000:]))
-                cleaned = json.loads(proc.stdout)
-                if (not isinstance(cleaned, dict) or cleaned.get("stage") != stage
-                        or cleaned.get("cleanup") not in ("removed", "unconfirmed")):
-                    raise ValueError("invalid remote cleanup response")
+                for cleanup_code in (code, normal_cleanup):
+                    proc = remote_call(prefix, remote, cleanup_code)
+                    if proc.returncode:
+                        raise ValueError("cleanup transport exited {}: {}".format(proc.returncode, proc.stderr[-2000:]))
+                    cleaned = json.loads(proc.stdout)
+                    if (not isinstance(cleaned, dict) or cleaned.get("stage") != stage
+                            or cleaned.get("cleanup") not in ("removed", "unconfirmed")):
+                        raise ValueError("invalid remote cleanup response")
+                    if cleaned.get("cleanup_stage_nonempty") is not True:
+                        break
+                    if cleanup_code == normal_cleanup:
+                        raise ValueError("invalid normal cleanup response")
+                    # Normal cleanup can replace the journal. Retire its old
+                    # pin durably BEFORE that mutation, even if the reply is
+                    # lost. Empty-stage validation never discards its pin.
+                    run.pop("cleanup_receipt", None)
+                    publish(path, ledger)
                 observe_recovery_evidence(run, cleaned, "lifecycle", fresh=True)
+                # A refused snapshot must not replace the receipt that pins it.
+                if "cleanup_evidence_error" not in cleaned:
+                    run["cleanup_receipt"] = cleaned
                 execution.update(cleaned)
                 if revoke_negative_observation(run):
                     publish(path, ledger)
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 execution["cleanup_error"] = str(exc)[-2000:]
+                break
+            publish(path, ledger)
+            if cleaned.get("cleanup_snapshot_pending") is True:
+                # Lost responses have no saved digest. Persist the bound audit
+                # snapshot, then validate that same snapshot before mutation.
+                continue
+            if (cleanup_pass or was_reconciled or remote["executor"] != "slurm"
+                    or cleaned.get("quiescent") is not True
+                    or not slurm_quiescent(cleaned, run["request"])):
+                break
+            # Re-read the immutable receipts and supervision marker along with
+            # cleanup's newly persisted lifecycle observation. No receipt or
+            # acknowledgment is inferred from the scheduler result alone.
+            retrieve_records(run, frame_call, lambda: publish(path, ledger))
+            if not run["reconciled"]:
+                break
+        if error:
+            run["transport_error"] = error
+        if (prefix and remote["executor"] == "slurm"
+                and execution.get("cleanup") == "removed"):
+            # The stage is gone. Retire its auxiliary evidence only after the
+            # exact cleanup receipt is durable in coordinator state. This uses
+            # coordinator code because the staged harness has been removed.
+            publish(path, ledger)
+            receipt = run.get("cleanup_receipt", {})
+            retained = receipt.get("retained_cleanup", receipt)
+            code = ("import fcntl, hashlib, json, pathlib\n"
+                    "p = pathlib.Path(%r)\n"
+                    "history = p.with_name(p.name + '.cleanup.json')\n"
+                    "lock = p.with_name(p.name + '.cleanup.lock')\n"
+                    "if not (p.exists() or p.is_symlink()):\n"
+                    "    with lock.open('a') as guard:\n"
+                    "        fcntl.flock(guard.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+                    "        if (p.exists() or p.is_symlink()): raise ValueError('stage reappeared; auxiliary evidence retained')\n"
+                    "        if history.exists():\n"
+                    "            data = json.loads(history.read_text())\n"
+                    "            digest = hashlib.sha256(json.dumps(data, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()\n"
+                    "            if digest != %r: raise ValueError('cleanup snapshot changed; retained')\n"
+                    "            history.unlink()\n"
+                    "        lock.unlink()\n") % (stage, record_digest(retained))
+            try:
+                proc = remote_call(prefix, remote, code)
+                if proc.returncode:
+                    raise ValueError("cleanup evidence retirement transport exited {}".format(proc.returncode))
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                execution["cleanup_evidence_error"] = str(exc)[-2000:]
         outcomes = []
         final = run.get("final")
         for index in range(len(checks)):

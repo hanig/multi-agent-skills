@@ -48,8 +48,33 @@ The remote root exists before launch. The supervisor submits and polls;
 verification runs exclusively inside the allocated worker.
 
 A cleanup-unconfirmed warning means removal was not confirmed; retain any
-surviving stage. Inspect the reported job IDs, launch job name and `cleanup.json`;
+surviving stage. Inspect the reported job IDs, launch job name and `cleanup.json`
+(or the adjacent `STAGE.cleanup.json` once removal starts);
 a successful cancellation request alone is insufficient to establish termination.
+Before deleting stage contents, cleanup persists its final evidence beside the
+stage and closes the in-stage lock while retaining an external cleanup lock.
+The stage directory is removed last; `cleanup: removed` reports confirmed absence.
+Final cleanup evidence stays beside the removed stage until its exact receipt is
+durable in coordinator state; acknowledgment then retires the auxiliary files.
+Audit-publication errors leave the actual scheduler observation unchanged.
+After an interrupted deletion, the coordinator's durable ordinary acknowledgment
+and positive lifecycle state permit completion of an empty or absent stage.
+Completion uses atomic `rmdir` under the external lock, imports no staged harness,
+and runs no verifier or scheduler. Any remaining files stay subject to normal
+cleanup guards; a partially deleted nonempty stage with no harness stays retained.
+Before `rmdir`, completion checks the adjacent journal's stage, launch identity,
+and digest against its saved receipt. An unreadable or mismatched journal leaves
+the stage intact and reports cleanup unconfirmed. A lost cleanup response causes
+retrieval to save the bound snapshot first, then check its digest and finish
+within the same invocation. Removed status follows an actual absence check.
+When a nonempty stage returns to normal cleanup, the coordinator saves retirement
+of its old receipt pin before that cleanup can replace the journal. Empty-stage
+validation preserves the existing pin on a mismatch.
+External snapshots remain nested audit data, separate from fresh lifecycle
+observations. Retrieval preserves their exact contents in coordinator state
+before retirement, including after an interrupted final write. When the journal
+is already gone, the recorded removal permits retiring its leftover lock; a
+present mismatched journal stays intact.
 Cleanup is conditional on terminal accounting for all launch jobs, finished
 supervision and acknowledged claim evidence. Missing job IDs are recovered by
 name from `squeue` and `sacct`; unavailable or empty discovery leaves the stage
@@ -63,11 +88,14 @@ live queue, after every individual accounting/cancellation operation, and record
 `scheduler_observed_at` in UTC. A live row, failed or ambiguous query, or newly
 discovered ID lacking already-collected terminal accounting retains the stage.
 New IDs are saved for the next bounded retrieval; the final queue observation
-ends the current scheduler queries. An observed negative result resets the
+ends that cleanup pass's scheduler queries. An observed negative result resets the
 coordinator's stale reconciliation/publication flags and acknowledgment;
 a transport failure alone leaves them unchanged. Admission also blocks persisted
 negative lifecycle evidence despite stale flags. Later positive observations can
-reconcile the original immutable receipts.
+reconcile the original immutable receipts. A positive cleanup observation in the
+same invocation triggers one bounded re-ingestion and reconciliation under the
+binding lock, followed by cleanup with the durable acknowledgment. That cleanup
+again checks the scheduler; a negative result still revokes reconciliation.
 A privileged requeue remains possible after the final observation;
 `--no-requeue` and the worker-started guard protect against
 ordinary restarts and receipt replacement, without an atomic scheduler fence.
