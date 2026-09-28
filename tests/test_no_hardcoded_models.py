@@ -5,28 +5,32 @@ Which model reviews, breaks ties or writes code lives in
 and ``models.json``. A model id inside a script is a routing decision the data
 cannot change, which is how the committee tie-breaker stayed pinned to one
 model after the roster moved on. This sweep reads every non-docstring string
-literal in every authored Python file outside tests, docs and vendored code
+literal in every tracked Python file outside tests, docs and vendored code
 (comments and docstrings are prose, not routing) and fails on any model id those three files declare.
 """
 
 import ast
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-# Upstream code this repo carries verbatim and must not edit (CLAUDE.md):
-# the non-hanig skill bundles and the vendored fleet tools in bin/.
+# The sweep's scope is what the repository TRACKS, because tracked is what
+# authored means here: virtualenvs, caches and other tool state are never
+# committed, so no skip list for them exists to go stale. Earlier versions
+# walked the filesystem and skipped named directories, and three gate rounds
+# in a row found a directory the list got wrong.
+#
+# Excluded from the tracked set: tests, docs and examples (prose and
+# fixtures that legitimately name models) and upstream code this repo
+# carries verbatim and must not edit (CLAUDE.md): the non-hanig skill
+# bundles, which the hanig- prefix classifies, and the vendored fleet tools
+# in bin/.
 VENDORED_BIN = {"bus", "agent-manager", "agent-view"}
 SKIPPED_TOP = {"tests", "docs", "examples"}
-# Tool state, never authored: version control, caches and environments.
-# Every other hidden directory (.claude, .github, ...) is swept, and any
-# virtualenv or installed-package tree is third-party wherever it sits.
-TOOL_STATE = {".git", ".venv", ".tox", ".nox", ".mypy_cache", ".pytest_cache",
-              ".ruff_cache", ".cache", ".eggs"}
-THIRD_PARTY = {"site-packages", "node_modules", "__pycache__"}
 
 
 def is_python(path):
@@ -39,17 +43,20 @@ def is_python(path):
     return first.startswith(b"#!") and b"python" in first
 
 
+def tracked_files(root):
+    """Paths git tracks under root. Raises when git cannot answer."""
+    listing = subprocess.run(["git", "-C", str(root), "ls-files", "-z"],
+                             capture_output=True, check=True, timeout=60)
+    return [root / name for name in
+            listing.stdout.decode("utf-8", "surrogateescape").split("\0") if name]
+
+
 def authored_python(root=ROOT):
-    """Every Python file outside tests, docs and vendored upstream code."""
+    """Every tracked Python file outside tests, docs and vendored code."""
     found = []
-    for path in sorted(root.rglob("*")):
+    for path in sorted(tracked_files(root)):
         rel = path.relative_to(root)
-        top = rel.parts[0]
-        if (not path.is_file() or top in SKIPPED_TOP
-                or top in TOOL_STATE
-                or THIRD_PARTY.intersection(rel.parts)
-                or any((root.joinpath(*rel.parts[:i]) / "pyvenv.cfg").exists()
-                       for i in range(1, len(rel.parts)))):
+        if not path.is_file() or rel.parts[0] in SKIPPED_TOP:
             continue
         if rel.parts[0] == "skills" and not rel.parts[1].startswith("hanig-"):
             continue
@@ -114,25 +121,33 @@ class TestNoHardcodedModels(unittest.TestCase):
         for vendored in VENDORED_BIN:
             self.assertTrue((ROOT / "bin" / vendored).is_file(), vendored)
 
-    def test_new_scripts_are_swept_without_listing_them(self):
+    def test_new_tracked_scripts_are_swept_and_untracked_state_is_not(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
             swept = [root / "scripts" / "route.py", root / "bin" / "route",
                      root / "skills" / "hanig-x" / "scripts" / "a.py",
-                     root / ".github" / "route.py"]
-            skipped = [root / "tests" / "t.py", root / "bin" / "bus",
-                       root / "skills" / "paseo" / "scripts" / "v.py",
-                       root / "bin" / "notes", root / ".venv" / "lib" / "x.py",
-                       root / "env" / "lib" / "y.py",
-                       root / "lib" / "site-packages" / "z.py"]
-            (root / "env").mkdir()
-            (root / "env" / "pyvenv.cfg").write_text("", encoding="utf-8")
-            for path in swept + skipped:
+                     root / ".github" / "route.py", root / ".claude" / "h.py"]
+            excluded = [root / "tests" / "t.py", root / "bin" / "bus",
+                        root / "skills" / "paseo" / "scripts" / "v.py",
+                        root / "bin" / "notes"]
+            untracked = [root / ".venv" / "lib" / "x.py",
+                         root / "lib" / "site-packages" / "z.py",
+                         root / "fresh.py"]
+            for path in swept + excluded + untracked:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 body = "no shebang\n" if path.name == "notes" else (
                     "#!/usr/bin/env python3\nMODEL = 'x'\n")
                 path.write_text(body, encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "--"]
+                           + [str(p.relative_to(root)) for p in swept + excluded],
+                           check=True)
             self.assertEqual(authored_python(root), sorted(swept))
+
+    def test_a_directory_git_cannot_read_fails_loudly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(subprocess.CalledProcessError):
+                authored_python(Path(tmp) / "absent")
 
     def test_no_authored_string_literal_names_a_declared_model(self):
         ids = declared_model_ids()
