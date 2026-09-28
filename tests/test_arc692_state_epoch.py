@@ -18,6 +18,15 @@ SWARM = SCRIPTS / "swarm.py"
 HALT = "another coordinator has written state under us"
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from scheduler_fixture import isolated_module_path  # noqa: E402
+from scheduler_fixture import cleanup_module_path as tearDownModule  # noqa: E402
+
+
+def setUpModule():
+    isolated_module_path()
+
+
 class TestStateEpoch(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()

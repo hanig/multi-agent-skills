@@ -20,6 +20,7 @@ CASES = (
     'tests.test_runtime.TestACanaryMustExerciseWhatItVouchesFor',
     'tests.test_portable_paths.InstalledSnapshot.test_contract_handoff_survey_and_validation_use_copy_not_checkout',
     'tests.test_project.TestTheSurveySaysWhoMayUseAPartition',
+    'tests.test_arc692_state_epoch.TestStateEpoch.test_sequential_dry_run_commands_each_use_their_own_epoch',
 )
 
 
