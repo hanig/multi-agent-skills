@@ -955,8 +955,9 @@ def cleanup_slurm(stage, request, reconciled):
                     evidence.update(cleanup="removed", retained_cleanup=retained_cleanup,
                                     cleanup_error=str(exc)[-2000:])
                 else:
-                    evidence.update(cleanup="unconfirmed", quiescent=False,
-                                    cleanup_error=str(exc)[-2000:])
+                    # Audit failure supplies no new scheduler observation,
+                    # including when rmdir left an empty directory behind.
+                    evidence.update(cleanup="unconfirmed", cleanup_error=str(exc)[-2000:])
         if removal_locked and history != removal_history:
             # The legacy lock still guards a retained stage. No deletion began,
             # so no external lock or removal evidence needs to survive this call.
@@ -1081,6 +1082,53 @@ def cleanup(stage, reconciled=None):
         if lock is not None:
             lock.close()
     return evidence
+
+
+def can_finish_empty_stage(run):
+    """Use ordinary coordinator authority, never an auxiliary cleanup snapshot."""
+    request, execution = run["request"], run.get("execution", {})
+    ack = run.get("ack")
+    return bool(run.get("reconciled") is True and isinstance(ack, str)
+        and re.fullmatch(r"[0-9a-f]{64}", ack)
+        and request.get("launch_id") == run["launch_id"]
+        and request["verification_host"]["executor"] == "slurm"
+        and execution.get("stage") == run["stage"]
+        and execution.get("launch_id") == run["launch_id"]
+        and execution.get("quiescent") is not False
+        and slurm_quiescent(execution, request))
+
+
+def finish_empty_stage(stage, launch_id):
+    """Coordinator-emitted completion; delete no contents or lifecycle evidence.
+
+    The caller establishes durable ordinary authority before sending this code.
+    Return None for a nonempty stage, which still needs normal guarded cleanup.
+    """
+    history = stage.with_name(stage.name + ".cleanup.json")
+    lock = stage.with_name(stage.name + ".cleanup.lock")
+    with lock.open("a") as guard:
+        fcntl.flock(guard.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if stage.exists():
+            if any(stage.iterdir()):
+                return None
+            # The kernel refuses a late child even after the empty listing.
+            stage.rmdir()
+        result = {"stage": str(stage), "launch_id": launch_id, "cleanup": "removed"}
+        try:
+            with history.open("rb") as handle:
+                raw = handle.read(65537)
+            if len(raw) > 65536:
+                raise ValueError("retained cleanup snapshot exceeds 64 KiB")
+            snapshot = json.loads(raw)
+            if (not isinstance(snapshot, dict) or snapshot.get("stage") != str(stage)
+                    or snapshot.get("launch_id") != launch_id):
+                raise ValueError("retained cleanup snapshot binding mismatch")
+            result["retained_cleanup"] = snapshot
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as exc:
+            result["cleanup_evidence_error"] = str(exc)[-2000:]
+        return result
 
 
 def validate_receipt(receipt, request, index):
@@ -1481,14 +1529,18 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
             code = ("import json, pathlib, sys; p=pathlib.Path(%r); "
                     "sys.path.insert(0, str(p)); from remote_verify import cleanup; "
                     "print(json.dumps(cleanup(p, %r)))") % (stage, run.get("ack") if run["reconciled"] else None)
-            if run["reconciled"]:
+            if can_finish_empty_stage(run):
+                # The ordinary ack and positive lifecycle are durable BEFORE
+                # any empty-directory completion, including a lost response.
+                publish(path, ledger)
+                code = ("import fcntl, json\nfrom pathlib import Path\n"
+                        + inspect.getsource(finish_empty_stage)
+                        + ("\np = Path(%r)\nfinished = finish_empty_stage(p, %r)\n"
+                           "if finished is None:\n    exec(%r)\n"
+                           "else:\n    print(json.dumps(finished))\n") % (stage, run["launch_id"], code))
+            elif run["reconciled"] and remote["executor"] == "direct":
                 code = ("import json, pathlib; p=pathlib.Path(%r)\n"
-                        "if not p.exists():\n"
-                        "    h = p.with_name(p.name + '.cleanup.json')\n"
-                        "    saved = json.loads(h.read_text()) if h.is_file() else {'stage': str(p), 'cleanup': 'removed'}\n"
-                        "    if saved.get('cleanup') != 'removed':\n"
-                        "        saved = dict(saved, cleanup='removed', retained_cleanup=saved)\n"
-                        "    print(json.dumps(saved))\n"
+                        "if not p.exists(): print(json.dumps({'stage': str(p), 'cleanup': 'removed'}))\n"
                         "else:\n    exec(%r)\n") % (stage, code)
             try:
                 proc = remote_call(prefix, remote, code)
@@ -1531,14 +1583,16 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
                     "p = pathlib.Path(%r)\n"
                     "history = p.with_name(p.name + '.cleanup.json')\n"
                     "lock = p.with_name(p.name + '.cleanup.lock')\n"
-                    "if not p.exists() and history.is_file():\n"
+                    "if not p.exists():\n"
                     "    with lock.open('a') as guard:\n"
                     "        fcntl.flock(guard.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
-                    "        data = json.loads(history.read_text())\n"
-                    "        digest = hashlib.sha256(json.dumps(data, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()\n"
-                    "        if not p.exists() and digest == %r:\n"
+                    "        if p.exists(): raise ValueError('stage reappeared; auxiliary evidence retained')\n"
+                    "        if history.exists():\n"
+                    "            data = json.loads(history.read_text())\n"
+                    "            digest = hashlib.sha256(json.dumps(data, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()\n"
+                    "            if digest != %r: raise ValueError('cleanup snapshot changed; retained')\n"
                     "            history.unlink()\n"
-                    "            lock.unlink()\n") % (stage, record_digest(retained))
+                    "        lock.unlink()\n") % (stage, record_digest(retained))
             try:
                 proc = remote_call(prefix, remote, code)
                 if proc.returncode:

@@ -56,10 +56,17 @@ stage and closes the in-stage lock while retaining an external cleanup lock.
 The stage directory is removed last; `cleanup: removed` reports confirmed absence.
 Final cleanup evidence stays beside the removed stage until its exact receipt is
 durable in coordinator state; acknowledgment then retires the auxiliary files.
-If the final evidence update fails after deletion, observed directory absence
-still confirms removal without revoking the positive scheduler observation.
-Retrieval preserves the exact older snapshot in coordinator state before retiring
-it and records confirmed absence even after an interrupted final write.
+Audit-publication errors leave the actual scheduler observation unchanged.
+After an interrupted deletion, the coordinator's durable ordinary acknowledgment
+and positive lifecycle state permit completion of an empty or absent stage.
+Completion uses atomic `rmdir` under the external lock, imports no staged harness,
+and runs no verifier or scheduler. Any remaining files stay subject to normal
+cleanup guards; a partially deleted nonempty stage with no harness stays retained.
+External snapshots remain nested audit data, separate from fresh lifecycle
+observations. Retrieval preserves their exact contents in coordinator state
+before retirement, including after an interrupted final write. When the journal
+is already gone, the recorded removal permits retiring its leftover lock; a
+present mismatched journal stays intact.
 Cleanup is conditional on terminal accounting for all launch jobs, finished
 supervision and acknowledged claim evidence. Missing job IDs are recovered by
 name from `squeue` and `sacct`; unavailable or empty discovery leaves the stage
