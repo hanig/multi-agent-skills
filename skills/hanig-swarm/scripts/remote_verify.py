@@ -814,7 +814,12 @@ def cleanup_slurm(stage, request, reconciled):
     evidence = {"cleanup": "unconfirmed", "stage": str(stage),
                 "launch_id": request["launch_id"], "quiescent": False}
     history, lock = stage / "cleanup.json", None
+    removal_history = stage.with_name(stage.name + ".cleanup.json")
+    removal_lock = None
     try:
+        # This lock survives removal of the stage and its legacy lock file.
+        removal_lock = stage.with_name(stage.name + ".cleanup.lock").open("a")
+        fcntl.flock(removal_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         lock = (stage / "cleanup.lock").open("a")
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         known, job = set(), None
@@ -919,20 +924,33 @@ def cleanup_slurm(stage, request, reconciled):
         if (not reconciled or reconciled != evidence_digest(collected)
                 or not collected.get("final") or not collected.get("supervision")):
             raise ValueError("remote evidence is not quiescent and reconciled; stage retained")
+        # Save the final observation outside the tree BEFORE deleting any of
+        # its evidence. A failed final rmdir must not repopulate the stage.
+        publish_cleanup(removal_history, evidence)
+        history = removal_history
+        # Keep the external lock until completion, but close the in-stage file
+        # before unlinking it (an open unlinked file can retain a network stage).
+        lock.close()
+        lock = None
         shutil.rmtree(stage, ignore_errors=False)
+        if stage.exists():
+            raise ValueError("stage removal unconfirmed")
         evidence["cleanup"] = "removed"
     except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError) as exc:
         evidence["cleanup_error"] = str(exc)[-2000:]
     finally:
+        # A lock refusal must not overwrite another cleanup's journal.
+        if ((history == removal_history or stage.exists())
+                and evidence.get("cancellation_attempts") is not None):
+            try:
+                publish_cleanup(history, evidence)
+            except (OSError, ValueError) as exc:
+                evidence.update(cleanup="unconfirmed", quiescent=False,
+                                cleanup_error=str(exc)[-2000:])
         if lock is not None:
-            # A lock refusal must not overwrite another cleanup's journal.
-            if stage.exists() and evidence.get("cancellation_attempts") is not None:
-                try:
-                    publish_cleanup(history, evidence)
-                except (OSError, ValueError) as exc:
-                    evidence.update(cleanup="unconfirmed", quiescent=False,
-                                    cleanup_error=str(exc)[-2000:])
             lock.close()
+        if removal_lock is not None:
+            removal_lock.close()
     return evidence
 
 
@@ -1397,21 +1415,21 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
                         error = "remote transport incomplete: " + str(exc)
         # Bounded retrieval also works when the original aggregate or staged
         # harness is unavailable. Never rerun a verifier to recover its result.
+        def frame_call(code):
+            nonlocal error
+            try:
+                proc = remote_call(prefix, remote, code)
+            except subprocess.TimeoutExpired as exc:
+                if not exc.stdout:
+                    raise
+                captured = exc.stdout
+                if isinstance(captured, bytes):
+                    captured = captured.decode("utf-8", "replace")
+                proc = subprocess.CompletedProcess([], 255, captured, "transport capture timed out")
+            if proc.returncode:
+                error = "ssh/remote transport exited {}: {}".format(proc.returncode, proc.stderr[-2000:])
+            return proc.stdout
         if not run["reconciled"] and prefix:
-            def frame_call(code):
-                nonlocal error
-                try:
-                    proc = remote_call(prefix, remote, code)
-                except subprocess.TimeoutExpired as exc:
-                    if not exc.stdout:
-                        raise
-                    captured = exc.stdout
-                    if isinstance(captured, bytes):
-                        captured = captured.decode("utf-8", "replace")
-                    proc = subprocess.CompletedProcess([], 255, captured, "transport capture timed out")
-                if proc.returncode:
-                    error = "ssh/remote transport exited {}: {}".format(proc.returncode, proc.stderr[-2000:])
-                return proc.stdout
             retrieve_records(run, frame_call, lambda: publish(path, ledger))
         if (prefix and remote["executor"] == "slurm" and checks
                 and len(run["receipts"]) == len(checks)
@@ -1437,7 +1455,12 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
         # Raw evidence is durable before authorizing remote removal. This is
         # reconciliation, not publication under the operator observation fence.
         publish(path, ledger)
-        if execution.get("cleanup") != "removed" and prefix:
+        # One observation can unlock reconciliation; at most one acknowledged
+        # cleanup follows it, all under the existing binding lock.
+        for cleanup_pass in range(2):
+            if execution.get("cleanup") == "removed" or not prefix:
+                break
+            was_reconciled = run["reconciled"]
             code = ("import json, pathlib, sys; p=pathlib.Path(%r); "
                     "sys.path.insert(0, str(p)); from remote_verify import cleanup; "
                     "print(json.dumps(cleanup(p, %r)))") % (stage, run.get("ack") if run["reconciled"] else None)
@@ -1459,6 +1482,20 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
                     publish(path, ledger)
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 execution["cleanup_error"] = str(exc)[-2000:]
+                break
+            publish(path, ledger)
+            if (cleanup_pass or was_reconciled or remote["executor"] != "slurm"
+                    or cleaned.get("quiescent") is not True
+                    or not slurm_quiescent(cleaned, run["request"])):
+                break
+            # Re-read the immutable receipts and supervision marker along with
+            # cleanup's newly persisted lifecycle observation. No receipt or
+            # acknowledgment is inferred from the scheduler result alone.
+            retrieve_records(run, frame_call, lambda: publish(path, ledger))
+            if not run["reconciled"]:
+                break
+        if error:
+            run["transport_error"] = error
         outcomes = []
         final = run.get("final")
         for index in range(len(checks)):

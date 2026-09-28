@@ -48,8 +48,13 @@ The remote root exists before launch. The supervisor submits and polls;
 verification runs exclusively inside the allocated worker.
 
 A cleanup-unconfirmed warning means removal was not confirmed; retain any
-surviving stage. Inspect the reported job IDs, launch job name and `cleanup.json`;
+surviving stage. Inspect the reported job IDs, launch job name and `cleanup.json`
+(or the adjacent `STAGE.cleanup.json` once removal starts);
 a successful cancellation request alone is insufficient to establish termination.
+Before deleting stage contents, cleanup persists its final evidence beside the
+stage and closes the in-stage lock while retaining an external cleanup lock.
+The stage directory is removed last; `cleanup: removed` reports confirmed absence.
+Final cleanup evidence remains outside the removed stage and in coordinator state.
 Cleanup is conditional on terminal accounting for all launch jobs, finished
 supervision and acknowledged claim evidence. Missing job IDs are recovered by
 name from `squeue` and `sacct`; unavailable or empty discovery leaves the stage
@@ -63,11 +68,14 @@ live queue, after every individual accounting/cancellation operation, and record
 `scheduler_observed_at` in UTC. A live row, failed or ambiguous query, or newly
 discovered ID lacking already-collected terminal accounting retains the stage.
 New IDs are saved for the next bounded retrieval; the final queue observation
-ends the current scheduler queries. An observed negative result resets the
+ends that cleanup pass's scheduler queries. An observed negative result resets the
 coordinator's stale reconciliation/publication flags and acknowledgment;
 a transport failure alone leaves them unchanged. Admission also blocks persisted
 negative lifecycle evidence despite stale flags. Later positive observations can
-reconcile the original immutable receipts.
+reconcile the original immutable receipts. A positive cleanup observation in the
+same invocation triggers one bounded re-ingestion and reconciliation under the
+binding lock, followed by cleanup with the durable acknowledgment. That cleanup
+again checks the scheduler; a negative result still revokes reconciliation.
 A privileged requeue remains possible after the final observation;
 `--no-requeue` and the worker-started guard protect against
 ordinary restarts and receipt replacement, without an atomic scheduler fence.
