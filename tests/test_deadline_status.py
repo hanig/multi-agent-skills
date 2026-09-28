@@ -14,6 +14,15 @@ sys.path.insert(0, str(SCRIPTS))
 import swarm as S  # noqa: E402
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from scheduler_fixture import isolated_module_path  # noqa: E402
+from scheduler_fixture import cleanup_module_path as tearDownModule  # noqa: E402
+
+
+def setUpModule():
+    isolated_module_path()
+
+
 def unit(**overrides):
     value = {"id": "u", "kind": "slurm", "runtime": "none",
              "command": "true", "outputs": ["out.txt"]}

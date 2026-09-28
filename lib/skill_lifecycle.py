@@ -461,6 +461,23 @@ def _destination_lock(destination: Path):
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+def _secure_payload(root: Path) -> None:
+    """Remove shared write bits from a staged copy without following symlinks.
+
+    copytree preserves source modes, including a checkout created under umask
+    002. Keep its read/execute bits, leave source and external link targets
+    untouched, and fail staging if any chmod fails.
+    """
+    def unreadable(error):
+        raise error
+
+    for directory, directories, files in os.walk(
+            root, followlinks=False, onerror=unreadable):
+        for path in [Path(directory)] + [Path(directory) / name for name in files]:
+            if not path.is_symlink():
+                path.chmod(path.stat().st_mode & ~0o022)
+
+
 def _stage(item: PreflightItem, validator: Callable[[Path], None]) -> Path:
     target = item.target
     token = f".{target.name}.stage-{uuid.uuid4().hex}"
@@ -468,12 +485,13 @@ def _stage(item: PreflightItem, validator: Callable[[Path], None]) -> Path:
              if target.mode == "copy" else target.destination.parent / token)
     try:
         if target.mode == "copy":
-            stage.parent.mkdir(parents=True, exist_ok=False)
+            stage.parent.mkdir(parents=True, exist_ok=False, mode=0o700)
             shutil.copytree(target.source, stage, symlinks=True)
             write_provenance(
                 stage,
                 _record_for(target, item.previous, item.previous_owned),
             )
+            _secure_payload(stage)
             validator(stage)
         else:
             # Link targets validate the source now, and stage their sidecar in

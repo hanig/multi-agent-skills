@@ -33,6 +33,15 @@ ENV = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@x",
 HEAD = "a" * 40
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from scheduler_fixture import closed_bin, isolated_module_path  # noqa: E402
+from scheduler_fixture import cleanup_module_path as tearDownModule  # noqa: E402
+
+
+def setUpModule():
+    isolated_module_path()
+
+
 def git(repo, *a):
     return subprocess.run(["git", "-C", repo] + list(a), check=True, env=ENV,
                           capture_output=True, text=True)
@@ -294,7 +303,7 @@ def _paseo_stub_on_path(case):
     old = os.environ.get("PATH", "")
     case.addCleanup(shutil.rmtree, d, True)
     case.addCleanup(os.environ.__setitem__, "PATH", old)
-    os.environ["PATH"] = d + os.pathsep + old
+    os.environ["PATH"] = closed_bin(d)
 
 
 class TestTheRequirementIsDeclared(unittest.TestCase):

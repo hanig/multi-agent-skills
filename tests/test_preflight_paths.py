@@ -24,6 +24,15 @@ ENV = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@x",
            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@x")
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from scheduler_fixture import closed_bin, isolated_module_path  # noqa: E402
+from scheduler_fixture import cleanup_module_path as tearDownModule  # noqa: E402
+
+
+def setUpModule():
+    isolated_module_path()
+
+
 def git(repo, *args, check=True):
     return subprocess.run(["git", "-C", str(repo)] + list(args), check=check,
                           env=ENV, capture_output=True, text=True)
@@ -68,7 +77,7 @@ def paseo_stub_path(root, env):
                  "exit 127\n")
     f.chmod(0o755)
     return dict(env,
-                PATH=str(binp) + os.pathsep + env.get("PATH", ""))
+                PATH=closed_bin(binp))
 
 
 def fake_paseo_result(argv, root, agent="agent-123"):

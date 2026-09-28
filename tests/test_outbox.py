@@ -28,6 +28,15 @@ PLAN = {"name": "rna-bench", "units": [
      "needs": ["prep"], "write_scopes": ["r/t/"]}]}
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from scheduler_fixture import isolated_module_path  # noqa: E402
+from scheduler_fixture import cleanup_module_path as tearDownModule  # noqa: E402
+
+
+def setUpModule():
+    isolated_module_path()
+
+
 def run(tmp, *argv):
     (tmp / "plan.json").write_text(json.dumps(PLAN))
     return subprocess.run(

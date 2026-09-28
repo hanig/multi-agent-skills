@@ -51,6 +51,96 @@ class LifecycleTest(unittest.TestCase):
         self.assertIn("version=abc123\n", marker)
         self.assertIn("schema=2\n", marker)
 
+    def test_copy_payload_modes_ignore_shared_umask_and_source_modes(self):
+        old = os.umask(0o002)
+        self.addCleanup(os.umask, old)
+        source = self.source()
+        scripts = source / "scripts"
+        scripts.mkdir()
+        executable = scripts / "worker.sh"
+        executable.write_text("#!/bin/sh\nexit 0\n")
+        executable.chmod(0o777)
+        # Deliberately writable input, as on a shared checkout. copytree
+        # preserves these bits even if the install process uses umask 022.
+        source.chmod(0o777)
+        scripts.chmod(0o777)
+        (source / "SKILL.md").chmod(0o666)
+        external = self.root / "external"
+        external.mkdir()
+        outside = external / "data"
+        outside.write_text("outside\n")
+        outside.chmod(0o666)
+        (source / "linked-file").symlink_to(outside)
+        (source / "linked-directory").symlink_to(external, target_is_directory=True)
+        original = {p: p.stat().st_mode for p in (source, scripts, executable,
+                    source / "SKILL.md", external, outside)}
+        target = self.target(source=source)
+        # The second installation exercises the upgrade path too.
+        for expected in ("installed", "upgraded"):
+            with self.subTest(action=expected):
+                result = lifecycle.install([target])[0]
+                self.assertEqual(result.status, expected, result.detail)
+                paths = [target.destination] + list(target.destination.rglob("*"))
+                # This independent enumerator includes nested payload entries
+                # and stops at symlink leaves on every required interpreter.
+                self.assertIn(target.destination / "scripts", paths)
+                self.assertIn(target.destination / "scripts/worker.sh", paths)
+                self.assertIn(target.destination / "linked-directory", paths)
+                self.assertNotIn(target.destination / "linked-directory/data", paths)
+                self.assertTrue((target.destination / lifecycle.MARKER).is_file())
+                for path in paths:
+                    if not path.is_symlink():
+                        self.assertEqual(path.stat().st_mode & 0o022, 0, str(path))
+                self.assertEqual((target.destination / "scripts/worker.sh").stat().st_mode & 0o111,
+                                 0o111)
+                self.assertTrue((target.destination / "linked-file").is_symlink())
+                self.assertTrue((target.destination / "linked-directory").is_symlink())
+                for path, mode in original.items():
+                    self.assertEqual(path.stat().st_mode, mode, str(path))
+                    if path == source or source in path.parents:
+                        copied = target.destination / path.relative_to(source)
+                        self.assertEqual(copied.stat().st_mode, mode & ~0o022,
+                                         str(copied))
+
+    def test_unreadable_staged_tree_is_not_published_with_source_modes(self):
+        source = self.source()
+        source.chmod(0o777)
+        target = self.target(source=source)
+        original_scandir = os.scandir
+
+        def deny_stage_scan(path):
+            # copytree scans the source, while hardening must scan the stage.
+            # Leave rmtree's descriptor-based cleanup available.
+            if not isinstance(path, int) and ".stage-" in os.fspath(path):
+                raise PermissionError("fixture staged enumeration denied")
+            return original_scandir(path)
+
+        with mock.patch.object(os, "scandir", side_effect=deny_stage_scan):
+            result = lifecycle.install([target])[0]
+        self.assertEqual(result.status, "failed", result.detail)
+        self.assertIn("fixture staged enumeration denied", result.detail)
+        self.assertFalse(target.destination.exists())
+        self.assertFalse(list(target.destination.parent.glob("*.stage-*")))
+
+    def test_permission_failure_retains_previous_install(self):
+        target = self.target()
+        self.assertEqual(lifecycle.install([target])[0].status, "installed")
+        before = (target.destination / "SKILL.md").read_bytes()
+        (target.source / "SKILL.md").write_text("replacement\n")
+        original_chmod = Path.chmod
+
+        def refuse_staged_chmod(path, mode, **kwargs):
+            if any(".stage-" in parent.name for parent in path.parents):
+                raise PermissionError("fixture chmod refusal")
+            return original_chmod(path, mode, **kwargs)
+
+        with mock.patch.object(Path, "chmod", refuse_staged_chmod):
+            result = lifecycle.install([target])[0]
+        self.assertEqual(result.status, "failed")
+        self.assertIn("fixture chmod refusal", result.detail)
+        self.assertEqual((target.destination / "SKILL.md").read_bytes(), before)
+        self.assertFalse(list(target.destination.parent.glob("*.stage-*")))
+
     def test_foreign_and_legacy_markers_are_not_promoted_to_authored(self):
         dest = self.home / ".claude" / "skills" / "alpha"
         dest.mkdir(parents=True)

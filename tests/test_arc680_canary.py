@@ -16,6 +16,15 @@ sys.path.insert(0, str(ROOT / 'skills' / 'hanig-swarm' / 'scripts'))
 import swarm as S
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from scheduler_fixture import isolated_module_path  # noqa: E402
+from scheduler_fixture import cleanup_module_path as tearDownModule  # noqa: E402
+
+
+def setUpModule():
+    isolated_module_path()
+
+
 def plan():
     return {'name': 'canary-test', 'canary': 'a', 'units': [
         {'id': uid, 'kind': 'slurm', 'runtime': 'none', 'command': 'true',
