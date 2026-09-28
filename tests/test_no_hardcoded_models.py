@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # carries verbatim and must not edit (CLAUDE.md): the non-hanig skill
 # bundles, which the hanig- prefix classifies, and the vendored fleet tools
 # in bin/.
-VENDORED_BIN = {"bus", "agent-manager", "agent-view"}
+VENDORED = {"bin/bus", "bin/agent-manager", "bin/agent-view"}
 SKIPPED_TOP = {"tests", "docs", "examples"}
 
 
@@ -60,7 +60,7 @@ def authored_python(root=ROOT):
             continue
         if rel.parts[0] == "skills" and not rel.parts[1].startswith("hanig-"):
             continue
-        if rel.parts[0] == "bin" and rel.name in VENDORED_BIN:
+        if rel.as_posix() in VENDORED:
             continue
         if is_python(path):
             found.append(path)
@@ -93,18 +93,19 @@ def declared_model_ids():
 
 
 def literal_hits(source, ids):
+    """Model ids in string constants the code USES.
+
+    A string that is a whole statement (a docstring, wherever it sits, or a
+    bare string used as a comment) does nothing at runtime and routes
+    nothing, so it is prose. Every other string constant is a value.
+    """
     tree = ast.parse(source)
-    docstrings = set()
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
-                             ast.AsyncFunctionDef)) and node.body:
-            first = node.body[0]
-            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
-                docstrings.add(id(first.value))
+    prose = {id(node.value) for node in ast.walk(tree)
+             if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)}
     hits = []
     for node in ast.walk(tree):
         if (isinstance(node, ast.Constant) and isinstance(node.value, str)
-                and id(node) not in docstrings):
+                and id(node) not in prose):
             hits.extend((node.lineno, model) for model in sorted(ids)
                         if model in node.value)
     return hits
@@ -118,14 +119,15 @@ class TestNoHardcodedModels(unittest.TestCase):
                          "integration_tests.py", "changed_tests_stable.py"):
             self.assertIn(expected, names)
         self.assertIn("gpt-6-sol", declared_model_ids())
-        for vendored in VENDORED_BIN:
-            self.assertTrue((ROOT / "bin" / vendored).is_file(), vendored)
+        for vendored in VENDORED:
+            self.assertTrue((ROOT / vendored).is_file(), vendored)
 
     def test_new_tracked_scripts_are_swept_and_untracked_state_is_not(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             subprocess.run(["git", "init", "-q", str(root)], check=True)
             swept = [root / "scripts" / "route.py", root / "bin" / "route",
+                     root / "bin" / "tools" / "bus",
                      root / "skills" / "hanig-x" / "scripts" / "a.py",
                      root / ".github" / "route.py", root / ".claude" / "h.py"]
             excluded = [root / "tests" / "t.py", root / "bin" / "bus",
@@ -166,6 +168,11 @@ class TestNoHardcodedModels(unittest.TestCase):
         self.assertEqual(literal_hits(
             'def f():\n    """gpt-6-sol found this."""\n    # gpt-6-sol\n', ids),
             [])
+        self.assertEqual(literal_hits(
+            'from __future__ import annotations\n"""gpt-6-sol notes."""\n', ids),
+            [])
+        self.assertEqual(literal_hits('X = ("a", "gpt-6-sol")\n"""prose"""\n', ids),
+                         [(1, "gpt-6-sol")])
 
 
 if __name__ == "__main__":
