@@ -56,6 +56,10 @@ stage and closes the in-stage lock while retaining an external cleanup lock.
 The stage directory is removed last; `cleanup: removed` reports confirmed absence.
 Final cleanup evidence stays beside the removed stage until its exact receipt is
 durable in coordinator state; acknowledgment then retires the auxiliary files.
+If the final evidence update fails after deletion, observed directory absence
+still confirms removal without revoking the positive scheduler observation.
+Retrieval preserves the exact older snapshot in coordinator state before retiring
+it and records confirmed absence even after an interrupted final write.
 Cleanup is conditional on terminal accounting for all launch jobs, finished
 supervision and acknowledged claim evidence. Missing job IDs are recovered by
 name from `squeue` and `sacct`; unavailable or empty discovery leaves the stage

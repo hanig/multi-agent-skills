@@ -816,6 +816,7 @@ def cleanup_slurm(stage, request, reconciled):
     history, lock = stage / "cleanup.json", None
     removal_history = stage.with_name(stage.name + ".cleanup.json")
     removal_lock, removal_locked = None, False
+    retained_cleanup = None
     try:
         # This lock survives removal of the stage and its legacy lock file.
         removal_lock = stage.with_name(stage.name + ".cleanup.lock").open("a")
@@ -928,6 +929,7 @@ def cleanup_slurm(stage, request, reconciled):
         # Save the final observation outside the tree BEFORE deleting any of
         # its evidence. A failed final rmdir must not repopulate the stage.
         publish_cleanup(removal_history, evidence)
+        retained_cleanup = dict(evidence)
         history = removal_history
         # Keep the external lock until completion, but close the in-stage file
         # before unlinking it (an open unlinked file can retain a network stage).
@@ -946,8 +948,15 @@ def cleanup_slurm(stage, request, reconciled):
             try:
                 publish_cleanup(history, evidence)
             except (OSError, ValueError) as exc:
-                evidence.update(cleanup="unconfirmed", quiescent=False,
-                                cleanup_error=str(exc)[-2000:])
+                if history == removal_history and not stage.exists():
+                    # Failed audit publication is not a negative scheduler
+                    # observation. Preserve the exact pre-removal snapshot so
+                    # the coordinator can acknowledge it after saving this fact.
+                    evidence.update(cleanup="removed", retained_cleanup=retained_cleanup,
+                                    cleanup_error=str(exc)[-2000:])
+                else:
+                    evidence.update(cleanup="unconfirmed", quiescent=False,
+                                    cleanup_error=str(exc)[-2000:])
         if removal_locked and history != removal_history:
             # The legacy lock still guards a retained stage. No deletion began,
             # so no external lock or removal evidence needs to survive this call.
@@ -1476,7 +1485,10 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
                 code = ("import json, pathlib; p=pathlib.Path(%r)\n"
                         "if not p.exists():\n"
                         "    h = p.with_name(p.name + '.cleanup.json')\n"
-                        "    print(h.read_text() if h.is_file() else json.dumps({'stage': str(p), 'cleanup': 'removed'}))\n"
+                        "    saved = json.loads(h.read_text()) if h.is_file() else {'stage': str(p), 'cleanup': 'removed'}\n"
+                        "    if saved.get('cleanup') != 'removed':\n"
+                        "        saved = dict(saved, cleanup='removed', retained_cleanup=saved)\n"
+                        "    print(json.dumps(saved))\n"
                         "else:\n    exec(%r)\n") % (stage, code)
             try:
                 proc = remote_call(prefix, remote, code)
@@ -1513,6 +1525,8 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
             # exact cleanup receipt is durable in coordinator state. This uses
             # coordinator code because the staged harness has been removed.
             publish(path, ledger)
+            receipt = run.get("cleanup_receipt", {})
+            retained = receipt.get("retained_cleanup", receipt)
             code = ("import fcntl, hashlib, json, pathlib\n"
                     "p = pathlib.Path(%r)\n"
                     "history = p.with_name(p.name + '.cleanup.json')\n"
@@ -1524,7 +1538,7 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
                     "        digest = hashlib.sha256(json.dumps(data, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()\n"
                     "        if not p.exists() and digest == %r:\n"
                     "            history.unlink()\n"
-                    "            lock.unlink()\n") % (stage, record_digest(run.get("cleanup_receipt")))
+                    "            lock.unlink()\n") % (stage, record_digest(retained))
             try:
                 proc = remote_call(prefix, remote, code)
                 if proc.returncode:
