@@ -4,9 +4,9 @@ Which model reviews, breaks ties or writes code lives in
 ``skills/hanig-review-gate/reviewers.json``, ``skills/hanig-swarm/agents.json``
 and ``models.json``. A model id inside a script is a routing decision the data
 cannot change, which is how the committee tie-breaker stayed pinned to one
-model after the roster moved on. This sweep reads every string literal in the
-authored scripts, installer and hooks (comments and docstrings are prose, not
-routing) and fails on any model id those three files declare.
+model after the roster moved on. This sweep reads every non-docstring string
+literal in every authored Python file outside tests, docs and vendored code
+(comments and docstrings are prose, not routing) and fails on any model id those three files declare.
 """
 
 import ast
@@ -20,7 +20,11 @@ ROOT = Path(__file__).resolve().parents[1]
 # Upstream code this repo carries verbatim and must not edit (CLAUDE.md):
 # the non-hanig skill bundles and the vendored fleet tools in bin/.
 VENDORED_BIN = {"bus", "agent-manager", "agent-view"}
-SKIPPED_TOP = {".git", "tests", "docs", "examples"}
+SKIPPED_TOP = {"tests", "docs", "examples"}
+# Hidden top-level directories are tool state (.git, .venv, .tox), except the
+# repo's own hooks. Any virtualenv or installed-package tree is third-party.
+TRACKED_HIDDEN = {".claude"}
+THIRD_PARTY = {"site-packages", "node_modules", "__pycache__"}
 
 
 def is_python(path):
@@ -38,8 +42,12 @@ def authored_python(root=ROOT):
     found = []
     for path in sorted(root.rglob("*")):
         rel = path.relative_to(root)
-        if (not path.is_file() or rel.parts[0] in SKIPPED_TOP
-                or "__pycache__" in rel.parts):
+        top = rel.parts[0]
+        if (not path.is_file() or top in SKIPPED_TOP
+                or (top.startswith(".") and top not in TRACKED_HIDDEN)
+                or THIRD_PARTY.intersection(rel.parts)
+                or any((root.joinpath(*rel.parts[:i]) / "pyvenv.cfg").exists()
+                       for i in range(1, len(rel.parts)))):
             continue
         if rel.parts[0] == "skills" and not rel.parts[1].startswith("hanig-"):
             continue
@@ -69,7 +77,10 @@ def declared_model_ids():
     for model in registry["models"]:
         ids.add(model["id"])
         ids.add(model["id"].split("/", 1)[1])
-    return {value for value in ids if len(value) > 3}
+    # A bare segment such as "opus" is an English word; only keep a bare
+    # segment when it is an identifier (it carries a digit).
+    return {value for value in ids
+            if len(value) > 3 and ("/" in value or any(c.isdigit() for c in value))}
 
 
 def literal_hits(source, ids):
@@ -108,7 +119,11 @@ class TestNoHardcodedModels(unittest.TestCase):
                      root / "skills" / "hanig-x" / "scripts" / "a.py"]
             skipped = [root / "tests" / "t.py", root / "bin" / "bus",
                        root / "skills" / "paseo" / "scripts" / "v.py",
-                       root / "bin" / "notes"]
+                       root / "bin" / "notes", root / ".venv" / "lib" / "x.py",
+                       root / "env" / "lib" / "y.py",
+                       root / "lib" / "site-packages" / "z.py"]
+            (root / "env").mkdir()
+            (root / "env" / "pyvenv.cfg").write_text("", encoding="utf-8")
             for path in swept + skipped:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 body = "no shebang\n" if path.name == "notes" else (

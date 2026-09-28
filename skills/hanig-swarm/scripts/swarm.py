@@ -79,8 +79,10 @@ def load_agent_routing(path=AGENTS_FILE):
     table = data.get("thinking_by_model") if isinstance(data, dict) else None
     provider = default.get("provider") if isinstance(default, dict) else None
     thinking = default.get("thinking") if isinstance(default, dict) else None
-    if not (isinstance(provider, str) and "/" in provider.strip("/")
-            and provider == provider.strip()):
+    parts = provider.split("/") if isinstance(provider, str) else []
+    if not (len(parts) >= 2 and all(part and part == part.strip()
+                                    and not any(c.isspace() for c in part)
+                                    for part in parts)):
         raise SystemExit("swarm: %s default.provider must be a PROVIDER/MODEL "
                          "string" % path)
     if not (isinstance(thinking, str) and thinking.strip()):

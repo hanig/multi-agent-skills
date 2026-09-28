@@ -476,6 +476,16 @@ class TestTheDefaultAgent(unittest.TestCase):
                                                  "thinking": "high"}),
             "padded provider": dict(good, default={"provider": " codex/m",
                                                    "thinking": "high"}),
+            "trailing slash": dict(good, default={"provider": "codex/m/",
+                                                  "thinking": "high"}),
+            "leading slash": dict(good, default={"provider": "/codex/m",
+                                                 "thinking": "high"}),
+            "empty segment": dict(good, default={"provider": "codex//m",
+                                                 "thinking": "high"}),
+            "inner space": dict(good, default={"provider": "codex/m x",
+                                               "thinking": "high"}),
+            "not a string": dict(good, default={"provider": ["codex/m"],
+                                                "thinking": "high"}),
             "empty thinking": dict(good, default={"provider": "codex/m",
                                                   "thinking": ""}),
             "table not a map": dict(good, thinking_by_model=["codex/m"]),
@@ -491,6 +501,11 @@ class TestTheDefaultAgent(unittest.TestCase):
                     with self.assertRaises(SystemExit) as stopped:
                         S.load_agent_routing(path)
                     self.assertIn(str(path), str(stopped.exception.code))
+            nested = dict(good, default={"provider": "pi/vendor/model-1",
+                                         "thinking": "high"})
+            path = Path(tmp) / "nested.json"
+            path.write_text(json.dumps(nested), encoding="utf-8")
+            self.assertEqual(S.load_agent_routing(path)[0], "pi/vendor/model-1")
             path = Path(tmp) / "good.json"
             path.write_text(json.dumps(good), encoding="utf-8")
             self.assertEqual(S.load_agent_routing(path),
