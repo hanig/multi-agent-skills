@@ -1,0 +1,5 @@
+{
+  "prefix_byte": "\n",
+  "bytes_past_limit": 1,
+  "payload_fixture": "bom-receipt.json"
+}

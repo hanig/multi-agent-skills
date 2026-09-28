@@ -326,11 +326,11 @@ default is 64000 and the error now reports the token counts.
 exactly one round before the input grew past it too. Splitting keeps working and
 sharpens the per-file context.
 
-**Put the limits in a FILE, not in the context prose.** The context grew into a
-wall of thirteen inlined "do not re-report" clauses, and a reviewer then burned
-its whole 64000-token budget reasoning over that wall on a 97KB file it had
-answered fine one round earlier. Pass the limits document with `--file` and keep
-the prose to what changed this round.
+**Context describes what changed, not how the last round went.** Never tell the
+panel what a previous round decided, including through a `--file`. Put lengthy
+limits in files. Exact opening annotations and JSON gate reports are stripped;
+prompt and receipt notices identify removals. Unmatched allegations and
+measurements stay unchanged. See `PROTOCOL.md` for scope and blind spots.
 
 **Pass `--threat-model`** whenever the code has one. A finding whose
 preconditions it excludes is printed under OUT OF SCOPE and does not decide the

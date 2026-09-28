@@ -1,0 +1,12 @@
+﻿{
+  "state": "REVIEW_PASS",
+  "checked_at": "synthetic timestamp",
+  "profile": "synthetic profile",
+  "profile_reason": "synthetic fixture",
+  "excluded": [],
+  "results": [],
+  "reviewed": "synthetic subject",
+  "unavailable": [],
+  "panel_policy": {},
+  "journal": {}
+}

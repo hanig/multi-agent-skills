@@ -1,0 +1,14 @@
+{
+  "6ffec653b8ea38ff9d9ba17602d274c5d77f0eff913858390abf12614bb42bce": {
+    "location": "phase0b/run_pipeline.sh:1540",
+    "summary": "The interpreter preflight accepts arbitrary executables that ignore Python arguments and return zero, allowing every Python policy guard to be skipped.",
+    "disposition": "reproduced",
+    "reason": "Before fixing production code, both true paths and a zero-exit script bypassed predictor refusal; preflight now requires a complete runtime/version/import receipt and the controls require PIPELINE_INTERPRETER_UNUSABLE."
+  },
+  "b0b4ab161925b1d31119ad299144d2bc191b9acf5144c2d200790de5130100e9": {
+    "location": "phase0b/test_no_mhc_binding_predictor.py:148",
+    "summary": "The non-Python interpreter refusal test checks 'REACHED_FDB_INPUTS' instead of 'REACHED_FDR_INPUTS', so it cannot detect if the pipeline proceeds to FDR inputs after an unusable interpreter.",
+    "disposition": "not-reproduced",
+    "reason": "Independent direct-status recursive grep found zero REACHED_FDB matches in Python and shell files; the test file has zero REACHED_FDB matching lines and 26 REACHED_FDR matching lines, and the inspected refusal assertion uses REACHED_FDR_INPUTS. No source change was made."
+  }
+}
