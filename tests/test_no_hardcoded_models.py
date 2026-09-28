@@ -140,7 +140,12 @@ class TestNoHardcodedModels(unittest.TestCase):
                          "skill_installer.py", "tracker_sync_check.py",
                          "integration_tests.py", "changed_tests_stable.py"):
             self.assertIn(expected, names)
-        self.assertIn("gpt-6-sol", declared_model_ids())
+        declared = declared_model_ids()
+        self.assertIn("gpt-6-sol", declared)
+        self.assertIn("claude/opus", declared)
+        # Deliberate: a bare suffix with no digit is an English word, so
+        # "opus" (from claude/opus) is not an id on its own.
+        self.assertNotIn("opus", declared)
         for vendored in VENDORED:
             self.assertTrue((ROOT / vendored).is_file(), vendored)
 
