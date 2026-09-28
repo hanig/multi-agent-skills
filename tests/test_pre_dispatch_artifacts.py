@@ -34,6 +34,14 @@ import unit as U  # noqa: E402
 import worktree as W  # noqa: E402
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from scheduler_fixture import isolated_module_path  # noqa: E402
+
+
+def setUpModule():
+    isolated_module_path()
+
+
 class Base(unittest.TestCase):
     """One external run root, one coordinator state directory, no scheduler.
 

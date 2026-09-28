@@ -24,6 +24,14 @@ GIT_ENV = dict(os.environ, GIT_AUTHOR_NAME="test",
                GIT_COMMITTER_EMAIL="test@example.invalid")
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from scheduler_fixture import isolated_module_path  # noqa: E402
+
+
+def setUpModule():
+    isolated_module_path()
+
+
 def git(repo, *args):
     return subprocess.run(
         ["git", "-C", str(repo), *args], check=True, capture_output=True,

@@ -15,6 +15,10 @@ import unittest
 from pathlib import Path
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from scheduler_fixture import closed_bin  # noqa: E402
+
+
 REPO = Path(__file__).resolve().parents[1]
 SKILLS = REPO / "skills"
 AUTHORED = ("hanig-orchestrate", "hanig-portable-handoff", "hanig-project",
@@ -42,7 +46,7 @@ class InstalledSnapshot(unittest.TestCase):
         shutil.rmtree(source.parent)
         self.prefix = prefix
         # Portability must not depend on coordinator credentials or config.
-        self.env = {"HOME": str(self.home), "PATH": os.defpath}
+        self.env = {"HOME": str(self.home), "PATH": closed_bin(self.root / "bin")}
 
     def tearDown(self):
         self.temp.cleanup()

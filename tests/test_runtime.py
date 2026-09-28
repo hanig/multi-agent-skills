@@ -26,6 +26,14 @@ RT = {"id": "py", "resolution": "direct", "entrypoint": "/abs/python",
                      "by hand this morning"}
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from scheduler_fixture import isolated_module_path  # noqa: E402
+
+
+def setUpModule():
+    isolated_module_path()
+
+
 def plan(units, runtimes=None):
     p = {"project": "p", "units": units}
     if runtimes:

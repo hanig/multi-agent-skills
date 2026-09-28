@@ -67,6 +67,14 @@ SPAWN_NAMES = {"run", "Popen", "call", "check_call", "check_output"}
 # would repeat the unbounded-pattern mistake this module exists to avoid.
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from scheduler_fixture import isolated_module_path  # noqa: E402
+
+
+def setUpModule():
+    isolated_module_path()
+
+
 def _child_env_call(node, module_aliases, direct_aliases):
     if not isinstance(node, ast.Call):
         return False

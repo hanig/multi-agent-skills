@@ -15,6 +15,14 @@ import swarm as S
 import unit as U
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from scheduler_fixture import isolated_module_path  # noqa: E402
+
+
+def setUpModule():
+    isolated_module_path()
+
+
 class TestNoProducedChange(unittest.TestCase):
     def git(self, repo, *args):
         env = dict(os.environ, GIT_AUTHOR_NAME="test", GIT_AUTHOR_EMAIL="t@x",

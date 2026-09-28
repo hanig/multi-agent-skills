@@ -32,6 +32,14 @@ SCRIPTS = ROOT / "skills" / "hanig-swarm" / "scripts"
 MERGE_OPERATOR = ROOT / "skills/hanig-orchestrate/scripts/merge_unit.py"
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from scheduler_fixture import isolated_module_path  # noqa: E402
+
+
+def setUpModule():
+    isolated_module_path()
+
+
 def authority_scripts():
     # The connected operator shares coordinator-state authority readers even
     # though its forge credentials exclude it from coordinator containment.

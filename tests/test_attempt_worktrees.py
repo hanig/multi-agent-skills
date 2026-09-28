@@ -21,6 +21,14 @@ ENV = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@x",
            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@x")
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from scheduler_fixture import closed_bin, isolated_module_path  # noqa: E402
+
+
+def setUpModule():
+    isolated_module_path()
+
+
 def git(repo, *args):
     return subprocess.run(["git", "-C", str(repo), *args], check=True,
                           env=ENV, capture_output=True, text=True).stdout.strip()
@@ -56,12 +64,8 @@ def paseo_resolvable():
         f.write_text("#!/bin/sh\necho 'stub paseo: PATH placeholder' >&2\n"
                      "exit 127\n")
         f.chmod(0o755)
-        # PREPEND, unlike tests/test_dispatch_claims.py::fake_bin which must
-        # REPLACE. That fixture proves a tool is ABSENT, so a real one leaking
-        # in from the host defeats it. This one proves a name RESOLVES while
-        # the run seam is stubbed, and the code under test still needs a real
-        # git, so the rest of PATH must survive.
-        os.environ["PATH"] = d + os.pathsep + old
+        # Keep only declared ordinary tools alongside the stub.
+        os.environ["PATH"] = closed_bin(d)
         yield d
     finally:
         os.environ["PATH"] = old

@@ -40,6 +40,14 @@ PLAN = {"name": "p", "units": [
      "needs": ["a"]}]}
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from scheduler_fixture import isolated_module_path  # noqa: E402
+
+
+def setUpModule():
+    isolated_module_path()
+
+
 def run(script, *argv, cwd=None):
     return subprocess.run([sys.executable, str(script), *argv],
                           capture_output=True, text=True, cwd=cwd)
@@ -2546,8 +2554,7 @@ class TestTheSurveySaysWhoMayUseAPartition(unittest.TestCase):
     def _survey(self, tools=("sinfo", "scontrol", "sacctmgr"), qos_rows=None):
         with tempfile.TemporaryDirectory() as d:
             env = dict(os.environ)
-            env["PATH"] = (self._fake_slurm(d, tools, qos_rows)
-                           + os.pathsep + env.get("PATH", ""))
+            env["PATH"] = self._fake_slurm(d, tools, qos_rows)
             r = subprocess.run([sys.executable, str(SURVEY), "--repo", d,
                                 "--json"], capture_output=True, text=True,
                                env=env)
