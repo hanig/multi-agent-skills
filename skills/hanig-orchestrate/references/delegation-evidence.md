@@ -21,22 +21,24 @@ A continuation names its recovery ref and completed evidence, while a retry rece
 
 These observations were checked against `skills/hanig-review-gate/reviewers.json` at the task base rather than copied from an older roster. <!-- declaration: evidence.checkable, review.panel-source -->
 
-`plan`: luna, kimi-k2.7-code.
+`plan`: sol, kimi-k2.7-code.
 
-`fast`: luna, kimi-k2.7-code.
+`fast`: luna, sonnet-5.5.
 
-`standard`: luna, kimi-k2.7-code, glm-5.3.
+`standard`: luna, sonnet-5.5, kimi-k2.7-code.
 
-`deep`: luna, kimi-k2.7-code, glm-5.3, sol.
+`deep`: luna, sonnet-5.5, kimi-k2.7-code, sol.
 
-Astra left the `deep` tier on 2026-09-24, when it became the code driver, and sits in no gate tier, which keeps astra-authored code off astra's panel. It keeps nothing else off: sol drove code until that date and now sits in `deep`, so a change sol authored stops at `standard`. The roster is the sole enforcement of either arrangement; neither tool takes an author as input (ARC-755).
+Astra left the `deep` tier on 2026-09-24, when it became the code driver, and sits in no gate tier, which keeps astra-authored code off astra's panel. It keeps nothing else off: sol drove code until that date and now sits in `plan` and `deep`, so a change sol authored stops at `standard`. Plans are written by the orchestrator, a Claude model, which is why no Claude reviewer sits in `plan`. The roster is the sole enforcement of either arrangement; neither tool takes an author as input (ARC-755).
 
-`committee`: deepseek-v4-pro, luna, kimi-k2.7-code.
+`committee`: deepseek-v4-pro, luna, sonnet-5.5.
 
-Enabled price hints recorded per million tokens are luna input $0.2 and output $1.2; kimi-k2.7-code input $0.67 and output $3.4; glm-5.3 input $1.4 and output $4.4; deepseek-v4-pro input $0.87 and output $1.74; and sol input $2.0 and output $10.0. Astra has no `_cost` record; it no longer sits in a gate tier, and the committee and tie-breaker seats it holds carry no fixed total either. <!-- declaration: review.cost -->
+`committee.py` picks the tie-breaker from reviewers.json by profile: the one enabled reviewer whose profile list is exactly `["tiebreak"]`. That is sol-tiebreak since 2026-09-28. It replaced astra-xhigh because astra authors the code under dispute.
+
+Enabled price hints recorded per million tokens are luna input $0.2 and output $1.2; kimi-k2.7-code input $0.67 and output $3.4; sonnet-5.5 input $2.0 and output $10.0; deepseek-v4-pro input $0.87 and output $1.74; and sol input $2.0 and output $10.0. Astra has no `_cost` record; it no longer sits in a gate tier or the tie-breaker seat, and committee.py reaches it only with `--member`. <!-- declaration: review.cost -->
 
 Panel reporting names actual answers and absences instead of describing configured membership as completed review. <!-- declaration: review.honesty -->
 
 ## Checked effort measurement
 
-The recorded 2026-09-19 note used three samples per cell on a real 120-line diff at a 16000 cap. GLM-5.3 returned zero characters after using the full reasoning budget in 3 of 3 high samples and 2 of 3 low samples, while null returned a 4581-character review costing $0.016 in 3 of 3. Kimi-K2.7-Code used about 12k completion tokens at every effort; high cost 83 percent more and returned slightly less answer. This supports null for those two reviewers, not a general claim that null is best for every model. <!-- declaration: review.effort -->
+The recorded 2026-09-19 note used three samples per cell on a real 120-line diff at a 16000 cap. GLM-5.3 returned zero characters after using the full reasoning budget in 3 of 3 high samples and 2 of 3 low samples, while null returned a 4581-character review costing $0.016 in 3 of 3. Kimi-K2.7-Code used about 12k completion tokens at every effort; high cost 83 percent more and returned slightly less answer. This supports null for those two reviewers, not a general claim that null is best for every model. GLM-5.3 left the roster on 2026-09-28; the measurement stays as the evidence for Kimi-K2.7-Code's null. <!-- declaration: review.effort -->

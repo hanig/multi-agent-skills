@@ -288,7 +288,7 @@
     },
     {
       "id": "code.default-agent",
-      "normative_text": "The default code agent is `codex/gpt-6-astra` with `thinking: high`; overrides belong on the unit, `thinking: null` suppresses the option, and mode remains explicit and provider-specific.",
+      "normative_text": "The default code agent and its thinking level are the `default` entry in `hanig-swarm/agents.json`; overrides belong on the unit, `thinking: null` suppresses the option, and mode remains explicit and provider-specific.",
       "references": [
         "references/unit-contract.md"
       ]

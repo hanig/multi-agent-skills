@@ -632,16 +632,18 @@ Panels, from `reviewers.json`:
 
 | profile | membership | use |
 |---|---|---|
-| `plan` | luna, kimi-k2.7-code | acceptance criteria and designs, before code exists |
-| `fast` | luna, kimi-k2.7-code | cheapest implementation panel, first tier of `--escalate` |
-| `standard` | fast + glm-5.3 | the usual implementation panel |
+| `plan` | sol, kimi-k2.7-code | acceptance criteria and designs, before code exists |
+| `fast` | luna, sonnet-5.5 | cheapest implementation panel, first tier of `--escalate` |
+| `standard` | fast + kimi-k2.7-code | the usual implementation panel |
 | `deep` | standard + sol at `xhigh` | final escalation tier or explicit `--profile deep` |
 
 Luna routes to `gpt-6-luna` at `high`, and Sol to `gpt-6-sol` at `xhigh`,
 by owner decision on 2026-09-25. Both retain their 128000-token output caps;
 dated acceptance probes and prior-release measurements live in `reviewers.json`.
-Astra drives code and is in no gate tier; `kimi-k3` is disabled and DeepSeek
-is a committee member. Pass every author's provider/model ID with `--author`.
+Sonnet 5.5 joined `fast`, `standard`, `deep` and the committee on 2026-09-28,
+when GLM-5.3 and Kimi K3 were dropped. Astra drives code and is in no gate tier,
+DeepSeek is a committee member, and the committee tie-breaker is whichever
+reviewer holds the `tiebreak` profile (`sol-tiebreak`). Pass every author's provider/model ID with `--author`.
 
 **Two contrasting models for a plan, never escalated.** A third adds agreement,
 not insight. That is measured, not assumed. `reviewers.json` carries routing
@@ -1071,7 +1073,7 @@ is a separate axis — `paseo run --thinking <id>`, or
 `settings.thinkingOptionId` on `create_agent` — and the schema is provider
 strings plus freeform prompt text, with no slot for it. The per-model effort
 decision in `docs/plan-field-reports.md` therefore binds `hanig-swarm`'s code
-units, which pass it from `swarm.py`'s `THINKING_BY_MODEL`, and binds nothing
+units, which read it from `skills/hanig-swarm/agents.json`'s `thinking_by_model`, and binds nothing
 else: a Paseo skill dispatching from these categories gets the provider
 default. Measured on 2026-09-04 by dispatching and inspecting real agents,
 `claude/opus` comes up at `auto` against an intended `high`, so `ui` and

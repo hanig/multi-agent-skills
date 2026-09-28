@@ -2037,7 +2037,17 @@ class TestVendoredAgentBusLayoutIsExplicit(_FixtureTestCase):
             checkout = sandbox / "checkout"
             (checkout / "bin").mkdir(parents=True)
             shutil.copy2(ROOT / "bin" / "bus", checkout / "bin" / "bus")
-            shutil.copy2(ROOT / "models.json", checkout / "models.json")
+            # The shipped registry plus one entry whose live collector always
+            # writes a cache (bin/bus probes vLLM for any deepseek id), so the
+            # cache-placement contract below is exercised whatever the owner
+            # routes to. The shipped models.json carries no such entry since
+            # the self-hosted DeepSeek was dropped on 2026-09-28.
+            registry = json.loads((ROOT / "models.json").read_text(
+                encoding="utf-8"))
+            registry["models"].append({"id": "pi/fixture/deepseek-probe",
+                                       "label": "cache-writing fixture"})
+            (checkout / "models.json").write_text(json.dumps(registry),
+                                                  encoding="utf-8")
             fixture_bus = checkout / "bin" / "bus"
             fake_home = sandbox / "home"
             outside = sandbox / "outside"

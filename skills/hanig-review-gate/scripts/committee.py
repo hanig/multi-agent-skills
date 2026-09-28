@@ -557,23 +557,33 @@ def substantive(value):
     return isinstance(value, str) and bool(value.strip())
 
 
+def tiebreaker():
+    """The single enabled reviewer whose ONLY profile is `tiebreak`.
+
+    Chosen from reviewers.json, never by name or model: which model breaks
+    ties is routing data. Anything but exactly one such seat is a
+    misconfiguration, and the split goes to the owner.
+    """
+    seats = [r for r in R.load_reviewers()
+             if r.get("enabled", True) and r.get("profiles") == ["tiebreak"]]
+    if len(seats) != 1:
+        return None, ("tie-breaker unavailable or misconfigured: reviewers.json "
+                      "must enable exactly one reviewer whose only profile is "
+                      "tiebreak (found %d)" % len(seats))
+    return seats[0], None
+
+
 def tiebreak(args, session, inputs):
     record = {"kind": "tiebreak", "inputs": inputs}
-    _kept, excluded = R.exclude_authors(
-        [{"name": "astra-xhigh", "model": "gpt-6-astra"}],
-        author_models(inputs["author"]))
+    member, error = tiebreaker()
+    if error:
+        return finish_decision(args, session, record, "OWNER", error)
+    _kept, excluded = R.exclude_authors([member], author_models(inputs["author"]))
     if excluded:
         return finish_decision(args, session, record, "OWNER",
-                               "tie-break refused: gpt-6-astra authored the "
-                               "disputed work and cannot judge itself")
-    members = [r for r in R.load_reviewers()
-               if r["name"] == "astra-xhigh" and r.get("enabled", True)
-               and r.get("profiles") == ["tiebreak"]
-               and r["model"] == "gpt-6-astra" and r["provider"] == "openai"
-               and r.get("effort") == "xhigh"]
-    if len(members) != 1:
-        return finish_decision(args, session, record, "OWNER",
-                               "astra-xhigh tie-breaker unavailable or misconfigured")
+                               "tie-break refused: %s authored the disputed "
+                               "work and cannot judge itself" % member["model"])
+    members = [member]
     prompt = (
         'Rule on this split. Return {"status":"RULING", "adopts":"member name", '
         '"ruling":"RULING: ...", "evidence":"the evidence that decided it"}. '

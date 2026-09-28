@@ -1,0 +1,16 @@
+{
+ "_comment": "Code-unit agent routing, read by swarm.py at import. Data, not code: change a model here, never in a script. `default` is what a `code` unit runs when it declares no provider. A unit overrides provider, model or thinking on itself. There is deliberately no fallback model: a host that cannot serve the default fails loudly at dispatch (paseo returns an ERRORED agent) instead of silently running a model the plan never declared.",
+ "default": {
+  "provider": "codex/gpt-6-astra",
+  "thinking": "high",
+  "_evidence": "Owner decision 2026-09-24. A canary launched with `paseo run --provider codex --model gpt-6-astra --thinking high` inspected as Provider codex, Model gpt-6-astra, Thinking high, and answered. That check is the bar for changing this value, because paseo answers an unknown thinking id with an ERRORED agent."
+ },
+ "thinking_by_model": {
+  "codex/gpt-6-astra": "high",
+  "codex/gpt-6-sol": "high",
+  "codex/gpt-6-luna": "xhigh",
+  "claude/opus": "high",
+  "claude/claude-opus-5": "high"
+ },
+ "_thinking_by_model": "Reasoning effort belongs to the MODEL, not the project. Keys are provider/model exactly as a unit resolves them (provider string, or provider prefix plus a separate `model`), so list every spelling that reaches paseo. A model not listed gets default.thinking. Measured 2026-09-04: high resolves on claude, whose bare default is auto, and claude/opus expanded to claude-opus-5. The 6-series Sol/Luna dispatch defaults are unmeasured; pass the intended effort and inspect the launched agent. Gate effort is configured separately in hanig-review-gate/reviewers.json."
+}

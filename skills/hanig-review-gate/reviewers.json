@@ -2,12 +2,12 @@
  "_comment": "Routing config only \u2014 endpoint, model id, reasoning effort, profile membership. Carries NO quality scores: a stale ranking is worse than none. Availability is MEASURED by `review.py --list`, which probes each provider live; a key being set is not availability. All reviewers use DEFAULT_MAX_OUTPUT_TOKENS (64000) unless they set max_output_tokens: reasoning tokens come out of the answer's budget, and at 16000 a large review returned no content at all. Prices in _cost are per million tokens as listed 2026-08-25 and are a budgeting hint, not a routing input.",
  "default_profile": "standard",
  "_profiles": {
-  "plan": "TWO contrasting models, never escalated. For acceptance criteria and designs, BEFORE code exists. A third reviewer adds agreement, not insight.",
+  "plan": "TWO contrasting models, never escalated. For acceptance criteria and designs, BEFORE code exists. A third reviewer adds agreement, not insight. Since 2026-09-28 the pair is sol and kimi-k2.7-code: plans are written by the orchestrator, a Claude model, so no Claude reviewer sits here.",
   "fast": "cheapest implementation panel; the first tier of --escalate",
   "standard": "fast + mid-cost; the usual implementation panel",
-  "deep": "standard + sol. Final --escalate tier, or a fixed --profile deep panel. astra is NOT here since 2026-09-24: it writes the code now, and an author does not review itself. sol returned to this seat because it had been excluded only for being the driver.",
-  "committee": "committee.py members. SEPARATE from the gate profiles on purpose: deepseek plans and concedes well but over-claims as a refuter, so it sits here and in no gate profile.",
-  "tiebreak": "Committee divergence only: astra-xhigh rules on existing positions. Not a gate tier or a committee membership profile."
+  "deep": "standard + sol. Final --escalate tier, or a fixed --profile deep panel. astra is NOT here since 2026-09-24: it writes the code now, and an author does not review itself.",
+  "committee": "committee.py members. SEPARATE from the gate profiles on purpose: deepseek plans and concedes well but over-claims as a refuter, so it sits here and in no gate profile. Since 2026-09-28: deepseek-v4-pro, luna and sonnet-5.5, three model makers.",
+  "tiebreak": "Committee divergence only: the ONE enabled reviewer whose only profile is tiebreak rules on existing positions. committee.py selects it by this profile, never by name or model. Not a gate tier or a committee membership profile. sol-tiebreak since 2026-09-28, replacing astra-xhigh because astra authors the code it would rule on (ARC-755)."
  },
  "reviewers": [
   {
@@ -44,7 +44,6 @@
     "committee",
     "deep",
     "fast",
-    "plan",
     "standard"
    ],
    "enabled": true,
@@ -85,9 +84,7 @@
    "model": "moonshotai/kimi-k2.7-code",
    "effort": null,
    "profiles": [
-    "committee",
     "deep",
-    "fast",
     "plan",
     "standard"
    ],
@@ -110,12 +107,45 @@
    }
   },
   {
+   "name": "sonnet-5.5",
+   "provider": "openrouter",
+   "model": "anthropic/claude-sonnet-5.5",
+   "effort": "high",
+   "profiles": [
+    "committee",
+    "deep",
+    "fast",
+    "standard"
+   ],
+   "enabled": true,
+   "_cost": {
+    "in": 2.0,
+    "out": 10.0
+   },
+   "_note": "Added 2026-09-28 by owner decision, taking kimi-k2.7-code's fast and committee seats, so no tier lacks a second model maker. Released the same day: no third-party code-review data yet, and AA-Omniscience rates it more likely than Opus 5.5 to state a wrong answer confidently. Every finding is reproduced before it is acted on, which bounds that cost. Kept off plan review because the orchestrator that writes plans is a Claude model.",
+   "max_output_tokens": 128000,
+   "_max_output_tokens": "MEASURED through review._post's OpenRouter request shape at the configured effort and 128000 cap; completed with finish_reason stop. The minimal probe establishes budget acceptance, not capacity for every review.",
+   "_max_output_tokens_accepted": {
+    "date": "2026-09-28",
+    "max_output_tokens": 128000,
+    "provider": "openrouter",
+    "model": "anthropic/claude-sonnet-5.5",
+    "effort": "high",
+    "outcome": "completed",
+    "input_tokens": 1386,
+    "output_tokens": 275,
+    "reasoning_tokens": 195,
+    "response_id": "gen-1790628085-TdT8M8abJuB19MqmRTvd",
+    "observed_in": "2026-09-28 routing change; review._post to OpenRouter chat/completions with review.SYSTEM and input: Reply with exactly OK.; returned an upheld empty verdict. Timestamp is UTC."
+   }
+  },
+  {
    "name": "astra",
    "provider": "openai",
    "model": "gpt-6-astra",
    "effort": "high",
    "profiles": [],
-   "_profiles_note": "In NO gate tier since 2026-09-24: astra drives code units now, and an author does not review itself. Still enabled because committee.py reaches it with --member and it is the concurrence party in docs/orchestrator-mandate.md. The owner chose it as the committee tie-breaker at xhigh; that seat is not built yet (ARC-753). Do not seat it with --member on a change it authored: nothing refuses that today (ARC-755).",
+   "_profiles_note": "In NO gate tier since 2026-09-24: astra drives code units now, and an author does not review itself. Left the tie-breaker seat on 2026-09-28 for the same reason, and the concurrence seat in docs/orchestrator-mandate.md went to sol on 2026-09-25. Still enabled only so committee.py can reach it with --member on work it did not author; nothing refuses a self-review there today (ARC-755).",
    "enabled": true,
    "max_output_tokens": 128000,
    "_max_output_tokens": "PRE-EMPTIVE, not measured as starving. Raised with the sibling sweep for ARC-689 rather than after its own incident, because the shared 64000 default is what starved glm-5.3 and kimi-k2.7-code and leaving a reviewer on it is what let the defect recur. That the provider ACCEPTS 128000 is measured; see _max_output_tokens_accepted.",
@@ -135,7 +165,8 @@
    "model": "gpt-6-sol",
    "effort": "xhigh",
    "profiles": [
-    "deep"
+    "deep",
+    "plan"
    ],
    "enabled": true,
    "max_output_tokens": 128000,
@@ -157,7 +188,7 @@
     "in": 2.0,
     "out": 10.0
    },
-   "_note": "deep-tier reviewer since 2026-09-24. Owner decision: astra became the code driver, so it left the deep tier (an author does not review itself) and sol, which had been disabled only because IT was the driver, took the seat. The ladder reaches deep both when the cheaper tiers came up clean and when they could not fill quorum, and skips it only when a finding already has quorum behind it.",
+   "_note": "deep-tier reviewer since 2026-09-24 and plan reviewer since 2026-09-28. Owner decision: astra became the code driver, so it left the deep tier (an author does not review itself) and sol, which had been disabled only because IT was the driver, took the seat. The ladder reaches deep both when the cheaper tiers came up clean and when they could not fill quorum, and skips it only when a finding already has quorum behind it.",
    "_max_output_tokens_history": [
     {
      "date": "2026-09-24",
@@ -171,71 +202,33 @@
    ]
   },
   {
-   "name": "kimi-k3",
-   "provider": "openrouter",
-   "model": "moonshotai/kimi-k3",
-   "effort": null,
-   "profiles": [
-    "standard",
-    "deep"
-   ],
-   "enabled": false,
-   "_cost": {
-    "in": 3.0,
-    "out": 15.0
-   },
-   "_note": "dropped 2026-08-27: $15.00/M output, dearer than sol ($10.00) which is the deep-only tie-breaker, so cheapest-first reached its priciest reviewer before its designated last resort. Disabled rather than deleted so the reason survives; flip enabled to re-add."
-  },
-  {
-   "name": "glm-5.3",
-   "provider": "openrouter",
-   "model": "z-ai/glm-5.3",
-   "effort": null,
-   "max_output_tokens": 128000,
-   "profiles": [
-    "deep",
-    "standard"
-   ],
-   "enabled": true,
-   "_max_output_tokens": "MEASURED. At the 64000 default this model returned finish_reason=length with no content; ARC-689 now classifies that as REVIEW_INCOMPLETE rather than an implementation defect or coverage. review.py reported completion_tokens=64000 against reasoning_tokens=64005: the cap bound and essentially all of it went to reasoning, the 5-token excess being the provider's two counters disagreeing rather than reasoning escaping the cap. At 128000 the same 138KB range returned 42211 tokens with a substantive finding. effort is null and it still reasons, so the budget is the only lever here.",
-   "_note": "1M context, so it does not need the >100KB review split. glm-5.2 is marginally cheaper (1.19/3.74) with the same context if cost matters more than recency.",
-   "_cost": {
-    "in": 1.4,
-    "out": 4.4
-   },
-   "_effort": "null is measured, not forgotten; see _effort_null_is_deliberate",
-   "_max_output_tokens_accepted": {
-    "date": "2026-09-21",
-    "max_output_tokens": 128000,
-    "provider": "openrouter",
-    "model": "z-ai/glm-5.3",
-    "outcome": "completed",
-    "output_tokens": 34267,
-    "observed_in": "gate run, PR #41 round 1"
-   }
-  },
-  {
-   "name": "astra-xhigh",
+   "name": "sol-tiebreak",
    "provider": "openai",
-   "model": "gpt-6-astra",
+   "model": "gpt-6-sol",
    "effort": "xhigh",
    "profiles": [
     "tiebreak"
    ],
    "enabled": true,
+   "_note": "Committee tie-breaker since 2026-09-28, replacing astra-xhigh: astra authors the code it would rule on. sol also holds the concurrence seat in docs/orchestrator-mandate.md. A change sol authored cannot be tie-broken here; committee.py routes it to the owner.",
    "max_output_tokens": 128000,
-   "_max_output_tokens": "MEASURED at xhigh in an ARC-753 numeric-ordering ruling probe; provider returned completed status and usable content. This measures budget acceptance, not capacity for every question.",
+   "_max_output_tokens": "MEASURED for this model: same model, effort and cap as the sol reviewer, whose 2026-09-26 acceptance this repeats. Acceptance is per model, and this is that model.",
    "_max_output_tokens_accepted": {
-    "date": "2026-09-24",
+    "date": "2026-09-26",
     "max_output_tokens": 128000,
     "provider": "openai",
-    "model": "gpt-6-astra",
+    "model": "gpt-6-sol",
+    "effort": "xhigh",
     "outcome": "completed",
-    "output_tokens": 373,
-    "observed_in": "ARC-753 real committee.ask_member numeric-ordering probe at xhigh; 288 input tokens; response retained in attempt evidence"
+    "input_tokens": 11,
+    "output_tokens": 5,
+    "reasoning_tokens": 0,
+    "response_id": "resp_084cd15d6d01929c006ab72343854c87d087366255b5d69202",
+    "observed_in": "Copy of the sol reviewer's probe: run 2026-09-26 UTC for the owner's 2026-09-25 upgrade, through review._post's Responses request, input: Reply with exactly OK.; returned OK. Measures budget acceptance, not capacity for every question."
    }
   }
  ],
- "_effort_null_is_deliberate": "Measured 2026-09-19, three samples per cell against a real 120-line diff at a 16000 cap: glm-5.3 at effort=high burned the ENTIRE budget on reasoning and returned zero characters in 3 of 3 samples, at effort=low in 2 of 3, and at effort=null returned a 4581-character review for $0.016 in 3 of 3. kimi-k2.7-code spends ~12k completion tokens at every level, so effort changes nothing but price: high cost 83% more and returned slightly LESS answer. A null effort here is therefore deliberate and load-bearing, not an omission. Setting one on either reviewer makes the gate pay more for less, and on glm-5.3 for nothing at all.",
- "_output_budget_rule": "Every ENABLED reviewer must declare max_output_tokens explicitly and must carry a STRUCTURED _max_output_tokens_accepted record: date, max_output_tokens, provider, model, outcome and a positive output_tokens. tests/test_reviewer_budgets.py compares those typed fields to the reviewer's own configuration by exact equality. It was free text matched by substring for one round, and the gate refused that correctly: \"completed a 1280000-token request via openrouterx for z-ai/glm-5.3-variant\" satisfied substring checks for 128000, openrouter and z-ai/glm-5.3. English commentary belongs in _max_output_tokens, not in the thing a test parses. The rule exists because the 64000 shared default is not a safe default for a reasoning model -- it silently starved glm-5.3 and then kimi-k2.7-code (ARC-689). ARC-689 now records a starved reviewer as REVIEW_INCOMPLETE and gives it no judgment; it still spends resource budget and prevents a pass. Inheriting the default is therefore not permitted for an enabled reviewer, which is why sol and kimi-k3 must be measured before they are re-enabled. Acceptance is per MODEL: 128000 completing for gpt-6-astra says nothing about gpt-6-sol. output_tokens is required and must be positive because a provider ACCEPTING a budget is not the same fact as a reviewer RETURNING usable output, and it was the second fact that motivated this change. STILL OWED, and not claimed here: these records are transcribed by hand from measured runs. Nothing generates them from the probe, so the test checks that a record is well formed and self-consistent, never that the run happened."
+ "_effort_null_is_deliberate": "Measured 2026-09-19, three samples per cell against a real 120-line diff at a 16000 cap: glm-5.3 at effort=high burned the ENTIRE budget on reasoning and returned zero characters in 3 of 3 samples, at effort=low in 2 of 3, and at effort=null returned a 4581-character review for $0.016 in 3 of 3. kimi-k2.7-code spends ~12k completion tokens at every level, so effort changes nothing but price: high cost 83% more and returned slightly LESS answer. A null effort here is therefore deliberate and load-bearing, not an omission. Setting one on either reviewer makes the gate pay more for less, and on glm-5.3 for nothing at all. glm-5.3 was dropped from the roster on 2026-09-28; its measurements stay here as the evidence for the rule. kimi-k2.7-code keeps effort null.",
+ "_output_budget_rule": "Every ENABLED reviewer must declare max_output_tokens explicitly and must carry a STRUCTURED _max_output_tokens_accepted record: date, max_output_tokens, provider, model, outcome and a positive output_tokens. tests/test_reviewer_budgets.py compares those typed fields to the reviewer's own configuration by exact equality. It was free text matched by substring for one round, and the gate refused that correctly: \"completed a 1280000-token request via openrouterx for z-ai/glm-5.3-variant\" satisfied substring checks for 128000, openrouter and z-ai/glm-5.3. English commentary belongs in _max_output_tokens, not in the thing a test parses. The rule exists because the 64000 shared default is not a safe default for a reasoning model -- it silently starved glm-5.3 and then kimi-k2.7-code (ARC-689). ARC-689 now records a starved reviewer as REVIEW_INCOMPLETE and gives it no judgment; it still spends resource budget and prevents a pass. Inheriting the default is therefore not permitted for an enabled reviewer, which is why any reviewer must be measured before it is enabled. Acceptance is per MODEL: 128000 completing for gpt-6-astra says nothing about gpt-6-sol. output_tokens is required and must be positive because a provider ACCEPTING a budget is not the same fact as a reviewer RETURNING usable output, and it was the second fact that motivated this change. STILL OWED, and not claimed here: these records are transcribed by hand from measured runs. Nothing generates them from the probe, so the test checks that a record is well formed and self-consistent, never that the run happened.",
+ "_dropped": "2026-09-28 by owner decision: glm-5.3 (slowest reviewer in 18 saved gate runs, 408 s average, most expensive open model, starved at the old default in ARC-689), kimi-k3 (disabled since 2026-08-27, never measured) and astra-xhigh (the tie-breaker seat moved to sol-tiebreak). Their entries are in git history."
 }

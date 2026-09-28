@@ -456,9 +456,71 @@ class TestTheDefaultAgent(unittest.TestCase):
         self.assertTrue(src.is_file())
         return None
 
-    def test_the_default_is_astra_at_high(self):
-        self.assertEqual(S.DEFAULT_AGENT_PROVIDER, "codex/gpt-6-astra")
-        self.assertEqual(S.DEFAULT_AGENT_THINKING, "high")
+    def test_the_default_comes_from_agents_json(self):
+        import json
+        routing = json.loads(S.AGENTS_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(S.AGENTS_FILE.parent.name, "hanig-swarm")
+        self.assertEqual(S.DEFAULT_AGENT_PROVIDER, routing["default"]["provider"])
+        self.assertEqual(S.DEFAULT_AGENT_THINKING, routing["default"]["thinking"])
+        self.assertEqual(S.THINKING_BY_MODEL, routing["thinking_by_model"])
+
+    def test_malformed_agent_routing_stops_instead_of_guessing(self):
+        import json
+        import tempfile
+        good = json.loads(S.AGENTS_FILE.read_text(encoding="utf-8"))
+        cases = {
+            "missing": None,
+            "not json": "{",
+            "no default": {"thinking_by_model": {}},
+            "bare provider": dict(good, default={"provider": "codex",
+                                                 "thinking": "high"}),
+            "padded provider": dict(good, default={"provider": " codex/m",
+                                                   "thinking": "high"}),
+            "trailing slash": dict(good, default={"provider": "codex/m/",
+                                                  "thinking": "high"}),
+            "leading slash": dict(good, default={"provider": "/codex/m",
+                                                 "thinking": "high"}),
+            "empty segment": dict(good, default={"provider": "codex//m",
+                                                 "thinking": "high"}),
+            "inner space": dict(good, default={"provider": "codex/m x",
+                                               "thinking": "high"}),
+            "not a string": dict(good, default={"provider": ["codex/m"],
+                                                "thinking": "high"}),
+            "empty thinking": dict(good, default={"provider": "codex/m",
+                                                  "thinking": ""}),
+            "padded thinking": dict(good, default={"provider": "codex/m",
+                                                   "thinking": " high "}),
+            "inner-space thinking": dict(good, default={"provider": "codex/m",
+                                                        "thinking": "hi gh"}),
+            "table not a map": dict(good, thinking_by_model=["codex/m"]),
+            "empty table": dict(good, thinking_by_model={}),
+            "no table": {"default": good["default"]},
+            "empty table value": dict(good, thinking_by_model={"codex/m": ""}),
+            "padded table value": dict(good, thinking_by_model={"codex/m": "high\n"}),
+            "padded table key": dict(good, thinking_by_model={"codex/m ": "high"}),
+            "bare table key": dict(good, thinking_by_model={"codex": "high"}),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            for label, body in cases.items():
+                with self.subTest(case=label):
+                    path = Path(tmp) / (label.replace(" ", "-") + ".json")
+                    if body is not None:
+                        path.write_text(body if isinstance(body, str)
+                                        else json.dumps(body), encoding="utf-8")
+                    with self.assertRaises(SystemExit) as stopped:
+                        S.load_agent_routing(path)
+                    self.assertIn(str(path), str(stopped.exception.code))
+            nested = dict(good, default={"provider": "pi/vendor/model-1",
+                                         "thinking": "high"})
+            path = Path(tmp) / "nested.json"
+            path.write_text(json.dumps(nested), encoding="utf-8")
+            self.assertEqual(S.load_agent_routing(path)[0], "pi/vendor/model-1")
+            path = Path(tmp) / "good.json"
+            path.write_text(json.dumps(good), encoding="utf-8")
+            self.assertEqual(S.load_agent_routing(path),
+                             (good["default"]["provider"],
+                              good["default"]["thinking"],
+                              good["thinking_by_model"]))
 
     def test_dispatch_passes_the_default_provider_and_thinking(self):
         import ast

@@ -12,7 +12,7 @@ Before confirmation the session follows the current mandate's narrow mode, whose
 
 The matrix distinguishes evidence that disproves a finding, a confirmed required defect, a confirmed excluded defect, and an unresolved finding. <!-- declaration: adjudication.matrix -->
 
-For a proposed nonblocking disposition, Astra receives neutral premises and an invitation to refute instead of a request to ratify. <!-- declaration: adjudication.concurrence -->
+For a proposed nonblocking disposition, the mandate's concurrence party receives neutral premises and an invitation to refute instead of a request to ratify. <!-- declaration: adjudication.concurrence -->
 
 The decision record answers five questions:
 

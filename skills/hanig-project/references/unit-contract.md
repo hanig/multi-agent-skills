@@ -16,8 +16,8 @@ A provider flag placed there is a sentence for the agent to read, not runner
 configuration. Provider, mode, model, thinking, and environment must remain <!-- declaration: code.prompt-boundary -->
 unit fields. <!-- declaration: code.prompt-boundary -->
 
-The default agent is `codex/gpt-6-astra` at `thinking: high`. <!-- declaration: code.default-agent -->
-The owner chose this default on 2026-09-24 after verification on a live agent. <!-- declaration: code.default-agent -->
+The default agent is the `default` entry in `hanig-swarm/agents.json`. <!-- declaration: code.default-agent -->
+That file records the owner's choice and the live-agent check behind it. <!-- declaration: code.default-agent -->
 An explicit mode <!-- declaration: code.configuration -->
 is still required because provider vocabularies differ and default permissions <!-- declaration: code.configuration -->
 can stop unattended work at its first write. The owner chooses unattended <!-- declaration: code.configuration -->
