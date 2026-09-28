@@ -488,8 +488,15 @@ class TestTheDefaultAgent(unittest.TestCase):
                                                 "thinking": "high"}),
             "empty thinking": dict(good, default={"provider": "codex/m",
                                                   "thinking": ""}),
+            "padded thinking": dict(good, default={"provider": "codex/m",
+                                                   "thinking": " high "}),
+            "inner-space thinking": dict(good, default={"provider": "codex/m",
+                                                        "thinking": "hi gh"}),
             "table not a map": dict(good, thinking_by_model=["codex/m"]),
             "empty table value": dict(good, thinking_by_model={"codex/m": ""}),
+            "padded table value": dict(good, thinking_by_model={"codex/m": "high\n"}),
+            "padded table key": dict(good, thinking_by_model={"codex/m ": "high"}),
+            "bare table key": dict(good, thinking_by_model={"codex": "high"}),
         }
         with tempfile.TemporaryDirectory() as tmp:
             for label, body in cases.items():

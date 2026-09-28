@@ -69,8 +69,25 @@ KINDS = U.KINDS
 AGENTS_FILE = _HERE.parent / "agents.json"
 
 
+def _routing_token(value):
+    """A non-empty string with no whitespace anywhere: an id paseo accepts."""
+    return (isinstance(value, str) and bool(value)
+            and not any(c.isspace() for c in value))
+
+
+def _routing_model(value):
+    """PROVIDER/MODEL[/...]: every slash-separated segment a routing token."""
+    return (_routing_token(value) and len(value.split("/")) >= 2
+            and all(value.split("/")))
+
+
 def load_agent_routing(path=AGENTS_FILE):
-    """Read and check agents.json. Raises SystemExit naming the defect."""
+    """Read and check agents.json. Raises SystemExit naming the defect.
+
+    Every value is checked the same way and returned exactly as written:
+    nothing is stripped or normalized, because these strings go to paseo
+    verbatim and a padded id would dispatch as an ERRORED agent.
+    """
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -79,20 +96,17 @@ def load_agent_routing(path=AGENTS_FILE):
     table = data.get("thinking_by_model") if isinstance(data, dict) else None
     provider = default.get("provider") if isinstance(default, dict) else None
     thinking = default.get("thinking") if isinstance(default, dict) else None
-    parts = provider.split("/") if isinstance(provider, str) else []
-    if not (len(parts) >= 2 and all(part and part == part.strip()
-                                    and not any(c.isspace() for c in part)
-                                    for part in parts)):
+    if not _routing_model(provider):
         raise SystemExit("swarm: %s default.provider must be a PROVIDER/MODEL "
-                         "string" % path)
-    if not (isinstance(thinking, str) and thinking.strip()):
+                         "string without whitespace or empty segments" % path)
+    if not _routing_token(thinking):
         raise SystemExit("swarm: %s default.thinking must be a non-empty "
-                         "string" % path)
+                         "thinking id without whitespace" % path)
     if not (isinstance(table, dict) and all(
-            isinstance(k, str) and isinstance(v, str) and v.strip()
-            for k, v in table.items())):
-        raise SystemExit("swarm: %s thinking_by_model must map model strings "
-                         "to thinking ids" % path)
+            _routing_model(k) and _routing_token(v) for k, v in table.items())):
+        raise SystemExit("swarm: %s thinking_by_model must map PROVIDER/MODEL "
+                         "strings to thinking ids, neither with whitespace"
+                         % path)
     return provider, thinking, dict(table)
 
 
