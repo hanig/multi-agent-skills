@@ -67,6 +67,9 @@ and digest against its saved receipt. An unreadable or mismatched journal leaves
 the stage intact and reports cleanup unconfirmed. A lost cleanup response causes
 retrieval to save the bound snapshot first, then check its digest and finish
 within the same invocation. Removed status follows an actual absence check.
+When a nonempty stage returns to normal cleanup, the coordinator saves retirement
+of its old receipt pin before that cleanup can replace the journal. Empty-stage
+validation preserves the existing pin on a mismatch.
 External snapshots remain nested audit data, separate from fresh lifecycle
 observations. Retrieval preserves their exact contents in coordinator state
 before retirement, including after an interrupted final write. When the journal

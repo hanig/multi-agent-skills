@@ -1541,6 +1541,7 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
             code = ("import json, pathlib, sys; p=pathlib.Path(%r); "
                     "sys.path.insert(0, str(p)); from remote_verify import cleanup; "
                     "print(json.dumps(cleanup(p, %r)))") % (stage, run.get("ack") if run["reconciled"] else None)
+            normal_cleanup = code
             if can_finish_empty_stage(run):
                 # The ordinary ack and positive lifecycle are durable BEFORE
                 # any empty-directory completion, including a lost response.
@@ -1554,21 +1555,32 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
                 code = ("import fcntl, hashlib, json\nfrom pathlib import Path\n"
                         + inspect.getsource(finish_empty_stage)
                         + ("\np = Path(%r)\nfinished = finish_empty_stage(p, %r, %r)\n"
-                           "if finished is None:\n    exec(%r)\n"
+                           "if finished is None:\n"
+                           "    print(json.dumps({'stage': str(p), 'cleanup': 'unconfirmed', 'cleanup_stage_nonempty': True}))\n"
                            "else:\n    print(json.dumps(finished))\n") % (
-                               stage, run["launch_id"], snapshot_sha256, code))
+                               stage, run["launch_id"], snapshot_sha256))
             elif run["reconciled"] and remote["executor"] == "direct":
                 code = ("import json, pathlib; p=pathlib.Path(%r)\n"
                         "if not (p.exists() or p.is_symlink()): print(json.dumps({'stage': str(p), 'cleanup': 'removed'}))\n"
                         "else:\n    exec(%r)\n") % (stage, code)
             try:
-                proc = remote_call(prefix, remote, code)
-                if proc.returncode:
-                    raise ValueError("cleanup transport exited {}: {}".format(proc.returncode, proc.stderr[-2000:]))
-                cleaned = json.loads(proc.stdout)
-                if (not isinstance(cleaned, dict) or cleaned.get("stage") != stage
-                        or cleaned.get("cleanup") not in ("removed", "unconfirmed")):
-                    raise ValueError("invalid remote cleanup response")
+                for cleanup_code in (code, normal_cleanup):
+                    proc = remote_call(prefix, remote, cleanup_code)
+                    if proc.returncode:
+                        raise ValueError("cleanup transport exited {}: {}".format(proc.returncode, proc.stderr[-2000:]))
+                    cleaned = json.loads(proc.stdout)
+                    if (not isinstance(cleaned, dict) or cleaned.get("stage") != stage
+                            or cleaned.get("cleanup") not in ("removed", "unconfirmed")):
+                        raise ValueError("invalid remote cleanup response")
+                    if cleaned.get("cleanup_stage_nonempty") is not True:
+                        break
+                    if cleanup_code == normal_cleanup:
+                        raise ValueError("invalid normal cleanup response")
+                    # Normal cleanup can replace the journal. Retire its old
+                    # pin durably BEFORE that mutation, even if the reply is
+                    # lost. Empty-stage validation never discards its pin.
+                    run.pop("cleanup_receipt", None)
+                    publish(path, ledger)
                 observe_recovery_evidence(run, cleaned, "lifecycle", fresh=True)
                 # A refused snapshot must not replace the receipt that pins it.
                 if "cleanup_evidence_error" not in cleaned:

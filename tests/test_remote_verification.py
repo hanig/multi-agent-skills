@@ -2976,6 +2976,56 @@ class TestSlurmReconciliation(unittest.TestCase):
         self.assertTrue(self.f.stage.exists())
         self.assertEqual(saved['receipts'], self.run['receipts'])
 
+    def test_lost_second_cleanup_response_does_not_pin_earlier_observation(self):
+        self.run.update(reconciled=False, published=False)
+        self.run.pop('ack', None)
+        (self.f.stage / 'cleanup.json').unlink()
+        self.run['execution'] = {}
+        RV.publish(self.path, self.ledger)
+        calls = []
+        def lose_second(prefix, remote, code, timeout=45):
+            result = self.remote_call(prefix, remote, code, timeout)
+            if 'from remote_verify import cleanup' in code:
+                calls.append(code)
+                if len(calls) == 2:
+                    return subprocess.CompletedProcess([], 255, '', 'cleanup response lost')
+            return result
+        self.retrieve(lose_second)
+        outside = self.f.stage.with_name(self.f.stage.name + '.cleanup.json')
+        saved = read_json(self.path)['runs'][0]
+        self.assertNotIn('cleanup_receipt', saved)
+        self.assertTrue(outside.is_file())
+        self.assertEqual(saved['execution']['cleanup'], 'unconfirmed')
+        self.retrieve()
+        saved = read_json(self.path)['runs'][0]
+        self.assertEqual(saved['execution']['cleanup'], 'removed')
+        self.assertEqual(saved['receipts'], self.run['receipts'])
+        self.assertFalse(outside.exists())
+        self.assertFalse(self.f.stage.exists())
+
+    def test_lost_cleanup_response_after_partial_deletion_does_not_keep_stale_pin(self):
+        with mock.patch.object(RV.shutil, 'rmtree', side_effect=OSError('partial removal')):
+            self.retrieve()
+        old_receipt = read_json(self.path)['runs'][0]['cleanup_receipt']
+        outside = self.f.stage.with_name(self.f.stage.name + '.cleanup.json')
+        self.assertEqual(old_receipt, read_json(outside))
+        self.assertTrue((self.f.stage / 'request.json').exists())
+        def lose_response(prefix, remote, code, timeout=45):
+            if 'from remote_verify import cleanup' in code:
+                self.assertNotIn('cleanup_receipt', read_json(self.path)['runs'][0])
+            result = self.remote_call(prefix, remote, code, timeout)
+            if 'from remote_verify import cleanup' in code:
+                return subprocess.CompletedProcess([], 255, '', 'cleanup response lost')
+            return result
+        self.retrieve(lose_response)
+        self.assertNotEqual(old_receipt, read_json(outside))
+        self.retrieve()
+        saved = read_json(self.path)['runs'][0]
+        self.assertEqual(saved['execution']['cleanup'], 'removed')
+        self.assertEqual(saved['receipts'], self.run['receipts'])
+        self.assertFalse(outside.exists())
+        self.assertFalse(self.f.stage.exists())
+
     def test_negative_cleanup_revokes_flags_and_later_reconciles_same_receipts(self):
         receipts = self.run['receipts']
         self.f.configure({'321': 'RUNNING'})
