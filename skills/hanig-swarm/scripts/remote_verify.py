@@ -10,6 +10,7 @@ import base64
 from contextlib import contextmanager
 import fcntl
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -286,6 +287,10 @@ def load_ledger(path, unit, basis, journal_entries=None):
     for launch_id, run in runs.items():
         if run.get("witness_required") and launch_id not in witnesses:
             raise ValueError(unresolved_message(run) + "; restore the required launch witness")
+        if run.get("recovery_authority") is not None:
+            recovered(run)
+        elif run.get("execution", {}).get("recovery_authority_sha256"):
+            raise ValueError("restore the coordinator recovery authority")
     for row in journal_entries or ():
         execution = row.get("execution", {})
         if (row.get("unit") != unit or any(row.get(k) != v for k, v in basis.items())
@@ -351,6 +356,127 @@ def binding_lock(state_dir, unit, basis):
 
 def publication_digest(run):
     return record_digest({"receipts": run["receipts"], "final": run.get("final")})
+
+
+def recovery_binding(run):
+    return {"launch_id": run["launch_id"], "stage": run["stage"],
+            "request_sha256": record_digest(run["request"]),
+            "receipts_sha256": record_digest(run["receipts"])}
+
+
+def validate_recovery_attestation(attestation, run):
+    """Explicit operator testimony, never a probe or inferred liveness result."""
+    if (not isinstance(attestation, dict)
+            or set(attestation) != {"binding", "supervisor", "jobs", "privileged_requeue"}
+            or attestation["binding"] != recovery_binding(run)):
+        raise ValueError("recovery attestation does not bind the exact launch and completed receipts")
+    for subject in ("supervisor", "jobs", "privileged_requeue"):
+        proof = attestation[subject]
+        if (not isinstance(proof, dict) or set(proof) != {"status", "evidence"}
+                or proof["status"] != "fenced"
+                or not isinstance(proof["evidence"], str) or not proof["evidence"].strip()):
+            raise ValueError("recovery requires attested fencing of " + subject
+                             + "; unreachable or missing evidence is not proof")
+
+
+def observe_recovery_evidence(run, evidence, source, fresh=False):
+    """Keep contrary observations monotonic; cached pre-probe bytes are stale."""
+    digest = record_digest(evidence)
+    proof = run.get("probe_terminal_success")
+    if proof and (fresh or digest != proof["preceding_sources"].get(source)):
+        jobs = set(proof["known_job_ids"])
+        incoming = list(evidence.get("job_ids", [])) + list(evidence.get("queued_job_ids", []))
+        if evidence.get("job_id") is not None:
+            incoming.append(evidence["job_id"])
+        states = evidence.get("cleanup_sacct_states", {})
+        incoming.extend(states)
+        jobs.update(j for j in incoming if isinstance(j, str) and re.fullmatch(r"[0-9]+", j))
+        proof["known_job_ids"] = sorted(jobs)
+        contrary = (jobs != set(proof["observation"]["job_ids"])
+                    or bool(evidence.get("queued_job_ids"))
+                    or any(state is not None and tuple(state) != ("COMPLETED", "0:0")
+                           for state in states.values())
+                    or (evidence.get("sacct_state") is not None and
+                        (evidence.get("sacct_state"), evidence.get("sacct_exit_code")) != ("COMPLETED", "0:0")))
+        if contrary:
+            proof["contradiction"] = True
+    run.setdefault("recovery_source_digests", {})[source] = digest
+
+
+def record_recovery_success(run, observation):
+    """Persist a whole successful snapshot, covering every previously known job."""
+    if (not slurm_quiescent(observation, run["request"])
+            or any(tuple(state) != ("COMPLETED", "0:0")
+                   for state in observation["cleanup_sacct_states"].values())):
+        return False
+    previous = run.get("probe_terminal_success", {})
+    if not set(previous.get("known_job_ids", [])).issubset(observation["job_ids"]):
+        return False
+    run["probe_terminal_success"] = dict(binding=recovery_binding(run),
+        observation=observation, known_job_ids=list(observation["job_ids"]),
+        preceding_sources=dict(run.get("recovery_source_digests", {})), contradiction=False)
+    return True
+
+
+def recovery_success(run):
+    """Historical execution evidence is usable only with explicit fencing."""
+    proof = run.get("probe_terminal_success")
+    if proof is None:
+        return {}
+    observation = proof.get("observation", {})
+    if (proof.get("binding") != recovery_binding(run) or proof.get("contradiction") is not False
+            or not slurm_quiescent(observation, run["request"])
+            or set(proof.get("known_job_ids", [])) != set(observation["job_ids"])
+            or any(tuple(state) != ("COMPLETED", "0:0")
+                   for state in observation["cleanup_sacct_states"].values())):
+        raise ValueError("coordinator terminal-success observation is invalid or superseded")
+    return dict(job_id=observation["job_ids"][0], sacct_state="COMPLETED", sacct_exit_code="0:0")
+
+
+def recovery_complete(run):
+    """Revalidate existing bytes; authority never creates a completion receipt."""
+    success = recovery_success(run)
+    checks = run["request"]["checks"]
+    if (not checks or set(run["receipts"]) != {str(i) for i in range(len(checks))}
+            or run.get("error")):
+        raise ValueError("recovery requires every complete bound receipt without evidence conflicts")
+    for index in range(len(checks)):
+        receipt = run["receipts"][str(index)]
+        validate_receipt(receipt, run["request"], index)
+        # An attestation supplies lifecycle authority, never Slurm success.
+        if receipt["outcome"]["exit_code"] == 0:
+            execution = dict(receipt["execution"])
+            for key in ("job_id", "sacct_state", "sacct_exit_code"):
+                if key in run["execution"]:
+                    execution[key] = run["execution"][key]
+            execution.update(success)
+            problem = execution_problem(dict(result="pass", exit_code=0,
+                candidate_tree=run["request"]["basis"]["candidate_tree"], execution=execution))
+            if problem:
+                raise ValueError(problem)
+
+
+def recovered(run):
+    proof = run.get("recovery_authority")
+    if proof is None:
+        return False
+    if (not isinstance(proof, dict) or proof.get("evidence_class") != "attested"
+            or not isinstance(proof.get("by"), str) or not proof["by"].strip()
+            or not isinstance(proof.get("at"), str) or not proof["at"]):
+        raise ValueError("invalid coordinator recovery authority")
+    validate_recovery_attestation(proof.get("attestation"), run)
+    recovery_complete(run)
+    return True
+
+
+def apply_recovery(run):
+    # Called only after the authority has been fsynced in the coordinator ledger.
+    run["execution"].update(recovery_success(run))
+    run["reconciled"] = True
+    run.pop("ack", None)  # No remote cleanup acknowledgment is minted.
+    run["execution"].update(quiescent=True, evidence_reconciled=True,
+                            recovery_evidence_class="attested",
+                            recovery_authority_sha256=record_digest(run["recovery_authority"]))
 
 
 def acknowledge(state_dir, unit, basis, launch_id, digest):
@@ -647,6 +773,35 @@ def slurm_quiescent(evidence, request):
         and isinstance(states, dict) and set(states) == set(jobs)
         and all(isinstance(state, (list, tuple)) and len(state) == 2
                 and state[0] in TERMINAL for state in states.values()))
+
+
+def observe_slurm_success(request, known=()):
+    """Read-only execution evidence; never grants launch quiescence."""
+    evidence = discover_slurm_jobs(request, known)
+    states = {j: scheduler_state(j) for j in evidence["job_ids"]} if evidence["scheduler_confirmed"] else {}
+    evidence.update(discover_slurm_jobs(request, evidence["job_ids"]))
+    evidence.update(launch_id=request["launch_id"], cleanup_sacct_states=states)
+    if (slurm_quiescent(evidence, request)
+            and all(tuple(state) == ("COMPLETED", "0:0") for state in states.values())):
+        evidence.update(job_id=evidence["job_ids"][0], sacct_state="COMPLETED", sacct_exit_code="0:0")
+    return evidence
+
+
+def slurm_success_probe(run):
+    # Send current coordinator code without rewriting an older staged harness.
+    known = list(run["execution"].get("job_ids", []))
+    known.extend(run.get("probe_terminal_success", {}).get("known_job_ids", []))
+    if run["execution"].get("job_id") is not None:
+        known.append(run["execution"]["job_id"])
+    if any(not isinstance(j, str) or not re.fullmatch(r"[0-9]+", j) for j in known):
+        raise ValueError("invalid saved Slurm job identity")
+    code = ("import hashlib, json, re, subprocess, sys, time\n"
+            "sys.path.insert(0, %r)\nimport child_environment as CE\n"
+            "TERMINAL = %r\n") % (run["stage"], TERMINAL)
+    for function in (_command, scheduler_state, slurm_job_name, discover_slurm_jobs,
+                     slurm_quiescent, observe_slurm_success):
+        code += inspect.getsource(function) + "\n"
+    return code + "print(json.dumps(observe_slurm_success(%r, %r)))\n" % ({"launch_id": run["launch_id"]}, known)
 
 
 def cleanup_slurm(stage, request, reconciled):
@@ -973,11 +1128,13 @@ def ingest(run, response):
                                  and lifecycle.get("stage") == run["stage"]
                                  and slurm_quiescent(lifecycle, request))
     if isinstance(supervision, dict):
+        observe_recovery_evidence(run, supervision, "supervision")
         for key in ("job_id", "sacct_state", "sacct_exit_code"):
             if key in supervision:
                 run["execution"][key] = supervision[key]
     lifecycle = response.get("lifecycle")
     if isinstance(lifecycle, dict) and lifecycle.get("stage") == run["stage"]:
+        observe_recovery_evidence(run, lifecycle, "lifecycle")
         run["execution"].update(lifecycle)
         revoke_negative_observation(run)
     if run["reconciled"]:
@@ -1106,7 +1263,7 @@ def retrieve_records(run, call, save):
 
 
 def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, unit,
-               journal_entries, retrieve_only=False):
+               journal_entries, retrieve_only=False, recovery=None):
     """Persist intent before launch and ingest completed receipts monotonically.
 
     A pending invocation only retrieves its original stage, even if the caller
@@ -1119,6 +1276,8 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
         raise ValueError("remote verification requires coordinator journal entries")
     with binding_lock(state_dir, unit, basis) as path:
         ledger = load_ledger(path, unit, basis, journal_entries)
+        if recovery is not None and not retrieve_only:
+            raise ValueError("recovery requires retrieval of an existing launch")
         for previous_run in ledger["runs"]:
             if revoke_negative_observation(previous_run):
                 publish(path, ledger)
@@ -1158,13 +1317,33 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
             "launch_id": run["launch_id"], "cleanup": "unconfirmed",
             "executables": {key: {"path": remote[key], "version": None}
                             for key in ("python", "git")}})
+        if recovery is not None:
+            attestation, approver = recovery
+            if not isinstance(approver, str) or not approver.strip():
+                raise ValueError("recovery requires a named operator")
+            validate_recovery_attestation(attestation, run)
+            recovery_complete(run)
+            if run.get("recovery_authority") is not None:
+                if run["recovery_authority"]["attestation"] != attestation:
+                    raise ValueError("conflicting recovery authority")
+            else:
+                run["recovery_authority"] = dict(evidence_class="attested", by=approver,
+                    at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    attestation=attestation)
+                run["published"] = False
+                publish(path, ledger)  # Authority durable BEFORE changing disposition.
+        recovery_active = recovered(run)
+        if recovery_active:
+            apply_recovery(run)
+            publish(path, ledger)
         if not retry and not ssh:
             # No transport was attempted. A missing local client cannot create
             # unresolved remote evidence or require retrieval from a fake stage.
             execution.pop("launch_id")
             execution.update(stage=None, cleanup="not-created")
             return [incomplete("ssh is unavailable") for _ in checks], execution
-        prefix = [ssh, "-oBatchMode=yes", "-oConnectTimeout=15", remote["ssh_alias"]] if ssh else None
+        prefix = ([ssh, "-oBatchMode=yes", "-oConnectTimeout=15", remote["ssh_alias"]]
+                  if ssh and not recovery_active else None)
         error = None
 
         def receive(proc):
@@ -1234,6 +1413,25 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
                     error = "ssh/remote transport exited {}: {}".format(proc.returncode, proc.stderr[-2000:])
                 return proc.stdout
             retrieve_records(run, frame_call, lambda: publish(path, ledger))
+        if (prefix and remote["executor"] == "slurm" and checks
+                and len(run["receipts"]) == len(checks)
+                and ((execution.get("sacct_state"), execution.get("sacct_exit_code")) != ("COMPLETED", "0:0")
+                     or run.get("probe_terminal_success"))):
+            # Old supervisors can die before saving terminal success. Observe it
+            # using current coordinator code; neither this probe nor its absence
+            # can reconcile the launch. Ordinary cleanup still observes last.
+            try:
+                proc = remote_call(prefix, remote, slurm_success_probe(run))
+                if proc.returncode or len(proc.stdout) > 100000:
+                    raise ValueError("terminal-success observation unavailable")
+                observed = json.loads(proc.stdout)
+                observe_recovery_evidence(run, observed, "probe", fresh=True)
+                if record_recovery_success(run, observed):
+                    execution.update(job_id=observed["job_ids"][0], sacct_state="COMPLETED",
+                        sacct_exit_code="0:0", recovery_success_observed_at=observed["scheduler_observed_at"])
+                    publish(path, ledger)
+            except (OSError, ValueError, TypeError, AttributeError, KeyError, subprocess.SubprocessError) as exc:
+                execution["recovery_observation_error"] = str(exc)[-2000:]
         if error:
             run["transport_error"] = error
         # Raw evidence is durable before authorizing remote removal. This is
@@ -1255,6 +1453,7 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
                 if (not isinstance(cleaned, dict) or cleaned.get("stage") != stage
                         or cleaned.get("cleanup") not in ("removed", "unconfirmed")):
                     raise ValueError("invalid remote cleanup response")
+                observe_recovery_evidence(run, cleaned, "lifecycle", fresh=True)
                 execution.update(cleaned)
                 if revoke_negative_observation(run):
                     publish(path, ledger)
@@ -1273,6 +1472,8 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
         if final:
             # Failure before any claim still has truthful tree/probe diagnostics.
             execution.update(final.get("execution", {}))
+        if recovery_active:
+            execution.update(recovery_success(run))
         execution["evidence_reconciled"] = run["reconciled"]
         execution["publication_digest"] = publication_digest(run)
         if not run["reconciled"]:

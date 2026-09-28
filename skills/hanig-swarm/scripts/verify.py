@@ -752,7 +752,7 @@ def run_merge_precondition(runner, repo, produced_head, target_commit,
 def run_merge_preconditions(runner, repo, produced_head, target_commit,
                             timeout=900, claims=(INTEGRATION_CLAIM, STABILITY_CLAIM),
                             execution_policy=None, state_dir=None, unit=None,
-                            retrieve_remote=False, journal_entries=None):
+                            retrieve_remote=False, journal_entries=None, recovery=None):
     """Run target-pinned claims in one disposable candidate merge.
 
     Return receipts plus any execution error. A completed FAIL remains evidence
@@ -809,7 +809,7 @@ def run_merge_preconditions(runner, repo, produced_head, target_commit,
         if remote or retrieve_remote or RV.pending_problem(state_dir, unit, basis, journal_entries):
             outcomes, execution = RV.run_remote(
                 runner, tree, basis, programs, remote, timeout, repo, state_dir, unit,
-                journal_entries, retrieve_only=retrieve_remote)
+                journal_entries, retrieve_only=retrieve_remote, recovery=recovery)
             execution["coordinator_executables"] = executables
         else:
             outcomes = []

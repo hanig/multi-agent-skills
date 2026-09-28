@@ -52,13 +52,18 @@ if "tarfile" in command:
     mode = pathlib.Path(os.environ['REMOTE_MODE']).read_text()
     if mode == 'ssh-fail': raise SystemExit(255)
     raw = sys.stdin.buffer.read()
-    if mode == 'tamper':
+    if mode in ('tamper', 'direct-supervisor-died'):
         dst = io.BytesIO()
         with tarfile.open(fileobj=io.BytesIO(raw)) as source, tarfile.open(fileobj=dst, mode='w') as dest:
             for member in source:
                 data = source.extractfile(member).read()
-                if member.name == 'candidate.bundle':
+                if member.name == 'candidate.bundle' and mode == 'tamper':
                     data = pathlib.Path(os.environ['TAMPER_BUNDLE']).read_bytes()
+                    member.size = len(data)
+                if member.name == 'remote_verify.py' and mode == 'direct-supervisor-died':
+                    needle = b'    execution = result.get("execution", {})\n    publish(stage'
+                    assert needle in data
+                    data = data.replace(needle, b'    os.kill(os.getpid(), 9)\n' + needle)
                     member.size = len(data)
                 dest.addfile(member, io.BytesIO(data))
         raw = dst.getvalue()
@@ -87,6 +92,9 @@ assert '--time=00:05:00' in sys.argv
 if pathlib.Path(os.environ['REMOTE_MODE']).read_text() not in ('slurm-missing', 'slurm-pending', 'slurm-running', 'slurm-lost-job-id'):
     result = subprocess.run(['/bin/sh', sys.argv[-1]], capture_output=True)
     assert result.returncode == 0 or pathlib.Path(os.environ['REMOTE_MODE']).read_text() == 'slurm-worker-died', result.stderr
+    if pathlib.Path(os.environ['REMOTE_MODE']).read_text() == 'slurm-supervisor-died':
+        import signal
+        os.kill(os.getppid(), signal.SIGKILL)
     if pathlib.Path(os.environ['REMOTE_MODE']).read_text() == 'slurm-forced-requeue':
         pathlib.Path(os.environ['REMOTE_MODE']).write_text('pass')
         result = subprocess.run(['/bin/sh', sys.argv[-1]], capture_output=True)
@@ -1056,6 +1064,172 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertEqual(len(self.rows()), 2, 'terminal retrieval remains idempotent')
         self.assert_ok(self.admitted())
         self.assertFalse(Path(first['execution']['stage']).exists())
+
+    def recovery_proof(self):
+        path, = (self.f.state_dir / 'remote-verifications').glob('*.json')
+        run = read_json(path)['runs'][-1]
+        proof = {'binding': RV.recovery_binding(run),
+                 'supervisor': {'status': 'fenced', 'evidence': 'Supervisor terminated; launch capability revoked.'},
+                 'jobs': {'status': 'fenced', 'evidence': 'All launch jobs and descendants terminated; submission capability revoked.'},
+                 'privileged_requeue': {'status': 'fenced', 'evidence': 'Scheduler administrator disabled requeue for this launch permanently.'}}
+        proof_path = self.f.directory / 'recovery-attestation.json'
+        proof_path.write_text(json.dumps(proof))
+        return path, run, proof_path
+
+    def resolve_remote(self, proof_path):
+        return self.verify('--retrieve-remote-evidence',
+                           '--remote-recovery-attestation', str(proof_path))
+
+    def test_supervisor_loss_requires_authority_then_admits_existing_pass(self):
+        self.slurm_policy()
+        self.authorize_both(PYTHON + 'raise SystemExit(0)\n')
+        self.mode.write_text('slurm-supervisor-died')
+        self.assert_pending(self.verify())
+        path, before, proof = self.recovery_proof()
+        stage = Path(before['stage'])
+        self.assertFalse((stage / 'supervision-finished').exists())
+        self.assertEqual(len(before['receipts']), 2)
+        self.assertEqual(before['execution']['sacct_state'], 'COMPLETED')
+        self.assert_pending(self.admitted())
+        self.assert_pending(self.verify('--retrieve-remote-evidence'))
+        launches = self.ssh_launches()
+        self.assert_ok(self.resolve_remote(proof))
+        after = read_json(path)['runs'][-1]
+        self.assertEqual(after['receipts'], before['receipts'])
+        self.assertEqual(after['recovery_authority']['evidence_class'], 'attested')
+        self.assertTrue(after['reconciled'])
+        self.assertTrue(after['published'])
+        self.assertTrue(stage.exists())
+        self.assertFalse((stage / 'supervision-finished').exists())
+        self.assertEqual(self.ssh_launches(), launches)
+        self.assert_ok(self.verify('--retrieve-remote-evidence'))
+        self.assert_ok(self.admitted())  # Uses only the fixture gh on replaced PATH.
+
+    def test_old_staged_harness_recovers_without_receipt_or_harness_rewrite(self):
+        self.slurm_policy()
+        self.authorize_both(PYTHON + 'raise SystemExit(0)\n')
+        self.mode.write_text('slurm-supervisor-died')
+        # Retain the original missing-marker cleanup behavior, with no current
+        # coordinator observation helpers available in the staged harness.
+        base = (Path(RV.__file__).read_text() + '\n').encode()
+        original = b'        if not finished:\n            raise ValueError("supervision may still submit or publish a job ID; stage retained")'
+        self.assertIn(original, base)
+        text = base.decode()
+        start = text.index('def observe_slurm_success(')
+        end = text.index('def cleanup_slurm(', start)
+        base = (text[:start] + text[end:]).encode()
+        self.f.env['LEGACY_HARNESS'] = str(self.f.directory / 'legacy-harness.py')
+        Path(self.f.env['LEGACY_HARNESS']).write_bytes(base)
+        fixture = SSH.replace("if mode in ('tamper', 'direct-supervisor-died'):",
+                              "if mode in ('tamper', 'direct-supervisor-died', 'slurm-supervisor-died'):")
+        needle = '                dest.addfile(member, io.BytesIO(data))'
+        fixture = fixture.replace(needle,
+            "                if member.name == 'remote_verify.py' and mode == 'slurm-supervisor-died':\n"
+            "                    data = pathlib.Path(os.environ['LEGACY_HARNESS']).read_bytes()\n"
+            "                    member.size = len(data)\n" + needle)
+        self.write_ssh(fixture)
+        self.assert_pending(self.verify())
+        path, before, proof = self.recovery_proof()
+        staged = Path(before['stage']) / 'remote_verify.py'
+        self.assertEqual(staged.read_bytes(), base)
+        self.assertEqual(before['execution']['sacct_state'], 'COMPLETED')
+        self.assert_ok(self.resolve_remote(proof))
+        self.assertEqual(staged.read_bytes(), base)
+        self.assertEqual(read_json(path)['runs'][-1]['receipts'], before['receipts'])
+        self.assert_ok(self.admitted())
+
+    def test_supervisor_loss_recovery_preserves_completed_fail(self):
+        self.slurm_policy()
+        self.authorize_both(PYTHON + 'raise SystemExit(7)\n')
+        self.mode.write_text('slurm-supervisor-died')
+        self.assert_pending(self.verify())
+        path, before, proof = self.recovery_proof()
+        self.assertEqual({r['result'] for r in self.rows()}, {'fail'})
+        self.assert_pending(self.admitted())
+        result = self.resolve_remote(proof)
+        self.assert_failed(result)
+        self.assertIn('candidate merge verifier failed', result.stderr)
+        self.assertEqual(read_json(path)['runs'][-1]['receipts'], before['receipts'])
+        self.assert_failed(self.admitted())
+        self.assertEqual(self.merges(), [])
+
+    def test_direct_supervisor_loss_uses_same_explicit_recovery_authority(self):
+        self.authorize_both(PYTHON + 'raise SystemExit(0)\n')
+        self.mode.write_text('direct-supervisor-died')
+        self.assert_pending(self.verify())
+        path, before, proof = self.recovery_proof()
+        self.assertFalse((Path(before['stage']) / 'supervision-finished').exists())
+        self.assert_pending(self.admitted())
+        self.assert_ok(self.resolve_remote(proof))
+        self.assertEqual(read_json(path)['runs'][-1]['receipts'], before['receipts'])
+        self.assertTrue(Path(before['stage']).exists())
+        self.assert_ok(self.admitted())
+
+    def test_unreachable_supervisor_is_not_recovery_authority(self):
+        self.slurm_policy()
+        self.authorize_both(PYTHON + 'raise SystemExit(0)\n')
+        self.mode.write_text('slurm-supervisor-died')
+        self.assert_pending(self.verify())
+        path, before, proof_path = self.recovery_proof()
+        proof = read_json(proof_path)
+        proof['supervisor']['status'] = 'unreachable'
+        proof_path.write_text(json.dumps(proof))
+        self.mode.write_text('cleanup-ssh-fail')
+        result = self.resolve_remote(proof_path)
+        self.assert_failed(result)
+        self.assertIn('unreachable or missing evidence is not proof', result.stderr)
+        self.assertNotIn('recovery_authority', read_json(path)['runs'][-1])
+        self.assertEqual(read_json(path)['runs'][-1]['receipts'], before['receipts'])
+        self.assert_pending(self.admitted())
+        self.assertEqual(self.merges(), [])
+
+    def test_accounting_expiry_requires_authority_after_positive_observation(self):
+        self.slurm_policy()
+        self.authorize_both(PYTHON + 'raise SystemExit(0)\n')
+        # Lose only the coordinator cleanup connection after the supervisor's
+        # positive lifecycle observation, retaining the real stage.
+        self.write_ssh(SSH.replace("else:\n    if pathlib.Path", "else:\n    if 'from remote_verify import cleanup' in command: raise SystemExit(255)\n    if pathlib.Path"))
+        self.assert_ok(self.verify())
+        path, before, proof = self.recovery_proof()
+        self.assertTrue(before['reconciled'])
+        self.assertTrue(Path(before['stage']).exists())
+        self.write_ssh(SSH)
+        (self.f.bin / 'sacct').write_text(PYTHON + 'raise SystemExit(0)\n')
+        (self.f.bin / 'squeue').write_text(PYTHON + 'raise SystemExit(0)\n')
+        self.assert_pending(self.verify('--retrieve-remote-evidence'))
+        self.assert_pending(self.admitted())
+        self.assert_ok(self.resolve_remote(proof))
+        self.assertEqual(read_json(path)['runs'][-1]['receipts'], before['receipts'])
+        self.assertTrue(Path(before['stage']).exists())
+        self.assert_ok(self.admitted())
+
+    def test_null_marker_cannot_erase_recorded_success_before_accounting_expiry(self):
+        self.cancellation_fixture('pass')
+        self.authorize_both(PYTHON + 'raise SystemExit(0)\n')
+        self.assert_pending(self.verify('--verification-timeout', '1'))
+        path, initial, proof = self.recovery_proof()
+        stage = Path(initial['stage'])
+        marker = read_json(stage / 'supervision-finished')
+        self.assertIsNone(marker['sacct_state'])
+        (self.f.bin / 'sacct').write_text(PYTHON + SACCT)
+        self.write_ssh(SSH.replace("else:\n    if pathlib.Path",
+            "else:\n    if 'from remote_verify import cleanup' in command: raise SystemExit(255)\n    if pathlib.Path"))
+        self.assert_pending(self.verify('--retrieve-remote-evidence'))
+        observed = read_json(path)['runs'][-1]
+        self.assertEqual(observed['execution']['sacct_state'], 'COMPLETED')
+        self.write_ssh(SSH)
+        (self.f.bin / 'sacct').write_text(PYTHON + 'raise SystemExit(0)\n')
+        (self.f.bin / 'squeue').write_text(PYTHON + 'raise SystemExit(0)\n')
+        self.assert_pending(self.verify('--retrieve-remote-evidence'))
+        self.assert_pending(self.admitted())
+        (self.f.bin / 'ssh').unlink()  # Recovery and publication use only saved evidence.
+        self.assert_ok(self.resolve_remote(proof))
+        saved = read_json(path)['runs'][-1]
+        self.assertEqual(saved['receipts'], initial['receipts'])
+        self.assertTrue(saved['published'])
+        self.assertTrue(stage.exists())
+        self.assertEqual(read_json(stage / 'supervision-finished'), marker)
+        self.assert_ok(self.admitted())
 
     def test_slurm_negative_cleanup_blocks_operator_admission_and_recovers(self):
         self.slurm_policy()
@@ -2107,6 +2281,36 @@ else:
         self.assertEqual(read_json(self.stage / 'cleanup.json'), result)
         self.assert_queue_last(result)
 
+    def test_probe_late_completion_is_retryable_and_keeps_queue_last(self):
+        self.configure({'321': 'RUNNING'})
+        scheduler = self.bin / 'sacct'
+        source = scheduler.read_text()
+        emit = "        print(job + '|' + ('COMPLETED' if state.get('stale_terminal') else state['jobs'][job]) + '|0:0')"
+        self.assertIn(emit, source)
+        scheduler.write_text(source.replace(emit, emit +
+            "\n        state['jobs'][job] = 'COMPLETED'"
+            "\n        state_path.write_text(json.dumps(state))"))
+        shutil.copyfile(Path(RV.__file__).with_name('child_environment.py'),
+                        self.stage / 'child_environment.py')
+        run = dict(launch_id=self.launch, stage=str(self.stage), execution={},
+                   request=self.request)
+        code = RV.slurm_success_probe(run)
+        results = []
+        for _ in range(2):
+            probe = subprocess.run([sys.executable, '-c', code], capture_output=True,
+                                   text=True, check=True, timeout=30)
+            result = json.loads(probe.stdout)
+            results.append(result)
+            self.assert_queue_last(result)
+        first, later = results
+        # Discovery supplies identities and a queue snapshot, never fresh states.
+        # A nonterminal accounting read cannot become success from an empty queue.
+        self.assertEqual(first['cleanup_sacct_states'], {'321': None})
+        self.assertFalse(RV.slurm_quiescent(first, self.request))
+        self.assertNotIn('sacct_state', first)
+        self.assertEqual((later['sacct_state'], later['sacct_exit_code']), ('COMPLETED', '0:0'))
+        self.assertNotIn('quiescent', later, 'scheduler success is not launch authority')
+
     def test_final_new_identity_retains_then_recovers_from_saved_identity(self):
         self.configure({'321': 'COMPLETED'}, final_new_id=True)
         ack = self.ack()
@@ -2217,13 +2421,13 @@ class TestSlurmReconciliation(unittest.TestCase):
             output = output.getvalue()
         return subprocess.CompletedProcess([], 0, output, '')
 
-    def retrieve(self, call=None):
+    def retrieve(self, call=None, recovery=None):
         with mock.patch.object(RV, 'coordinator_ssh', return_value='/fixture/ssh'), \
                 mock.patch.object(RV, 'remote_call', side_effect=call or self.remote_call), \
                 mock.patch.object(RV, 'make_bundle') as bundle:
             result = RV.run_remote(None, self.f.root, self.ledger['basis'],
                 self.f.request['checks'], None, 1, self.f.root, self.state_dir,
-                'u', [], retrieve_only=True)
+                'u', [], retrieve_only=True, recovery=recovery)
             bundle.assert_not_called()
         return result
 
@@ -2285,6 +2489,160 @@ class TestSlurmReconciliation(unittest.TestCase):
         self.assertTrue(self.f.stage.exists())
         _, recovered = self.retrieve()
         self.assertEqual(recovered['cleanup'], 'removed')
+
+    def recovery(self):
+        run = read_json(self.path)['runs'][0]
+        proof = {'binding': RV.recovery_binding(run)}
+        for subject in ('supervisor', 'jobs', 'privileged_requeue'):
+            proof[subject] = {'status': 'fenced', 'evidence': subject + ' permanently fenced by operator'}
+        return proof, 'fixture-operator'
+
+    def retain_probe_success(self):
+        (self.f.stage / 'supervision-finished').unlink()
+        (self.f.stage / 'cleanup.json').unlink()
+        self.run['execution'].pop('sacct_state')
+        RV.publish(self.path, self.ledger)
+        self.retrieve()
+        run = read_json(self.path)['runs'][0]
+        self.assertIn('probe_terminal_success', run)
+        self.assertFalse(run['reconciled'])
+        return run
+
+    def assert_probe_contradiction(self, states):
+        before = self.retain_probe_success()
+        self.f.configure(states)
+        self.retrieve()
+        contradicted = read_json(self.path)['runs'][0]
+        self.f.configure({})
+        self.retrieve()  # Missing/stale later evidence cannot erase the blocker.
+        with self.assertRaisesRegex(ValueError, 'superseded'):
+            self.retrieve(recovery=self.recovery())
+        self.assertTrue(contradicted['probe_terminal_success']['contradiction'])
+        self.assert_revoked()
+        saved = read_json(self.path)['runs'][0]
+        self.assertEqual(saved['receipts'], before['receipts'])
+        self.assertNotIn('recovery_authority', saved)
+        # A fresh full success observation can cover every retained job identity.
+        self.f.configure({j: 'COMPLETED' for j in states})
+        self.retrieve()
+        self.retrieve(recovery=self.recovery())
+        self.assertTrue(read_json(self.path)['runs'][0]['reconciled'])
+
+    def test_new_job_cannot_disappear_from_recovery_success_evidence(self):
+        self.assert_probe_contradiction({'321': 'COMPLETED', '322': 'RUNNING'})
+
+    def test_failed_job_blocks_old_recovery_success_even_after_expiry(self):
+        self.assert_probe_contradiction({'321': 'FAILED'})
+
+    def test_live_job_blocks_old_recovery_success_even_after_expiry(self):
+        self.assert_probe_contradiction({'321': 'RUNNING'})
+
+    def test_fresh_negative_identical_to_cached_pre_probe_bytes_blocks_recovery(self):
+        (self.f.stage / 'supervision-finished').unlink()
+        self.run['execution'].pop('sacct_state')
+        self.run.update(reconciled=False, published=False)
+        RV.publish(self.path, self.ledger)
+        with mock.patch.object(RV.time, 'strftime', return_value='2026-09-27T22:40:00Z'):
+            self.f.configure({'321': 'RUNNING'})
+            cached = RV.cleanup(self.f.stage)
+            def transition(prefix, remote, code, timeout=45):
+                if 'def observe_slurm_success' in code:
+                    self.f.configure({'321': 'COMPLETED'})
+                    result = self.remote_call(prefix, remote, code, timeout)
+                    self.f.configure({'321': 'RUNNING'})
+                    return result
+                return self.remote_call(prefix, remote, code, timeout)
+            self.retrieve(call=transition)
+            self.assertEqual(read_json(self.f.stage / 'cleanup.json'), cached)
+            with self.assertRaisesRegex(ValueError, 'superseded'):
+                self.retrieve(recovery=self.recovery())
+            self.assert_revoked()
+
+    def test_recovery_success_observation_is_bound_and_validated(self):
+        self.retain_probe_success()
+        original = self.path.read_bytes()
+        for defect in ('binding', 'job-set', 'state', 'queue', 'missing'):
+            with self.subTest(defect=defect):
+                ledger = json.loads(original)
+                proof = ledger['runs'][0]['probe_terminal_success']
+                if defect == 'binding':
+                    proof['binding']['request_sha256'] = '0' * 64
+                elif defect == 'job-set':
+                    proof['known_job_ids'].append('322')
+                elif defect == 'state':
+                    proof['observation']['cleanup_sacct_states']['321'] = ['FAILED', '1:0']
+                elif defect == 'queue':
+                    proof['observation']['queued_job_ids'] = ['321']
+                else:
+                    proof['observation'] = {}
+                RV.publish(self.path, ledger)
+                with self.assertRaisesRegex(ValueError, 'invalid or superseded'):
+                    self.retrieve(recovery=self.recovery())
+                self.assertNotIn('recovery_authority', read_json(self.path)['runs'][0])
+
+    def test_recovery_authority_is_durable_before_use_and_repairs_interruption(self):
+        self.f.configure({})  # Purged accounting, retained immutable receipts.
+        self.retrieve()
+        self.assert_revoked()
+        proof = self.recovery()
+        publish = RV.publish
+        def interrupt(path, ledger, **kwargs):
+            saved = ledger['runs'][0]
+            if saved.get('recovery_authority') and saved['reconciled']:
+                durable = read_json(self.path)['runs'][0]
+                self.assertEqual(durable['recovery_authority']['attestation'], proof[0])
+                self.assertFalse(durable['reconciled'])
+                raise OSError('interrupted after authority publication')
+            return publish(path, ledger, **kwargs)
+        with mock.patch.object(RV, 'publish', side_effect=interrupt):
+            with self.assertRaisesRegex(OSError, 'interrupted after'):
+                self.retrieve(recovery=proof)
+        call = mock.Mock(side_effect=AssertionError('recovery contacted remote host'))
+        outcomes, execution = self.retrieve(call=call)
+        self.assertEqual([o['exit_code'] for o in outcomes], [125, 0])
+        self.assertTrue(execution['evidence_reconciled'])
+        self.assertEqual(execution['recovery_evidence_class'], 'attested')
+        call.assert_not_called()
+        self.assertTrue(self.f.stage.exists())
+        RV.acknowledge(self.state_dir, 'u', self.ledger['basis'], self.f.launch,
+                       execution['publication_digest'])
+        self.assertIsNone(RV.pending_problem(self.state_dir, 'u', self.ledger['basis'], []))
+        ledger = read_json(self.path)
+        ledger['runs'][0].pop('recovery_authority')
+        RV.publish(self.path, ledger)
+        self.assertIn('restore the coordinator recovery authority',
+                      RV.pending_problem(self.state_dir, 'u', self.ledger['basis'], []))
+
+    def test_recovery_refuses_missing_unbound_or_conflicting_completed_receipts(self):
+        original = self.path.read_bytes()
+        for defect in ('missing', 'binding', 'conflict', 'no-success'):
+            with self.subTest(defect=defect):
+                ledger = json.loads(original)
+                run = ledger['runs'][0]
+                if defect == 'missing':
+                    run['receipts'].pop('1')
+                elif defect == 'binding':
+                    run['receipts']['1']['claim_binding'] = {'claim': 'different'}
+                elif defect == 'conflict':
+                    run['error'] = 'conflicting completed remote receipt'
+                else:
+                    run['execution'].pop('sacct_state')
+                RV.publish(self.path, ledger)
+                with self.assertRaises(ValueError):
+                    self.retrieve(recovery=self.recovery())
+                self.assertNotIn('recovery_authority', read_json(self.path)['runs'][0])
+
+    def test_recovery_requires_every_fence_and_exact_binding(self):
+        for subject in ('supervisor', 'jobs', 'privileged_requeue', 'binding'):
+            with self.subTest(subject=subject):
+                proof, operator = self.recovery()
+                if subject == 'binding':
+                    proof['binding']['launch_id'] = 'b' * 32
+                else:
+                    proof[subject]['status'] = 'unreachable'
+                with self.assertRaises(ValueError):
+                    self.retrieve(recovery=(proof, operator))
+                self.assertNotIn('recovery_authority', read_json(self.path)['runs'][0])
 
 
 class TestSlurmPolicy(unittest.TestCase):

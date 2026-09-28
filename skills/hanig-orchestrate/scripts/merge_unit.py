@@ -706,7 +706,9 @@ def verify_integration(args, repo, snapshot):
         timeout=args.verification_timeout, execution_policy=snapshot["execution_policy"],
         state_dir=args.state_dir, unit=binding["unit"],
         retrieve_remote=getattr(args, "retrieve_remote_evidence", False),
-        journal_entries=S.load_verifications(args.state_dir)[0])
+        journal_entries=S.load_verifications(args.state_dir)[0],
+        recovery=(read_object(args.remote_recovery_attestation), args.approver)
+                 if getattr(args, "remote_recovery_attestation", None) else None)
     if error and not evidences:
         raise Refusal(error + ". " + verification_hint(args))
 
@@ -846,6 +848,8 @@ def main(argv=None):
     parser.add_argument("--verification-timeout", type=int, default=900)
     parser.add_argument("--retrieve-remote-evidence", action="store_true",
                         help="retrieve the existing remote launch for this binding without launching a verifier")
+    parser.add_argument("--remote-recovery-attestation", metavar="JSON_FILE",
+                        help="journal operator-attested fencing of the exact launch; retain its stage")
     parser.add_argument("--allow-unchecked-scope", type=nonempty, metavar="REASON")
     parser.add_argument("--abandon-intent", type=nonempty, metavar="OPERATION_ID")
     parser.add_argument("--reason", type=nonempty)
@@ -854,6 +858,8 @@ def main(argv=None):
         parser.error("--verify-integration cannot abandon an intent")
     if args.retrieve_remote_evidence and not args.verify_integration:
         parser.error("--retrieve-remote-evidence requires --verify-integration")
+    if args.remote_recovery_attestation and not args.retrieve_remote_evidence:
+        parser.error("--remote-recovery-attestation requires --retrieve-remote-evidence")
     if args.verification_timeout <= 0:
         parser.error("--verification-timeout must be positive")
     if args.pr <= 0:

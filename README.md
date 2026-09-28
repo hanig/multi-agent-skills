@@ -433,6 +433,15 @@ Generic candidate admission rejects same-basis unresolved/local fallbacks and
 prior FAIL despite later PASS, while distinct valid bindings remain eligible.
 Legacy branch-local semantics remain unchanged.
 
+For a permanently fenced launch whose supervisor marker or current accounting
+is unavailable, the named operator can add `--remote-recovery-attestation FILE`
+to `--verify-integration --retrieve-remote-evidence`. The exact-launch testimony
+is journaled as **attested**, never verified, before reconciliation. It admits
+only already-complete bound receipts, preserves FAIL and Slurm terminal-success
+requirements, and retains the stage. Unreachable is not fenced. See the
+[recovery procedure](skills/hanig-orchestrate/references/operating-loop.md#guarded-merge-and-reconciliation)
+for the three fencing assertions, binding format, and operator-owned residual risk.
+
 Missing local SSH is retryable and records no launch. After a possible launch,
 apparent connection failure may require investigation; changing hosts or going
 local cannot escape uncertainty. Cleanup requires quiescence and acknowledgment
