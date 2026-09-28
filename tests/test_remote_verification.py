@@ -2406,6 +2406,23 @@ else:
         self.assertEqual(observations[0]['cleanup'], 'unconfirmed')
         self.assertEqual(read_json(outside), result)
 
+    def test_post_removal_evidence_write_failure_preserves_positive_status(self):
+        self.configure({'321': 'COMPLETED'})
+        publish = RV.publish_cleanup
+        outside = self.stage.with_name(self.stage.name + '.cleanup.json')
+        def fail_final(path, evidence):
+            if path == outside and evidence['cleanup'] == 'removed':
+                raise OSError('final evidence write unavailable')
+            publish(path, evidence)
+        with mock.patch.object(RV, 'publish_cleanup', side_effect=fail_final):
+            result = RV.cleanup(self.stage, self.ack())
+        self.assertFalse(self.stage.exists())
+        self.assertEqual(result['cleanup'], 'removed')
+        self.assertTrue(result['quiescent'])
+        self.assertEqual(result['retained_cleanup'], read_json(outside))
+        self.assertEqual(result['retained_cleanup']['cleanup'], 'unconfirmed')
+        self.assertIn('final evidence write unavailable', result['cleanup_error'])
+
     def test_removal_requires_durable_external_evidence(self):
         self.configure({'321': 'COMPLETED'})
         publish = RV.publish_cleanup
@@ -2523,7 +2540,8 @@ class TestSlurmReconciliation(unittest.TestCase):
                 saved = read_json(self.path)['runs'][0]
                 outside = self.f.stage.with_name(self.f.stage.name + '.cleanup.json')
                 if outside.exists():
-                    self.assertEqual(saved['cleanup_receipt'], read_json(outside))
+                    receipt = saved['cleanup_receipt']
+                    self.assertEqual(receipt.get('retained_cleanup', receipt), read_json(outside))
                 self.assertFalse(self.f.stage.exists())
             output = io.StringIO()
             with redirect_stdout(output):
@@ -2585,6 +2603,48 @@ class TestSlurmReconciliation(unittest.TestCase):
         self.assertEqual(saved['cleanup_receipt'], retained)
         self.assertEqual(saved['execution']['cleanup'], 'removed')
         self.assertFalse(outside.exists())
+
+    def test_interruption_after_rmdir_recovers_actual_absence(self):
+        publish = RV.publish_cleanup
+        def interrupt_final(path, evidence):
+            if evidence['cleanup'] == 'removed':
+                raise OSError('final evidence write interrupted')
+            publish(path, evidence)
+        def lose_process(prefix, remote, code, timeout=45):
+            with mock.patch.object(RV, 'publish_cleanup', side_effect=interrupt_final):
+                result = self.remote_call(prefix, remote, code, timeout)
+            if 'from remote_verify import cleanup' in code:
+                return subprocess.CompletedProcess([], 255, '', 'cleanup response lost')
+            return result
+        self.retrieve(lose_process)
+        outside = self.f.stage.with_name(self.f.stage.name + '.cleanup.json')
+        retained = read_json(outside)
+        self.assertFalse(self.f.stage.exists())
+        self.assertEqual(retained['cleanup'], 'unconfirmed')
+        self.assertTrue(read_json(self.path)['runs'][0]['reconciled'])
+        self.retrieve()
+        saved = read_json(self.path)['runs'][0]
+        self.assertEqual(saved['execution']['cleanup'], 'removed')
+        self.assertTrue(saved['reconciled'])
+        self.assertEqual(saved['cleanup_receipt']['retained_cleanup'], retained)
+        self.assertFalse(outside.exists())
+        self.assertFalse(self.f.stage.with_name(self.f.stage.name + '.cleanup.lock').exists())
+
+    def test_post_removal_evidence_write_failure_does_not_revoke_reconciliation(self):
+        publish = RV.publish_cleanup
+        def fail_final(path, evidence):
+            if evidence['cleanup'] == 'removed':
+                raise OSError('final evidence write unavailable')
+            publish(path, evidence)
+        with mock.patch.object(RV, 'publish_cleanup', side_effect=fail_final):
+            self.retrieve()
+        saved = read_json(self.path)['runs'][0]
+        self.assertFalse(self.f.stage.exists())
+        self.assertEqual(saved['execution']['cleanup'], 'removed')
+        self.assertTrue(saved['reconciled'])
+        self.assertTrue(saved['ack'])
+        self.assertIsNone(RV.pending_problem(self.state_dir, 'u', self.ledger['basis'], []))
+        self.assertFalse(self.f.stage.with_name(self.f.stage.name + '.cleanup.json').exists())
 
     def first_observation_during_cleanup(self, second_transport_failure=False):
         self.run.update(reconciled=False, published=False)
