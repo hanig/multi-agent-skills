@@ -26,7 +26,7 @@ import unit as U  # noqa: E402
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from scheduler_fixture import isolated_module_path  # noqa: E402
+from scheduler_fixture import closed_bin, isolated_module_path  # noqa: E402
 
 
 def setUpModule():
@@ -178,7 +178,7 @@ def _paseo_stub_on_path(case):
     old = os.environ.get("PATH", "")
     case.addCleanup(shutil.rmtree, d, True)
     case.addCleanup(os.environ.__setitem__, "PATH", old)
-    os.environ["PATH"] = d
+    os.environ["PATH"] = closed_bin(d)
 
 
 class TestTheBoundIsDeclaredAndChecked(unittest.TestCase):

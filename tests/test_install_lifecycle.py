@@ -91,6 +91,10 @@ class LifecycleTest(unittest.TestCase):
                 self.assertTrue((target.destination / "linked-directory").is_symlink())
                 for path, mode in original.items():
                     self.assertEqual(path.stat().st_mode, mode, str(path))
+                    if path == source or source in path.parents:
+                        copied = target.destination / path.relative_to(source)
+                        self.assertEqual(copied.stat().st_mode, mode & ~0o022,
+                                         str(copied))
 
     def test_permission_failure_retains_previous_install(self):
         target = self.target()

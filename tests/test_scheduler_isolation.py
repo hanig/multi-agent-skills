@@ -1,4 +1,5 @@
 """ARC-1170: exercise the real test fixtures under hostile ambient Slurm."""
+import importlib
 import os
 from pathlib import Path
 import shlex
@@ -6,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from scheduler_fixture import closed_bin
@@ -36,6 +38,50 @@ esac
         path.write_text(body)
         path.chmod(0o755)
     return str(directory)
+
+
+class OrdinaryTools(unittest.TestCase):
+    def test_relative_path_tool_still_runs_from_another_cwd(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tools = root / "relative-tools"
+            tools.mkdir()
+            (tools / "sh").symlink_to("/bin/sh")
+            previous = Path.cwd()
+            try:
+                os.chdir(root)
+                with mock.patch.dict(os.environ, {"PATH": "relative-tools"}):
+                    path = closed_bin(root / "closed", tools=("sh",))
+            finally:
+                os.chdir(previous)
+            result = subprocess.run(["sh", "-c", "printf fixture-ok"],
+                                    cwd=previous, env=dict(os.environ, PATH=path),
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "fixture-ok")
+
+    def test_paseo_helpers_keep_ordinary_tools_but_drop_host_scheduler(self):
+        for module in ("tests.test_continuation", "tests.test_verify"):
+            with self.subTest(module=module), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                calls = root / "calls"
+                ambient = hostile_scheduler(root / "hostile", calls) + os.pathsep + closed_bin(root / "tools")
+                case = unittest.TestCase()
+                with mock.patch.dict(os.environ, {"PATH": ambient}):
+                    try:
+                        importlib.import_module(module)._paseo_stub_on_path(case)
+                        result = subprocess.run(
+                            ["sh", "-c", "command -v paseo && ! command -v sinfo"],
+                            capture_output=True, text=True, timeout=10)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertIn("paseo", result.stdout)
+                        python = subprocess.run(["python3", "-c", "print('fixture-ok')"],
+                                                capture_output=True, text=True, timeout=10)
+                        self.assertEqual(python.returncode, 0, python.stderr)
+                        self.assertEqual(python.stdout.strip(), "fixture-ok")
+                    finally:
+                        case.doCleanups()
+                self.assertFalse(calls.exists())
 
 
 class HostileScheduler(unittest.TestCase):

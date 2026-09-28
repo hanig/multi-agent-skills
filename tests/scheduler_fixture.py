@@ -27,7 +27,7 @@ def closed_bin(directory, tools=TOOLS):
     for name in tools:
         target = shutil.which(name)
         if target and not (directory / name).exists():
-            (directory / name).symlink_to(target)
+            (directory / name).symlink_to(os.path.abspath(target))
     for name in ("python", "python3"):
         if not (directory / name).exists():
             (directory / name).symlink_to(sys.executable)
