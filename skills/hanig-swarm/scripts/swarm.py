@@ -102,11 +102,13 @@ def load_agent_routing(path=AGENTS_FILE):
     if not _routing_token(thinking):
         raise SystemExit("swarm: %s default.thinking must be a non-empty "
                          "thinking id without whitespace" % path)
-    if not (isinstance(table, dict) and all(
+    # An empty table is refused, not read as "every model at the default":
+    # a table emptied by a bad edit would silently downgrade measured efforts.
+    if not (isinstance(table, dict) and table and all(
             _routing_model(k) and _routing_token(v) for k, v in table.items())):
-        raise SystemExit("swarm: %s thinking_by_model must map PROVIDER/MODEL "
-                         "strings to thinking ids, neither with whitespace"
-                         % path)
+        raise SystemExit("swarm: %s thinking_by_model must be a non-empty map "
+                         "of PROVIDER/MODEL strings to thinking ids, neither "
+                         "with whitespace" % path)
     return provider, thinking, dict(table)
 
 

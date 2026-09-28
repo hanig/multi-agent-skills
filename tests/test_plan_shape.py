@@ -493,6 +493,8 @@ class TestTheDefaultAgent(unittest.TestCase):
             "inner-space thinking": dict(good, default={"provider": "codex/m",
                                                         "thinking": "hi gh"}),
             "table not a map": dict(good, thinking_by_model=["codex/m"]),
+            "empty table": dict(good, thinking_by_model={}),
+            "no table": {"default": good["default"]},
             "empty table value": dict(good, thinking_by_model={"codex/m": ""}),
             "padded table value": dict(good, thinking_by_model={"codex/m": "high\n"}),
             "padded table key": dict(good, thinking_by_model={"codex/m ": "high"}),
