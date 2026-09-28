@@ -61,45 +61,44 @@ STATE_FILE = "swarm-state.json"
 STATE_EPOCH_FILE = "state-epoch.json"
 KINDS = U.KINDS
 
-# What a `code` unit runs unless it says otherwise.
-#
-# `codex/gpt-6-astra` at `high`, by owner decision on 2026-09-24, replacing
-# `codex/gpt-5.6-sol`. Provider, model and thinking id were read off a live
-# agent before this default changed, not guessed: a canary launched with
-# `paseo run --provider codex --model gpt-6-astra --thinking high` inspected as
-# Provider codex, Model gpt-6-astra, Thinking high, and answered. That check is
-# the bar, because paseo answers an unknown thinking id with an ERRORED agent,
-# and a default that fails at dispatch is worse than no default.
-#
-# There is deliberately no fallback to another model. A silent fallback would
-# dispatch a model the plan never declared, and a host that cannot serve this
-# one fails loudly instead: paseo returns an ERRORED agent at dispatch. The
-# live check above ran on the coordinator's host; a host that has not run it
-# should, and on 2026-09-24 chimera could not run ANY codex model, sol included,
-# because its codex login token had expired.
-#
+# What a `code` unit runs unless it says otherwise, and the reasoning effort
+# each model gets, live in ../agents.json. Models are data: this file names
+# none. The file ships inside the skill so a cluster install carries it.
+# A missing or malformed file stops the coordinator at import rather than
+# dispatching a guessed default; there is deliberately no fallback model.
+AGENTS_FILE = _HERE.parent / "agents.json"
+
+
+def load_agent_routing(path=AGENTS_FILE):
+    """Read and check agents.json. Raises SystemExit naming the defect."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SystemExit("swarm: cannot read agent routing %s: %s" % (path, exc))
+    default = data.get("default") if isinstance(data, dict) else None
+    table = data.get("thinking_by_model") if isinstance(data, dict) else None
+    provider = default.get("provider") if isinstance(default, dict) else None
+    thinking = default.get("thinking") if isinstance(default, dict) else None
+    if not (isinstance(provider, str) and "/" in provider.strip("/")
+            and provider == provider.strip()):
+        raise SystemExit("swarm: %s default.provider must be a PROVIDER/MODEL "
+                         "string" % path)
+    if not (isinstance(thinking, str) and thinking.strip()):
+        raise SystemExit("swarm: %s default.thinking must be a non-empty "
+                         "string" % path)
+    if not (isinstance(table, dict) and all(
+            isinstance(k, str) and isinstance(v, str) and v.strip()
+            for k, v in table.items())):
+        raise SystemExit("swarm: %s thinking_by_model must map model strings "
+                         "to thinking ids" % path)
+    return provider, thinking, dict(table)
+
+
 # A unit overrides any of it with `provider`, `model` or `thinking`. Setting
 # `thinking` to null or "" turns the flag off entirely for a provider that has
 # no such option.
-DEFAULT_AGENT_PROVIDER = "codex/gpt-6-astra"
-DEFAULT_AGENT_THINKING = "high"
-
-# Reasoning effort belongs to the MODEL, not to the project. The owner
-# upgraded Sol and Luna on 2026-09-25 while retaining their dispatch intent:
-# Sol at high, Luna at xhigh. Gate effort is configured separately in
-# reviewers.json. API probes there do not establish Paseo dispatch behavior.
-#
-# Measured on 2026-09-04: high resolves on claude, whose bare default is auto,
-# and claude/opus expands to claude-opus-5, hence both spellings below.
-# The 6-series Sol/Luna dispatch defaults have not been measured here;
-# pass the intended effort explicitly and inspect the launched agent.
-THINKING_BY_MODEL = {
-    "codex/gpt-6-astra": "high",
-    "codex/gpt-6-sol": "high",
-    "codex/gpt-6-luna": "xhigh",
-    "claude/opus": "high",
-    "claude/claude-opus-5": "high",
-}
+DEFAULT_AGENT_PROVIDER, DEFAULT_AGENT_THINKING, THINKING_BY_MODEL = (
+    load_agent_routing())
 
 
 def default_thinking_for(u):
@@ -9387,10 +9386,10 @@ SCHEMA_FIELDS = [
      "no default on purpose. Absent or empty means default permissions, so "
      "the agent stalls at its first write"),
     ("provider", "code", "optional",
-     "default codex/gpt-6-astra"),
+     "default is agents.json default.provider"),
     ("model", "code", "optional", "overrides the provider's default"),
     ("thinking", "code", "optional",
-     "default high. JSON null or \"\" suppresses the flag; the STRING "
+     "default from agents.json. JSON null or \"\" suppresses the flag; the STRING "
      "\"null\" is refused"),
     ("env", "code", "optional", "list of KEY=VALUE passed to the agent"),
     ("continuation", "code", "optional",

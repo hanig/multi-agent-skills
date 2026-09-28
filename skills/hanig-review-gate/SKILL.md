@@ -157,7 +157,7 @@ design is wrong, which is the point of asking.
 After challenging the members, run
 `python3 "$HANIG_REVIEW_GATE_DIR/scripts/committee.py" synthesize SESSION --author PROVIDER/MODEL`.
 Convergence produces a unified plan; divergence automatically calls the
-`astra-xhigh` seat (`gpt-6-astra`, effort `xhigh`, profile `tiebreak` only).
+one enabled reviewer whose profiles are exactly `["tiebreak"]` (sol-tiebreak).
 For an already identified split, use `tiebreak SESSION --author PROVIDER/MODEL` directly.
 It receives the question and every member's final position verbatim and saves
 a RULING adopting a named position with the deciding evidence, not a fresh plan.
@@ -297,9 +297,9 @@ walks toward `deep`, stopping at the first `REVIEW_FAIL` or
 tier did not run:
 
 ```
-fast      luna + kimi-k2.7-code
+fast      luna + sonnet-5.5
   ↓ pass
-standard  + glm-5.3
+standard  + kimi-k2.7-code
   ↓ pass
 deep      + sol @ xhigh
 ```
@@ -424,21 +424,18 @@ and availability is resolved live by `--list` rather than asserted in a file.
 | Name | Provider | Model | Needs |
 |---|---|---|---|
 | `luna` | OpenAI | `gpt-6-luna` (effort `high`) | `OPENAI_API_KEY` |
+| `sonnet-5.5` | OpenRouter | `anthropic/claude-sonnet-5.5` (effort `high`) | `OPENROUTER_API_KEY` |
 | `kimi-k2.7-code` | OpenRouter | `moonshotai/kimi-k2.7-code` | `OPENROUTER_API_KEY` |
-| `glm-5.3` | OpenRouter | `z-ai/glm-5.3` | `OPENROUTER_API_KEY` |
-| `sol` | OpenAI | `gpt-6-sol` (effort `xhigh`, deep only) | `OPENAI_API_KEY` |
+| `sol` | OpenAI | `gpt-6-sol` (effort `xhigh`, plan and deep) | `OPENAI_API_KEY` |
 
 Both keys are exported from `~/.zshrc`. A non-interactive shell does not source
 it, so run through a login shell (`zsh -ic`) or export the keys explicitly —
 otherwise the gate reports `REVIEW_UNAVAILABLE`, which is correct behaviour but
 not what you wanted.
 
-Sol and Luna use their 6-series releases by owner decision on 2026-09-25;
-their efforts, profile membership and output budgets are unchanged.
-`kimi-k3` remains disabled. Astra drives code and is in no gate tier;
-its `high` seat remains available to an explicitly selected committee and its
-`xhigh` seat serves committee tie-breaks. DeepSeek V4 Pro is a committee member,
-not a gate reviewer. Author exclusion applies to every selected panel. Reviewers run in parallel, so wall time is the slowest one.
+Plan review is Sol and Kimi, because a Claude orchestrator writes the plans.
+Astra drives code and is in no gate tier; its `high` seat remains available to
+an explicitly selected committee. DeepSeek V4 Pro is a committee member. Author exclusion applies to every selected panel. Reviewers run in parallel, so wall time is the slowest one.
 
 Transient 5xx and 429 responses are retried with backoff — a gateway hiccup must
 not silently shrink the panel and make the gate weaker than it reports.

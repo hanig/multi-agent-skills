@@ -2155,7 +2155,7 @@ def author_argument(value):
         raise argparse.ArgumentTypeError(
             "author must be PROVIDER/MODEL without whitespace or control "
             "characters, using ASCII token components (at most 256 characters); "
-            "pass e.g. codex/gpt-6-sol")
+            "pass the provider and the model id the reviewer runs as, e.g. openai/MODEL")
     return value
 
 

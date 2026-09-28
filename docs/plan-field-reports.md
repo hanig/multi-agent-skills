@@ -273,8 +273,8 @@ Reasoning effort is per MODEL, revised 2026-09-04: `codex/gpt-5.6-sol`
 at **high**, `codex/gpt-5.6-luna` at **xhigh**, `claude/opus` at
 **high**. luna sits below the other two on `bus models`' measured
 intelligence, so it is asked for xhigh to compensate; asking the leaders
-for xhigh buys latency and not quality. `swarm.py`'s `THINKING_BY_MODEL`
-enforces this for code units, and nothing enforces it for a paseo skill
+for xhigh buys latency and not quality. `hanig-swarm/agents.json`'s
+`thinking_by_model` enforces this for code units, and nothing enforces it for a paseo skill
 dispatching from `orchestration-preferences.json`, which has no slot for
 effort -- there, claude/opus falls to its `auto` default.
 

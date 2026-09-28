@@ -1317,15 +1317,17 @@ class TestAuthoredSkillShape(unittest.TestCase):
         self.assertEqual(DECLARATION_REGISTRY.reference_problems(skill), [])
         self.assertEqual(_reference_elaboration_problems(skill), [])
 
-    def test_project_default_agent_matches_the_coordinator(self):
-        source = (SKILLS / "hanig-swarm" / "scripts" / "swarm.py").read_text(
-            encoding="utf-8")
-        defaults = {
-            target.id: node.value.value
-            for node in ast.parse(source).body
-            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
-            for target in node.targets if isinstance(target, ast.Name)
-        }
+    def test_project_default_agent_points_at_the_routing_data(self):
+        """The default agent is data in agents.json, and prose names the file.
+
+        Quoting the model in prose is how a routing change leaves three
+        documents describing the previous one, so every surface must name
+        the file and none may name the current default's model.
+        """
+        routing = json.loads((SKILLS / "hanig-swarm" / "agents.json").read_text(
+            encoding="utf-8"))
+        provider = routing["default"]["provider"]
+        model = provider.split("/", 1)[1]
         skill = SKILLS / "hanig-project"
         declaration = next(
             item for item in DECLARATION_REGISTRY.load_registry(skill)
@@ -1335,9 +1337,8 @@ class TestAuthoredSkillShape(unittest.TestCase):
                         (skill / "SKILL.md").read_text(encoding="utf-8"),
                         (skill / "references" / "unit-contract.md").read_text(
                             encoding="utf-8")):
-            self.assertIn("`{}`".format(defaults["DEFAULT_AGENT_PROVIDER"]), surface)
-            self.assertIn("`thinking: {}`".format(
-                defaults["DEFAULT_AGENT_THINKING"]), surface)
+            self.assertIn("`hanig-swarm/agents.json`", surface)
+            self.assertNotIn(model, surface)
 
     def test_project_keeps_partition_routing_as_owner_judgment(self):
         declarations = {
