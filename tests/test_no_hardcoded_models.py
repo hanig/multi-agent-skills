@@ -33,13 +33,17 @@ VENDORED = {"bin/bus", "bin/agent-manager", "bin/agent-view"}
 SKIPPED_TOP = {"tests", "docs", "examples"}
 
 
+PYTHON_SUFFIXES = {".py", ".pyw"}
+
+
 def is_python(path):
-    if path.suffix == ".py":
+    """A Python source by suffix, or an extensionless file with a python shebang."""
+    if path.suffix in PYTHON_SUFFIXES:
         return True
     if path.suffix or not path.is_file():
         return False
     with path.open("rb") as handle:
-        first = handle.readline(200)
+        first = handle.readline()
     return first.startswith(b"#!") and b"python" in first
 
 
@@ -74,22 +78,40 @@ def declared_model_ids():
     ids = set()
     review = json.loads((ROOT / "skills/hanig-review-gate/reviewers.json")
                         .read_text(encoding="utf-8"))
-    for reviewer in review["reviewers"]:
-        ids.add(reviewer["model"])
-        ids.add(reviewer["model"].rsplit("/", 1)[-1])
+    routes = [reviewer["model"] for reviewer in review["reviewers"]]
     agents = json.loads((ROOT / "skills/hanig-swarm/agents.json")
                         .read_text(encoding="utf-8"))
-    for route in [agents["default"]["provider"], *agents["thinking_by_model"]]:
-        ids.add(route)
-        ids.add(route.split("/", 1)[1])
+    routes += [agents["default"]["provider"], *agents["thinking_by_model"]]
     registry = json.loads((ROOT / "models.json").read_text(encoding="utf-8"))
-    for model in registry["models"]:
-        ids.add(model["id"])
-        ids.add(model["id"].split("/", 1)[1])
+    routes += [model["id"] for model in registry["models"]]
+    for route in routes:
+        # The whole route and every suffix after a slash: openrouter's
+        # "moonshotai/kimi-k2.7-code" and its bare "kimi-k2.7-code".
+        segments = route.split("/")
+        ids.update("/".join(segments[i:]) for i in range(len(segments)))
     # A bare segment such as "opus" is an English word; only keep a bare
     # segment when it is an identifier (it carries a digit).
     return {value for value in ids
             if len(value) > 3 and ("/" in value or any(c.isdigit() for c in value))}
+
+
+# Characters that belong to a model id. A match must not run into one on
+# either side, except that a "/" may precede it (a provider prefix), so
+# "codex/gpt-6-sol" hits gpt-6-sol while "docs/claude/opus-usage.md" and
+# "claude/opus.md" do not hit claude/opus.
+ID_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")
+
+
+def names_model(text, model):
+    start = text.find(model)
+    while start != -1:
+        end = start + len(model)
+        before = text[start - 1] if start else ""
+        after = text[end] if end < len(text) else ""
+        if before not in ID_CHARS and after not in ID_CHARS | {"/"}:
+            return True
+        start = text.find(model, start + 1)
+    return False
 
 
 def literal_hits(source, ids):
@@ -107,7 +129,7 @@ def literal_hits(source, ids):
         if (isinstance(node, ast.Constant) and isinstance(node.value, str)
                 and id(node) not in prose):
             hits.extend((node.lineno, model) for model in sorted(ids)
-                        if model in node.value)
+                        if names_model(node.value, model))
     return hits
 
 
@@ -129,7 +151,8 @@ class TestNoHardcodedModels(unittest.TestCase):
             swept = [root / "scripts" / "route.py", root / "bin" / "route",
                      root / "bin" / "tools" / "bus",
                      root / "skills" / "hanig-x" / "scripts" / "a.py",
-                     root / ".github" / "route.py", root / ".claude" / "h.py"]
+                     root / ".github" / "route.py", root / ".claude" / "h.py",
+                     root / "scripts" / "launch.pyw", root / "bin" / "long"]
             excluded = [root / "tests" / "t.py", root / "bin" / "bus",
                         root / "skills" / "paseo" / "scripts" / "v.py",
                         root / "bin" / "notes"]
@@ -140,6 +163,8 @@ class TestNoHardcodedModels(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 body = "no shebang\n" if path.name == "notes" else (
                     "#!/usr/bin/env python3\nMODEL = 'x'\n")
+                if path.name == "long":  # "python" past the first 200 bytes
+                    body = "#!/usr/bin/env " + "-S " * 80 + "python3\n"
                 path.write_text(body, encoding="utf-8")
             subprocess.run(["git", "-C", str(root), "add", "--"]
                            + [str(p.relative_to(root)) for p in swept + excluded],
@@ -173,6 +198,16 @@ class TestNoHardcodedModels(unittest.TestCase):
             [])
         self.assertEqual(literal_hits('X = ("a", "gpt-6-sol")\n"""prose"""\n', ids),
                          [(1, "gpt-6-sol")])
+        for value in ("gpt-6-sol", "codex/gpt-6-sol", "--model gpt-6-sol",
+                      "openrouter/x/gpt-6-sol", "'gpt-6-sol'"):
+            with self.subTest(value=value):
+                self.assertTrue(names_model(value, "gpt-6-sol"))
+        for value in ("docs/claude/opus-usage.md", "claude/opus.md",
+                      "claude/opus/notes", "xclaude/opus", "claude/opuses"):
+            with self.subTest(value=value):
+                self.assertFalse(names_model(value, "claude/opus"))
+        self.assertEqual(literal_hits('P = "docs/claude/opus-usage.md"\n',
+                                      {"claude/opus"}), [])
 
 
 if __name__ == "__main__":
