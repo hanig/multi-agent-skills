@@ -2531,22 +2531,22 @@ class TestSlurmReconciliation(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'already in progress'):
             with RV.binding_lock(self.state_dir, 'u', self.ledger['basis']):
                 self.fail('coordinator lock was released during retrieval')
-        if 'from remote_verify import cleanup' in code and self.f.stage.exists():
-            saved = read_json(self.path)['runs'][0]
-            response = RV.cleanup(self.f.stage, saved.get('ack') if saved['reconciled'] else None)
-            output = json.dumps(response)
-        else:
-            if 'history.unlink()' in code:
+        outside = self.f.stage.with_name(self.f.stage.name + '.cleanup.json')
+        unlink = Path.unlink
+        def audited_unlink(path, *args, **kwargs):
+            if path == outside:
                 saved = read_json(self.path)['runs'][0]
-                outside = self.f.stage.with_name(self.f.stage.name + '.cleanup.json')
-                if outside.exists():
-                    receipt = saved['cleanup_receipt']
-                    self.assertEqual(receipt.get('retained_cleanup', receipt), read_json(outside))
+                receipt = saved['cleanup_receipt']
+                self.assertEqual(receipt.get('retained_cleanup', receipt), read_json(outside))
                 self.assertFalse(self.f.stage.exists())
-            output = io.StringIO()
-            with redirect_stdout(output):
-                exec(code, {})
-            output = output.getvalue()
+            return unlink(path, *args, **kwargs)
+        # Execute the actual wrapper and observe durable delivery at the unlink
+        # consumer, including recovery before its staged-harness import.
+        output = io.StringIO()
+        with redirect_stdout(output), mock.patch.object(sys, 'path', list(sys.path)), \
+                mock.patch.object(Path, 'unlink', audited_unlink):
+            exec(code, {})
+        output = output.getvalue()
         return subprocess.CompletedProcess([], 0, output, '')
 
     def retrieve(self, call=None, recovery=None):
@@ -2600,7 +2600,8 @@ class TestSlurmReconciliation(unittest.TestCase):
         self.assertEqual(read_json(self.path)['runs'][0]['execution']['cleanup'], 'unconfirmed')
         self.retrieve()
         saved = read_json(self.path)['runs'][0]
-        self.assertEqual(saved['cleanup_receipt'], retained)
+        self.assertEqual(saved['cleanup_receipt']['retained_cleanup'], retained)
+        self.assertNotIn('quiescent', saved['cleanup_receipt'])
         self.assertEqual(saved['execution']['cleanup'], 'removed')
         self.assertFalse(outside.exists())
 
@@ -2645,6 +2646,156 @@ class TestSlurmReconciliation(unittest.TestCase):
         self.assertTrue(saved['ack'])
         self.assertIsNone(RV.pending_problem(self.state_dir, 'u', self.ledger['basis'], []))
         self.assertFalse(self.f.stage.with_name(self.f.stage.name + '.cleanup.json').exists())
+
+    def strand_empty_stage(self):
+        rmdir = os.rmdir
+        def fail_final(path, *args, **kwargs):
+            if Path(path) == self.f.stage:
+                raise OSError(39, 'Directory not empty', str(path))
+            return rmdir(path, *args, **kwargs)
+        with mock.patch.object(RV.os, 'rmdir', side_effect=fail_final):
+            self.retrieve()
+        self.assertEqual(list(self.f.stage.iterdir()), [])
+        saved = read_json(self.path)['runs'][0]
+        self.assertTrue(saved['reconciled'])
+        self.assertTrue(saved['ack'])
+        return saved
+
+    def test_retry_after_final_rmdir_error_removes_only_empty_stage(self):
+        saved = self.strand_empty_stage()
+        receipts = saved['receipts']
+        self.retrieve()
+        saved = read_json(self.path)['runs'][0]
+        self.assertFalse(self.f.stage.exists())
+        self.assertEqual(saved['execution']['cleanup'], 'removed')
+        self.assertEqual(saved['receipts'], receipts)
+        self.assertFalse(self.f.stage.with_name(self.f.stage.name + '.cleanup.json').exists())
+
+    def test_empty_stage_recovery_preserves_late_file(self):
+        self.strand_empty_stage()
+        late = self.f.stage / 'late-output'
+        late.write_bytes(b'preserve these bytes')
+        self.retrieve()
+        self.assertEqual(late.read_bytes(), b'preserve these bytes')
+        self.assertEqual(read_json(self.path)['runs'][0]['execution']['cleanup'], 'unconfirmed')
+
+    def test_empty_stage_recovery_refuses_persisted_negative_observation(self):
+        self.strand_empty_stage()
+        ledger = read_json(self.path)
+        ledger['runs'][0]['execution']['quiescent'] = False
+        RV.publish(self.path, ledger)
+        self.retrieve()
+        self.assert_revoked()
+        self.assertTrue(self.f.stage.is_dir())
+        self.assertEqual(list(self.f.stage.iterdir()), [])
+
+    def test_empty_stage_recovery_respects_external_lock(self):
+        self.strand_empty_stage()
+        lock = self.f.stage.with_name(self.f.stage.name + '.cleanup.lock')
+        with lock.open('a') as guard:
+            fcntl.flock(guard.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.retrieve()
+            self.assertTrue(self.f.stage.is_dir())
+        self.retrieve()
+        self.assertFalse(self.f.stage.exists())
+
+    def test_empty_stage_recovery_after_lost_cleanup_response(self):
+        rmdir = os.rmdir
+        def fail_final(path, *args, **kwargs):
+            if Path(path) == self.f.stage:
+                raise OSError(39, 'Directory not empty', str(path))
+            return rmdir(path, *args, **kwargs)
+        def lose_response(prefix, remote, code, timeout=45):
+            result = self.remote_call(prefix, remote, code, timeout)
+            if 'from remote_verify import cleanup' in code:
+                return subprocess.CompletedProcess([], 255, '', 'response lost')
+            return result
+        with mock.patch.object(RV.os, 'rmdir', side_effect=fail_final):
+            self.retrieve(lose_response)
+        self.assertEqual(list(self.f.stage.iterdir()), [])
+        saved = read_json(self.path)['runs'][0]
+        self.assertTrue(saved['reconciled'])
+        self.assertTrue(saved['ack'])
+        self.assertNotIn('cleanup_receipt', saved)
+        self.retrieve()
+        self.assertFalse(self.f.stage.exists())
+        self.assertEqual(read_json(self.path)['runs'][0]['receipts'], saved['receipts'])
+
+    def test_empty_stage_journal_failure_does_not_fabricate_negative_observation(self):
+        rmdir, publish = os.rmdir, RV.publish_cleanup
+        def fail_rmdir(path, *args, **kwargs):
+            if Path(path) == self.f.stage:
+                raise OSError(39, 'Directory not empty', str(path))
+            return rmdir(path, *args, **kwargs)
+        def fail_final(path, evidence):
+            if path.name.endswith('.cleanup.json') and not (self.f.stage / 'request.json').exists():
+                raise OSError('final journal write failed')
+            publish(path, evidence)
+        with mock.patch.object(RV.os, 'rmdir', side_effect=fail_rmdir), \
+                mock.patch.object(RV, 'publish_cleanup', side_effect=fail_final):
+            self.retrieve()
+        self.assertEqual(list(self.f.stage.iterdir()), [])
+        saved = read_json(self.path)['runs'][0]
+        self.assertTrue(saved['reconciled'])
+        self.assertTrue(saved['ack'])
+        self.assertTrue(saved['execution']['quiescent'])
+        self.retrieve()
+        self.assertFalse(self.f.stage.exists())
+
+    def test_empty_stage_recovery_requires_original_acknowledgment(self):
+        self.strand_empty_stage()
+        ledger = read_json(self.path)
+        ledger['runs'][0].pop('ack')
+        RV.publish(self.path, ledger)
+        self.retrieve()
+        self.assertTrue(self.f.stage.is_dir())
+        self.assertNotIn('ack', read_json(self.path)['runs'][0])
+
+    def test_empty_stage_recovery_requires_matching_coordinator_binding(self):
+        self.strand_empty_stage()
+        ledger = read_json(self.path)
+        ledger['runs'][0]['execution']['launch_id'] = 'e' * 32
+        RV.publish(self.path, ledger)
+        self.retrieve()
+        self.assertTrue(self.f.stage.is_dir())
+        self.assertEqual(read_json(self.path)['runs'][0]['execution']['cleanup'], 'unconfirmed')
+
+    def test_auxiliary_retirement_preserves_changed_snapshot(self):
+        outside = self.f.stage.with_name(self.f.stage.name + '.cleanup.json')
+        def change_snapshot(prefix, remote, code, timeout=45):
+            if 'history.unlink()' in code:
+                snapshot = read_json(outside)
+                snapshot['changed-after-receipt'] = True
+                RV.publish(outside, snapshot)
+            return self.remote_call(prefix, remote, code, timeout)
+        self.retrieve(change_snapshot)
+        self.assertFalse(self.f.stage.exists())
+        self.assertTrue(read_json(outside)['changed-after-receipt'])
+        saved = read_json(self.path)['runs'][0]
+        self.assertTrue(saved['reconciled'])
+        self.assertNotIn('changed-after-receipt', saved['cleanup_receipt'])
+        self.assertIn('cleanup_evidence_error', saved['execution'])
+        self.retrieve()
+        self.assertTrue(read_json(outside)['changed-after-receipt'])
+
+    def test_auxiliary_retirement_retries_after_history_unlink(self):
+        unlink = Path.unlink
+        lock = self.f.stage.with_name(self.f.stage.name + '.cleanup.lock')
+        def fail_lock(path, *args, **kwargs):
+            if path == lock:
+                raise OSError('lock unlink interrupted')
+            return unlink(path, *args, **kwargs)
+        with mock.patch.object(Path, 'unlink', fail_lock):
+            self.retrieve()
+        self.assertFalse(self.f.stage.exists())
+        self.assertFalse(self.f.stage.with_name(self.f.stage.name + '.cleanup.json').exists())
+        self.assertTrue(lock.exists())
+        saved = read_json(self.path)['runs'][0]
+        self.assertTrue(saved['reconciled'])
+        self.assertEqual(saved['execution']['cleanup'], 'removed')
+        self.retrieve()
+        self.assertFalse(lock.exists())
+        self.assertEqual(read_json(self.path)['runs'][0]['receipts'], saved['receipts'])
 
     def first_observation_during_cleanup(self, second_transport_failure=False):
         self.run.update(reconciled=False, published=False)
