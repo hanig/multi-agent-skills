@@ -2671,6 +2671,45 @@ class TestSlurmReconciliation(unittest.TestCase):
         self.assertEqual(saved['receipts'], receipts)
         self.assertFalse(self.f.stage.with_name(self.f.stage.name + '.cleanup.json').exists())
 
+    def test_empty_stage_recovery_retains_dangling_symlink(self):
+        self.strand_empty_stage()
+        self.f.stage.rmdir()
+        self.f.stage.symlink_to(self.f.root / 'missing-stage-target')
+        outside = self.f.stage.with_name(self.f.stage.name + '.cleanup.json')
+        self.retrieve()
+        saved = read_json(self.path)['runs'][0]
+        self.assertTrue(self.f.stage.is_symlink())
+        self.assertEqual(saved['execution']['cleanup'], 'unconfirmed')
+        self.assertTrue(outside.is_file())
+        self.assertTrue(saved['reconciled'])
+
+    def test_auxiliary_retirement_retains_evidence_when_symlink_appears(self):
+        outside = self.f.stage.with_name(self.f.stage.name + '.cleanup.json')
+        def replace_stage(prefix, remote, code, timeout=45):
+            if 'history.unlink()' in code:
+                self.f.stage.symlink_to(self.f.root / 'missing-stage-target')
+            return self.remote_call(prefix, remote, code, timeout)
+        self.retrieve(replace_stage)
+        self.assertTrue(self.f.stage.is_symlink())
+        self.assertTrue(outside.is_file())
+        self.assertTrue(self.f.stage.with_name(self.f.stage.name + '.cleanup.lock').is_file())
+
+    def test_empty_stage_recovery_retains_child_created_before_rmdir(self):
+        self.strand_empty_stage()
+        late = self.f.stage / 'late-output'
+        rmdir = os.rmdir
+        def create_child(path, *args, **kwargs):
+            if Path(path) == self.f.stage:
+                late.write_bytes(b'late write survives atomic rmdir refusal')
+            return rmdir(path, *args, **kwargs)
+        with mock.patch.object(RV.os, 'rmdir', side_effect=create_child):
+            self.retrieve()
+        saved = read_json(self.path)['runs'][0]
+        self.assertEqual(late.read_bytes(), b'late write survives atomic rmdir refusal')
+        self.assertEqual(saved['execution']['cleanup'], 'unconfirmed')
+        self.assertTrue(saved['reconciled'])
+        self.assertTrue(saved['execution']['quiescent'])
+
     def test_empty_stage_recovery_preserves_late_file(self):
         self.strand_empty_stage()
         late = self.f.stage / 'late-output'

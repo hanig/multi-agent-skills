@@ -936,19 +936,19 @@ def cleanup_slurm(stage, request, reconciled):
         lock.close()
         lock = None
         shutil.rmtree(stage, ignore_errors=False)
-        if stage.exists():
+        if (stage.exists() or stage.is_symlink()):
             raise ValueError("stage removal unconfirmed")
         evidence["cleanup"] = "removed"
     except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError) as exc:
         evidence["cleanup_error"] = str(exc)[-2000:]
     finally:
         # A lock refusal must not overwrite another cleanup's journal.
-        if ((history == removal_history or stage.exists())
+        if ((history == removal_history or (stage.exists() or stage.is_symlink()))
                 and evidence.get("cancellation_attempts") is not None):
             try:
                 publish_cleanup(history, evidence)
             except (OSError, ValueError) as exc:
-                if history == removal_history and not stage.exists():
+                if history == removal_history and not (stage.exists() or stage.is_symlink()):
                     # Failed audit publication is not a negative scheduler
                     # observation. Preserve the exact pre-removal snapshot so
                     # the coordinator can acknowledge it after saving this fact.
@@ -981,7 +981,7 @@ def cleanup(stage, reconciled=None):
     removal. Unknown supervision, journal failure or exhaustion retains the stage.
     """
     evidence = {"cleanup": "unconfirmed", "stage": str(stage)}
-    if not stage.exists():
+    if not (stage.exists() or stage.is_symlink()):
         return dict(evidence, cleanup="removed" if reconciled else "unconfirmed")
     try:
         request = json.loads((stage / "request.json").read_text())
@@ -995,7 +995,7 @@ def cleanup(stage, reconciled=None):
         return cleanup_slurm(stage, request, reconciled)
     lock = None
     try:
-        if not stage.exists():
+        if not (stage.exists() or stage.is_symlink()):
             return dict(evidence, cleanup="removed" if reconciled else "unconfirmed")
         try:
             job = (stage / "job-id").read_text()
@@ -1108,7 +1108,7 @@ def finish_empty_stage(stage, launch_id):
     lock = stage.with_name(stage.name + ".cleanup.lock")
     with lock.open("a") as guard:
         fcntl.flock(guard.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        if stage.exists():
+        if (stage.exists() or stage.is_symlink()):
             if any(stage.iterdir()):
                 return None
             # The kernel refuses a late child even after the empty listing.
@@ -1540,7 +1540,7 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
                            "else:\n    print(json.dumps(finished))\n") % (stage, run["launch_id"], code))
             elif run["reconciled"] and remote["executor"] == "direct":
                 code = ("import json, pathlib; p=pathlib.Path(%r)\n"
-                        "if not p.exists(): print(json.dumps({'stage': str(p), 'cleanup': 'removed'}))\n"
+                        "if not (p.exists() or p.is_symlink()): print(json.dumps({'stage': str(p), 'cleanup': 'removed'}))\n"
                         "else:\n    exec(%r)\n") % (stage, code)
             try:
                 proc = remote_call(prefix, remote, code)
@@ -1583,10 +1583,10 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
                     "p = pathlib.Path(%r)\n"
                     "history = p.with_name(p.name + '.cleanup.json')\n"
                     "lock = p.with_name(p.name + '.cleanup.lock')\n"
-                    "if not p.exists():\n"
+                    "if not (p.exists() or p.is_symlink()):\n"
                     "    with lock.open('a') as guard:\n"
                     "        fcntl.flock(guard.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
-                    "        if p.exists(): raise ValueError('stage reappeared; auxiliary evidence retained')\n"
+                    "        if (p.exists() or p.is_symlink()): raise ValueError('stage reappeared; auxiliary evidence retained')\n"
                     "        if history.exists():\n"
                     "            data = json.loads(history.read_text())\n"
                     "            digest = hashlib.sha256(json.dumps(data, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()\n"
