@@ -41,6 +41,22 @@ esac
 
 
 class OrdinaryTools(unittest.TestCase):
+    def test_module_path_is_restored_by_the_unittest_consumer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            program = (
+                "import os, pathlib, sys, unittest\n"
+                "before = os.environ.get('PATH')\n"
+                "suite = unittest.defaultTestLoader.loadTestsFromName("
+                "'tests.test_runtime.TestRuntimeMustBeDeclared')\n"
+                "result = unittest.TextTestRunner().run(suite)\n"
+                "assert result.wasSuccessful()\n"
+                "assert os.environ.get('PATH') == before, 'module PATH leaked'\n"
+                "assert not list(pathlib.Path(sys.argv[1]).glob('scheduler-free-*')), 'module fixture retained'\n")
+            result = subprocess.run([sys.executable, "-c", program, directory],
+                                    cwd=ROOT, env=dict(os.environ, TMPDIR=directory),
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_empty_path_still_resolves_named_system_tools(self):
         with tempfile.TemporaryDirectory() as directory:
             with mock.patch.dict(os.environ, {"PATH": ""}):

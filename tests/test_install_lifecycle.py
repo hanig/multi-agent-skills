@@ -81,6 +81,12 @@ class LifecycleTest(unittest.TestCase):
                 result = lifecycle.install([target])[0]
                 self.assertEqual(result.status, expected, result.detail)
                 paths = [target.destination] + list(target.destination.rglob("*"))
+                # This independent enumerator includes nested payload entries
+                # and stops at symlink leaves on every required interpreter.
+                self.assertIn(target.destination / "scripts", paths)
+                self.assertIn(target.destination / "scripts/worker.sh", paths)
+                self.assertIn(target.destination / "linked-directory", paths)
+                self.assertNotIn(target.destination / "linked-directory/data", paths)
                 self.assertTrue((target.destination / lifecycle.MARKER).is_file())
                 for path in paths:
                     if not path.is_symlink():

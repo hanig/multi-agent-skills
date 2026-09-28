@@ -42,6 +42,7 @@ swarm = importlib.util.module_from_spec(_s2); _s2.loader.exec_module(swarm)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from scheduler_fixture import isolated_module_path  # noqa: E402
+from scheduler_fixture import cleanup_module_path as tearDownModule  # noqa: E402
 
 
 def setUpModule():

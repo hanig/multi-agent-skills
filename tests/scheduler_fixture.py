@@ -14,7 +14,7 @@ from unittest import mock
 
 
 TOOLS = ("sh", "bash", "git", "basename", "cat", "chmod", "cp", "cut",
-         "date", "df", "diff", "dirname", "env", "find", "head", "hostname",
+         "date", "df", "diff", "dirname", "env", "false", "find", "head", "hostname",
          "id", "ln", "ls", "mkdir", "mktemp", "mv", "perl", "ps", "pwd", "readlink",
          "rm", "sed", "sleep", "sort", "stat", "tail", "tar", "touch", "tr",
          "true", "uname", "wc", "xargs")
@@ -43,3 +43,13 @@ def isolated_module_path():
     patch = mock.patch.dict(os.environ, {"PATH": closed_bin(temporary.name)})
     patch.start()
     unittest.addModuleCleanup(patch.stop)
+
+
+def cleanup_module_path():
+    """Enroll the module in Python 3.9.6's cleanup lifecycle.
+
+    That runner drains registered cleanups only when tearDownModule exists;
+    newer runners drain them unconditionally. The runner owns the actual
+    cleanup call after this hook returns. The consumer regression checks
+    both environment restoration and removal of the temporary directory.
+    """
