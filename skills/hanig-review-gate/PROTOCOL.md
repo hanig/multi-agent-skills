@@ -288,6 +288,39 @@ Write claims you expect might FAIL. Claims written to be upheld waste the
 panel. In practice roughly two of six claims per round have been refuted, and
 the refuted ones are the entire value of the round.
 
+## Required refusals do not exempt the absolute counter-claim
+
+**ARC-1163, 2026-09-29: the orchestrator chose this documented-limit path;
+the owner may reverse it. This is not an owner decision.** The gate cannot
+independently distinguish a required refusal from a wrongful one. Keep
+`This change cannot make an honest run fail.` absolute and standalone: no caller
+qualification and no whitelist of a qualified sentence. Its refutation always
+blocks a pass; quorum determines the non-passing verdict, not permission to
+ignore the refutation.
+
+Claim-level `in_scope` is deliberately not consumed. It is not the finding-scope
+mechanism. A modeled scope filter turned an explicit wrongful-UTC refutation
+into a clean pass when the refuting reviewer excluded it and the other reviewer
+supported the claim. Independent acceptance criteria admitted UTC; misleading
+caller scope prose did not change that fact. Reproduction:
+`.swarm/arc1163/stepback/reproduction.json`. Committee analysis:
+`.swarm/arc1163/stepback/sessions/arc1163-stepback-run-20260929T042532Z-8VYnZv.json`.
+These are local historical paths, not runtime dependencies. Portable control:
+`tests/test_arc1163_claim_scope.py`; targeted mutation:
+`python3 tests/mutate_arc1163.py`.
+
+Use `hanig-orchestrate`'s `adjudication.matrix` for required-refusal disputes
+outside the gate, under the existing mandate rather than a new blanket waiver.
+Demonstrably outside-required-behaviour findings need independent orchestrator
+and mandate-named concurrence, excluding the author, plus the complete impact
+record (affected goals, criteria, outputs and consumers; evidence bounding
+impact; shared surfaces; pre-existing policy authority; observable falsifier).
+Required-criterion and hard-invariant violations remain nonoverridable;
+unresolved applicability blocks. Preserve `REVIEW_FAIL` and
+`REVIEW_CLAIMS_REFUTED` and their evidence. Eligibility after adjudication is
+not a pass, and a false delivered claim must not be silently endorsed. This
+choice retains the false-rejection limit; it changes no gate decision logic.
+
 ## The author does not judge their own work
 
 When a reviewer proposes a design, exclude it from the panel that reviews the
