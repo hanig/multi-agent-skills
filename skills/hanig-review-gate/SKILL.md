@@ -495,54 +495,8 @@ reviews *against the plan*, with bounded iterations and a step-back rule when
 it stalls. The version here that ran 28 rounds had no plan to check against, no
 bound, and no step-back.
 
-## Known limitation: required refusals and the absolute counter-claim
-
-**ARC-1163 decision, 2026-09-29: an orchestrator decision reversible by the
-owner, not an owner decision.** Keep the absolute standalone counter-claim,
-`This change cannot make an honest run fail.`, and keep its refutations blocking.
-Do not qualify it or whitelist a qualified spelling. This documents a limit;
-it does not fix the false-rejection gap or authorize a change to gate logic.
-
-The gate cannot independently distinguish a required refusal from a wrongful
-one: that judgment needs independent acceptance criteria and evidence applying
-them. A required refusal can therefore be reported as a counter-claim
-refutation. At quorum, a refuted counter-claim always blocks a pass, regardless
-of findings or claim-level `in_scope`; without quorum, the result is still
-non-passing. Finding scope remains a separate mechanism.
-
-Claim-level `in_scope` is deliberately not consumed in adjudication. It may be
-retained as reviewer extension data, but cannot exempt a refutation. The rejected
-scope-filter design produced a concrete false pass: a candidate wrongly refused
-UTC under a contract admitting it; one reviewer explicitly refuted the absolute
-claim but marked it out of scope under a misleading caller boundary, while the
-other supported it. Both top-level verdicts were upheld. The unchanged gate
-returned exit 7; modeling the proposed filter made the same replies pass at
-quorum 2. Keeping the sentence unchanged while suppressing its counterexample
-does not preserve its protection.
-
-Required-refusal disputes are adjudicated **outside the gate** through
-`hanig-orchestrate`'s `adjudication.matrix`, under the current
-`docs/orchestrator-mandate.md`. This decision grants no new override authority.
-A confirmed finding demonstrably outside required behaviour is eligible for a
-nonblocking disposition only with independent orchestrator and mandate-named
-concurrence, author exclusion, and a full impact record: affected goals,
-criteria, outputs and consumers; impact evidence; shared surfaces;
-pre-existing policy authority; and an observable falsifier. Hard-invariant or
-required-criterion violations are not overridable; unresolved applicability
-blocks. Calling a refusal deliberate or required is not itself adjudication.
-
-Preserve the original `REVIEW_FAIL` or `REVIEW_CLAIMS_REFUTED` and its evidence.
-Eligibility after recorded adjudication is never called a pass, and a false
-delivered claim is never silently endorsed. The outside disposition does not
-change the mandatory assertion or the gate's decision.
-
-Local historical evidence (not installed dependencies):
-`.swarm/arc1163/stepback/reproduction.json` and committee session
-`.swarm/arc1163/stepback/sessions/arc1163-stepback-run-20260929T042532Z-8VYnZv.json`.
-The committee supplied analysis, not the decision's authority. The portable
-regression is `tests/test_arc1163_claim_scope.py`; run
-`python3 tests/mutate_arc1163.py` to require the rejected scope filter to fail
-that regression specifically at its exit-code assertion.
+**Required-refusal limit (ARC-1163):** the gate cannot independently distinguish required from wrongful refusal; a counter-claim refutation always blocks a pass.
+Adjudicate required refusals outside the gate via `hanig-orchestrate`'s `adjudication.matrix`, preserving the verdict. See [PROTOCOL.md](PROTOCOL.md) for the owner-reversible orchestrator decision (not an owner decision), rationale and durable regression evidence.
 
 ## Known limitation: `command` predicates are unsandboxed
 
