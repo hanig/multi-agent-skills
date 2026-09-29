@@ -19,9 +19,20 @@ SPEC.loader.exec_module(cases)
 
 
 def main():
-    baseline = unittest.TextTestRunner(stream=io.StringIO()).run(
+    method = "test_000_wrongful_refusal_with_false_scope_still_blocks"
+
+    class BaselineResult(unittest.TextTestResult):
+        positive_control_passed = False
+
+        def addSuccess(self, test):
+            super().addSuccess(test)
+            if test.id() == cases.TestCounterClaimScope(method).id():
+                self.positive_control_passed = True
+
+    baseline = unittest.TextTestRunner(stream=io.StringIO(), resultclass=BaselineResult).run(
         unittest.defaultTestLoader.loadTestsFromTestCase(cases.TestCounterClaimScope))
-    if not baseline.wasSuccessful() or baseline.testsRun != 4:
+    if (not baseline.wasSuccessful() or baseline.testsRun < 4
+            or not baseline.positive_control_passed):
         print(json.dumps({"baseline_passed": False, "tests": baseline.testsRun,
                           "failures": [trace for _test, trace in baseline.failures],
                           "errors": [trace for _test, trace in baseline.errors]}, indent=2))
@@ -37,7 +48,6 @@ def main():
     mutant = types.ModuleType("arc1163_scope_mutant")
     mutant.__file__ = str(cases.SCRIPT)
     exec(compile(source.replace(original, replacement), str(cases.SCRIPT), "exec"), mutant.__dict__)
-    method = "test_000_wrongful_refusal_with_false_scope_still_blocks"
     with patch.object(cases, "review", mutant):
         result = unittest.TextTestRunner(stream=io.StringIO()).run(
             unittest.TestSuite([cases.TestCounterClaimScope(method)]))
