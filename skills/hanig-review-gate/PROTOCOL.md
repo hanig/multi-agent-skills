@@ -288,6 +288,91 @@ Write claims you expect might FAIL. Claims written to be upheld waste the
 panel. In practice roughly two of six claims per round have been refuted, and
 the refuted ones are the entire value of the round.
 
+## Required refusals do not exempt the absolute counter-claim
+
+**ARC-1163, 2026-09-29: the orchestrator chose this documented-limit path;
+the owner may reverse it. This is not an owner decision.** The gate cannot
+independently distinguish a required refusal from a wrongful one. Keep
+`This change cannot make an honest run fail.` absolute and standalone: no caller
+qualification and no whitelist of a qualified sentence. Its refutation always
+blocks a pass; quorum determines the non-passing verdict, not permission to
+ignore the refutation.
+
+### Why claim scope is not applied
+
+The missing distinction is semantic: deciding whether a refusal is wrongful
+requires independent acceptance criteria and evidence applying them. A required
+refusal can therefore be reported as a counter-claim refutation. At quorum it
+blocks a pass regardless of findings or claim-level `in_scope`; without quorum
+the result is still non-passing. Finding scope remains a separate mechanism.
+
+Claim-level `in_scope` is deliberately not consumed in adjudication. It may be
+retained as reviewer extension data, but cannot exempt a refutation. The rejected
+scope-filter design produced a concrete false pass: a candidate wrongly refused
+UTC under a contract admitting it; one reviewer explicitly refuted the absolute
+claim but marked it out of scope under a misleading caller boundary, while the
+other supported it. Both top-level verdicts were upheld. The unchanged gate
+returned exit 7; filtering that refutation made the same replies pass at quorum
+2. Keeping the sentence unchanged while suppressing its counterexample does not
+preserve its protection.
+
+The committee identified the shared source of both failure directions: a
+reviewer-set scope flag supplies the needed applicability judgment from the
+same fallible source as the claim assessment. Neither a validated boolean nor
+a rationale supplies independent authority. Under the available criteria and
+authority, wiring the field cannot guarantee both protection from wrongful
+refusal and freedom from false rejection of required refusals. This is a
+documented limit, not proof that every bounded mechanism under different,
+independently supplied criteria is impossible.
+
+Rejected alternatives include consuming claim scope, qualifying the claim,
+whitelisting a qualified sentence, and rewriting the absolute counter-claim.
+The scope filter creates the reproduced false-pass path; the latter alternatives
+weaken the counter-pressure and are forbidden here. More agreement or stronger
+prompt wording does not itself establish independent acceptance criteria. The
+committee supplied analysis, not the authority for the orchestrator's decision.
+
+### Durable reproduction and optional local rationale
+
+The in-repository positive control is `tests/test_arc1163_claim_scope.py`,
+specifically
+`TestCounterClaimScope.test_000_wrongful_refusal_with_false_scope_still_blocks`.
+It executes the wrongful UTC refusal first, then sends the two responses through
+real gate parsing and adjudication, requiring exit 7 and preserving the explicit
+refutation in output and serialized audit evidence. Companion tests cover
+escalation, text output and refusal of a caller-qualified counter-claim.
+
+Run `python3 -m unittest tests.test_arc1163_claim_scope` and
+`python3 tests/mutate_arc1163.py`. The mutation runner adds the rejected scope
+filter in memory and requires the positive control to fail specifically with
+`0 != 7 : [arc1163-counter-claim-exit]`, not from a collateral error. These tracked
+tests require no worktree-local receipt and reproduce the evidence on another
+checkout.
+
+Optional supporting committee session, **local evidence not in the repository**:
+`/home/hani/multi-agent-skills-arc1163/.swarm/arc1163/stepback/sessions/arc1163-stepback-run-20260929T042532Z-8VYnZv.json`.
+SHA-256: `9cfe9d2f83c3a1e172eddeb546fb892b6f175e3bf4e20e3ae1376758ee2a0dfb`.
+The absolute path may become unavailable when that worktree is removed; the
+digest identifies the observed bytes but does not make them repository evidence.
+The regression and mutation runner above are the durable evidence.
+
+### Adjudication stays outside the gate
+
+Use `hanig-orchestrate`'s `adjudication.matrix` for required-refusal disputes
+outside the gate, under the current `docs/orchestrator-mandate.md` rather than a
+new blanket waiver. This decision grants no new override authority.
+Demonstrably outside-required-behaviour findings need independent orchestrator
+and mandate-named concurrence, excluding the author, plus the complete impact
+record (affected goals, criteria, outputs and consumers; evidence bounding
+impact; shared surfaces; pre-existing policy authority; observable falsifier).
+Required-criterion and hard-invariant violations remain nonoverridable;
+unresolved applicability blocks. Calling a refusal deliberate or required is
+not itself adjudication. Preserve `REVIEW_FAIL` and
+`REVIEW_CLAIMS_REFUTED` and their evidence. Eligibility after adjudication is
+not a pass, and a false delivered claim must not be silently endorsed. This
+choice retains the false-rejection limit; it changes neither the mandatory
+assertion nor any gate decision logic.
+
 ## The author does not judge their own work
 
 When a reviewer proposes a design, exclude it from the panel that reviews the

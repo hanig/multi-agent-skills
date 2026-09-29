@@ -495,6 +495,9 @@ reviews *against the plan*, with bounded iterations and a step-back rule when
 it stalls. The version here that ran 28 rounds had no plan to check against, no
 bound, and no step-back.
 
+**Required-refusal limit (ARC-1163):** the gate cannot independently distinguish required from wrongful refusal; a counter-claim refutation always blocks a pass.
+Adjudicate required refusals outside the gate via `hanig-orchestrate`'s `adjudication.matrix`, preserving the verdict. See [PROTOCOL.md](PROTOCOL.md) for the owner-reversible orchestrator decision (not an owner decision), rationale and durable regression evidence.
+
 ## Known limitation: `command` predicates are unsandboxed
 
 A `command` predicate in a contract runs through `sh` with the verifier's full
