@@ -8,6 +8,7 @@ are replaced. Fixtures are self-contained; no historical receipt is required.
 import importlib.util
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
@@ -84,6 +85,9 @@ class TestCounterClaimScope(unittest.TestCase):
             argv.extend(["--only", "refuter,supporter"])
         stdout, stderr = io.StringIO(), io.StringIO()
         with ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ))
+            for credential in ("OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"):
+                os.environ.pop(credential, None)
             stack.enter_context(patch("sys.argv", argv))
             stack.enter_context(patch.object(review, "load_reviewers", return_value=roster))
             stack.enter_context(patch.object(review, "availability", return_value=None))
