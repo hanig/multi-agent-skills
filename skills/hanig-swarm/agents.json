@@ -3,6 +3,14 @@
  "default": {
   "provider": "codex/gpt-6-astra",
   "thinking": "high",
+  "family": {
+   "listing": "paseo:codex",
+   "vendor": "",
+   "prefix": "gpt-",
+   "separator": ".",
+   "suffix": "-astra",
+   "major": 6
+  },
   "_evidence": "Owner decision 2026-09-24. A canary launched with `paseo run --provider codex --model gpt-6-astra --thinking high` inspected as Provider codex, Model gpt-6-astra, Thinking high, and answered. That check is the bar for changing this value, because paseo answers an unknown thinking id with an ERRORED agent."
  },
  "thinking_by_model": {

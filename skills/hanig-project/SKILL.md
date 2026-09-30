@@ -122,7 +122,11 @@ Run in this order. Each step's output is the next step's input.
 
 ```sh
 python3 "$P/scripts/survey.py" --repo . --out .swarm/survey.json
+python3 "$HANIG_REVIEW_GATE_DIR/scripts/resolve_models.py" --project .
 ```
+
+The second command moves each model seat to its newest probed point release
+for this project; report its `NEW_GENERATION` lines to the owner.
 
 The survey reports host, Python, schedulers, partitions, accounts, memory-flag
 requirements, disk, repository history and shape, protected documents, and

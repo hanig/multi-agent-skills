@@ -22,6 +22,22 @@ committee = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(committee)
 
 
+
+# A real routing snapshot for this checkout (resolve_models.py run here) would
+# otherwise move shipped seats under these roster-exact tests.
+_SNAPSHOTS = os.environ.get("HANIG_ROUTING_SNAPSHOTS")
+
+
+def setUpModule():
+    os.environ["HANIG_ROUTING_SNAPSHOTS"] = "off"
+
+
+def tearDownModule():
+    if _SNAPSHOTS is None:
+        os.environ.pop("HANIG_ROUTING_SNAPSHOTS", None)
+    else:
+        os.environ["HANIG_ROUTING_SNAPSHOTS"] = _SNAPSHOTS
+
 class TestCommitteeTokenUsage(unittest.TestCase):
     def run_stub(self, member, response):
         session = {

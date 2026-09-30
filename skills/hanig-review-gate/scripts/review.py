@@ -80,6 +80,10 @@ STATES = {"REVIEW_PASS": 0, "REVIEW_FAIL": 1, "REVIEW_UNAVAILABLE": 2,
 
 HERE = Path(__file__).resolve().parent
 CONFIG = HERE.parent / "reviewers.json"
+# The code-agent routing a resolution snapshot is also bound to. It belongs to
+# the sibling hanig-swarm skill; absent means the snapshot was resolved without
+# it, and model_family hashes absence as None on both sides.
+AGENTS_CONFIG = HERE.parent.parent / "hanig-swarm" / "agents.json"
 DEFAULT_PROFILE = "standard"
 # Bound on rounds for ONE change. Five rounds on one change in a single session
 # produced rounds 3, 4 and 5 each finding a defect in the previous round's fix.
@@ -959,7 +963,11 @@ def call_openai(rev, prompt, timeout, deadline=None):
         return None, empty_error
     return {"text": text,
             "in_tokens": usage.get("input_tokens"),
-            "out_tokens": usage.get("output_tokens")}, None
+            "out_tokens": usage.get("output_tokens"),
+            "reasoning_tokens": detail.get("reasoning_tokens"),
+            "served_model": data.get("model"),
+            "status": data.get("status"),
+            "response_id": data.get("id")}, None
 
 
 def call_openrouter(rev, prompt, timeout, deadline=None):
@@ -996,7 +1004,12 @@ def call_openrouter(rev, prompt, timeout, deadline=None):
         return None, empty_error
     return {"text": text,
             "in_tokens": usage.get("prompt_tokens"),
-            "out_tokens": usage.get("completion_tokens")}, None
+            "out_tokens": usage.get("completion_tokens"),
+            "reasoning_tokens": detail.get("reasoning_tokens"),
+            "served_model": data.get("model"),
+            "status": ("completed" if choice.get("finish_reason") == "stop"
+                       else choice.get("finish_reason")),
+            "response_id": data.get("id")}, None
 
 
 PROVIDERS = {"openai": call_openai, "openrouter": call_openrouter}
@@ -1899,6 +1912,50 @@ def load_reviewers():
     return revs
 
 
+def load_effective_reviewers(start=None):
+    """The roster with this project's valid routing-snapshot entries applied.
+
+    load_reviewers() returns the shipped pins. A snapshot written by
+    resolve_models.py replaces a seat's model and budget record only when it
+    matches this project and the exact installed routing config, and only
+    after model_family re-checks the entry against the live seat. Anything
+    else leaves the pin. HANIG_ROUTING_SNAPSHOTS=off disables snapshots.
+    """
+    reviewers = load_reviewers()
+    if os.environ.get("HANIG_ROUTING_SNAPSHOTS") == "off":
+        return reviewers
+    try:
+        import model_family as MF
+    except ImportError as exc:
+        if isinstance(exc, ModuleNotFoundError) and exc.name == "model_family":
+            return reviewers  # not installed alongside: the pins apply quietly
+        print(f"routing: model_family could not be loaded, using pins: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return reviewers
+    except Exception as exc:
+        print(f"routing: model_family could not be loaded, using pins: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return reviewers
+    pins = reviewers
+    try:
+        reviewers, notes = MF.apply_to_reviewers(
+            pins, MF.config_digests(CONFIG, AGENTS_CONFIG), start)
+    except Exception as exc:
+        # Resolution is an optimisation of routing, never a precondition of
+        # review: anything that goes wrong here leaves the pins already
+        # loaded (never a second read of reviewers.json).
+        print(f"routing: snapshot not applied, using pins: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return pins
+    for note in notes:
+        print(f"routing: {note}", file=sys.stderr)
+    for r in reviewers:
+        if r.get("_resolved_from"):
+            print(f"routing: {r['name']} resolved {r['_resolved_from']} -> "
+                  f"{r['model']}", file=sys.stderr)
+    return reviewers
+
+
 def availability(rev):
     """Why a reviewer cannot run, or None if it can."""
     if not rev.get("enabled", True):
@@ -1960,7 +2017,32 @@ def _short_error(err):
 
 def run_one(rev, prompt, timeout, require_claims=0, asserted=None):
     """Never raises: one malformed provider response must degrade that reviewer,
-    not take the whole panel down with a traceback."""
+    not take the whole panel down with a traceback.
+
+    A seat resolved to a newer point release (it carries `_resolved_from`)
+    that returns no usable verdict is retried once on its shipped pin, so a
+    resolution never leaves a seat without a verdict its pin would give. A
+    usable verdict, refutation included, stays that seat's judgment: asking
+    another model after an unwelcome answer is reviewer shopping, which the
+    orchestrator mandate forbids. The result names both models.
+    """
+    result = _guarded_run_one(rev, prompt, timeout, require_claims, asserted)
+    pinned = rev.get("_resolved_from")
+    if pinned and not result.get("ok") and not rev.get("_no_pin_fallback"):
+        fallback = dict(rev, model=pinned,
+                        _max_output_tokens_accepted=rev.get("_pinned_accepted"))
+        fallback.pop("_resolved_from", None)
+        retry = _guarded_run_one(fallback, prompt, timeout, require_claims,
+                                 asserted)
+        retry["fell_back_from"] = rev["model"]
+        retry["resolved_error"] = result.get("error")
+        print(f"routing: {rev['name']} fell back from {rev['model']} to its "
+              f"pin {pinned}: {result.get('error')}", file=sys.stderr)
+        return retry
+    return result
+
+
+def _guarded_run_one(rev, prompt, timeout, require_claims=0, asserted=None):
     try:
         return _run_one(rev, prompt, timeout, require_claims, asserted)
     except Exception as e:
@@ -2198,6 +2280,11 @@ def exclude_authors(reviewers, models):
             excluded.append({"name": reviewer["name"],
                              "model": reviewer["model"],
                              "reason": "authored this change"})
+        elif reviewer.get("_resolved_from") in models:
+            # The seat reviews on its resolved model, which did not author
+            # the change, but its pin did: keep the seat and forbid the
+            # fallback, so the author can never be the model that answers.
+            kept.append(dict(reviewer, _no_pin_fallback=True))
         else:
             kept.append(reviewer)
     return kept, excluded
@@ -2586,7 +2673,7 @@ def main():
     arm_watchdog(args.watchdog if args.watchdog is not None
                  else max(1800, args.timeout * 3))
 
-    reviewers = load_reviewers()
+    reviewers = load_effective_reviewers()
     roster = reviewers
     # --- the protocol, enforced rather than remembered ---------------------
     # Every rule below was already written down, and drifted from anyway,
@@ -2678,7 +2765,7 @@ def main():
             # said only what was wrong. The rule "every refusal names an
             # action" had been applied to the two verifiers and never to this
             # tool, which is the sibling-miss class it exists to catch.
-            have = ", ".join(sorted(r["name"] for r in load_reviewers()))
+            have = ", ".join(sorted(r["name"] for r in load_effective_reviewers()))
             config_error(f"no reviewer matches {wanted}. Available: {have}. "
                          f"Pass one of those, or drop --only to use the "
                          f"profile.")

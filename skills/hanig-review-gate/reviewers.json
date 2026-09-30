@@ -14,6 +14,14 @@
    "name": "deepseek-v4-pro",
    "provider": "openrouter",
    "model": "deepseek/deepseek-v4-pro",
+   "family": {
+    "listing": "openrouter",
+    "vendor": "deepseek",
+    "prefix": "deepseek-v",
+    "separator": ".",
+    "suffix": "-pro",
+    "major": 4
+   },
    "effort": null,
    "profiles": [
     "committee"
@@ -39,6 +47,14 @@
    "name": "luna",
    "provider": "openai",
    "model": "gpt-6-luna",
+   "family": {
+    "listing": "openai",
+    "vendor": "",
+    "prefix": "gpt-",
+    "separator": ".",
+    "suffix": "-luna",
+    "major": 6
+   },
    "effort": "high",
    "profiles": [
     "committee",
@@ -82,6 +98,14 @@
    "name": "kimi-k2.7-code",
    "provider": "openrouter",
    "model": "moonshotai/kimi-k2.7-code",
+   "family": {
+    "listing": "openrouter",
+    "vendor": "moonshotai",
+    "prefix": "kimi-k",
+    "separator": ".",
+    "suffix": "-code",
+    "major": 2
+   },
    "effort": null,
    "profiles": [
     "deep",
@@ -110,6 +134,14 @@
    "name": "sonnet-5.5",
    "provider": "openrouter",
    "model": "anthropic/claude-sonnet-5.5",
+   "family": {
+    "listing": "openrouter",
+    "vendor": "anthropic",
+    "prefix": "claude-sonnet-",
+    "separator": ".",
+    "suffix": "",
+    "major": 5
+   },
    "effort": "high",
    "profiles": [
     "committee",
@@ -143,6 +175,14 @@
    "name": "astra",
    "provider": "openai",
    "model": "gpt-6-astra",
+   "family": {
+    "listing": "openai",
+    "vendor": "",
+    "prefix": "gpt-",
+    "separator": ".",
+    "suffix": "-astra",
+    "major": 6
+   },
    "effort": "high",
    "profiles": [],
    "_profiles_note": "In NO gate tier since 2026-09-24: astra drives code units now, and an author does not review itself. Left the tie-breaker seat on 2026-09-28 for the same reason, and the concurrence seat in docs/orchestrator-mandate.md went to sol on 2026-09-25. Still enabled only so committee.py can reach it with --member on work it did not author; nothing refuses a self-review there today (ARC-755).",
@@ -163,6 +203,14 @@
    "name": "sol",
    "provider": "openai",
    "model": "gpt-6.1-sol",
+   "family": {
+    "listing": "openai",
+    "vendor": "",
+    "prefix": "gpt-",
+    "separator": ".",
+    "suffix": "-sol",
+    "major": 6
+   },
    "effort": "xhigh",
    "profiles": [
     "deep",
@@ -218,6 +266,14 @@
    "name": "sol-tiebreak",
    "provider": "openai",
    "model": "gpt-6.1-sol",
+   "family": {
+    "listing": "openai",
+    "vendor": "",
+    "prefix": "gpt-",
+    "separator": ".",
+    "suffix": "-sol",
+    "major": 6
+   },
    "effort": "xhigh",
    "profiles": [
     "tiebreak"
@@ -243,5 +299,6 @@
  ],
  "_effort_null_is_deliberate": "Measured 2026-09-19, three samples per cell against a real 120-line diff at a 16000 cap: glm-5.3 at effort=high burned the ENTIRE budget on reasoning and returned zero characters in 3 of 3 samples, at effort=low in 2 of 3, and at effort=null returned a 4581-character review for $0.016 in 3 of 3. kimi-k2.7-code spends ~12k completion tokens at every level, so effort changes nothing but price: high cost 83% more and returned slightly LESS answer. A null effort here is therefore deliberate and load-bearing, not an omission. Setting one on either reviewer makes the gate pay more for less, and on glm-5.3 for nothing at all. glm-5.3 was dropped from the roster on 2026-09-28; its measurements stay here as the evidence for the rule. kimi-k2.7-code keeps effort null.",
  "_output_budget_rule": "Every ENABLED reviewer must declare max_output_tokens explicitly and must carry a STRUCTURED _max_output_tokens_accepted record: date, max_output_tokens, provider, model, outcome and a positive output_tokens. tests/test_reviewer_budgets.py compares those typed fields to the reviewer's own configuration by exact equality. It was free text matched by substring for one round, and the gate refused that correctly: \"completed a 1280000-token request via openrouterx for z-ai/glm-5.3-variant\" satisfied substring checks for 128000, openrouter and z-ai/glm-5.3. English commentary belongs in _max_output_tokens, not in the thing a test parses. The rule exists because the 64000 shared default is not a safe default for a reasoning model -- it silently starved glm-5.3 and then kimi-k2.7-code (ARC-689). ARC-689 now records a starved reviewer as REVIEW_INCOMPLETE and gives it no judgment; it still spends resource budget and prevents a pass. Inheriting the default is therefore not permitted for an enabled reviewer, which is why any reviewer must be measured before it is enabled. Acceptance is per MODEL: 128000 completing for gpt-6-astra says nothing about gpt-6-sol. output_tokens is required and must be positive because a provider ACCEPTING a budget is not the same fact as a reviewer RETURNING usable output, and it was the second fact that motivated this change. STILL OWED, and not claimed here: these records are transcribed by hand from measured runs. Nothing generates them from the probe, so the test checks that a record is well formed and self-consistent, never that the run happened.",
- "_dropped": "2026-09-28 by owner decision: glm-5.3 (slowest reviewer in 18 saved gate runs, 408 s average, most expensive open model, starved at the old default in ARC-689), kimi-k3 (disabled since 2026-08-27, never measured) and astra-xhigh (the tie-breaker seat moved to sol-tiebreak). Their entries are in git history."
+ "_dropped": "2026-09-28 by owner decision: glm-5.3 (slowest reviewer in 18 saved gate runs, 408 s average, most expensive open model, starved at the old default in ARC-689), kimi-k3 (disabled since 2026-08-27, never measured) and astra-xhigh (the tie-breaker seat moved to sol-tiebreak). Their entries are in git history.",
+ "_family": "A seat's `family` lets resolve_models.py move it to a newer POINT RELEASE at project start: a listed id whose vendor path equals `vendor` and whose name is `prefix` + version (N, or N + `separator` + M) + `suffix`, with major equal to `major`, above the pinned `model`, whose probe passes. `major` is the owner's ceiling; raising it is a reviewed change to this file. The resolved choice lives in a per-project snapshot under the state home, never here; see docs/plan-model-resolution.md. The seat NAME is a label and does not change when the model does."
 }
