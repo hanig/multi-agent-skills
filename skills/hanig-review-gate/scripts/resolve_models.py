@@ -57,19 +57,41 @@ def _get_json(url, headers, timeout):
         return json.loads(response.read().decode("utf-8"))
 
 
-def _paseo(argv, timeout, cwd=None):
-    """Run a paseo command; return parsed JSON from its stdout, or raise."""
-    done = subprocess.run(["paseo"] + argv, capture_output=True, text=True,
-                          timeout=timeout, cwd=cwd)
-    if done.returncode != 0:
-        raise RuntimeError("paseo %s exited %d: %s" % (
-            argv[0], done.returncode, (done.stderr or done.stdout)[-300:].strip()))
-    text = done.stdout
+class PaseoError(RuntimeError):
+    """A failed paseo command, carrying whatever JSON it printed anyway."""
+
+    def __init__(self, message, payload=None):
+        RuntimeError.__init__(self, message)
+        self.payload = payload
+
+
+def _json_after_banner(text):
     start = min([i for i in (text.find("{"), text.find("[")) if i >= 0],
                 default=-1)
     if start < 0:
-        raise RuntimeError("paseo %s printed no JSON" % argv[0])
-    return json.loads(text[start:])
+        return None
+    try:
+        return json.loads(text[start:])
+    except ValueError:
+        return None
+
+
+def _paseo(argv, timeout, cwd=None):
+    """Run a paseo command; return parsed JSON from its stdout, or raise.
+
+    A non-zero exit still carries any JSON it printed, so a run that created
+    an agent and then failed can have that agent archived.
+    """
+    done = subprocess.run(["paseo"] + argv, capture_output=True, text=True,
+                          timeout=timeout, cwd=cwd)
+    payload = _json_after_banner(done.stdout or "")
+    if done.returncode != 0:
+        raise PaseoError("paseo %s exited %d: %s" % (
+            argv[0], done.returncode, (done.stderr or done.stdout)[-300:].strip()),
+            payload)
+    if payload is None:
+        raise PaseoError("paseo %s printed no JSON" % argv[0])
+    return payload
 
 
 def _shaped(value, kind, what):
@@ -89,8 +111,14 @@ def _paseo_object(argv, timeout, cwd=None):
 
 
 def _ids(rows, what):
-    return sorted({row["id"] for row in _shaped(rows, list, what)
-                   if isinstance(row, dict) and isinstance(row.get("id"), str)})
+    """Ids from a listing; any row without a string id fails the listing."""
+    ids = set()
+    for row in _shaped(rows, list, what):
+        if not (isinstance(row, dict) and isinstance(row.get("id"), str)):
+            raise RuntimeError("%s has a row without a string id: %r"
+                               % (what, row)[:200])
+        ids.add(row["id"])
+    return sorted(ids)
 
 
 def list_ids(listing, timeout):
@@ -147,29 +175,42 @@ def probe_reviewer(seat, candidate, timeout):
     return record, None
 
 
+def _archive(agent):
+    """Archive a canary; return None, or the reason it was not archived."""
+    try:
+        _paseo_object(["archive", agent, "--json"], 60)
+        return None
+    except Exception as exc:  # reported, never swallowed
+        reason = str(exc)[:200] or type(exc).__name__
+        print("resolve_models: canary %s was not archived: %s" % (agent, reason),
+              file=sys.stderr)
+        return reason
+
+
 def probe_agent(route, model, thinking, timeout):
     """(inspect record, None) when paseo launched exactly this; (None, reason)."""
     canary = MF.snapshot_dir() / "canary"
     canary.mkdir(parents=True, exist_ok=True, mode=0o700)
     archive_error = None
     try:
-        launched = _paseo_object(["run", "--provider", route, "--model", model,
-                           "--thinking", thinking, "--title", "resolve-canary",
-                           "--wait-timeout", "%ds" % timeout, "--json",
-                           CANARY_PROMPT], timeout + 60, cwd=str(canary))
+        try:
+            launched = _paseo_object(
+                ["run", "--provider", route, "--model", model, "--thinking",
+                 thinking, "--title", "resolve-canary", "--wait-timeout",
+                 "%ds" % timeout, "--json", CANARY_PROMPT],
+                timeout + 60, cwd=str(canary))
+        except PaseoError as exc:
+            orphan = exc.payload.get("agentId") if isinstance(exc.payload, dict) else None
+            if isinstance(orphan, str) and orphan:
+                archive_error = _archive(orphan)
+            raise
         agent = launched.get("agentId")
         if not (isinstance(agent, str) and agent):
             return None, "paseo run returned no agentId"
         try:
             seen = _paseo_object(["inspect", agent, "--json"], 60)
         finally:
-            try:
-                _paseo_object(["archive", agent, "--json"], 60)
-            except (RuntimeError, OSError, ValueError,
-                    subprocess.SubprocessError) as exc:
-                archive_error = str(exc)[:200]
-                print("resolve_models: canary %s was not archived: %s"
-                      % (agent, archive_error), file=sys.stderr)
+            archive_error = _archive(agent)
     except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as exc:
         detail = str(exc)[:300]
         if archive_error:
@@ -204,9 +245,9 @@ def resolve(args):
         if listing not in listings:
             try:
                 listings[listing] = (list_ids(listing, args.timeout), None)
-            except (OSError, ValueError, RuntimeError, KeyError,
-                    urllib.error.URLError, subprocess.SubprocessError) as exc:
-                listings[listing] = (None, R.redact(str(exc))[:200])
+            except Exception as exc:  # any listing failure keeps the pins
+                listings[listing] = (None, R.redact(
+                    "%s: %s" % (type(exc).__name__, exc))[:200])
         return listings[listing]
 
     def report(status, seat, pin, detail):
@@ -217,61 +258,95 @@ def resolve(args):
     if args.only:
         seats = [r for r in seats if r["name"] in args.only]
     for seat in seats:
-        family = MF.check_family(seat["family"])
-        ids, error = listed(family["listing"])
-        if error:
-            report("LISTING_FAILED", seat["name"], seat["model"], error)
-            continue
-        chosen, newer = MF.select(ids, family, seat["model"])
-        if newer:
-            report("NEW_GENERATION", seat["name"], seat["model"],
-                   "listed above major %d, not adopted: %s" % (
-                       family["major"], ", ".join(newer)))
-        if chosen is None:
-            report("PINNED", seat["name"], seat["model"], "no newer point release")
-            continue
-        if args.dry_run:
-            report("WOULD_PROBE", seat["name"], seat["model"], chosen)
-            continue
-        record, why = probe_reviewer(seat, chosen, args.timeout)
-        if record is None:
-            report("PROBE_FAILED", seat["name"], seat["model"],
-                   "%s: %s" % (chosen, why))
-            continue
-        snapshot["reviewers"][seat["name"]] = {"model": chosen, "record": record}
-        report("RESOLVED", seat["name"], seat["model"], chosen)
+        MF.check_family(seat["family"])  # a config error stops the run: exit 4
+        MF.select([], seat["family"], seat["model"])
+        _isolated(report, seat["name"], seat["model"], _resolve_reviewer,
+                  seat, listed, report, snapshot, args)
 
     default = (agents or {}).get("default") or {}
     if default.get("family") and (not args.only or "agent-default" in args.only):
-        family = MF.check_family(default["family"])
-        route, _slash, pin_model = default["provider"].partition("/")
-        table = (agents or {}).get("thinking_by_model") or {}
-        ids, error = listed(family["listing"])
-        if error:
-            report("LISTING_FAILED", "agent-default", default["provider"], error)
+        MF.check_family(default["family"])
+        MF.select([], default["family"], default["provider"].partition("/")[2])
+        _isolated(report, "agent-default", default["provider"],
+                  _resolve_agent_default, default, agents, listed, report,
+                  snapshot, args)
+    return _finish(args, snapshot, lines)
+
+
+def _isolated(report, name, pinned, step, *step_args):
+    """Run one seat's resolution; any failure there keeps that seat's pin.
+
+    Configuration errors were raised before this point. Everything else a
+    seat can meet (a provider or Paseo reply of an unexpected shape, an
+    exception inside a provider call, an unparseable id) is that seat's
+    SEAT_FAILED and never aborts the other seats.
+    """
+    try:
+        step(*step_args)
+    except Exception as exc:
+        report("SEAT_FAILED", name, pinned, R.redact(
+            "%s: %s" % (type(exc).__name__, exc))[:300])
+
+
+def _resolve_reviewer(seat, listed, report, snapshot, args):
+    family = seat["family"]
+    ids, error = listed(family["listing"])
+    if error:
+        report("LISTING_FAILED", seat["name"], seat["model"], error)
+        return
+    chosen, newer = MF.select(ids, family, seat["model"])
+    if newer:
+        report("NEW_GENERATION", seat["name"], seat["model"],
+               "listed above major %d, not adopted: %s" % (
+                   family["major"], ", ".join(newer)))
+    if chosen is None:
+        report("PINNED", seat["name"], seat["model"], "no newer point release")
+        return
+    if args.dry_run:
+        report("WOULD_PROBE", seat["name"], seat["model"], chosen)
+        return
+    record, why = probe_reviewer(seat, chosen, args.timeout)
+    if record is None:
+        report("PROBE_FAILED", seat["name"], seat["model"],
+               "%s: %s" % (chosen, why))
+        return
+    snapshot["reviewers"][seat["name"]] = {"model": chosen, "record": record}
+    report("RESOLVED", seat["name"], seat["model"], chosen)
+
+
+def _resolve_agent_default(default, agents, listed, report, snapshot, args):
+    family = default["family"]
+    route, _slash, pin_model = default["provider"].partition("/")
+    table = (agents or {}).get("thinking_by_model") or {}
+    ids, error = listed(family["listing"])
+    if error:
+        report("LISTING_FAILED", "agent-default", default["provider"], error)
+    else:
+        chosen, newer = MF.select(ids, family, pin_model)
+        if newer:
+            report("NEW_GENERATION", "agent-default", default["provider"],
+                   "listed above major %d, not adopted: %s" % (
+                       family["major"], ", ".join(newer)))
+        if chosen is None:
+            report("PINNED", "agent-default", default["provider"],
+                   "no newer point release")
+        elif args.dry_run:
+            report("WOULD_PROBE", "agent-default", default["provider"],
+                   route + "/" + chosen)
         else:
-            chosen, newer = MF.select(ids, family, pin_model)
-            if newer:
-                report("NEW_GENERATION", "agent-default", default["provider"],
-                       "listed above major %d, not adopted: %s" % (
-                           family["major"], ", ".join(newer)))
-            if chosen is None:
-                report("PINNED", "agent-default", default["provider"],
-                       "no newer point release")
-            elif args.dry_run:
-                report("WOULD_PROBE", "agent-default", default["provider"],
-                       route + "/" + chosen)
+            thinking = MF.agent_thinking(default, table, route + "/" + chosen)
+            probe, why = probe_agent(route, chosen, thinking, args.timeout)
+            if probe is None:
+                report("PROBE_FAILED", "agent-default", default["provider"],
+                       "%s/%s: %s" % (route, chosen, why))
             else:
-                thinking = MF.agent_thinking(default, table, route + "/" + chosen)
-                probe, why = probe_agent(route, chosen, thinking, args.timeout)
-                if probe is None:
-                    report("PROBE_FAILED", "agent-default", default["provider"],
-                           "%s/%s: %s" % (route, chosen, why))
-                else:
-                    snapshot["agent_default"] = {"provider": route + "/" + chosen,
-                                                 "probe": probe}
-                    report("RESOLVED", "agent-default", default["provider"],
-                           route + "/" + chosen)
+                snapshot["agent_default"] = {"provider": route + "/" + chosen,
+                                             "probe": probe}
+                report("RESOLVED", "agent-default", default["provider"],
+                       route + "/" + chosen)
+
+
+def _finish(args, snapshot, lines):
     path = None
     if not args.dry_run:
         if args.only:

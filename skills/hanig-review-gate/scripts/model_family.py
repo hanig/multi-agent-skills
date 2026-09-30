@@ -81,7 +81,9 @@ def version_of(model_id, family):
         return None
     core = name[len(prefix):len(name) - len(suffix)]
     sep = re.escape(family.get("separator", "."))
-    match = re.fullmatch(r"([0-9]+)(?:%s([0-9]+))?" % sep, core)
+    # Bounded digit runs: an unbounded run from an external id would reach
+    # int()'s digit limit on newer Pythons.
+    match = re.fullmatch(r"([0-9]{1,6})(?:%s([0-9]{1,6}))?" % sep, core)
     if not match:
         return None
     return int(match.group(1)), int(match.group(2) or 0)

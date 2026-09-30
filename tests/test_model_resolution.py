@@ -68,7 +68,8 @@ class TestFamilyParser(unittest.TestCase):
         for model in ("gpt-6-sol-pro", "gpt-6-sol:batch", "gpt-6.1-sol-2026-09-30",
                       "openai/gpt-6-sol", "gpt-6.1.2-sol", "gpt--sol", "gpt-x-sol",
                       "gpt-6-solar", "sol", "", None, "gpt-6-luna",
-                      "/gpt-6.1-sol", "gpt-6.1-sol/", "x//gpt-6.1-sol"):
+                      "/gpt-6.1-sol", "gpt-6.1-sol/", "x//gpt-6.1-sol",
+                      "gpt-" + "9" * 5000 + "-sol"):
             with self.subTest(model=model):
                 self.assertIsNone(MF.version_of(model, SOL))
 
@@ -245,8 +246,35 @@ class TestProbes(unittest.TestCase):
             self.assertIsNone(probe)
             self.assertTrue(why)
 
+    def test_a_run_that_fails_after_creating_an_agent_still_archives_it(self):
+        archived = []
+
+        def fake(argv, timeout, cwd=None):
+            if argv[0] == "run":
+                raise RM.PaseoError("paseo run exited 1: wait timeout",
+                                    {"agentId": "orphan"})
+            archived.append(argv[1])
+            return {"status": "archived"}
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"XDG_STATE_HOME": tmp}), \
+                mock.patch.object(RM, "_paseo", side_effect=fake):
+            probe, why = RM.probe_agent("codex", "gpt-6.1-astra", "high", 5)
+        self.assertIsNone(probe)
+        self.assertEqual(archived, ["orphan"])
+        self.assertIn("wait timeout", why)
+
+    def test_a_nonzero_paseo_exit_keeps_the_json_it_printed(self):
+        done = subprocess.CompletedProcess([], 1, stdout='banner\n{"agentId": "a9"}',
+                                           stderr="boom")
+        with mock.patch.object(RM.subprocess, "run", return_value=done):
+            with self.assertRaises(RM.PaseoError) as raised:
+                RM._paseo(["run"], 5)
+        self.assertEqual(raised.exception.payload, {"agentId": "a9"})
+
     def test_a_malformed_listing_raises_the_handled_error(self):
-        for listing, reply in (("paseo:codex", {"id": "gpt-6-astra"}),
+        for listing, reply in (("openrouter", {"data": [{"name": "x"}]}),
+                               ("paseo:codex", [{"id": "gpt-6-astra"}, {"model": "y"}]),
+                               ("paseo:codex", {"id": "gpt-6-astra"}),
                                ("paseo:codex", "gpt-6-astra"),
                                ("openrouter", []), ("openrouter", {"data": {"id": 1}})):
             with self.subTest(listing=listing, reply=reply):
@@ -499,6 +527,23 @@ class TestResolveEndToEnd(StateHome):
         self.assertEqual(stopped.exception.code, 0)
         statuses = {l["status"] for l in json.loads(out.getvalue())["seats"]}
         self.assertEqual(statuses, {"LISTING_FAILED"})
+
+    def test_any_failure_inside_one_seat_keeps_its_pin_and_spares_the_others(self):
+        def probe(seat, candidate, timeout):
+            if seat["name"] == "sol":
+                raise AttributeError("'list' object has no attribute 'get'")
+            return ({"model": candidate, "provider": seat["provider"],
+                     "max_output_tokens": seat.get("max_output_tokens"),
+                     "effort": seat.get("effort"), "outcome": "completed",
+                     "output_tokens": 3}, None)
+        report, _probe = self.run_resolver(probe=probe)
+        status = {(l["seat"], l["status"]) for l in report["seats"]}
+        self.assertIn(("sol", "SEAT_FAILED"), status)
+        self.assertIn(("sol-tiebreak", "RESOLVED"), status)
+        failed = [l for l in report["seats"] if l["status"] == "SEAT_FAILED"]
+        self.assertIn("AttributeError", failed[0]["detail"])
+        self.assertEqual(set(json.loads(Path(report["snapshot"]).read_text())
+                             ["reviewers"]), {"sol-tiebreak"})
 
     def test_a_failed_probe_writes_no_entry(self):
         report, _probe = self.run_resolver(probe=lambda s, c, t: (None, "HTTP 500"))
