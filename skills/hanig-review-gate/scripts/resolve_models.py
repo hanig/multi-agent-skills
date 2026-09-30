@@ -462,12 +462,18 @@ def _finish(args, snapshot, lines):
         try:
             path = MF.write_snapshot(args.project, snapshot)
         except OSError:
-            # Nothing new was recorded, so no older snapshot may keep
-            # routing this project: remove it and let the pins apply.
+            # Nothing new was recorded, so remove any older snapshot and let
+            # the pins apply. If the state directory refuses that too, the
+            # older snapshot (itself a probed, config-matching record) stays
+            # in force until the next successful run; say so.
             try:
                 MF.snapshot_path(args.project).unlink()
             except FileNotFoundError:
                 pass
+            except OSError as exc:
+                print("resolve_models: the previous snapshot %s could not be "
+                      "removed and stays in force: %s"
+                      % (MF.snapshot_path(args.project), exc), file=sys.stderr)
             raise
     return lines, path
 

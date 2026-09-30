@@ -884,6 +884,27 @@ class TestResolveEndToEnd(StateHome):
         self.assertEqual(stopped.exception.code, 4)
         self.assertFalse(path.exists())
 
+    def test_an_unremovable_older_snapshot_is_reported(self):
+        self.run_resolver()
+        argv = ["resolve_models.py", "--project", str(self.project)]
+        real_unlink = Path.unlink
+
+        def refuse(self_path, *a, **k):
+            if self_path == MF.snapshot_path(self.project):
+                raise PermissionError("read-only state")
+            return real_unlink(self_path, *a, **k)
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(RM.R, "load_reviewers", return_value=fixture_roster()), \
+                mock.patch.object(RM, "list_ids", side_effect=lambda l, t: self.LISTINGS[l]), \
+                mock.patch.object(RM, "probe_reviewer", return_value=(None, "down")), \
+                mock.patch.object(RM.MF, "write_snapshot", side_effect=OSError("disk full")), \
+                mock.patch.object(Path, "unlink", refuse), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
+            with self.assertRaises(SystemExit) as stopped:
+                RM.main()
+        self.assertEqual(stopped.exception.code, 4)
+        self.assertIn("stays in force", err.getvalue())
+
     def test_a_partial_run_keeps_the_other_seats(self):
         self.run_resolver()
         report, _probe = self.run_resolver("--only", "sol")
