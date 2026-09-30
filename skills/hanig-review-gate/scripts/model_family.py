@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -134,8 +135,22 @@ def project_key(project_dir):
 
 
 def git_toplevel(start):
-    """Nearest ancestor of start (inclusive) holding .git, or None."""
+    """The Git work tree containing start, or None.
+
+    Git answers first, so a work tree configured through GIT_DIR and
+    GIT_WORK_TREE, or any other layout git itself recognises, counts. Only
+    when git cannot answer does the nearest ancestor holding .git decide.
+    """
     here = Path(os.path.realpath(str(start)))
+    try:
+        done = subprocess.run(["git", "-C", str(here), "rev-parse",
+                               "--show-toplevel"], capture_output=True,
+                              text=True, timeout=15)
+        top = done.stdout.strip()
+        if done.returncode == 0 and top:
+            return Path(os.path.realpath(top))
+    except (OSError, subprocess.SubprocessError):
+        pass
     for candidate in (here,) + tuple(here.parents):
         if (candidate / ".git").exists():
             return candidate

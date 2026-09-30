@@ -404,6 +404,19 @@ class TestSnapshotStorage(StateHome):
                 MF.write_snapshot(self.project, self.snapshot())
             self.assertFalse((self.project / "state").exists())
 
+    def test_a_work_tree_configured_by_git_environment_is_respected(self):
+        meta = Path(self.tmp.name) / "meta"
+        work = Path(self.tmp.name) / "work"
+        (work / "app").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(meta)], check=True)
+        env = {"GIT_DIR": str(meta / ".git"), "GIT_WORK_TREE": str(work),
+               "XDG_STATE_HOME": str(work / "state")}
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(MF.git_toplevel(work / "app"),
+                             Path(os.path.realpath(work)))
+            with self.assertRaises(OSError):
+                MF.check_state_location(work / "app")
+
     def test_projects_in_one_repository_do_not_share_and_subdirs_find_theirs(self):
         (self.project / ".git").mkdir()
         a, b = self.project / "a", self.project / "b"
