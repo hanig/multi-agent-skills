@@ -105,7 +105,7 @@ class TestShippedLadderAddsReviewers(unittest.TestCase):
     def test_upgraded_models_reach_the_openai_request_with_existing_limits(self):
         roster = {r["name"]: r for r in R.load_reviewers()}
         for name, model, effort in (("luna", "gpt-6-luna", "high"),
-                                    ("sol", "gpt-6-sol", "xhigh")):
+                                    ("sol", "gpt-6.1-sol", "xhigh")):
             with self.subTest(reviewer=name), \
                     patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}), \
                     patch.object(R, "_post", return_value=({
@@ -440,7 +440,7 @@ class TestAuthorExclusion(unittest.TestCase):
     def test_deep_excludes_sol_author_and_names_removal(self):
         code, output, _err, called = self.invoke(
             "--profile", "deep", "--quorum", "3",
-            "--author", "codex/gpt-6-sol")
+            "--author", "codex/gpt-6.1-sol")
         self.assertNotIn("sol", called)
         self.assertEqual(set(called), {"luna", "sonnet-5.5", "kimi-k2.7-code"})
         self.assertEqual(code, R.STATES["REVIEW_PASS"], output)
@@ -461,7 +461,7 @@ class TestAuthorExclusion(unittest.TestCase):
                       ["--only", "sol,luna,kimi-k2.7-code,sonnet-5.5"]):
             with self.subTest(flags=flags):
                 code, output, _err, called = self.invoke(
-                    *flags, "--quorum", "4", "--author", "codex/gpt-6-sol",
+                    *flags, "--quorum", "4", "--author", "codex/gpt-6.1-sol",
                     "--json")
                 self.assertEqual(code, R.STATES["REVIEW_UNAVAILABLE"], output)
                 report = json.loads(output)
@@ -472,7 +472,7 @@ class TestAuthorExclusion(unittest.TestCase):
 
     def test_escalation_does_not_reintroduce_the_author(self):
         code, output, _err, called = self.invoke(
-            "--escalate", "--quorum", "3", "--author", "codex/gpt-6-sol",
+            "--escalate", "--quorum", "3", "--author", "codex/gpt-6.1-sol",
             "--json")
         self.assertEqual(code, 0, output)
         self.assertEqual(set(called), {"luna", "sonnet-5.5", "kimi-k2.7-code"})
@@ -480,7 +480,7 @@ class TestAuthorExclusion(unittest.TestCase):
 
     def test_repeatable_authors_preserve_nested_model_ids(self):
         code, output, _err, called = self.invoke(
-            "--profile", "deep", "--author", "codex/gpt-6-sol",
+            "--profile", "deep", "--author", "codex/gpt-6.1-sol",
             "--author", "openrouter/moonshotai/kimi-k2.7-code", "--json")
         self.assertEqual(code, 0, output)
         self.assertEqual(set(called), {"luna", "sonnet-5.5"})
@@ -488,8 +488,8 @@ class TestAuthorExclusion(unittest.TestCase):
                          {"sol", "kimi-k2.7-code"})
 
     def test_model_equality_does_not_match_substrings_case_or_seat_names(self):
-        for author in ("codex/my-gpt-6-sol-helper", "codex/GPT-6-SOL",
-                       "codex/sol", "codex/gpt-6-sol-extra"):
+        for author in ("codex/my-gpt-6.1-sol-helper", "codex/GPT-6.1-SOL",
+                       "codex/sol", "codex/gpt-6.1-sol-extra"):
             with self.subTest(author=author):
                 code, output, _err, called = self.invoke(
                     "--profile", "deep", "--author", author, "--json")
@@ -500,7 +500,7 @@ class TestAuthorExclusion(unittest.TestCase):
     def test_different_effort_seats_of_same_model_are_both_excluded(self):
         code, output, _err, called = self.invoke(
             "--only", "sol,sol-tiebreak,luna,kimi-k2.7-code",
-            "--author", "codex/gpt-6-sol", "--json")
+            "--author", "codex/gpt-6.1-sol", "--json")
         self.assertEqual(code, 0, output)
         self.assertEqual(set(called), {"luna", "kimi-k2.7-code"})
         self.assertEqual({r["name"] for r in json.loads(output)["excluded"]},
@@ -509,21 +509,21 @@ class TestAuthorExclusion(unittest.TestCase):
     def test_all_selected_authors_cannot_run_even_with_singleton_override(self):
         code, output, _err, called = self.invoke(
             "--only", "sol", "--quorum", "1", "--allow-single-reviewer",
-            "diagnostic", "--author", "codex/gpt-6-sol")
+            "diagnostic", "--author", "codex/gpt-6.1-sol")
         self.assertEqual(code, R.STATES["REVIEW_UNAVAILABLE"], output)
         self.assertEqual(called, [])
 
     def test_fresh_cycle_floor_survives_author_exclusion(self):
         code, output, _err, called = self.invoke(
             "--profile", "deep", "--fresh-cycle-from", "deep",
-            "--author", "codex/gpt-6-sol", "--json")
+            "--author", "codex/gpt-6.1-sol", "--json")
         self.assertEqual(code, R.STATES["REVIEW_UNAVAILABLE"], output)
         self.assertEqual(json.loads(output)["quorum"], 4)
         self.assertEqual(called, [])
 
     def test_plan_cannot_drop_its_author_and_pass_with_one(self):
         code, output, _err, called = self.invoke(
-            "--author", "codex/gpt-6-sol", kind="plan")
+            "--author", "codex/gpt-6.1-sol", kind="plan")
         self.assertEqual(code, R.STATES["REVIEW_UNAVAILABLE"], output)
         self.assertIn("required quorum is 2", output)
         self.assertEqual(called, [])
@@ -535,7 +535,7 @@ class TestAuthorExclusion(unittest.TestCase):
         self.assertNotIn("excluded", output)
 
     def test_malformed_author_is_a_usage_error(self):
-        for author in ("sol", "/gpt-6-sol", "codex/", "codex/ gpt-6-sol"):
+        for author in ("sol", "/gpt-6.1-sol", "codex/", "codex/ gpt-6.1-sol"):
             with self.subTest(author=author):
                 code, _out, err, called = self.invoke("--author", author)
                 self.assertEqual(code, R.STATES["REVIEW_ERROR"])

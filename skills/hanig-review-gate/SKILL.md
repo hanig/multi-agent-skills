@@ -59,11 +59,11 @@ plan review would have rejected.
 ## The author does not judge their own work
 
 Declare every author with repeatable `--author PROVIDER/MODEL`, for example
-`--author codex/gpt-6-sol`. The gate removes matching models from fixed,
+`--author codex/gpt-6.1-sol`. The gate removes matching models from fixed,
 explicit `--only`, and escalated panels and names each removal, such as
 `sol excluded: authored this change`. It compares the complete model ID after
 the first slash exactly, independent of transport provider: Codex's
-`codex/gpt-6-sol` matches the `openai` reviewer model `gpt-6-sol`, and
+`codex/gpt-6.1-sol` matches the `openai` reviewer model `gpt-6.1-sol`, and
 `openrouter/moonshotai/kimi-k2.7-code` retains the nested model ID. Model
 substrings, case variants, and seat names are not model matches. If exclusion
 leaves too few eligible reviewers for quorum (including a fresh-cycle floor),
@@ -306,7 +306,7 @@ deep      + sol @ xhigh
 
 A failing change costs its starting tier when that tier reaches quorum.
 Pass
-`--author codex/gpt-6-sol` for a change Sol authored: the gate excludes Sol
+`--author codex/gpt-6.1-sol` for a change Sol authored: the gate excludes Sol
 even at `deep`, provided the remaining independent panel can reach quorum. This matters more than it
 sounds: across six review rounds on this repo, **every single one failed**, and
 running the full panel each time paid the slowest, dearest reviewer to re-find
@@ -426,7 +426,7 @@ and availability is resolved live by `--list` rather than asserted in a file.
 | `luna` | OpenAI | `gpt-6-luna` (effort `high`) | `OPENAI_API_KEY` |
 | `sonnet-5.5` | OpenRouter | `anthropic/claude-sonnet-5.5` (effort `high`) | `OPENROUTER_API_KEY` |
 | `kimi-k2.7-code` | OpenRouter | `moonshotai/kimi-k2.7-code` | `OPENROUTER_API_KEY` |
-| `sol` | OpenAI | `gpt-6-sol` (effort `xhigh`, plan and deep) | `OPENAI_API_KEY` |
+| `sol` | OpenAI | `gpt-6.1-sol` (effort `xhigh`, plan and deep) | `OPENAI_API_KEY` |
 
 Both keys are exported from `~/.zshrc`. A non-interactive shell does not source
 it, so run through a login shell (`zsh -ic`) or export the keys explicitly —
