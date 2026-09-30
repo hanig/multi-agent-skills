@@ -645,6 +645,40 @@ when GLM-5.3 and Kimi K3 were dropped. Astra drives code and is in no gate tier,
 DeepSeek is a committee member, and the committee tie-breaker is whichever
 reviewer holds the `tiebreak` profile (`sol-tiebreak`). Pass every author's provider/model ID with `--author`.
 
+#### Model families
+
+A seat that declares a `family` in `reviewers.json` (or the code-agent
+`default` in `hanig-swarm/agents.json`) can move to a newer point release per
+project, without anyone editing a model name:
+
+```sh
+python3 scripts/resolve_models.py --project .            # hanig-project step 1
+python3 scripts/resolve_models.py --project . --dry-run  # list and select only
+```
+
+A family is a literal `vendor`, `prefix` and `suffix` around a version `N` or
+`N<separator>M`, plus `major`, the owner's ceiling. The resolver lists the
+provider's catalog (`openai`, `openrouter`, or `paseo:<provider>`), takes the
+greatest id with that major above the shipped pin, and probes it: an API seat
+must complete at its configured effort and output cap with the response naming
+exactly that id, and a Paseo seat's canary must inspect as exactly the
+requested provider, model and thinking. Only a passing probe is recorded, in
+one snapshot per project directory under the state home. The installed files
+never change. A listed id with a greater major prints `NEW_GENERATION`;
+adopting it is a reviewed change to `major`.
+
+`review.py`, `committee.py` and `swarm.py` use the snapshot only when it
+matches the project and the exact bytes of the installed `reviewers.json` and
+`agents.json`, and only for entries that pass the family, major, pin and
+probe-record checks again; otherwise the pins apply. Reinstalling a release
+therefore returns every seat to its pin until the resolver runs again.
+`HANIG_ROUTING_SNAPSHOTS=off` ignores snapshots. The state home is writable by
+the owner's UID, which launched agents share; that is a declared limit, as for
+coordinator state. Author exclusion compares the effective model exactly, so a
+family sibling (an author on `gpt-6-astra`, a seat resolved to `gpt-6.1-astra`)
+is not excluded. Seat names are labels and keep their names when the model
+moves.
+
 **Two contrasting models for a plan, never escalated.** A third adds agreement,
 not insight. That is measured, not assumed. `reviewers.json` carries routing
 only (endpoint, model id, effort, profile membership) and deliberately no

@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+"""Resolve each routing seat to its newest probed point release for a project.
+
+Run at project start (hanig-project step 1), or alone:
+
+    python3 "$HANIG_REVIEW_GATE_DIR/scripts/resolve_models.py" --project .
+
+For every enabled seat in reviewers.json that declares a `family`, and for the
+code-agent default in hanig-swarm/agents.json, it lists the provider catalog,
+picks the greatest same-major point release above the shipped pin
+(model_family.select), probes that exact id, and records it only when the
+probe passes. The result is one snapshot per project under the state home;
+the installed skill files are never modified. A newer generation is reported
+as NEW_GENERATION and never chosen: raising a family's `major` is a reviewed
+change. Exit 0 whenever every seat has a usable model, which includes keeping
+its pin; exit 4 on a configuration error.
+
+This program is network-capable, like review.py. swarm.py must never import
+it; it reads the snapshot through model_family only.
+"""
+
+import argparse
+import datetime
+import json
+import os
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+
+import model_family as MF  # noqa: E402
+import review as R  # noqa: E402
+
+PROBE_PROMPT = "Reply with exactly OK."
+CANARY_PROMPT = "Reply with exactly OK and nothing else. Do not use any tools."
+LISTING_URLS = {"openai": "https://api.openai.com/v1/models",
+                "openrouter": "https://openrouter.ai/api/v1/models"}
+LISTING_KEYS = {"openai": "OPENAI_API_KEY"}
+
+
+def utc_now():
+    return datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+
+def _get_json(url, headers, timeout):
+    request = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _paseo(argv, timeout, cwd=None):
+    """Run a paseo command; return parsed JSON from its stdout, or raise."""
+    done = subprocess.run(["paseo"] + argv, capture_output=True, text=True,
+                          timeout=timeout, cwd=cwd)
+    if done.returncode != 0:
+        raise RuntimeError("paseo %s exited %d: %s" % (
+            argv[0], done.returncode, (done.stderr or done.stdout)[-300:].strip()))
+    text = done.stdout
+    start = min([i for i in (text.find("{"), text.find("[")) if i >= 0],
+                default=-1)
+    if start < 0:
+        raise RuntimeError("paseo %s printed no JSON" % argv[0])
+    return json.loads(text[start:])
+
+
+def list_ids(listing, timeout):
+    """Model ids a listing serves, or raise with the reason."""
+    if listing.startswith(MF.PASEO_PREFIX):
+        rows = _paseo(["provider", "models", listing[len(MF.PASEO_PREFIX):],
+                       "--json"], timeout)
+        return sorted({row["id"] for row in rows
+                       if isinstance(row, dict) and isinstance(row.get("id"), str)})
+    headers = {}
+    key_var = LISTING_KEYS.get(listing)
+    if key_var:
+        key = os.environ.get(key_var)
+        if not key:
+            raise RuntimeError("%s not set" % key_var)
+        headers["Authorization"] = "Bearer " + key
+    data = _get_json(LISTING_URLS[listing], headers, timeout)
+    return sorted({row["id"] for row in data.get("data", [])
+                   if isinstance(row, dict) and isinstance(row.get("id"), str)})
+
+
+def probe_reviewer(seat, candidate, timeout):
+    """(record, None) when the exact candidate answered; (None, reason) otherwise."""
+    call = R.PROVIDERS.get(seat["provider"])
+    if call is None:
+        return None, "unknown provider %r" % seat["provider"]
+    response, error = call(dict(seat, model=candidate), PROBE_PROMPT, timeout)
+    if error:
+        return None, R.redact(str(error))
+    tokens = response.get("out_tokens")
+    if response.get("status") != "completed":
+        return None, "status %r" % response.get("status")
+    if not (response.get("text") or "").strip():
+        return None, "empty text"
+    if not (isinstance(tokens, int) and not isinstance(tokens, bool) and tokens > 0):
+        return None, "no output tokens"
+    if response.get("served_model") != candidate:
+        return None, "served %r, not %r" % (response.get("served_model"), candidate)
+    record = {"date": utc_now()[:10],
+              "max_output_tokens": seat.get("max_output_tokens"),
+              "provider": seat["provider"], "model": candidate,
+              "outcome": "completed",
+              "input_tokens": response.get("in_tokens"),
+              "output_tokens": tokens,
+              "reasoning_tokens": response.get("reasoning_tokens"),
+              "response_id": response.get("response_id"),
+              "observed_in": "resolve_models.py probe at %s: %s" % (
+                  utc_now(), PROBE_PROMPT)}
+    if seat.get("effort") is not None:
+        record["effort"] = seat["effort"]
+    return record, None
+
+
+def probe_agent(route, model, thinking, timeout):
+    """(inspect record, None) when paseo launched exactly this; (None, reason)."""
+    canary = MF.snapshot_dir() / "canary"
+    canary.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        launched = _paseo(["run", "--provider", route, "--model", model,
+                           "--thinking", thinking, "--title", "resolve-canary",
+                           "--wait-timeout", "%ds" % timeout, "--json",
+                           CANARY_PROMPT], timeout + 60, cwd=str(canary))
+        agent = launched.get("agentId")
+        if not agent:
+            return None, "paseo run returned no agentId"
+        try:
+            seen = _paseo(["inspect", agent, "--json"], 60)
+        finally:
+            try:
+                _paseo(["archive", agent, "--json"], 60)
+            except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
+                pass
+    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as exc:
+        return None, str(exc)[:300]
+    got = {key: seen.get(key) for key in ("Provider", "Model", "Thinking")}
+    want = {"Provider": route, "Model": model, "Thinking": thinking}
+    if got != want:
+        return None, "inspected %s, requested %s" % (got, want)
+    return dict(got, agent_id=agent, date=utc_now()), None
+
+
+def resolve(args):
+    reviewers = R.load_reviewers()
+    agents = None
+    if R.AGENTS_CONFIG.exists():
+        agents = json.loads(R.AGENTS_CONFIG.read_text(encoding="utf-8"))
+    listings, lines = {}, []
+    snapshot = {"schema": MF.SCHEMA,
+                "project": os.path.realpath(args.project),
+                "project_key": MF.project_key(args.project),
+                "config_sha256": MF.config_digests(R.CONFIG, R.AGENTS_CONFIG),
+                "resolved_at": utc_now(), "reviewers": {}, "agent_default": None}
+
+    def listed(listing):
+        if listing not in listings:
+            try:
+                listings[listing] = (list_ids(listing, args.timeout), None)
+            except (OSError, ValueError, RuntimeError, KeyError,
+                    urllib.error.URLError, subprocess.SubprocessError) as exc:
+                listings[listing] = (None, R.redact(str(exc))[:200])
+        return listings[listing]
+
+    def report(status, seat, pin, detail):
+        lines.append({"status": status, "seat": seat, "pinned": pin,
+                      "detail": detail})
+
+    seats = [r for r in reviewers if r.get("enabled", True) and r.get("family")]
+    if args.only:
+        seats = [r for r in seats if r["name"] in args.only]
+    for seat in seats:
+        family = MF.check_family(seat["family"])
+        ids, error = listed(family["listing"])
+        if error:
+            report("LISTING_FAILED", seat["name"], seat["model"], error)
+            continue
+        chosen, newer = MF.select(ids, family, seat["model"])
+        if newer:
+            report("NEW_GENERATION", seat["name"], seat["model"],
+                   "listed above major %d, not adopted: %s" % (
+                       family["major"], ", ".join(newer)))
+        if chosen is None:
+            report("PINNED", seat["name"], seat["model"], "no newer point release")
+            continue
+        if args.dry_run:
+            report("WOULD_PROBE", seat["name"], seat["model"], chosen)
+            continue
+        record, why = probe_reviewer(seat, chosen, args.timeout)
+        if record is None:
+            report("PROBE_FAILED", seat["name"], seat["model"],
+                   "%s: %s" % (chosen, why))
+            continue
+        snapshot["reviewers"][seat["name"]] = {"model": chosen, "record": record}
+        report("RESOLVED", seat["name"], seat["model"], chosen)
+
+    default = (agents or {}).get("default") or {}
+    if default.get("family") and (not args.only or "agent-default" in args.only):
+        family = MF.check_family(default["family"])
+        route, _slash, pin_model = default["provider"].partition("/")
+        thinking = ((agents or {}).get("thinking_by_model") or {}).get(
+            default["provider"], default.get("thinking"))
+        ids, error = listed(family["listing"])
+        if error:
+            report("LISTING_FAILED", "agent-default", default["provider"], error)
+        else:
+            chosen, newer = MF.select(ids, family, pin_model)
+            if newer:
+                report("NEW_GENERATION", "agent-default", default["provider"],
+                       "listed above major %d, not adopted: %s" % (
+                           family["major"], ", ".join(newer)))
+            if chosen is None:
+                report("PINNED", "agent-default", default["provider"],
+                       "no newer point release")
+            elif args.dry_run:
+                report("WOULD_PROBE", "agent-default", default["provider"],
+                       route + "/" + chosen)
+            else:
+                probe, why = probe_agent(route, chosen, thinking, args.timeout)
+                if probe is None:
+                    report("PROBE_FAILED", "agent-default", default["provider"],
+                           "%s/%s: %s" % (route, chosen, why))
+                else:
+                    snapshot["agent_default"] = {"provider": route + "/" + chosen,
+                                                 "probe": probe}
+                    report("RESOLVED", "agent-default", default["provider"],
+                           route + "/" + chosen)
+    path = None
+    if not args.dry_run:
+        if args.only:
+            # A partial run keeps the other seats' entries from a snapshot
+            # that still matches this project and config; readers re-check
+            # every entry anyway.
+            previous = _matching_snapshot(args.project, snapshot)
+            for name, entry in (previous.get("reviewers") or {}).items():
+                if name not in args.only:
+                    snapshot["reviewers"].setdefault(name, entry)
+            if "agent-default" not in args.only and previous.get("agent_default"):
+                snapshot["agent_default"] = previous["agent_default"]
+        path = MF.write_snapshot(args.project, snapshot)
+    return lines, path
+
+
+def _matching_snapshot(project, fresh):
+    try:
+        data = json.loads(MF.snapshot_path(project).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not (isinstance(data, dict) and data.get("schema") == fresh["schema"]
+            and data.get("project_key") == fresh["project_key"]
+            and data.get("config_sha256") == fresh["config_sha256"]):
+        return {}
+    return data
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--project", default=".",
+                    help="project directory the snapshot is keyed to")
+    ap.add_argument("--only", action="append", metavar="SEAT",
+                    help="resolve just this seat (repeatable; agent-default "
+                         "names the code-agent default)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="list and select only: no probe, no snapshot")
+    ap.add_argument("--timeout", type=int, default=300)
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+    if not Path(args.project).is_dir():
+        print("error: --project %s is not a directory" % args.project,
+              file=sys.stderr)
+        sys.exit(4)
+    try:
+        lines, path = resolve(args)
+    except (MF.FamilyError, OSError) as exc:
+        print("error: %s" % exc, file=sys.stderr)
+        sys.exit(4)
+    if args.json:
+        print(json.dumps({"seats": lines,
+                          "snapshot": str(path) if path else None}, indent=1))
+    else:
+        for line in lines:
+            print("%-15s %-16s %s  %s" % (line["status"], line["seat"],
+                                          line["pinned"], line["detail"]))
+        print("snapshot: %s" % (path if path else "not written (dry run)"))
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

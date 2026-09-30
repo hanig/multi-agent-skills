@@ -428,10 +428,10 @@ and availability is resolved live by `--list` rather than asserted in a file.
 | `kimi-k2.7-code` | OpenRouter | `moonshotai/kimi-k2.7-code` | `OPENROUTER_API_KEY` |
 | `sol` | OpenAI | `gpt-6.1-sol` (effort `xhigh`, plan and deep) | `OPENAI_API_KEY` |
 
-Both keys are exported from `~/.zshrc`. A non-interactive shell does not source
-it, so run through a login shell (`zsh -ic`) or export the keys explicitly —
-otherwise the gate reports `REVIEW_UNAVAILABLE`, which is correct behaviour but
-not what you wanted.
+Both keys are exported from `~/.zshrc`; a non-interactive shell does not source
+it, so run through `zsh -ic` or the gate reports `REVIEW_UNAVAILABLE`.
+
+**Point releases resolve per project** (`scripts/resolve_models.py`; README, "Model families").
 
 Plan review is Sol and Kimi, because a Claude orchestrator writes the plans.
 Astra drives code and is in no gate tier; its `high` seat remains available to

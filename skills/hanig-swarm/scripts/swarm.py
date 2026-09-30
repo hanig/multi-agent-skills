@@ -119,6 +119,56 @@ DEFAULT_AGENT_PROVIDER, DEFAULT_AGENT_THINKING, THINKING_BY_MODEL = (
     load_agent_routing())
 
 
+def _model_family():
+    """The review gate's network-free model_family module, or None.
+
+    Loaded by file path from the sibling hanig-review-gate skill (or
+    HANIG_REVIEW_GATE_DIR), never through review.py or committee.py, which
+    are network-capable and must not enter this process. Absent means no
+    resolution: the pins in agents.json apply.
+    """
+    import importlib.util
+    root = os.environ.get("HANIG_REVIEW_GATE_DIR") or str(
+        _HERE.parent.parent / "hanig-review-gate")
+    path = Path(root) / "scripts" / "model_family.py"
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("hanig_model_family", str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def apply_agent_resolution(plan_path):
+    """Adopt this project's resolved code-agent default, if its snapshot is valid.
+
+    Called once when a command loads a plan, so the snapshot is looked up
+    from the plan's directory upward to its project. A unit's own provider,
+    model or thinking still wins. The resolved model inherits the pinned
+    model's thinking level unless agents.json names one for it.
+    """
+    global DEFAULT_AGENT_PROVIDER
+    family = _model_family()
+    if family is None:
+        return DEFAULT_AGENT_PROVIDER
+    try:
+        routing = json.loads(AGENTS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return DEFAULT_AGENT_PROVIDER
+    digests = family.config_digests(
+        Path(family.__file__).resolve().parent.parent / "reviewers.json",
+        AGENTS_FILE)
+    provider, note = family.resolved_agent_default(
+        routing.get("default") or {}, routing.get("thinking_by_model") or {},
+        digests, start=Path(plan_path).resolve().parent)
+    if provider and provider != DEFAULT_AGENT_PROVIDER:
+        THINKING_BY_MODEL.setdefault(provider, THINKING_BY_MODEL.get(
+            DEFAULT_AGENT_PROVIDER, DEFAULT_AGENT_THINKING))
+        DEFAULT_AGENT_PROVIDER = provider
+        print("swarm: routing: " + note, file=sys.stderr)
+    return DEFAULT_AGENT_PROVIDER
+
+
 def default_thinking_for(u):
     """The reasoning effort one unit gets when it declares none.
 
@@ -8868,6 +8918,7 @@ def _prepare_command_paths(args, plan=None, extra_repos=(), need_root=False,
 
 
 def cmd_validate(args):
+    apply_agent_resolution(args.plan)
     plan, err = U.read_json(args.plan)
     if err:
         sys.exit(f"error: no readable plan at {args.plan}: {err}")
@@ -8928,6 +8979,7 @@ def cmd_validate(args):
 
 def cmd_run(args):
     """Dispatch what is ready, then EXIT. Does not babysit."""
+    apply_agent_resolution(args.plan)
     plan = _load_plan(args.plan)
     _prepare_command_paths(args, plan=plan, need_root=True)
     # ONE WRITER. Two schedulers firing at once, or a human running `advance`
