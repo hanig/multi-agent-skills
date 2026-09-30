@@ -179,7 +179,10 @@ def probe_reviewer(seat, candidate, timeout):
 def _archive(agent):
     """Archive a canary; return None, or the reason it was not archived."""
     try:
-        _paseo_object(["archive", agent, "--json"], 60)
+        reply = _paseo_object(["archive", agent, "--json"], 60)
+        if reply.get("status") != "archived":
+            raise RuntimeError("paseo archive reported status %r"
+                               % (reply.get("status"),))
         return None
     except Exception as exc:  # reported, never swallowed
         reason = str(exc)[:200] or type(exc).__name__
@@ -249,7 +252,9 @@ def _archive_orphans(agent, title, cwd):
         ids.update(row["id"] for row in rows if isinstance(row, dict)
                    and row.get("name") == title and isinstance(row.get("id"), str))
     except Exception as exc:
-        errors.append("could not look up canary %s: %s" % (title, str(exc)[:150]))
+        reason = "could not look up canary %s: %s" % (title, str(exc)[:150])
+        print("resolve_models: " + reason, file=sys.stderr)
+        errors.append(reason)
     errors += [error for error in (_archive(i) for i in sorted(ids)) if error]
     return "; ".join(errors) or None
 

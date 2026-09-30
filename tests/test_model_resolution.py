@@ -240,6 +240,25 @@ class TestProbes(unittest.TestCase):
         self.assertIn("inspect exited", why)
         self.assertIn("left unarchived", why)
 
+    def test_an_archive_reply_counts_only_when_it_says_archived(self):
+        with mock.patch.object(RM, "_paseo", return_value={"status": "failed"}), \
+                redirect_stderr(io.StringIO()) as err:
+            self.assertIn("'failed'", RM._archive("a1"))
+        self.assertIn("not archived", err.getvalue())
+        with mock.patch.object(RM, "_paseo", return_value={"status": "archived"}):
+            self.assertIsNone(RM._archive("a1"))
+
+    def test_a_failed_lookup_is_printed(self):
+        def fake(argv, timeout, cwd=None):
+            if argv[0] == "ls":
+                raise RuntimeError("daemon gone")
+            return {"status": "archived"}
+        with mock.patch.object(RM, "_paseo", side_effect=fake), \
+                redirect_stderr(io.StringIO()) as err:
+            reason = RM._archive_orphans("a1", "resolve-canary-x", ".")
+        self.assertIn("could not look up", reason)
+        self.assertIn("could not look up", err.getvalue())
+
     def test_a_failed_archive_is_reported_not_swallowed(self):
         good = {"Provider": "codex", "Model": "gpt-6.1-astra", "Thinking": "high"}
         with redirect_stderr(io.StringIO()) as err:
