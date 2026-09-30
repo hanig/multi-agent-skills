@@ -263,6 +263,26 @@ class TestProbes(unittest.TestCase):
         self.assertEqual(archived, ["orphan"])
         self.assertIn("wait timeout", why)
 
+    def test_a_killed_run_is_archived_by_its_unique_title(self):
+        seen = {}
+
+        def fake(argv, timeout, cwd=None):
+            if argv[0] == "run":
+                seen["title"] = argv[argv.index("--title") + 1]
+                raise subprocess.TimeoutExpired(["paseo", "run"], timeout)
+            if argv[0] == "ls":
+                return [{"id": "other", "name": "resolve-canary-elsewhere"},
+                        {"id": "mine", "name": seen["title"]}]
+            seen.setdefault("archived", []).append(argv[1])
+            return {"status": "archived"}
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"XDG_STATE_HOME": tmp}), \
+                mock.patch.object(RM, "_paseo", side_effect=fake):
+            probe, why = RM.probe_agent("codex", "gpt-6.1-astra", "high", 5)
+        self.assertIsNone(probe)
+        self.assertTrue(seen["title"].startswith("resolve-canary-"))
+        self.assertEqual(seen["archived"], ["mine"])
+
     def test_a_nonzero_paseo_exit_keeps_the_json_it_printed(self):
         done = subprocess.CompletedProcess([], 1, stdout='banner\n{"agentId": "a9"}',
                                            stderr="boom")
@@ -557,6 +577,41 @@ class TestResolveEndToEnd(StateHome):
         self.assertIsNone(report["snapshot"])
         self.assertFalse(probe.called)
         self.assertFalse((self.state / "hanig-review-gate").exists())
+
+    def exit_code(self, **patches):
+        argv = ["resolve_models.py", "--project", str(self.project)]
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(RM, "list_ids", side_effect=AssertionError("listed")), \
+                mock.patch.object(RM, "probe_reviewer", side_effect=AssertionError("probed")), \
+                redirect_stderr(io.StringIO()) as err, redirect_stdout(io.StringIO()):
+            with mock.patch.multiple(RM.R, **patches):
+                with self.assertRaises(SystemExit) as stopped:
+                    RM.main()
+        return stopped.exception.code, err.getvalue()
+
+    def test_any_configuration_error_stops_before_any_seat_starts(self):
+        roster = [dict(r) for r in shipped()[0]]
+        last = next(r for r in reversed(roster) if r.get("family"))
+        last["family"] = dict(last["family"], separator="_")
+        code, err = self.exit_code(load_reviewers=mock.Mock(return_value=roster))
+        self.assertEqual(code, 4)
+        self.assertIn("separator", err)
+        roster = [dict(r) for r in shipped()[0]]
+        last = next(r for r in reversed(roster) if r.get("family"))
+        last["family"] = dict(last["family"], major=last["family"]["major"] + 1)
+        code, err = self.exit_code(load_reviewers=mock.Mock(return_value=roster))
+        self.assertEqual(code, 4)
+        self.assertIn("not in its family", err)
+
+    def test_malformed_agents_json_is_a_configuration_error(self):
+        bad = Path(self.tmp.name) / "agents.json"
+        for body in ("{", "[]", '{"default": 3}', json.dumps(
+                {"default": {"provider": "codex", "family": shipped()[1]["default"]["family"]},
+                 "thinking_by_model": {}})):
+            with self.subTest(body=body):
+                bad.write_text(body)
+                code, err = self.exit_code(AGENTS_CONFIG=bad)
+                self.assertEqual(code, 4, err)
 
     def test_the_state_location_is_checked_before_any_canary_exists(self):
         inside = self.project / ".state"

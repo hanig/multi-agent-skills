@@ -27,6 +27,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -187,22 +188,40 @@ def _archive(agent):
         return reason
 
 
+def _archive_orphans(agent, title, cwd):
+    """Archive a failed run's agent: by id when known, else by its title."""
+    ids = [agent] if isinstance(agent, str) and agent else []
+    if not ids:
+        try:
+            rows = _shaped(_paseo(["ls", "--json"], 60, cwd=str(cwd)), list,
+                           "paseo ls")
+            ids = [row["id"] for row in rows if isinstance(row, dict)
+                   and row.get("name") == title and isinstance(row.get("id"), str)]
+        except Exception as exc:
+            return "could not look up canary %s: %s" % (title, str(exc)[:150])
+    errors = [error for error in (_archive(i) for i in ids) if error]
+    return "; ".join(errors) or None
+
+
 def probe_agent(route, model, thinking, timeout):
     """(inspect record, None) when paseo launched exactly this; (None, reason)."""
     canary = MF.snapshot_dir() / "canary"
     canary.mkdir(parents=True, exist_ok=True, mode=0o700)
+    title = "resolve-canary-" + uuid.uuid4().hex[:12]
     archive_error = None
     try:
         try:
             launched = _paseo_object(
                 ["run", "--provider", route, "--model", model, "--thinking",
-                 thinking, "--title", "resolve-canary", "--wait-timeout",
+                 thinking, "--title", title, "--wait-timeout",
                  "%ds" % timeout, "--json", CANARY_PROMPT],
                 timeout + 60, cwd=str(canary))
-        except PaseoError as exc:
-            orphan = exc.payload.get("agentId") if isinstance(exc.payload, dict) else None
-            if isinstance(orphan, str) and orphan:
-                archive_error = _archive(orphan)
+        except Exception as exc:
+            # A run that failed or was killed may still have created its
+            # agent. Archive it by the id it printed, else by its unique title.
+            orphan = (exc.payload.get("agentId")
+                      if isinstance(getattr(exc, "payload", None), dict) else None)
+            archive_error = _archive_orphans(orphan, title, canary)
             raise
         agent = launched.get("agentId")
         if not (isinstance(agent, str) and agent):
@@ -228,12 +247,49 @@ def probe_agent(route, model, thinking, timeout):
     return record, None
 
 
+def _pin_in_family(pin, family, what):
+    version = MF.version_of(pin, MF.check_family(family))
+    if version is None or version[0] != family["major"]:
+        raise MF.FamilyError("%s: pinned %r is not in its family at major %d"
+                             % (what, pin, family["major"]))
+
+
+def validate_config(reviewers, agents):
+    """Every configuration check, for every seat, before any seat starts.
+
+    Raises MF.FamilyError naming the first defect; main() turns it into
+    exit 4. Nothing has been listed, probed or launched when this runs.
+    """
+    for seat in reviewers:
+        if seat.get("enabled", True) and seat.get("family") is not None:
+            _pin_in_family(seat.get("model"), seat["family"], seat.get("name"))
+    if agents is None:
+        return
+    if not isinstance(agents, dict):
+        raise MF.FamilyError("agents.json must be a JSON object")
+    default = agents.get("default")
+    table = agents.get("thinking_by_model", {})
+    if not isinstance(default, dict) or not isinstance(table, dict):
+        raise MF.FamilyError("agents.json default and thinking_by_model must "
+                             "be objects")
+    if default.get("family") is not None:
+        route, slash, model = str(default.get("provider", "")).partition("/")
+        if not (route and slash and model):
+            raise MF.FamilyError("agents.json default.provider must be "
+                                 "PROVIDER/MODEL")
+        _pin_in_family(model, default["family"], "agent-default")
+
+
 def resolve(args):
     MF.check_state_location(args.project)  # before any canary directory exists
     reviewers = R.load_reviewers()
     agents = None
     if R.AGENTS_CONFIG.exists():
-        agents = json.loads(R.AGENTS_CONFIG.read_text(encoding="utf-8"))
+        try:
+            agents = json.loads(R.AGENTS_CONFIG.read_text(encoding="utf-8"))
+        except ValueError as exc:
+            raise MF.FamilyError("%s is not valid JSON: %s" % (R.AGENTS_CONFIG, exc))
+    validate_config(reviewers, agents)
     listings, lines = {}, []
     snapshot = {"schema": MF.SCHEMA,
                 "project": os.path.realpath(args.project),
@@ -258,15 +314,11 @@ def resolve(args):
     if args.only:
         seats = [r for r in seats if r["name"] in args.only]
     for seat in seats:
-        MF.check_family(seat["family"])  # a config error stops the run: exit 4
-        MF.select([], seat["family"], seat["model"])
         _isolated(report, seat["name"], seat["model"], _resolve_reviewer,
                   seat, listed, report, snapshot, args)
 
     default = (agents or {}).get("default") or {}
     if default.get("family") and (not args.only or "agent-default" in args.only):
-        MF.check_family(default["family"])
-        MF.select([], default["family"], default["provider"].partition("/")[2])
         _isolated(report, "agent-default", default["provider"],
                   _resolve_agent_default, default, agents, listed, report,
                   snapshot, args)
@@ -393,7 +445,7 @@ def main():
         sys.exit(4)
     try:
         lines, path = resolve(args)
-    except (MF.FamilyError, OSError) as exc:
+    except (MF.FamilyError, OSError) as exc:  # configuration or state location
         print("error: %s" % exc, file=sys.stderr)
         sys.exit(4)
     if args.json:
