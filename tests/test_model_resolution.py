@@ -230,6 +230,31 @@ class TestProbes(unittest.TestCase):
             (probe, why), _calls = self.paseo(dict(good, Model="x"), archive_fails=True)
         self.assertIn("left unarchived", why)
 
+    def test_a_malformed_paseo_reply_fails_the_probe_and_never_raises(self):
+        replies = {"run is a list": {"run": [], "inspect": {}},
+                   "run has no id": {"run": {"agentId": 7}, "inspect": {}},
+                   "inspect is a list": {"run": {"agentId": "a1"}, "inspect": []},
+                   "inspect is a string": {"run": {"agentId": "a1"}, "inspect": "x"}}
+        for label, reply in replies.items():
+            def fake(argv, timeout, cwd=None, reply=reply):
+                return reply.get(argv[0], {"status": "archived"})
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.dict(os.environ, {"XDG_STATE_HOME": tmp}), \
+                    mock.patch.object(RM, "_paseo", side_effect=fake):
+                probe, why = RM.probe_agent("codex", "gpt-6.1-astra", "high", 5)
+            self.assertIsNone(probe)
+            self.assertTrue(why)
+
+    def test_a_malformed_listing_raises_the_handled_error(self):
+        for listing, reply in (("paseo:codex", {"id": "gpt-6-astra"}),
+                               ("paseo:codex", "gpt-6-astra"),
+                               ("openrouter", []), ("openrouter", {"data": {"id": 1}})):
+            with self.subTest(listing=listing, reply=reply):
+                with mock.patch.object(RM, "_paseo", return_value=reply), \
+                        mock.patch.object(RM, "_get_json", return_value=reply):
+                    with self.assertRaises(RuntimeError):
+                        RM.list_ids(listing, 5)
+
     def test_paseo_output_is_parsed_after_its_banner(self):
         done = subprocess.CompletedProcess(
             [], 0, stdout='Created workspace w - x\nTip\n{"agentId": "a1"}\n', stderr="")
@@ -461,6 +486,19 @@ class TestResolveEndToEnd(StateHome):
         snapshot = json.loads(Path(report["snapshot"]).read_text())
         self.assertEqual(set(snapshot["reviewers"]), {"sol", "sol-tiebreak"})
         self.assertEqual(snapshot["config_sha256"], self.digests)
+
+    def test_a_malformed_listing_keeps_the_pin(self):
+        argv = ["resolve_models.py", "--project", str(self.project), "--json"]
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(RM, "_get_json", return_value=[]), \
+                mock.patch.object(RM, "_paseo", return_value={"not": "a list"}), \
+                mock.patch.dict(os.environ, {"OPENAI_API_KEY": "k"}), \
+                redirect_stdout(io.StringIO()) as out:
+            with self.assertRaises(SystemExit) as stopped:
+                RM.main()
+        self.assertEqual(stopped.exception.code, 0)
+        statuses = {l["status"] for l in json.loads(out.getvalue())["seats"]}
+        self.assertEqual(statuses, {"LISTING_FAILED"})
 
     def test_a_failed_probe_writes_no_entry(self):
         report, _probe = self.run_resolver(probe=lambda s, c, t: (None, "HTTP 500"))

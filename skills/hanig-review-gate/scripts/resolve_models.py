@@ -72,13 +72,32 @@ def _paseo(argv, timeout, cwd=None):
     return json.loads(text[start:])
 
 
+def _shaped(value, kind, what):
+    """Every external JSON value passes through here before it is read.
+
+    A value of the wrong shape raises RuntimeError, which the callers turn
+    into LISTING_FAILED or PROBE_FAILED, so the seat keeps its pin.
+    """
+    if not isinstance(value, kind):
+        raise RuntimeError("%s returned %s, not %s" % (
+            what, type(value).__name__, kind.__name__))
+    return value
+
+
+def _paseo_object(argv, timeout, cwd=None):
+    return _shaped(_paseo(argv, timeout, cwd), dict, "paseo " + argv[0])
+
+
+def _ids(rows, what):
+    return sorted({row["id"] for row in _shaped(rows, list, what)
+                   if isinstance(row, dict) and isinstance(row.get("id"), str)})
+
+
 def list_ids(listing, timeout):
     """Model ids a listing serves, or raise with the reason."""
     if listing.startswith(MF.PASEO_PREFIX):
-        rows = _paseo(["provider", "models", listing[len(MF.PASEO_PREFIX):],
-                       "--json"], timeout)
-        return sorted({row["id"] for row in rows
-                       if isinstance(row, dict) and isinstance(row.get("id"), str)})
+        return _ids(_paseo(["provider", "models", listing[len(MF.PASEO_PREFIX):],
+                            "--json"], timeout), "paseo provider models")
     headers = {}
     key_var = LISTING_KEYS.get(listing)
     if key_var:
@@ -86,9 +105,9 @@ def list_ids(listing, timeout):
         if not key:
             raise RuntimeError("%s not set" % key_var)
         headers["Authorization"] = "Bearer " + key
-    data = _get_json(LISTING_URLS[listing], headers, timeout)
-    return sorted({row["id"] for row in data.get("data", [])
-                   if isinstance(row, dict) and isinstance(row.get("id"), str)})
+    data = _shaped(_get_json(LISTING_URLS[listing], headers, timeout), dict,
+                   listing + " model listing")
+    return _ids(data.get("data"), listing + " model listing data")
 
 
 def probe_reviewer(seat, candidate, timeout):
@@ -134,18 +153,18 @@ def probe_agent(route, model, thinking, timeout):
     canary.mkdir(parents=True, exist_ok=True, mode=0o700)
     archive_error = None
     try:
-        launched = _paseo(["run", "--provider", route, "--model", model,
+        launched = _paseo_object(["run", "--provider", route, "--model", model,
                            "--thinking", thinking, "--title", "resolve-canary",
                            "--wait-timeout", "%ds" % timeout, "--json",
                            CANARY_PROMPT], timeout + 60, cwd=str(canary))
         agent = launched.get("agentId")
-        if not agent:
+        if not (isinstance(agent, str) and agent):
             return None, "paseo run returned no agentId"
         try:
-            seen = _paseo(["inspect", agent, "--json"], 60)
+            seen = _paseo_object(["inspect", agent, "--json"], 60)
         finally:
             try:
-                _paseo(["archive", agent, "--json"], 60)
+                _paseo_object(["archive", agent, "--json"], 60)
             except (RuntimeError, OSError, ValueError,
                     subprocess.SubprocessError) as exc:
                 archive_error = str(exc)[:200]
