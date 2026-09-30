@@ -145,15 +145,16 @@ def git_toplevel(start):
     try:
         done = subprocess.run(["git", "-C", str(here), "rev-parse",
                                "--show-toplevel"], capture_output=True,
-                              text=True, timeout=15)
-        # Remove exactly git's one trailing newline and nothing else: a path
-        # that ends in whitespace is still that path (never normalise a
-        # value about to be decided with).
+                              timeout=15)
+        # Bytes, decoded the way the OS decodes paths, with exactly git's one
+        # trailing newline removed: no text-mode translation and no
+        # stripping, so any valid POSIX path survives unchanged (never
+        # normalise a value about to be decided with).
         out = done.stdout
-        top = out[:-1] if out.endswith("\n") else out
+        top = os.fsdecode(out[:-1] if out.endswith(b"\n") else out)
         if done.returncode == 0 and top:
             return Path(os.path.realpath(top))
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, ValueError, subprocess.SubprocessError):
         pass
     for candidate in (here,) + tuple(here.parents):
         if (candidate / ".git").exists():

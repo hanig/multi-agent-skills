@@ -467,7 +467,8 @@ def _finish(args, snapshot, lines):
             # that still matches this project and config; readers re-check
             # every entry anyway.
             previous = _matching_snapshot(args.project, snapshot)
-            for name, entry in (previous.get("reviewers") or {}).items():
+            kept = previous.get("reviewers")
+            for name, entry in (kept if isinstance(kept, dict) else {}).items():
                 if name not in args.only:
                     snapshot["reviewers"].setdefault(name, entry)
             if "agent-default" not in args.only and previous.get("agent_default"):

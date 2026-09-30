@@ -427,6 +427,14 @@ class TestSnapshotStorage(StateHome):
             with self.assertRaises(OSError):
                 MF.check_state_location(repo / "app")
 
+    def test_git_paths_are_decoded_exactly_as_the_os_does(self):
+        for raw in (b"/tmp/repo\rname\n", b"/tmp/repo\xffname\n", b"/tmp/r \n"):
+            done = subprocess.CompletedProcess([], 0, stdout=raw, stderr=b"")
+            with self.subTest(raw=raw), \
+                    mock.patch.object(MF.subprocess, "run", return_value=done), \
+                    mock.patch.object(MF.os.path, "realpath", side_effect=lambda p: p):
+                self.assertEqual(str(MF.git_toplevel("/x")), os.fsdecode(raw[:-1]))
+
     def test_the_routing_directory_is_owner_only(self):
         target = MF.ensure_snapshot_dir()
         self.assertEqual(os.stat(target).st_mode & 0o777, 0o700)
@@ -976,6 +984,16 @@ class TestResolveEndToEnd(StateHome):
         self.assertEqual(stopped.exception.code, 4)
         self.assertEqual(path.read_bytes(), before)
         self.assertIn("stays in force", err.getvalue())
+
+    def test_a_partial_run_ignores_a_malformed_previous_reviewers_map(self):
+        self.run_resolver()
+        path = MF.snapshot_path(self.project)
+        data = json.loads(path.read_text())
+        data["reviewers"] = [1, 2]
+        path.write_text(json.dumps(data))
+        report, _probe = self.run_resolver("--only", "sol")
+        self.assertEqual(set(json.loads(Path(report["snapshot"]).read_text())
+                             ["reviewers"]), {"sol"})
 
     def test_a_partial_run_keeps_the_other_seats(self):
         self.run_resolver()
