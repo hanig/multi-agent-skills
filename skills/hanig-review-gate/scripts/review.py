@@ -1928,6 +1928,10 @@ def load_effective_reviewers(start=None):
         import model_family as MF
     except ImportError:
         return reviewers  # resolution not installed alongside: the pins apply
+    except Exception as exc:
+        print(f"routing: model_family could not be loaded, using pins: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return reviewers
     try:
         reviewers, notes = MF.apply_to_reviewers(
             reviewers, MF.config_digests(CONFIG, AGENTS_CONFIG), start)

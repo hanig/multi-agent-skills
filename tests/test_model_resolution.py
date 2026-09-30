@@ -523,6 +523,21 @@ class TestReaders(StateHome):
         self.assertEqual([r["model"] for r in effective],
                          [r["model"] for r in self.roster()])
 
+    def test_an_unloadable_module_is_reported_and_uses_the_pins(self):
+        real_import = __import__
+
+        def unreadable(name, *args, **kwargs):
+            if name == "model_family":
+                raise PermissionError("model_family.py: permission denied")
+            return real_import(name, *args, **kwargs)
+        with mock.patch("builtins.__import__", side_effect=unreadable), \
+                mock.patch.object(R, "load_reviewers", return_value=self.roster()), \
+                redirect_stderr(io.StringIO()) as err:
+            effective = R.load_effective_reviewers(start=self.project)
+        self.assertIn("could not be loaded, using pins", err.getvalue())
+        self.assertEqual([r["model"] for r in effective],
+                         [r["model"] for r in self.roster()])
+
     def test_the_off_switch_ignores_snapshots(self):
         MF.write_snapshot(self.project, self.snapshot(**{"sol": self.ENTRY}))
         with mock.patch.dict(os.environ, {"HANIG_ROUTING_SNAPSHOTS": "off"}):
