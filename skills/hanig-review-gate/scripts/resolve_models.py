@@ -284,6 +284,13 @@ def validate_config(reviewers, agents):
     for seat in reviewers:
         if seat.get("enabled", True) and seat.get("family") is not None:
             _pin_in_family(seat.get("model"), seat["family"], seat.get("name"))
+            # A reviewer is probed through its own provider, so its catalog
+            # must be that provider's; a reviewer never lists from paseo.
+            if seat["family"].get("listing") != seat.get("provider"):
+                raise MF.FamilyError("%s: family.listing %r must equal its "
+                                     "provider %r" % (seat.get("name"),
+                                     seat["family"].get("listing"),
+                                     seat.get("provider")))
     if agents is None:
         return
     # The same rules swarm.py's load_agent_routing applies to this file;

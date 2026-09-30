@@ -483,6 +483,14 @@ class TestReaders(StateHome):
             R.load_effective_reviewers(start=self.project)
         self.assertEqual(err.getvalue(), "")
 
+    def test_an_unreadable_snapshot_is_reported_and_ignored(self):
+        path = MF.snapshot_path(self.project)
+        path.parent.mkdir(parents=True)
+        path.write_text("{not json")
+        with redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(MF.find_snapshot(self.project), (None, None, None))
+        self.assertIn("unreadable, ignored", err.getvalue())
+
     def test_the_off_switch_ignores_snapshots(self):
         MF.write_snapshot(self.project, self.snapshot(**{"sol": self.ENTRY}))
         with mock.patch.dict(os.environ, {"HANIG_ROUTING_SNAPSHOTS": "off"}):
@@ -748,6 +756,14 @@ class TestResolveEndToEnd(StateHome):
         code, err = self.exit_code(load_reviewers=mock.Mock(return_value=roster))
         self.assertEqual(code, 4)
         self.assertIn("not in its family", err)
+
+    def test_a_reviewer_family_must_list_from_its_own_provider(self):
+        roster = [dict(r) for r in shipped()[0]]
+        seat = next(r for r in roster if r["name"] == "sol")
+        seat["family"] = dict(seat["family"], listing="openrouter")
+        code, err = self.exit_code(load_reviewers=mock.Mock(return_value=roster))
+        self.assertEqual(code, 4)
+        self.assertIn("must equal its provider", err)
 
     def test_malformed_agents_json_is_a_configuration_error(self):
         bad = Path(self.tmp.name) / "agents.json"

@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import tempfile
 from pathlib import Path
 
@@ -221,7 +222,11 @@ def find_snapshot(start=None):
         path = snapshot_path(candidate)
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as exc:
+            print("routing: snapshot %s is unreadable, ignored: %s: %s"
+                  % (path, type(exc).__name__, exc), file=sys.stderr)
             continue
         if isinstance(data, dict):
             return path, data, candidate
