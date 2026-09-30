@@ -28,6 +28,23 @@ SOL = {"listing": "openai", "vendor": "", "prefix": "gpt-", "separator": ".",
        "suffix": "-sol", "major": 6}
 
 
+def fixture_roster():
+    """The shipped roster with both Sol seats pinned to gpt-6-sol.
+
+    Reader and resolver tests need a pin with a known newer point release,
+    and must not depend on which release main happens to ship.
+    """
+    roster = []
+    for seat in shipped()[0]:
+        seat = dict(seat)
+        if seat["name"] in ("sol", "sol-tiebreak"):
+            seat["model"] = "gpt-6-sol"
+            seat["_max_output_tokens_accepted"] = dict(
+                seat["_max_output_tokens_accepted"], model="gpt-6-sol")
+        roster.append(seat)
+    return roster
+
+
 def shipped():
     reviewers = json.loads((GATE / "reviewers.json").read_text(encoding="utf-8"))
     agents = json.loads((ROOT / "skills/hanig-swarm/agents.json")
@@ -369,7 +386,7 @@ class TestReaders(StateHome):
                         "outcome": "completed", "output_tokens": 5}}
 
     def roster(self):
-        return [dict(r) for r in shipped()[0]]
+        return fixture_roster()
 
     def apply(self, snapshot, roster=None):
         MF.write_snapshot(self.project, snapshot)
@@ -573,6 +590,7 @@ class TestResolveEndToEnd(StateHome):
         argv = ["resolve_models.py", "--project", str(self.project), "--json"] + list(flags)
         out = io.StringIO()
         with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(RM.R, "load_reviewers", return_value=fixture_roster()), \
                 mock.patch.object(RM, "list_ids", side_effect=lambda l, t: self.LISTINGS[l]), \
                 mock.patch.object(RM, "probe_reviewer", side_effect=probe or record) as p, \
                 mock.patch.object(RM, "probe_agent") as agent, \
