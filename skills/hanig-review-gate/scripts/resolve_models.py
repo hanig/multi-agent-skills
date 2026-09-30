@@ -319,8 +319,14 @@ def validate_config(reviewers, agents):
         raise MF.FamilyError("agents.json thinking_by_model must be a non-empty "
                              "map of PROVIDER/MODEL strings to thinking ids")
     if default.get("family") is not None:
-        _pin_in_family(default["provider"].partition("/")[2], default["family"],
-                       "agent-default")
+        route, _slash, model = default["provider"].partition("/")
+        _pin_in_family(model, default["family"], "agent-default")
+        # The code agent is launched through paseo on its route, so its
+        # catalog must be that route's paseo listing.
+        if default["family"].get("listing") != MF.PASEO_PREFIX + route:
+            raise MF.FamilyError("agent-default: family.listing %r must be %r"
+                                 % (default["family"].get("listing"),
+                                    MF.PASEO_PREFIX + route))
 
 
 def _routing_token(value):

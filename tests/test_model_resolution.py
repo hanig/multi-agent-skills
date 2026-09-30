@@ -830,6 +830,20 @@ class TestResolveEndToEnd(StateHome):
         self.assertEqual(code, 4)
         self.assertIn("must equal its provider", err)
 
+    def test_the_agent_default_lists_from_its_own_paseo_route(self):
+        agents = json.loads(json.dumps(shipped()[1]))
+        agents["default"]["family"]["listing"] = "openai"
+        with self.assertRaises(MF.FamilyError) as raised:
+            RM.validate_config([], agents)
+        self.assertIn("paseo:codex", str(raised.exception))
+
+    def test_malformed_reviewers_json_exits_4_before_any_listing(self):
+        bad = Path(self.tmp.name) / "reviewers.json"
+        bad.write_text('{"reviewers": [1,],}')
+        code, err = self.exit_code(CONFIG=bad)
+        self.assertEqual(code, 4)
+        self.assertIn("REVIEW_ERROR", err)
+
     def test_malformed_agents_json_is_a_configuration_error(self):
         bad = Path(self.tmp.name) / "agents.json"
         for body in ("{", "[]", "null", '{"default": 3}', json.dumps(
