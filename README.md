@@ -637,8 +637,8 @@ Panels, from `reviewers.json`:
 | `standard` | fast + kimi-k2.7-code | the usual implementation panel |
 | `deep` | standard + sol at `xhigh` | final escalation tier or explicit `--profile deep` |
 
-Luna routes to `gpt-6-luna` at `high`, and Sol to `gpt-6-sol` at `xhigh`,
-by owner decision on 2026-09-25. Both retain their 128000-token output caps;
+Luna routes to `gpt-6-luna` at `high` (owner decision, 2026-09-25), and Sol to
+`gpt-6.1-sol` at `xhigh` (owner decision, 2026-09-30). Both retain their 128000-token output caps;
 dated acceptance probes and prior-release measurements live in `reviewers.json`.
 Sonnet 5.5 joined `fast`, `standard`, `deep` and the committee on 2026-09-28,
 when GLM-5.3 and Kimi K3 were dropped. Astra drives code and is in no gate tier,

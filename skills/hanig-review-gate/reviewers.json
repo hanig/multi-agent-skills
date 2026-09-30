@@ -162,7 +162,7 @@
   {
    "name": "sol",
    "provider": "openai",
-   "model": "gpt-6-sol",
+   "model": "gpt-6.1-sol",
    "effort": "xhigh",
    "profiles": [
     "deep",
@@ -170,26 +170,39 @@
    ],
    "enabled": true,
    "max_output_tokens": 128000,
-   "_max_output_tokens": "MEASURED for the 6-series upgrade through review._post at the configured effort and unchanged 128000 cap; completed with usable output. Prior model acceptance remains in _max_output_tokens_history. The minimal probe establishes budget acceptance, not capacity for every review.",
+   "_max_output_tokens": "MEASURED for gpt-6.1-sol on 2026-09-30 through review._post at the configured effort and unchanged 128000 cap; completed with usable output and the response named gpt-6.1-sol. Prior model acceptance remains in _max_output_tokens_history. The minimal probe establishes budget acceptance, not capacity for every review.",
    "_max_output_tokens_accepted": {
-    "date": "2026-09-26",
+    "date": "2026-09-30",
     "max_output_tokens": 128000,
     "provider": "openai",
-    "model": "gpt-6-sol",
+    "model": "gpt-6.1-sol",
     "effort": "xhigh",
     "outcome": "completed",
-    "input_tokens": 11,
-    "output_tokens": 5,
-    "reasoning_tokens": 0,
-    "response_id": "resp_084cd15d6d01929c006ab72343854c87d087366255b5d69202",
-    "observed_in": "2026-09-25 owner upgrade; real review._post Responses probe, input: Reply with exactly OK.; returned OK. Timestamp is UTC; this measures budget acceptance, not capacity for every review."
+    "input_tokens": 911,
+    "output_tokens": 543,
+    "reasoning_tokens": 432,
+    "response_id": "resp_0c34102f29d9ff7e006abd2085dcb887d0ad4b36c347f9be3c",
+    "observed_in": "2026-09-30 owner switch to gpt-6.1-sol; review._post to the Responses API with review.SYSTEM and input: Reply with exactly OK.; completed with response model gpt-6.1-sol. Timestamp is UTC; measures budget acceptance, not capacity for every review."
    },
    "_cost": {
     "in": 2.0,
     "out": 10.0
    },
-   "_note": "deep-tier reviewer since 2026-09-24 and plan reviewer since 2026-09-28. Owner decision: astra became the code driver, so it left the deep tier (an author does not review itself) and sol, which had been disabled only because IT was the driver, took the seat. The ladder reaches deep both when the cheaper tiers came up clean and when they could not fill quorum, and skips it only when a finding already has quorum behind it.",
+   "_note": "deep-tier reviewer since 2026-09-24 and plan reviewer since 2026-09-28. Owner decision: astra became the code driver, so it left the deep tier (an author does not review itself) and sol, which had been disabled only because IT was the driver, took the seat. The ladder reaches deep both when the cheaper tiers came up clean and when they could not fill quorum, and skips it only when a finding already has quorum behind it. Moved to gpt-6.1-sol by owner decision on 2026-09-30; the Paseo route codex/gpt-6-sol is unchanged because paseo lists no 6.1 yet.",
    "_max_output_tokens_history": [
+    {
+     "date": "2026-09-26",
+     "max_output_tokens": 128000,
+     "provider": "openai",
+     "model": "gpt-6-sol",
+     "effort": "xhigh",
+     "outcome": "completed",
+     "input_tokens": 11,
+     "output_tokens": 5,
+     "reasoning_tokens": 0,
+     "response_id": "resp_084cd15d6d01929c006ab72343854c87d087366255b5d69202",
+     "observed_in": "2026-09-25 owner upgrade; real review._post Responses probe, input: Reply with exactly OK.; returned OK. Timestamp is UTC; this measures budget acceptance, not capacity for every review."
+    },
     {
      "date": "2026-09-24",
      "max_output_tokens": 128000,
@@ -204,7 +217,7 @@
   {
    "name": "sol-tiebreak",
    "provider": "openai",
-   "model": "gpt-6-sol",
+   "model": "gpt-6.1-sol",
    "effort": "xhigh",
    "profiles": [
     "tiebreak"
@@ -212,19 +225,19 @@
    "enabled": true,
    "_note": "Committee tie-breaker since 2026-09-28, replacing astra-xhigh: astra authors the code it would rule on. sol also holds the concurrence seat in docs/orchestrator-mandate.md. A change sol authored cannot be tie-broken here; committee.py routes it to the owner.",
    "max_output_tokens": 128000,
-   "_max_output_tokens": "MEASURED for this model: same model, effort and cap as the sol reviewer, whose 2026-09-26 acceptance this repeats. Acceptance is per model, and this is that model.",
+   "_max_output_tokens": "MEASURED for this model: same model, effort and cap as the sol reviewer, whose 2026-09-30 gpt-6.1-sol acceptance this repeats.",
    "_max_output_tokens_accepted": {
-    "date": "2026-09-26",
+    "date": "2026-09-30",
     "max_output_tokens": 128000,
     "provider": "openai",
-    "model": "gpt-6-sol",
+    "model": "gpt-6.1-sol",
     "effort": "xhigh",
     "outcome": "completed",
-    "input_tokens": 11,
-    "output_tokens": 5,
-    "reasoning_tokens": 0,
-    "response_id": "resp_084cd15d6d01929c006ab72343854c87d087366255b5d69202",
-    "observed_in": "Copy of the sol reviewer's probe: run 2026-09-26 UTC for the owner's 2026-09-25 upgrade, through review._post's Responses request, input: Reply with exactly OK.; returned OK. Measures budget acceptance, not capacity for every question."
+    "input_tokens": 911,
+    "output_tokens": 543,
+    "reasoning_tokens": 432,
+    "response_id": "resp_0c34102f29d9ff7e006abd2085dcb887d0ad4b36c347f9be3c",
+    "observed_in": "2026-09-30 owner switch to gpt-6.1-sol; review._post to the Responses API with review.SYSTEM and input: Reply with exactly OK.; completed with response model gpt-6.1-sol. Timestamp is UTC; measures budget acceptance, not capacity for every review."
    }
   }
  ],
