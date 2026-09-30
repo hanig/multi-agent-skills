@@ -117,6 +117,9 @@ def load_agent_routing(path=AGENTS_FILE):
 # no such option.
 DEFAULT_AGENT_PROVIDER, DEFAULT_AGENT_THINKING, THINKING_BY_MODEL = (
     load_agent_routing())
+# The shipped pin. apply_agent_resolution starts from it every time, so a
+# resolution applied for one plan never outlives that plan in this process.
+PINNED_AGENT_PROVIDER = DEFAULT_AGENT_PROVIDER
 
 
 def _model_family():
@@ -148,6 +151,7 @@ def apply_agent_resolution(plan_path):
     model's thinking level unless agents.json names one for it.
     """
     global DEFAULT_AGENT_PROVIDER
+    DEFAULT_AGENT_PROVIDER = PINNED_AGENT_PROVIDER
     family = _model_family()
     if family is None:
         return DEFAULT_AGENT_PROVIDER
@@ -161,9 +165,9 @@ def apply_agent_resolution(plan_path):
     provider, note = family.resolved_agent_default(
         routing.get("default") or {}, routing.get("thinking_by_model") or {},
         digests, start=Path(plan_path).resolve().parent)
-    if provider and provider != DEFAULT_AGENT_PROVIDER:
+    if provider and note and provider != PINNED_AGENT_PROVIDER:
         THINKING_BY_MODEL.setdefault(provider, THINKING_BY_MODEL.get(
-            DEFAULT_AGENT_PROVIDER, DEFAULT_AGENT_THINKING))
+            PINNED_AGENT_PROVIDER, DEFAULT_AGENT_THINKING))
         DEFAULT_AGENT_PROVIDER = provider
         print("swarm: routing: " + note, file=sys.stderr)
     return DEFAULT_AGENT_PROVIDER

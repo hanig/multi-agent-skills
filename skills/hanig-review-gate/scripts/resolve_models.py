@@ -35,7 +35,11 @@ sys.path.insert(0, str(HERE))
 import model_family as MF  # noqa: E402
 import review as R  # noqa: E402
 
-PROBE_PROMPT = "Reply with exactly OK."
+# The probe goes through the gate's own call path, so the model answers under
+# review.SYSTEM; the reply must parse as a review verdict, not just be text.
+PROBE_PROMPT = ("Change under review: README.md gains the line 'Run the suite "
+                "before merging.'\nClaim 1: The change adds one line of prose "
+                "and no code.\nReturn your verdict.")
 CANARY_PROMPT = "Reply with exactly OK and nothing else. Do not use any tools."
 LISTING_URLS = {"openai": "https://api.openai.com/v1/models",
                 "openrouter": "https://openrouter.ai/api/v1/models"}
@@ -102,6 +106,9 @@ def probe_reviewer(seat, candidate, timeout):
         return None, "empty text"
     if not (isinstance(tokens, int) and not isinstance(tokens, bool) and tokens > 0):
         return None, "no output tokens"
+    verdict, verdict_error = R.parse_verdict(response.get("text"))
+    if verdict is None:
+        return None, "reply is not a review verdict: %s" % verdict_error
     if response.get("served_model") != candidate:
         return None, "served %r, not %r" % (response.get("served_model"), candidate)
     record = {"date": utc_now()[:10],
@@ -112,8 +119,10 @@ def probe_reviewer(seat, candidate, timeout):
               "output_tokens": tokens,
               "reasoning_tokens": response.get("reasoning_tokens"),
               "response_id": response.get("response_id"),
-              "observed_in": "resolve_models.py probe at %s: %s" % (
-                  utc_now(), PROBE_PROMPT)}
+              "observed_in": "resolve_models.py probe at %s: a one-claim "
+                             "review under review.SYSTEM; the reply parsed as a "
+                             "verdict. Measures budget acceptance and a usable "
+                             "verdict, not capacity for every review." % utc_now()}
     if seat.get("effort") is not None:
         record["effort"] = seat["effort"]
     return record, None
@@ -131,20 +140,29 @@ def probe_agent(route, model, thinking, timeout):
         agent = launched.get("agentId")
         if not agent:
             return None, "paseo run returned no agentId"
+        archive_error = None
         try:
             seen = _paseo(["inspect", agent, "--json"], 60)
         finally:
             try:
                 _paseo(["archive", agent, "--json"], 60)
-            except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
-                pass
+            except (RuntimeError, OSError, ValueError,
+                    subprocess.SubprocessError) as exc:
+                archive_error = str(exc)[:200]
+                print("resolve_models: canary %s was not archived: %s"
+                      % (agent, archive_error), file=sys.stderr)
     except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as exc:
         return None, str(exc)[:300]
     got = {key: seen.get(key) for key in ("Provider", "Model", "Thinking")}
     want = {"Provider": route, "Model": model, "Thinking": thinking}
+    suffix = "; canary %s left unarchived: %s" % (agent, archive_error) \
+        if archive_error else ""
     if got != want:
-        return None, "inspected %s, requested %s" % (got, want)
-    return dict(got, agent_id=agent, date=utc_now()), None
+        return None, "inspected %s, requested %s%s" % (got, want, suffix)
+    record = dict(got, agent_id=agent, date=utc_now())
+    if archive_error:
+        record["archive_error"] = archive_error
+    return record, None
 
 
 def resolve(args):

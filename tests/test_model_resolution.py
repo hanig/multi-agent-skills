@@ -133,7 +133,9 @@ class TestSelection(unittest.TestCase):
 class TestProbes(unittest.TestCase):
     SEAT = {"name": "sol", "provider": "openai", "model": "gpt-6-sol",
             "effort": "xhigh", "max_output_tokens": 128000, "family": SOL}
-    GOOD = {"text": "OK", "in_tokens": 11, "out_tokens": 5, "reasoning_tokens": 0,
+    VERDICT = json.dumps({"verdict": "upheld", "findings": [], "claims": [
+        {"claim_index": 1, "status": "supported", "reason": "prose only"}]})
+    GOOD = {"text": VERDICT, "in_tokens": 11, "out_tokens": 5, "reasoning_tokens": 0,
             "served_model": "gpt-6.1-sol", "status": "completed", "response_id": "r"}
 
     def probe(self, response, error=None):
@@ -158,6 +160,7 @@ class TestProbes(unittest.TestCase):
         cases = {"error": (None, "HTTP 500"),
                  "incomplete": (dict(self.GOOD, status="incomplete"), None),
                  "empty": (dict(self.GOOD, text="  "), None),
+                 "not a verdict": (dict(self.GOOD, text="OK"), None),
                  "no tokens": (dict(self.GOOD, out_tokens=0), None),
                  "bool tokens": (dict(self.GOOD, out_tokens=True), None),
                  "other model": (dict(self.GOOD, served_model="gpt-6-sol"), None),
@@ -170,7 +173,7 @@ class TestProbes(unittest.TestCase):
                 self.assertIsNone(record)
                 self.assertTrue(why)
 
-    def paseo(self, inspected):
+    def paseo(self, inspected, archive_fails=False):
         calls = []
 
         def fake(argv, timeout, cwd=None):
@@ -179,6 +182,8 @@ class TestProbes(unittest.TestCase):
                 return {"agentId": "a1", "status": "completed"}
             if argv[0] == "inspect":
                 return inspected
+            if archive_fails:
+                raise RuntimeError("paseo archive exited 1: daemon gone")
             return {"status": "archived"}
         with tempfile.TemporaryDirectory() as tmp, \
                 mock.patch.dict(os.environ, {"XDG_STATE_HOME": tmp}), \
@@ -199,6 +204,16 @@ class TestProbes(unittest.TestCase):
                 self.assertIsNone(probe)
                 self.assertIn("inspected", why)
                 self.assertEqual(calls, ["run", "inspect", "archive"])
+
+    def test_a_failed_archive_is_reported_not_swallowed(self):
+        good = {"Provider": "codex", "Model": "gpt-6.1-astra", "Thinking": "high"}
+        with redirect_stderr(io.StringIO()) as err:
+            (probe, why), calls = self.paseo(good, archive_fails=True)
+        self.assertIn("not archived", err.getvalue())
+        self.assertIn("daemon gone", probe["archive_error"])
+        with redirect_stderr(io.StringIO()):
+            (probe, why), _calls = self.paseo(dict(good, Model="x"), archive_fails=True)
+        self.assertIn("left unarchived", why)
 
     def test_paseo_output_is_parsed_after_its_banner(self):
         done = subprocess.CompletedProcess(
@@ -336,6 +351,22 @@ class TestReaders(StateHome):
             capture_output=True, text=True, timeout=60,
             env=dict(os.environ, XDG_STATE_HOME=str(self.state)))
         self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_swarm_resolution_never_outlives_its_plan(self):
+        import swarm as S
+        agents = shipped()[1]
+        MF.write_snapshot(self.project, dict(self.snapshot(), agent_default={
+            "provider": "codex/gpt-6.1-astra",
+            "probe": {"Provider": "codex", "Model": "gpt-6.1-astra",
+                      "Thinking": agents["thinking_by_model"]["codex/gpt-6-astra"]}}))
+        other = Path(self.tmp.name) / "other"
+        other.mkdir()
+        self.addCleanup(setattr, S, "DEFAULT_AGENT_PROVIDER", S.PINNED_AGENT_PROVIDER)
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(S.apply_agent_resolution(self.project / "plan.json"),
+                             "codex/gpt-6.1-astra")
+            self.assertEqual(S.apply_agent_resolution(other / "plan.json"),
+                             S.PINNED_AGENT_PROVIDER)
 
     def test_swarm_keeps_the_pin_for_a_mismatched_agent_probe(self):
         import swarm as S
