@@ -480,10 +480,16 @@ def _finish(args, snapshot, lines):
             # this project's previous snapshot untouched. It stays in force:
             # it is a probed, config-matching record for THIS project, and
             # removing it could expose an ancestor project's snapshot.
-            if MF.snapshot_path(args.project).exists():
+            previous = MF.snapshot_path(args.project)
+            if _matching_snapshot(args.project, snapshot):
                 print("resolve_models: snapshot not written; this project's "
-                      "previous snapshot %s stays in force"
-                      % MF.snapshot_path(args.project), file=sys.stderr)
+                      "previous snapshot %s stays in force" % previous,
+                      file=sys.stderr)
+            elif previous.exists():
+                print("resolve_models: snapshot not written; the previous "
+                      "snapshot %s does not match the installed routing "
+                      "config, so readers use the pins" % previous,
+                      file=sys.stderr)
             raise
     return lines, path
 

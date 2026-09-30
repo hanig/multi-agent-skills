@@ -984,6 +984,19 @@ class TestResolveEndToEnd(StateHome):
         self.assertEqual(stopped.exception.code, 4)
         self.assertEqual(path.read_bytes(), before)
         self.assertIn("stays in force", err.getvalue())
+        stale = json.loads(before)
+        stale["config_sha256"] = {"reviewers.json": "0" * 64, "agents.json": None}
+        path.write_text(json.dumps(stale))
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(RM.R, "load_reviewers", return_value=fixture_roster()), \
+                mock.patch.object(RM, "list_ids", side_effect=lambda l, t: self.LISTINGS[l]), \
+                mock.patch.object(RM, "probe_reviewer", return_value=(None, "down")), \
+                mock.patch.object(RM.MF, "write_snapshot", side_effect=OSError("disk full")), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
+            with self.assertRaises(SystemExit):
+                RM.main()
+        self.assertIn("readers use the pins", err.getvalue())
+        self.assertNotIn("stays in force", err.getvalue())
 
     def test_a_partial_run_ignores_a_malformed_previous_reviewers_map(self):
         self.run_resolver()
