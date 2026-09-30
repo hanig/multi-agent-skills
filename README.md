@@ -677,7 +677,8 @@ returns no usable verdict is retried once on its pin, so a resolution never
 leaves a seat without a verdict its pin would give; the report names both. A
 usable verdict, refutation included, stands: re-asking another model after an
 unwelcome answer would be reviewer shopping. Author
-exclusion therefore matches a seat's pin as well as its resolved model.
+exclusion compares the resolved model; a seat whose pin authored the change
+keeps its seat but loses the fallback, so the author never answers.
 `committee.py` keeps the shipped pins for its members and tie-breaker:
 it has no pin fallback, so resolution applies to the review gate only. The state home is writable by
 the owner's UID, which launched agents share; that is a declared limit, as for

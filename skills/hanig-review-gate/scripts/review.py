@@ -2015,7 +2015,7 @@ def run_one(rev, prompt, timeout, require_claims=0, asserted=None):
     """
     result = _guarded_run_one(rev, prompt, timeout, require_claims, asserted)
     pinned = rev.get("_resolved_from")
-    if pinned and not result.get("ok"):
+    if pinned and not result.get("ok") and not rev.get("_no_pin_fallback"):
         fallback = dict(rev, model=pinned,
                         _max_output_tokens_accepted=rev.get("_pinned_accepted"))
         fallback.pop("_resolved_from", None)
@@ -2263,13 +2263,15 @@ def exclude_authors(reviewers, models):
     """One exact-model exclusion rule shared with committee membership."""
     kept, excluded = [], []
     for reviewer in reviewers:
-        # A resolved seat falls back to its pin, so the pin must not be an
-        # author either.
-        if (reviewer["model"] in models
-                or reviewer.get("_resolved_from") in models):
+        if reviewer["model"] in models:
             excluded.append({"name": reviewer["name"],
                              "model": reviewer["model"],
                              "reason": "authored this change"})
+        elif reviewer.get("_resolved_from") in models:
+            # The seat reviews on its resolved model, which did not author
+            # the change, but its pin did: keep the seat and forbid the
+            # fallback, so the author can never be the model that answers.
+            kept.append(dict(reviewer, _no_pin_fallback=True))
         else:
             kept.append(reviewer)
     return kept, excluded

@@ -537,11 +537,44 @@ class TestReaders(StateHome):
                                          _resolved_from=None), "prompt", 5)
         self.assertFalse(pinned_only["ok"])
 
-    def test_an_author_on_the_pin_excludes_the_resolved_seat(self):
-        seat = {"name": "sol", "model": "gpt-6.1-sol", "_resolved_from": "gpt-6-sol"}
-        _kept, excluded = R.exclude_authors([seat], R.author_model_ids(
+    def test_an_author_on_the_pin_keeps_the_seat_but_loses_the_fallback(self):
+        seat = {"name": "sol", "provider": "openai", "model": "gpt-6.1-sol",
+                "_resolved_from": "gpt-6-sol",
+                "_max_output_tokens_accepted": {"model": "gpt-6.1-sol"},
+                "_pinned_accepted": {"model": "gpt-6-sol"}}
+        kept, excluded = R.exclude_authors([seat], R.author_model_ids(
             ["codex/gpt-6-sol"], [seat]))
+        self.assertEqual(excluded, [])
+        self.assertTrue(kept[0]["_no_pin_fallback"])
+        asked = []
+
+        def provider(rev, prompt, timeout, deadline=None):
+            asked.append(rev["model"])
+            return None, "HTTP 500"
+        with mock.patch.dict(R.PROVIDERS, {"openai": provider}):
+            result = R.run_one(kept[0], "prompt", 5)
+        self.assertEqual(asked, ["gpt-6.1-sol"])
+        self.assertFalse(result["ok"])
+        _kept, excluded = R.exclude_authors([seat], R.author_model_ids(
+            ["codex/gpt-6.1-sol"], [seat]))
         self.assertEqual([r["name"] for r in excluded], ["sol"])
+
+    def test_a_usable_refutation_is_never_retried_on_the_pin(self):
+        seat = {"name": "sol", "provider": "openai", "model": "gpt-6.1-sol",
+                "_resolved_from": "gpt-6-sol",
+                "_max_output_tokens_accepted": {"model": "gpt-6.1-sol"},
+                "_pinned_accepted": {"model": "gpt-6-sol"}}
+        refuted = json.dumps({"verdict": "refuted", "findings": [], "claims": []})
+        asked = []
+
+        def provider(rev, prompt, timeout, deadline=None):
+            asked.append(rev["model"])
+            return {"text": refuted, "in_tokens": 1, "out_tokens": 2}, None
+        with mock.patch.dict(R.PROVIDERS, {"openai": provider}):
+            result = R.run_one(seat, "prompt", 5)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["verdict"], "refuted")
+        self.assertEqual(asked, ["gpt-6.1-sol"])
 
     def test_the_committee_keeps_the_pins_even_with_a_snapshot(self):
         import committee
@@ -834,6 +867,22 @@ class TestResolveEndToEnd(StateHome):
         self.assertEqual(probe.call_args.args[:3], ("codex", "gpt-6.1-astra", want))
         snapshot = json.loads(Path(json.loads(out.getvalue())["snapshot"]).read_text())
         self.assertEqual(snapshot["agent_default"]["provider"], "codex/gpt-6.1-astra")
+
+    def test_a_failed_write_removes_the_older_snapshot(self):
+        self.run_resolver()
+        path = MF.snapshot_path(self.project)
+        self.assertTrue(path.exists())
+        argv = ["resolve_models.py", "--project", str(self.project)]
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(RM.R, "load_reviewers", return_value=fixture_roster()), \
+                mock.patch.object(RM, "list_ids", side_effect=lambda l, t: self.LISTINGS[l]), \
+                mock.patch.object(RM, "probe_reviewer", return_value=(None, "down")), \
+                mock.patch.object(RM.MF, "write_snapshot", side_effect=OSError("disk full")), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as stopped:
+                RM.main()
+        self.assertEqual(stopped.exception.code, 4)
+        self.assertFalse(path.exists())
 
     def test_a_partial_run_keeps_the_other_seats(self):
         self.run_resolver()

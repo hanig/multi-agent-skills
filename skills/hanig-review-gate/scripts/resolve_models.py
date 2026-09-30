@@ -459,7 +459,16 @@ def _finish(args, snapshot, lines):
                     snapshot["reviewers"].setdefault(name, entry)
             if "agent-default" not in args.only and previous.get("agent_default"):
                 snapshot["agent_default"] = previous["agent_default"]
-        path = MF.write_snapshot(args.project, snapshot)
+        try:
+            path = MF.write_snapshot(args.project, snapshot)
+        except OSError:
+            # Nothing new was recorded, so no older snapshot may keep
+            # routing this project: remove it and let the pins apply.
+            try:
+                MF.snapshot_path(args.project).unlink()
+            except FileNotFoundError:
+                pass
+            raise
     return lines, path
 
 
