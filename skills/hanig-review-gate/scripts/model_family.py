@@ -146,7 +146,11 @@ def git_toplevel(start):
         done = subprocess.run(["git", "-C", str(here), "rev-parse",
                                "--show-toplevel"], capture_output=True,
                               text=True, timeout=15)
-        top = done.stdout.strip()
+        # Remove exactly git's one trailing newline and nothing else: a path
+        # that ends in whitespace is still that path (never normalise a
+        # value about to be decided with).
+        out = done.stdout
+        top = out[:-1] if out.endswith("\n") else out
         if done.returncode == 0 and top:
             return Path(os.path.realpath(top))
     except (OSError, subprocess.SubprocessError):
@@ -167,6 +171,14 @@ def state_home():
 
 def snapshot_dir():
     return state_home().joinpath(*STATE_DIR)
+
+
+def ensure_snapshot_dir():
+    """Create the routing state directory, owner-only, and return it."""
+    target = snapshot_dir()
+    target.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(str(target), 0o700)
+    return target
 
 
 def snapshot_path(project_dir):
@@ -199,7 +211,7 @@ def write_snapshot(project_dir, snapshot):
     """Write atomically under the state home; refuse a path inside the project."""
     check_state_location(project_dir)
     target = snapshot_path(project_dir)
-    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    ensure_snapshot_dir()
     handle, tmp = tempfile.mkstemp(prefix=".snapshot-", dir=str(target.parent))
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as out:

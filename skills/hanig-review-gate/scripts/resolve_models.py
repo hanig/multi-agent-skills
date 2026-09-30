@@ -207,8 +207,8 @@ def probe_agent(route, model, thinking, timeout):
     and by the canary's unique title. A cleanup failure is printed and
     carried into the result.
     """
-    canary = MF.snapshot_dir() / "canary"
-    canary.mkdir(parents=True, exist_ok=True, mode=0o700)
+    canary = MF.ensure_snapshot_dir() / "canary"
+    canary.mkdir(exist_ok=True, mode=0o700)
     title = "resolve-canary-" + uuid.uuid4().hex[:12]
     printed = []
     outcome = (None, "canary did not run")

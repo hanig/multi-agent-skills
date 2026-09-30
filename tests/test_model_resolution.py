@@ -417,6 +417,20 @@ class TestSnapshotStorage(StateHome):
             with self.assertRaises(OSError):
                 MF.check_state_location(work / "app")
 
+    def test_a_work_tree_path_ending_in_whitespace_is_kept_exactly(self):
+        repo = Path(self.tmp.name) / "repo "
+        (repo / "app").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        self.assertEqual(MF.git_toplevel(repo / "app"),
+                         Path(os.path.realpath(repo)))
+        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(repo / "state")}):
+            with self.assertRaises(OSError):
+                MF.check_state_location(repo / "app")
+
+    def test_the_routing_directory_is_owner_only(self):
+        target = MF.ensure_snapshot_dir()
+        self.assertEqual(os.stat(target).st_mode & 0o777, 0o700)
+
     def test_projects_in_one_repository_do_not_share_and_subdirs_find_theirs(self):
         (self.project / ".git").mkdir()
         a, b = self.project / "a", self.project / "b"
