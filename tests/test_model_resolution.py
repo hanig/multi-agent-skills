@@ -548,7 +548,8 @@ class TestReaders(StateHome):
 
         def no_family(name, *args, **kwargs):
             if name == "model_family":
-                raise ImportError("not installed")
+                raise ModuleNotFoundError("No module named 'model_family'",
+                                          name="model_family")
             return real_import(name, *args, **kwargs)
         with mock.patch("builtins.__import__", side_effect=no_family), \
                 mock.patch.object(R, "load_reviewers", return_value=self.roster()), \
@@ -557,6 +558,19 @@ class TestReaders(StateHome):
         self.assertEqual(err.getvalue(), "")
         self.assertEqual([r["model"] for r in effective],
                          [r["model"] for r in self.roster()])
+
+    def test_a_broken_installed_module_is_reported(self):
+        real_import = __import__
+
+        def broken(name, *args, **kwargs):
+            if name == "model_family":
+                raise ModuleNotFoundError("No module named 'helper'", name="helper")
+            return real_import(name, *args, **kwargs)
+        with mock.patch("builtins.__import__", side_effect=broken), \
+                mock.patch.object(R, "load_reviewers", return_value=self.roster()), \
+                redirect_stderr(io.StringIO()) as err:
+            R.load_effective_reviewers(start=self.project)
+        self.assertIn("could not be loaded", err.getvalue())
 
     def test_an_unloadable_module_is_reported_and_uses_the_pins(self):
         real_import = __import__
