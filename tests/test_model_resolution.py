@@ -67,7 +67,8 @@ class TestFamilyParser(unittest.TestCase):
                 self.assertEqual(MF.version_of(model, SOL), version)
         for model in ("gpt-6-sol-pro", "gpt-6-sol:batch", "gpt-6.1-sol-2026-09-30",
                       "openai/gpt-6-sol", "gpt-6.1.2-sol", "gpt--sol", "gpt-x-sol",
-                      "gpt-6-solar", "sol", "", None, "gpt-6-luna"):
+                      "gpt-6-solar", "sol", "", None, "gpt-6-luna",
+                      "/gpt-6.1-sol", "gpt-6.1-sol/", "x//gpt-6.1-sol"):
             with self.subTest(model=model):
                 self.assertIsNone(MF.version_of(model, SOL))
 
@@ -204,6 +205,20 @@ class TestProbes(unittest.TestCase):
                 self.assertIsNone(probe)
                 self.assertIn("inspected", why)
                 self.assertEqual(calls, ["run", "inspect", "archive"])
+
+    def test_an_archive_failure_survives_an_inspect_failure(self):
+        def fake(argv, timeout, cwd=None):
+            if argv[0] == "run":
+                return {"agentId": "a1"}
+            raise RuntimeError("paseo %s exited 1" % argv[0])
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"XDG_STATE_HOME": tmp}), \
+                mock.patch.object(RM, "_paseo", side_effect=fake), \
+                redirect_stderr(io.StringIO()):
+            probe, why = RM.probe_agent("codex", "gpt-6.1-astra", "high", 5)
+        self.assertIsNone(probe)
+        self.assertIn("inspect exited", why)
+        self.assertIn("left unarchived", why)
 
     def test_a_failed_archive_is_reported_not_swallowed(self):
         good = {"Provider": "codex", "Model": "gpt-6.1-astra", "Thinking": "high"}
@@ -352,6 +367,37 @@ class TestReaders(StateHome):
             env=dict(os.environ, XDG_STATE_HOME=str(self.state)))
         self.assertEqual(check.returncode, 0, check.stderr)
 
+    def test_one_thinking_rule_for_resolver_reader_and_swarm(self):
+        import swarm as S
+        default = {"provider": "codex/gpt-6-astra", "thinking": "medium"}
+        table = {"codex/gpt-6-astra": "high", "codex/gpt-6.1-astra": "xhigh"}
+        self.assertEqual(MF.agent_thinking(default, table, "codex/gpt-6.1-astra"), "xhigh")
+        self.assertEqual(MF.agent_thinking(default, table, "codex/gpt-6.2-astra"), "high")
+        self.assertEqual(MF.agent_thinking(default, {}, "codex/gpt-6.2-astra"), "medium")
+        family = shipped()[1]["default"]["family"]
+        default = dict(default, family=family)
+        entry = lambda thinking: {"provider": "codex/gpt-6.1-astra", "probe": {
+            "Provider": "codex", "Model": "gpt-6.1-astra", "Thinking": thinking}}
+        self.assertIsNone(MF.agent_default_override(default, table, entry("high")))
+        self.assertEqual(MF.agent_default_override(default, table, entry("xhigh")),
+                         "codex/gpt-6.1-astra")
+        agents = json.loads(json.dumps(shipped()[1]))
+        agents["thinking_by_model"]["codex/gpt-6.1-astra"] = "xhigh"
+        fake = Path(self.tmp.name) / "agents.json"
+        fake.write_text(json.dumps(agents))
+        digests = MF.config_digests(R.CONFIG, fake)
+        MF.write_snapshot(self.project, dict(self.snapshot(), config_sha256=digests,
+                                             agent_default=entry("xhigh")))
+        table_before = dict(S.THINKING_BY_MODEL)
+        self.addCleanup(setattr, S, "THINKING_BY_MODEL", table_before)
+        self.addCleanup(setattr, S, "DEFAULT_AGENT_PROVIDER", S.PINNED_AGENT_PROVIDER)
+        with mock.patch.object(S, "AGENTS_FILE", fake), \
+                mock.patch.object(S, "THINKING_BY_MODEL", dict(table_before)), \
+                redirect_stderr(io.StringIO()):
+            self.assertEqual(S.apply_agent_resolution(self.project / "plan.json"),
+                             "codex/gpt-6.1-astra")
+            self.assertEqual(S.default_thinking_for({}), "xhigh")
+
     def test_swarm_resolution_never_outlives_its_plan(self):
         import swarm as S
         agents = shipped()[1]
@@ -428,6 +474,37 @@ class TestResolveEndToEnd(StateHome):
         self.assertIsNone(report["snapshot"])
         self.assertFalse(probe.called)
         self.assertFalse((self.state / "hanig-review-gate").exists())
+
+    def test_the_state_location_is_checked_before_any_canary_exists(self):
+        inside = self.project / ".state"
+        argv = ["resolve_models.py", "--project", str(self.project)]
+        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(inside)}), \
+                mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(RM, "list_ids", side_effect=AssertionError("listed")), \
+                redirect_stderr(io.StringIO()) as err:
+            with self.assertRaises(SystemExit) as stopped:
+                RM.main()
+        self.assertEqual(stopped.exception.code, 4)
+        self.assertIn("inside project", err.getvalue())
+        self.assertFalse(inside.exists())
+
+    def test_the_agent_default_is_probed_at_its_effective_thinking(self):
+        listings = dict(self.LISTINGS, **{"paseo:codex": ["gpt-6-astra", "gpt-6.1-astra"]})
+        agents = shipped()[1]
+        want = agents["thinking_by_model"]["codex/gpt-6-astra"]
+        argv = ["resolve_models.py", "--project", str(self.project), "--json",
+                "--only", "agent-default"]
+        probe = mock.Mock(return_value=({"Provider": "codex", "Model": "gpt-6.1-astra",
+                                         "Thinking": want}, None))
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(RM, "list_ids", side_effect=lambda l, t: listings[l]), \
+                mock.patch.object(RM, "probe_agent", probe), \
+                redirect_stdout(io.StringIO()) as out:
+            with self.assertRaises(SystemExit):
+                RM.main()
+        self.assertEqual(probe.call_args.args[:3], ("codex", "gpt-6.1-astra", want))
+        snapshot = json.loads(Path(json.loads(out.getvalue())["snapshot"]).read_text())
+        self.assertEqual(snapshot["agent_default"]["provider"], "codex/gpt-6.1-astra")
 
     def test_a_partial_run_keeps_the_other_seats(self):
         self.run_resolver()

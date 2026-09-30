@@ -166,8 +166,9 @@ def apply_agent_resolution(plan_path):
         routing.get("default") or {}, routing.get("thinking_by_model") or {},
         digests, start=Path(plan_path).resolve().parent)
     if provider and note and provider != PINNED_AGENT_PROVIDER:
-        THINKING_BY_MODEL.setdefault(provider, THINKING_BY_MODEL.get(
-            PINNED_AGENT_PROVIDER, DEFAULT_AGENT_THINKING))
+        THINKING_BY_MODEL[provider] = family.agent_thinking(
+            routing.get("default") or {}, routing.get("thinking_by_model") or {},
+            provider)
         DEFAULT_AGENT_PROVIDER = provider
         print("swarm: routing: " + note, file=sys.stderr)
     return DEFAULT_AGENT_PROVIDER

@@ -132,6 +132,7 @@ def probe_agent(route, model, thinking, timeout):
     """(inspect record, None) when paseo launched exactly this; (None, reason)."""
     canary = MF.snapshot_dir() / "canary"
     canary.mkdir(parents=True, exist_ok=True, mode=0o700)
+    archive_error = None
     try:
         launched = _paseo(["run", "--provider", route, "--model", model,
                            "--thinking", thinking, "--title", "resolve-canary",
@@ -140,7 +141,6 @@ def probe_agent(route, model, thinking, timeout):
         agent = launched.get("agentId")
         if not agent:
             return None, "paseo run returned no agentId"
-        archive_error = None
         try:
             seen = _paseo(["inspect", agent, "--json"], 60)
         finally:
@@ -152,7 +152,10 @@ def probe_agent(route, model, thinking, timeout):
                 print("resolve_models: canary %s was not archived: %s"
                       % (agent, archive_error), file=sys.stderr)
     except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as exc:
-        return None, str(exc)[:300]
+        detail = str(exc)[:300]
+        if archive_error:
+            detail += "; canary left unarchived: %s" % archive_error
+        return None, detail
     got = {key: seen.get(key) for key in ("Provider", "Model", "Thinking")}
     want = {"Provider": route, "Model": model, "Thinking": thinking}
     suffix = "; canary %s left unarchived: %s" % (agent, archive_error) \
@@ -166,6 +169,7 @@ def probe_agent(route, model, thinking, timeout):
 
 
 def resolve(args):
+    MF.check_state_location(args.project)  # before any canary directory exists
     reviewers = R.load_reviewers()
     agents = None
     if R.AGENTS_CONFIG.exists():
@@ -222,8 +226,7 @@ def resolve(args):
     if default.get("family") and (not args.only or "agent-default" in args.only):
         family = MF.check_family(default["family"])
         route, _slash, pin_model = default["provider"].partition("/")
-        thinking = ((agents or {}).get("thinking_by_model") or {}).get(
-            default["provider"], default.get("thinking"))
+        table = (agents or {}).get("thinking_by_model") or {}
         ids, error = listed(family["listing"])
         if error:
             report("LISTING_FAILED", "agent-default", default["provider"], error)
@@ -240,6 +243,7 @@ def resolve(args):
                 report("WOULD_PROBE", "agent-default", default["provider"],
                        route + "/" + chosen)
             else:
+                thinking = MF.agent_thinking(default, table, route + "/" + chosen)
                 probe, why = probe_agent(route, chosen, thinking, args.timeout)
                 if probe is None:
                     report("PROBE_FAILED", "agent-default", default["provider"],

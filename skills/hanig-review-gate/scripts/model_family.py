@@ -68,7 +68,9 @@ def version_of(model_id, family):
     else is accepted, so -pro, :batch, dated snapshots and previews are simply
     not in the family.
     """
-    if not isinstance(model_id, str):
+    # A leading or trailing "/" would leave an empty vendor or name; any other
+    # malformed path leaves a vendor that equals no family's.
+    if not isinstance(model_id, str) or model_id != model_id.strip("/"):
         return None
     vendor, name = split_id(model_id)
     if vendor != family.get("vendor", ""):
@@ -161,14 +163,24 @@ def _inside(path, root):
         return False
 
 
-def write_snapshot(project_dir, snapshot):
-    """Write atomically under the state home; refuse a path inside the project."""
+def check_state_location(project_dir):
+    """Raise unless the routing state dir lies outside the project and its worktree.
+
+    Called before anything is created there, canary directory included.
+    """
     project = Path(os.path.realpath(str(project_dir)))
     top = git_toplevel(project) or project
-    target = snapshot_path(project)
-    if _inside(target.parent, top) or _inside(target.parent, project):
-        raise OSError("routing snapshot %s would sit inside project %s; set "
+    target = snapshot_dir()
+    if _inside(target, top) or _inside(target, project):
+        raise OSError("routing state %s would sit inside project %s; set "
                       "XDG_STATE_HOME outside it" % (target, top))
+    return target
+
+
+def write_snapshot(project_dir, snapshot):
+    """Write atomically under the state home; refuse a path inside the project."""
+    check_state_location(project_dir)
+    target = snapshot_path(project_dir)
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     handle, tmp = tempfile.mkstemp(prefix=".snapshot-", dir=str(target.parent))
     try:
@@ -284,6 +296,16 @@ def apply_to_reviewers(reviewers, digests, start=None):
     return out, notes
 
 
+def agent_thinking(default, thinking_table, provider):
+    """Thinking id a code-agent provider runs at: its own table entry, else the
+    pinned provider's, else default.thinking. Resolver, reader and swarm.py
+    all use this one rule, so the probe runs at the effective setting."""
+    for key in (provider, default.get("provider")):
+        if key in thinking_table:
+            return thinking_table[key]
+    return default.get("thinking")
+
+
 def agent_default_override(default, thinking_table, entry):
     """The provider string a snapshot may set as the code-agent default, or None."""
     family = default.get("family") if isinstance(default, dict) else None
@@ -305,7 +327,7 @@ def agent_default_override(default, thinking_table, entry):
     if version[0] != family["major"] or version <= floor:
         return None
     probe = entry.get("probe")
-    thinking = thinking_table.get(pinned, default.get("thinking"))
+    thinking = agent_thinking(default, thinking_table, provider)
     if not (isinstance(probe, dict) and probe.get("Provider") == route
             and probe.get("Model") == model and probe.get("Thinking") == thinking):
         return None
