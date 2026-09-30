@@ -156,19 +156,23 @@ def apply_agent_resolution(plan_path):
     # In place, so every reference to the table sees the reset.
     THINKING_BY_MODEL.clear()
     THINKING_BY_MODEL.update(PINNED_THINKING_BY_MODEL)
-    family = _model_family()
-    if family is None:
-        return DEFAULT_AGENT_PROVIDER
     try:
+        family = _model_family()
+        if family is None:
+            return DEFAULT_AGENT_PROVIDER
         routing = json.loads(AGENTS_FILE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        digests = family.config_digests(
+            Path(family.__file__).resolve().parent.parent / "reviewers.json",
+            AGENTS_FILE)
+        provider, note = family.resolved_agent_default(
+            routing.get("default") or {}, routing.get("thinking_by_model") or {},
+            digests, start=Path(plan_path).resolve().parent)
+    except Exception as exc:
+        # Resolution never stops validate or run: anything wrong here leaves
+        # the shipped pin in force.
+        print("swarm: routing: snapshot not applied, using the pin: %s: %s"
+              % (type(exc).__name__, exc), file=sys.stderr)
         return DEFAULT_AGENT_PROVIDER
-    digests = family.config_digests(
-        Path(family.__file__).resolve().parent.parent / "reviewers.json",
-        AGENTS_FILE)
-    provider, note = family.resolved_agent_default(
-        routing.get("default") or {}, routing.get("thinking_by_model") or {},
-        digests, start=Path(plan_path).resolve().parent)
     if provider and note and provider != PINNED_AGENT_PROVIDER:
         THINKING_BY_MODEL[provider] = family.agent_thinking(
             routing.get("default") or {}, routing.get("thinking_by_model") or {},

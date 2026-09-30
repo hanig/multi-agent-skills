@@ -466,6 +466,23 @@ class TestReaders(StateHome):
                                  "gpt-6-sol")
                 self.assertTrue(any("sol" in note for note in notes))
 
+    def test_the_gate_never_breaks_on_resolution_and_falls_back_to_pins(self):
+        broken = Path(self.tmp.name) / "agents-dir"
+        broken.mkdir()
+        with mock.patch.object(R, "AGENTS_CONFIG", broken), \
+                mock.patch.object(R, "load_reviewers", return_value=self.roster()), \
+                redirect_stderr(io.StringIO()) as err:
+            effective = R.load_effective_reviewers(start=self.project)
+        self.assertEqual([r["model"] for r in effective],
+                         [r["model"] for r in self.roster()])
+        self.assertIn("using pins", err.getvalue())
+        with mock.patch.dict(os.environ, {"HANIG_ROUTING_SNAPSHOTS": "off"}), \
+                mock.patch.object(R, "AGENTS_CONFIG", broken), \
+                mock.patch.object(R, "load_reviewers", return_value=self.roster()), \
+                redirect_stderr(io.StringIO()) as err:
+            R.load_effective_reviewers(start=self.project)
+        self.assertEqual(err.getvalue(), "")
+
     def test_the_off_switch_ignores_snapshots(self):
         MF.write_snapshot(self.project, self.snapshot(**{"sol": self.ENTRY}))
         with mock.patch.dict(os.environ, {"HANIG_ROUTING_SNAPSHOTS": "off"}):
@@ -605,6 +622,15 @@ class TestReaders(StateHome):
             self.assertEqual(S.apply_agent_resolution(other / "plan.json"),
                              S.PINNED_AGENT_PROVIDER)
         self.assertEqual(S.THINKING_BY_MODEL, S.PINNED_THINKING_BY_MODEL)
+
+    def test_swarm_never_breaks_on_resolution(self):
+        import swarm as S
+        self.addCleanup(setattr, S, "DEFAULT_AGENT_PROVIDER", S.PINNED_AGENT_PROVIDER)
+        with mock.patch.object(S, "_model_family", side_effect=OSError("unreadable")), \
+                redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(S.apply_agent_resolution(self.project / "plan.json"),
+                             S.PINNED_AGENT_PROVIDER)
+        self.assertIn("using the pin", err.getvalue())
 
     def test_swarm_keeps_the_pin_for_a_mismatched_agent_probe(self):
         import swarm as S

@@ -9,11 +9,12 @@ For every enabled seat in reviewers.json that declares a `family`, and for the
 code-agent default in hanig-swarm/agents.json, it lists the provider catalog,
 picks the greatest same-major point release above the shipped pin
 (model_family.select), probes that exact id, and records it only when the
-probe passes. The result is one snapshot per project under the state home;
+probe passes. It prints one line per seat that declares a family. The result is one snapshot per project under the state home;
 the installed skill files are never modified. A newer generation is reported
 as NEW_GENERATION and never chosen: raising a family's `major` is a reviewed
 change. Exit 0 whenever every seat has a usable model, which includes keeping
-its pin; exit 4 on a configuration error.
+its pin; exit 4 on a configuration or location error, or when the snapshot
+cannot be written (the pins then apply).
 
 This program is network-capable, like review.py. swarm.py must never import
 it; it reads the snapshot through model_family only.

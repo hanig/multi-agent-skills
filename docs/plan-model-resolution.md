@@ -111,7 +111,7 @@ does not authenticate who wrote it.
 
 `hanig-project` step 1 adds one command after the survey:
 `python3 "$HANIG_REVIEW_GATE_DIR/scripts/resolve_models.py" --project .`. It
-prints one line per seat (`RESOLVED`, `PINNED`, `NEW_GENERATION`,
+prints one line per seat that declares a family (`RESOLVED`, `PINNED`, `NEW_GENERATION`,
 `PROBE_FAILED`) and exits 0 whenever every seat has a usable model, which
 includes keeping a pin. It can also be run alone.
 
