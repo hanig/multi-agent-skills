@@ -673,8 +673,10 @@ matches the project and the exact bytes of the installed `reviewers.json` and
 probe-record checks again; otherwise the pins apply. Reinstalling a release
 therefore returns every seat to its pin until the resolver runs again.
 `HANIG_ROUTING_SNAPSHOTS=off` ignores snapshots. A resolved gate seat that
-returns no usable verdict is retried once on its pin, so a resolution can
-never do worse than the model it replaced; the report names both. Author
+returns no usable verdict is retried once on its pin, so a resolution never
+leaves a seat without a verdict its pin would give; the report names both. A
+usable verdict, refutation included, stands: re-asking another model after an
+unwelcome answer would be reviewer shopping. Author
 exclusion therefore matches a seat's pin as well as its resolved model.
 `committee.py` members and its tie-breaker do not fall back: a failed
 committee call routes to the owner, as before. The state home is writable by

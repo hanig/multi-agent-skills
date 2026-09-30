@@ -2002,8 +2002,10 @@ def run_one(rev, prompt, timeout, require_claims=0, asserted=None):
 
     A seat resolved to a newer point release (it carries `_resolved_from`)
     that returns no usable verdict is retried once on its shipped pin, so a
-    resolved model can never do worse than the pin it replaced. The result
-    names both models.
+    resolution never leaves a seat without a verdict its pin would give. A
+    usable verdict, refutation included, stays that seat's judgment: asking
+    another model after an unwelcome answer is reviewer shopping, which the
+    orchestrator mandate forbids. The result names both models.
     """
     result = _guarded_run_one(rev, prompt, timeout, require_claims, asserted)
     pinned = rev.get("_resolved_from")
