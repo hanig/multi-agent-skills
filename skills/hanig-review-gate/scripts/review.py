@@ -1936,15 +1936,17 @@ def load_effective_reviewers(start=None):
         print(f"routing: model_family could not be loaded, using pins: "
               f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return reviewers
+    pins = reviewers
     try:
         reviewers, notes = MF.apply_to_reviewers(
-            reviewers, MF.config_digests(CONFIG, AGENTS_CONFIG), start)
+            pins, MF.config_digests(CONFIG, AGENTS_CONFIG), start)
     except Exception as exc:
         # Resolution is an optimisation of routing, never a precondition of
-        # review: anything that goes wrong here leaves the shipped pins.
+        # review: anything that goes wrong here leaves the pins already
+        # loaded (never a second read of reviewers.json).
         print(f"routing: snapshot not applied, using pins: "
               f"{type(exc).__name__}: {exc}", file=sys.stderr)
-        return load_reviewers()
+        return pins
     for note in notes:
         print(f"routing: {note}", file=sys.stderr)
     for r in reviewers:

@@ -513,12 +513,14 @@ class TestReaders(StateHome):
     def test_the_gate_never_breaks_on_resolution_and_falls_back_to_pins(self):
         broken = Path(self.tmp.name) / "agents-dir"
         broken.mkdir()
+        loads = mock.Mock(side_effect=[self.roster(), OSError("reviewers.json gone")])
         with mock.patch.object(R, "AGENTS_CONFIG", broken), \
-                mock.patch.object(R, "load_reviewers", return_value=self.roster()), \
+                mock.patch.object(R, "load_reviewers", loads), \
                 redirect_stderr(io.StringIO()) as err:
             effective = R.load_effective_reviewers(start=self.project)
         self.assertEqual([r["model"] for r in effective],
                          [r["model"] for r in self.roster()])
+        self.assertEqual(loads.call_count, 1)
         self.assertIn("using pins", err.getvalue())
         with mock.patch.dict(os.environ, {"HANIG_ROUTING_SNAPSHOTS": "off"}), \
                 mock.patch.object(R, "AGENTS_CONFIG", broken), \
