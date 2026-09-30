@@ -294,7 +294,8 @@ def apply_to_reviewers(reviewers, digests, start=None):
             continue
         model, record = override
         out.append(dict(seat, model=model, _max_output_tokens_accepted=record,
-                        _resolved_from=seat["model"]))
+                        _resolved_from=seat["model"],
+                        _pinned_accepted=seat.get("_max_output_tokens_accepted")))
     return out, notes
 
 

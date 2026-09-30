@@ -120,6 +120,7 @@ DEFAULT_AGENT_PROVIDER, DEFAULT_AGENT_THINKING, THINKING_BY_MODEL = (
 # The shipped pin. apply_agent_resolution starts from it every time, so a
 # resolution applied for one plan never outlives that plan in this process.
 PINNED_AGENT_PROVIDER = DEFAULT_AGENT_PROVIDER
+PINNED_THINKING_BY_MODEL = dict(THINKING_BY_MODEL)
 
 
 def _model_family():
@@ -152,6 +153,9 @@ def apply_agent_resolution(plan_path):
     """
     global DEFAULT_AGENT_PROVIDER
     DEFAULT_AGENT_PROVIDER = PINNED_AGENT_PROVIDER
+    # In place, so every reference to the table sees the reset.
+    THINKING_BY_MODEL.clear()
+    THINKING_BY_MODEL.update(PINNED_THINKING_BY_MODEL)
     family = _model_family()
     if family is None:
         return DEFAULT_AGENT_PROVIDER

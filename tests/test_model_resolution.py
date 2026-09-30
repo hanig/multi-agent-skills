@@ -184,6 +184,8 @@ class TestProbes(unittest.TestCase):
                 return {"agentId": "a1", "status": "completed"}
             if argv[0] == "inspect":
                 return inspected
+            if argv[0] == "ls":
+                return []
             if archive_fails:
                 raise RuntimeError("paseo archive exited 1: daemon gone")
             return {"status": "archived"}
@@ -198,14 +200,14 @@ class TestProbes(unittest.TestCase):
         (probe, why), calls = self.paseo(good)
         self.assertIsNone(why)
         self.assertEqual(probe["Model"], "gpt-6.1-astra")
-        self.assertEqual(calls, ["run", "inspect", "archive"])
+        self.assertEqual(calls, ["run", "inspect", "ls", "archive"])
         for key, value in (("Model", "gpt-6-astra"), ("Thinking", "auto"),
                            ("Provider", "claude")):
             with self.subTest(mismatch=key):
                 (probe, why), calls = self.paseo(dict(good, **{key: value}))
                 self.assertIsNone(probe)
                 self.assertIn("inspected", why)
-                self.assertEqual(calls, ["run", "inspect", "archive"])
+                self.assertEqual(calls, ["run", "inspect", "ls", "archive"])
 
     def test_an_archive_failure_survives_an_inspect_failure(self):
         def fake(argv, timeout, cwd=None):
@@ -253,6 +255,8 @@ class TestProbes(unittest.TestCase):
             if argv[0] == "run":
                 raise RM.PaseoError("paseo run exited 1: wait timeout",
                                     {"agentId": "orphan"})
+            if argv[0] == "ls":
+                return []
             archived.append(argv[1])
             return {"status": "archived"}
         with tempfile.TemporaryDirectory() as tmp, \
@@ -262,6 +266,25 @@ class TestProbes(unittest.TestCase):
         self.assertIsNone(probe)
         self.assertEqual(archived, ["orphan"])
         self.assertIn("wait timeout", why)
+
+    def test_a_run_reporting_no_id_is_still_archived_by_title(self):
+        seen = {"archived": []}
+
+        def fake(argv, timeout, cwd=None):
+            if argv[0] == "run":
+                seen["title"] = argv[argv.index("--title") + 1]
+                return {"agentId": 7}
+            if argv[0] == "ls":
+                return [{"id": "made", "name": seen["title"]}]
+            seen["archived"].append(argv[1])
+            return {"status": "archived"}
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"XDG_STATE_HOME": tmp}), \
+                mock.patch.object(RM, "_paseo", side_effect=fake):
+            probe, why = RM.probe_agent("codex", "gpt-6.1-astra", "high", 5)
+        self.assertIsNone(probe)
+        self.assertIn("no agentId", why)
+        self.assertEqual(seen["archived"], ["made"])
 
     def test_a_killed_run_is_archived_by_its_unique_title(self):
         seen = {}
@@ -413,6 +436,41 @@ class TestReaders(StateHome):
         _kept, excluded = R.exclude_authors(effective, models)
         self.assertEqual({r["name"] for r in excluded}, {"sol"})
 
+    def test_a_resolved_seat_that_fails_its_review_falls_back_to_its_pin(self):
+        seat = {"name": "sol", "provider": "openai", "model": "gpt-6.1-sol",
+                "effort": "xhigh", "_resolved_from": "gpt-6-sol",
+                "_max_output_tokens_accepted": {"model": "gpt-6.1-sol"},
+                "_pinned_accepted": {"model": "gpt-6-sol"}}
+        verdict = json.dumps({"verdict": "upheld", "findings": [], "claims": []})
+        asked = []
+
+        def provider(rev, prompt, timeout, deadline=None):
+            asked.append((rev["model"], rev["_max_output_tokens_accepted"]["model"],
+                          "_resolved_from" in rev))
+            if rev["model"] == "gpt-6.1-sol":
+                return None, "no content: finish_reason='length'"
+            return {"text": verdict, "in_tokens": 1, "out_tokens": 2}, None
+        with mock.patch.dict(R.PROVIDERS, {"openai": provider}), \
+                redirect_stderr(io.StringIO()) as err:
+            result = R.run_one(seat, "prompt", 5)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["model"], "gpt-6-sol")
+        self.assertEqual(result["fell_back_from"], "gpt-6.1-sol")
+        self.assertIn("no content", result["resolved_error"])
+        self.assertEqual(asked, [("gpt-6.1-sol", "gpt-6.1-sol", True),
+                                 ("gpt-6-sol", "gpt-6-sol", False)])
+        self.assertIn("fell back", err.getvalue())
+        with mock.patch.dict(R.PROVIDERS, {"openai": provider}):
+            pinned_only = R.run_one(dict(seat, model="gpt-6.1-sol",
+                                         _resolved_from=None), "prompt", 5)
+        self.assertFalse(pinned_only["ok"])
+
+    def test_an_author_on_the_pin_excludes_the_resolved_seat(self):
+        seat = {"name": "sol", "model": "gpt-6.1-sol", "_resolved_from": "gpt-6-sol"}
+        _kept, excluded = R.exclude_authors([seat], R.author_model_ids(
+            ["codex/gpt-6-sol"], [seat]))
+        self.assertEqual([r["name"] for r in excluded], ["sol"])
+
     def test_swarm_adopts_a_valid_agent_default_without_network_code(self):
         import swarm as S
         agents = shipped()[1]
@@ -484,8 +542,10 @@ class TestReaders(StateHome):
         with redirect_stderr(io.StringIO()):
             self.assertEqual(S.apply_agent_resolution(self.project / "plan.json"),
                              "codex/gpt-6.1-astra")
+            self.assertIn("codex/gpt-6.1-astra", S.THINKING_BY_MODEL)
             self.assertEqual(S.apply_agent_resolution(other / "plan.json"),
                              S.PINNED_AGENT_PROVIDER)
+        self.assertEqual(S.THINKING_BY_MODEL, S.PINNED_THINKING_BY_MODEL)
 
     def test_swarm_keeps_the_pin_for_a_mismatched_agent_probe(self):
         import swarm as S
@@ -612,6 +672,35 @@ class TestResolveEndToEnd(StateHome):
                 bad.write_text(body)
                 code, err = self.exit_code(AGENTS_CONFIG=bad)
                 self.assertEqual(code, 4, err)
+
+    def test_agents_json_rules_match_swarm_exactly(self):
+        import swarm as S
+        good = shipped()[1]
+        cases = [good, [], {"default": 3, "thinking_by_model": {}},
+                 dict(good, thinking_by_model={}),
+                 dict(good, thinking_by_model={"codex/m": 7}),
+                 dict(good, thinking_by_model={"codex": "high"}),
+                 dict(good, thinking_by_model={"codex/m ": "high"}),
+                 dict(good, default=dict(good["default"], provider="codex")),
+                 dict(good, default=dict(good["default"], provider="codex/m/")),
+                 dict(good, default=dict(good["default"], thinking=" high ")),
+                 dict(good, default=dict(good["default"], thinking="")),
+                 dict(good, default={"provider": "codex/m", "thinking": "high"})]
+        path = Path(self.tmp.name) / "agents.json"
+        for body in cases:
+            with self.subTest(body=body):
+                path.write_text(json.dumps(body))
+                try:
+                    S.load_agent_routing(path)
+                    swarm_ok = True
+                except SystemExit:
+                    swarm_ok = False
+                try:
+                    RM.validate_config([], body)
+                    resolver_ok = True
+                except MF.FamilyError:
+                    resolver_ok = False
+                self.assertEqual(resolver_ok, swarm_ok)
 
     def test_the_state_location_is_checked_before_any_canary_exists(self):
         inside = self.project / ".state"

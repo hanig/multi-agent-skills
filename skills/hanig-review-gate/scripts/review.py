@@ -1998,7 +1998,30 @@ def _short_error(err):
 
 def run_one(rev, prompt, timeout, require_claims=0, asserted=None):
     """Never raises: one malformed provider response must degrade that reviewer,
-    not take the whole panel down with a traceback."""
+    not take the whole panel down with a traceback.
+
+    A seat resolved to a newer point release (it carries `_resolved_from`)
+    that returns no usable verdict is retried once on its shipped pin, so a
+    resolved model can never do worse than the pin it replaced. The result
+    names both models.
+    """
+    result = _guarded_run_one(rev, prompt, timeout, require_claims, asserted)
+    pinned = rev.get("_resolved_from")
+    if pinned and not result.get("ok"):
+        fallback = dict(rev, model=pinned,
+                        _max_output_tokens_accepted=rev.get("_pinned_accepted"))
+        fallback.pop("_resolved_from", None)
+        retry = _guarded_run_one(fallback, prompt, timeout, require_claims,
+                                 asserted)
+        retry["fell_back_from"] = rev["model"]
+        retry["resolved_error"] = result.get("error")
+        print(f"routing: {rev['name']} fell back from {rev['model']} to its "
+              f"pin {pinned}: {result.get('error')}", file=sys.stderr)
+        return retry
+    return result
+
+
+def _guarded_run_one(rev, prompt, timeout, require_claims=0, asserted=None):
     try:
         return _run_one(rev, prompt, timeout, require_claims, asserted)
     except Exception as e:
@@ -2232,7 +2255,10 @@ def exclude_authors(reviewers, models):
     """One exact-model exclusion rule shared with committee membership."""
     kept, excluded = [], []
     for reviewer in reviewers:
-        if reviewer["model"] in models:
+        # A resolved seat falls back to its pin, so the pin must not be an
+        # author either.
+        if (reviewer["model"] in models
+                or reviewer.get("_resolved_from") in models):
             excluded.append({"name": reviewer["name"],
                              "model": reviewer["model"],
                              "reason": "authored this change"})

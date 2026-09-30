@@ -188,63 +188,70 @@ def _archive(agent):
         return reason
 
 
-def _archive_orphans(agent, title, cwd):
-    """Archive a failed run's agent: by id when known, else by its title."""
-    ids = [agent] if isinstance(agent, str) and agent else []
-    if not ids:
-        try:
-            rows = _shaped(_paseo(["ls", "--json"], 60, cwd=str(cwd)), list,
-                           "paseo ls")
-            ids = [row["id"] for row in rows if isinstance(row, dict)
-                   and row.get("name") == title and isinstance(row.get("id"), str)]
-        except Exception as exc:
-            return "could not look up canary %s: %s" % (title, str(exc)[:150])
-    errors = [error for error in (_archive(i) for i in ids) if error]
-    return "; ".join(errors) or None
-
-
 def probe_agent(route, model, thinking, timeout):
-    """(inspect record, None) when paseo launched exactly this; (None, reason)."""
+    """(inspect record, None) when paseo launched exactly this; (None, reason).
+
+    One cleanup rule, whatever happens: when the attempt ends, every agent
+    this canary may have created is archived, found by the id paseo printed
+    and by the canary's unique title. A cleanup failure is printed and
+    carried into the result.
+    """
     canary = MF.snapshot_dir() / "canary"
     canary.mkdir(parents=True, exist_ok=True, mode=0o700)
     title = "resolve-canary-" + uuid.uuid4().hex[:12]
-    archive_error = None
+    printed = []
+    outcome = (None, "canary did not run")
     try:
-        try:
-            launched = _paseo_object(
-                ["run", "--provider", route, "--model", model, "--thinking",
-                 thinking, "--title", title, "--wait-timeout",
-                 "%ds" % timeout, "--json", CANARY_PROMPT],
-                timeout + 60, cwd=str(canary))
-        except Exception as exc:
-            # A run that failed or was killed may still have created its
-            # agent. Archive it by the id it printed, else by its unique title.
-            orphan = (exc.payload.get("agentId")
-                      if isinstance(getattr(exc, "payload", None), dict) else None)
-            archive_error = _archive_orphans(orphan, title, canary)
-            raise
-        agent = launched.get("agentId")
-        if not (isinstance(agent, str) and agent):
-            return None, "paseo run returned no agentId"
-        try:
-            seen = _paseo_object(["inspect", agent, "--json"], 60)
-        finally:
-            archive_error = _archive(agent)
-    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as exc:
-        detail = str(exc)[:300]
-        if archive_error:
-            detail += "; canary left unarchived: %s" % archive_error
-        return None, detail
+        outcome = _launch_and_inspect(route, model, thinking, timeout, title,
+                                      canary, printed)
+    except Exception as exc:
+        outcome = (None, str(exc)[:300] or type(exc).__name__)
+    finally:
+        archive_error = _archive_orphans(printed[0] if printed else None,
+                                         title, canary)
+    record, why = outcome
+    if archive_error:
+        if record is None:
+            why = "%s; canary left unarchived: %s" % (why, archive_error)
+        else:
+            record = dict(record, archive_error=archive_error)
+    return record, why
+
+
+def _launch_and_inspect(route, model, thinking, timeout, title, canary, printed):
+    try:
+        launched = _paseo_object(
+            ["run", "--provider", route, "--model", model, "--thinking",
+             thinking, "--title", title, "--wait-timeout", "%ds" % timeout,
+             "--json", CANARY_PROMPT], timeout + 60, cwd=str(canary))
+    except PaseoError as exc:
+        if isinstance(exc.payload, dict) and isinstance(exc.payload.get("agentId"), str):
+            printed.append(exc.payload["agentId"])
+        raise
+    agent = launched.get("agentId")
+    if not (isinstance(agent, str) and agent):
+        return None, "paseo run returned no agentId"
+    printed.append(agent)
+    seen = _paseo_object(["inspect", agent, "--json"], 60)
     got = {key: seen.get(key) for key in ("Provider", "Model", "Thinking")}
     want = {"Provider": route, "Model": model, "Thinking": thinking}
-    suffix = "; canary %s left unarchived: %s" % (agent, archive_error) \
-        if archive_error else ""
     if got != want:
-        return None, "inspected %s, requested %s%s" % (got, want, suffix)
-    record = dict(got, agent_id=agent, date=utc_now())
-    if archive_error:
-        record["archive_error"] = archive_error
-    return record, None
+        return None, "inspected %s, requested %s" % (got, want)
+    return dict(got, agent_id=agent, date=utc_now()), None
+
+
+def _archive_orphans(agent, title, cwd):
+    """Archive by the printed id and by the unique title; None when all archived."""
+    ids = {agent} if isinstance(agent, str) and agent else set()
+    errors = []
+    try:
+        rows = _shaped(_paseo(["ls", "--json"], 60, cwd=str(cwd)), list, "paseo ls")
+        ids.update(row["id"] for row in rows if isinstance(row, dict)
+                   and row.get("name") == title and isinstance(row.get("id"), str))
+    except Exception as exc:
+        errors.append("could not look up canary %s: %s" % (title, str(exc)[:150]))
+    errors += [error for error in (_archive(i) for i in sorted(ids)) if error]
+    return "; ".join(errors) or None
 
 
 def _pin_in_family(pin, family, what):
@@ -265,19 +272,37 @@ def validate_config(reviewers, agents):
             _pin_in_family(seat.get("model"), seat["family"], seat.get("name"))
     if agents is None:
         return
+    # The same rules swarm.py's load_agent_routing applies to this file;
+    # tests/test_model_resolution.py runs both over one table of cases.
     if not isinstance(agents, dict):
         raise MF.FamilyError("agents.json must be a JSON object")
     default = agents.get("default")
-    table = agents.get("thinking_by_model", {})
-    if not isinstance(default, dict) or not isinstance(table, dict):
-        raise MF.FamilyError("agents.json default and thinking_by_model must "
-                             "be objects")
+    table = agents.get("thinking_by_model")
+    if not isinstance(default, dict):
+        raise MF.FamilyError("agents.json default must be an object")
+    if not _routing_model(default.get("provider")):
+        raise MF.FamilyError("agents.json default.provider must be a "
+                             "PROVIDER/MODEL string without whitespace")
+    if not _routing_token(default.get("thinking")):
+        raise MF.FamilyError("agents.json default.thinking must be a "
+                             "non-empty thinking id without whitespace")
+    if not (isinstance(table, dict) and table and all(
+            _routing_model(k) and _routing_token(v) for k, v in table.items())):
+        raise MF.FamilyError("agents.json thinking_by_model must be a non-empty "
+                             "map of PROVIDER/MODEL strings to thinking ids")
     if default.get("family") is not None:
-        route, slash, model = str(default.get("provider", "")).partition("/")
-        if not (route and slash and model):
-            raise MF.FamilyError("agents.json default.provider must be "
-                                 "PROVIDER/MODEL")
-        _pin_in_family(model, default["family"], "agent-default")
+        _pin_in_family(default["provider"].partition("/")[2], default["family"],
+                       "agent-default")
+
+
+def _routing_token(value):
+    return (isinstance(value, str) and bool(value)
+            and not any(c.isspace() for c in value))
+
+
+def _routing_model(value):
+    return (_routing_token(value) and len(value.split("/")) >= 2
+            and all(value.split("/")))
 
 
 def resolve(args):

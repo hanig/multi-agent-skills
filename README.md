@@ -672,11 +672,16 @@ matches the project and the exact bytes of the installed `reviewers.json` and
 `agents.json`, and only for entries that pass the family, major, pin and
 probe-record checks again; otherwise the pins apply. Reinstalling a release
 therefore returns every seat to its pin until the resolver runs again.
-`HANIG_ROUTING_SNAPSHOTS=off` ignores snapshots. The state home is writable by
+`HANIG_ROUTING_SNAPSHOTS=off` ignores snapshots. A resolved gate seat that
+returns no usable verdict is retried once on its pin, so a resolution can
+never do worse than the model it replaced; the report names both. Author
+exclusion therefore matches a seat's pin as well as its resolved model.
+`committee.py` members and its tie-breaker do not fall back: a failed
+committee call routes to the owner, as before. The state home is writable by
 the owner's UID, which launched agents share; that is a declared limit, as for
-coordinator state. Author exclusion compares the effective model exactly, so a
-family sibling (an author on `gpt-6-astra`, a seat resolved to `gpt-6.1-astra`)
-is not excluded. Seat names are labels and keep their names when the model
+coordinator state. A family sibling on neither the pin nor the resolved model (an
+author on `gpt-6.2-astra`, a seat pinned to `gpt-6-astra` and resolved to
+`gpt-6.1-astra`) is not excluded. Seat names are labels and keep their names when the model
 moves.
 
 **Two contrasting models for a plan, never escalated.** A third adds agreement,
