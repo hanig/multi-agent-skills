@@ -225,11 +225,16 @@ def find_snapshot(start=None):
         except FileNotFoundError:
             continue
         except (OSError, ValueError) as exc:
-            print("routing: snapshot %s is unreadable, ignored: %s: %s"
+            # The nearest snapshot decides. An unreadable one means the pins,
+            # never an ancestor project's snapshot.
+            print("routing: snapshot %s is unreadable, using the pins: %s: %s"
                   % (path, type(exc).__name__, exc), file=sys.stderr)
-            continue
+            return None, None, None
         if isinstance(data, dict):
             return path, data, candidate
+        print("routing: snapshot %s is not an object, using the pins" % path,
+              file=sys.stderr)
+        return None, None, None
     return None, None, None
 
 

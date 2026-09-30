@@ -492,13 +492,21 @@ class TestReaders(StateHome):
             R.load_effective_reviewers(start=self.project)
         self.assertEqual(err.getvalue(), "")
 
-    def test_an_unreadable_snapshot_is_reported_and_ignored(self):
-        path = MF.snapshot_path(self.project)
-        path.parent.mkdir(parents=True)
+    def test_an_unreadable_snapshot_means_pins_never_an_ancestor(self):
+        (self.project / ".git").mkdir()
+        child = self.project / "app"
+        child.mkdir()
+        MF.write_snapshot(self.project, self.snapshot(**{"sol": self.ENTRY}))
+        path = MF.snapshot_path(child)
         path.write_text("{not json")
         with redirect_stderr(io.StringIO()) as err:
-            self.assertEqual(MF.find_snapshot(self.project), (None, None, None))
-        self.assertIn("unreadable, ignored", err.getvalue())
+            self.assertEqual(MF.find_snapshot(child), (None, None, None))
+        self.assertIn("using the pins", err.getvalue())
+        path.write_text("[]")
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(MF.find_snapshot(child), (None, None, None))
+        path.unlink()
+        self.assertEqual(MF.find_snapshot(child)[0], MF.snapshot_path(self.project))
 
     def test_a_gate_without_the_module_uses_the_pins_quietly(self):
         real_import = __import__
@@ -896,41 +904,21 @@ class TestResolveEndToEnd(StateHome):
         snapshot = json.loads(Path(json.loads(out.getvalue())["snapshot"]).read_text())
         self.assertEqual(snapshot["agent_default"]["provider"], "codex/gpt-6.1-astra")
 
-    def test_a_failed_write_removes_the_older_snapshot(self):
+    def test_a_failed_write_keeps_this_projects_previous_snapshot(self):
         self.run_resolver()
         path = MF.snapshot_path(self.project)
-        self.assertTrue(path.exists())
+        before = path.read_bytes()
         argv = ["resolve_models.py", "--project", str(self.project)]
         with mock.patch.object(sys, "argv", argv), \
                 mock.patch.object(RM.R, "load_reviewers", return_value=fixture_roster()), \
                 mock.patch.object(RM, "list_ids", side_effect=lambda l, t: self.LISTINGS[l]), \
                 mock.patch.object(RM, "probe_reviewer", return_value=(None, "down")), \
                 mock.patch.object(RM.MF, "write_snapshot", side_effect=OSError("disk full")), \
-                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit) as stopped:
-                RM.main()
-        self.assertEqual(stopped.exception.code, 4)
-        self.assertFalse(path.exists())
-
-    def test_an_unremovable_older_snapshot_is_reported(self):
-        self.run_resolver()
-        argv = ["resolve_models.py", "--project", str(self.project)]
-        real_unlink = Path.unlink
-
-        def refuse(self_path, *a, **k):
-            if self_path == MF.snapshot_path(self.project):
-                raise PermissionError("read-only state")
-            return real_unlink(self_path, *a, **k)
-        with mock.patch.object(sys, "argv", argv), \
-                mock.patch.object(RM.R, "load_reviewers", return_value=fixture_roster()), \
-                mock.patch.object(RM, "list_ids", side_effect=lambda l, t: self.LISTINGS[l]), \
-                mock.patch.object(RM, "probe_reviewer", return_value=(None, "down")), \
-                mock.patch.object(RM.MF, "write_snapshot", side_effect=OSError("disk full")), \
-                mock.patch.object(Path, "unlink", refuse), \
                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
             with self.assertRaises(SystemExit) as stopped:
                 RM.main()
         self.assertEqual(stopped.exception.code, 4)
+        self.assertEqual(path.read_bytes(), before)
         self.assertIn("stays in force", err.getvalue())
 
     def test_a_partial_run_keeps_the_other_seats(self):

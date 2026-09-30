@@ -14,7 +14,7 @@ the installed skill files are never modified. A newer generation is reported
 as NEW_GENERATION and never chosen: raising a family's `major` is a reviewed
 change. Exit 0 whenever every seat has a usable model, which includes keeping
 its pin; exit 4 on a configuration or location error, or when the snapshot
-cannot be written (the pins then apply).
+cannot be written (this project's previous snapshot, if any, then stays).
 
 This program is network-capable, like review.py. swarm.py must never import
 it; it reads the snapshot through model_family only.
@@ -469,18 +469,14 @@ def _finish(args, snapshot, lines):
         try:
             path = MF.write_snapshot(args.project, snapshot)
         except OSError:
-            # Nothing new was recorded, so remove any older snapshot and let
-            # the pins apply. If the state directory refuses that too, the
-            # older snapshot (itself a probed, config-matching record) stays
-            # in force until the next successful run; say so.
-            try:
-                MF.snapshot_path(args.project).unlink()
-            except FileNotFoundError:
-                pass
-            except OSError as exc:
-                print("resolve_models: the previous snapshot %s could not be "
-                      "removed and stays in force: %s"
-                      % (MF.snapshot_path(args.project), exc), file=sys.stderr)
+            # write_snapshot replaces atomically, so a failed write leaves
+            # this project's previous snapshot untouched. It stays in force:
+            # it is a probed, config-matching record for THIS project, and
+            # removing it could expose an ancestor project's snapshot.
+            if MF.snapshot_path(args.project).exists():
+                print("resolve_models: snapshot not written; this project's "
+                      "previous snapshot %s stays in force"
+                      % MF.snapshot_path(args.project), file=sys.stderr)
             raise
     return lines, path
 
