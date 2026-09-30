@@ -113,7 +113,7 @@ def author_list(value):
 
 
 def author_models(value):
-    return R.author_model_ids(author_list(value), R.load_effective_reviewers(), legacy=True)
+    return R.author_model_ids(author_list(value), R.load_reviewers(), legacy=True)
 
 
 def bind_authors(session, declared):
@@ -138,7 +138,7 @@ def session_author_conflict(session):
     # Check saved model identities as well as today's routes. A roster change
     # cannot erase a member's authorship from an already persisted session.
     members = [dict(rec, name=name) for name, rec in session["members"].items()]
-    members += [r for r in R.load_effective_reviewers() if r["name"] in session["members"]]
+    members += [r for r in R.load_reviewers() if r["name"] in session["members"]]
     return member_author_conflict(members, session.get("author"))
 
 
@@ -151,7 +151,7 @@ def pick_members(explicit, authors=()):
     gateway are genuinely contrasting, and demanding a distinct provider per
     member would rule that out for no gain.
     """
-    revs = [r for r in R.load_effective_reviewers() if r.get("enabled", True)]
+    revs = [r for r in R.load_reviewers() if r.get("enabled", True)]
     if explicit:
         want = [n.strip() for spec in explicit for n in spec.split(",")
                 if n.strip()]
@@ -411,7 +411,7 @@ def cmd_ask(args):
              or session_author_conflict(session))
     if error:
         return finish_decision(args, session, {"kind": "ask"}, "OWNER", error)
-    members = [r for r in R.load_effective_reviewers()
+    members = [r for r in R.load_reviewers()
                if r["name"] in session["members"]]
     if len(members) != len(session["members"]):
         die(f"reviewers.json no longer defines every member of this session "
@@ -435,7 +435,7 @@ def cmd_review(args):
              or session_author_conflict(session))
     if error:
         return finish_decision(args, session, {"kind": "review"}, "OWNER", error)
-    members = [r for r in R.load_effective_reviewers() if r["name"] in session["members"]]
+    members = [r for r in R.load_reviewers() if r["name"] in session["members"]]
     # review.py exposes git_out(*args) -> str, not run(argv) -> (rc, out, err).
     # This called a function that has never existed, so phase 3 died with an
     # AttributeError every time it was invoked: the committee could plan and be
@@ -564,7 +564,7 @@ def tiebreaker():
     ties is routing data. Anything but exactly one such seat is a
     misconfiguration, and the split goes to the owner.
     """
-    seats = [r for r in R.load_effective_reviewers()
+    seats = [r for r in R.load_reviewers()
              if r.get("enabled", True) and r.get("profiles") == ["tiebreak"]]
     if len(seats) != 1:
         return None, ("tie-breaker unavailable or misconfigured: reviewers.json "
@@ -623,7 +623,7 @@ def cmd_synthesize(args):
     record = {"kind": "synthesis", "inputs": inputs}
     if error:
         return finish_decision(args, session, record, "OWNER", error)
-    members = [r for r in R.load_effective_reviewers()
+    members = [r for r in R.load_reviewers()
                if r["name"] in session["members"] and r.get("enabled", True)]
     if not members:
         return finish_decision(args, session, record, "OWNER",

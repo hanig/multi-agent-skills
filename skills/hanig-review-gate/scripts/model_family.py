@@ -4,8 +4,8 @@ A seat in reviewers.json or agents.json may declare a `family`: a literal
 vendor, prefix and suffix around a version `N` or `N<sep>M`, plus `major`, the
 owner's ceiling. `resolve_models.py` lists a provider's catalog, picks the
 greatest same-major point release above the shipped pin, probes it, and writes
-one snapshot per project under the state home. Readers (review.py,
-committee.py, and swarm.py by file) apply a snapshot only when it matches the
+one snapshot per project under the state home. Readers (review.py, and
+swarm.py by file; committee.py keeps the pins) apply a snapshot only when it matches the
 project and the exact bytes of the installed routing config, and only after
 re-checking each entry. See docs/plan-model-resolution.md.
 

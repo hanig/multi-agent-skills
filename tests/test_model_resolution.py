@@ -248,6 +248,17 @@ class TestProbes(unittest.TestCase):
         with mock.patch.object(RM, "_paseo", return_value={"status": "archived"}):
             self.assertIsNone(RM._archive("a1"))
 
+    def test_a_title_match_with_an_unusable_id_is_reported(self):
+        def fake(argv, timeout, cwd=None):
+            if argv[0] == "ls":
+                return [{"id": 7, "name": "resolve-canary-x"}]
+            return {"status": "archived"}
+        with mock.patch.object(RM, "_paseo", side_effect=fake), \
+                redirect_stderr(io.StringIO()) as err:
+            reason = RM._archive_orphans(None, "resolve-canary-x", ".")
+        self.assertIn("unusable id", reason)
+        self.assertIn("unusable id", err.getvalue())
+
     def test_a_failed_lookup_is_printed(self):
         def fake(argv, timeout, cwd=None):
             if argv[0] == "ls":
@@ -507,6 +518,18 @@ class TestReaders(StateHome):
             ["codex/gpt-6-sol"], [seat]))
         self.assertEqual([r["name"] for r in excluded], ["sol"])
 
+    def test_the_committee_keeps_the_pins_even_with_a_snapshot(self):
+        import committee
+        MF.write_snapshot(self.project, self.snapshot(**{"sol-tiebreak": dict(
+            self.ENTRY, record=dict(self.ENTRY["record"]))}))
+        with mock.patch.object(committee.R, "load_reviewers",
+                               return_value=self.roster()), \
+                mock.patch.object(os, "getcwd", return_value=str(self.project)):
+            seat, error = committee.tiebreaker()
+        self.assertIsNone(error)
+        self.assertEqual(seat["model"], "gpt-6-sol")
+        self.assertNotIn("_resolved_from", seat)
+
     def test_swarm_adopts_a_valid_agent_default_without_network_code(self):
         import swarm as S
         agents = shipped()[1]
@@ -702,7 +725,7 @@ class TestResolveEndToEnd(StateHome):
 
     def test_malformed_agents_json_is_a_configuration_error(self):
         bad = Path(self.tmp.name) / "agents.json"
-        for body in ("{", "[]", '{"default": 3}', json.dumps(
+        for body in ("{", "[]", "null", '{"default": 3}', json.dumps(
                 {"default": {"provider": "codex", "family": shipped()[1]["default"]["family"]},
                  "thinking_by_model": {}})):
             with self.subTest(body=body):

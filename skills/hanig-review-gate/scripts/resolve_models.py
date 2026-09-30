@@ -249,8 +249,16 @@ def _archive_orphans(agent, title, cwd):
     errors = []
     try:
         rows = _shaped(_paseo(["ls", "--json"], 60, cwd=str(cwd)), list, "paseo ls")
-        ids.update(row["id"] for row in rows if isinstance(row, dict)
-                   and row.get("name") == title and isinstance(row.get("id"), str))
+        for row in rows:
+            if not (isinstance(row, dict) and row.get("name") == title):
+                continue
+            if isinstance(row.get("id"), str) and row["id"]:
+                ids.add(row["id"])
+            else:
+                reason = "canary %s is listed with an unusable id %r" % (
+                    title, row.get("id"))
+                print("resolve_models: " + reason, file=sys.stderr)
+                errors.append(reason)
     except Exception as exc:
         reason = "could not look up canary %s: %s" % (title, str(exc)[:150])
         print("resolve_models: " + reason, file=sys.stderr)
@@ -313,12 +321,14 @@ def _routing_model(value):
 def resolve(args):
     MF.check_state_location(args.project)  # before any canary directory exists
     reviewers = R.load_reviewers()
-    agents = None
+    agents = None  # only when the file is absent; a present file must be an object
     if R.AGENTS_CONFIG.exists():
         try:
             agents = json.loads(R.AGENTS_CONFIG.read_text(encoding="utf-8"))
         except ValueError as exc:
             raise MF.FamilyError("%s is not valid JSON: %s" % (R.AGENTS_CONFIG, exc))
+        if not isinstance(agents, dict):
+            raise MF.FamilyError("%s must be a JSON object" % R.AGENTS_CONFIG)
     validate_config(reviewers, agents)
     listings, lines = {}, []
     snapshot = {"schema": MF.SCHEMA,

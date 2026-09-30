@@ -93,7 +93,7 @@ of the installed `reviewers.json` and `agents.json` bytes it resolved against,
 and holds, per changed seat, the chosen model and its probe record. It is
 written atomically.
 
-Readers (`review.py`, `committee.py`, and `swarm.py` by a plain file read) use
+Readers (`review.py`, and `swarm.py` by a plain file read; `committee.py` keeps the pins because it has no fallback) use
 the snapshot only when its project key and config hashes match what they have
 loaded, and then only its per-seat model and probe record, and only for a seat
 where that model is in the seat's family, carries the config's `major`, is

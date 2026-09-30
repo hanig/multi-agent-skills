@@ -667,7 +667,7 @@ one snapshot per project directory under the state home. The installed files
 never change. A listed id with a greater major prints `NEW_GENERATION`;
 adopting it is a reviewed change to `major`.
 
-`review.py`, `committee.py` and `swarm.py` use the snapshot only when it
+`review.py` and `swarm.py` use the snapshot only when it
 matches the project and the exact bytes of the installed `reviewers.json` and
 `agents.json`, and only for entries that pass the family, major, pin and
 probe-record checks again; otherwise the pins apply. Reinstalling a release
@@ -678,8 +678,8 @@ leaves a seat without a verdict its pin would give; the report names both. A
 usable verdict, refutation included, stands: re-asking another model after an
 unwelcome answer would be reviewer shopping. Author
 exclusion therefore matches a seat's pin as well as its resolved model.
-`committee.py` members and its tie-breaker do not fall back: a failed
-committee call routes to the owner, as before. The state home is writable by
+`committee.py` keeps the shipped pins for its members and tie-breaker:
+it has no pin fallback, so resolution applies to the review gate only. The state home is writable by
 the owner's UID, which launched agents share; that is a declared limit, as for
 coordinator state. A family sibling on neither the pin nor the resolved model (an
 author on `gpt-6.2-astra`, a seat pinned to `gpt-6-astra` and resolved to
