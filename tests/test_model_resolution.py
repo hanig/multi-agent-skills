@@ -844,7 +844,11 @@ class TestResolveEndToEnd(StateHome):
                  dict(good, default=dict(good["default"], provider="codex/m/")),
                  dict(good, default=dict(good["default"], thinking=" high ")),
                  dict(good, default=dict(good["default"], thinking="")),
-                 dict(good, default={"provider": "codex/m", "thinking": "high"})]
+                 dict(good, default={"provider": "codex/m", "thinking": "high"}),
+                 # A thinking id is an opaque token: slashes are not segments.
+                 dict(good, thinking_by_model=dict(good["thinking_by_model"],
+                                                   **{"codex/gpt-6-astra": "high//x"})),
+                 dict(good, default=dict(good["default"], thinking="a/b"))]
         path = Path(self.tmp.name) / "agents.json"
         for body in cases:
             with self.subTest(body=body):
