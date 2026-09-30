@@ -1926,6 +1926,9 @@ def load_effective_reviewers(start=None):
         return reviewers
     try:
         import model_family as MF
+    except ImportError:
+        return reviewers  # resolution not installed alongside: the pins apply
+    try:
         reviewers, notes = MF.apply_to_reviewers(
             reviewers, MF.config_digests(CONFIG, AGENTS_CONFIG), start)
     except Exception as exc:

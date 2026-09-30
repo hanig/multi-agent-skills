@@ -84,8 +84,15 @@ def _paseo(argv, timeout, cwd=None):
     A non-zero exit still carries any JSON it printed, so a run that created
     an agent and then failed can have that agent archived.
     """
-    done = subprocess.run(["paseo"] + argv, capture_output=True, text=True,
-                          timeout=timeout, cwd=cwd)
+    try:
+        done = subprocess.run(["paseo"] + argv, capture_output=True, text=True,
+                              timeout=timeout, cwd=cwd)
+    except subprocess.TimeoutExpired as exc:
+        partial = exc.stdout or exc.output or ""
+        if isinstance(partial, bytes):
+            partial = partial.decode("utf-8", "replace")
+        raise PaseoError("paseo %s timed out after %ss" % (argv[0], timeout),
+                         _json_after_banner(partial))
     payload = _json_after_banner(done.stdout or "")
     if done.returncode != 0:
         raise PaseoError("paseo %s exited %d: %s" % (

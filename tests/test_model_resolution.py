@@ -353,6 +353,15 @@ class TestProbes(unittest.TestCase):
         self.assertTrue(seen["title"].startswith("resolve-canary-"))
         self.assertEqual(seen["archived"], ["mine"])
 
+    def test_a_timed_out_paseo_run_keeps_the_id_it_printed(self):
+        timeout = subprocess.TimeoutExpired(["paseo", "run"], 5,
+                                            output=b'banner\n{"agentId": "t1"}')
+        with mock.patch.object(RM.subprocess, "run", side_effect=timeout):
+            with self.assertRaises(RM.PaseoError) as raised:
+                RM._paseo(["run"], 5)
+        self.assertEqual(raised.exception.payload, {"agentId": "t1"})
+        self.assertIn("timed out", str(raised.exception))
+
     def test_a_nonzero_paseo_exit_keeps_the_json_it_printed(self):
         done = subprocess.CompletedProcess([], 1, stdout='banner\n{"agentId": "a9"}',
                                            stderr="boom")
@@ -490,6 +499,21 @@ class TestReaders(StateHome):
         with redirect_stderr(io.StringIO()) as err:
             self.assertEqual(MF.find_snapshot(self.project), (None, None, None))
         self.assertIn("unreadable, ignored", err.getvalue())
+
+    def test_a_gate_without_the_module_uses_the_pins_quietly(self):
+        real_import = __import__
+
+        def no_family(name, *args, **kwargs):
+            if name == "model_family":
+                raise ImportError("not installed")
+            return real_import(name, *args, **kwargs)
+        with mock.patch("builtins.__import__", side_effect=no_family), \
+                mock.patch.object(R, "load_reviewers", return_value=self.roster()), \
+                redirect_stderr(io.StringIO()) as err:
+            effective = R.load_effective_reviewers(start=self.project)
+        self.assertEqual(err.getvalue(), "")
+        self.assertEqual([r["model"] for r in effective],
+                         [r["model"] for r in self.roster()])
 
     def test_the_off_switch_ignores_snapshots(self):
         MF.write_snapshot(self.project, self.snapshot(**{"sol": self.ENTRY}))
