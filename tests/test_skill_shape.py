@@ -323,6 +323,9 @@ REFERENCE_ELABORATION_INVENTORIES = {
         ("references/limits.md", "placement.reference-elaboration", 3),
         ("references/protocol-details.md", "code.merge-scope", 1),
         ("references/protocol-details.md", "placement.reference-elaboration", 1),
+        ("references/slurm-evidence.md", "compatibility.judgment-generation", 10),
+        ("references/slurm-evidence.md", "isolation.done-predicate", 10),
+        ("references/slurm-evidence.md", "usage.outputs", 2),
     ),
     "hanig-orchestrate": (
         ("references/authority-adjudication.md",

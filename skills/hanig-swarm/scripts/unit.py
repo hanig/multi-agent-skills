@@ -23,7 +23,9 @@ The worker writes only there. Shared datasets and environments are immutable
 PINNED READ-ONLY inputs, not isolated. Slurm cgroups already isolate GPU and
 memory. Once the write root is exclusive:
 
-    output exists in the run-dir  +  terminal-OK OWNED sacct row
+    output exists in the run-dir + pinned pre-dispatch artifact basis
+      + terminal-OK owned scheduler evidence (or a matching exit record
+        after confirmed queue absence)
       ==  this unit produced it
 
 Attribution by construction.
@@ -43,8 +45,8 @@ tests/test_unit.py enforces both halves.
 THE UNIT IS POLYMORPHIC. Hani chose three kinds; only the done predicate and the
 isolation boundary differ.
 
-  slurm     terminal-OK owned sacct row AND a declared output in the run-dir.
-            The clean case.
+  slurm     terminal-OK owned scheduler evidence, or a matching exit record
+            after queue absence, AND outputs plus their pre-dispatch basis.
   pipeline  the engine (Nextflow/Snakemake) owns its interior DAG, retries and
             work directory. Isolation is possible ONLY at the boundary: a fresh
             work dir and a fresh publish dir per unit. Per-task interior success
@@ -106,6 +108,10 @@ KINDS = ("slurm", "pipeline", "code")
 OWNERSHIP_SLACK_S = 1              # seconds of clock slack when binding a row
 # Written by the launcher wrapper, never by the engine itself.
 ENGINE_RC = "engine.rc"
+SLURM_EXIT_RECORD = "slurm-exit.json"
+SACCT_TIMEOUT_S = 20
+SACCT_UNAVAILABLE = False
+SACCT_STATUS_FD = None
 MAX_DIR_ENTRIES_SCANNED = 20_000   # bound on a directory freshness walk
 
 # Slurm states that mean "this attempt is over and it did not succeed".
@@ -175,7 +181,7 @@ def disarm_watchdog():
 child_env = CE.child_env
 
 
-def run(argv, cwd=None, timeout=30, pass_fds=()):
+def run(argv, cwd=None, timeout=30, pass_fds=(), preserve_newlines=False):
     """Run a command, returning (rc, stdout, stderr). Never raises.
 
     Never hangs EXCEPT on an explicit ``timeout=None``, which blocks until
@@ -194,18 +200,22 @@ def run(argv, cwd=None, timeout=30, pass_fds=()):
     spawn a descendant that inherits the captured pipe, and killing only the
     child leaves the wait blocked on EOF forever.
     errors="replace": undecodable bytes must not raise UnicodeDecodeError.
+    preserve_newlines captures bytes before decoding, retaining native delimiters.
     """
     if any(not isinstance(fd, int) or fd < 3 for fd in pass_fds):
         return 127, "", "refusing to pass a standard descriptor to a child"
     pr = None
     try:
+        text_options = {} if preserve_newlines else {"encoding": "utf-8", "errors": "replace"}
         pr = subprocess.Popen(argv, cwd=cwd, env=CE.child_env(),
                               stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              close_fds=True, encoding="utf-8",
-                              errors="replace", start_new_session=True,
-                              pass_fds=pass_fds)
+                              close_fds=True, start_new_session=True,
+                              pass_fds=pass_fds, **text_options)
         out, err = pr.communicate(timeout=timeout)
+        if preserve_newlines:
+            out = (out or b"").decode("utf-8", errors="replace")
+            err = (err or b"").decode("utf-8", errors="replace")
         return pr.returncode, (out or "").strip(), (err or "").strip()
     except subprocess.TimeoutExpired:
         try:
@@ -520,8 +530,78 @@ def exit_code_is_clean(code):
         return False
 
 
+def run_sacct(argv):
+    """Bound accounting once per process; a failed query is absent evidence."""
+    global SACCT_UNAVAILABLE
+    if SACCT_UNAVAILABLE or not shutil.which("sacct"):
+        return 127, "", "accounting unavailable for this pass"
+    result = run(argv, timeout=SACCT_TIMEOUT_S)
+    if result[0] != 0:
+        SACCT_UNAVAILABLE = True
+        if SACCT_STATUS_FD is not None:
+            os.write(SACCT_STATUS_FD, b"1")
+    return result
+
+
+def configure_sacct(args):
+    """Only the caller's private descriptor carries pass-local outage state."""
+    global SACCT_UNAVAILABLE, SACCT_STATUS_FD
+    SACCT_UNAVAILABLE = SACCT_UNAVAILABLE or getattr(args, "skip_sacct", False) is True
+    SACCT_STATUS_FD = getattr(args, "sacct_status_fd", None)
+    if type(SACCT_STATUS_FD) is not int or SACCT_STATUS_FD < 3:
+        SACCT_STATUS_FD = None
+
+
+def slurm_output_problem(outputs, unit_dir=None):
+    """Reject wrapper-owned destinations without rewriting declared paths.
+
+    Runtime checks also reject symlink aliases and enclosing directory outputs:
+    a wrapper's own status write must never satisfy the production predicate.
+    """
+    root = Path(unit_dir).resolve() if unit_dir is not None else None
+    for output in outputs:
+        destination = Path(str(output))
+        destinations = [destination]
+        if root is not None:
+            try:
+                destinations.append((root / destination).resolve().relative_to(root))
+            except ValueError:
+                pass
+            except (OSError, RuntimeError):
+                return f"cannot resolve declared output {output!r} safely"
+        for candidate in destinations:
+            parts = candidate.parts
+            if (not parts or parts[0] == SLURM_EXIT_RECORD
+                    or parts[0].startswith(SLURM_EXIT_RECORD + ".tmp.")):
+                return (f"output {output!r} includes a reserved Slurm exit-record "
+                        "destination; declare a separate payload artifact")
+    return None
+
+
+def slurm_record_policy(unit_dir, spec, basis):
+    """Admit the pinned attempt contract, never a worker's apparent capability.
+
+    Absence is legacy scheduler-only behavior. A present but invalid grant is
+    not absence: its identity and version must validate before either success
+    or failure can be inferred from a wrapper record.
+    """
+    if (spec.get("kind") != "slurm" or not isinstance(basis, dict)
+            or "slurm_exit_record" not in basis):
+        return False, None
+    problem = W.artifact_basis_problem(basis, unit_dir, spec)
+    policy = basis["slurm_exit_record"]
+    if problem:
+        return False, problem
+    if (not isinstance(policy, dict) or set(policy) != {"version", "path"}
+            or type(policy.get("version")) is not int or policy["version"] != 1
+            or policy.get("path") != SLURM_EXIT_RECORD):
+        return False, "invalid or unsupported Slurm exit-record capability"
+    outputs = spec.get("declared_outputs", spec.get("outputs", []))
+    return True, slurm_output_problem(outputs, unit_dir)
+
+
 def sacct_state(job_id, declared_at=None, bound_at=None,
-                newest_evidence_mtime=None, note_out=None):
+                newest_evidence_mtime=None, note_out=None, owned_out=None):
     """Terminal state of OUR job from Slurm accounting.
 
     Returns (state, exit_code, submit, why_not). An all-None state is absent
@@ -538,10 +618,12 @@ def sacct_state(job_id, declared_at=None, bound_at=None,
     Last-owned rather than first-owned: a requeued job has one row per attempt,
     oldest first, and reading the first pinned it at PREEMPTED permanently.
     """
+    if owned_out is not None:
+        owned_out[:] = [False]
     if not shutil.which("sacct"):
         return None, None, None, None
-    rc, out, _ = run(["sacct", "-n", "-X", "-P", "-j", str(job_id),
-                      "-o", "State,ExitCode,Submit,End"])
+    rc, out, _ = run_sacct(["sacct", "-n", "-X", "-P", "-j", str(job_id),
+                           "-o", "State,ExitCode,Submit,End"])
     if rc != 0 or not out:
         return None, None, None, None
     chosen, last_why, saw = None, None, None
@@ -577,7 +659,162 @@ def sacct_state(job_id, declared_at=None, bound_at=None,
         chosen = (state, f[1].strip() if len(f) > 1 else None, submit)
     if chosen is None:
         return None, None, saw, last_why
+    if owned_out is not None:
+        owned_out[:] = [True]
     return chosen[0], chosen[1], chosen[2], None
+
+
+def slurm_job_matches(requested, actual, array_job=None, array_task=None):
+    """Compare scheduler identifiers, including an explicitly bound array task."""
+    if actual == requested:
+        return True
+    return (all(isinstance(value, str) and re.fullmatch(r"[0-9]+", value)
+                for value in (actual, array_job, array_task))
+            and requested == array_job + "_" + array_task)
+
+
+def scontrol_fields(output, multiline=False):
+    """Extract evidence, refining lossy inline text through native line groups."""
+    lines = output.split("\n")
+    headers = [line for line in lines if line.lstrip().startswith("JobId=")]
+    if len(headers) != 1:
+        return None
+    header = re.split(r"\sJobName=", headers[0], maxsplit=1)
+    if len(header) != 2:
+        return None
+    identity = re.findall(r"(?:^|\s)(JobId|ArrayJobId|ArrayTaskId)=(\S*)", header[0])
+    fields = dict(identity)
+    if len(fields) != len(identity) or not re.fullmatch(r"[0-9]+", fields.get("JobId", "")):
+        return None
+    pattern = r"(?:^|\s)(JobState|ExitCode|SubmitTime|EndTime)=(\S*)"
+    groups = {"JobState": "JobState", "Requeue": "ExitCode",
+              "SubmitTime": "SubmitTime", "StartTime": "EndTime"}
+    if multiline:
+        pairs, seen = [], set()
+        for line in lines:
+            heading = line.lstrip().split("=", 1)[0]
+            if heading not in groups:
+                continue
+            if heading in seen:
+                return None
+            seen.add(heading)
+            found = re.findall(pattern, line)
+            if len(found) != 1 or found[0][0] != groups[heading]:
+                return None
+            pairs.extend(found)
+    else:
+        pairs = re.findall(pattern, output)
+    if len(pairs) != 4 or {name for name, value in pairs} != set(groups.values()):
+        return None
+    fields.update(pairs)
+    return fields
+
+
+def scontrol_state(job_id, declared_at, bound_at, newest, notes):
+    """Return (evidence, absent). Controller errors do not prove a purge.
+
+    A different submission or malformed row fails closed. Requeues can reset
+    SubmitTime, so such a row must not unlock stale accounting evidence.
+    Missing scontrol preserves accounting-only installations.
+    """
+    empty = (None, None, None, None)
+    if not shutil.which("scontrol"):
+        return empty, True
+    rc, out, err = run(["scontrol", "show", "job", "-o", str(job_id)],
+                       timeout=20, preserve_newlines=True)
+    if rc != 0:
+        absent = "Invalid job id specified" in (err or out)
+        return (None, None, None, None if absent else
+                "slurmctld query failed; job absence is unknown"), absent
+    if out.strip() in ("", "No jobs in the system", "No jobs in the system."):
+        return empty, True
+    fields = scontrol_fields(out)
+    if fields is None:
+        rc, out, err = run(["scontrol", "show", "job", str(job_id)],
+                           timeout=20, preserve_newlines=True)
+        fields = scontrol_fields(out, multiline=True) if rc == 0 else None
+        if fields is None:
+            return (None, None, None, "slurmctld evidence remains unresolved after grouped-line query"), False
+        notes.append("slurmctld: refined ambiguous one-line output using one complete grouped-line snapshot")
+    if not slurm_job_matches(str(job_id), fields.get("JobId"),
+                             fields.get("ArrayJobId"), fields.get("ArrayTaskId")):
+        return (None, None, None, "slurmctld returned a different job id"), False
+    submit = fields.get("SubmitTime")
+    ours, why = sacct_row_is_ours(parse_iso_ts(submit), declared_at, bound_at)
+    if not ours:
+        return (None, None, submit, why), False
+    state = fields.get("JobState")
+    if not state:
+        return (None, None, submit, "slurmctld omitted JobState"), False
+    if state in SLURM_OK and not terminal_record_postdates(
+            parse_iso_ts(fields.get("EndTime")), newest):
+        notes.append("the slurmctld row ended before the declared output(s); "
+                     "artifact ordering is diagnostic, not attribution")
+    return (state, fields.get("ExitCode"), submit, None), False
+
+
+def slurm_exit_state(unit_dir, job_id, declared_at, notes):
+    """A wrapper attestation is admissible only after positive queue absence.
+
+    This is weaker than scheduler evidence: trusted writers can alter it,
+    and SIGKILL cannot write one. Requeues clear the previous record before
+    executing, and any queued job (including an id reuse) blocks this path.
+    A later unobserved requeue cancelled before its wrapper starts can leave
+    an earlier success behind. Restart counts are diagnostic, not proof that
+    no later incarnation existed; this weaker fallback is owner-accepted.
+    """
+    empty = (None, None, None, None)
+    if not shutil.which("squeue"):
+        return empty
+    rc, out, err = run(["squeue", "-h", "--jobs=" + str(job_id),
+                        "--states=all", "-o", "%i"], timeout=20)
+    if out.strip() or (rc != 0 and "Invalid job id specified" not in err):
+        return empty
+    record, error = read_json(Path(unit_dir) / SLURM_EXIT_RECORD)
+    if error or not isinstance(record, dict):
+        return empty
+    status = record.get("exit_status")
+    ended = parse_iso_ts(record.get("end_time"))
+    if (not slurm_job_matches(str(job_id), record.get("job_id"),
+                              record.get("array_job_id"), record.get("array_task_id"))
+            or type(status) is not int or not 0 <= status <= 255
+            or ended is None or declared_at is None
+            or ended + OWNERSHIP_SLACK_S < declared_at):
+        return empty
+    notes.append("exit-record: job wrapper attestation, not scheduler evidence; "
+                 "a later unobserved requeue may be missed")
+    return ("COMPLETED" if status == 0 else "FAILED",
+            str(status) + ":0", None, None)
+
+
+def slurm_state(unit_dir, spec, notes, record_enabled=False):
+    """Prefer live controller evidence; never replace a known job's state."""
+    spec["slurm_evidence_source"] = None
+    job_id = str(spec["job_id"])
+    declared_at = parse_iso_ts(spec.get("created_at"))
+    bound_at = parse_iso_ts(spec.get("bound_at"))
+    newest = newest_declared_mtime({"declared_outputs":
+                                    [str(Path(unit_dir) / output)
+                                     for output in (spec.get("declared_outputs") or [])],
+                                    "cwd": str(unit_dir)}, str(unit_dir))
+    evidence, absent = scontrol_state(job_id, declared_at, bound_at, newest, notes)
+    if evidence[0] is not None:
+        spec["slurm_evidence_source"] = "slurmctld"
+        return evidence
+    if not absent:
+        return evidence
+    owned = []
+    evidence = sacct_state(job_id, declared_at, bound_at, newest, notes, owned)
+    if evidence[0] is not None:
+        spec["slurm_evidence_source"] = "sacct"
+        return evidence
+    if owned[0] or not record_enabled:
+        return evidence
+    fallback = slurm_exit_state(unit_dir, job_id, declared_at, notes)
+    if fallback[0] is not None:
+        spec["slurm_evidence_source"] = "exit-record"
+        return fallback
+    return evidence
 
 
 # Lifted callee: sha256_file. Found by a closure check that enumerates by
@@ -677,9 +914,11 @@ def cmd_allocate(args):
     if not args.output:
         sys.exit("error: a unit with no declared outputs cannot be judged done. "
                  "Pass --output PATH (relative to the run-dir) at least once.")
-
     attempt_id = os.urandom(8).hex()
     unit_dir = root / args.task / attempt_id
+    problem = slurm_output_problem(args.output, unit_dir) if args.kind == "slurm" else None
+    if problem:
+        sys.exit("error: " + problem)
     try:
         # exist_ok=False is the exclusivity. Never relax this.
         unit_dir.mkdir(parents=True, exist_ok=False)
@@ -1163,6 +1402,11 @@ def check_unit(unit_dir, spec, notes, launch_facts=None, artifact_basis=None):
     argument was resting on unchecked: a declared output that existed before
     dispatch and did not change is an input, whatever wrote it."""
     kind = spec.get("kind")
+    spec.update(slurm_evidence_source=None, artifact_fingerprints={})
+    record_enabled, problem = slurm_record_policy(unit_dir, spec, artifact_basis)
+    if problem:
+        notes.append(problem)
+        return "INCOMPLETE"
     present, missing, escaped = W.outputs_present(unit_dir, spec)
     spec["artifact_fingerprints"] = fingerprint_outputs(unit_dir, present)
     if escaped:
@@ -1189,24 +1433,15 @@ def check_unit(unit_dir, spec, notes, launch_facts=None, artifact_basis=None):
                      "shows it ran. Submit it and record the id with `bind`.")
         return "INCOMPLETE"
 
-    declared_at = parse_iso_ts(spec.get("created_at"))
-    bound_at = parse_iso_ts(spec.get("bound_at"))
-    newest = newest_declared_mtime({"declared_outputs":
-                                    [str(Path(unit_dir) / o)
-                                     for o in (spec.get("declared_outputs") or [])],
-                                    "cwd": str(unit_dir)}, str(unit_dir))
-    why = []
-    sstate, scode, ssubmit, why_not = sacct_state(
-        str(job_id), declared_at, bound_at, newest, why)
-    notes.extend(why)
+    sstate, scode, ssubmit, why_not = slurm_state(unit_dir, spec, notes, record_enabled)
 
     if sstate is None:
         if why_not:
-            notes.append(f"sacct row(s) for job {job_id} discarded: {why_not}")
+            notes.append(f"scheduler evidence for job {job_id} discarded: {why_not}")
         notes.append(f"REASON={REASON_NO_EVIDENCE}")
-        notes.append(f"no usable accounting row for job {job_id}, so its "
-                     f"terminal state is unknown. Wait, or check `sacct -j "
-                     f"{job_id}` by hand.")
+        notes.append(f"no usable terminal evidence for job {job_id}, so its "
+                     f"terminal state is unknown. Check slurmctld, accounting "
+                     f"or the job's exit record.")
         return "INCOMPLETE"
 
     if sstate in SLURM_PREEMPTED:
@@ -1254,6 +1489,7 @@ def check_unit(unit_dir, spec, notes, launch_facts=None, artifact_basis=None):
 
 
 def cmd_check(args):
+    configure_sacct(args)
     unit_dir = Path(args.unit_dir).resolve()
     spec, err = read_json(unit_dir / UNIT)
     if err:
@@ -1306,7 +1542,7 @@ def cmd_check(args):
             "exit_status_attested_by": {
                 "pipeline": "launcher wrapper (no scheduler)",
                 "code": "paseo agent lifecycle (no exit status exists)",
-            }.get(spec.get("kind"), "slurm accounting"),
+            }.get(spec.get("kind"), spec.get("slurm_evidence_source")),
             # Was False with a pointer to a tool we never called. Now it
             # records what was actually established, and PRODUCTION_DENIES
             # spells out the reach: "a change was produced" is not "the change
@@ -1384,6 +1620,8 @@ def main():
     c.add_argument("--isolation-facts", default=None)
     c.add_argument("--isolation-required", action="store_true", help=argparse.SUPPRESS)
     c.add_argument("--result-fd", type=int, default=None, help=argparse.SUPPRESS)
+    c.add_argument("--skip-sacct", action="store_true", help=argparse.SUPPRESS)
+    c.add_argument("--sacct-status-fd", type=int, default=None, help=argparse.SUPPRESS)
     c.set_defaults(fn=cmd_check)
 
     args = ap.parse_args()

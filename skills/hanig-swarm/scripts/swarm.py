@@ -1420,7 +1420,7 @@ def _units_with_canary(plan):
             and canary not in (u.get("needs") or []) else u for u in units]
 
 
-def validate_plan(plan, survey=None):
+def validate_plan(plan, survey=None, new_attempts=True):
     """Raise PlanError, or return a summary. Refuses BEFORE anything is
     dispatched: a plan that cannot be run should not half-run.
 
@@ -1735,6 +1735,9 @@ def validate_plan(plan, survey=None):
                     f"root is exclusive so that finding an artifact there is "
                     f"conclusive; an output above it is neither exclusive nor "
                     f"findable.")
+        problem = U.slurm_output_problem(u.get("outputs") or []) if new_attempts and u.get("kind") == "slurm" else None
+        if problem:
+            raise PlanError(f"unit {u.get('id', '?')!r}: {problem}")
 
     # --- findings.json must be able to REACH its reader -------------------
     #
@@ -3061,6 +3064,57 @@ def _clear_isolation_marker(facts):
     return None
 
 
+def _slurm_exit_trap(unit_dir):
+    """Record explicit exits, normal returns and default fatal-signal exits.
+
+    Payload handlers can replace defaults; no payload supervisor is introduced.
+    Clear old records when initialized, including requeues. Shell replacement,
+    a replaced EXIT trap, SIGKILL or node loss can leave absent evidence.
+    The recorder uses isolated positional data, not payload-mutable globals;
+    failure to publish a record must not change the payload's original status.
+
+    GNU Bash's trap-output write status permits a child-free CHLD probe:
+    default non-POSIX disposition prints nothing; configured/ignored traps
+    fail on closed stdout. POSIX default output conservatively opts out too.
+    Opt-outs invalidate existing JSON with builtins, without emitting CHLD.
+    """
+    record = shlex.quote(str(Path(unit_dir) / U.SLURM_EXIT_RECORD))
+    temporary = shlex.quote(str(Path(unit_dir) / (U.SLURM_EXIT_RECORD + ".tmp."))) + '"$$"'
+    clear = f"(builtin command -p rm -f -- {record})"
+    signal_exit = shlex.quote(clear + "; builtin exit ")
+    generator = f'''set -euo pipefail
+    builtin set -- $(builtin kill -l)
+    while (($#)); do
+        case "$1" in
+            *')'|KILL|SIGKILL|QUIT|SIGQUIT|CHLD|SIGCHLD|CONT|SIGCONT|STOP|SIGSTOP|TSTP|SIGTSTP|TTIN|SIGTTIN|TTOU|SIGTTOU|URG|SIGURG|WINCH|SIGWINCH) ;;
+            *) builtin printf 'case "$(builtin trap -p %q)" in ""|"trap -- - "*) builtin trap %q %q ;; esac\\n' "$1" {signal_exit}"$((128 + $(builtin kill -l "$1")))" "$1" ;;
+        esac
+        builtin shift
+    done'''
+    defaults = f'''builtin eval "$(/bin/bash -p -c {shlex.quote(generator)} || builtin printf '\\n%s\\n' 'builtin exit 1')"'''
+    prefix = '(\n    builtin set -- "$?"'
+    identity = '''builtin printf ' %q' "${SLURM_JOB_ID:-}" "${SLURM_ARRAY_JOB_ID:-}" "${SLURM_ARRAY_TASK_ID:-}" "${SLURM_RESTART_COUNT:-0}"'''
+    recorder = f'''
+    [[ $2 =~ ^[0-9]+$ ]] || exit 1
+    [[ $3:$4 =~ ^[0-9]+:[0-9]+$ ]] || builtin set -- "$1" "$2" "" "" "$5"
+    [[ $5 =~ ^[0-9]+$ ]] || builtin set -- "$1" "$2" "$3" "$4" ""
+    builtin printf '{{"job_id":"%s","exit_status":%s,"end_time":"%s","array_job_id":"%s","array_task_id":"%s","restart_count":"%s"}}\\n' \\
+        "$2" "$1" "$(command date -u +%Y-%m-%dT%H:%M:%SZ)" "$3" "$4" "$5" \\
+        > {temporary}
+) && command mv -f -- {temporary} {record} || {clear} || :'''
+    return f'''if [[ ! -o functrace && ! -o xtrace ]] && ! builtin shopt -q extdebug && builtin trap -p CHLD >&- 2>/dev/null; then
+{clear}
+{defaults}
+case "$(builtin trap -p EXIT)" in
+    ""|"trap -- - "*)
+        builtin trap "$(builtin printf '%s' {shlex.quote(prefix)}; {identity}; builtin printf '%s' {shlex.quote(recorder)})" EXIT ;;
+esac
+else
+    [[ ! -L {record} && ( ! -e {record} || -f {record} ) ]] || builtin exit 1
+    if [[ -s {record} ]]; then builtin printf '' >| {record}; fi
+fi'''
+
+
 def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
             dispatch_source=None):
     """Submit, and return (job_id, error). Dispatch differs per kind; judging
@@ -3070,6 +3124,10 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
     without a scheduler. A coordinator that can only be tested on a live
     cluster does not get tested."""
     kind = u["kind"]
+    record_enabled, problem = U.slurm_record_policy(
+        unit_dir, u, raw_artifact_basis(state or {}, u["id"], unit_dir))
+    if problem:
+        return None, problem
     anchored_base = None
     if kind == "code":
         # Capture only facts the coordinator can know before the agent exists.
@@ -3238,12 +3296,15 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
         # submitting a second one.
         attempt_id = Path(unit_dir).name
         body = ["#!/bin/bash", f"#SBATCH --job-name=swarm-{attempt_id}",
-                "set -euo pipefail", f"cd {unit_dir}",
+                "set -euo pipefail",
+                f"cd {shlex.quote(str(unit_dir))}",
                 f"export SWARM_UNIT_ID={shlex.quote(u['id'])}",
                 f"export SWARM_UNIT_DIR={shlex.quote(str(unit_dir))}"]
         # Quoted: a path is data. A directory with a space in its name must
         # not become two words in a shell script we generate.
         body += [f"export {n}={shlex.quote(v)}" for n, v in deps]
+        if record_enabled:
+            body.append(_slurm_exit_trap(unit_dir))
         body += [submission_command, ""]
         for extra in (u.get("sbatch") or []):
             body.insert(1, f"#SBATCH {extra}")
@@ -5057,6 +5118,8 @@ def _authority_result_sink():
 def _check(unit_dir, launch_facts=None, artifact_basis=None,
            isolation_facts=None, isolation_required=False):
     argv = [sys.executable, str(_HERE / "unit.py"), "check", str(unit_dir)]
+    if U.SACCT_UNAVAILABLE:
+        argv.append("--skip-sacct")
     # The separate judge receives the complete authority snapshot directly
     # from coordinator state. It never opens the launch audit record.
     if launch_facts:
@@ -5079,13 +5142,18 @@ def _check(unit_dir, launch_facts=None, artifact_basis=None,
     # Anonymous coordinator-owned storage is the authority channel. stdout
     # contains diagnostics derived from agent-writable artifacts and cannot
     # become authority merely by printing a reserved-looking prefix.
-    with _authority_result_sink() as result_sink:
+    with _authority_result_sink() as result_sink, _authority_result_sink() as scheduler_sink:
         result_fd = result_sink.fileno()
+        scheduler_fd = scheduler_sink.fileno()
         argv += ["--result-fd", str(result_fd)]
+        argv += ["--sacct-status-fd", str(scheduler_fd)]
         rc, out, err = U.run(
-            argv, timeout=300, pass_fds=(result_fd,))
+            argv, timeout=300, pass_fds=(result_fd, scheduler_fd))
         result_sink.seek(0)
         result_channel = result_sink.read(4097).decode("ascii", "replace")
+        scheduler_sink.seek(0)
+        if scheduler_sink.read(2) == b"1":
+            U.SACCT_UNAVAILABLE = True
     return rc, out or "", err or "", result_channel
 
 
@@ -6558,7 +6626,7 @@ def trusted_produced_head(state, unit, attempt_dir):
         Path(attempt_dir).name)
 
 
-def _capture_artifact_basis(state, unit, unit_dir, u):
+def _capture_artifact_basis(state, unit, unit_dir, u, enable_slurm_exit=False):
     """Digest every declared artifact BEFORE anything is dispatched.
 
     B1, and the strongest thing this function does is happen EARLY. The done
@@ -6602,7 +6670,17 @@ def _capture_artifact_basis(state, unit, unit_dir, u):
         "escaped": sorted(escaped),
         "present": U.fingerprint_outputs(unit_dir, present),
     }
+    if enable_slurm_exit and u.get("kind") == "slurm":
+        bases[attempt]["slurm_exit_record"] = {"version": 1, "path": U.SLURM_EXIT_RECORD}
     return bases[attempt]
+
+
+def raw_artifact_basis(state, unit, attempt_dir):
+    """Transport coordinator state without turning invalid capability into absence."""
+    if not attempt_dir:
+        return None
+    return ((((state.get("units") or {}).get(unit) or {})
+             .get("attempt_artifact_bases") or {}).get(Path(attempt_dir).name))
 
 
 def trusted_artifact_basis(state, unit, attempt_dir):
@@ -7439,7 +7517,8 @@ def reconcile_orphan(unit_dir, allocated_at=None, kind=None):
     for argv in (["squeue", "-h", "-n", name, "-o", "%i"],
                  ["sacct", "-n", "-P", "-X", "--name", name,
                   "-S", start, "-o", "JobID"]):
-        rc, out, _ = U.run(argv, timeout=60)
+        rc, out, _ = (U.run_sacct(argv) if argv[0] == "sacct"
+                      else U.run(argv, timeout=60))
         if rc != 0:
             continue                       # the tool failed; it proved nothing
         asked += 1
@@ -7462,6 +7541,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     Safe to run from a Paseo schedule or cron every few minutes: it never
     re-submits a unit that has an attempt recorded, and it persists before it
     acts."""
+    U.SACCT_UNAVAILABLE = False
     units = {u["id"]: u for u in _units_with_canary(plan)}
     report, dispatched, halted = [], 0, state.get("halted")
     advance_observed_at = time.time()
@@ -7865,7 +7945,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             isolation_facts = trusted_isolation_facts(state, u, attempt)
             check_args = (
                 attempt, launch_facts,
-                trusted_artifact_basis(state, uid, attempt))
+                raw_artifact_basis(state, uid, attempt))
             # Preserve the historical call shape for undeclared units and old
             # embedders. A declared profile takes the fourth, trusted-by-value
             # argument; there is no attempt-directory fallback.
@@ -8343,7 +8423,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         # basis is only a basis if it predates everything that could write
         # into the write root. A digest taken after dispatch is a digest of
         # the run's own output.
-        _capture_artifact_basis(state, uid, unit_dir, u)
+        _capture_artifact_basis(state, uid, unit_dir, u,
+                                enable_slurm_exit=u.get("kind") == "slurm")
         save_state(state_dir, state)
 
         # B6, and the reason it sits HERE. The lease excludes a second
@@ -8555,7 +8636,7 @@ def _load_plan(path):
     # refusal that fires after the DAG is live.
     survey, _note = discover_survey(path)
     try:
-        validate_plan(plan, survey)
+        validate_plan(plan, survey, new_attempts=False)
     except PlanError as e:
         sys.exit(f"error: invalid plan: {e}")
     except RecursionError:
