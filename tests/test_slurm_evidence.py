@@ -21,10 +21,16 @@ from tests.scheduler_fixture import closed_bin
 
 
 def _bash_major(path):
+    """Major version of the bash at path, or 0. A clean environment keeps
+    BASH_ENV or other startup output out of the answer, and only the last
+    line is read."""
     try:
-        done = subprocess.run([path, "-c", 'builtin echo "${BASH_VERSINFO[0]}"'],
-                              capture_output=True, text=True, timeout=10)
-        return int(done.stdout.strip())
+        done = subprocess.run([path, "--noprofile", "--norc", "-c",
+                               'builtin echo "${BASH_VERSINFO[0]}"'],
+                              capture_output=True, text=True, timeout=10,
+                              env={"PATH": os.defpath})
+        lines = done.stdout.strip().splitlines()
+        return int(lines[-1]) if lines else 0
     except (OSError, ValueError, subprocess.SubprocessError):
         return 0
 
@@ -1340,6 +1346,16 @@ class SlurmEvidence(unittest.TestCase):
                         record_path.rmdir()
                     else:
                         self.assertFalse(record_path.exists())
+
+    def test_a_bash_4_host_never_skips_the_wrapper_tests(self):
+        """Where /bin/bash is 4+, the wrapper tests must run, not skip."""
+        if _bash_major("/bin/bash") >= 4:
+            self.assertIsNotNone(BASH, "a bash 4+ exists at /bin/bash, yet the "
+                                 "probe found none; wrapper tests would skip")
+        with mock.patch.dict(os.environ, {"BASH_ENV": str(self.root / "noisy")}):
+            (self.root / "noisy").write_text("printf 'site setup\\n'\n")
+            for path in filter(None, (BASH, OLD_BASH)):
+                self.assertGreater(_bash_major(path), 0, path)
 
     @unittest.skipUnless(OLD_BASH, "/bin/bash here is 4+; the opt-out applies "
                          "to bash 3.2 such as macOS /bin/bash")
