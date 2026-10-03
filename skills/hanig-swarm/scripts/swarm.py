@@ -3077,6 +3077,17 @@ def _slurm_exit_trap(unit_dir):
     default non-POSIX disposition prints nothing; configured/ignored traps
     fail on closed stdout. POSIX default output conservatively opts out too.
     Opt-outs invalidate existing JSON with builtins, without emitting CHLD.
+
+    The CHLD probe needs GNU Bash 4 or later: bash 3.2 (macOS /bin/bash)
+    ignores the closed stdout and returns 0 even when a CHLD trap is set, so
+    it cannot tell a payload handler is present. Before 4 the wrapper takes
+    the conservative opt-out (no record, so the unit judges INCOMPLETE, never
+    DONE); BASH_VERSINFO is a builtin variable, so the check forks nothing.
+
+    The JSON braces are written as printf escapes (\\173, \\175), never as
+    literal `{...,...}`: bash 3.2 (macOS /bin/bash) brace-expands that text
+    inside the quoted command substitution that builds the EXIT trap, which
+    splits the trap into several words and records one field per line.
     """
     record = shlex.quote(str(Path(unit_dir) / U.SLURM_EXIT_RECORD))
     temporary = shlex.quote(str(Path(unit_dir) / (U.SLURM_EXIT_RECORD + ".tmp."))) + '"$$"'
@@ -3098,11 +3109,11 @@ def _slurm_exit_trap(unit_dir):
     [[ $2 =~ ^[0-9]+$ ]] || exit 1
     [[ $3:$4 =~ ^[0-9]+:[0-9]+$ ]] || builtin set -- "$1" "$2" "" "" "$5"
     [[ $5 =~ ^[0-9]+$ ]] || builtin set -- "$1" "$2" "$3" "$4" ""
-    builtin printf '{{"job_id":"%s","exit_status":%s,"end_time":"%s","array_job_id":"%s","array_task_id":"%s","restart_count":"%s"}}\\n' \\
+    builtin printf '\\173"job_id":"%s","exit_status":%s,"end_time":"%s","array_job_id":"%s","array_task_id":"%s","restart_count":"%s"\\175\\n' \\
         "$2" "$1" "$(command date -u +%Y-%m-%dT%H:%M:%SZ)" "$3" "$4" "$5" \\
         > {temporary}
 ) && command mv -f -- {temporary} {record} || {clear} || :'''
-    return f'''if [[ ! -o functrace && ! -o xtrace ]] && ! builtin shopt -q extdebug && builtin trap -p CHLD >&- 2>/dev/null; then
+    return f'''if (( ${{BASH_VERSINFO[0]:-0}} >= 4 )) && [[ ! -o functrace && ! -o xtrace ]] && ! builtin shopt -q extdebug && builtin trap -p CHLD >&- 2>/dev/null; then
 {clear}
 {defaults}
 case "$(builtin trap -p EXIT)" in
