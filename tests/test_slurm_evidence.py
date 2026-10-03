@@ -40,7 +40,10 @@ def _find_bash(minimum):
     for candidate in (os.environ.get("HANIG_TEST_BASH"), "/bin/bash",
                       "/opt/homebrew/bin/bash", "/usr/local/bin/bash",
                       "/usr/bin/bash", shutil.which("bash")):
-        if candidate and candidate not in seen and os.access(candidate, os.X_OK):
+        if not candidate:
+            continue
+        candidate = os.path.abspath(candidate)  # tests run with other cwds
+        if candidate not in seen and os.access(candidate, os.X_OK):
             seen.append(candidate)
             if _bash_major(candidate) >= minimum:
                 return candidate
@@ -48,6 +51,7 @@ def _find_bash(minimum):
 
 
 BASH = _find_bash(4)
+assert BASH is None or os.path.isabs(BASH)
 OLD_BASH = "/bin/bash" if 0 < _bash_major("/bin/bash") < 4 else None
 
 
