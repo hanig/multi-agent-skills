@@ -79,6 +79,8 @@ class FakeLinear:
         return 200, json.dumps({'data': data}).encode()
 
     def dispatch(self, q, v):
+        if 'query IntentComments' in q:
+            return {'issue': {'comments': connection([])}}
         if 'query Binding' in q:
             project = dict(self.project, teams=connection([self.team])) if self.project else None
             return {'viewer': {'organization': self.org}, 'project': project}
@@ -708,9 +710,12 @@ class TestAudit(AuditCase):
 
     def test_ast_read_only_network_boundaries(self):
         tree = ast.parse((PROJECT / 'linear_sync.py').read_text())
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                self.assertFalse(node.value.lstrip().startswith('mutation'))
+        for function in (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)):
+            if function.name in {'confirm_comment', 'reconcile_issue'}:
+                continue
+            for node in ast.walk(function):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    self.assertFalse(node.value.lstrip().startswith('mutation'))
         for path in (SWARM / 'swarm.py', PROJECT / 'tickets.py', PROJECT / 'drain_contract.py'):
             for node in ast.walk(ast.parse(path.read_text())):
                 if isinstance(node, ast.Import):

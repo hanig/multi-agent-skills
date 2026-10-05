@@ -2769,8 +2769,11 @@ class TestClosureAuthorityIsFixedByKind(unittest.TestCase):
 
     def test_the_skill_tells_a_drainer_what_to_do_with_a_violation(self):
         doc = (ROOT / "skills" / "hanig-project" / "SKILL.md").read_text()
-        self.assertIn("integrity", doc.lower())
-        self.assertIn("Never mark the intent applied", doc)
+        step = doc.split("## 6. Drain.", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("Never mark the intent applied", step)
+        self.assertIn("An issue closed without its authorised evidence is an integrity violation.",
+                      " ".join(step.split()))
+        self.assertIn("Say so loudly and reopen it.", step)
 
 
 class TestADefaultChangeIsMadeVisible(unittest.TestCase):

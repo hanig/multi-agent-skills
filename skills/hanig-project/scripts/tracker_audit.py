@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 
 CHECKS = {'binding', 'coverage', 'misplaced', 'relationless',
-          'prose_dependency', 'cycle', 'blocked_in_progress'}
+          'prose_dependency', 'cycle', 'blocked_in_progress', 'intent_order'}
 VERDICTS = {'CLEAN', 'DRIFT', 'UNKNOWN'}
 STATE_SOURCES = ('swarm-state.json', 'outbox.jsonl', 'outbox-receipts.jsonl')
 

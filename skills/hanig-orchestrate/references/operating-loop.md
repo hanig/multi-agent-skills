@@ -102,17 +102,18 @@ ordinary restarts and receipt replacement, without an atomic scheduler fence.
 
 ## Drain the post-merge close intent
 
-After receipt recording and successful advancement, `merge_unit.py` displays the current attempt's pending close intent with its key and `tracker` issue, or `no tracker declared`, followed by the acknowledgment command. It performs no tracker mutation. The following read-only audit and section report consistency over their read interval; unavailable configuration or failed reads print UNAVAILABLE without changing the merge exit code. If no unacknowledged close intent exists, it says so; that message establishes neither tracker delivery nor unit closure. <!-- declaration: tracker.drain -->
+After receipt recording and successful advancement, `merge_unit.py` displays the current attempt's pending close key, `tracker` issue (or `no tracker declared`), and drain command. With a binding and key it invokes drain for that state directory and prints its summary, then runs audit and section. Missing configuration or sibling prints `Tracker drain: UNAVAILABLE (reason)`; drain and audit never change merge success. <!-- declaration: tracker.drain -->
 
-The authorized session applies each pending intent to the named issue using its connector. Before retrying an ambiguous operation, resolve it by receiver read-back or deduplication. Once the operation has landed, replace `KEY` with the displayed key and `ID` with the returned tracker reference: <!-- declaration: tracker.drain -->
+Drain every relevant state directory before auditing; repeat `--state-dir` to cover several waves. <!-- declaration: tracker.drain -->
 
 ```bash
-python3 "$HANIG_SWARM_DIR/scripts/swarm.py" outbox --state-dir "$STATE"
-python3 "$HANIG_SWARM_DIR/scripts/swarm.py" outbox --state-dir "$STATE" \
-  --record-receipt KEY --ref ID
+python3 "$HANIG_PROJECT_DIR/scripts/linear_sync.py" drain \
+  --binding .hanig/linear-binding.json --state-dir "$STATE"
+python3 "$HANIG_PROJECT_DIR/scripts/linear_sync.py" audit \
+  --binding .hanig/linear-binding.json --out "$AUDIT"
 ```
 
-The receipt is an attestation, not independently verified tracker state. Without a connector or a known issue, keep the intent unacknowledged and report pending synchronization; never guess the issue or acknowledge an unapplied operation. The tracker label supplies no authority for admission, closure, or DONE. <!-- declaration: tracker.drain, tracker.authority -->
+The per-project host lock serializes local drainers. Each issue is reconciled once to its latest-ordered genuine state comment, including issues with receipts. Two-host races repair eventually after writes stop and listings catch up. Receipts are historical read-back observations; uncovered legacy history and comment editing/deletion limit coverage. No pending intent is not proof of delivery or unit closure, and tracker status supplies no coordinator authority. <!-- declaration: tracker.drain, tracker.authority -->
 
 ## Tracker and the hourly report
 
