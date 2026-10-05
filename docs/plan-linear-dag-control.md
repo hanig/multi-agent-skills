@@ -80,12 +80,14 @@ blocks the merge. Tests drive the real report consumer with absent, stale,
 mismatched, partial and failing audits; none renders clean; removing the
 requirement fails them.
 
-**Slice 3: drain.** Outbox draining from `hanig/linear-api` with project
-membership checked before any state change and the identity namespacing
-above. A local lock does not serialize drainers on other hosts or state
-directories, so a state change is applied only when the read-back shows no
-newer acknowledged state change for that issue; otherwise it stays
-unacknowledged with that reason. Finding 7 is repaired here.
+**Slice 3: drain.** Outbox draining with project membership checked before
+any state change and the identity namespacing above. Revised 2026-10-05
+after its plan review exhausted and a design consult with Sol: one drainer
+per project per host (flock), comments posted in order, one reconciliation
+per touched issue to its latest-ordered genuine state intent on every run,
+and an `intent_order` audit check. The guarantee is eventual reconciliation,
+not race-free correctness across hosts; detail in `docs/plan-linear-drain.md`.
+Finding 7 is repaired here.
 
 **Slice 4: writes.** Approved `tickets.json` filing (approval digest covering
 every executed mutation, including edge lists; the immutable approved spec
