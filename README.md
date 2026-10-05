@@ -542,6 +542,20 @@ be reconciled as attestations; unavailable integration evidence is explicitly
 labelled `integration-unverified`. Forge observations remain attestations,
 and the local lock and journals retain their same-node, trusted-writer limit.
 
+The operator drains tracker intents before auditing current state:
+
+```sh
+python3 "$HANIG_PROJECT_DIR/scripts/linear_sync.py" drain \
+  --binding .hanig/linear-binding.json --state-dir STATE [--state-dir OTHER_STATE] [--dry-run]
+python3 "$HANIG_PROJECT_DIR/scripts/linear_sync.py" audit \
+  --binding .hanig/linear-binding.json --out AUDIT
+```
+
+`--draft tickets.json` supports named plans; nameless plans use the binding
+and intent tracker identifiers. Reconciliation is eventual across hosts,
+one state write per issue per run. Historical receipts and current audit
+state are separate; see [tracker outbox](docs/tracker-outbox.md).
+
 ### hanig-swarm
 
 The coordinator. Roughly 2,200 lines in `swarm.py`, 1,300 in `unit.py`.
@@ -553,7 +567,7 @@ python3 scripts/swarm.py status   plan.json [--json]
 python3 scripts/swarm.py advance  plan.json
 python3 scripts/swarm.py outbox            [--all] [--json]
 python3 scripts/swarm.py outbox \
-        --record-receipt KEY --ref ARC-171     # after the tracker confirms
+        --record-receipt KEY --ref ARC-171     # compatibility attestation after confirmation
 python3 scripts/swarm.py promote  plan.json --unit ID --approve --approver hani
 python3 scripts/swarm.py merge    --unit ID --repo o/r \
         --pr URL --head SHA --target main --merged-as SHA --method merge

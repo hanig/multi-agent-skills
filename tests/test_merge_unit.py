@@ -515,15 +515,15 @@ class TestMergeUnit(unittest.TestCase):
         self.assertLess(result.stdout.index("Merge receipt recorded and advance ran."),
                         result.stdout.index("Pending tracker close:"))
         self.assertEqual(S.acknowledgment_status(self.state_dir)[0], {})
-        line, = [line for line in result.stdout.splitlines()
-                 if "--record-receipt" in line]
+        line, = [line for line in result.stdout.splitlines() if 'linear_sync.py' in line and ' drain ' in line]
         command = shlex.split(line)
-        self.assertEqual(command, [sys.executable, str(SCRIPTS / "swarm.py"), "outbox",
-                                  "--state-dir", str(self.state_dir), "--record-receipt",
-                                  close["key"], "--ref", "ID"])
-        # The displayed command is actually consumable after the session's
-        # external action. This test supplies an attestation, not a tracker call.
-        command[-1] = "ARC-1"
+        self.assertEqual(command, [sys.executable,
+                                  str(SCRIPTS.parents[1] / 'hanig-project/scripts/linear_sync.py'), 'drain',
+                                  '--binding', str(self.plan_path.parent / '.hanig/linear-binding.json'),
+                                  '--state-dir', str(self.state_dir)])
+        # The compatibility receipt remains usable after external confirmation.
+        command = [sys.executable, str(SCRIPTS / 'swarm.py'), 'outbox',
+                   '--state-dir', str(self.state_dir), '--record-receipt', close['key'], '--ref', 'ARC-1']
         ack = subprocess.run(command, cwd=str(self.repo), env=self.env,
                              capture_output=True, text=True)
         self.assertEqual(ack.returncode, 0, ack.stdout + ack.stderr)
@@ -539,7 +539,7 @@ class TestMergeUnit(unittest.TestCase):
         close, = [i for i in S.read_outbox(self.state_dir) if i["verb"] == "close"]
         self.assertNotIn("tracker", close)
         self.assertIn("key={} no tracker declared".format(close["key"]), result.stdout)
-        self.assertIn("--record-receipt {} --ref ID".format(close["key"]), result.stdout)
+        self.assertIn("linear_sync.py drain --binding", result.stdout)
 
     def test_forge_auth_survives_but_all_coordinator_children_are_contained(self):
         names = sorted(CE.DENIED_ENV_NAMES | {"SWARM_UNIT_TEST", "SWARM_DEP_TEST"})
@@ -634,6 +634,7 @@ class TestMergeUnit(unittest.TestCase):
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Tracker: UNAVAILABLE (missing declared installed dependency 'hanig-project'", result.stdout)
+        self.assertIn("Tracker drain: UNAVAILABLE (missing declared installed dependency 'hanig-project'", result.stdout)
         self.assertEqual(len(self.calls(["pr", "merge"])), 1)
         state = json.loads((self.state_dir / S.STATE_FILE).read_text())
         self.assertEqual(state["units"]["u"]["state"], "DONE")

@@ -412,7 +412,7 @@
     },
     {
       "id": "outbox.receipt",
-      "normative_text": "Apply each pending intent through the connector before marking it applied, and record its outbox receipt only after tracker confirmation; an absent receipt means `unacknowledged`, never that the issue was not filed, and false acknowledgment is worse than missing acknowledgment.",
+      "normative_text": "Run linear_sync.py drain with a binding or draft and every relevant state directory, then run audit. The drain posts idempotent namespaced comments, reconciles each issue once to its latest-ordered state intent, and records receipts only after read-back. Earlier state intents remain superseded; existing receipts are historical observations, separate from current audited state. An absent receipt means unacknowledged, never that the issue was not filed. False acknowledgment is worse than missing acknowledgment.",
       "references": [
         "references/tracker-sync.md"
       ]

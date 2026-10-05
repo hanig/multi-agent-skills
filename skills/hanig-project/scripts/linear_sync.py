@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""Read-only Linear binding, audit and tracker section commands.
+"""Linear binding, audit, outbox drain and tracker section commands.
 
-All remote reads use linear_api.transport through Client. Local input bytes
+All remote requests use linear_api.transport through Client. Local input bytes
 are captured once; no draft, state or receipt is rewritten by the audit.
 """
 import argparse
 import datetime as dt
+import fcntl
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 
 import linear_api as API
 import tracker_audit as TA
@@ -392,6 +394,16 @@ def audit(args, client):
         # A failed binding is itself conclusive drift/unknown; no other
         # remote data is trusted. Coverage explicitly records the skipped read.
         reader.problems.append('issue read withheld because binding did not match')
+    for issue in issues:
+        try:
+            latest = latest_state(issue_comments(reader, workspace, project, issue['id']))
+            if latest and issue['state']['type'] != STATE_TYPE[latest['op']]:
+                finding('intent_order', 'DRIFT', {'issue': issue['identifier'],
+                        'latest': latest['key'], 'expected': STATE_TYPE[latest['op']],
+                        'actual': issue['state']['type']})
+        except (API.LinearError, ValueError, TypeError, KeyError) as exc:
+            finding('intent_order', 'UNKNOWN', str(exc))
+            reader.problems.append(str(exc))
     if args.state_dir:
         try:
             if raw[str((Path(args.state_dir) / 'swarm-state.json').absolute())] is None:
@@ -437,6 +449,390 @@ def audit(args, client):
             'checks': records}
 
 
+# State is reconciled once per issue. Comments, including those from other
+# hosts, are the eventually visible ordering journal; there is no CAS or loop.
+STATE_TYPE = {'start': 'started', 'close': 'completed', 'reopen': 'unstarted'}
+OPERATIONS = set(STATE_TYPE) | {'note', 'block', 'open_pr'}
+COMMENT_FIELDS = 'id body issue { id }'
+DRAIN_ISSUE_FIELDS = 'id identifier state { type } project { id } team { id }'
+
+
+def intent_order(at, key):
+    if not isinstance(key, str) or not re.fullmatch(r'[A-Za-z0-9._:-]+', key):
+        raise ValueError('key not drainable')
+    require_id(at, 'intent at')
+    try:
+        instant = dt.datetime.strptime(at, '%Y-%m-%dT%H:%M:%S%z')
+    except ValueError:
+        instant = dt.datetime.fromisoformat(at.replace('Z', '+00:00'))
+    if instant.utcoffset() is None:
+        raise ValueError('intent at requires a timezone')
+    return instant, key
+
+
+def comment_id(workspace, project, issue, key):
+    return API.derived_id('comment:%s/%s/%s/%s' % (workspace, project, issue, key))
+
+
+def intent_markers(intent):
+    return {'intent': intent['key'], 'evidence': intent['envelope']['evidence_digest'],
+            'order': '%s %s %s' % (intent['at'], intent['key'], intent['verb'])}
+
+
+def comment_body(intent):
+    lines = ['swarm `%s` for unit `%s`: %s' %
+             (intent['verb'], intent['unit'], intent.get('why') or intent['verb']),
+             '', '- unit state: `%s`' % intent.get('unit_state'),
+             '- attempt: `%s`' % intent['envelope']['attempt']['id'],
+             '- evidence digest: `%s`' % intent['envelope']['evidence_digest'], '']
+    lines.extend('`swarm-%s: %s`' % pair for pair in intent_markers(intent).items())
+    return '\n'.join(lines)
+
+
+def comment_markers(comment):
+    """Read only the fixed trailer; marker-like prose above it is free text."""
+    body = comment.get('body') or ''
+    trailer = [line for line in body.splitlines() if line.strip()][-3:]
+    if len(trailer) != 3:
+        return None
+    values = {}
+    for name, line in zip(('intent', 'evidence', 'order'), trailer):
+        match = re.fullmatch(r'`swarm-' + name + r': ([^`\r\n]+)`', line)
+        if not match:
+            return None
+        values[name] = match[1]
+    return values
+
+
+def genuine_comment(comment, workspace, project, issue):
+    """Ignore copies and malformed/edited markers; compare ids exactly."""
+    markers = comment_markers(comment)
+    if not markers or (comment.get('issue') or {}).get('id') != issue:
+        return None
+    key = markers['intent']
+    if comment.get('id') != comment_id(workspace, project, issue, key):
+        return None
+    if not re.fullmatch('[0-9a-f]{64}', markers['evidence']):
+        return None
+    try:
+        at, order_key, op = markers['order'].rsplit(' ', 2)
+        if order_key != key or op not in OPERATIONS:
+            return None
+        order = intent_order(at, key)
+    except (ValueError, TypeError):
+        return None
+    return {'key': key, 'op': op, 'order': order, 'markers': markers}
+
+
+def issue_comments(reader, workspace, project, issue):
+    q = ('query IntentComments($id: String!, $after: String) { issue(id: $id) { '
+         'comments(first: 100, after: $after) { nodes { %s } %s } } }' % (COMMENT_FIELDS, PAGE))
+    nodes = reader.pages_of(lambda after: reader.client.query(q, {'id': issue, 'after': after})['issue']['comments'])
+    return [parsed for c in nodes
+            for parsed in [genuine_comment(c, workspace, project, issue)] if parsed]
+
+
+def latest_state(comments):
+    return max((c for c in comments if c['op'] in STATE_TYPE),
+               key=lambda c: c['order'], default=None)
+
+
+def read_drain_issue(client, ref):
+    q = 'query DrainIssue($id: String!) { issue(id: $id) { %s } }' % DRAIN_ISSUE_FIELDS
+    issue = client.query(q, {'id': ref})['issue']
+    if not issue:
+        raise ValueError('unreadable issue: ' + ref)
+    require_id(issue.get('id'), 'issue id')
+    require_id(issue.get('identifier'), 'issue identifier')
+    return issue
+
+
+def check_membership(issue, project, team):
+    if ((issue.get('project') or {}).get('id') != project or
+            (issue.get('team') or {}).get('id') != team):
+        raise ValueError('issue outside the bound project')
+
+
+def read_comment(client, cid):
+    return client.query('query IntentComment($id: String!) { comment(id: $id) { %s } }' %
+                        COMMENT_FIELDS, {'id': cid})['comment']
+
+
+def confirm_comment(client, intent, workspace, project, issue, create):
+    cid = comment_id(workspace, project, issue, intent['key'])
+    comment = read_comment(client, cid)
+    if comment is None and create:
+        try:
+            client.query('mutation IntentCommentCreate($input: CommentCreateInput!) { '
+                         'commentCreate(input: $input) { success } }',
+                         {'input': {'id': cid, 'issueId': issue, 'body': comment_body(intent)}})
+        except API.LinearError:
+            # A rejection or ambiguous response counts only if the exact
+            # comment is subsequently read back on the intended issue.
+            pass
+        comment = read_comment(client, cid)
+    if comment is None and not create:
+        return None
+    parsed = genuine_comment(comment, workspace, project, issue) if comment else None
+    if not parsed or parsed['markers'] != intent_markers(intent):
+        raise ValueError('comment missing or markers disagree on read-back')
+    return parsed
+
+
+def drain_identity(args, reader):
+    path = Path(args.binding or args.draft)
+    raw = path.read_bytes()
+    config = json.loads(raw)
+    if args.binding:
+        if type(config.get('schema_version')) is not int or config['schema_version'] != 1:
+            raise ValueError('binding schema_version')
+        workspace = require_id(config['workspace']['id'], 'workspace id')
+        team = require_id(config['team']['id'], 'team id')
+        project = require_id(config['project']['id'], 'project id')
+    else:
+        project = require_id(config['project']['linear_id'], 'draft project.linear_id')
+        require_id(config['project'].get('slug'), 'draft project.slug')
+        team_value = config['project']['team']
+        team = team_value.get('id') if isinstance(team_value, dict) else team_value
+        workspace = (config.get('workspace') or {}).get('id')
+    org, remote, teams = binding_read(reader, project)
+    if not args.binding:
+        workspace = org['id'] if workspace is None else workspace
+        if not isinstance(team_value, dict):
+            matches = [t for t in teams if team_value in (t['id'], t['key'], t.get('name'))]
+            if len(matches) == 1:
+                team = matches[0]['id']
+    if org['id'] != workspace or not remote or remote['id'] != project or team not in [t['id'] for t in teams]:
+        raise ValueError('workspace, team or project ids disagree')
+    return path, raw, config, workspace, project, team
+
+
+def drain_lock_path(workspace, project):
+    # UUIDs in production; restrict path components without rewriting ids.
+    if any(not re.fullmatch('[A-Za-z0-9-]+', v) for v in (workspace, project)):
+        raise ValueError('invalid workspace or project lock id')
+    return Path.home() / '.local/state/hanig-swarm' / ('linear-drain-%s-%s.lock' % (workspace, project))
+
+
+def collect_intents(directories, contract, report):
+    entries = []
+    for directory in dict.fromkeys(directories):
+        try:
+            status, problems = contract.contract.acknowledgment_status(directory)
+            if problems:
+                raise ValueError('receipt journal incomplete: %s' % problems)
+            path = Path(directory) / contract.OUTBOX
+            lines = path.read_text().splitlines() if path.exists() else []
+        except Exception as exc:
+            report('%s: %s' % (directory, exc))
+            continue
+        for number, line in enumerate(lines, 1):
+            if not line.strip():
+                continue
+            label = '%s line %d' % (directory, number)
+            try:
+                intent = contract.normalize_intent(json.loads(line))
+                order = intent_order(intent.get('at'), intent.get('key'))
+                problems = contract.validate_intent(intent)
+                if problems:
+                    raise ValueError('; '.join(problems))
+                label += ' key=' + intent['key']
+                if intent['verb'] == 'close':
+                    evidence = intent.get('evidence')
+                    receipt = evidence.get('receipt') if isinstance(evidence, dict) else None
+                    if not isinstance(receipt, dict) or not receipt:
+                        raise ValueError('close evidence carries no receipt')
+                    if intent.get('closing_evidence') == 'merged_pr':
+                        problem = contract.contract._merge_shape_problem(receipt)
+                        if problem or receipt.get('unit') != intent['unit']:
+                            raise ValueError('merge receipt: ' + (problem or 'names another unit'))
+                grade = status.get(intent['key'], (contract.contract.UNACKNOWLEDGED, []))[0]
+                if grade == contract.contract.CONFLICT:
+                    raise ValueError('conflicting acknowledgments')
+                entries.append({'intent': intent, 'directory': directory, 'label': label, 'order': order,
+                                'receipted': grade != contract.contract.UNACKNOWLEDGED})
+            except Exception as exc:
+                report('%s: %s' % (label, exc))
+    return sorted(entries, key=lambda e: e['order'])
+
+
+def record_drain_receipt(entry, issue, contract):
+    intent = entry['intent']
+    envelope = intent['envelope']
+    observation = {k: envelope[k] for k in ('project', 'unit', 'attempt', 'idempotency_key',
+                                           'requested_operation', 'evidence_digest')}
+    observation.update(schema_version=contract.OBSERVATION_SCHEMA_VERSION,
+                       connector_capability=envelope['required_connector_capability'],
+                       outcome=contract.CONFIRMED_BY_READBACK, source=contract.RECEIVER_READBACK,
+                       matched=True, reference=issue['identifier'], by='linear_sync.py drain', at=utc())
+    with tempfile.TemporaryDirectory(prefix='linear-drain-') as tmp:
+        ipath, opath = Path(tmp) / 'intent.json', Path(tmp) / 'observation.json'
+        ipath.write_text(json.dumps(intent))
+        opath.write_text(json.dumps(observation))
+        result = subprocess.run([sys.executable, str(Path(__file__).with_name('drain_contract.py')),
+                                 'reconcile', '--state-dir', entry['directory'], '--intent', str(ipath),
+                                 '--observation', str(opath)],
+                                env={k: v for k, v in os.environ.items() if k != API.KEY_ENV},
+                                capture_output=True, text=True, timeout=60)
+    if result.returncode:
+        raise ValueError('receipt refused: ' + result.stderr)
+
+
+def reconcile_issue(reader, workspace, project, team, issue, entries, dry_run):
+    comments = issue_comments(reader, workspace, project, issue['id'])
+    expected = {e['intent']['key']: intent_markers(e['intent']) for e in entries}
+    for comment in comments:
+        if comment['key'] in expected and comment['markers'] != expected[comment['key']]:
+            raise ValueError('listed comment disagrees with collected intent')
+    comments += [e['confirmed'] for e in entries if 'confirmed' in e]
+    if dry_run:
+        comments += [{'key': e['intent']['key'], 'op': e['intent']['verb'], 'order': e['order']}
+                     for e in entries if not e['receipted'] and not e.get('error')]
+    latest = latest_state(comments)
+    before = read_drain_issue(reader.client, issue['id'])
+    if before['id'] != issue['id']:
+        raise ValueError('issue identity changed')
+    check_membership(before, project, team)
+    if latest and before['state']['type'] != STATE_TYPE[latest['op']]:
+        target_type = STATE_TYPE[latest['op']]
+        q = ('query DrainStates($id: String!, $after: String) { team(id: $id) { '
+             'states(first: 100, after: $after) { nodes { id type position } %s } } }' % PAGE)
+        states = reader.pages_of(lambda after: reader.client.query(q, {'id': team, 'after': after})['team']['states'])
+        # "First" is the lowest position, which is the order Linear shows a
+        # team's workflow; API page order is not guaranteed to match it.
+        target = min((s for s in states if s['type'] == target_type),
+                     key=lambda s: s['position'], default=None)
+        if target is None:
+            raise ValueError('team has no ' + target_type + ' state')
+        if not dry_run:
+            reader.client.query('mutation DrainState($id: String!, $state: String!) { '
+                                'issueUpdate(id: $id, input: {stateId: $state}) { success } }',
+                                {'id': issue['id'], 'state': target['id']})
+    after = read_drain_issue(reader.client, issue['id'])
+    check_membership(after, project, team)
+    if after['id'] != issue['id'] or (latest and not dry_run and after['state']['type'] != STATE_TYPE[latest['op']]):
+        raise ValueError('state read-back does not show latest target')
+    return latest, after
+
+
+def drain(args, client):
+    import drain_contract as contract
+
+    reader = Reader(client)
+    path, raw, config, workspace, project, team = drain_identity(args, reader)
+    lock_path = drain_lock_path(workspace, project)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open('a') as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise ValueError('another drain holds the project lock; nothing was applied')
+        # Identity must be read to locate the lock. All actual input collection
+        # follows acquisition, with the routing bytes checked again here.
+        if path.read_bytes() != raw:
+            raise ValueError('binding or draft changed while acquiring lock')
+        return drain_locked(args, reader, config, workspace, project, team, contract)
+
+
+def drain_locked(args, reader, config, workspace, project, team, contract):
+    failures, acknowledged, superseded = [], [], []
+
+    def say(message):
+        print(API.redact(message, reader.client._key))
+
+    def fail(message):
+        failures.append(message)
+        say('unacknowledged/UNKNOWN ' + message)
+
+    entries = collect_intents(args.state_dir, contract, fail)
+    identifiers = {}
+    if args.draft:
+        for item in config.get('issues', []):
+            if item.get('identifier'):
+                if item['unit'] in identifiers:
+                    raise ValueError('duplicate unit in draft')
+                identifiers[item['unit']] = item['identifier']
+    groups = {}
+    for entry in entries:
+        intent = entry['intent']
+        try:
+            if args.draft:
+                if intent['project'] == 'swarm' or intent['project'] != config['project']['slug']:
+                    raise ValueError('intent project does not match draft (nameless plans require binding)')
+                ref = identifiers.get(intent['unit'])
+                if 'tracker' in intent and intent['tracker'] != ref:
+                    raise ValueError('tracker disagrees with draft identifier')
+            else:
+                ref = intent.get('tracker')
+            if not ref:
+                raise ValueError('no tracker issue')
+            issue = read_drain_issue(reader.client, ref)
+            check_membership(issue, project, team)
+            group = groups.setdefault(issue['id'], (issue, []))
+            group[1].append(entry)
+            try:
+                confirmed = confirm_comment(reader.client, intent, workspace, project, issue['id'],
+                                            not entry['receipted'] and not args.dry_run)
+                if confirmed:
+                    entry['confirmed'] = confirmed
+                elif entry['receipted']:
+                    say('%s: uncovered history (comment missing); reconciling from existing comments' % issue['identifier'])
+                elif args.dry_run:
+                    say('would post comment for ' + entry['label'])
+            except Exception as exc:
+                if entry['receipted']:
+                    if isinstance(exc, ValueError):
+                        say('%s: uncovered history (%s); reconciling from existing comments' % (issue['identifier'], exc))
+                    else:
+                        fail(entry['label'] + ': comment read UNKNOWN: ' + str(exc))
+                else:
+                    raise
+        except Exception as exc:
+            entry['error'] = str(exc)
+            fail(entry['label'] + ': ' + str(exc))
+    for issue, group in groups.values():
+        try:
+            latest, after = reconcile_issue(reader, workspace, project, team, issue, group, args.dry_run)
+            say('%s: %s%s' % (issue['identifier'], 'would reconcile to ' if args.dry_run else 'reconciled to ',
+                             STATE_TYPE[latest['op']] if latest else 'existing state (no state intent)'))
+        except Exception as exc:
+            fail('%s reconciliation: %s' % (issue['identifier'], exc))
+            latest, after = None, None
+        # A pending state intent that failed leaves this issue's intended
+        # state unresolved, so nothing on the issue is acknowledged this run.
+        unresolved = next((e['label'] for e in group if e.get('error') and not e['receipted']
+                           and e['intent'].get('verb') in STATE_TYPE), None)
+        for entry in group:
+            if entry['receipted'] or entry.get('error'):
+                continue
+            intent = entry['intent']
+            if after is None:
+                fail(entry['label'] + ': reconciliation UNKNOWN')
+                continue
+            if unresolved:
+                fail('%s: receipt withheld; state intent %s on this issue failed' % (entry['label'], unresolved))
+                continue
+            if intent['verb'] in STATE_TYPE:
+                if latest and latest['key'] != intent['key']:
+                    superseded.append(entry['label'])
+                    say('%s: superseded by %s' % (entry['label'], latest['key']))
+                    continue
+            if args.dry_run:
+                fail(entry['label'] + ': dry-run; no receipt recorded')
+                continue
+            if 'confirmed' not in entry:
+                fail(entry['label'] + ': comment not confirmed')
+                continue
+            try:
+                record_drain_receipt(entry, after or issue, contract)
+                acknowledged.append(entry['label'])
+                say('acknowledged ' + entry['label'])
+            except Exception as exc:
+                fail(entry['label'] + ': ' + str(exc))
+    say('%d acknowledged, %d superseded, %d failures' % (len(acknowledged), len(superseded), len(failures)))
+    return 3 if failures else 0
+
+
 def sources(args):
     return {k: getattr(args, k, None) for k in ('binding', 'draft', 'plan', 'state_dir')}
 
@@ -455,10 +851,16 @@ def main(argv=None):
         p.add_argument('--plan')
         p.add_argument('--state-dir')
         p.add_argument('--out' if command == 'audit' else '--audit', required=command == 'section')
+    p = sub.add_parser('drain')
+    group = p.add_mutually_exclusive_group(required=True)
+    group.add_argument('--binding')
+    group.add_argument('--draft')
+    p.add_argument('--state-dir', action='append', required=True)
+    p.add_argument('--dry-run', action='store_true')
     args = parser.parse_args(argv)
     if getattr(args, 'plan', None) and not args.draft:
         parser.error('--plan requires --draft')
-    if getattr(args, 'state_dir', None) and not args.plan:
+    if args.command != 'drain' and getattr(args, 'state_dir', None) and not args.plan:
         parser.error('--state-dir requires --plan and --draft')
     key = None
     try:
@@ -481,6 +883,8 @@ def main(argv=None):
             path.write_text(json.dumps(value, indent=2) + '\n')
             print(str(path))
             return 0
+        if args.command == 'drain':
+            return drain(args, client)
         if args.out:
             for source in TA.source_paths(**sources(args)):
                 if (str(Path(args.out).absolute()) == source or
@@ -493,7 +897,7 @@ def main(argv=None):
             Path(args.out).write_text(payload)
         print(payload, end='')
         return {'CLEAN': 0, 'DRIFT': 1, 'UNKNOWN': 3}[record['verdict']]
-    except (API.LinearError, OSError, ValueError, TypeError, KeyError) as exc:
+    except (API.LinearError, OSError, ValueError, TypeError, KeyError, AttributeError, ImportError) as exc:
         print(API.redact('error: ' + str(exc), key), file=sys.stderr)
         return 2
 

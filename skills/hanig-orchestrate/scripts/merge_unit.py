@@ -831,10 +831,46 @@ def print_pending_close(args, plan):
                    else "no tracker declared")
         print("Pending tracker close: key={} {}; unit={}".format(
             intent["key"], tracker, args.unit))
-        print("After the session applies this intent, replace ID with the tracker "
-              "reference and record its attested acknowledgment:")
-        print(shlex.join([sys.executable, SWARM, "outbox", "--state-dir", args.state_dir,
-                          "--record-receipt", intent["key"], "--ref", "ID"]))
+        print('Drain the outbox, then run the tracker audit:')
+        try:
+            project_dir = skill_paths.sibling_skill_root(
+                _ORCHESTRATE_DIR, 'hanig-orchestrate', 'hanig-project')
+            script = shlex.quote(str(project_dir / 'scripts' / 'linear_sync.py'))
+        except Exception:
+            script = '"$HANIG_PROJECT_DIR/scripts/linear_sync.py"'
+        binding = Path(args.plan).absolute().parent / '.hanig/linear-binding.json'
+        print(shlex.quote(sys.executable) + ' ' + script + ' drain ' +
+              shlex.join(['--binding', str(binding), '--state-dir', args.state_dir]))
+
+
+def print_tracker_drain(args):
+    """Best-effort operator mutation after advance; never a merge prerequisite."""
+    key = None
+    try:
+        project_dir = skill_paths.sibling_skill_root(
+            _ORCHESTRATE_DIR, 'hanig-orchestrate', 'hanig-project')
+        sys.path.insert(0, str(project_dir / 'scripts'))
+        import linear_api as LINEAR_API
+
+        binding = Path(args.plan).absolute().parent / '.hanig/linear-binding.json'
+        if not binding.is_file():
+            print('Tracker drain: UNAVAILABLE (no binding)')
+            return
+        key = LINEAR_API.load_key()
+        if not key:
+            print('Tracker drain: UNAVAILABLE (no key)')
+            return
+        command = [sys.executable, str(project_dir / 'scripts/linear_sync.py'), 'drain',
+                   '--binding', str(binding), '--state-dir', args.state_dir]
+        result = subprocess.run(command, env=dict(os.environ, LINEAR_API_KEY=key),
+                                stdin=subprocess.DEVNULL, capture_output=True,
+                                text=True, timeout=300)
+        if result.returncode not in (0, 3):
+            raise ValueError('drain failed: ' + result.stderr)
+        print(LINEAR_API.redact('Tracker drain: ' + result.stdout, key))
+    except Exception as exc:
+        message = 'Tracker drain: UNAVAILABLE (' + str(exc) + ')'
+        print(LINEAR_API.redact(message, key) if key else message)
 
 
 def print_tracker_audit(args):
@@ -866,7 +902,7 @@ def print_tracker_audit(args):
         inputs = []
         for name, value in sources.items():
             inputs.extend(['--' + name.replace('_', '-'), value])
-        with tempfile.TemporaryDirectory(prefix='tracker-audit-', dir=args.state_dir) as tmp:
+        with tempfile.TemporaryDirectory(prefix='tracker-audit-') as tmp:
             path = str(Path(tmp) / 'audit.json')
             for command in ([sys.executable, script, 'audit', *inputs, '--out', path],
                             [sys.executable, script, 'section', *inputs, '--audit', path]):
@@ -941,6 +977,7 @@ def main(argv=None):
         print(result.stdout, end="")
         print("Merge receipt recorded and advance ran.")
         print_pending_close(args, plan)
+        print_tracker_drain(args)
         print_tracker_audit(args)
         return 0
     except (OSError, ValueError, TypeError, KeyError, AttributeError, argparse.ArgumentTypeError,

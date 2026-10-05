@@ -45,10 +45,11 @@ and source. <!-- declaration: tracker.attestation -->
 Unit state remains authoritative when tracker access fails. A tracker outage
 must never mutate swarm state. <!-- declaration: drain.authority -->
 
-Apply each pending intent through the connector before marking it applied. <!-- declaration: outbox.receipt -->
-Record a receipt only after the connector confirms the tracker write. Missing <!-- declaration: outbox.receipt -->
-receipt state means `unacknowledged`, not that no filing occurred; repeat drains
-are safe because intents carry idempotency keys. <!-- declaration: outbox.receipt -->
+Run `linear_sync.py drain --binding .hanig/linear-binding.json --state-dir DIR` (repeat `--state-dir` for other waves), then `audit`. Draft mode uses `--draft tickets.json`, requires the exact envelope project slug, refuses nameless `swarm`, and requires any tracker identifier to agree exactly. Both modes check issue project and team before mutation. <!-- declaration: outbox.receipt -->
+
+Comments carry reason, unit state, attempt, evidence digest and intent/evidence/order markers. IDs are derived from workspace, project, issue and key. State reconciliation reads every comment page, ignores copied non-derived IDs, and includes comments confirmed by id in this run despite listing lag. One host locks the project; two hosts are an accepted eventual-reconciliation boundary. The latest instant/key state intent wins in one state write; earlier intents are superseded. <!-- declaration: outbox.receipt -->
+
+Receipts record read-back at a time, not present synchronization. Already-receipted intents receive no new comment or receipt but their issues are reconciled. Missing derived comments are uncovered history; incomplete reads or failed reconciliation return 3 even with all intents receipted. Missing receipt state means unacknowledged, never that no filing occurred. Drain exits are 0 when only superseded intents remain, 3 for other pending intents or failed reconciliation, and 2 for configuration/key/lock errors. Dry-run performs no mutation or receipt write and retains the same pending-intent exit convention. <!-- declaration: outbox.receipt -->
 
 ## Read-only audit <!-- declaration: tracker.check -->
 
@@ -56,6 +57,6 @@ are safe because intents carry idempotency keys. <!-- declaration: outbox.receip
 
 Run `linear_sync.py audit --binding .hanig/linear-binding.json --out audit.json`, or `audit --draft tickets.json --plan plan.json --state-dir DIR --out audit.json`, then quote `linear_sync.py section --audit audit.json` with the same source arguments. <!-- declaration: tracker.check -->
 
-The fixed state inputs are `swarm-state.json`, `outbox.jsonl` and `outbox-receipts.jsonl`, including their absence. Paths in the record are absolute. The read interval covers paginated issue and relation reads plus updatedAt rechecks. An external write after that interval is outside the claim. Audit exits are CLEAN 0, DRIFT 1, UNKNOWN 3 and configuration error 2. State comparison requires both plan and draft. <!-- declaration: tracker.check -->
+The fixed state inputs are `swarm-state.json`, `outbox.jsonl` and `outbox-receipts.jsonl`, including their absence. Paths in the record are absolute. The read interval covers paginated issue and relation reads plus comment pagination and updatedAt rechecks. The intent_order check detects a state differing from the latest visible genuine state-intent comment; it shares comment-list visibility limits. An external write after that interval is outside the claim. Audit exits are CLEAN 0, DRIFT 1, UNKNOWN 3 and configuration error 2. State comparison requires both plan and draft. <!-- declaration: tracker.check -->
 
 The key comes from `LINEAR_API_KEY` or shell-word parsing of `~/.config/hanig/linear.env`. Output streams and error text are redacted; input files are never scrubbed. The program never copies its loaded key into data files, while operator-supplied secrets in other data remain a declared limit. <!-- declaration: tracker.credential-boundary -->

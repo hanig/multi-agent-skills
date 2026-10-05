@@ -209,3 +209,57 @@ read when a key is available. Audit/section errors print UNAVAILABLE and
 never alter merge success. Linear subprocesses inherit the operator's
 environment; every other child has LINEAR_API_KEY removed. A read-only
 section remains offline even when the key is loaded for output redaction.
+
+## Linear drain and eventual reconciliation
+
+The authorized operator now applies outbox intents with:
+
+```sh
+python3 skills/hanig-project/scripts/linear_sync.py drain \
+  --binding .hanig/linear-binding.json --state-dir STATE --state-dir OTHER_STATE
+python3 skills/hanig-project/scripts/linear_sync.py audit \
+  --binding .hanig/linear-binding.json --out AUDIT
+```
+
+Alternatively use `--draft tickets.json` for named plans. Draft slug and any
+tracker identifier compare exactly; `swarm` is refused in draft mode. Binding
+mode uses each intent's tracker and supports nameless plans. Both verify issue
+project and team before mutations. The key comes from `LINEAR_API_KEY` or the
+mode-600 env file and is stripped from the offline reconciliation child.
+
+Each pending intent posts one comment with reason, state, attempt, evidence
+and code-span intent/evidence/order markers. Its SHA-256-derived UUID v4 id
+namespaces workspace, project, issue and key. `start`, `close`, `reopen` target
+the team's first started, completed, unstarted state respectively, preserving
+an existing state of the target type. `note`, `block`, `open_pr` only comment.
+Close evidence must contain a receipt; merged-PR evidence must have swarm's
+merge shape and name the same unit.
+
+A project-level `flock` under `~/.local/state/hanig-swarm` is held across local
+input collection, mutations, read-back and receipts. All intents are ordered
+by parsed instant then key. After posting comments, every targeted issue is
+reconciled once to the latest genuine state-intent comment, paging to
+completion and adding comments confirmed by id in this run. Incomplete pages
+make reconciliation UNKNOWN and cause no further changes on that issue.
+
+The latest state intent receives a `confirmed_by_readback` observation only
+after both effects are read back; earlier intents remain superseded. Notes,
+blocks and open-PR intents need their comment read back. Receipts go through
+`drain_contract.py reconcile --state-dir` and remain historical attestations.
+Already-receipted intents get no new comment or receipt, but reconciliation
+still runs. Missing derived comments are reported as uncovered history, which
+includes legacy receipts; reconciliation uses the comments that exist.
+
+This is eventual reconciliation, not cross-host exclusion. After competing
+writes stop and comments become visible, a successful covering drain restores
+the latest target. Audit's `intent_order` detects visible drift. Continuous
+competing writes, comment editing and deletion remain limits.
+
+Exit 0 means only superseded intents remain pending; exit 3 means another
+intent remains pending or reconciliation failed (even with all receipts);
+exit 2 means configuration, key or lock failure. `--dry-run` reads/previews
+without mutations or receipts, retaining the same pending-intent exit rule.
+One failed intent does not stop processing others. The existing offline
+receipt writer refuses a whole malformed outbox, so a malformed sibling can
+prevent another intent's receipt even after its remote effects are confirmed;
+that refusal is reported and the effects remain safe to re-read next time.
