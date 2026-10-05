@@ -1,0 +1,502 @@
+#!/usr/bin/env python3
+"""Read-only Linear binding, audit and tracker section commands.
+
+All remote reads use linear_api.transport through Client. Local input bytes
+are captured once; no draft, state or receipt is rewritten by the audit.
+"""
+import argparse
+import datetime as dt
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+import linear_api as API
+import tracker_audit as TA
+import skill_paths
+
+PAGE = 'pageInfo { hasNextPage endCursor }'
+# Linear rejects 100 issues x 100 nested relations as too complex. Measured
+# live on 2026-10-05: 50 x 20 (both relation lists) is accepted, 50 x 50 and
+# 25 x 50 are refused. Overflow relations are paged by a follow-up query.
+ISSUE_PAGE = 50
+NESTED_RELATION_PAGE = 20
+RELATION = 'id type issue { id identifier } relatedIssue { id identifier }'
+FIELDS = '''id identifier updatedAt description archivedAt
+ state { type name } project { id } team { id }
+ relations(first: %d) { nodes { %s } %s }
+ inverseRelations(first: %d) { nodes { %s } %s }''' % (
+    NESTED_RELATION_PAGE, RELATION, PAGE, NESTED_RELATION_PAGE, RELATION, PAGE)
+BINDING_QUERY = '''query Binding($id: String!) {
+ viewer { organization { id name } }
+ project(id: $id) { id name teams(first: 100) { nodes { id key name } %s } }
+}''' % PAGE
+
+
+def utc():
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def require_id(value, name):
+    if not isinstance(value, str) or not value or value.isspace():
+        raise ValueError('missing ' + name)
+    return value
+
+
+class Reader:
+    def __init__(self, client):
+        self.client = client
+        self.seen = {}
+        self.memberships = []
+        self.pages = 0
+        self.problems = []
+
+    def pages_of(self, fetch):
+        cursor, cursors, ids, nodes = None, set(), set(), []
+        while True:
+            conn = fetch(cursor)
+            self.pages += 1
+            if not isinstance(conn, dict) or not isinstance(conn.get('nodes'), list):
+                raise ValueError('unreadable connection')
+            for node in conn['nodes']:
+                iid = require_id(node.get('id'), 'node id')
+                if iid in ids:
+                    raise ValueError('duplicate id in connection: ' + iid)
+                ids.add(iid)
+                nodes.append(node)
+            info = conn['pageInfo']
+            if type(info['hasNextPage']) is not bool:
+                raise ValueError('invalid pageInfo')
+            if not info['hasNextPage']:
+                return nodes
+            cursor = require_id(info['endCursor'], 'next cursor')
+            if cursor in cursors:
+                raise ValueError('repeated cursor')
+            cursors.add(cursor)
+
+    def remember(self, issue):
+        iid = require_id(issue.get('id'), 'issue id')
+        updated = require_id(issue.get('updatedAt'), 'issue updatedAt')
+        if iid in self.seen and self.seen[iid]['updatedAt'] != updated:
+            self.problems.append('issue changed during read: ' + iid)
+        if iid not in self.seen:
+            self.seen[iid] = issue
+        for field in ('relations', 'inverseRelations'):
+            initial = issue[field]
+            def fetch(cursor, field=field, initial=initial):
+                if cursor is None:
+                    return initial
+                q = ('query Relations($id: String!, $after: String) { issue(id: $id) { '
+                     '%s(first: 100, after: $after) { nodes { %s } %s } } }' % (field, RELATION, PAGE))
+                return self.client.query(q, {'id': iid, 'after': cursor})['issue'][field]
+            issue[field] = {'nodes': self.pages_of(fetch)}
+        return issue
+
+    def issue(self, ref):
+        q = 'query Issue($id: String!) { issue(id: $id) { %s } }' % FIELDS
+        issue = self.client.query(q, {'id': ref})['issue']
+        if not issue:
+            raise ValueError('unreadable issue: ' + ref)
+        return self.remember(issue)
+
+    def project_issues(self, project):
+        q = ('query ProjectIssues($id: String!, $after: String) { project(id: $id) { '
+             'issues(first: %d, after: $after, includeArchived: true) { nodes { %s } %s } } }' % (ISSUE_PAGE, FIELDS, PAGE))
+        return self.collection('project issues', lambda cursor: self.client.query(
+            q, {'id': project, 'after': cursor})['project']['issues'])
+
+    def markers(self, plan):
+        q = ('query Markers($marker: String!, $after: String) { issues(first: %d, after: $after, '
+             'includeArchived: true, filter: {description: {contains: $marker}}) { nodes { %s } %s } }' % (ISSUE_PAGE, FIELDS, PAGE))
+        return self.collection('marker search', lambda cursor: self.client.query(
+            q, {'marker': 'swarm-unit: ' + plan + '/', 'after': cursor})['issues'])
+
+    def collection(self, label, fetch):
+        nodes = self.pages_of(fetch)
+        self.memberships.append((label, fetch, {i['id'] for i in nodes}))
+        return [self.remember(i) for i in nodes]
+
+    def stable(self):
+        q = 'query Stability($id: String!) { issue(id: $id) { id updatedAt } }'
+        for iid, first in self.seen.items():
+            try:
+                last = self.client.query(q, {'id': iid})['issue']
+                if not last or last['id'] != iid or last['updatedAt'] != first['updatedAt']:
+                    self.problems.append('snapshot moved: ' + iid)
+            except (API.LinearError, ValueError, TypeError, KeyError) as exc:
+                self.problems.append(str(exc))
+        for label, fetch, first_ids in self.memberships:
+            try:
+                last = self.pages_of(fetch)
+                last_ids = {i['id'] for i in last}
+                if last_ids != first_ids:
+                    self.problems.append('snapshot moved: ' + label)
+                for issue in last:
+                    first = self.seen.get(issue['id'])
+                    if first and issue.get('updatedAt') != first['updatedAt']:
+                        self.problems.append('snapshot moved: ' + issue['id'])
+            except (API.LinearError, ValueError, TypeError, KeyError) as exc:
+                self.problems.append(str(exc))
+
+
+def binding_read(reader, project):
+    data = reader.client.query(BINDING_QUERY, {'id': project})
+    remote = data['project']
+    if not remote:
+        return data['viewer']['organization'], None, []
+    initial = remote['teams']
+    def fetch(cursor):
+        if cursor is None:
+            return initial
+        q = ('query Teams($id: String!, $after: String) { project(id: $id) { '
+             'teams(first: 100, after: $after) { nodes { id key name } %s } } }' % PAGE)
+        return reader.client.query(q, {'id': project, 'after': cursor})['project']['teams']
+    return data['viewer']['organization'], remote, reader.pages_of(fetch)
+
+
+def completion(issue):
+    if issue.get('archivedAt') or issue['state']['type'] in ('canceled', 'duplicate'):
+        return 'UNKNOWN'
+    return 'completed' if issue['state']['type'] == 'completed' else 'open'
+
+
+def edges_of(issues):
+    edges, relations = set(), {}
+    for issue in issues:
+        neighbors = relations.setdefault(issue['id'], set())
+        for field in ('relations', 'inverseRelations'):
+            for rel in issue[field]['nodes']:
+                a, b = rel['issue']['id'], rel['relatedIssue']['id']
+                neighbors.add(b if a == issue['id'] else a)
+                if rel['type'] == 'blocks':
+                    edges.add((a, b))
+    return edges, relations
+
+
+def cyclic(nodes, edges):
+    graph = {n: set() for n in nodes}
+    degree = {n: 0 for n in nodes}
+    for a, b in edges:
+        if a in graph and b in graph and b not in graph[a]:
+            graph[a].add(b)
+            degree[b] += 1
+    ready = [n for n in nodes if degree[n] == 0]
+    count = 0
+    while ready:
+        a = ready.pop()
+        count += 1
+        for b in graph[a]:
+            degree[b] -= 1
+            if degree[b] == 0:
+                ready.append(b)
+    return count != len(nodes)
+
+
+def prose_candidates(issue, neighbors, identifiers):
+    text = re.sub(r'```[\s\S]*?```|`[^`]*`|"[^"\n]*"|“[^”]*”|\'[^\'\n]*\'', '', issue.get('description') or '')
+    lines = []
+    for line in text.splitlines():
+        if re.match(r'^\s*(?:>|not\b|no\b|never\b|does\s+not\b|do\s+not\b|is\s+not\b|historically\b)', line, re.I):
+            # End the candidate sentence rather than connecting text across
+            # an excluded line. Ordinary soft line wraps stay in the sentence.
+            lines.append('.')
+        else:
+            lines.append(line)
+    out = []
+    for sentence in re.split(r'(?<=[.!?])\s+', '\n'.join(lines)):
+        for match in re.finditer(r'\b(blocked by|depends on|must land before)\b([^.!?]*)', sentence, re.I):
+            for ident in re.findall(r'\b[A-Z][A-Z0-9]*-\d+\b', match[2]):
+                if identifiers.get(ident, ident) in neighbors:
+                    continue
+                edge = ([issue['identifier'], ident] if match[1].lower() == 'must land before'
+                        else [ident, issue['identifier']])
+                out.append({'issue': issue['identifier'], 'sentence': sentence, 'proposed_blocks': edge})
+    return out
+
+
+def read_object(raw, path):
+    value = json.loads(raw[str(Path(path).absolute())])
+    if not isinstance(value, dict):
+        raise ValueError('expected object: ' + str(path))
+    return value
+
+
+def audit(args, client):
+    started = utc()
+    paths = TA.source_paths(**sources(args))
+    raw, inputs = TA.capture(paths)
+    plan = read_object(raw, args.plan) if args.plan else None
+    draft = read_object(raw, args.draft) if args.draft else None
+    binding = read_object(raw, args.binding) if args.binding else None
+    if plan is not None:
+        require_id(plan.get('name'), 'plan name')
+        if not isinstance(plan.get('units'), list):
+            raise ValueError('units must be a list')
+        for unit in plan['units']:
+            if not isinstance(unit.get('needs', []), list):
+                raise ValueError('needs must be a list')
+    if binding:
+        if binding.get('schema_version') != 1:
+            raise ValueError('binding schema_version')
+        workspace = require_id(binding['workspace']['id'], 'workspace id')
+        team = require_id(binding['team']['id'], 'team id')
+        project = require_id(binding['project']['id'], 'project id')
+    else:
+        project = require_id(draft['project']['linear_id'], 'draft project.linear_id')
+        # Legacy drafts name a team by exact key or name, not UUID. Resolve
+        # once from the bound project's teams; use its id thereafter.
+        team_value = draft['project']['team']
+        team = team_value.get('id') if isinstance(team_value, dict) else team_value
+        workspace = (draft.get('workspace') or {}).get('id')
+    scope = {'workspace': workspace or 'unresolved', 'team': team, 'project': project,
+             'repository': binding.get('repository') if binding else (plan or {}).get('repository'),
+             'plan': plan['name'] if plan else None}
+    checks = {cid: {'id': cid, 'verdict': 'CLEAN', 'evidence': []} for cid in sorted(TA.CHECKS)}
+    if plan:
+        checks['plan_edges'] = {'id': 'plan_edges', 'verdict': 'CLEAN', 'evidence': []}
+    if args.state_dir:
+        checks['swarm_state'] = {'id': 'swarm_state', 'verdict': 'CLEAN', 'evidence': []}
+
+    def finding(cid, value, evidence):
+        check = checks[cid]
+        if value == 'UNKNOWN' or check['verdict'] != 'UNKNOWN':
+            check['verdict'] = value
+        check['evidence'].append(API.redact(evidence, client._key) if isinstance(evidence, str) and value == 'UNKNOWN' else evidence)
+
+    reader = Reader(client)
+    try:
+        org, remote, teams = binding_read(reader, project)
+        if not binding:
+            if workspace is None:
+                workspace = org['id']
+            if not isinstance(team_value, dict):
+                matches = [t for t in teams if team_value in (t['id'], t['key'], t.get('name'))]
+                if len(matches) == 1:
+                    team = matches[0]['id']
+            scope.update(workspace=workspace, team=team)
+        if org['id'] != workspace or not remote or remote['id'] != project or team not in [t['id'] for t in teams]:
+            finding('binding', 'DRIFT', 'workspace, team or project ids disagree')
+    except (API.LinearError, ValueError, KeyError, TypeError) as exc:
+        finding('binding', 'UNKNOWN', str(exc))
+        reader.problems.append(str(exc))
+    issues = []
+    mapped = {}
+    known = []
+    if checks['binding']['verdict'] == 'CLEAN':
+        try:
+            issues = reader.project_issues(project)
+        except (API.LinearError, ValueError, KeyError, TypeError) as exc:
+            reader.problems.append(str(exc))
+        refs = [(i.get('unit'), i['identifier']) for i in (draft or {}).get('issues', []) if i.get('identifier')]
+        if args.state_dir:
+            try:
+                payload = raw[str((Path(args.state_dir) / 'outbox-receipts.jsonl').absolute())]
+                for line in (payload or b'').splitlines():
+                    receipt = json.loads(line)
+                    refs.append((None, require_id(receipt.get('ref'), 'receipt ref')))
+            except (ValueError, TypeError, KeyError) as exc:
+                finding('misplaced', 'UNKNOWN', str(exc))
+        for unit, ref in refs:
+            try:
+                issue = reader.issue(ref)
+                known.append(issue)
+                if unit:
+                    mapped[unit] = issue
+            except (API.LinearError, ValueError, KeyError, TypeError) as exc:
+                finding('misplaced', 'UNKNOWN', str(exc))
+                reader.problems.append(str(exc))
+                if unit and plan:
+                    finding('plan_edges', 'UNKNOWN', {'unit': unit, 'error': str(exc)})
+        marker_plan = plan['name'] if plan else (draft or {}).get('project', {}).get('slug')
+        if marker_plan:
+            try:
+                found = reader.markers(marker_plan)
+                known.extend(found)
+                for issue in found:
+                    for unit in (plan or {}).get('units', []):
+                        marker = 'swarm-unit: ' + marker_plan + '/' + unit['id']
+                        if re.search(r'(?m)^\s*`?' + re.escape(marker) + r'`?\s*$', issue.get('description') or ''):
+                            if unit['id'] in mapped and mapped[unit['id']]['id'] != issue['id']:
+                                finding('plan_edges', 'UNKNOWN', {'unit': unit['id'], 'error': 'multiple issue mappings'})
+                            else:
+                                mapped[unit['id']] = issue
+            except (API.LinearError, ValueError, KeyError, TypeError) as exc:
+                reader.problems.append(str(exc))
+                finding('misplaced', 'UNKNOWN', str(exc))
+        for issue in known:
+            if (issue.get('project') or {}).get('id') != project:
+                finding('misplaced', 'DRIFT', issue['identifier'])
+        try:
+            edges, relations = edges_of(list(reader.seen.values()))
+            for issue in issues:
+                for a, b in edges:
+                    if b == issue['id'] and a not in reader.seen:
+                        try:
+                            reader.issue(a)
+                        except (API.LinearError, ValueError, KeyError, TypeError) as exc:
+                            reader.problems.append(str(exc))
+                            if issue['state']['type'] == 'started':
+                                finding('blocked_in_progress', 'UNKNOWN', str(exc))
+            identifiers = {i['identifier']: i['id'] for i in reader.seen.values()}
+            for issue in reader.seen.values():
+                for field in ('relations', 'inverseRelations'):
+                    for relation in issue[field]['nodes']:
+                        for endpoint in ('issue', 'relatedIssue'):
+                            peer = relation[endpoint]
+                            identifiers[peer['identifier']] = peer['id']
+            unit_ids = {i['id'] for i in mapped.values()}
+            # Draft mappings exempt units even when no plan was supplied.
+            for issue in issues:
+                iid = issue['id']
+                if completion(issue) == 'open' and iid not in unit_ids and not re.search(r'(?m)^\s*`?swarm-unit: \S+/\S+`?\s*$', issue.get('description') or '') and not relations.get(iid) and not re.search(r'(?m)^[ \t]*swarm-independent:[ \t]*\S[^\n]*$', issue.get('description') or ''):
+                    finding('relationless', 'DRIFT', issue['identifier'])
+                candidates = prose_candidates(issue, relations.get(iid, set()), identifiers)
+                if candidates:
+                    finding('prose_dependency', 'ADVISORY', candidates)
+                if issue['state']['type'] == 'started':
+                    for a, b in edges:
+                        if b != iid or a not in reader.seen:
+                            continue
+                        status = completion(reader.seen[a])
+                        if status != 'completed':
+                            finding('blocked_in_progress', 'UNKNOWN' if status == 'UNKNOWN' else 'DRIFT',
+                                    {'issue': issue['identifier'], 'blocker': reader.seen[a]['identifier']})
+            if cyclic({i['id'] for i in issues}, edges):
+                finding('cycle', 'DRIFT', 'blocks cycle in project')
+            if plan:
+                # A filed reference that could not be read is UNKNOWN, not
+                # evidence that the unit has no filed issue. Markers count too.
+                filed_units = set(mapped) | {unit for unit, ref in refs if unit}
+                expected = set()
+                for unit in plan['units']:
+                    uid = unit['id']
+                    if uid not in filed_units:
+                        finding('plan_edges', 'DRIFT', {'unit': uid, 'error': 'no filed issue'})
+                    for dep in unit.get('needs', []):
+                        unmapped = sorted({dep, uid} - filed_units)
+                        if unmapped:
+                            finding('plan_edges', 'DRIFT', {'edge': [dep, uid],
+                                    'unmapped': unmapped, 'error': 'no filed issue'})
+                        elif dep in mapped and uid in mapped:
+                            expected.add((mapped[dep]['id'], mapped[uid]['id']))
+                actual = {(a, b) for a, b in edges if a in unit_ids and b in unit_ids}
+                for edge in sorted(expected - actual):
+                    finding('plan_edges', 'DRIFT', {'missing': list(edge)})
+                for edge in sorted(actual - expected):
+                    finding('plan_edges', 'DRIFT', {'extra': list(edge)})
+        except (ValueError, TypeError, KeyError) as exc:
+            reader.problems.append(str(exc))
+    else:
+        # A failed binding is itself conclusive drift/unknown; no other
+        # remote data is trusted. Coverage explicitly records the skipped read.
+        reader.problems.append('issue read withheld because binding did not match')
+    if args.state_dir:
+        try:
+            if raw[str((Path(args.state_dir) / 'swarm-state.json').absolute())] is None:
+                raise ValueError('coordinator state absent')
+            project_dir = os.environ.get('HANIG_PROJECT_DIR') or Path(__file__).parents[1]
+            swarm_dir = skill_paths.sibling_skill_root(project_dir, 'hanig-project', 'hanig-swarm')
+            env = {k: v for k, v in os.environ.items() if k != API.KEY_ENV}
+            result = subprocess.run([sys.executable, str(swarm_dir / 'scripts' / 'swarm.py'),
+                                     'status', args.plan, '--state-dir', args.state_dir, '--json'],
+                                    env=env, capture_output=True, text=True, timeout=60)
+            if result.returncode:
+                raise ValueError('coordinator status failed: ' + result.stderr)
+            for row in json.loads(result.stdout)['units']:
+                if row['id'] not in mapped:
+                    continue
+                issue_state = mapped[row['id']]['state']['type']
+                state = row['state']
+                mismatch = ((state == 'DONE' and issue_state != 'completed') or
+                            (state in ('RUNNING', 'SUBMITTED') and issue_state != 'started') or
+                            (state in ('FAILED', 'FAILED_EVIDENCE', 'HELD', 'NEEDS_HUMAN') and issue_state == 'completed'))
+                if mismatch:
+                    finding('swarm_state', 'DRIFT', {'unit': row['id'], 'coordinator': state, 'issue': issue_state})
+        except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
+            finding('swarm_state', 'UNKNOWN', str(exc))
+            reader.problems.append(str(exc))
+    reader.stable()
+    # Catch local writes during the read, including status-side observations.
+    try:
+        if TA.capture(paths)[1] != inputs:
+            reader.problems.append('local inputs changed during read')
+    except OSError as exc:
+        reader.problems.append(str(exc))
+    if reader.problems:
+        finding('coverage', 'UNKNOWN', [API.redact(p, client._key) for p in reader.problems])
+        # A check that saw an incomplete read has not established CLEAN.
+        for cid, check in checks.items():
+            if cid != 'coverage' and check['verdict'] == 'CLEAN':
+                finding(cid, 'UNKNOWN', 'not evaluated over a complete read')
+    records = list(checks.values())
+    return {'schema_version': 1, 'verdict': TA.verdict(records), 'read_started': started,
+            'read_finished': utc(), 'scope': scope, 'inputs': inputs,
+            'coverage': {'complete': not reader.problems, 'pages': reader.pages, 'issues': len(issues)},
+            'checks': records}
+
+
+def sources(args):
+    return {k: getattr(args, k, None) for k in ('binding', 'draft', 'plan', 'state_dir')}
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest='command', required=True)
+    bind = sub.add_parser('bind')
+    bind.add_argument('--project', required=True)
+    bind.add_argument('--repository', required=True)
+    for command in ('audit', 'section'):
+        p = sub.add_parser(command)
+        group = p.add_mutually_exclusive_group(required=command == 'audit')
+        group.add_argument('--binding')
+        group.add_argument('--draft')
+        p.add_argument('--plan')
+        p.add_argument('--state-dir')
+        p.add_argument('--out' if command == 'audit' else '--audit', required=command == 'section')
+    args = parser.parse_args(argv)
+    if getattr(args, 'plan', None) and not args.draft:
+        parser.error('--plan requires --draft')
+    if getattr(args, 'state_dir', None) and not args.plan:
+        parser.error('--state-dir requires --plan and --draft')
+    key = None
+    try:
+        if args.command == 'section':
+            print(TA.section(args.audit, **sources(args)))
+            return 0
+        key = API.load_key()
+        client = API.Client(key)
+        if args.command == 'bind':
+            root = next((p for p in (Path.cwd(), *Path.cwd().parents) if (p / '.git').exists()), None)
+            if root is None:
+                raise ValueError('bind requires a Git checkout')
+            org, project, teams = binding_read(Reader(client), args.project)
+            if not project or project['id'] != args.project or len(teams) != 1:
+                raise ValueError('binding requires an exact project id with one team')
+            path = root / '.hanig/linear-binding.json'
+            path.parent.mkdir(parents=True, exist_ok=True)
+            value = {'schema_version': 1, 'repository': args.repository, 'workspace': org,
+                     'team': teams[0], 'project': {'id': project['id'], 'name': project['name']}}
+            path.write_text(json.dumps(value, indent=2) + '\n')
+            print(str(path))
+            return 0
+        if args.out:
+            for source in TA.source_paths(**sources(args)):
+                if (str(Path(args.out).absolute()) == source or
+                        (Path(args.out).exists() and Path(source).exists() and
+                         os.path.samefile(args.out, source))):
+                    raise ValueError('--out cannot overwrite an audit input')
+        record = audit(args, client)
+        payload = API.redact(json.dumps(record, indent=2) + '\n', key)
+        if args.out:
+            Path(args.out).write_text(payload)
+        print(payload, end='')
+        return {'CLEAN': 0, 'DRIFT': 1, 'UNKNOWN': 3}[record['verdict']]
+    except (API.LinearError, OSError, ValueError, TypeError, KeyError) as exc:
+        print(API.redact('error: ' + str(exc), key), file=sys.stderr)
+        return 2
+
+
+if __name__ == '__main__':
+    sys.exit(main())

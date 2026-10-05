@@ -254,7 +254,7 @@ REFERENCE_ELABORATION_INVENTORIES = {
         ('references/reporting-evidence.md', 'findings.interview', 2),
         ('references/reporting-evidence.md', 'placement.reference-elaboration', 1),
         ('references/reporting-evidence.md', 'report.contents', 4),
-        ('references/reporting-evidence.md', 'report.evidence-source', 1),
+        ('references/reporting-evidence.md', 'report.evidence-source', 2),
         ('references/reporting-evidence.md', 'report.required', 2),
         ('references/survey-interview.md', 'adoption.context', 2),
         ('references/survey-interview.md', 'adoption.remaining-work', 2),
@@ -278,7 +278,8 @@ REFERENCE_ELABORATION_INVENTORIES = {
         ('references/tracker-sync.md', 'tracker.apply', 2),
         ('references/tracker-sync.md', 'tracker.approval', 1),
         ('references/tracker-sync.md', 'tracker.attestation', 2),
-        ('references/tracker-sync.md', 'tracker.credential-boundary', 1),
+        ('references/tracker-sync.md', 'tracker.credential-boundary', 2),
+        ('references/tracker-sync.md', 'tracker.check', 4),
         ('references/tracker-sync.md', 'tracker.edges', 3),
         ('references/tracker-sync.md', 'tracker.readback-shape', 4),
         ('references/unit-contract.md', 'code.configuration', 7),
@@ -359,7 +360,7 @@ REFERENCE_ELABORATION_INVENTORIES = {
         ("references/operating-loop.md", "code.merge-command", 2),
         ("references/operating-loop.md", "limit.merge-command", 2),
         ("references/operating-loop.md", "preservation.before-cleanup", 1),
-        ("references/operating-loop.md", "report.three-parts", 1),
+        ("references/operating-loop.md", "report.three-parts", 2),
         ("references/operating-loop.md", "tracker.authority", 2),
         ("references/operating-loop.md", "tracker.dag", 1),
         ("references/operating-loop.md", "tracker.drain", 3),
@@ -1003,6 +1004,17 @@ class TestAuthoredSkillShape(unittest.TestCase):
         self.assertIn("step-three dispatches", report)
         self.assertIn("before writing the report", report)
         self.assertIn("pending synchronization", report)
+
+    def test_orchestrate_declares_merge_and_optional_audit_dependencies(self):
+        declarations = {
+            item["id"]: item["normative_text"]
+            for item in DECLARATION_REGISTRY.load_registry(
+                SKILLS / "hanig-orchestrate")
+        }
+        dependencies = declarations["capability.dependencies"]
+        self.assertIn("merge_unit.py requires hanig-swarm for merge and reconciliation", dependencies)
+        self.assertIn("hanig-project is optional for its tracker audit", dependencies)
+        self.assertIn("Tracker: UNAVAILABLE without blocking the merge or changing its exit code", dependencies)
 
     def test_orchestrate_installs_and_doctor_calls_it_authored(self):
         names = (

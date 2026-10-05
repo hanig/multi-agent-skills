@@ -3,8 +3,9 @@
 
 Never imported by the coordinator. Local authority readers/locking are shared
 with swarm; scope checking, receipt recording and advancement use its CLI.
-The operator's gh calls inherit its environment for authentication; swarm.py
-children use hanig-swarm's child_environment.child_env containment instead.
+The operator's gh calls retain authentication but strip LINEAR_API_KEY;
+swarm.py children use hanig-swarm's child_environment.child_env containment.
+Only linear_sync.py children receive the operator's Linear environment.
 Forge observations remain attestations. Same-node, trusted-writer convention;
 GitHub's head compare protects the merge, not a concurrent CI rerun/retarget.
 """
@@ -87,7 +88,9 @@ def run(command, allowed=(0,)):
     result = subprocess.run(command, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, timeout=300,
-                            env=CE.child_env() if command[:2] == [sys.executable, SWARM] else None)
+                            env=(CE.child_env() if command[:2] == [sys.executable, SWARM]
+                                 else {k: v for k, v in os.environ.items()
+                                       if k != "LINEAR_API_KEY"}))
     if result.returncode not in allowed:
         raise Refusal("command exited {}: {}{}".format(
             result.returncode, result.stdout, result.stderr))
@@ -834,6 +837,52 @@ def print_pending_close(args, plan):
                           "--record-receipt", intent["key"], "--ref", "ID"]))
 
 
+def print_tracker_audit(args):
+    """Best-effort operator read after advance; never affects merge outcome."""
+    key = None
+    try:
+        project_dir = skill_paths.sibling_skill_root(
+            _ORCHESTRATE_DIR, "hanig-orchestrate", "hanig-project")
+        sys.path.insert(0, str(project_dir / "scripts"))
+        import tracker_audit as TA
+        import linear_api as LINEAR_API
+
+        root = Path(args.plan).absolute().parent
+        draft = root / 'tickets.json'
+        binding = root / '.hanig' / 'linear-binding.json'
+        if draft.is_file():
+            sources = {'draft': str(draft), 'plan': str(Path(args.plan).absolute()),
+                       'state_dir': args.state_dir}
+        elif binding.is_file():
+            sources = {'binding': str(binding)}
+        else:
+            print('Tracker: UNAVAILABLE (no binding or draft)')
+            return
+        key = LINEAR_API.load_key()
+        if not key:
+            print('Tracker: UNAVAILABLE (no key)')
+            return
+        script = str(project_dir / 'scripts' / 'linear_sync.py')
+        inputs = []
+        for name, value in sources.items():
+            inputs.extend(['--' + name.replace('_', '-'), value])
+        with tempfile.TemporaryDirectory(prefix='tracker-audit-', dir=args.state_dir) as tmp:
+            path = str(Path(tmp) / 'audit.json')
+            for command in ([sys.executable, script, 'audit', *inputs, '--out', path],
+                            [sys.executable, script, 'section', *inputs, '--audit', path]):
+                result = subprocess.run(command, env=dict(os.environ),
+                                        stdin=subprocess.DEVNULL, capture_output=True,
+                                        text=True, timeout=300)
+                allowed = (0, 1, 3) if command[2] == 'audit' else (0,)
+                if result.returncode not in allowed or not Path(path).is_file():
+                    raise ValueError('audit/section failed: ' + result.stderr)
+            # Use the same offline renderer at the final consumer boundary.
+            print(LINEAR_API.redact(TA.section(path, **sources), key))
+    except Exception as exc:
+        message = 'Tracker: UNAVAILABLE (' + str(exc) + ')'
+        print(LINEAR_API.redact(message, key) if key else message)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("plan")
@@ -892,6 +941,7 @@ def main(argv=None):
         print(result.stdout, end="")
         print("Merge receipt recorded and advance ran.")
         print_pending_close(args, plan)
+        print_tracker_audit(args)
         return 0
     except (OSError, ValueError, TypeError, KeyError, AttributeError, argparse.ArgumentTypeError,
             subprocess.SubprocessError, S.PlanError, S.OutboxError,

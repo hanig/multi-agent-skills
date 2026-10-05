@@ -187,3 +187,25 @@ drainers cannot admit two receiver references for one key.
 A `close` intent always carries the evidence admitted by the coordinator.
 Lifecycle observations from MCP tasks, A2A tasks, Paseo agents, or any other
 remote worker cannot replace it.
+
+## Read-only Linear consistency audit
+
+The authorized operator can run `linear_sync.py audit` from the installed
+hanig-project skill, followed by `section` with the same binding or draft,
+plan and state inputs. This PR performs no GraphQL mutation. Existing
+connector draining and its acknowledgment contract remain the write path.
+The coordinator, tickets and drain_contract modules stay network-free.
+
+The offline `tracker_audit.py` renderer requires schema-valid CLEAN evidence,
+complete coverage, identical local input sources and byte digests (including
+absence), and a read finished within 15 minutes. It claims consistency only
+within the recorded read interval; later external writes are outside that
+claim. `report.py --tracker-audit FILE` uses that renderer. Without this
+option the tracker section is UNKNOWN (no audit), regardless of receipts.
+
+After advance and pending-close output, `merge_unit.py` finds tickets beside
+the plan, otherwise `.hanig/linear-binding.json`, and performs the operator
+read when a key is available. Audit/section errors print UNAVAILABLE and
+never alter merge success. Linear subprocesses inherit the operator's
+environment; every other child has LINEAR_API_KEY removed. A read-only
+section remains offline even when the key is loaded for output redaction.

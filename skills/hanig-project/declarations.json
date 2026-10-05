@@ -336,7 +336,7 @@
     },
     {
       "id": "tracker.credential-boundary",
-      "normative_text": "Draft tracker work without network access on the shared login-node coordinator; tracker credentials and remote operations stay in the authorized connector session.",
+      "normative_text": "Draft tracker work without network access on the coordinator; tracker credentials and remote operations stay in the authorized operator session. linear_sync.py bind and audit are read-only network operations through linear_api.transport; section and tracker_audit.py render offline, and no coordinator child receives LINEAR_API_KEY.",
       "references": [
         "references/tracker-sync.md"
       ]
@@ -382,7 +382,10 @@
     },
     {
       "id": "tracker.check",
-      "normative_text": "After apply and read-back, re-draft and run `tickets.py check` until both unit mapping and blocker edges agree."
+      "normative_text": "After apply and read-back, re-draft and run `tickets.py check` until both unit mapping and blocker edges agree. Run linear_sync.py audit with the binding or draft and plan inputs, and quote linear_sync.py section for tracker consistency; a missing, invalid, stale, incomplete, DRIFT or UNKNOWN audit never supports a clean tracker claim.",
+      "references": [
+        "references/tracker-sync.md"
+      ]
     },
     {
       "id": "dispatch.sequence",
@@ -427,7 +430,7 @@
     },
     {
       "id": "report.evidence-source",
-      "normative_text": "Assemble reports only from plan, coordinator state, and receipts; never add a fact from narrative recollection when it is absent on disk.",
+      "normative_text": "Assemble reports from plan, coordinator state, receipts and the structured tracker audit; never add a fact from narrative recollection when it is absent on disk. Supply report.py --tracker-audit FILE for its shared offline tracker section; without it the tracker is UNKNOWN (no audit).",
       "references": [
         "references/reporting-evidence.md"
       ]
