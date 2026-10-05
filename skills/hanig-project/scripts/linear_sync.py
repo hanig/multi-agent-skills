@@ -554,8 +554,11 @@ def check_membership(issue, project, team):
 
 
 def read_comment(client, cid):
-    return client.query('query IntentComment($id: String!) { comment(id: $id) { %s } }' %
-                        COMMENT_FIELDS, {'id': cid})['comment']
+    # `comment(id:)` answers an absent id with an "Entity not found" error,
+    # measured live on 2026-10-05; the filtered list answers it with no nodes.
+    nodes = client.query('query IntentComment($id: ID!) { comments(filter: {id: {eq: $id}}, first: 1) '
+                         '{ nodes { %s } } }' % COMMENT_FIELDS, {'id': cid})['comments']['nodes']
+    return nodes[0] if nodes else None
 
 
 def confirm_comment(client, intent, workspace, project, issue, create):

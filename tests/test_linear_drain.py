@@ -45,6 +45,10 @@ class DrainLinear(FakeLinear):
         q, v = request['query'], request['variables']
         assert headers['Authorization'] == KEY
         self.calls.append((q, v))
+        if 'comment(id:' in q and v.get('id') not in self.comments:
+            # Real Linear, measured 2026-10-05: a single-entity read of an
+            # absent comment is an error, not null.
+            return 200, json.dumps({'data': None, 'errors': [{'message': 'Entity not found: Comment'}]}).encode()
         if self.fail and self.fail in q:
             raise OSError('failed ' + KEY)
         if q.startswith('mutation'):
@@ -95,7 +99,8 @@ class DrainLinear(FakeLinear):
                 conn = connection(nodes)
             return {'issue': {'comments': conn}}
         if 'query IntentComment(' in q:
-            return {'comment': None if self.hide_comments else copy.deepcopy(self.comments.get(v['id']))}
+            found = None if self.hide_comments else copy.deepcopy(self.comments.get(v['id']))
+            return {'comments': {'nodes': [found] if found else []}}
         if 'query DrainIssue' in q:
             issue = next((copy.deepcopy(i) for i in self.issues.values() if v['id'] in (i['id'], i['identifier'])), None)
             if issue and self.lag_state and issue['id'] in self.state_before:
