@@ -8,8 +8,8 @@ explains the evidence labels and findings shape. <!-- declaration: placement.ref
 The final unit reaching DONE is not run completion. The report must be produced, <!-- declaration: report.required -->
 its fragment published, and the owner given the artifact link. <!-- declaration: report.required -->
 
-The report is assembled from `plan.json`, coordinator state, and attempt
-receipts. A narrative memory must never supply a fact absent from that evidence. <!-- declaration: report.evidence-source -->
+The report is assembled from `plan.json`, coordinator state, attempt
+receipts and an optional structured tracker audit. A narrative memory must never supply a fact absent from that evidence. <!-- declaration: report.evidence-source -->
 
 Three sections carry the main claim:
 
@@ -39,3 +39,5 @@ output and must promote it to the project directory where the report reads it. <
 A clean sample bounds a rate; it does not establish that no defects exist. <!-- declaration: findings.bound -->
 Findings must state the measured bound, what is not proved, every deliberate <!-- declaration: findings.bound -->
 omission, and why it was made so readers do not mistake silence for evidence. <!-- declaration: findings.bound -->
+
+Supply `report.py --tracker-audit FILE` to render the shared tracker section; without an audit it says `Tracker: UNKNOWN (no audit)`. The consumer selects tickets, plan and state when tickets exist, otherwise the repository binding. <!-- declaration: report.evidence-source -->

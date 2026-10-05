@@ -102,7 +102,7 @@ ordinary restarts and receipt replacement, without an atomic scheduler fence.
 
 ## Drain the post-merge close intent
 
-After receipt recording and successful advancement, `merge_unit.py` displays the current attempt's pending close intent with its key and `tracker` issue, or `no tracker declared`, followed by the acknowledgment command. It performs no tracker call. If no unacknowledged close intent exists, it says so; that message establishes neither tracker delivery nor unit closure. <!-- declaration: tracker.drain -->
+After receipt recording and successful advancement, `merge_unit.py` displays the current attempt's pending close intent with its key and `tracker` issue, or `no tracker declared`, followed by the acknowledgment command. It performs no tracker mutation. The following read-only audit and section report consistency over their read interval; unavailable configuration or failed reads print UNAVAILABLE without changing the merge exit code. If no unacknowledged close intent exists, it says so; that message establishes neither tracker delivery nor unit closure. <!-- declaration: tracker.drain -->
 
 The authorized session applies each pending intent to the named issue using its connector. Before retrying an ambiguous operation, resolve it by receiver read-back or deduplication. Once the operation has landed, replace `KEY` with the displayed key and `ID` with the returned tracker reference: <!-- declaration: tracker.drain -->
 
@@ -119,12 +119,12 @@ The receipt is an attestation, not independently verified tracker state. Without
 The tracker mirrors coordinator state, and GitHub's pull-request attachment does not perform the issue transition. <!-- declaration: tracker.authority -->
 
 
-Blocking relationships are recorded as tracker relations, established at filing and at dispatch, and dispatch order is read from the resulting graph. A dependency stated only in an issue's prose is not traversable, so no query surfaces what a piece of work is waiting on. <!-- declaration: tracker.dag -->
+The DAG check is `linear_sync.py audit`. Plan units use plan needs and coordinator evidence; ad-hoc issues use Linear blocks edges. Prose candidates are advisory and a discrepancy supplies no coordinator authority. <!-- declaration: tracker.dag -->
 
 The reporting order incorporates the still-open pull request 60 source material:
 
 1. Running work: agents, pull requests, checks, failures, skips, corrections, and observation times.
-2. Tracker: every in-progress, merged-but-open, and filed-but-unmoved issue, swept by state.
+2. Tracker: quote `linear_sync.py section --audit FILE` with the same inputs verbatim. <!-- declaration: report.three-parts -->
 3. Ready work: compare the backlog to what landed and dispatch; otherwise state the exact blocker or saturation reason.
 
 The order and the dispatch action are part of the decision surface rather than a pointer-only recommendation. Before the report is written, step-three dispatches reach the tracker or the report names their pending synchronization when the connector is unavailable. <!-- declaration: report.three-parts -->

@@ -49,3 +49,13 @@ Apply each pending intent through the connector before marking it applied. <!-- 
 Record a receipt only after the connector confirms the tracker write. Missing <!-- declaration: outbox.receipt -->
 receipt state means `unacknowledged`, not that no filing occurred; repeat drains
 are safe because intents carry idempotency keys. <!-- declaration: outbox.receipt -->
+
+## Read-only audit <!-- declaration: tracker.check -->
+
+`linear_sync.py bind --project ID --repository OWNER/REPO` writes `.hanig/linear-binding.json` in the repository root. Multi-team projects are ambiguous and refused. Names are descriptive; identity comparisons use exact ids. Legacy drafts resolve their exact team key or name from the project's teams, and obtain workspace identity from the viewer when the draft lacks it. <!-- declaration: tracker.check -->
+
+Run `linear_sync.py audit --binding .hanig/linear-binding.json --out audit.json`, or `audit --draft tickets.json --plan plan.json --state-dir DIR --out audit.json`, then quote `linear_sync.py section --audit audit.json` with the same source arguments. <!-- declaration: tracker.check -->
+
+The fixed state inputs are `swarm-state.json`, `outbox.jsonl` and `outbox-receipts.jsonl`, including their absence. Paths in the record are absolute. The read interval covers paginated issue and relation reads plus updatedAt rechecks. An external write after that interval is outside the claim. Audit exits are CLEAN 0, DRIFT 1, UNKNOWN 3 and configuration error 2. State comparison requires both plan and draft. <!-- declaration: tracker.check -->
+
+The key comes from `LINEAR_API_KEY` or shell-word parsing of `~/.config/hanig/linear.env`. Output streams and error text are redacted; input files are never scrubbed. The program never copies its loaded key into data files, while operator-supplied secrets in other data remain a declared limit. <!-- declaration: tracker.credential-boundary -->

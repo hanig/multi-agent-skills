@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "repository": "hanig/multi-agent-skills",
+  "workspace": {
+    "id": "a9130677-aaf9-4015-8da5-2d9dddf7c729",
+    "name": "Arc - projects"
+  },
+  "team": {
+    "id": "aa36a08a-10b8-4837-a452-9f44094b7bec",
+    "key": "ARC",
+    "name": "Arc"
+  },
+  "project": {
+    "id": "6dacfddd-1dd0-4e34-9034-6f7398c0977c",
+    "name": "Swarm skills: field-report hardening"
+  }
+}

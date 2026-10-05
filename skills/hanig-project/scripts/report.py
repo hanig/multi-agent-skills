@@ -29,6 +29,8 @@ import shutil
 import sys
 from pathlib import Path
 
+import tracker_audit as TA
+
 from skill_paths import sibling_skill_root
 
 _SWARM_SCRIPTS = sibling_skill_root(Path(__file__).parent.parent,
@@ -1154,54 +1156,54 @@ def render(data, title=None):
         a("</ul></div></section>")
 
     # tracker
-    if data["tickets"] or data["outbox"]:
-        a("<section>")
-        a('<div class="sec-head"><h2>Tracker</h2>'
-          "<p>Issues filed for this plan, and whether the coordinator has "
-          "confirmed each update was applied.</p></div>")
-        issues = (data["tickets"].get("issues")
-                  or data["tickets"].get("tickets") or [])
-        if issues:
-            a('<div class="tablewrap"><table><thead><tr>'
-              "<th>id</th><th>unit</th><th>title</th></tr></thead><tbody>")
-            for it in issues:
-                if not isinstance(it, dict):
-                    continue
-                ident = it.get("identifier") or it.get("id") or "-"
-                url = _safe_url(it.get("url"))
-                cell = ('<a href="%s" rel="noopener noreferrer">%s</a>'
-                        % (e(url), e(ident)) if url else e(ident))
-                a("<tr>")
-                a('<td class="mono">%s</td>' % cell)
-                a('<td class="mono">%s</td>' % e(it.get("unit") or "-"))
-                a('<td class="wrap-cell">%s</td>' % e(it.get("title") or ""))
-                a("</tr>")
-            a("</tbody></table></div>")
-        if ack_fatal:
-            a('<div class="note" style="margin-top:12px">'
-              "<strong>The receipt journal cannot be read in full.</strong>"
-              "<p style='margin:6px 0 0'>No acknowledgment status derived "
-              "from it can be trusted, including the reassuring parts, so "
-              "none is shown.</p><ul>")
-            for f in ack_fatal:
-                a("<li>%s</li>" % e(f))
-            a("</ul></div>")
-        if ack_conflicts:
-            a('<div class="note" style="margin-top:12px">'
-              "<strong>%d intent(s) carry conflicting tracker refs.</strong>"
-              "<p style='margin:6px 0 0'>Two attestations name different "
-              "references for one intent, so something was filed twice, in "
-              "two places.</p></div>" % len(ack_conflicts))
-        if unack:
-            a('<div class="note" style="margin-top:12px">'
-              "<strong>%d tracker intent(s) are unacknowledged.</strong>"
-              "<p style='margin:6px 0 0'>That does NOT mean they were never "
-              "filed: it means nothing here has confirmation either way. "
-              "Re-draining is safe, because intents are keyed. And an "
-              "<em>attested</em> intent is the drainer's word, not proof: "
-              "nothing in this project can ask the tracker.</p></div>"
-              % len(unack))
-        a("</section>")
+    a("<section>")
+    a('<div class="sec-head"><h2>Tracker</h2>'
+      "<p>Issues filed for this plan, and whether the coordinator has "
+      "received an attestation for each update.</p></div>")
+    a("<p>%s</p>" % e(data.get("tracker_section", "Tracker: UNKNOWN (no audit)")))
+    issues = (data["tickets"].get("issues")
+              or data["tickets"].get("tickets") or [])
+    if issues:
+        a('<div class="tablewrap"><table><thead><tr>'
+          "<th>id</th><th>unit</th><th>title</th></tr></thead><tbody>")
+        for it in issues:
+            if not isinstance(it, dict):
+                continue
+            ident = it.get("identifier") or it.get("id") or "-"
+            url = _safe_url(it.get("url"))
+            cell = ('<a href="%s" rel="noopener noreferrer">%s</a>'
+                    % (e(url), e(ident)) if url else e(ident))
+            a("<tr>")
+            a('<td class="mono">%s</td>' % cell)
+            a('<td class="mono">%s</td>' % e(it.get("unit") or "-"))
+            a('<td class="wrap-cell">%s</td>' % e(it.get("title") or ""))
+            a("</tr>")
+        a("</tbody></table></div>")
+    if ack_fatal:
+        a('<div class="note" style="margin-top:12px">'
+          "<strong>The receipt journal cannot be read in full.</strong>"
+          "<p style='margin:6px 0 0'>No acknowledgment status derived "
+          "from it can be trusted, including the reassuring parts, so "
+          "none is shown.</p><ul>")
+        for f in ack_fatal:
+            a("<li>%s</li>" % e(f))
+        a("</ul></div>")
+    if ack_conflicts:
+        a('<div class="note" style="margin-top:12px">'
+          "<strong>%d intent(s) carry conflicting tracker refs.</strong>"
+          "<p style='margin:6px 0 0'>Two attestations name different "
+          "references for one intent, so something was filed twice, in "
+          "two places.</p></div>" % len(ack_conflicts))
+    if unack:
+        a('<div class="note" style="margin-top:12px">'
+          "<strong>%d tracker intent(s) are unacknowledged.</strong>"
+          "<p style='margin:6px 0 0'>That does NOT mean they were never "
+          "filed: it means nothing here has confirmation either way. "
+          "Re-draining is safe, because intents are keyed. And an "
+          "<em>attested</em> intent is the drainer's word, not proof: "
+          "only a current tracker audit supports a consistency claim.</p></div>"
+          % len(unack))
+    a("</section>")
 
     # environment
     sstat = (data.get("survey_status") or {}).get("status", "missing")
@@ -1295,6 +1297,15 @@ def wrap_fragment(body, title):
             % (e(title), FONTS, CSS, body))
 
 
+def tracker_sources(project, state_dir):
+    """Report's invocation defines its sources independently of the record."""
+    root = Path(project)
+    if (root / 'tickets.json').is_file():
+        return {'draft': root / 'tickets.json', 'plan': root / 'plan.json',
+                'state_dir': state_dir}
+    return {'binding': root / '.hanig' / 'linear-binding.json'}
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Build the end-of-run report for a swarm project.")
@@ -1302,6 +1313,7 @@ def main(argv=None):
     ap.add_argument("--out", default=None,
                     help="write here (default: <project>/report.html)")
     ap.add_argument("--title", default=None)
+    ap.add_argument("--tracker-audit")
     ap.add_argument("--fragment", action="store_true",
                     help="emit a body fragment for publishing as an artifact "
                          "rather than a standalone document")
@@ -1313,12 +1325,16 @@ def main(argv=None):
         sys.stderr.write("error: %s is not a directory\n" % args.project)
         return 2
     data = collect(args.project)
+    sources = tracker_sources(args.project, data["state_dir"])
+    data["tracker_section"] = (TA.section(args.tracker_audit, **sources)
+                               if args.tracker_audit else "Tracker: UNKNOWN (no audit)")
 
     if args.json:
         rows = unit_rows(data)
         v, why = verdict(rows)
         json.dump({"schema_version": SCHEMA, "verdict": v, "why": why,
-                   "units": rows, "gaps": evidence_gaps(rows)},
+                   "units": rows, "gaps": evidence_gaps(rows),
+                   "tracker_section": data["tracker_section"]},
                   sys.stdout, indent=1, default=str)
         sys.stdout.write("\n")
         return 0

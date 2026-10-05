@@ -20,6 +20,7 @@ import os
 # bounded and exact: additions require an exact credential name, not a suffix,
 # prefix or value-shape guess.
 DENIED_ENV_NAMES = frozenset({
+    "LINEAR_API_KEY",
     "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
     "ANTHROPIC_API_KEY",

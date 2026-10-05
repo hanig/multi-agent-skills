@@ -569,6 +569,7 @@ class TestMergeUnit(unittest.TestCase):
         swarm = prefix / "hanig-swarm"
         shutil.copytree(OPERATOR.parents[1], operator)
         shutil.copytree(SCRIPTS.parent, swarm)
+        shutil.copytree(SCRIPTS.parents[1] / "hanig-project", swarm.parent / "hanig-project")
         self.operator = operator / "scripts/merge_unit.py"
         self.env["HANIG_ORCHESTRATE_DIR"] = str(operator)
         result = self.invoke()
@@ -584,6 +585,7 @@ class TestMergeUnit(unittest.TestCase):
         dependencies = self.directory / "dependencies"
         swarm = dependencies / "hanig-swarm"
         shutil.copytree(SCRIPTS.parent, swarm)
+        shutil.copytree(SCRIPTS.parents[1] / "hanig-project", swarm.parent / "hanig-project")
         self.operator = operator / "scripts/merge_unit.py"
         self.env["HANIG_ORCHESTRATE_DIR"] = str(operator)
         self.env["HANIG_SKILL_DEP_ROOTS"] = str(dependencies)
@@ -598,6 +600,7 @@ class TestMergeUnit(unittest.TestCase):
         swarm = dependencies / "hanig-swarm"
         shutil.copytree(OPERATOR.parents[1], operator)
         shutil.copytree(SCRIPTS.parent, swarm)
+        shutil.copytree(SCRIPTS.parents[1] / "hanig-project", swarm.parent / "hanig-project")
         self.operator = operator / "scripts/merge_unit.py"
         self.env["HANIG_ORCHESTRATE_DIR"] = str(operator)
         self.env["HANIG_SKILL_DEP_ROOTS"] = "../deps"
@@ -612,12 +615,53 @@ class TestMergeUnit(unittest.TestCase):
         operator.symlink_to(OPERATOR.parents[1], target_is_directory=True)
         swarm = prefix / "deps/hanig-swarm"
         shutil.copytree(SCRIPTS.parent, swarm)
+        shutil.copytree(SCRIPTS.parents[1] / "hanig-project", swarm.parent / "hanig-project")
         self.operator = operator / "scripts/merge_unit.py"
         self.env["HANIG_ORCHESTRATE_DIR"] = str(operator)
         self.env["HANIG_SKILL_DEP_ROOTS"] = "../deps"
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(str(swarm / "scripts/swarm.py"), result.stdout)
+
+    def test_missing_project_sibling_preserves_merge_and_prints_unavailable(self):
+        prefix = self.directory / "missing-project"
+        operator = prefix / "hanig-orchestrate"
+        shutil.copytree(OPERATOR.parents[1], operator)
+        shutil.copytree(SCRIPTS.parent, prefix / "hanig-swarm")
+        self.operator = operator / "scripts/merge_unit.py"
+        self.env["HANIG_ORCHESTRATE_DIR"] = str(operator)
+        self.env.pop("HANIG_SKILL_DEP_ROOTS", None)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Tracker: UNAVAILABLE (missing declared installed dependency 'hanig-project'", result.stdout)
+        self.assertEqual(len(self.calls(["pr", "merge"])), 1)
+        state = json.loads((self.state_dir / S.STATE_FILE).read_text())
+        self.assertEqual(state["units"]["u"]["state"], "DONE")
+
+    def test_broken_project_imports_preserve_merge_and_print_unavailable(self):
+        prefix = self.directory / "broken-project"
+        operator = prefix / "hanig-orchestrate"
+        project = prefix / "hanig-project"
+        shutil.copytree(OPERATOR.parents[1], operator)
+        shutil.copytree(SCRIPTS.parent, prefix / "hanig-swarm")
+        shutil.copytree(SCRIPTS.parents[1] / "hanig-project", project)
+        self.operator = operator / "scripts/merge_unit.py"
+        self.env["HANIG_ORCHESTRATE_DIR"] = str(operator)
+        self.env.pop("HANIG_SKILL_DEP_ROOTS", None)
+        for name in ("tracker_audit", "linear_api"):
+            with self.subTest(module=name):
+                module = project / "scripts" / (name + ".py")
+                original = module.read_bytes()
+                try:
+                    module.write_text("raise ImportError('broken " + name + "')\n")
+                    result = self.invoke()
+                finally:
+                    module.write_bytes(original)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("Tracker: UNAVAILABLE (broken " + name + ")", result.stdout)
+                self.assertEqual(len(self.calls(["pr", "merge"])), 1)
+                state = json.loads((self.state_dir / S.STATE_FILE).read_text())
+                self.assertEqual(state["units"]["u"]["state"], "DONE")
 
     def test_missing_installed_sibling_refuses_before_forge_or_writes(self):
         operator = self.directory / "isolated" / "hanig-orchestrate"
