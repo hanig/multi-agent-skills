@@ -30,98 +30,77 @@ def add_parser(sub):
     p.add_argument('--draft', required=True)
 
 
-def exact_identity_block(body, expected):
-    """Only this draft's complete, contiguous whole-line block binds in prose."""
-    names = ('swarm-plan', 'swarm-repo') if expected and 'swarm-plan' in expected else (
-        'swarm-unit', 'swarm-repo', 'swarm-body')
-    if not expected or any(name not in expected for name in names):
-        return None
-    lines = [re.escape(name + ': ' + expected[name]) for name in names]
-    pattern = r'(?m)^' + r'\r?\n'.join('(?:' + line + '|`' + line + '`)' for line in lines) + r'\r?$'
-    match = re.search(pattern, body or '')
-    return match.span() if match else None
-
-
 def identity_block(body):
-    """Locate the trailing identity lines, before any PR 3 provenance/trailer.
+    """Parse one complete terminal identity, above any PR 3 trailer.
 
-    Legacy units and projects have two lines; units with a body digest have
-    three. Only this position can establish conflicting or legacy identity;
-    exact_identity_block separately recognizes this draft's block in prose.
+    Projects require plan/repo; units require unit/repo with an optional
+    body digest for legacy bindings. Whole lines may be plain or backticked,
+    in any order, with blank separators. Adjacent deps-by provenance is
+    preserved only when a PR 3 trailer is present. Partial blocks are prose.
     """
+    body = body or ''
     mark = LI.trailer(body)
-    prefix = mark['prefix'] if mark else body or ''
+    prefix = mark['prefix'] if mark else body
     lines = [m for m in re.finditer(r'[^\r\n]+', prefix) if m[0].strip()]
     end = len(prefix)
-    # Edge edits accumulate deps-by lines adjacent to the identity block.
     provenance = r'`swarm-deps-by: [^`\r\n]+`'
     while mark and lines and re.fullmatch(provenance, lines[-1][0]):
         end = lines.pop().start()
-    start = end
-    count = 3 if any(re.fullmatch(r'`?swarm-body: [^`\r\n]+`?', m[0]) for m in lines[-3:]) else 2
-    for _ in range(count):
-        if not lines or not re.fullmatch(r'`?swarm-(?:unit|plan|repo|body): [^`\r\n]+`?', lines[-1][0]):
-            break
-        start = lines.pop().start()
-    if start != end:
-        while mark and lines and re.fullmatch(provenance, lines[-1][0]):
-            start = lines.pop().start()
-    return start, end
+    for count, names in ((3, {'swarm-unit', 'swarm-repo', 'swarm-body'}),
+                         (2, {'swarm-unit', 'swarm-repo'}),
+                         (2, {'swarm-plan', 'swarm-repo'})):
+        if len(lines) < count:
+            continue
+        values = {}
+        for line in lines[-count:]:
+            parsed = re.fullmatch(r'(`?)(swarm-(?:unit|plan|repo|body)): ([^`\r\n]+)\1', line[0])
+            if parsed:
+                values[parsed[2]] = parsed[3]
+        if set(values) == names:
+            start = lines[-count].start()
+            before = lines[:-count]
+            while mark and before and re.fullmatch(provenance, before[-1][0]):
+                start = before.pop().start()
+            return {'start': start, 'end': end, 'values': values}
+    return {'start': end, 'end': end, 'values': {}}
 
 
 def markers(body, name):
-    body = body or ''
-    start, end = identity_block(body)
-    return re.findall(r'(?m)^`?' + re.escape(name) + r': ([^\r\n`]+)`?\r?$', body[start:end])
+    values = identity_block(body)['values']
+    return [values[name]] if name in values else []
 
 
 def has_markers(body, expected):
-    return (exact_identity_block(body, expected) is not None or
-            all(markers(body, k) == [v] for k, v in expected.items()))
+    values = identity_block(body)['values']
+    return bool(expected) and all(values.get(k) == v for k, v in expected.items())
 
 
 def identity_lines(body, expected, existing=True):
-    """Insert identity above the PR 3 trailer, preserving its bytes and prose."""
-    exact = exact_identity_block(body, expected) if existing else None
-    if exact and exact[0] < identity_block(body)[0]:
-        for name, value in expected.items():
-            found = markers(body, name)
-            if found and found != [value]:
-                raise ValueError('conflicting ' + name + ' marker')
-        # Move our exact block back to its writing position. Everything else,
-        # including prose appended after it, remains in the prefix.
-        start, end = exact
-        block = body[start:end]
-        if body[end:end + 1] == '\n':
-            end += 1
-        body = body[:start] + body[end:]
-        mark = LI.trailer(body)
-        end = len(mark['prefix']) if mark else len(body)
-        prefix = body[:end]
-        return prefix + ('' if not prefix or prefix.endswith('\n') else '\n') + block + '\n' + body[end:]
+    """Write terminal identity, preserving project prose and PR 3 bytes."""
+    body = body or ''
+    block = identity_block(body)
+    values = block['values'] if existing else {}
+    for name, value in values.items():
+        if name not in expected or (name != 'swarm-body' and value != expected[name]):
+            raise ValueError('conflicting ' + name + ' marker')
     if existing and has_markers(body, expected):
         return body
-    mark = LI.trailer(body)
-    end = identity_block(body)[1] if existing else len(mark['prefix'] if mark else body)
+    end = block['end']
     prefix = body[:end]
+    if values and 'swarm-body' in values:
+        start = block['start']
+        prefix = prefix[:start] + re.sub(
+            r'(?m)^(`?swarm-body: )[^\r\n`]+(`?\r?)$',
+            lambda m: m[1] + expected['swarm-body'] + m[2], prefix[start:])
     for name, value in expected.items():
-        found = markers(body, name) if existing else []
-        if found != [value]:
-            if found:
-                if name != 'swarm-body' or len(found) != 1:
-                    raise ValueError('conflicting ' + name + ' marker')
-                start, stop = identity_block(prefix)
-                prefix = prefix[:start] + re.sub(
-                    r'(?m)^(`?swarm-body: )[^\r\n`]+(`?\r?)$',
-                    lambda m: m[1] + value + m[2], prefix[start:stop]) + prefix[stop:]
-                continue
+        if name not in values:
             prefix += ('\n' if prefix and not prefix.endswith('\n') else '') + name + ': ' + value + '\n'
     return prefix + body[end:]
 
 
 def approved_body(body, approved):
     """Replace issue prose after adding identity, keeping identity and provenance bytes."""
-    start, _ = identity_block(body)
+    start = identity_block(body)['start']
     return approved + ('\n' if approved and not approved.endswith('\n') else '') + body[start:]
 
 
@@ -210,29 +189,25 @@ def project_values(project):
     return {k: project.get(k) or '' for k in ('name', 'description', 'content')}
 
 
-def identity_values(body, expected=None):
-    values = {name: markers(body, name) for name in ('swarm-plan', 'swarm-unit', 'swarm-repo', 'swarm-body')}
-    if exact_identity_block(body, expected):
-        # An exact block proves binding without hiding a conflicting trailer.
-        for name, value in expected.items():
-            if not values[name]:
-                values[name] = [value]
-    return values
+def identity_values(body):
+    values = identity_block(body)['values']
+    return {name: [values[name]] if name in values else []
+            for name in ('swarm-plan', 'swarm-unit', 'swarm-repo', 'swarm-body')}
 
 
-def project_identity(project, expected=None):
+def project_identity(project):
     if project is None:
         return None
     return {'name': project['name'], 'description': project.get('description') or '',
-            'content': identity_values(project.get('content'), expected)}
+            'content': identity_values(project.get('content'))}
 
 
-def issue_identity(issue, expected=None):
+def issue_identity(issue):
     """Managed values are plain title and markers, never rendered Markdown."""
     if issue is None:
         return None
     body = issue.get('description') or ''
-    return {'title': issue['title'], 'identity': identity_values(body, expected),
+    return {'title': issue['title'], 'identity': identity_values(body),
             'trailer': LI.components(body)['trailer']}
 
 
@@ -278,12 +253,12 @@ def prepare(draft, client, sync, org, team, pid, derived, adopt, op):
         expected = dict(binding)
         expected['swarm-body'] = hashlib.sha256(issue['body'].encode('utf-8')).hexdigest()
         derived_hit = resolved[derived_units[unit]]
-        LI.refuse_deleted_creation(derived_hit, None)
-        if derived_hit and not (has_markers(derived_hit.get('description'), expected) or
+        ref = issue.get('linear_id') or issue.get('identifier')
+        explicit_selection = ref and resolved[ref] is not None and resolved[ref]['id'] == derived_units[unit]
+        if derived_hit and not explicit_selection and not (has_markers(derived_hit.get('description'), expected) or
                                 has_markers(derived_hit.get('description'), binding)):
             raise ValueError('derived issue id collision: %s (%s)' %
                              (derived_hit['identifier'], derived_hit['id']))
-        ref = issue.get('linear_id') or issue.get('identifier')
         found = resolved[ref] if ref else resolved[derived_units[unit]]
         if ref and found is None:
             raise ValueError('recorded issue not found: ' + ref)
@@ -298,7 +273,7 @@ def prepare(draft, client, sync, org, team, pid, derived, adopt, op):
             sync.check_membership(found, pid, team['id'])
             LI.refuse_deleted_creation(found, None)
             body = found.get('description') or ''
-            if not LI.trailer(body) and re.search(r'(?m)^`swarm-deps:', body):
+            if LI.malformed_trailer(body):
                 raise ValueError('malformed dependency trailer')
             other = [u for u, iid in derived_units.items() if iid == found['id'] and u != unit]
             other += [i['unit'] for i in draft['issues'] if i['unit'] != unit and
@@ -333,7 +308,7 @@ def prepare(draft, client, sync, org, team, pid, derived, adopt, op):
         before = {'title': found['title'], 'description': found.get('description') or ''} if found else None
         body = before['description'] if before else drafted['body']
         title = before['title'] if before else drafted['title']
-        if not LI.trailer(body) and re.search(r'(?m)^`swarm-deps:', body):
+        if LI.malformed_trailer(body):
             raise ValueError('malformed dependency trailer')
         replace_body = drafted and before and not has_markers(body, expected)
         body = identity_lines(body, expected, existing=before is not None) if expected else body
@@ -417,9 +392,9 @@ class Filing:
             return
         if self.team['id'] not in [t['id'] for t in remote['teams']['nodes']]:
             raise ValueError('project team changed')
-        live = project_identity(remote, s['project_markers'])
-        if live != project_identity(s['project_desired'], s['project_markers']) and (
-                is_confirmed or live != project_identity(s['project_before'], s['project_markers'])):
+        live = project_identity(remote)
+        if live != project_identity(s['project_desired']) and (
+                is_confirmed or live != project_identity(s['project_before'])):
             raise ValueError('managed project changed')
 
     def read_managed(self, is_confirmed, reader=None):
@@ -434,7 +409,7 @@ class Filing:
         for iid, issue in live.items():
             if issue:
                 self.sync.check_membership(issue, s['project'], s['team'])
-                LI.refuse_deleted_creation(issue, self.path)
+                LI.refuse_deleted_creation(issue, self.path if self.path.exists() else None)
                 if any(value is not None and value != issue['identifier']
                        for value in (identities[iid], recorded_names.get(iid))):
                     raise ValueError('managed identifier changed')
@@ -448,9 +423,9 @@ class Filing:
                 continue
             resolvable = all(identities[i] for i in row['desired'].get('incoming', []) + row['desired'].get('outgoing', []))
             desired = LI.desired_value(row, identities) if resolvable else row['before']
-            actual = issue_identity(issue, row['markers'])
-            if actual != issue_identity(desired, row['markers']) and (
-                    is_confirmed or actual != issue_identity(row['before'], row['markers'])):
+            actual = issue_identity(issue)
+            if actual != issue_identity(desired) and (
+                    is_confirmed or actual != issue_identity(row['before'])):
                 raise ValueError('managed issue changed: ' + issue['identifier'])
             if row['before'] is None:
                 self.validate_created(row, issue)
@@ -471,12 +446,10 @@ class Filing:
         LI.reject_key(current, self.client._key)
 
     def issue_matches(self, current, desired):
-        expected = next(row['markers'] for row in self.spec['issues'] if row['id'] == current['id'])
-        return issue_identity(current, expected) == issue_identity(desired, expected)
+        return issue_identity(current) == issue_identity(desired)
 
     def issue_update(self, current, desired):
-        expected = next(row['markers'] for row in self.spec['issues'] if row['id'] == current['id'])
-        before, after = issue_identity(current, expected), issue_identity(desired, expected)
+        before, after = issue_identity(current), issue_identity(desired)
         changes = {}
         if before['title'] != after['title']:
             changes['title'] = desired['title']
@@ -495,7 +468,7 @@ class Filing:
                                   {'input': dict(desired, id=s['project'], teamIds=[s['team']])})
             except API.LinearError as exc:
                 create_error = exc
-        elif project_identity(remote, s['project_markers']) != project_identity(desired, s['project_markers']):
+        elif project_identity(remote) != project_identity(desired):
             self.client.query('mutation FilingProjectUpdate($id: String!, $input: ProjectUpdateInput!) { '
                               'projectUpdate(id: $id, input: $input) { success } }',
                               {'id': s['project'], 'input': desired})

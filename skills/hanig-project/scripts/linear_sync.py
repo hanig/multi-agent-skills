@@ -120,7 +120,13 @@ class Reader:
                  'includeArchived: true, filter: {description: {contains: $marker}}) { nodes { %s } %s } }' %
                  (ISSUE_PAGE, 'id updatedAt' if stamps else FIELDS, PAGE))
             return self.client.query(q, {'marker': 'swarm-unit: ' + plan + '/', 'after': cursor})['issues']
-        return self.collection('marker search', fetch)
+        before = set(self.seen)
+        found = self.collection('marker search', fetch)
+        found = [i for i in found if any(value.startswith(plan + '/')
+                 for value in LF.markers(i.get('description'), 'swarm-unit'))]
+        keep = before | {i['id'] for i in found}
+        self.seen = {k: v for k, v in self.seen.items() if k in keep}
+        return found
 
     def collection(self, label, fetch):
         nodes = self.pages_of(fetch)
@@ -396,10 +402,8 @@ def audit(args, client, filing=None):
                 known.extend(found)
                 for issue in found:
                     for unit in (plan or {}).get('units', []):
-                        marker = 'swarm-unit: ' + marker_plan + '/' + unit['id']
                         matches = (LF.markers(issue.get('description'), 'swarm-unit') ==
-                                   [marker_plan + '/' + unit['id']] if filing else
-                                   re.search(r'(?m)^\s*`?' + re.escape(marker) + r'`?\s*$', issue.get('description') or ''))
+                                   [marker_plan + '/' + unit['id']])
                         if matches:
                             if unit['id'] in mapped and mapped[unit['id']]['id'] != issue['id']:
                                 finding('plan_edges', 'UNKNOWN', {'unit': unit['id'], 'error': 'multiple issue mappings'})
@@ -1072,7 +1076,8 @@ def main(argv=None):
         if args.command == 'issue':
             message = ' '.join(message.splitlines())
         print(message, file=sys.stderr)
-        return 3 if isinstance(exc, LI.DeletedIssue) else 2
+        replay = args.command == 'replay' or (args.command == 'issue' and args.issue_command == 'replay')
+        return 3 if replay and isinstance(exc, LI.DeletedIssue) else 2
 
 
 if __name__ == '__main__':

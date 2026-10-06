@@ -589,7 +589,7 @@ class TestAudit(AuditCase):
     def test_misplaced_identifiers_markers_receipts_and_unreadable(self):
         self.make_plan(needs=[])
         self.fake.issues['1']['project'] = None
-        self.fake.add('3', description='swarm-unit: sample/extra', project='elsewhere')['team'] = {'id': 'other'}
+        self.fake.add('3', description='swarm-unit: sample/extra\nswarm-repo: owner/repo', project='elsewhere')['team'] = {'id': 'other'}
         self.assertEqual(self.audit(plan=True), 1)
         self.assertEqual(self.checks['misplaced'], 'DRIFT')
         reads = [f for q, v in self.fake.calls if 'query OperationIdentifiers' in q for f in v['filter']['or']]
@@ -627,7 +627,7 @@ class TestAudit(AuditCase):
         draft = json.loads(self.draft.read_text())
         draft['project']['slug'] = 'sample'
         self.draft.write_text(json.dumps(draft))
-        self.fake.add('3', description='swarm-unit: sample/extra', project='other')
+        self.fake.add('3', description='swarm-unit: sample/extra\nswarm-repo: owner/repo', project='other')
         self.assertEqual(self.cli('audit', '--draft', str(self.draft), '--out', str(self.out)), 1)
         record = json.loads(self.out.read_text())
         self.assertIsNone(record['scope']['plan'])
@@ -699,10 +699,22 @@ class TestAudit(AuditCase):
         draft['issues'] = []
         self.draft.write_text(json.dumps(draft))
         for iid, unit in (('1', 'one'), ('2', 'two')):
-            self.fake.issues[iid]['description'] = 'swarm-unit: sample/' + unit
+            self.fake.issues[iid]['description'] = 'swarm-unit: sample/' + unit + '\nswarm-repo: owner/repo'
         self.fake.edge('1', '2')
         self.assertEqual(self.audit(plan=True), 0)
         self.assertEqual(self.checks['plan_edges'], 'CLEAN')
+
+    def test_audit_identity_requires_complete_terminal_block(self):
+        self.make_plan(needs=[])
+        draft = json.loads(self.draft.read_text())
+        draft['project']['slug'] = 'sample'
+        self.draft.write_text(json.dumps(draft))
+        for description in ('swarm-unit: sample/extra',
+                            'swarm-unit: sample/extra\nswarm-repo: owner/repo\nEnd example'):
+            self.fake.add('3', description=description, project='other')
+            self.assertEqual(self.cli('audit', '--draft', str(self.draft), '--out', str(self.out)), 0)
+            record = json.loads(self.out.read_text())
+            self.assertEqual(next(c['verdict'] for c in record['checks'] if c['id'] == 'misplaced'), 'CLEAN')
 
     def test_cycle_and_blocker_completion_policy(self):
         self.fake.add('1')

@@ -211,47 +211,53 @@ class FileCase(IssueCase):
                 self.assertTrue(live['description'].startswith('Approved prose 0\n'))
                 self.assertTrue(live['description'].endswith(self.body_line()))
 
-    def test_appended_project_prose_preserves_binding(self):
-        self.new_draft(1)
-        self.assertEqual(self.file(), 0, self.stdout + self.stderr)
-        project = self.fake.projects[self.read()['project']['linear_id']]
-        project['content'] += '\nHuman note\nswarm-plan: other\nswarm-repo: other/repo\nEnd note\n'
-        content = project['content']
-        writes = len(self.fake.mutations)
-        self.assertEqual(self.replay_file(), 0, self.stdout + self.stderr)
-        self.assertEqual(self.file(), 0, self.stdout + self.stderr)
-        self.assertEqual(len(self.fake.mutations), writes)
-        self.assertEqual(project['content'], content)
+    def test_appended_prose_recovery_through_file_refile_and_replay(self):
+        for kind in ('project', 'issue'):
+            for pr3 in (False, True):
+                with self.subTest(kind=kind, pr3=pr3):
+                    self.fake.issues.clear()
+                    self.fake.projects.clear()
+                    self.new_draft(1)
+                    self.assertEqual(self.file(), 0, self.stdout + self.stderr)
+                    iid = self.unit_ids()['u0']
+                    pid = self.data['project']['linear_id']
+                    remote = self.fake.projects[pid] if kind == 'project' else self.fake.issues[iid]
+                    field = 'content' if kind == 'project' else 'description'
+                    prose = remote[field] + '\nHuman appended note\n'
+                    suffix = LI.description('', set(), set(), 'old-op', 'owner') if pr3 else ''
+                    remote[field] = prose + suffix
+                    writes, records = len(self.fake.mutations), self.records()
+                    self.assertEqual(self.file(), 2, self.stdout + self.stderr)
+                    self.assertIn('unmarked ' + kind, self.stderr)
+                    self.assertIn(pid if kind == 'project' else remote['identifier'], self.stderr)
+                    self.assertEqual(self.records(), records)
+                    self.assertEqual(len(self.fake.mutations), writes)
+                    self.assertEqual(self.replay_file(), 2, self.stdout + self.stderr)
+                    # Leave recovery incomplete, then resume its recorded before/desired values.
+                    self.fake.ignore_update = True
+                    self.assertEqual(self.file('--adopt-checked'), 3, self.stdout + self.stderr)
+                    self.fake.ignore_update = False
+                    self.assertEqual(self.replay_file(), 0, self.stdout + self.stderr)
+                    identity = ('swarm-plan: plan\nswarm-repo: owner/repo' if kind == 'project' else
+                                'swarm-unit: plan/u0\nswarm-repo: owner/repo\n' + self.body_line())
+                    prefix = prose if kind == 'project' else 'Approved prose 0\n'
+                    self.assertEqual(remote[field], render_markdown(prefix + identity + '\n' + suffix))
+                    writes = len(self.fake.mutations)
+                    self.assertEqual(self.file(), 0, self.stdout + self.stderr)
+                    self.assertEqual(self.replay_file(), 0, self.stdout + self.stderr)
+                    self.assertEqual(len(self.fake.mutations), writes)
 
-    def test_appended_issue_prose_preserves_binding(self):
-        self.new_draft(1)
-        self.assertEqual(self.file(), 0, self.stdout + self.stderr)
-        live = self.fake.issues[self.unit_ids()['u0']]
-        live['description'] += ('\nHuman note\nswarm-unit: plan/other\nswarm-repo: other/repo\n'
-                                'swarm-body: ' + '0' * 64 + '\nEnd note\n')
-        body = live['description']
-        writes = len(self.fake.mutations)
-        self.assertEqual(self.replay_file(), 0, self.stdout + self.stderr)
-        self.assertEqual(self.file(), 0, self.stdout + self.stderr)
-        self.assertEqual(len(self.fake.mutations), writes)
-        self.data['issues'][0]['title'] = 'Revised title'
-        self.approve()
-        self.assertEqual(self.file(), 0, self.stdout + self.stderr)
-        self.assertEqual(self.fake.mutations[-1][1]['input'], {'title': 'Revised title'})
-        self.assertEqual(live['description'], body)
-
-    def test_identity_rewrite_preserves_appended_prose_and_pr3_trailer(self):
+    def test_issue_recovery_with_changed_edges_keeps_pr3_trailer(self):
         self.assertEqual(self.file(), 0, self.stdout + self.stderr)
         ids = self.unit_ids()
         live = self.fake.issues[ids['u1']]
-        note = '\nHuman note\nswarm-unit: example/u1\nswarm-repo: example/repo\nEnd note\n'
-        prose = live['description'] + note
-        live['description'] = LI.description(prose, {self.fake.issues[ids['u0']]['identifier']},
+        live['description'] = LI.description(live['description'] + '\nHuman note\n',
+                                             {self.fake.issues[ids['u0']]['identifier']},
                                              set(), 'old-op', 'old-owner')
         self.data['issues'][1]['blocked_by'] = []
         self.approve()
-        self.assertEqual(self.file(), 0, self.stdout + self.stderr)
-        expected = ('Approved prose 1' + note + 'swarm-unit: plan/u1\n'
+        self.assertEqual(self.file('--adopt-checked'), 0, self.stdout + self.stderr)
+        expected = ('Approved prose 1\nswarm-unit: plan/u1\n'
                     'swarm-repo: owner/repo\n' + self.body_line(1) + '\n')
         self.assertEqual(LI.trailer(live['description'])['prefix'], expected)
         self.assertEqual(LI.trailer(live['description'])['op'], 'old-op')
@@ -259,6 +265,7 @@ class FileCase(IssueCase):
         self.assertIsNone(LI.declared_edges(live))
         writes = len(self.fake.mutations)
         self.assertEqual(self.replay_file(), 0, self.stdout + self.stderr)
+        self.assertEqual(self.file(), 0, self.stdout + self.stderr)
         self.assertEqual(len(self.fake.mutations), writes)
 
     def test_embedded_identity_requires_exact_contiguous_whole_lines(self):
@@ -266,7 +273,7 @@ class FileCase(IssueCase):
         pid = self.seed()
         live = self.existing_unit(0, pid)
         identity = 'swarm-unit: plan/u0\nswarm-repo: owner/repo\n' + self.body_line()
-        for block in (identity.replace('plan/u0', 'plan/other'),
+        for block in (identity, identity.replace('plan/u0', 'plan/other'),
                       identity.replace('owner/repo', 'other/repo'),
                       identity.replace(self.body_line(), 'swarm-body: ' + '0' * 64),
                       identity.replace('\n', '\nInterruption\n', 1),
@@ -301,6 +308,8 @@ class FileCase(IssueCase):
         project = self.fake.projects[self.data['project']['linear_id']]
         project['content'] += '\nHuman note\nswarm-plan: other\nswarm-repo: other/repo'
         self.assertEqual(self.file(), 2, self.stdout + self.stderr)
+        self.assertIn('unmarked project', self.stderr)
+        self.assertEqual(self.file('--adopt-checked'), 2, self.stdout + self.stderr)
         self.assertIn('conflicting swarm-plan marker', self.stderr)
         self.assertEqual(self.replay_file(), 2, self.stdout + self.stderr)
         self.assertIn('managed project changed', self.stderr)
@@ -537,9 +546,26 @@ class FileCase(IssueCase):
             with self.subTest(field=field):
                 live.update(trashed=False, archivedAt=None)
                 live[field] = value
-                self.assertEqual(self.file(), 3, self.stdout + self.stderr)
+                self.assertEqual(self.file(), 2, self.stdout + self.stderr)
+                self.assertEqual(self.records(), [])
+                self.assertFalse(list((self.root / 'ops').glob('*/*/*.progress.jsonl')))
                 self.assertIn('issue deleted after creation', self.stderr)
                 self.assertEqual(self.fake.mutations, [])
+
+    def test_pre_record_managed_deletion_leaves_no_progress(self):
+        self.new_draft(1)
+        live = self.existing_unit(0, self.seed(), marked=True)
+        prepare = LF.prepare
+        def archived(*args, **kwargs):
+            spec, reader, project = prepare(*args, **kwargs)
+            reader.seen[live['id']]['archivedAt'] = 'date'
+            return spec, reader, project
+        with mock.patch.object(LF, 'prepare', archived):
+            self.assertEqual(self.file(), 2, self.stdout + self.stderr)
+        self.assertIn('issue deleted', self.stderr)
+        self.assertEqual(self.records(), [])
+        self.assertFalse(list((self.root / 'ops').glob('*/*/*.progress.jsonl')))
+        self.assertEqual(self.fake.mutations, [])
 
     def test_deleted_unit_refile_and_replay_send_no_mutations(self):
         self.new_draft(1)
@@ -559,7 +585,7 @@ class FileCase(IssueCase):
                 live[field] = value
                 for command, call in (('file', self.file), ('replay', lambda: self.replay_file(op))):
                     with self.subTest(command=command):
-                        self.assertEqual(call(), 3, self.stdout + self.stderr)
+                        self.assertEqual(call(), 2 if command == 'file' else 3, self.stdout + self.stderr)
                         self.assertIn('issue deleted', self.stdout + self.stderr)
                         self.assertEqual(self.fake.mutations, writes)
         # Completed operations also refuse a retained deleted unit.
@@ -797,6 +823,8 @@ class FileCase(IssueCase):
                      'swarm-unit: plan/u0\nswarm-repo: owner/repo\nProse after markers'):
             for reference in (None, 'linear_id', 'identifier'):
                 for args in ((), ('--adopt-checked',)):
+                    if reference and args and LF.identity_block(body)['values'] == {}:
+                        continue
                     with self.subTest(body=body, reference=reference, args=args):
                         self.data['issues'][0].pop('linear_id', None)
                         self.data['issues'][0].pop('identifier', None)
@@ -807,8 +835,8 @@ class FileCase(IssueCase):
                         before = copy.deepcopy(self.fake.issues)
                         draft_before = self.draft.read_bytes()
                         self.assertEqual(self.file(*args), 2, self.stdout + self.stderr)
-                        self.assertIn('derived issue id collision', self.stderr)
-                        self.assertIn(collision['id'], self.stderr)
+                        error = ('bound to another unit' if LF.identity_block(body)['values'] else 'unmarked issue') if reference else 'derived issue id collision'
+                        self.assertIn(error, self.stderr)
                         self.assertIn('ARC-99', self.stderr)
                         self.assertEqual(self.fake.mutations, [])
                         self.assertEqual(self.fake.issues, before)
@@ -1044,7 +1072,7 @@ class FileCase(IssueCase):
                 self.assertEqual(live['description'], body + suffix)
                 self.assertEqual(self.file('--adopt-checked'), 0, self.stdout + self.stderr)
                 self.assertEqual(self.unit_ids(), {'u0': live['id']})
-                self.assertEqual(live['description'], ('Approved prose 0\n`swarm-unit: plan/u0`' + newline +
+                self.assertEqual(live['description'], ('Approved prose 0\nswarm-unit: plan/u0\n' +
                                  'swarm-repo: owner/repo\n' + self.body_line() + '\n' + suffix).rstrip())
                 mutations = len(self.fake.mutations)
                 self.assertEqual(self.file(), 0, self.stdout + self.stderr)
@@ -1054,7 +1082,7 @@ class FileCase(IssueCase):
         self.new_draft(1)
         pid = self.seed()
         live = self.existing_unit(0, pid)
-        for unit in ('', 'swarm-unit: plan/u0\n'):
+        for unit in ('swarm-unit: plan/u0\n',):
             for trailer in (False, True):
                 with self.subTest(unit=unit, trailer=trailer):
                     body = 'Existing prose\n' + unit + '`swarm-repo: other/repository`\n'
@@ -1066,6 +1094,96 @@ class FileCase(IssueCase):
                         self.assertIn('bound to another unit', self.stderr)
                         self.assertEqual(self.fake.mutations, [])
                         self.assertEqual(live['description'], body)
+
+    def test_lone_and_prose_only_foreign_markers_do_not_conflict(self):
+        for prose in ('`swarm-repo: other/repository`', 'swarm-unit: plan/other',
+                      'swarm-unit: plan/other\nswarm-repo: other/repository\nEnd of example'):
+            for pr3 in (False, True):
+                with self.subTest(prose=prose, pr3=pr3):
+                    self.fake.issues.clear()
+                    self.fake.projects.clear()
+                    self.new_draft(1)
+                    pid = self.seed()
+                    live = self.existing_unit(0, pid)
+                    suffix = LI.description('', set(), set(), 'old-op', 'owner') if pr3 else ''
+                    live['description'] = prose + '\n' + suffix
+                    self.fake.projects[pid]['content'] = prose
+                    self.assertEqual(self.file('--adopt-checked'), 0, self.stdout + self.stderr)
+                    self.assertEqual(self.fake.projects[pid]['content'],
+                                     prose + '\nswarm-plan: plan\nswarm-repo: owner/repo')
+                    self.assertNotIn('other/repository', live['description'])
+                    self.assertNotIn('plan/other', live['description'])
+                    self.assertEqual(self.replay_file(), 0, self.stdout + self.stderr)
+                    writes = len(self.fake.mutations)
+                    self.assertEqual(self.file(), 0, self.stdout + self.stderr)
+                    self.assertEqual(len(self.fake.mutations), writes)
+
+    def test_explicit_unmarked_derived_issue_adoption(self):
+        for selector in ('linear_id', 'identifier'):
+            for pr3 in (False, True):
+                with self.subTest(selector=selector, pr3=pr3):
+                    self.fake.issues.clear()
+                    self.fake.projects.clear()
+                    self.new_draft(1)
+                    live = self.existing_unit(0, self.seed(), derived=True, trailer=pr3)
+                    self.data['issues'][0][selector] = live['id' if selector == 'linear_id' else selector]
+                    self.save()
+                    writes = len(self.fake.mutations)
+                    self.assertEqual(self.file(), 2, self.stdout + self.stderr)
+                    self.assertIn('unmarked issue', self.stderr)
+                    self.assertEqual(len(self.fake.mutations), writes)
+                    self.fake.ignore_update = True
+                    self.assertEqual(self.file('--adopt-checked'), 3, self.stdout + self.stderr)
+                    self.fake.ignore_update = False
+                    self.assertEqual(self.replay_file(), 0, self.stdout + self.stderr)
+                    self.assertTrue(live['description'].startswith('Approved prose 0\nswarm-unit:'))
+                    self.assertEqual(bool(LI.trailer(live['description'])), pr3)
+                    writes = len(self.fake.mutations)
+                    self.assertEqual(self.file(), 0, self.stdout + self.stderr)
+                    self.assertEqual(self.replay_file(), 0, self.stdout + self.stderr)
+                    self.assertEqual(len(self.fake.mutations), writes)
+
+    def test_archived_observed_blockers_kept_reported_and_cycle_checked(self):
+        for field, value in (('archivedAt', 'date'), ('trashed', True)):
+            with self.subTest(field=field):
+                self.fake.issues.clear()
+                self.fake.projects.clear()
+                self.new_draft(2)
+                pid = self.seed()
+                a = self.existing_unit(0, pid, marked=True)
+                b = self.existing_unit(1, pid, marked=True)
+                external = self.fake.add('80', project='external')
+                external[field] = value
+                self.fake.edge('80', a['id'])
+                edges = LS.edges_of(list(self.fake.issues.values()))[0]
+                self.assertEqual(self.file(), 0, self.stdout + self.stderr)
+                self.assertIn('kept outside-plan blocker 80 -> ' + a['id'], self.stdout)
+                self.assertEqual(LS.edges_of(list(self.fake.issues.values()))[0], edges | {(a['id'], b['id'])})
+                self.assertEqual(self.read()[T.READBACK]['edges'][a['identifier']], ['ARC-80'])
+                self.assertEqual(self.replay_file(), 0, self.stdout + self.stderr)
+                self.assertEqual(self.file(), 0, self.stdout + self.stderr)
+                self.fake.edge(b['id'], '80')
+                writes = len(self.fake.mutations)
+                self.assertEqual(self.file(), 2, self.stdout + self.stderr)
+                self.assertIn('resulting blocks cycle', self.stderr)
+                self.assertEqual(len(self.fake.mutations), writes)
+
+    def test_isolated_plan_unit_filing_audit_relationless_is_clean(self):
+        self.new_draft(1)
+        records = []
+        original = LS.audit
+        def capture(*args, **kwargs):
+            result = original(*args, **kwargs)
+            self.assertIsNotNone(kwargs.get('filing'))
+            records.append(result[0])
+            return result
+        with mock.patch.object(LS, 'audit', capture):
+            self.assertEqual(self.file(), 0, self.stdout + self.stderr)
+            self.assertEqual(self.file(), 0, self.stdout + self.stderr)
+            self.assertEqual(self.replay_file(), 0, self.stdout + self.stderr)
+        self.assertEqual(len(records), 3)
+        for record in records:
+            self.assertEqual(next(c['verdict'] for c in record['checks'] if c['id'] == 'relationless'), 'CLEAN')
 
     def test_03_adopted_project_refiles_by_markers_without_flag(self):
         pid = self.seed(markers=False, derived=False)
@@ -1436,6 +1554,16 @@ class FileCase(IssueCase):
         self.assertEqual(self.file(), 2)
         self.assertIn('malformed dependency trailer', self.stderr)
         self.assertEqual(self.fake.mutations, [])
+
+    def test_fenced_dependency_example_files_refiles_and_replays(self):
+        self.new_draft(1)
+        self.data['issues'][0]['body'] = 'Example:\n```text\n`swarm-deps: example`\n```\n'
+        self.approve()
+        self.assertEqual(self.file(), 0, self.stdout + self.stderr)
+        writes = len(self.fake.mutations)
+        self.assertEqual(self.file(), 0, self.stdout + self.stderr)
+        self.assertEqual(self.replay_file(), 0, self.stdout + self.stderr)
+        self.assertEqual(len(self.fake.mutations), writes)
 
     def test_replay_new_edge_refuses_without_overwriting(self):
         self.assertEqual(self.file(), 0, self.stdout + self.stderr)

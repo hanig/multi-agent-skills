@@ -111,13 +111,13 @@ class IssueLinear(FakeLinear):
         data = super().dispatch(q, v)
         if 'query Binding' in q and self.team_paging:
             data['project']['teams'] = connection([], True, 'teams-next')
-        if 'query ProjectIssues' in q and 'relations(' in q:
-            if self.relation_page_size:
+        if 'query ProjectIssues' in q:
+            if self.relation_page_size and 'relations(' in q:
                 for node in data['project']['issues']['nodes']:
                     for field in ('relations', 'inverseRelations'):
                         node[field] = self.relation_page(node[field]['nodes'])
             data['project']['issues']['nodes'] = [i for i in data['project']['issues']['nodes']
-                                                 if not i.get('trashed')]
+                                                 if not self.issues[i['id']].get('trashed')]
         return data
 
     def relation_page(self, nodes, start=0):
@@ -353,6 +353,64 @@ runpy.run_path(str(script), run_name='__main__')
 
 
 class TestIssue(IssueCase):
+    def test_archived_observed_sources_and_relation_lookups(self):
+        for field, value in (('archivedAt', 'date'), ('trashed', True)):
+            for incoming in (True, False):
+                with self.subTest(field=field, incoming=incoming):
+                    self.fake.issues['1'].update(archivedAt=None, trashed=False)
+                    self.fake.issues['1'][field] = value
+                    self.assertEqual(self.issue('new', '--blocked-by' if incoming else '--blocks', 'ARC-1'), 0,
+                                     self.stdout + self.stderr)
+                    op = re.search(r'^operation (\S+)$', self.stdout, re.M)[1]
+                    target = LI.load_record(next(p for p in self.records() if p.stem == op))['target']
+                    edge = ('1', target) if incoming else (target, '1')
+                    self.assertIn(edge, LS.edges_of(list(self.fake.issues.values()))[0])
+                    self.assertEqual(self.issue('replay', op), 0, self.stdout + self.stderr)
+                    relation = next(r for r in self.fake.relations()
+                                    if (r['issue']['id'], r['relatedIssue']['id']) == edge)
+                    self.assertEqual(LI.relation_by_id(LS, API.Client(KEY), relation['id'], *edge, endpoint='1'), relation)
+                    with self.assertRaises(LI.DeletedIssue):
+                        LI.relation_by_id(LS, API.Client(KEY), relation['id'], *edge, endpoint='1', managed=True)
+
+    def test_archived_touched_counterparts_refuse_before_record(self):
+        self.marked('1')
+        for field, value in (('archivedAt', 'date'), ('trashed', True)):
+            self.fake.issues['1'].update(archivedAt=None, trashed=False)
+            self.fake.issues['1'][field] = value
+            self.assertEqual(self.issue('new', '--blocked-by', 'ARC-1'), 2, self.stdout + self.stderr)
+            self.assertIn('issue deleted', self.stderr)
+            self.assertEqual(self.records(), [])
+            self.assertEqual(self.fake.mutations, [])
+
+    def test_archived_managed_source_after_trailer_write_refuses_relation_write(self):
+        self.marked('1')
+        def archive(q, v):
+            if 'OperationUpdate' in q and v['id'] == '1':
+                self.fake.issues['1']['archivedAt'] = 'date'
+        self.fake.after_mutation = archive
+        self.assertEqual(self.issue('new', '--blocked-by', 'ARC-1'), 3, self.stdout + self.stderr)
+        self.assertIn('issue deleted', self.stdout)
+        self.assertFalse(any('OperationRelation' in q for q, _ in self.fake.mutations))
+
+    def test_archived_observed_frontier_retains_cycle_edges(self):
+        self.external_chain()
+        self.fake.issues['3']['archivedAt'] = 'date'
+        self.fake.issues['4']['trashed'] = True
+        self.assertEqual(self.issue('edit', 'ARC-1', '--add-blocks', 'ARC-2'), 2,
+                         self.stdout + self.stderr)
+        self.assertIn('resulting blocks cycle', self.stderr)
+        self.assertEqual(self.records(), [])
+        self.assertEqual(self.fake.mutations, [])
+
+    def test_dependency_examples_are_prose_in_audit_and_prepare(self):
+        for prose in ('Example:\n```text\n`swarm-deps: example`\n```',
+                      '> `swarm-deps: example`', '`swarm-deps: example`\nEnd of example'):
+            with self.subTest(prose=prose):
+                self.fake.issues['1']['description'] = prose
+                self.assertIsNone(LI.declared_edges(self.fake.issues['1']))
+                self.assertEqual(self.issue('new', '--blocked-by', 'ARC-1'), 0,
+                                 self.stdout + self.stderr)
+
     def test_deleted_issue_edit_and_replay_send_no_mutations(self):
         self.fake.ignore_update = True
         self.assertEqual(self.issue('edit', 'ARC-1', '--title', 'Changed'), 3,
@@ -366,7 +424,7 @@ class TestIssue(IssueCase):
                 self.fake.issues['1'][field] = value
                 for args in (('edit', 'ARC-1', '--title', 'Another title'), ('replay', op)):
                     with self.subTest(command=args[0]):
-                        self.assertEqual(self.issue(*args), 3, self.stdout + self.stderr)
+                        self.assertEqual(self.issue(*args), 3 if args[0] == 'replay' else 2, self.stdout + self.stderr)
                         self.assertIn('issue deleted', self.stdout + self.stderr)
                         self.assertEqual(self.fake.mutations, writes)
 

@@ -120,6 +120,21 @@ def trailer(body):
     return values
 
 
+def malformed_trailer(body):
+    """Recognize an incomplete PR 3 suffix, never marker examples in prose."""
+    if trailer(body):
+        return False
+    lines = [line for line in (body or '').splitlines() if line.strip()]
+    # A partial trailer can end after deps or op. Other text, including a
+    # closing fence, makes the example prose rather than a trailer.
+    for count in (1, 2, 3):
+        tail = lines[-count:]
+        if len(tail) == count and all(line.startswith('`swarm-' + name + ':')
+                                     for line, name in zip(tail, ('deps', 'op', 'approver'))):
+            return True
+    return False
+
+
 def dependency_names(issue):
     incoming, outgoing = set(), set()
     for field in ('relations', 'inverseRelations'):
@@ -143,7 +158,7 @@ def declared_edges(issue):
     mark = trailer(issue.get('description'))
     body = issue.get('description') or ''
     if mark is None:
-        if re.search(r'(?m)^`swarm-deps:', body):
+        if malformed_trailer(body):
             return {'issue': issue['identifier'], 'error': 'malformed dependency trailer'}
         return None
     parsed = re.fullmatch(r'blocked-by=([^ ]+) blocks=([^ ]+)', mark['deps'])
@@ -339,7 +354,6 @@ def scope(sync, client, project, refs):
     for ref, issue in resolved.items():
         if issue is None:
             raise ValueError('issue not found: ' + ref)
-        refuse_deleted_creation(issue, None)
     return expand_scope(sync, reader)
 
 
@@ -360,7 +374,6 @@ def expand_scope(sync, reader):
         for iid, reached in read(reader.resolve, missing).items():
             if reached is None:
                 raise ValueError('issue not found: ' + iid)
-            refuse_deleted_creation(reached, None)
     reader.stable()
     if reader.problems:
         raise IncompleteGraph('incomplete graph read: ' + '; '.join(reader.problems))
@@ -425,7 +438,7 @@ def prepare(args, client, sync, identity, op):
     for a, b in additions | removals:
         peer = b if a == target_id else a
         other = issues[peer]
-        if not trailer(other.get('description')) and re.search(r'(?m)^`swarm-deps:', other.get('description') or ''):
+        if malformed_trailer(other.get('description')):
             raise ValueError('malformed counterpart dependency trailer: ' + other['identifier'])
         if trailer(other.get('description')):
             sync.check_membership(other, project, team)
@@ -446,6 +459,7 @@ def prepare(args, client, sync, identity, op):
     warnings = []
     for iid in sorted(touched, key=lambda value: (value != target_id, value)):
         issue = issues.get(iid)
+        refuse_deleted_creation(issue, None)
         before = {'title': issue['title'], 'description': issue.get('description') or ''} if issue else None
         old = trailer(before['description']) if before else None
         body = prefix if iid == target_id else old['prefix']
@@ -564,7 +578,7 @@ def read_managed(spec, sync, client, is_confirmed, path, reader=None):
     return live, identities
 
 
-def relation_by_id(sync, client, rid, a, b, endpoint, reader=None):
+def relation_by_id(sync, client, rid, a, b, endpoint, reader=None, managed=False):
     """Read an exact blocks relation through either endpoint's covered pages."""
     if endpoint not in (a, b):
         raise ValueError('relation lookup requires one of its endpoints')
@@ -578,7 +592,8 @@ def relation_by_id(sync, client, rid, a, b, endpoint, reader=None):
             issue = reader.seen.get(endpoint)
         if issue is None:
             raise ValueError('relation endpoint deleted: ' + endpoint)
-        refuse_deleted_creation(issue, None)
+        if managed:
+            refuse_deleted_creation(issue, None)
         if reader.problems:
             raise ValueError('; '.join(reader.problems))
         return next((r for r in issue[field]['nodes'] if r['id'] == rid and
@@ -599,7 +614,8 @@ def source_endpoints(spec, client, sync, absent=()):
         for iid, issue in endpoints.items():
             if issue is None:
                 raise ValueError('relation endpoint deleted: ' + iid)
-            refuse_deleted_creation(issue, None)
+            if any(row['id'] == iid for row in spec['issues']):
+                refuse_deleted_creation(issue, None)
         reader.stable()
         if reader.problems:
             raise ValueError('; '.join(reader.problems))
@@ -665,6 +681,7 @@ def apply(spec, path, client, sync, initial=None, handler=None):
     # endpoints in one batch so a deleted endpoint cannot trigger a write.
     if wrote_issue:
         endpoints = source_endpoints(spec, client, sync)
+    managed = {row['id'] for row in spec['issues']}
     added_relations = []
     for adding, changes in ((True, spec['additions']), (False, spec['removals'])):
         for a, b in changes:
@@ -681,7 +698,7 @@ def apply(spec, path, client, sync, initial=None, handler=None):
                                  {'input': {'id': rid, 'type': 'blocks', 'issueId': a, 'relatedIssueId': b}})
                 except API.LinearError as exc:
                     try:
-                        recovered = relation_by_id(sync, client, rid, a, b, endpoint=b)
+                        recovered = relation_by_id(sync, client, rid, a, b, endpoint=b, managed=b in managed)
                     except (API.LinearError, OSError, ValueError, KeyError, TypeError):
                         raise exc from None
                     if not recovered:
@@ -704,7 +721,7 @@ def apply(spec, path, client, sync, initial=None, handler=None):
             except (API.LinearError, OSError, ValueError, KeyError, TypeError) as exc:
                 raise IncompleteGraph('incomplete relation read: ' + str(exc)) from exc
             for rid, a, b in added_relations:
-                if not relation_by_id(sync, client, rid, a, b, endpoint=b, reader=reader):
+                if not relation_by_id(sync, client, rid, a, b, endpoint=b, reader=reader, managed=b in managed):
                     raise ValueError('rejected relation create: type or endpoints disagree')
     if handler is not None:
         identifier = handler.verify()

@@ -69,6 +69,25 @@ The first two lines bind the issue to the unit. The body digest is SHA-256
 of the approved body's exact UTF-8 bytes, including whitespace, before any
 identity lines are added.
 
+One parser defines binding, conflicts, rewriting, replay and audit. Only a
+complete identity block in the terminal position counts: project plan/repo,
+or issue unit/repo with an optional body digest for legacy issues. Each
+whole line is plain or backticked; order and blank separators are accepted.
+With a PR 3 trailer, identity sits above it and adjacent `swarm-deps-by`
+provenance. A lone marker-like line or a block followed by prose neither
+binds nor conflicts. Dependency markers are also read only in PR 3's
+terminal position; fenced and quoted examples in prose do not refuse.
+
+For a **project**, text a person appends after the identity lines makes the
+next `file` refuse as unmarked and name the project ID. After audit,
+`--adopt-checked` re-binds it by writing the identity block after that text,
+preserving the text (and keeping any PR 3 trailer last).
+
+For an **issue**, `--adopt-checked` re-binds it and restores the approved
+body: text added in Linear is replaced. An explicitly selected unmarked
+issue, including one at its derived ID, is recoverable this way. A complete
+terminal block naming another unit or repository still refuses adoption.
+
 **Content identity, not Markdown rendering.** Linear re-renders descriptions:
 the live check changed `- kind:` to `* kind:` and dropped the blank line
 before the marker block. Filing, replay's before/desired checks and
@@ -81,8 +100,8 @@ by identity lines, while the project name and plain-text description
 (the approved summary on creation) keep their exact comparisons after the
 existing terminal-whitespace trim.
 
-**Declared limit:** prose edited by a person in Linear after filing is not
-detected by `file`; changing the approved body is. The body marker records
+**Declared limit:** prose edited before an intact terminal identity block is
+not detected by `file`; changing the approved body is. The body marker records
 the approved content identity, not a checksum of Linear's current rendered
 prose. Project content prose is likewise outside the comparison.
 Operations recorded before body identities existed refuse replay before any
@@ -151,6 +170,13 @@ removal. A removal that is retried after it succeeded, including one named
 by UUID for an issue outside the project, is satisfied rather than an error
 (finding 5).
 
+Archived, trashed or deleted refusal applies to issues the operation mutates:
+unit issues during filing, and the target and touched counterparts during
+an issue command. Graph-only neighbors are observed for cycle checks, even
+when archived or trashed; their edges remain in the graph and kept-edge
+reports. A missing endpoint still prevents a complete graph read. Managed
+endpoint checks remain in preparation, replay and mutation read-back.
+
 ## Crash safety, read-back and audit
 
 Filing runs under PR 2's project lock and records an operation record and
@@ -178,7 +204,9 @@ linear_sync.py file --draft tickets.json [--adopt-checked] [--preview]
 linear_sync.py replay OPERATION_ID --draft tickets.json
 ```
 
-Exit 0 confirmed, 3 incomplete or not confirmed, 2 refused before mutation.
+Exit 0 confirmed, 3 incomplete or not confirmed after recording an operation,
+2 refused before the operation record exists. In particular, retained deleted
+managed issues refuse fresh filing with 2 and replay with 3.
 `--preview` runs every check, prints what would be created, adopted, linked
 and unlinked, and sends and writes nothing.
 
