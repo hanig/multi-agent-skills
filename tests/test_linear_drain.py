@@ -12,7 +12,7 @@ import sys
 import unittest
 from unittest import mock
 
-from tests.test_linear_audit import AuditCase, FakeLinear, KEY, ROOT, connection
+from tests.test_linear_audit import AuditCase, FakeLinear, KEY, ROOT, connection, BudgetPaging, budget_page, budget_project
 
 PROJECT = ROOT / 'skills/hanig-project/scripts'
 sys.path.insert(0, str(PROJECT))
@@ -96,7 +96,7 @@ class DrainLinear(FakeLinear):
                     raise OSError('page failed')
                 conn = connection(nodes[1:] if v['after'] else nodes[:1], not v['after'], 'next')
             else:
-                conn = connection(nodes)
+                conn = budget_page(nodes, v['after'], 100)
             return {'issue': {'comments': conn}}
         if 'query IntentComment(' in q:
             found = None if self.hide_comments else copy.deepcopy(self.comments.get(v['id']))
@@ -109,6 +109,10 @@ class DrainLinear(FakeLinear):
         if 'query DrainStates' in q:
             return {'team': {'states': connection(self.states)}}
         return super().dispatch(q, v)
+
+
+class BudgetDrainLinear(BudgetPaging, DrainLinear):
+    pass
 
 
 class DrainCase(AuditCase):
@@ -169,6 +173,50 @@ class DrainCase(AuditCase):
 
 
 class TestDrain(DrainCase):
+    def test_request_budget(self):
+        self.fake = BudgetDrainLinear()
+        budget_project(self.fake)
+        self.intent()
+        with mock.patch.object(API, 'transport', self.fake):
+            self.assertEqual(self.drain(), 0, self.stdout + self.stderr)
+        comments = sum('query IntentComments' in q for q, _ in self.fake.calls)
+        print('drain budget: %d requests + %d comment pages' % (len(self.fake.calls) - comments, comments))
+        self.assertLessEqual(len(self.fake.calls) - comments, 20)
+
+    def test_audit_comment_overflow_reads_latest_and_rejects_late_page_faults(self):
+        base = self.intent('start', 'start')
+        for n in range(25):
+            self.seed(dict(base, key='note-%d' % n, verb='note'))
+        self.seed(dict(base, key='last', verb='close', at='2026-10-05T12:00:00+0000'))
+        self.assertEqual(self.audit(), 1)
+        self.assertEqual(self.checks['intent_order'], 'DRIFT')
+        self.assertTrue(any('query IntentComments' in q and v['after'] == '20' for q, v in self.fake.calls))
+        self.fake.issues['1']['state']['type'] = 'completed'
+        self.assertEqual(self.audit(), 0)
+        dispatch = self.fake.dispatch
+        for fault in ('error', 'duplicate', 'repeat', 'unfinished'):
+            with self.subTest(fault=fault):
+                def broken(q, v):
+                    if 'query IntentComments' in q and v['after'] is not None:
+                        if fault == 'error':
+                            raise OSError('late comment page failed')
+                        if fault == 'duplicate':
+                            return {'issue': {'comments': connection([next(iter(self.fake.comments.values()))])}}
+                        return {'issue': {'comments': connection([], True, '20' if fault == 'repeat' else None)}}
+                    return dispatch(q, v)
+                with mock.patch.object(self.fake, 'dispatch', broken):
+                    self.assertEqual(self.audit(), 3)
+                self.assertEqual(self.checks['intent_order'], 'UNKNOWN')
+                self.assertFalse(self.record['coverage']['complete'])
+
+    def test_drain_batches_repeated_initial_references(self):
+        for n in range(5):
+            self.intent('note-%d' % n, 'note')
+        self.assertEqual(self.drain(), 0, self.stdout + self.stderr)
+        self.assertEqual(sum('query OperationIdentifiers' in q for q, _ in self.fake.calls), 1)
+        self.assertEqual(sum('query DrainIssue' in q for q, _ in self.fake.calls), 2)
+        self.assertEqual(len(self.receipts()), 5)
+
     def test_failed_state_intent_withholds_sibling_receipts_until_resolved(self):
         self.intent('s1', 'start')
         self.intent('n1', 'note', at='2026-10-05T10:00:05+0000')
@@ -692,7 +740,7 @@ class TestDrainGuards(DrainCase):
     def test_membership_and_identity_rechecked_and_state_missing(self):
         self.intent()
         actual = self.fake.dispatch
-        for when, field in ((2, 'project'), (2, 'id'), (3, 'team'), (3, 'id')):
+        for when, field in ((1, 'project'), (1, 'id'), (2, 'team'), (2, 'id')):
             with self.subTest(when=when, field=field):
                 self.fake.comments.clear(); self.fake.mutations.clear()
                 self.fake.issues['1']['state']['type'] = 'unstarted'
@@ -707,7 +755,7 @@ class TestDrainGuards(DrainCase):
                 with mock.patch.object(self.fake, 'dispatch', side_effect=move):
                     self.assertEqual(self.drain(), 3)
                 self.assertEqual(self.receipts(), [])
-                self.assertEqual(len(self.writes('DrainState')), 0 if when == 2 else 1)
+                self.assertEqual(len(self.writes('DrainState')), 0 if when == 1 else 1)
         self.fake.states = []
         self.fake.issues['1']['state']['type'] = 'unstarted'
         self.fake.mutations.clear()

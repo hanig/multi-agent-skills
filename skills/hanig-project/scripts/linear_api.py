@@ -111,6 +111,7 @@ class Client:
                 "no Linear API key: set %s or write it to %s (mode 600)"
                 % (KEY_ENV, KEY_FILE))
         self._key = key
+        self.requests = 0
 
     def __repr__(self):
         return "Client(key=[REDACTED])"
@@ -121,6 +122,7 @@ class Client:
                            "variables": variables or {}}).encode("utf-8")
         headers = {"Authorization": self._key,
                    "Content-Type": "application/json"}
+        self.requests += 1
         try:
             status, raw = transport(body, headers)
         except Exception as exc:  # noqa: BLE001  any transport failure

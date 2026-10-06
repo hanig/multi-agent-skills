@@ -556,6 +556,37 @@ and intent tracker identifiers. Reconciliation is eventual across hosts,
 one state write per issue per run. Historical receipts and current audit
 state are separate; see [tracker outbox](docs/tracker-outbox.md).
 
+Ad-hoc issues use the same project lock and declare their graph at filing:
+
+```sh
+python3 "$HANIG_PROJECT_DIR/scripts/linear_sync.py" issue new \
+  --binding .hanig/linear-binding.json --title 'Follow-up' --body-file body.md \
+  --blocked-by ARC-123 --approver NAME [--preview]
+python3 "$HANIG_PROJECT_DIR/scripts/linear_sync.py" issue edit ARC-124 \
+  --binding .hanig/linear-binding.json --add-blocked-by ARC-125 \
+  --remove-blocked-by ARC-123 --approver NAME
+python3 "$HANIG_PROJECT_DIR/scripts/linear_sync.py" issue replay OPERATION_ID \
+  --binding .hanig/linear-binding.json
+```
+
+`--blocked-by` and `--blocks` repeat and combine; an issue with no dependencies
+uses `--independent REASON` instead. Edits also support `--add-blocks`,
+`--remove-blocks`, optional title/body replacement and `--clear-independent`.
+Bodies come from a file or `--body-stdin`. Preview runs all prechecks without
+writes. Structured dependency lines must agree with the resulting graph.
+Marked counterparts are checked and rewritten too. Read-back compares full
+edge sets and rechecks cycles. Exits are 0 confirmed, 3 incomplete/drift and
+2 pre-mutation refusal. Replay resumes the recorded operation; invoking new
+again creates a different operation. Confirmed replay never repairs later
+drift or recreates a deleted issue.
+
+Fsynced operation records and progress live outside Git under
+`~/.local/state/hanig-swarm/linear-ops/WORKSPACE/PROJECT/`; tests can set
+`HANIG_LINEAR_OPS_DIR` to an external temporary directory. The audit reports
+`declared_edges` drift from Linear alone and supplementary local
+`op_incomplete` drift. See [tracker commands](skills/hanig-project/references/tracker-sync.md)
+for replay rules and the same-host locking boundary.
+
 ### hanig-swarm
 
 The coordinator. Roughly 2,200 lines in `swarm.py`, 1,300 in `unit.py`.

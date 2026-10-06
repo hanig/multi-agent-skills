@@ -120,7 +120,7 @@ The per-project host lock serializes local drainers. Each issue is reconciled on
 The tracker mirrors coordinator state, and GitHub's pull-request attachment does not perform the issue transition. <!-- declaration: tracker.authority -->
 
 
-The DAG check is `linear_sync.py audit`. Plan units use plan needs and coordinator evidence; ad-hoc issues use Linear blocks edges. Prose candidates are advisory and a discrepancy supplies no coordinator authority. <!-- declaration: tracker.dag -->
+The DAG check is `linear_sync.py audit`. File and edit ad-hoc issues through `linear_sync.py issue`, declaring relations at filing or an independence reason; prose dependencies are not a substitute. Replay incomplete operations by their recorded operation ID. Plan units use plan needs and coordinator evidence; ad-hoc issues use Linear blocks edges. Prose candidates are advisory and a discrepancy supplies no coordinator authority. <!-- declaration: tracker.dag -->
 
 The reporting order incorporates the still-open pull request 60 source material:
 

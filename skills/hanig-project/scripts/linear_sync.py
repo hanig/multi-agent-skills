@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Linear binding, audit, outbox drain and tracker section commands.
+"""Linear binding, audit, ad-hoc issue, outbox drain and tracker section commands.
 
 All remote requests use linear_api.transport through Client. Local input bytes
 are captured once; no draft, state or receipt is rewritten by the audit.
 """
 import argparse
+from contextlib import contextmanager
 import datetime as dt
 import fcntl
 import json
@@ -16,6 +17,7 @@ import sys
 import tempfile
 
 import linear_api as API
+import linear_issue as LI
 import tracker_audit as TA
 import skill_paths
 
@@ -26,7 +28,7 @@ PAGE = 'pageInfo { hasNextPage endCursor }'
 ISSUE_PAGE = 50
 NESTED_RELATION_PAGE = 20
 RELATION = 'id type issue { id identifier } relatedIssue { id identifier }'
-FIELDS = '''id identifier updatedAt description archivedAt
+FIELDS = '''id identifier title updatedAt description archivedAt
  state { type name } project { id } team { id }
  relations(first: %d) { nodes { %s } %s }
  inverseRelations(first: %d) { nodes { %s } %s }''' % (
@@ -104,43 +106,90 @@ class Reader:
         return self.remember(issue)
 
     def project_issues(self, project):
-        q = ('query ProjectIssues($id: String!, $after: String) { project(id: $id) { '
-             'issues(first: %d, after: $after, includeArchived: true) { nodes { %s } %s } } }' % (ISSUE_PAGE, FIELDS, PAGE))
-        return self.collection('project issues', lambda cursor: self.client.query(
-            q, {'id': project, 'after': cursor})['project']['issues'])
+        def fetch(cursor, stamps=False):
+            q = ('query ProjectIssues($id: String!, $after: String) { project(id: $id) { '
+                 'issues(first: %d, after: $after, includeArchived: true) { nodes { %s } %s } } }' %
+                 (ISSUE_PAGE, 'id updatedAt' if stamps else FIELDS, PAGE))
+            return self.client.query(q, {'id': project, 'after': cursor})['project']['issues']
+        return self.collection('project issues', fetch)
 
     def markers(self, plan):
-        q = ('query Markers($marker: String!, $after: String) { issues(first: %d, after: $after, '
-             'includeArchived: true, filter: {description: {contains: $marker}}) { nodes { %s } %s } }' % (ISSUE_PAGE, FIELDS, PAGE))
-        return self.collection('marker search', lambda cursor: self.client.query(
-            q, {'marker': 'swarm-unit: ' + plan + '/', 'after': cursor})['issues'])
+        def fetch(cursor, stamps=False):
+            q = ('query Markers($marker: String!, $after: String) { issues(first: %d, after: $after, '
+                 'includeArchived: true, filter: {description: {contains: $marker}}) { nodes { %s } %s } }' %
+                 (ISSUE_PAGE, 'id updatedAt' if stamps else FIELDS, PAGE))
+            return self.client.query(q, {'marker': 'swarm-unit: ' + plan + '/', 'after': cursor})['issues']
+        return self.collection('marker search', fetch)
 
     def collection(self, label, fetch):
         nodes = self.pages_of(fetch)
-        self.memberships.append((label, fetch, {i['id'] for i in nodes}))
+        # Each collection owns its first stamps, even when another collection
+        # also reads an issue. Never recover these from the shared issue cache.
+        self.memberships.append((label, fetch, {i['id']: i['updatedAt'] for i in nodes}))
         return [self.remember(i) for i in nodes]
 
+    def batches(self, ids, fields=None, name='IssueBatch'):
+        """Cover issue and nested relation pages; missing ids remain absences."""
+        ids = sorted(set(ids))
+        for offset in range(0, len(ids), ISSUE_PAGE):
+            batch = ids[offset:offset + ISSUE_PAGE]
+            q = ('query %s($ids: [ID!]!, $after: String) { issues(filter: {id: {in: $ids}}, '
+                 'first: %d, after: $after, includeArchived: true) { nodes { %s } %s } }' %
+                 (name, ISSUE_PAGE, fields if fields is not None else 'trashed ' + FIELDS, PAGE))
+            nodes = self.pages_of(lambda after: self.client.query(q, {'ids': batch, 'after': after})['issues'])
+            if {n['id'] for n in nodes} - set(batch):
+                raise ValueError('issue id disagrees on read-back')
+            yield [self.remember(node) for node in nodes] if fields is None else nodes
+
+    def resolve(self, refs, fields=None):
+        """Reuse the snapshot, batching only references it does not contain."""
+        by_ref = {ref: i for i in self.seen.values() for ref in (i['id'], i['identifier'])}
+        missing = sorted(set(refs) - by_ref.keys())
+        ids = [ref for ref in missing if not re.fullmatch(LI.IDENTIFIER, ref)]
+        for nodes in self.batches(ids, fields):
+            for issue in nodes:
+                by_ref[issue['id']] = issue
+        names = [ref for ref in missing if re.fullmatch(LI.IDENTIFIER, ref)]
+        for offset in range(0, len(names), ISSUE_PAGE):
+            batch = names[offset:offset + ISSUE_PAGE]
+            filters = [{'team': {'key': {'eq': ref.rsplit('-', 1)[0]}},
+                        'number': {'eq': int(ref.rsplit('-', 1)[1])}} for ref in batch]
+            q = ('query OperationIdentifiers($filter: IssueFilter!, $after: String) { '
+                 'issues(filter: $filter, first: %d, after: $after, includeArchived: true) '
+                 '{ nodes { %s } %s } }' % (ISSUE_PAGE, 'trashed ' + FIELDS if fields is None else fields, PAGE))
+            nodes = self.pages_of(lambda after: self.client.query(q, {'filter': {'or': filters}, 'after': after})['issues'])
+            found = set()
+            for node in nodes:
+                ref = node['identifier']
+                if ref not in batch or ref in found:
+                    raise ValueError('issue identifier disagrees on read-back: ' + ref)
+                found.add(ref)
+                by_ref[ref] = self.remember(node) if fields is None else node
+        return {ref: by_ref.get(ref) for ref in sorted(set(refs))}
+
     def stable(self):
-        q = 'query Stability($id: String!) { issue(id: $id) { id updatedAt } }'
-        for iid, first in self.seen.items():
+        covered = set()
+        for label, fetch, first_stamps in self.memberships:
+            covered.update(first_stamps)
             try:
-                last = self.client.query(q, {'id': iid})['issue']
-                if not last or last['id'] != iid or last['updatedAt'] != first['updatedAt']:
-                    self.problems.append('snapshot moved: ' + iid)
-            except (API.LinearError, ValueError, TypeError, KeyError) as exc:
-                self.problems.append(str(exc))
-        for label, fetch, first_ids in self.memberships:
-            try:
-                last = self.pages_of(fetch)
-                last_ids = {i['id'] for i in last}
-                if last_ids != first_ids:
+                last = self.pages_of(lambda after: fetch(after, stamps=True))
+                if {i['id'] for i in last} != set(first_stamps):
                     self.problems.append('snapshot moved: ' + label)
-                for issue in last:
-                    first = self.seen.get(issue['id'])
-                    if first and issue.get('updatedAt') != first['updatedAt']:
-                        self.problems.append('snapshot moved: ' + issue['id'])
+                self.compare_stamps(last, first_stamps)
             except (API.LinearError, ValueError, TypeError, KeyError) as exc:
                 self.problems.append(str(exc))
+        remaining = set(self.seen) - covered
+        try:
+            last = [i for nodes in self.batches(remaining, 'id updatedAt', 'StabilityBatch') for i in nodes]
+            self.compare_stamps(last, {iid: self.seen[iid]['updatedAt'] for iid in remaining})
+        except (API.LinearError, ValueError, TypeError, KeyError) as exc:
+            self.problems.append(str(exc))
+
+    def compare_stamps(self, last, expected):
+        by_id = {i['id']: i for i in last}
+        for iid, stamp in expected.items():
+            if iid not in by_id or by_id[iid].get('updatedAt') != stamp:
+                self.problems.append('snapshot moved: ' + iid)
 
 
 def binding_read(reader, project):
@@ -162,6 +211,15 @@ def completion(issue):
     if issue.get('archivedAt') or issue['state']['type'] in ('canceled', 'duplicate'):
         return 'UNKNOWN'
     return 'completed' if issue['state']['type'] == 'completed' else 'open'
+
+
+def relationless(issue, has_relation, unit_ids=()):
+    """Whether an open project issue needs a relation or independence reason."""
+    body = issue.get('description') or ''
+    return (completion(issue) == 'open' and issue['id'] not in unit_ids and
+            not re.search(r'(?m)^\s*`?swarm-unit: \S+/\S+`?\s*$', body) and
+            not has_relation and
+            not re.search(r'(?m)^[ \t]*swarm-independent:[ \t]*\S[^\n]*$', body))
 
 
 def edges_of(issues):
@@ -227,6 +285,7 @@ def read_object(raw, path):
 
 def audit(args, client):
     started = utc()
+    requests_started = client.requests
     paths = TA.source_paths(**sources(args))
     raw, inputs = TA.capture(paths)
     plan = read_object(raw, args.plan) if args.plan else None
@@ -300,17 +359,23 @@ def audit(args, client):
                     refs.append((None, require_id(receipt.get('ref'), 'receipt ref')))
             except (ValueError, TypeError, KeyError) as exc:
                 finding('misplaced', 'UNKNOWN', str(exc))
+        try:
+            resolved = reader.resolve([ref for _, ref in refs])
+        except (API.LinearError, ValueError, KeyError, TypeError) as exc:
+            resolved = {}
+            reader.problems.append(str(exc))
         for unit, ref in refs:
-            try:
-                issue = reader.issue(ref)
+            issue = resolved.get(ref)
+            if issue is not None:
                 known.append(issue)
                 if unit:
                     mapped[unit] = issue
-            except (API.LinearError, ValueError, KeyError, TypeError) as exc:
-                finding('misplaced', 'UNKNOWN', str(exc))
-                reader.problems.append(str(exc))
+            else:
+                error = 'issue not found or unreadable: ' + ref
+                finding('misplaced', 'UNKNOWN', error)
+                reader.problems.append(error)
                 if unit and plan:
-                    finding('plan_edges', 'UNKNOWN', {'unit': unit, 'error': str(exc)})
+                    finding('plan_edges', 'UNKNOWN', {'unit': unit, 'error': error})
         marker_plan = plan['name'] if plan else (draft or {}).get('project', {}).get('slug')
         if marker_plan:
             try:
@@ -332,15 +397,18 @@ def audit(args, client):
                 finding('misplaced', 'DRIFT', issue['identifier'])
         try:
             edges, relations = edges_of(list(reader.seen.values()))
-            for issue in issues:
-                for a, b in edges:
-                    if b == issue['id'] and a not in reader.seen:
-                        try:
-                            reader.issue(a)
-                        except (API.LinearError, ValueError, KeyError, TypeError) as exc:
-                            reader.problems.append(str(exc))
-                            if issue['state']['type'] == 'started':
-                                finding('blocked_in_progress', 'UNKNOWN', str(exc))
+            project_ids = {i['id'] for i in issues}
+            blockers = {a for a, b in edges if b in project_ids and a not in reader.seen}
+            try:
+                resolved = reader.resolve(blockers)
+                absent = sorted(ref for ref, issue in resolved.items() if issue is None)
+                if absent:
+                    raise ValueError('unreadable blockers: ' + ', '.join(absent))
+            except (API.LinearError, ValueError, KeyError, TypeError) as exc:
+                reader.problems.append(str(exc))
+                if any(i['state']['type'] == 'started' and any(b == i['id'] and a in blockers for a, b in edges)
+                       for i in issues):
+                    finding('blocked_in_progress', 'UNKNOWN', str(exc))
             identifiers = {i['identifier']: i['id'] for i in reader.seen.values()}
             for issue in reader.seen.values():
                 for field in ('relations', 'inverseRelations'):
@@ -352,7 +420,10 @@ def audit(args, client):
             # Draft mappings exempt units even when no plan was supplied.
             for issue in issues:
                 iid = issue['id']
-                if completion(issue) == 'open' and iid not in unit_ids and not re.search(r'(?m)^\s*`?swarm-unit: \S+/\S+`?\s*$', issue.get('description') or '') and not relations.get(iid) and not re.search(r'(?m)^[ \t]*swarm-independent:[ \t]*\S[^\n]*$', issue.get('description') or ''):
+                problem = LI.declared_edges(issue)
+                if problem:
+                    finding('declared_edges', 'DRIFT', problem)
+                if relationless(issue, relations.get(iid), unit_ids):
                     finding('relationless', 'DRIFT', issue['identifier'])
                 candidates = prose_candidates(issue, relations.get(iid, set()), identifiers)
                 if candidates:
@@ -394,16 +465,26 @@ def audit(args, client):
         # A failed binding is itself conclusive drift/unknown; no other
         # remote data is trusted. Coverage explicitly records the skipped read.
         reader.problems.append('issue read withheld because binding did not match')
-    for issue in issues:
-        try:
-            latest = latest_state(issue_comments(reader, workspace, project, issue['id']))
+    # Legacy drafts learn the workspace from the reader. Capture their local
+    # operation inputs too, and let section reuse that resolved scope.
+    op_paths = TA.source_paths(operation_scope=scope)
+    for path in op_paths:
+        if path not in paths:
+            paths.append(path)
+            added_raw, added_inputs = TA.capture([path])
+            raw.update(added_raw)
+            inputs.update(added_inputs)
+    try:
+        comments = project_comments(reader, workspace, project, [i['id'] for i in issues])
+        for issue in issues:
+            latest = latest_state(comments[issue['id']])
             if latest and issue['state']['type'] != STATE_TYPE[latest['op']]:
                 finding('intent_order', 'DRIFT', {'issue': issue['identifier'],
                         'latest': latest['key'], 'expected': STATE_TYPE[latest['op']],
                         'actual': issue['state']['type']})
-        except (API.LinearError, ValueError, TypeError, KeyError) as exc:
-            finding('intent_order', 'UNKNOWN', str(exc))
-            reader.problems.append(str(exc))
+    except (API.LinearError, ValueError, TypeError, KeyError) as exc:
+        finding('intent_order', 'UNKNOWN', str(exc))
+        reader.problems.append(str(exc))
     if args.state_dir:
         try:
             if raw[str((Path(args.state_dir) / 'swarm-state.json').absolute())] is None:
@@ -429,10 +510,15 @@ def audit(args, client):
         except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
             finding('swarm_state', 'UNKNOWN', str(exc))
             reader.problems.append(str(exc))
+    try:
+        for problem in LI.incomplete_operations(workspace, project):
+            finding('op_incomplete', 'DRIFT', problem)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        finding('op_incomplete', 'UNKNOWN', str(exc))
     reader.stable()
     # Catch local writes during the read, including status-side observations.
     try:
-        if TA.capture(paths)[1] != inputs:
+        if TA.current_inputs(**sources(args), operation_scope=scope) != inputs:
             reader.problems.append('local inputs changed during read')
     except OSError as exc:
         reader.problems.append(str(exc))
@@ -445,7 +531,8 @@ def audit(args, client):
     records = list(checks.values())
     return {'schema_version': 1, 'verdict': TA.verdict(records), 'read_started': started,
             'read_finished': utc(), 'scope': scope, 'inputs': inputs,
-            'coverage': {'complete': not reader.problems, 'pages': reader.pages, 'issues': len(issues)},
+            'coverage': {'complete': not reader.problems, 'pages': reader.pages, 'issues': len(issues),
+                         'requests': client.requests - requests_started},
             'checks': records}
 
 
@@ -524,12 +611,24 @@ def genuine_comment(comment, workspace, project, issue):
     return {'key': key, 'op': op, 'order': order, 'markers': markers}
 
 
-def issue_comments(reader, workspace, project, issue):
+def issue_comments(reader, workspace, project, issue, initial=None):
     q = ('query IntentComments($id: String!, $after: String) { issue(id: $id) { '
          'comments(first: 100, after: $after) { nodes { %s } %s } } }' % (COMMENT_FIELDS, PAGE))
-    nodes = reader.pages_of(lambda after: reader.client.query(q, {'id': issue, 'after': after})['issue']['comments'])
+    nodes = reader.pages_of(lambda after: initial if after is None and initial is not None else
+                            reader.client.query(q, {'id': issue, 'after': after})['issue']['comments'])
     return [parsed for c in nodes
             for parsed in [genuine_comment(c, workspace, project, issue)] if parsed]
+
+
+def project_comments(reader, workspace, project, ids):
+    fields = 'id comments(first: 20) { nodes { %s } %s }' % (COMMENT_FIELDS, PAGE)
+    result = {}
+    for nodes in reader.batches(ids, fields, 'CommentBatch'):
+        for node in nodes:
+            result[node['id']] = issue_comments(reader, workspace, project, node['id'], node['comments'])
+    if set(result) != set(ids):
+        raise ValueError('incomplete issue comment listing')
+    return result
 
 
 def latest_state(comments):
@@ -615,6 +714,19 @@ def drain_lock_path(workspace, project):
     if any(not re.fullmatch('[A-Za-z0-9-]+', v) for v in (workspace, project)):
         raise ValueError('invalid workspace or project lock id')
     return Path.home() / '.local/state/hanig-swarm' / ('linear-drain-%s-%s.lock' % (workspace, project))
+
+
+@contextmanager
+def project_lock(workspace, project):
+    """The same per-project, per-host flock for every Linear writer."""
+    path = drain_lock_path(workspace, project)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a') as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise ValueError('another writer holds the project lock; nothing was applied')
+        yield
 
 
 def collect_intents(directories, contract, report):
@@ -723,13 +835,7 @@ def drain(args, client):
 
     reader = Reader(client)
     path, raw, config, workspace, project, team = drain_identity(args, reader)
-    lock_path = drain_lock_path(workspace, project)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open('a') as lock:
-        try:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            raise ValueError('another drain holds the project lock; nothing was applied')
+    with project_lock(workspace, project):
         # Identity must be read to locate the lock. All actual input collection
         # follows acquisition, with the routing bytes checked again here.
         if path.read_bytes() != raw:
@@ -755,7 +861,7 @@ def drain_locked(args, reader, config, workspace, project, team, contract):
                 if item['unit'] in identifiers:
                     raise ValueError('duplicate unit in draft')
                 identifiers[item['unit']] = item['identifier']
-    groups = {}
+    references = {}
     for entry in entries:
         intent = entry['intent']
         try:
@@ -769,7 +875,24 @@ def drain_locked(args, reader, config, workspace, project, team, contract):
                 ref = intent.get('tracker')
             if not ref:
                 raise ValueError('no tracker issue')
-            issue = read_drain_issue(reader.client, ref)
+            entry['ref'] = ref
+            references[ref] = None
+        except Exception as exc:
+            entry['error'] = str(exc)
+            fail(entry['label'] + ': ' + str(exc))
+    try:
+        references = reader.resolve(references, fields=DRAIN_ISSUE_FIELDS)
+    except Exception as exc:
+        fail('issue references: ' + str(exc))
+    groups = {}
+    for entry in entries:
+        if entry.get('error'):
+            continue
+        intent = entry['intent']
+        try:
+            issue = references[entry['ref']]
+            if issue is None:
+                raise ValueError('unreadable issue: ' + entry['ref'])
             check_membership(issue, project, team)
             group = groups.setdefault(issue['id'], (issue, []))
             group[1].append(entry)
@@ -860,18 +983,23 @@ def main(argv=None):
     group.add_argument('--draft')
     p.add_argument('--state-dir', action='append', required=True)
     p.add_argument('--dry-run', action='store_true')
+    LI.add_parser(sub)
     args = parser.parse_args(argv)
     if getattr(args, 'plan', None) and not args.draft:
         parser.error('--plan requires --draft')
     if args.command != 'drain' and getattr(args, 'state_dir', None) and not args.plan:
         parser.error('--state-dir requires --plan and --draft')
-    key = None
+    key = None  # Validation can refuse before credentials are loaded.
     try:
         if args.command == 'section':
             print(TA.section(args.audit, **sources(args)))
             return 0
+        if args.command == 'issue':
+            LI.validate_request(args)
         key = API.load_key()
         client = API.Client(key)
+        if args.command == 'issue':
+            return LI.run(args, client, sys.modules[__name__])
         if args.command == 'bind':
             root = next((p for p in (Path.cwd(), *Path.cwd().parents) if (p / '.git').exists()), None)
             if root is None:
@@ -901,7 +1029,10 @@ def main(argv=None):
         print(payload, end='')
         return {'CLEAN': 0, 'DRIFT': 1, 'UNKNOWN': 3}[record['verdict']]
     except (API.LinearError, OSError, ValueError, TypeError, KeyError, AttributeError, ImportError) as exc:
-        print(API.redact('error: ' + str(exc), key), file=sys.stderr)
+        message = API.redact('error: ' + str(exc), key)
+        if args.command == 'issue':
+            message = ' '.join(message.splitlines())
+        print(message, file=sys.stderr)
         return 2
 
 
