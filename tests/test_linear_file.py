@@ -211,6 +211,101 @@ class FileCase(IssueCase):
                 self.assertTrue(live['description'].startswith('Approved prose 0\n'))
                 self.assertTrue(live['description'].endswith(self.body_line()))
 
+    def test_appended_project_prose_preserves_binding(self):
+        self.new_draft(1)
+        self.assertEqual(self.file(), 0, self.stdout + self.stderr)
+        project = self.fake.projects[self.read()['project']['linear_id']]
+        project['content'] += '\nHuman note\nswarm-plan: other\nswarm-repo: other/repo\nEnd note\n'
+        content = project['content']
+        writes = len(self.fake.mutations)
+        self.assertEqual(self.replay_file(), 0, self.stdout + self.stderr)
+        self.assertEqual(self.file(), 0, self.stdout + self.stderr)
+        self.assertEqual(len(self.fake.mutations), writes)
+        self.assertEqual(project['content'], content)
+
+    def test_appended_issue_prose_preserves_binding(self):
+        self.new_draft(1)
+        self.assertEqual(self.file(), 0, self.stdout + self.stderr)
+        live = self.fake.issues[self.unit_ids()['u0']]
+        live['description'] += ('\nHuman note\nswarm-unit: plan/other\nswarm-repo: other/repo\n'
+                                'swarm-body: ' + '0' * 64 + '\nEnd note\n')
+        body = live['description']
+        writes = len(self.fake.mutations)
+        self.assertEqual(self.replay_file(), 0, self.stdout + self.stderr)
+        self.assertEqual(self.file(), 0, self.stdout + self.stderr)
+        self.assertEqual(len(self.fake.mutations), writes)
+        self.data['issues'][0]['title'] = 'Revised title'
+        self.approve()
+        self.assertEqual(self.file(), 0, self.stdout + self.stderr)
+        self.assertEqual(self.fake.mutations[-1][1]['input'], {'title': 'Revised title'})
+        self.assertEqual(live['description'], body)
+
+    def test_identity_rewrite_preserves_appended_prose_and_pr3_trailer(self):
+        self.assertEqual(self.file(), 0, self.stdout + self.stderr)
+        ids = self.unit_ids()
+        live = self.fake.issues[ids['u1']]
+        note = '\nHuman note\nswarm-unit: example/u1\nswarm-repo: example/repo\nEnd note\n'
+        prose = live['description'] + note
+        live['description'] = LI.description(prose, {self.fake.issues[ids['u0']]['identifier']},
+                                             set(), 'old-op', 'old-owner')
+        self.data['issues'][1]['blocked_by'] = []
+        self.approve()
+        self.assertEqual(self.file(), 0, self.stdout + self.stderr)
+        expected = ('Approved prose 1' + note + 'swarm-unit: plan/u1\n'
+                    'swarm-repo: owner/repo\n' + self.body_line(1) + '\n')
+        self.assertEqual(LI.trailer(live['description'])['prefix'], expected)
+        self.assertEqual(LI.trailer(live['description'])['op'], 'old-op')
+        self.assertEqual(LI.trailer(live['description'])['approver'], 'old-owner')
+        self.assertIsNone(LI.declared_edges(live))
+        writes = len(self.fake.mutations)
+        self.assertEqual(self.replay_file(), 0, self.stdout + self.stderr)
+        self.assertEqual(len(self.fake.mutations), writes)
+
+    def test_embedded_identity_requires_exact_contiguous_whole_lines(self):
+        self.new_draft(1)
+        pid = self.seed()
+        live = self.existing_unit(0, pid)
+        identity = 'swarm-unit: plan/u0\nswarm-repo: owner/repo\n' + self.body_line()
+        for block in (identity.replace('plan/u0', 'plan/other'),
+                      identity.replace('owner/repo', 'other/repo'),
+                      identity.replace(self.body_line(), 'swarm-body: ' + '0' * 64),
+                      identity.replace('\n', '\nInterruption\n', 1),
+                      'Example ' + identity, identity + ' suffix',
+                      identity.rsplit('\n', 1)[0]):
+            with self.subTest(block=block):
+                live['description'] = block + '\nEnd of prose'
+                self.assertEqual(self.file(), 2, self.stdout + self.stderr)
+                self.assertIn('unmarked issue', self.stderr)
+                self.assertEqual(self.fake.mutations, [])
+        # Other values in prose neither prove a binding nor conflict with adoption.
+        live['description'] = identity.replace('plan/u0', 'plan/other') + '\nEnd of prose'
+        self.fake.projects[pid]['content'] = 'swarm-plan: other\nswarm-repo: other/repo\nEnd of prose'
+        self.assertEqual(self.file(), 2, self.stdout + self.stderr)
+        self.assertIn('unmarked project', self.stderr)
+        self.assertEqual(self.fake.mutations, [])
+        self.assertEqual(self.file('--adopt-checked'), 0, self.stdout + self.stderr)
+
+    def test_exact_embedded_identity_does_not_hide_foreign_trailer(self):
+        self.new_draft(1)
+        self.assertEqual(self.file(), 0, self.stdout + self.stderr)
+        live = self.fake.issues[self.unit_ids()['u0']]
+        body = live['description']
+        live['description'] += '\nHuman note\nswarm-unit: plan/other\nswarm-repo: other/repo'
+        writes = len(self.fake.mutations)
+        self.assertEqual(self.file(), 2, self.stdout + self.stderr)
+        self.assertIn('bound to another unit', self.stderr)
+        self.assertEqual(self.replay_file(), 2, self.stdout + self.stderr)
+        self.assertIn('managed issue changed', self.stderr)
+        self.assertEqual(len(self.fake.mutations), writes)
+        live['description'] = body
+        project = self.fake.projects[self.data['project']['linear_id']]
+        project['content'] += '\nHuman note\nswarm-plan: other\nswarm-repo: other/repo'
+        self.assertEqual(self.file(), 2, self.stdout + self.stderr)
+        self.assertIn('conflicting swarm-plan marker', self.stderr)
+        self.assertEqual(self.replay_file(), 2, self.stdout + self.stderr)
+        self.assertIn('managed project changed', self.stderr)
+        self.assertEqual(len(self.fake.mutations), writes)
+
     def test_render_equivalent_reapproval_changes_exact_body_digest(self):
         self.new_draft(1)
         self.data['issues'][0]['body'] = '- kind: code\n\n'
@@ -442,9 +537,38 @@ class FileCase(IssueCase):
             with self.subTest(field=field):
                 live.update(trashed=False, archivedAt=None)
                 live[field] = value
-                self.assertEqual(self.file(), 2, self.stdout + self.stderr)
+                self.assertEqual(self.file(), 3, self.stdout + self.stderr)
                 self.assertIn('issue deleted after creation', self.stderr)
                 self.assertEqual(self.fake.mutations, [])
+
+    def test_deleted_unit_refile_and_replay_send_no_mutations(self):
+        self.new_draft(1)
+        self.assertEqual(self.file(), 0, self.stdout + self.stderr)
+        live = self.fake.issues[self.unit_ids()['u0']]
+        confirmed_op = self.operation()
+        self.data['issues'][0]['title'] = 'Pending title'
+        self.approve()
+        self.fake.ignore_update = True
+        self.assertEqual(self.file(), 3, self.stdout + self.stderr)
+        self.fake.ignore_update = False
+        op = self.operation()
+        writes = copy.deepcopy(self.fake.mutations)
+        for field, value in (('trashed', True), ('archivedAt', '2026-10-06T00:00:00Z')):
+            with self.subTest(field=field):
+                live.update(trashed=False, archivedAt=None)
+                live[field] = value
+                for command, call in (('file', self.file), ('replay', lambda: self.replay_file(op))):
+                    with self.subTest(command=command):
+                        self.assertEqual(call(), 3, self.stdout + self.stderr)
+                        self.assertIn('issue deleted', self.stdout + self.stderr)
+                        self.assertEqual(self.fake.mutations, writes)
+        # Completed operations also refuse a retained deleted unit.
+        self.data['issues'][0]['title'] = 'Unit 0'
+        self.approve()
+        live.update(trashed=True, archivedAt=None)
+        self.assertEqual(self.replay_file(confirmed_op), 3, self.stdout + self.stderr)
+        self.assertIn('issue deleted', self.stdout + self.stderr)
+        self.assertEqual(self.fake.mutations, writes)
 
     def test_01_progress_does_not_change_digest_and_redraft_rearms(self):
         old = T.content_digest(self.data)

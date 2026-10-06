@@ -1072,7 +1072,7 @@ def main(argv=None):
         if args.command == 'issue':
             message = ' '.join(message.splitlines())
         print(message, file=sys.stderr)
-        return 2
+        return 3 if isinstance(exc, LI.DeletedIssue) else 2
 
 
 if __name__ == '__main__':

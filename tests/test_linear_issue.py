@@ -353,6 +353,23 @@ runpy.run_path(str(script), run_name='__main__')
 
 
 class TestIssue(IssueCase):
+    def test_deleted_issue_edit_and_replay_send_no_mutations(self):
+        self.fake.ignore_update = True
+        self.assertEqual(self.issue('edit', 'ARC-1', '--title', 'Changed'), 3,
+                         self.stdout + self.stderr)
+        self.fake.ignore_update = False
+        op = self.operation()
+        writes = copy.deepcopy(self.fake.mutations)
+        for field, value in (('trashed', True), ('archivedAt', '2026-10-06T00:00:00Z')):
+            with self.subTest(field=field):
+                self.fake.issues['1'].update(trashed=False, archivedAt=None)
+                self.fake.issues['1'][field] = value
+                for args in (('edit', 'ARC-1', '--title', 'Another title'), ('replay', op)):
+                    with self.subTest(command=args[0]):
+                        self.assertEqual(self.issue(*args), 3, self.stdout + self.stderr)
+                        self.assertIn('issue deleted', self.stdout + self.stderr)
+                        self.assertEqual(self.fake.mutations, writes)
+
     def test_new_edit_and_counterpart_descriptions_match_storage(self):
         self.marked('1')
         self.assertEqual(self.issue('new', '--blocked-by', 'ARC-1',

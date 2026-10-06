@@ -24,6 +24,10 @@ class IncompleteGraph(ValueError):
     """Read-back coverage cannot establish the resulting graph."""
 
 
+class DeletedIssue(ValueError):
+    """A retained deleted issue must never be treated as a live write target."""
+
+
 def add_parser(sub):
     issue = sub.add_parser('issue')
     commands = issue.add_subparsers(dest='issue_command', required=True)
@@ -335,6 +339,7 @@ def scope(sync, client, project, refs):
     for ref, issue in resolved.items():
         if issue is None:
             raise ValueError('issue not found: ' + ref)
+        refuse_deleted_creation(issue, None)
     return expand_scope(sync, reader)
 
 
@@ -355,6 +360,7 @@ def expand_scope(sync, reader):
         for iid, reached in read(reader.resolve, missing).items():
             if reached is None:
                 raise ValueError('issue not found: ' + iid)
+            refuse_deleted_creation(reached, None)
     reader.stable()
     if reader.problems:
         raise IncompleteGraph('incomplete graph read: ' + '; '.join(reader.problems))
@@ -486,7 +492,7 @@ def refuse_deleted_creation(issue, path):
         if path is not None and not any(isinstance(entry, dict) and entry.get('step') in (step, 'CONFIRMED')
                                         for entry in progress(path)):
             log_step(path, step)
-        raise ValueError('issue deleted after creation')
+        raise DeletedIssue('issue deleted after creation')
 
 
 def desired_value(row, identities):
@@ -502,8 +508,7 @@ def read_managed(spec, sync, client, is_confirmed, path, reader=None):
     identities = dict(spec['identities'])
     target = (read_by_id(sync, client, spec['target'], reader)
               if reader is None or spec['kind'] == 'new' else reader.seen.get(spec['target']))
-    if spec['kind'] == 'new':
-        refuse_deleted_creation(target, path)
+    refuse_deleted_creation(target, path)
     creation_step = 'issue:' + spec['target']
     created = any(isinstance(entry, dict) and entry.get('step') in (creation_step, 'CONFIRMED')
                   for entry in (progress(path) if path is not None else []))
@@ -534,6 +539,7 @@ def read_managed(spec, sync, client, is_confirmed, path, reader=None):
                 raise ValueError('managed issue deleted: ' + row['id'])
             continue
         sync.check_membership(issue, spec['project'], spec['team'])
+        refuse_deleted_creation(issue, path)
         if spec['identities'][row['id']] is not None and issue['identifier'] != spec['identities'][row['id']]:
             raise ValueError('managed identifier changed: ' + row['id'])
         # Before creation, the desired counterpart trailer has a symbolic id.
@@ -572,11 +578,14 @@ def relation_by_id(sync, client, rid, a, b, endpoint, reader=None):
             issue = reader.seen.get(endpoint)
         if issue is None:
             raise ValueError('relation endpoint deleted: ' + endpoint)
+        refuse_deleted_creation(issue, None)
         if reader.problems:
             raise ValueError('; '.join(reader.problems))
         return next((r for r in issue[field]['nodes'] if r['id'] == rid and
                      r['type'] == 'blocks' and r['issue']['id'] == a and
                      r['relatedIssue']['id'] == b), None)
+    except DeletedIssue:
+        raise
     except (API.LinearError, OSError, ValueError, KeyError, TypeError) as exc:
         raise IncompleteGraph('incomplete relation read: ' + str(exc)) from exc
 
@@ -587,13 +596,16 @@ def source_endpoints(spec, client, sync, absent=()):
         reader = sync.Reader(client)
         sources = {a for a, b in spec['additions'] + spec['removals']} - set(absent)
         endpoints = reader.resolve(sources)
-        reader.stable()
-        if reader.problems:
-            raise ValueError('; '.join(reader.problems))
         for iid, issue in endpoints.items():
             if issue is None:
                 raise ValueError('relation endpoint deleted: ' + iid)
+            refuse_deleted_creation(issue, None)
+        reader.stable()
+        if reader.problems:
+            raise ValueError('; '.join(reader.problems))
         return endpoints
+    except DeletedIssue:
+        raise
     except (API.LinearError, OSError, ValueError, KeyError, TypeError) as exc:
         raise IncompleteGraph('incomplete relation read: ' + str(exc)) from exc
 
@@ -720,6 +732,7 @@ def verify(spec, client, sync, reader=None):
     for row in spec['issues']:
         issue = reader.seen[row['id']]
         sync.check_membership(issue, spec['project'], spec['team'])
+        refuse_deleted_creation(issue, None)
         expected = dict(desired_value(row, identities), identifier=identities[row['id']])
         for field, desired in expected.items():
             if issue.get(field) != desired:
