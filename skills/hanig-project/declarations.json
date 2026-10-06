@@ -354,7 +354,7 @@
     },
     {
       "id": "tracker.apply",
-      "normative_text": "After approval, create the project then issues, persist every returned id and identifier, and update objects keyed by unit id on later runs rather than duplicating them.",
+      "normative_text": "After approval, create the project then issues, persist every returned id and identifier, and update objects keyed by unit id on later runs rather than duplicating them. File and edit ad-hoc issues through linear_sync.py issue new or edit with a binding and named approver attestation. Supply bodies only by file or stdin. Declare dependencies or an independence reason at filing; refuse relationless open results, including removed endpoints. Preview performs all prechecks without writes. Check every touched marked counterpart, exact structured dependencies, complete graph coverage and cycles before writing. Refuse content containing the loaded key. Persist the immutable operation specification outside Git worktrees before mutation; preserve incomplete operations and use issue replay. Read back all managed values and exact edge sets, then check cycles again. Confirmed replay only verifies; incomplete replay refuses newer conflicting values. Report declared_edges and local op_incomplete drift without automatic undo. Share the per-project host lock with drain; cross-host races remain detectable, not prevented.",
       "references": [
         "references/tracker-sync.md"
       ]

@@ -2,19 +2,43 @@
 import datetime as dt
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 
 CHECKS = {'binding', 'coverage', 'misplaced', 'relationless',
-          'prose_dependency', 'cycle', 'blocked_in_progress', 'intent_order'}
+          'prose_dependency', 'cycle', 'blocked_in_progress', 'intent_order',
+          'declared_edges', 'op_incomplete'}
 VERDICTS = {'CLEAN', 'DRIFT', 'UNKNOWN'}
 STATE_SOURCES = ('swarm-state.json', 'outbox.jsonl', 'outbox-receipts.jsonl')
 
 
-def source_paths(binding=None, draft=None, plan=None, state_dir=None):
+def operation_directory(workspace, project):
+    if any(not isinstance(v, str) or not re.fullmatch('[A-Za-z0-9-]+', v)
+           for v in (workspace, project)):
+        raise ValueError('invalid operation workspace or project id')
+    root = Path(os.environ.get('HANIG_LINEAR_OPS_DIR',
+                               str(Path.home() / '.local/state/hanig-swarm/linear-ops')))
+    return root / workspace / project
+
+
+def source_paths(binding=None, draft=None, plan=None, state_dir=None, operation_scope=None):
     paths = [str(Path(p).absolute()) for p in (binding, draft, plan) if p]
     if state_dir:
         paths.extend(str((Path(state_dir) / name).absolute()) for name in STATE_SOURCES)
+    if operation_scope is not None:
+        directory = operation_directory(operation_scope['workspace'], operation_scope['project'])
+        paths.extend(str(p.absolute()) for p in sorted(directory.glob('*.json*')))
+    elif binding or draft:
+        try:
+            config = json.loads(Path(binding or draft).read_bytes())
+            workspace = config['workspace']['id']
+            project = config['project']['id' if binding else 'linear_id']
+        except (FileNotFoundError, ValueError, KeyError, TypeError):
+            pass  # Legacy drafts may resolve workspace only from the API.
+        else:
+            directory = operation_directory(workspace, project)
+            paths.extend(str(p.absolute()) for p in sorted(directory.glob('*.json*')))
     return paths
 
 
@@ -130,7 +154,12 @@ def section(path, **sources):
         record = None
     except (OSError, ValueError):
         return 'Tracker: INVALID'
+    if record is not None:
+        try:
+            validate(record)
+        except (ValueError, TypeError, KeyError, AttributeError):
+            return 'Tracker: INVALID'
     try:
-        return render(record, current_inputs(**sources))
-    except OSError:
+        return render(record, current_inputs(**sources, operation_scope=record.get('scope') if record else None))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return 'Tracker: STALE: inputs unreadable'

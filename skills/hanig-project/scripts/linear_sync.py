@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Linear binding, audit, outbox drain and tracker section commands.
+"""Linear binding, audit, ad-hoc issue, outbox drain and tracker section commands.
 
 All remote requests use linear_api.transport through Client. Local input bytes
 are captured once; no draft, state or receipt is rewritten by the audit.
 """
 import argparse
+from contextlib import contextmanager
 import datetime as dt
 import fcntl
 import json
@@ -16,6 +17,7 @@ import sys
 import tempfile
 
 import linear_api as API
+import linear_issue as LI
 import tracker_audit as TA
 import skill_paths
 
@@ -26,7 +28,7 @@ PAGE = 'pageInfo { hasNextPage endCursor }'
 ISSUE_PAGE = 50
 NESTED_RELATION_PAGE = 20
 RELATION = 'id type issue { id identifier } relatedIssue { id identifier }'
-FIELDS = '''id identifier updatedAt description archivedAt
+FIELDS = '''id identifier title updatedAt description archivedAt
  state { type name } project { id } team { id }
  relations(first: %d) { nodes { %s } %s }
  inverseRelations(first: %d) { nodes { %s } %s }''' % (
@@ -162,6 +164,15 @@ def completion(issue):
     if issue.get('archivedAt') or issue['state']['type'] in ('canceled', 'duplicate'):
         return 'UNKNOWN'
     return 'completed' if issue['state']['type'] == 'completed' else 'open'
+
+
+def relationless(issue, has_relation, unit_ids=()):
+    """Whether an open project issue needs a relation or independence reason."""
+    body = issue.get('description') or ''
+    return (completion(issue) == 'open' and issue['id'] not in unit_ids and
+            not re.search(r'(?m)^\s*`?swarm-unit: \S+/\S+`?\s*$', body) and
+            not has_relation and
+            not re.search(r'(?m)^[ \t]*swarm-independent:[ \t]*\S[^\n]*$', body))
 
 
 def edges_of(issues):
@@ -352,7 +363,10 @@ def audit(args, client):
             # Draft mappings exempt units even when no plan was supplied.
             for issue in issues:
                 iid = issue['id']
-                if completion(issue) == 'open' and iid not in unit_ids and not re.search(r'(?m)^\s*`?swarm-unit: \S+/\S+`?\s*$', issue.get('description') or '') and not relations.get(iid) and not re.search(r'(?m)^[ \t]*swarm-independent:[ \t]*\S[^\n]*$', issue.get('description') or ''):
+                problem = LI.declared_edges(issue)
+                if problem:
+                    finding('declared_edges', 'DRIFT', problem)
+                if relationless(issue, relations.get(iid), unit_ids):
                     finding('relationless', 'DRIFT', issue['identifier'])
                 candidates = prose_candidates(issue, relations.get(iid, set()), identifiers)
                 if candidates:
@@ -394,6 +408,15 @@ def audit(args, client):
         # A failed binding is itself conclusive drift/unknown; no other
         # remote data is trusted. Coverage explicitly records the skipped read.
         reader.problems.append('issue read withheld because binding did not match')
+    # Legacy drafts learn the workspace from the reader. Capture their local
+    # operation inputs too, and let section reuse that resolved scope.
+    op_paths = TA.source_paths(operation_scope=scope)
+    for path in op_paths:
+        if path not in paths:
+            paths.append(path)
+            added_raw, added_inputs = TA.capture([path])
+            raw.update(added_raw)
+            inputs.update(added_inputs)
     for issue in issues:
         try:
             latest = latest_state(issue_comments(reader, workspace, project, issue['id']))
@@ -429,10 +452,15 @@ def audit(args, client):
         except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
             finding('swarm_state', 'UNKNOWN', str(exc))
             reader.problems.append(str(exc))
+    try:
+        for problem in LI.incomplete_operations(workspace, project):
+            finding('op_incomplete', 'DRIFT', problem)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        finding('op_incomplete', 'UNKNOWN', str(exc))
     reader.stable()
     # Catch local writes during the read, including status-side observations.
     try:
-        if TA.capture(paths)[1] != inputs:
+        if TA.current_inputs(**sources(args), operation_scope=scope) != inputs:
             reader.problems.append('local inputs changed during read')
     except OSError as exc:
         reader.problems.append(str(exc))
@@ -617,6 +645,19 @@ def drain_lock_path(workspace, project):
     return Path.home() / '.local/state/hanig-swarm' / ('linear-drain-%s-%s.lock' % (workspace, project))
 
 
+@contextmanager
+def project_lock(workspace, project):
+    """The same per-project, per-host flock for every Linear writer."""
+    path = drain_lock_path(workspace, project)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a') as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise ValueError('another writer holds the project lock; nothing was applied')
+        yield
+
+
 def collect_intents(directories, contract, report):
     entries = []
     for directory in dict.fromkeys(directories):
@@ -723,13 +764,7 @@ def drain(args, client):
 
     reader = Reader(client)
     path, raw, config, workspace, project, team = drain_identity(args, reader)
-    lock_path = drain_lock_path(workspace, project)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open('a') as lock:
-        try:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            raise ValueError('another drain holds the project lock; nothing was applied')
+    with project_lock(workspace, project):
         # Identity must be read to locate the lock. All actual input collection
         # follows acquisition, with the routing bytes checked again here.
         if path.read_bytes() != raw:
@@ -860,18 +895,23 @@ def main(argv=None):
     group.add_argument('--draft')
     p.add_argument('--state-dir', action='append', required=True)
     p.add_argument('--dry-run', action='store_true')
+    LI.add_parser(sub)
     args = parser.parse_args(argv)
     if getattr(args, 'plan', None) and not args.draft:
         parser.error('--plan requires --draft')
     if args.command != 'drain' and getattr(args, 'state_dir', None) and not args.plan:
         parser.error('--state-dir requires --plan and --draft')
-    key = None
+    key = None  # Validation can refuse before credentials are loaded.
     try:
         if args.command == 'section':
             print(TA.section(args.audit, **sources(args)))
             return 0
+        if args.command == 'issue':
+            LI.validate_request(args)
         key = API.load_key()
         client = API.Client(key)
+        if args.command == 'issue':
+            return LI.run(args, client, sys.modules[__name__])
         if args.command == 'bind':
             root = next((p for p in (Path.cwd(), *Path.cwd().parents) if (p / '.git').exists()), None)
             if root is None:
@@ -901,7 +941,10 @@ def main(argv=None):
         print(payload, end='')
         return {'CLEAN': 0, 'DRIFT': 1, 'UNKNOWN': 3}[record['verdict']]
     except (API.LinearError, OSError, ValueError, TypeError, KeyError, AttributeError, ImportError) as exc:
-        print(API.redact('error: ' + str(exc), key), file=sys.stderr)
+        message = API.redact('error: ' + str(exc), key)
+        if args.command == 'issue':
+            message = ' '.join(message.splitlines())
+        print(message, file=sys.stderr)
         return 2
 
 

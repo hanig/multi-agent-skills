@@ -275,7 +275,7 @@ REFERENCE_ELABORATION_INVENTORIES = {
         ('references/tracker-sync.md', 'drain.authority', 1),
         ('references/tracker-sync.md', 'outbox.receipt', 3),
         ('references/tracker-sync.md', 'placement.reference-elaboration', 1),
-        ('references/tracker-sync.md', 'tracker.apply', 2),
+        ('references/tracker-sync.md', 'tracker.apply', 8),
         ('references/tracker-sync.md', 'tracker.approval', 1),
         ('references/tracker-sync.md', 'tracker.attestation', 2),
         ('references/tracker-sync.md', 'tracker.credential-boundary', 2),
