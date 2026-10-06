@@ -3,10 +3,12 @@ import ast
 import copy
 import hashlib
 import io
+import itertools
 import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -774,6 +776,61 @@ class FileCase(IssueCase):
                         self.assertEqual(len(self.fake.issues), 3)
                         self.assertEqual(len(self.fake.relations()), 1)
 
+    def test_replay_created_issue_before_its_uncreated_blocker(self):
+        for boundary in ('mutation', 'checkpoint'):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as directory:
+                with mock.patch.dict(os.environ, {'HANIG_LINEAR_OPS_DIR': directory}):
+                    self.fake.issues.clear()
+                    self.fake.projects.clear()
+                    self.fake.mutations.clear()
+                    self.new_draft(2)
+                    # Filing creates new issues in derived-id order. Make A,
+                    # the first one created, depend on the still-absent B.
+                    ordered = sorted(self.data['issues'], key=lambda i: API.derived_id(
+                        'issue:workspace/owner/repo/plan/' + i['unit']))
+                    a, b = ordered
+                    a['blocked_by'], b['blocked_by'] = [b['unit']], []
+                    self.approve()
+                    aid, bid = [API.derived_id('issue:workspace/owner/repo/plan/' + i['unit'])
+                                for i in ordered]
+                    checkpoint = LF.Filing.checkpoint
+
+                    def crash_mutation(query, variables):
+                        if 'mutation OperationCreate(' in query:
+                            self.assertEqual(variables['input']['id'], aid)
+                            raise Crash()
+
+                    def crash_checkpoint(handler, step, current=None):
+                        checkpoint(handler, step, current)
+                        if step == 'issue:' + aid:
+                            raise Crash()
+
+                    self.fake.after_mutation = crash_mutation if boundary == 'mutation' else None
+                    with mock.patch.object(LF.Filing, 'checkpoint',
+                                           crash_checkpoint if boundary == 'checkpoint' else checkpoint):
+                        with self.assertRaises(Crash):
+                            self.file()
+                    self.fake.after_mutation = None
+                    self.assertEqual(set(self.fake.issues), {aid})
+                    self.assertEqual(self.fake.relations(), [])
+                    path = next(Path(directory).glob('*/*/*.json'))
+                    spec = LI.load_record(path)
+                    self.assertIsNone(spec['identities'][bid])
+                    self.assertTrue(LF.has_markers(self.fake.issues[aid]['description'],
+                                                  next(r for r in spec['issues'] if r['id'] == aid)['markers']))
+                    self.assertEqual(self.replay_file(path.stem), 0, self.stdout + self.stderr)
+                    self.assertIn('CONFIRMED', self.stdout)
+                    self.assertTrue(LI.confirmed(path))
+                    self.assertEqual(set(self.fake.issues), {aid, bid})
+                    self.assertEqual(LS.edges_of(list(self.fake.issues.values()))[0], {(bid, aid)})
+                    creates = [v['input']['id'] for q, v in self.fake.mutations
+                               if 'mutation OperationCreate(' in q]
+                    self.assertCountEqual(creates, [aid, bid])
+                    self.assertEqual(len(self.fake.relations()), 1)
+                    writes = len(self.fake.mutations)
+                    self.assertEqual(self.replay_file(path.stem), 0, self.stdout + self.stderr)
+                    self.assertEqual(len(self.fake.mutations), writes)
+
     def test_02_replay_edited_draft_and_redirected_ids_refuse(self):
         self.assertEqual(self.file(), 0, self.stdout + self.stderr)
         old = copy.deepcopy(self.read())
@@ -1269,7 +1326,7 @@ class FileCase(IssueCase):
     def test_scoped_audit_gate_consumes_every_required_check(self):
         self.assertEqual(self.file(), 0, self.stdout + self.stderr)
         original = LS.audit
-        for check in ('binding', 'coverage', 'plan_edges', 'misplaced', 'relationless', 'declared_edges', 'cycle'):
+        for check in ('binding', 'coverage', 'plan_edges', 'misplaced', 'declared_edges', 'cycle'):
             for verdict in ('UNKNOWN', 'DRIFT'):
                 with self.subTest(check=check, verdict=verdict):
                     def audit(*args, **kwargs):
@@ -1282,6 +1339,51 @@ class FileCase(IssueCase):
                         self.assertEqual(self.replay_file(), 3)
                         self.assertIn(check + '=' + verdict, self.stdout)
                         self.assertNotIn('CONFIRMED', self.stdout)
+
+    def test_scoped_audit_gate_refuses_each_missing_required_check(self):
+        original = LS.audit
+        for check in ('binding', 'coverage', 'plan_edges', 'misplaced', 'declared_edges', 'cycle'):
+            with self.subTest(check=check), tempfile.TemporaryDirectory() as directory:
+                with mock.patch.dict(os.environ, {'HANIG_LINEAR_OPS_DIR': directory}):
+                    self.fake.issues.clear()
+                    self.fake.projects.clear()
+                    self.new_draft()
+
+                    def audit(*args, **kwargs):
+                        record, reader = original(*args, **kwargs)
+                        self.assertIn(check, [row['id'] for row in record['checks']])
+                        record['checks'] = [row for row in record['checks'] if row['id'] != check]
+                        return record, reader
+
+                    with mock.patch.object(LS, 'audit', audit):
+                        self.assertEqual(self.file(), 3, self.stdout + self.stderr)
+                        self.assertIn('INCOMPLETE', self.stdout)
+                        self.assertIn(check + '=MISSING', self.stdout)
+                        self.assertNotIn('CONFIRMED', self.stdout)
+                        path = next(Path(directory).glob('*/*/*.json'))
+                        self.assertFalse(LI.confirmed(path))
+                        writes = len(self.fake.mutations)
+                        self.assertEqual(self.replay_file(path.stem), 3, self.stdout + self.stderr)
+                        self.assertFalse(LI.confirmed(path))
+                        self.assertEqual(len(self.fake.mutations), writes)
+                    self.assertEqual(self.replay_file(path.stem), 0, self.stdout + self.stderr)
+                    self.assertIn('CONFIRMED', self.stdout)
+                    self.assertEqual(len(self.fake.mutations), writes)
+
+    def test_scoped_audit_gate_does_not_require_relationless(self):
+        original = LS.audit
+
+        def audit(*args, **kwargs):
+            record, reader = original(*args, **kwargs)
+            record['checks'] = [row for row in record['checks'] if row['id'] != 'relationless']
+            return record, reader
+
+        with mock.patch.object(LS, 'audit', audit):
+            self.assertEqual(self.file(), 0, self.stdout + self.stderr)
+            writes = len(self.fake.mutations)
+            self.assertEqual(self.replay_file(), 0, self.stdout + self.stderr)
+            self.assertIn('CONFIRMED', self.stdout)
+            self.assertEqual(len(self.fake.mutations), writes)
 
     def test_filing_audit_ignores_search_hits_without_this_plans_trailer_identity(self):
         self.new_draft(1)
@@ -1415,6 +1517,52 @@ runpy.run_path(sys.argv[0], run_name='__main__')
         self.assertEqual(self.fake.mutations, [])
 
 
+
+
+class TestDocumentedLinearCommands(unittest.TestCase):
+    def test_readme_and_project_skill_commands_parse_without_network(self):
+        seen = set()
+        with mock.patch.object(API, 'load_key', side_effect=AssertionError('loaded credentials')) as key, \
+                mock.patch.object(API, 'transport', side_effect=AssertionError('network call')) as transport:
+            for relative in ('README.md', 'skills/hanig-project/SKILL.md'):
+                commands = []
+                for block in re.findall(r'^```[^\n]*\n(.*?)^```', (ROOT / relative).read_text(), re.M | re.S):
+                    for line in block.replace('\\\n', ' ').splitlines():
+                        if 'linear_sync.py' in line:
+                            commands.append(line.strip())
+                self.assertTrue(commands, relative + ' has no CLI examples')
+                for command in commands:
+                    # Brackets denote optional groups in these examples. Test
+                    # every combination, including exactly the bare command.
+                    groups = re.findall(r'\[([^\[\]]*)\]', command)
+                    for enabled in itertools.product((False, True), repeat=len(groups)):
+                        choices = iter(enabled)
+                        expanded = re.sub(r'\[([^\[\]]*)\]',
+                                          lambda m: m[1] if next(choices) else '', command)
+                        words = shlex.split(expanded, comments=True)
+                        with self.subTest(document=relative, command=expanded):
+                            self.assertEqual(words[0], 'python3')
+                            self.assertTrue(words[1].endswith('/linear_sync.py'))
+                            args = LS.parse_args(words[2:])
+                            self.assertEqual(args.command, words[2])
+                            seen.add(args.command)
+                            if args.command in ('file', 'replay'):
+                                self.assertFalse(hasattr(args, 'state_dir'))
+            key.assert_not_called()
+            transport.assert_not_called()
+        self.assertTrue({'file', 'replay', 'drain', 'audit', 'issue'} <= seen)
+
+    def test_state_directory_is_not_a_filing_argument(self):
+        for argv in (['file', '--draft', 'tickets.json'],
+                     ['replay', 'OPERATION_ID', '--draft', 'tickets.json']):
+            with self.subTest(argv=argv):
+                self.assertEqual(LS.parse_args(argv).draft, 'tickets.json')
+                with mock.patch('sys.stderr', io.StringIO()), self.assertRaises(SystemExit) as caught:
+                    LS.parse_args(argv + ['--state-dir', 'STATE'])
+                self.assertEqual(caught.exception.code, 2)
+        with mock.patch('sys.stderr', io.StringIO()), self.assertRaises(SystemExit) as caught:
+            LS.parse_args(['drain', '--binding', 'binding.json'])
+        self.assertEqual(caught.exception.code, 2)
 
 
 class TestProjectQueryComplexity(unittest.TestCase):

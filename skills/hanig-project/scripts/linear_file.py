@@ -482,9 +482,11 @@ class Filing:
             'plan': plan, 'draft': self.draft, 'binding': self.binding,
             'checked': [row['id'] for row in s['issues']]})
         live, identities = self.read_managed(True, reader)
-        required = {'binding', 'coverage', 'plan_edges', 'misplaced', 'relationless', 'declared_edges', 'cycle'}
+        # Plan units are judged by plan_edges, not the ad-hoc relationless check.
+        required = {'binding', 'coverage', 'plan_edges', 'misplaced', 'declared_edges', 'cycle'}
         bad = [c['id'] + '=' + c['verdict'] for c in record['checks']
                if c['id'] in required and c['verdict'] != 'CLEAN']
+        bad += [cid + '=MISSING' for cid in sorted(required - {c['id'] for c in record['checks']})]
         if bad:
             raise LI.IncompleteGraph('scoped audit: ' + ', '.join(bad))
         edges, _ = self.sync.edges_of(list(reader.seen.values()))

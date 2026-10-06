@@ -993,7 +993,8 @@ def sources(args):
     return {k: getattr(args, k, None) for k in ('binding', 'draft', 'plan', 'state_dir')}
 
 
-def main(argv=None):
+def parse_args(argv=None):
+    """Parse and validate command syntax without credentials, I/O or dispatch."""
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     bind = sub.add_parser('bind')
@@ -1020,6 +1021,11 @@ def main(argv=None):
         parser.error('--plan requires --draft')
     if args.command != 'drain' and getattr(args, 'state_dir', None) and not args.plan:
         parser.error('--state-dir requires --plan and --draft')
+    return args
+
+
+def main(argv=None):
+    args = parse_args(argv)
     key = None  # Validation can refuse before credentials are loaded.
     try:
         if args.command == 'section':

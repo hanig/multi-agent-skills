@@ -31,7 +31,7 @@ Issue adoption writes approved prose and preserves earlier operation provenance;
 
 `blocked_by` is truth; filing computes the live delta. `add_blocked_by` and `remove_blocked_by` are previews. Remove only undeclared blockers that are current plan units; keep and report ad-hoc, external and deleted-unit blockers, using `issue edit` for an explicit removal. <!-- declaration: tracker.edges -->
 
-Read every unit and touched relation by id, even when a project listing lags. Confirmation requires the scoped plan, membership, relationless, declared-edge and expanded cycle audit checks to be CLEAN. The read-back contains identifiers and edges, never issue text. <!-- declaration: tracker.apply -->
+Read every unit and touched relation by id, even when a project listing lags. Confirmation requires binding, coverage, plan_edges, misplaced, declared_edges and expanded cycle audit checks all present and CLEAN. Plan units are exempt from relationless and judged by plan_edges. The read-back contains identifiers and edges, never issue text. <!-- declaration: tracker.apply -->
 
 Each key represents the blocked issue and may use a unit id, tracker identifier, <!-- declaration: tracker.readback-shape -->
 or UUID. An issue observed with no blockers must appear with an empty list; <!-- declaration: tracker.readback-shape -->

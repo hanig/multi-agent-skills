@@ -121,13 +121,17 @@ For a unit with no identifier in the draft:
    create and name them (finding 4);
 4. otherwise the issue is created.
 
-In a project this program did not create (its id is not the derived id, or
-its markers are absent), the run refuses before any mutation unless
+In a project that does not carry this draft's `swarm-plan` and `swarm-repo`
+markers, the run refuses before any mutation unless
 `--adopt-checked` is given after the owner reviewed `linear_sync.py audit`'s
 listing: that covers adopting existing issues (step 2), creating issues
 (step 4) and every edge change in that project, not only creation. Linear enforces no
 unique titles and a listing can lag, so a hand-filed issue the listing
-misses can still be duplicated; that is a declared limit.
+misses can still be duplicated; that is a declared limit. A project
+carrying the markers is this program's whether or not its id is the derived
+one, because adoption writes them (provenance by marker); someone who copies
+the markers onto another project makes it look like this program's, the same
+trusted-writer boundary the repository already declares.
 
 ## Edges and the cross-boundary policy
 
@@ -160,10 +164,12 @@ result is written back to the draft as progress, atomically. After the last
 step it reads back the project, every unit issue (by id, so a lagging
 listing cannot hide a just-filed issue, finding 6) and every touched edge,
 writes the tracker read-back into the draft, and runs PR 1's audit scoped to
-the plan (`plan_edges`, `misplaced`, `relationless`, `declared_edges`,
+the plan (`plan_edges`, `misplaced`, `declared_edges`,
 `cycle`, over the transitively expanded graph as in PR 3). The
-run reports CONFIRMED only when the read-back matches and those checks are
-CLEAN; otherwise exit 3, resumable with `replay`.
+run reports CONFIRMED only when the read-back matches and every required check
+(`binding`, `coverage` and those four plan checks) is present and CLEAN;
+otherwise exit 3, resumable with `replay`. Plan unit issues are exempt from
+`relationless`; their dependencies are judged by `plan_edges`.
 
 ## Command
 
@@ -213,9 +219,11 @@ so. `docs/tracker-outbox.md` and CLAUDE.md name it.
    edge while keeping an external blocker, crash between the trailer write
    and the relation write, replay, and the scoped audit is CLEAN with both
    trailers matching Linear.
-5. Read-back covers every unit issue by id; CONFIRMED requires the scoped
-   audit checks CLEAN, including `cycle`, so a cycle closed by another
-   writer through ad-hoc issues is not confirmed.
+5. Read-back covers every unit issue by id; CONFIRMED requires `binding`,
+   `coverage`, `plan_edges`, `misplaced`, `declared_edges` and `cycle` all
+   present and CLEAN. A missing required check yields INCOMPLETE (exit 3),
+   and a cycle closed by another writer through ad-hoc issues is not
+   confirmed. `relationless` is not a filing requirement for plan units.
 6. Request budget: filing a 30-unit plan with 40 edges into an empty project
    uses at most 120 requests, pinned by a counting test.
 7. The key never reaches output, a written file (the read-back holds only
