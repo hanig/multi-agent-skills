@@ -279,7 +279,7 @@ REFERENCE_ELABORATION_INVENTORIES = {
         ('references/tracker-sync.md', 'tracker.approval', 1),
         ('references/tracker-sync.md', 'tracker.attestation', 2),
         ('references/tracker-sync.md', 'tracker.credential-boundary', 2),
-        ('references/tracker-sync.md', 'tracker.check', 4),
+        ('references/tracker-sync.md', 'tracker.check', 5),
         ('references/tracker-sync.md', 'tracker.edges', 3),
         ('references/tracker-sync.md', 'tracker.readback-shape', 4),
         ('references/unit-contract.md', 'code.configuration', 7),

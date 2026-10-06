@@ -12,7 +12,7 @@ import subprocess
 import unittest
 from unittest import mock
 
-from tests.test_linear_audit import AuditCase, FakeLinear, KEY, ROOT, connection
+from tests.test_linear_audit import AuditCase, FakeLinear, KEY, ROOT, connection, BudgetPaging, budget_project
 
 sys.path.insert(0, str(ROOT / 'skills/hanig-project/scripts'))
 import linear_api as API
@@ -26,6 +26,53 @@ class Crash(BaseException):
 
 
 class IssueLinear(FakeLinear):
+    # Independent request fixtures for the issue command's complete query
+    # inventory, checked against linear/linear's packages/sdk/src/schema.graphql.
+    # Do not import the production query fragments: that would bless regressions.
+    page = 'pageInfo { hasNextPage endCursor }'
+    relation = 'id type issue { id identifier } relatedIssue { id identifier }'
+    fields = ('id identifier title updatedAt description archivedAt state { type name } '
+              'project { id } team { id } relations(first: 20) { nodes { %s } %s } '
+              'inverseRelations(first: 20) { nodes { %s } %s }' % (relation, page, relation, page))
+    shapes = {
+        'OperationIssue': [
+            'query OperationIssue($id: ID!) { issues(filter: {id: {eq: $id}}, first: 1, '
+            'includeArchived: true) { nodes { trashed %s } %s } }' % (fields, page),
+            'query OperationIssue($id: ID!) { issues(filter: {id: {eq: $id}}, first: 1) { nodes { id } } }'],
+        'OperationIdentifier': [
+            'query OperationIdentifier($filter: IssueFilter!) { issues(filter: $filter, first: 1, '
+            'includeArchived: true) { nodes { %s } %s } }' % (fields, page)],
+        'Binding': ['query Binding($id: String!) { viewer { organization { id name } } '
+                    'project(id: $id) { id name teams(first: 100) { nodes { id key name } %s } } }' % page],
+        'Teams': ['query Teams($id: String!, $after: String) { project(id: $id) { '
+                  'teams(first: 100, after: $after) { nodes { id key name } %s } } }' % page],
+        'ProjectIssues': ['query ProjectIssues($id: String!, $after: String) { project(id: $id) { '
+                          'issues(first: 50, after: $after, includeArchived: true) { nodes { id updatedAt } %s } } }' % page,
+                          'query ProjectIssues($id: String!, $after: String) { project(id: $id) { '
+                          'issues(first: 50, after: $after, includeArchived: true) { nodes { %s } %s } } }' % (fields, page)],
+        'Relations': [
+            'query Relations($id: String!, $after: String) { issue(id: $id) { relations(first: 100, '
+            'after: $after) { nodes { %s } %s } } }' % (relation, page),
+            'query Relations($id: String!, $after: String) { issue(id: $id) { inverseRelations(first: 100, '
+            'after: $after) { nodes { %s } %s } } }' % (relation, page)],
+        'IssueBatch': ['query IssueBatch($ids: [ID!]!, $after: String) { issues(filter: {id: {in: $ids}}, '
+                       'first: 50, after: $after, includeArchived: true) { nodes { trashed %s } %s } }' % (fields, page)],
+        'StabilityBatch': ['query StabilityBatch($ids: [ID!]!, $after: String) { issues(filter: {id: {in: $ids}}, '
+                           'first: 50, after: $after, includeArchived: true) { nodes { id updatedAt } %s } }' % page],
+        'OperationIdentifiers': ['query OperationIdentifiers($filter: IssueFilter!, $after: String) { '
+                                 'issues(filter: $filter, first: 50, after: $after, includeArchived: true) '
+                                 '{ nodes { trashed %s } %s } }' % (fields, page)],
+        'Stability': ['query Stability($id: String!) { issue(id: $id) { id updatedAt } }'],
+        'OperationCreate': ['mutation OperationCreate($input: IssueCreateInput!) { '
+                            'issueCreate(input: $input) { success } }'],
+        'OperationUpdate': ['mutation OperationUpdate($id: String!, $input: IssueUpdateInput!) { '
+                            'issueUpdate(id: $id, input: $input) { success } }'],
+        'OperationRelationCreate': ['mutation OperationRelationCreate($input: IssueRelationCreateInput!) { '
+                                    'issueRelationCreate(input: $input) { success } }'],
+        'OperationRelationDelete': ['mutation OperationRelationDelete($id: String!) { '
+                                    'issueRelationDelete(id: $id) { success } }'],
+    }
+
     def __init__(self):
         super().__init__()
         self.mutations = []
@@ -35,6 +82,8 @@ class IssueLinear(FakeLinear):
         self.ignore_update = False
         self.ignore_delete = False
         self.read_override = None
+        self.relation_page_size = None
+        self.team_paging = False
         self.tick = 0
 
     def add(self, *args, **kwargs):
@@ -44,20 +93,52 @@ class IssueLinear(FakeLinear):
         return issue
 
     def dispatch(self, q, v):
+        if any('query ' + name in q for name in ('IssueBatch', 'OperationIdentifiers')):
+            data = super().dispatch(q, v)
+            if self.relation_page_size:
+                for node in data['issues']['nodes']:
+                    for field in ('relations', 'inverseRelations'):
+                        node[field] = self.relation_page(node[field]['nodes'])
+            if self.read_override:
+                self.read_override(data)
+            return data
+        if 'query Teams' in q:
+            return {'project': {'teams': connection([self.team])}}
+        if 'query Relations' in q and self.relation_page_size:
+            field = 'inverseRelations' if 'inverseRelations(' in q else 'relations'
+            start = int(v['after'])
+            return {'issue': {field: self.relation_page(self.issues[v['id']][field]['nodes'], start)}}
         data = super().dispatch(q, v)
-        if 'query ProjectIssues' in q:
+        if 'query Binding' in q and self.team_paging:
+            data['project']['teams'] = connection([], True, 'teams-next')
+        if 'query ProjectIssues' in q and 'relations(' in q:
+            if self.relation_page_size:
+                for node in data['project']['issues']['nodes']:
+                    for field in ('relations', 'inverseRelations'):
+                        node[field] = self.relation_page(node[field]['nodes'])
             data['project']['issues']['nodes'] = [i for i in data['project']['issues']['nodes']
                                                  if not i.get('trashed')]
         return data
+
+    def relation_page(self, nodes, start=0):
+        stop = start + self.relation_page_size
+        more = stop < len(nodes)
+        return connection(copy.deepcopy(nodes[start:stop]), more, str(stop) if more else None)
 
     def __call__(self, body, headers, timeout=None):
         q, v = (json.loads(body)[k] for k in ('query', 'variables'))
         assert headers['Authorization'] == KEY
         self.calls.append((q, v))
+        if re.search(r'\bissueRelations\s*\([^)]*\bfilter\s*:', q):
+            return 200, json.dumps({'errors': [{'message':
+                'Unknown argument "filter" on field "Query.issueRelations". Did you mean "after"?'}]}).encode()
         sizes = re.findall(r'issues\(first: (\d+)', q)
         nested = re.findall(r'(?:inverseRelations|relations)\(first: (\d+)', q)
         if sizes and nested and (max(map(int, sizes)) > 50 or max(map(int, nested)) > 20):
             return 200, json.dumps({'errors': [{'message': 'Query too complex'}]}).encode()
+        name = re.match(r'(?:query|mutation) (\w+)', q)[1]
+        if name in self.shapes:
+            assert ' '.join(q.split()) in self.shapes[name], 'unsupported request shape: ' + q
         if self.fail and self.fail in q:
             raise OSError('transport failed ' + KEY)
         if ('issue(id:' in q and not any(v.get('id') in (i['id'], i['identifier']) for i in self.issues.values())):
@@ -84,6 +165,9 @@ class IssueLinear(FakeLinear):
                 issue = None
             nodes = [copy.deepcopy(issue)] if issue else []
             for node in nodes:
+                if self.relation_page_size:
+                    for field in ('relations', 'inverseRelations'):
+                        node[field] = self.relation_page(node[field]['nodes'])
                 if not re.search(r'\btrashed\b', q):
                     node.pop('trashed', None)
                 if not re.search(r'\barchivedAt\b', q):
@@ -91,15 +175,14 @@ class IssueLinear(FakeLinear):
             data = {'issues': connection(nodes)}
             if self.read_override:
                 self.read_override(data)
-        elif 'query OperationIdentifier' in q:
+        elif 'query OperationIdentifier(' in q:
             assert 'issues(filter: $filter' in q
             assert 'includeArchived: true' in q
             identifier = '%s-%d' % (v['filter']['team']['key']['eq'], v['filter']['number']['eq'])
             data = {'issues': connection([copy.deepcopy(i) for i in self.issues.values()
                                           if i['identifier'] == identifier])}
-        elif 'query OperationRelation' in q:
-            assert 'issueRelations(filter: {id: {eq: $id}}' in q
-            data = {'issueRelations': {'nodes': [copy.deepcopy(r) for r in self.relations() if r['id'] == v['id']]}}
+        elif 'issueRelation(id:' in q:
+            data = {'issueRelation': next(copy.deepcopy(r) for r in self.relations() if r['id'] == v['id'])}
         else:
             data = self.dispatch(q, v)
         return 200, json.dumps({'data': data}).encode()
@@ -132,6 +215,10 @@ class IssueLinear(FakeLinear):
                 self.issues[v['id']].update(v['input'])
         else:
             raise AssertionError(q)
+
+
+class BudgetIssueLinear(BudgetPaging, IssueLinear):
+    pass
 
 
 class IssueCase(AuditCase):
@@ -181,9 +268,8 @@ def transport(body, headers, timeout=None):
     query = json.loads(body)['query']
     if 'query ProjectIssues' in query:
         project_reads += 1
-        # The first preparation reads the collection and its stability copy.
-        # Only the second preparation, under the real lock, sees this edge.
-        if scenario == 'cycle-under-lock' and project_reads == 3:
+        # Preparation runs under the real lock; inject before that read.
+        if scenario == 'cycle-under-lock' and project_reads == 1:
             fake.edge('2', '1')
     return fake(body, headers, timeout)
 API.transport = transport
@@ -248,6 +334,165 @@ runpy.run_path(str(script), run_name='__main__')
 
 
 class TestIssue(IssueCase):
+    def test_request_budget(self):
+        self.fake = BudgetIssueLinear()
+        budget_project(self.fake)
+        self.fake.relation_page_size = 20
+        with mock.patch.object(API, 'transport', self.fake):
+            self.assertEqual(self.issue('new', '--blocked-by', 'ARC-1', '--blocked-by', 'ARC-2'), 0,
+                             self.stdout + self.stderr)
+        self.assertEqual(sum('query ProjectIssues' in q and 'relations(' in q and v['after'] is None
+                             for q, v in self.fake.calls), 2)
+        self.assertGreaterEqual(sum('query Relations' in q for q, _ in self.fake.calls), 6)
+        print('issue new budget: %d requests' % len(self.fake.calls))
+        self.assertLessEqual(len(self.fake.calls), 42)
+
+    def test_relation_query_rejections_match_linear(self):
+        client = API.Client(KEY)
+        for arguments in ('filter: {id: {eq: $id}}, first: 1',
+                          'first: 1, filter: {id: {eq: $id}}'):
+            query = ('query OperationRelation($id: ID!) { issueRelations(%s) '
+                     '{ nodes { id } } }' % arguments)
+            with self.assertRaises(API.LinearError) as caught:
+                client.query(query, {'id': 'absent'})
+            self.assertEqual(str(caught.exception),
+                'Linear refused the request: Unknown argument "filter" on field "Query.issueRelations". '
+                'Did you mean "after"?')
+        query = 'query OperationRelation($id: String!) { issueRelation(id: $id) { id } }'
+        with self.assertRaisesRegex(API.LinearError, 'Entity not found: IssueRelation'):
+            client.query(query, {'id': 'absent'})
+        self.fake.edge('1', '2')
+        relation = self.fake.relations()[0]
+        self.assertEqual(client.query(query, {'id': relation['id']})['issueRelation']['id'], relation['id'])
+
+    def test_relation_creation_confirms_on_first_attempt_from_blocked_pages(self):
+        self.fake.relation_page_size = 1
+        # The new relation will be on the blocked issue's second inverse page.
+        self.fake.edge('1', '2', 'related')
+        for command, args in (('new', ('--blocked-by', 'ARC-1', '--blocks', 'ARC-2')),
+                              ('edit', ('ARC-1', '--add-blocks', 'ARC-2'))):
+            with self.subTest(command=command):
+                self.fake.calls.clear()
+                self.assertEqual(self.issue(command, *args), 0, self.stdout + self.stderr)
+                self.assertTrue(any('query Relations' in q and 'inverseRelations(' in q and
+                                    v == {'id': '2', 'after': '1'} for q, v in self.fake.calls))
+                self.assertFalse(any(re.search(r'\bissueRelations?\s*\(', q) for q, _ in self.fake.calls))
+                self.assertTrue(all(LI.confirmed(path) for path in self.records()))
+
+    def relation_overflow(self):
+        self.fake.relation_page_size = 20
+        for number in range(3, 24):
+            self.fake.add(str(number))
+            self.fake.edge(str(number), '2', 'related')
+            self.fake.edge('1', str(number), 'related')
+
+    def test_batched_relation_overflow_create(self):
+        self.relation_overflow()
+        self.assertEqual(self.issue('edit', 'ARC-1', '--add-blocks', 'ARC-2'), 0,
+                         self.stdout + self.stderr)
+        self.assertTrue(LI.confirmed(self.records()[0]))
+        rid = API.derived_id('relation:workspace/project/1/2')
+        self.assertEqual(self.fake.issues['2']['inverseRelations']['nodes'][21]['id'], rid)
+        # Require overflow reads specifically between the mutation and confirmation.
+        created = next(n for n, (q, _) in enumerate(self.fake.calls) if 'OperationRelationCreate' in q)
+        self.assertTrue(any('query Relations' in q and 'inverseRelations(' in q and
+                            v == {'id': '2', 'after': '20'} for q, v in self.fake.calls[created + 1:]))
+
+    def test_batched_relation_overflow_remove(self):
+        self.relation_overflow()
+        self.fake.edge('1', '2')
+        rid = self.fake.issues['1']['relations']['nodes'][21]['id']
+        self.assertEqual(self.issue('edit', 'ARC-1', '--remove-blocks', 'ARC-2'), 0,
+                         self.stdout + self.stderr)
+        self.assertTrue(any('OperationRelationDelete' in q and v['id'] == rid for q, v in self.fake.calls))
+        self.assertFalse(any(r['id'] == rid for r in self.fake.relations()))
+        self.assertTrue(all(LI.confirmed(path) for path in self.records()))
+
+    def test_query_inventory_includes_paged_binding_and_external_identifier(self):
+        self.fake.team_paging = True
+        self.fake.add('3', project='external')
+        self.assertEqual(self.issue('new', '--blocked-by', 'ARC-3'), 0, self.stdout + self.stderr)
+        self.assertTrue(any('query Teams(' in q and v['after'] == 'teams-next' for q, v in self.fake.calls))
+        self.assertTrue(any('query OperationIdentifiers(' in q for q, _ in self.fake.calls))
+
+    def test_relation_readback_page_failure_is_incomplete_until_replay(self):
+        self.fake.relation_page_size = 1
+        self.fake.edge('1', '2', 'related')
+        def fail_readback(q, v):
+            if 'OperationRelationCreate' in q:
+                self.fake.fail = 'query Relations'
+        self.fake.after_mutation = fail_readback
+        self.assertEqual(self.issue('new', '--blocks', 'ARC-2'), 3, self.stdout + self.stderr)
+        self.assertIn('UNKNOWN/INCOMPLETE: incomplete relation read:', self.stdout)
+        self.assertFalse(LI.confirmed(self.records()[0]))
+        before = copy.deepcopy(self.fake.mutations)
+        self.fake.fail = None
+        self.assertEqual(self.replay(), 0, self.stdout + self.stderr)
+        self.assertEqual(self.fake.mutations, before)
+
+    def test_relation_lookup_pages_both_sides_and_matches_exact_tuple(self):
+        self.fake.relation_page_size = 1
+        self.fake.edge('1', '2', 'related')
+        self.fake.edge('1', '2')
+        relation = self.fake.relations()[-1]
+        client = API.Client(KEY)
+        for endpoint, field in (('2', 'inverseRelations'), ('1', 'relations')):
+            with self.subTest(endpoint=endpoint):
+                self.fake.calls.clear()
+                self.assertEqual(LI.relation_by_id(LS, client, relation['id'], '1', '2', endpoint), relation)
+                self.assertTrue(any('query Relations' in q and field + '(' in q and
+                                    v == {'id': endpoint, 'after': '1'} for q, v in self.fake.calls))
+                self.assertIsNone(LI.relation_by_id(LS, client, 'absent', '1', '2', endpoint))
+                for key in ('id', 'type', 'issue', 'relatedIssue'):
+                    old = relation[key]
+                    relation[key] = {'id': old['id'] + '-suffix'} if isinstance(old, dict) else old.upper()
+                    rid = old if key == 'id' else relation['id']
+                    self.assertIsNone(LI.relation_by_id(LS, client, rid, '1', '2', endpoint), key)
+                    relation[key] = old
+
+    def test_relation_lookup_refuses_incomplete_or_moving_pages(self):
+        self.fake.relation_page_size = 1
+        self.fake.edge('1', '2', 'related')
+        self.fake.edge('1', '2')
+        relation = self.fake.relations()[-1]
+        client = API.Client(KEY)
+        dispatch = self.fake.dispatch
+        for endpoint, field in (('2', 'inverseRelations'), ('1', 'relations')):
+            for fault in ('error', 'duplicate', 'repeat', 'missing-cursor', 'invalid-info', 'moved', 'deleted'):
+                with self.subTest(endpoint=endpoint, fault=fault):
+                    def broken(q, v):
+                        if 'query StabilityBatch' in q and endpoint in v['ids'] and fault == 'deleted':
+                            return {'issues': connection([])}
+                        if 'query Relations' not in q or v['id'] != endpoint:
+                            return dispatch(q, v)
+                        if fault == 'error':
+                            raise OSError('relation page failed')
+                        if fault == 'duplicate':
+                            return {'issue': {field: connection([self.fake.relations()[0]])}}
+                        if fault in ('repeat', 'missing-cursor', 'invalid-info'):
+                            return {'issue': {field: connection([], 1 if fault == 'invalid-info' else True,
+                                                               None if fault == 'missing-cursor' else '1')}}
+                        return dispatch(q, v)
+                    self.fake.moved = {endpoint} if fault == 'moved' else set()
+                    with mock.patch.object(self.fake, 'dispatch', broken), self.assertRaises(LI.IncompleteGraph):
+                        LI.relation_by_id(LS, client, relation['id'], '1', '2', endpoint)
+
+    def test_confirmed_line_identifies_target_for_new_edit_and_replay(self):
+        self.marked('1')
+        self.assertEqual(self.issue('new', '--blocked-by', 'ARC-1'), 0, self.stdout + self.stderr)
+        target = self.target()
+        identifier = self.fake.issues[target]['identifier']
+        new_op = self.operation()
+        self.assertEqual(self.stdout.splitlines(), ['operation ' + new_op, 'CONFIRMED ' + new_op + ' ' + identifier])
+        self.assertEqual(self.issue('replay', new_op), 0, self.stdout + self.stderr)
+        self.assertEqual(self.stdout.splitlines(), ['operation ' + new_op, 'CONFIRMED ' + new_op + ' ' + identifier])
+        # Editing by UUID must still report the server's human-readable identifier.
+        self.assertEqual(self.issue('edit', target, '--title', 'edited'), 0, self.stdout + self.stderr)
+        edit_op = self.stdout.splitlines()[0].split()[1]
+        self.assertEqual(self.stdout.splitlines(), ['operation ' + edit_op, 'CONFIRMED ' + edit_op + ' ' + identifier])
+        self.assertEqual(self.issue('replay', edit_op), 0, self.stdout + self.stderr)
+        self.assertEqual(self.stdout.splitlines(), ['operation ' + edit_op, 'CONFIRMED ' + edit_op + ' ' + identifier])
+
     def test_cli_validation_before_key_load_is_one_line_refusal(self):
         cases = [(['--approver', ' ', '--independent', 'reason'],
                   'approver must be a nonblank single line without backticks'),
@@ -282,7 +527,7 @@ class TestIssue(IssueCase):
         self.assertEqual(rc, 2, self.stdout + self.stderr)
         self.assertEqual(self.stderr.splitlines(), ['error: resulting blocks cycle'])
         self.assertEqual(self.stdout, '')
-        self.assertEqual(observed['project_reads'], 4)
+        self.assertEqual(observed['project_reads'], 2)
         self.assertEqual(observed['mutations'], [])
         self.assertEqual(self.records(), [])
 
@@ -306,18 +551,21 @@ class TestIssue(IssueCase):
 
     def test_fresh_live_value_refusal_leaves_no_record(self):
         self.marked('1')
-        def changed(data):
-            for issue in data['issues']['nodes']:
-                if issue['id'] == '1':
-                    issue['title'] = 'concurrent title'
-        self.fake.read_override = changed
+        dispatch = self.fake.dispatch
+        def changed(q, v):
+            data = dispatch(q, v)
+            if 'query ProjectIssues' in q and 'relations(' in q:
+                self.fake.issues['1']['title'] = 'concurrent title'
+                self.fake.issues['1']['updatedAt'] += '-changed'
+            return data
+        self.fake.dispatch = changed
         for command, args in (('new', ('--blocked-by', 'ARC-1')),
                               ('edit', ('ARC-1', '--title', 'desired'))):
             with self.subTest(command=command):
                 rc = self.issue(command, *args)
                 self.assertEqual(self.records(), [])
                 self.assertEqual(rc, 2, self.stdout + self.stderr)
-                self.assertEqual(self.stderr.splitlines(), ['error: managed title changed: ARC-1'])
+                self.assertEqual(self.stderr.splitlines(), ['error: incomplete graph read: snapshot moved: 1'])
                 self.assertEqual(self.stdout, '')
                 self.assertEqual(list((self.root / 'ops').rglob('*.progress.jsonl')), [])
                 self.assertEqual(self.fake.mutations, [])
@@ -340,8 +588,8 @@ class TestIssue(IssueCase):
                     self.assertFalse(any('issue(id:' in q and v.get('id') == ref
                                          for q, v in self.fake.calls))
                     if ref == missing:
-                        self.assertEqual([v for q, v in self.fake.calls if 'query OperationIssue' in q],
-                                         [{'id': missing}])
+                        self.assertEqual([v for q, v in self.fake.calls if 'query IssueBatch' in q],
+                                         [{'ids': [missing], 'after': None}])
                     self.assertEqual(self.records(), [])
                     self.assertEqual(self.fake.mutations, [])
 
@@ -350,7 +598,7 @@ class TestIssue(IssueCase):
         peer = self.fake.add(iid, project='foreign', description='external blocker')
         peer['identifier'] = 'ARC-3'
         self.assertEqual(self.issue('new', '--blocked-by', iid), 0, self.stdout + self.stderr)
-        self.assertTrue(any('query OperationIssue' in q and v == {'id': iid}
+        self.assertTrue(any('query IssueBatch' in q and v == {'ids': [iid], 'after': None}
                             for q, v in self.fake.calls))
         self.assertFalse(any('query Issue(' in q and v.get('id') == iid for q, v in self.fake.calls))
         self.assertIn((iid, self.target()),
@@ -424,6 +672,96 @@ class TestIssue(IssueCase):
         self.fake.collision = collision
         self.assertEqual(self.issue('new', '--blocked-by', 'ARC-2'), 3)
         self.assertIn('type or endpoints', self.stdout)
+
+    def test_add_collision_preserves_removal_until_replay(self):
+        for collision in ('type', 'endpoints'):
+            with self.subTest(collision=collision):
+                self.fake = IssueLinear()
+                for iid in ('1', '2', '3', '4'):
+                    self.fake.add(iid)
+                self.fake.edge('1', '2')
+                original = copy.deepcopy(self.fake.relations()[0])
+                rid = API.derived_id('relation:workspace/project/1/3')
+                self.fake.edge('1', '3' if collision == 'type' else '4',
+                               'related' if collision == 'type' else 'blocks')
+                self.fake.relations()[-1]['id'] = rid
+                self.fake.reject = 'OperationRelationCreate'
+                folder = self.root / collision
+                with mock.patch.object(API, 'transport', self.fake), mock.patch.dict(
+                        os.environ, {'HANIG_LINEAR_OPS_DIR': str(folder)}):
+                    self.assertEqual(self.issue('edit', 'ARC-1', '--add-blocks', 'ARC-3',
+                                                '--remove-blocks', 'ARC-2'), 3, self.stdout)
+                    self.assertIn('rejected relation create: type or endpoints disagree', self.stdout)
+                    self.assertIn(original, self.fake.relations())
+                    self.assertFalse(any('OperationRelationDelete' in q for q, _ in self.fake.mutations))
+                    path = next(folder.glob('*/*/*.json'))
+                    self.assertFalse(LI.confirmed(path))
+                    immutable = path.read_bytes()
+                    # Repair the colliding tuple in place, preserving any
+                    # pre-existing blocks edge recorded by this operation.
+                    self.fake.relations()[-1]['id'] = 'repaired-collision'
+                    self.fake.reject = None
+                    self.assertEqual(self.issue('replay', path.stem), 0, self.stdout)
+                    self.assertEqual(path.read_bytes(), immutable)
+                    edges, _ = LS.edges_of(list(self.fake.issues.values()))
+                    self.assertIn(('1', '3'), edges)
+                    self.assertNotIn(('1', '2'), edges)
+                    self.assertTrue(LI.confirmed(path))
+
+    def test_additions_confirm_in_one_batch_before_removals(self):
+        for fault in (None, 'missing', 'read-failure', 'moving', 'existing-disappears'):
+            with self.subTest(fault=fault):
+                self.fake = IssueLinear()
+                for iid in ('1', '2', '3', '4'):
+                    self.fake.add(iid)
+                self.fake.edge('1', '2')
+                if fault == 'existing-disappears':
+                    self.fake.edge('4', '1')
+                def after_add(q, v):
+                    if 'OperationRelationCreate' not in q:
+                        return
+                    if fault == 'read-failure':
+                        self.fake.fail = 'query IssueBatch'
+                    elif fault == 'moving':
+                        self.fake.moved.add('3')
+                    elif fault == 'existing-disappears' or (fault == 'missing' and v['input']['issueId'] == '4'):
+                        self.fake.issues['4']['relations']['nodes'].clear()
+                        self.fake.issues['1']['inverseRelations']['nodes'].clear()
+                self.fake.after_mutation = after_add
+                folder = self.root / str(fault)
+                with mock.patch.object(API, 'transport', self.fake), mock.patch.dict(
+                        os.environ, {'HANIG_LINEAR_OPS_DIR': str(folder)}):
+                    self.assertEqual(self.issue('edit', 'ARC-1', '--add-blocks', 'ARC-3',
+                        '--add-blocked-by', 'ARC-4', '--remove-blocks', 'ARC-2'),
+                        3 if fault else 0, self.stdout)
+                    calls = self.fake.calls
+                    last_add = max(i for i, (q, _) in enumerate(calls) if 'OperationRelationCreate' in q)
+                    removals = [i for i, (q, _) in enumerate(calls) if 'OperationRelationDelete' in q]
+                    stop = removals[0] if removals else len(calls)
+                    batches = [v['ids'] for q, v in calls[last_add + 1:stop] if 'query IssueBatch' in q]
+                    self.assertEqual(batches, [['1', '3', '4']])
+                    path = next(folder.glob('*/*/*.json'))
+                    if fault:
+                        self.assertEqual(removals, [])
+                        self.assertIn(('1', '2'), LS.edges_of(list(self.fake.issues.values()))[0])
+                        self.assertFalse(LI.confirmed(path))
+                        if fault in ('read-failure', 'moving'):
+                            self.assertIn('UNKNOWN/INCOMPLETE:', self.stdout)
+                    else:
+                        self.assertEqual(len(removals), 1)
+                        self.assertTrue(LI.confirmed(path))
+
+    def test_rejected_external_relation_type_remains_drift(self):
+        self.fake.add('3', project='external')
+        def wrong_type(q, v):
+            if 'OperationRelationCreate' in q:
+                value = v['input']
+                self.fake.edge(value['issueId'], value['relatedIssueId'], 'related')
+                self.fake.issues[value['issueId']]['relations']['nodes'][-1]['id'] = value['id']
+        self.fake.collision = wrong_type
+        self.assertEqual(self.issue('new', '--blocks', 'ARC-3'), 3, self.stdout + self.stderr)
+        self.assertIn('DRIFT/INCOMPLETE: rejected relation create: type or endpoints disagree', self.stdout)
+        self.assertFalse(LI.confirmed(self.records()[0]))
 
     def test_3_crash_each_new_step_remote_local_and_replay(self):
         for step in range(1, 6):
@@ -511,7 +849,7 @@ class TestIssue(IssueCase):
                 self.assertIn('issue deleted after creation', self.stdout)
                 self.assertEqual(self.fake.mutations, before)
 
-    def test_create_rechecks_deleted_id_after_initial_read(self):
+    def test_create_readback_preserves_deleted_id_race_after_record(self):
         save = LI.save_record
         def race(path, spec):
             save(path, spec)
@@ -520,7 +858,11 @@ class TestIssue(IssueCase):
             self.assertEqual(self.issue('new', '--independent', 'reason'), 3,
                              self.stdout + self.stderr)
         self.assertIn('issue deleted after creation', self.stdout)
-        self.assertEqual(self.fake.mutations, [])
+        # The pre-create read precedes the record. A collision after that
+        # boundary cannot overwrite the existing id and is caught on read-back.
+        self.assertEqual([q.split('(')[0] for q, _ in self.fake.mutations], ['mutation OperationCreate'])
+        self.assertTrue(self.fake.issues[self.target()]['trashed'])
+        self.assertEqual(self.fake.issues[self.target()]['title'], 'original')
         self.assertEqual(LI.progress(self.records()[0]), [{'step': 'issue:' + self.target()}])
 
 
@@ -551,14 +893,16 @@ class TestIssue(IssueCase):
         self.marked('1')
         self.crash_after(1, lambda: self.issue('new', '--blocked-by', 'ARC-1'))
         target = self.target()
-        def fail_counterpart(data):
-            if any(i['id'] == '1' for i in data['issues']['nodes']):
+        dispatch = self.fake.dispatch
+        def fail_counterpart(q, v):
+            if 'query ProjectIssues' in q:
                 raise OSError('counterpart unavailable')
-        self.fake.read_override = fail_counterpart
+            return dispatch(q, v)
+        self.fake.dispatch = fail_counterpart
         before = copy.deepcopy(self.fake.mutations)
         self.assertEqual(self.replay(), 3, self.stdout)
         self.assertIn('counterpart unavailable', self.stdout)
-        self.fake.read_override = None
+        self.fake.dispatch = dispatch
         del self.fake.issues[target]
         self.assertEqual(self.replay(), 3, self.stdout)
         self.assertIn('issue deleted after creation', self.stdout)
@@ -578,10 +922,12 @@ class TestIssue(IssueCase):
         self.fake.moved.add('3')
         self.assertEqual(self.replay(), 3, self.stdout)
         self.assertIn('incomplete graph read', self.stdout)
+        self.assertIn('UNKNOWN/INCOMPLETE:', self.stdout)
         self.fake.moved.clear()
         self.fake.nested = 'fail'
         self.assertEqual(self.replay(), 3, self.stdout)
         self.assertIn('unfinished relation page', self.stdout)
+        self.assertIn('UNKNOWN/INCOMPLETE:', self.stdout)
         self.fake.nested = None
         self.assertEqual(self.replay(), 0, self.stdout)
         self.assertEqual(self.fake.mutations, before)
@@ -653,6 +999,55 @@ class TestIssue(IssueCase):
             self.assertEqual(len(self.fake.mutations), before)
         self.fake.issues[target] = original
         self.assertEqual(self.replay(), 0, self.stdout)
+
+    def test_replay_managed_values_use_newer_covered_snapshot(self):
+        self.fake.issues['1']['title'] = 'Old'
+        # Leave the immutable edit specification durable but entirely unapplied.
+        self.fake.ignore_update = True
+        self.crash_after(1, lambda: self.issue('edit', 'ARC-1', '--title', 'Planned'))
+        self.fake.ignore_update = False
+        path = self.records()[0]
+        immutable = path.read_bytes()
+        before = copy.deepcopy(self.fake.mutations)
+        original = copy.deepcopy(self.fake.issues['1'])
+        changes = {
+            'title': {'title': 'External'},
+            'body': {'description': 'External\nswarm-independent: test'},
+            'independence': {'description': 'swarm-independent: External'},
+            'trailer': {'description': LI.description('swarm-independent: test', (), (),
+                                                     'external-op', 'external-owner')},
+            'identifier': {'identifier': 'ARC-999'},
+            'project': {'project': {'id': 'external'}},
+            'team': {'team': {'id': 'external'}},
+            'edges': {},
+        }
+        for field, change in changes.items():
+            with self.subTest(field=field):
+                LI.progress_path(path).write_bytes(b'')
+                self.fake.mutations = copy.deepcopy(before)
+                self.fake.issues['1'] = copy.deepcopy(original)
+                self.fake.issues['2']['inverseRelations']['nodes'].clear()
+                observed = []
+                def interleave(data):
+                    # read_override runs after the exact-id response was copied,
+                    # before the replay's project/scope read starts.
+                    if not observed:
+                        observed.append(copy.deepcopy(data['issues']['nodes'][0]))
+                        self.fake.issues['1'].update(change, updatedAt='external-change')
+                        if field == 'edges':
+                            self.fake.edge('1', '2')
+                with mock.patch.object(self.fake, 'read_override', interleave):
+                    self.assertEqual(self.replay(), 3, self.stdout)
+                self.assertEqual(observed[0]['title'], 'Old')
+                self.assertIn('DRIFT/INCOMPLETE:', self.stdout)
+                expected = ('unrecorded blocks edge' if field == 'edges' else
+                            'outside the bound project' if field in ('project', 'team') else field)
+                self.assertIn(expected, self.stdout)
+                self.assertEqual(self.fake.mutations, before)
+                for key, value in change.items():
+                    self.assertEqual(self.fake.issues['1'][key], value)
+                self.assertEqual(path.read_bytes(), immutable)
+                self.assertFalse(LI.confirmed(path))
 
     def test_3_unchanged_managed_edge_removed_refuses_replay(self):
         self.fake.edge('1', '2')
@@ -835,6 +1230,16 @@ class TestIssue(IssueCase):
         self.assertEqual(self.fake.mutations, [])
         self.assertEqual(self.records(), [])
 
+    def test_scope_limit_counts_uuid_and_identifier_as_one_issue(self):
+        iid = '12345678-1234-1234-1234-123456789abc'
+        peer = self.fake.add(iid, project='external')
+        peer['identifier'] = 'ARC-3'
+        with mock.patch.object(LI, 'MAX_SCOPE_ISSUES', 3):
+            self.assertEqual(self.issue('edit', 'ARC-1', '--add-blocked-by', iid,
+                                        '--add-blocked-by', 'ARC-3'), 0, self.stdout + self.stderr)
+        self.assertEqual(sum('OperationRelationCreate' in q for q, _ in self.fake.mutations), 1)
+        self.assertTrue(LI.confirmed(self.records()[0]))
+
     def test_external_scope_cap_unknown_after_write(self):
         def race(q, v):
             if 'OperationUpdate' in q:
@@ -924,8 +1329,8 @@ class TestIssue(IssueCase):
                 self.assertIn('issue not found: ARC-999', self.stderr)
                 self.assertNotIn('Entity not found', self.stderr)
         lookups = [v for q, v in self.fake.calls if 'query OperationIdentifier' in q]
-        self.assertEqual(lookups, [{'filter': {'team': {'key': {'eq': 'ARC'}},
-                                             'number': {'eq': 999}}}] * 2)
+        self.assertEqual(lookups, [{'filter': {'or': [{'team': {'key': {'eq': 'ARC'}},
+                                                     'number': {'eq': 999}}]}, 'after': None}] * 2)
         self.assertFalse(any('issue(id:' in q and v.get('id') == 'ARC-999'
                              for q, v in self.fake.calls))
         self.assertEqual(self.fake.mutations, [])
@@ -970,7 +1375,7 @@ class TestIssue(IssueCase):
         self.assertEqual(self.issue('new', '--blocked-by', 'ARC-99'), 2)
         self.assertIn('issue not found: ARC-99', self.stderr)
         lock = LS.drain_lock_path('workspace', 'project')
-        lock.parent.mkdir(parents=True)
+        lock.parent.mkdir(parents=True, exist_ok=True)
         with lock.open('a') as handle:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.assertEqual(self.issue('new', '--blocked-by', 'ARC-1'), 2)
@@ -1007,17 +1412,17 @@ class TestIssue(IssueCase):
         self.check_remote('DRIFT')
 
     def test_readback_same_display_identifier_different_id_is_drift(self):
-        real = LI.verify
-        def race(spec, client, sync):
+        def race(q, v):
+            if 'OperationRelationCreate' not in q:
+                return
             foreign = self.fake.add('foreign')
             foreign['identifier'] = 'ARC-1'
             relation = self.fake.issues['1']['relations']['nodes'].pop()
             relation['issue']['id'] = 'foreign'
             foreign['relations']['nodes'].append(relation)
-            return real(spec, client, sync)
-        with mock.patch.object(LI, 'verify', race):
-            self.assertEqual(self.issue('new', '--blocked-by', 'ARC-1'), 3)
-        self.assertIn('declared_edges DRIFT', self.stdout)
+        self.fake.after_mutation = race
+        self.assertEqual(self.issue('new', '--blocked-by', 'ARC-1'), 3)
+        self.assertIn('rejected relation create: type or endpoints disagree', self.stdout)
 
     def test_operation_storage_fsync_and_outside_git(self):
         real = os.fsync
@@ -1142,6 +1547,61 @@ class TestIssue(IssueCase):
         self.assertEqual(self.issue('new', '--blocked-by', 'ARC-1'), 3)
         self.assertIn('relation endpoint deleted', self.stdout)
         self.assertEqual(len(self.fake.mutations), 1)
+
+    def test_source_resolution_failure_leaves_no_operation_record(self):
+        self.fake.fail = 'query IssueBatch'
+        self.assertEqual(self.issue('new', '--blocked-by', 'ARC-1'), 2,
+                         self.stdout + self.stderr)
+        self.assertIn('incomplete relation read:', self.stderr)
+        self.assertEqual(self.fake.mutations, [])
+        self.assertEqual(self.records(), [])
+        self.assertEqual(list((self.root / 'ops').rglob('*.progress.jsonl')), [])
+
+    def test_creation_resolution_failure_leaves_no_operation_record(self):
+        self.fake.fail = 'query OperationIssue'
+        self.assertEqual(self.issue('new', '--independent', 'reason'), 2,
+                         self.stdout + self.stderr)
+        self.assertEqual(self.fake.mutations, [])
+        self.assertEqual(self.records(), [])
+
+    def test_record_is_followed_by_mutation_before_any_readback(self):
+        save = LI.save_record
+        pending = []
+        def saved(path, spec):
+            save(path, spec)
+            pending.append(path)
+        def transport(body, headers, timeout=None):
+            query = json.loads(body)['query']
+            if pending:
+                self.assertTrue(query.startswith('mutation'), query)
+                self.assertTrue(pending.pop().is_file())
+            return self.fake(body, headers, timeout)
+        with mock.patch.object(LI, 'save_record', saved), mock.patch.object(API, 'transport', transport):
+            for command, args in (('new', ('--blocked-by', 'ARC-1', '--blocks', 'ARC-2')),
+                                  ('edit', ('ARC-1', '--add-blocks', 'ARC-2'))):
+                with self.subTest(command=command):
+                    pending.clear()
+                    self.assertEqual(self.issue(command, *args), 0, self.stdout + self.stderr)
+                    self.assertEqual(pending, [])
+
+    def test_source_endpoint_read_failure_is_unknown_and_resumable(self):
+        def fail_sources(q, v):
+            if 'OperationCreate' in q:
+                self.fake.fail = 'query IssueBatch'
+        self.fake.after_mutation = fail_sources
+        self.assertEqual(self.issue('new', '--blocked-by', 'ARC-1'), 3, self.stdout)
+        self.assertIn('UNKNOWN/INCOMPLETE: incomplete relation read:', self.stdout)
+        self.assertNotIn('DRIFT/INCOMPLETE:', self.stdout)
+        self.assertEqual(len(self.fake.mutations), 1)
+        path = self.records()[0]
+        self.assertFalse(LI.confirmed(path))
+        immutable = path.read_bytes()
+        self.fake.fail = None
+        self.fake.after_mutation = None
+        self.assertEqual(self.replay(), 0, self.stdout)
+        self.assertEqual(path.read_bytes(), immutable)
+        self.assertTrue(LI.confirmed(path))
+        self.assertEqual(sum('OperationCreate(' in q for q, _ in self.fake.mutations), 1)
 
     def test_audit_operation_digest_binding_and_bad_progress(self):
         self.assertEqual(self.issue('new', '--independent', 'why'), 0)

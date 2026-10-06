@@ -320,41 +320,33 @@ def scope(sync, client, project, refs):
     def check_limit(extra=0):
         if len(reader.seen) + extra > MAX_SCOPE_ISSUES:
             raise ValueError('graph issue limit exceeded: %d' % MAX_SCOPE_ISSUES)
-    reader.project_issues(project)
+    def read(method, *args):
+        try:
+            return method(*args)
+        except (API.LinearError, OSError, ValueError, KeyError, TypeError) as exc:
+            raise IncompleteGraph('incomplete graph read: ' + str(exc)) from exc
+    read(reader.project_issues, project)
     check_limit()
-    for ref in refs:
-        if not any(ref in (i['id'], i['identifier']) for i in reader.seen.values()):
-            check_limit(1)
-            if re.fullmatch(IDENTIFIER, ref):
-                team, number = ref.rsplit('-', 1)
-                query = ('query OperationIdentifier($filter: IssueFilter!) { '
-                         'issues(filter: $filter, first: 1, includeArchived: true) '
-                         '{ nodes { %s } %s } }' % (sync.FIELDS, sync.PAGE))
-                nodes = reader.pages_of(lambda after: client.query(query, {'filter': {
-                    'team': {'key': {'eq': team}}, 'number': {'eq': int(number)}}})['issues'])
-                if not nodes:
-                    raise ValueError('issue not found: ' + ref)
-                if len(nodes) != 1 or nodes[0]['identifier'] != ref:
-                    raise ValueError('issue identifier disagrees on read-back: ' + ref)
-                reader.remember(nodes[0])
-            else:
-                validate_reference(ref)
-                if read_by_id(sync, client, ref, reader) is None:
-                    raise ValueError('issue not found: ' + ref)
-    # Read both ends of every reached blocks edge, including each newly read
-    # issue's paginated relations. A one-hop boundary can hide a return path.
-    pending = list(reader.seen.values())
-    for issue in pending:
-        edges, _ = sync.edges_of([issue])
-        for iid in sorted({iid for edge in edges for iid in edge} - reader.seen.keys()):
-            check_limit(1)
-            reached = read_by_id(sync, client, iid, reader)
+    resolved = read(reader.resolve, refs)
+    # Identifiers and UUIDs can name the same issue; only resolved ids count.
+    check_limit()
+    for ref, issue in resolved.items():
+        if issue is None:
+            raise ValueError('issue not found: ' + ref)
+    # Expand an entire frontier at a time, then follow every newly found edge.
+    # A one-hop boundary can hide a return path through external issues.
+    while True:
+        edges, _ = read(sync.edges_of, list(reader.seen.values()))
+        missing = {iid for edge in edges for iid in edge} - reader.seen.keys()
+        if not missing:
+            break
+        check_limit(len(missing))
+        for iid, reached in read(reader.resolve, missing).items():
             if reached is None:
                 raise ValueError('issue not found: ' + iid)
-            pending.append(reached)
     reader.stable()
     if reader.problems:
-        raise ValueError('incomplete graph read: ' + '; '.join(reader.problems))
+        raise IncompleteGraph('incomplete graph read: ' + '; '.join(reader.problems))
     return reader
 
 
@@ -462,7 +454,7 @@ def prepare(args, client, sync, identity, op):
                       for a, b in sorted(managed)],
             'additions': [list(e) for e in sorted(additions)], 'removals': [list(e) for e in sorted(removals)]}
     reject_key(spec, client._key)
-    return spec, warnings
+    return spec, warnings, reader
 
 
 def read_by_id(sync, client, iid, reader=None):
@@ -493,9 +485,10 @@ def desired_value(row, identities):
             d['op'], d['approver'], d['by'])}
 
 
-def read_managed(spec, sync, client, is_confirmed, path):
+def read_managed(spec, sync, client, is_confirmed, path, reader=None):
     identities = dict(spec['identities'])
-    target = read_by_id(sync, client, spec['target'])
+    target = (read_by_id(sync, client, spec['target'], reader)
+              if reader is None or spec['kind'] == 'new' else reader.seen.get(spec['target']))
     if spec['kind'] == 'new':
         refuse_deleted_creation(target, path)
     creation_step = 'issue:' + spec['target']
@@ -513,9 +506,14 @@ def read_managed(spec, sync, client, is_confirmed, path):
             log_step(path, creation_step)
     if is_confirmed and not target:
         raise ValueError('issue deleted after completion')
-    live = {spec['target']: target}
-    live.update({row['id']: read_by_id(sync, client, row['id'])
-                 for row in spec['issues'] if row['id'] != spec['target']})
+    if reader is None:
+        refs = [row['id'] for row in spec['issues'] if row['id'] != spec['target'] or target is not None]
+        reader = scope(sync, client, spec['project'], refs)
+    # The exact-id read above preserves creation evidence. Managed values and
+    # edges must all come from the newer, covered scope, including the target.
+    live = {row['id']: reader.seen.get(row['id']) for row in spec['issues']}
+    if spec['kind'] == 'new' and live[spec['target']]:
+        identities[spec['target']] = live[spec['target']]['identifier']
     for row in spec['issues']:
         issue = live[row['id']]
         if issue is None:
@@ -547,37 +545,72 @@ def read_managed(spec, sync, client, is_confirmed, path):
     return live, identities
 
 
-def relation_by_id(client, rid):
-    nodes = client.query('query OperationRelation($id: ID!) { issueRelations(filter: {id: {eq: $id}}, '
-                         'first: 1) { nodes { id type issue { id } relatedIssue { id } } } }',
-                         {'id': rid})['issueRelations']['nodes']
-    return nodes[0] if nodes else None
+def relation_by_id(sync, client, rid, a, b, endpoint, reader=None):
+    """Read an exact blocks relation through either endpoint's covered pages."""
+    if endpoint not in (a, b):
+        raise ValueError('relation lookup requires one of its endpoints')
+    field = 'inverseRelations' if endpoint == b else 'relations'
+    try:
+        if reader is None:
+            reader = sync.Reader(client)
+            issue = read_by_id(sync, client, endpoint, reader)
+            reader.stable()
+        else:
+            issue = reader.seen.get(endpoint)
+        if issue is None:
+            raise ValueError('relation endpoint deleted: ' + endpoint)
+        if reader.problems:
+            raise ValueError('; '.join(reader.problems))
+        return next((r for r in issue[field]['nodes'] if r['id'] == rid and
+                     r['type'] == 'blocks' and r['issue']['id'] == a and
+                     r['relatedIssue']['id'] == b), None)
+    except (API.LinearError, OSError, ValueError, KeyError, TypeError) as exc:
+        raise IncompleteGraph('incomplete relation read: ' + str(exc)) from exc
+
+
+def source_endpoints(spec, client, sync, absent=()):
+    """Resolve and cover existing sources before recording or changing edges."""
+    try:
+        reader = sync.Reader(client)
+        sources = {a for a, b in spec['additions'] + spec['removals']} - set(absent)
+        endpoints = reader.resolve(sources)
+        reader.stable()
+        if reader.problems:
+            raise ValueError('; '.join(reader.problems))
+        for iid, issue in endpoints.items():
+            if issue is None:
+                raise ValueError('relation endpoint deleted: ' + iid)
+        return endpoints
+    except (API.LinearError, OSError, ValueError, KeyError, TypeError) as exc:
+        raise IncompleteGraph('incomplete relation read: ' + str(exc)) from exc
 
 
 def apply(spec, path, client, sync, initial=None):
     is_confirmed = confirmed(path)
-    live, identities = (read_managed(spec, sync, client, is_confirmed, path)
-                        if initial is None else initial)
+    if initial is None:
+        live, identities = read_managed(spec, sync, client, is_confirmed, path)
+    else:
+        live, identities, endpoints = initial
     if is_confirmed:
-        verify(spec, client, sync)
-        return
+        return verify(spec, client, sync)
+    if initial is None:
+        endpoints = source_endpoints(spec, client, sync, [iid for iid, issue in live.items() if issue is None])
+    wrote_issue = False
     for row in spec['issues']:
         iid = row['id']
         desired = desired_value(row, identities)
         current = live[iid]
         if current is None:
-            # Recheck the exact derived id immediately before creating: a
-            # prior create may have succeeded without a durable progress line.
+            # The exact derived id was checked before persisting a fresh
+            # operation. A raced or ambiguous create is resolved by read-back.
+            try:
+                client.query('mutation OperationCreate($input: IssueCreateInput!) { issueCreate(input: $input) { success } }',
+                             {'input': dict(desired, id=iid, projectId=spec['project'], teamId=spec['team'])})
+            except API.LinearError:
+                pass
+            wrote_issue = True
             current = read_by_id(sync, client, iid)
             refuse_deleted_creation(current, path)
-            if current is None:
-                try:
-                    client.query('mutation OperationCreate($input: IssueCreateInput!) { issueCreate(input: $input) { success } }',
-                                 {'input': dict(desired, id=iid, projectId=spec['project'], teamId=spec['team'])})
-                except API.LinearError:
-                    pass
-                current = read_by_id(sync, client, iid)
-                refuse_deleted_creation(current, path)
             mark = trailer(current.get('description')) if current else None
             if not current or not mark or mark['op'] != spec['operation']:
                 raise ValueError('rejected create: issue missing or lacks this operation marker')
@@ -586,11 +619,16 @@ def apply(spec, path, client, sync, initial=None):
         elif any(current.get(k) != v for k, v in desired.items()):
             client.query('mutation OperationUpdate($id: String!, $input: IssueUpdateInput!) { '
                          'issueUpdate(id: $id, input: $input) { success } }', {'id': iid, 'input': desired})
+            wrote_issue = True
         log_step(path, 'issue:' + iid)
-    # All touched trailers precede every relation change.
+    # All touched trailers precede every relation change. Refresh the source
+    # endpoints in one batch so a deleted endpoint cannot trigger a write.
+    if wrote_issue:
+        endpoints = source_endpoints(spec, client, sync)
+    added_relations = []
     for adding, changes in ((True, spec['additions']), (False, spec['removals'])):
         for a, b in changes:
-            issue = read_by_id(sync, client, a)
+            issue = endpoints[a]
             if issue is None:
                 raise ValueError('relation endpoint deleted: ' + a)
             matches = [r for r in issue['relations']['nodes'] if r['type'] == 'blocks'
@@ -603,22 +641,40 @@ def apply(spec, path, client, sync, initial=None):
                                  {'input': {'id': rid, 'type': 'blocks', 'issueId': a, 'relatedIssueId': b}})
                 except API.LinearError:
                     pass
-                relation = relation_by_id(client, rid)
-                if (not relation or relation['id'] != rid or relation['type'] != 'blocks' or
-                        relation['issue']['id'] != a or relation['relatedIssue']['id'] != b):
-                    raise ValueError('rejected relation create: type or endpoints disagree')
+                added_relations.append((rid, a, b))
+            elif adding:
+                added_relations.append((matches[0]['id'], a, b))
             if not adding:
                 for relation in matches:
                     client.query('mutation OperationRelationDelete($id: String!) { issueRelationDelete(id: $id) { success } }',
                                  {'id': relation['id']})
             log_step(path, ('add:' if adding else 'remove:') + a + '/' + b)
-    verify(spec, client, sync)
-    log_step(path, 'CONFIRMED')
-
-
-def verify(spec, client, sync):
+        if adding and added_relations:
+            # Confirm every addition together before any removal can run,
+            # including edges that were already present on replay.
+            reader = sync.Reader(client)
+            try:
+                reader.resolve({iid for _, a, b in added_relations for iid in (a, b)})
+                reader.stable()
+            except (API.LinearError, OSError, ValueError, KeyError, TypeError) as exc:
+                raise IncompleteGraph('incomplete relation read: ' + str(exc)) from exc
+            for rid, a, b in added_relations:
+                if not relation_by_id(sync, client, rid, a, b, endpoint=b, reader=reader):
+                    raise ValueError('rejected relation create: type or endpoints disagree')
     try:
         reader = scope(sync, client, spec['project'], [row['id'] for row in spec['issues']])
+    except (API.LinearError, OSError, ValueError, KeyError, TypeError) as exc:
+        label = 'incomplete relation read' if added_relations else 'incomplete graph read'
+        raise IncompleteGraph(label + ': ' + str(exc)) from exc
+    identifier = verify(spec, client, sync, reader=reader)
+    log_step(path, 'CONFIRMED')
+    return identifier
+
+
+def verify(spec, client, sync, reader=None):
+    try:
+        if reader is None:
+            reader = scope(sync, client, spec['project'], [row['id'] for row in spec['issues']])
     except (API.LinearError, OSError, ValueError, KeyError, TypeError) as exc:
         raise IncompleteGraph('incomplete graph read: ' + str(exc)) from exc
     identities = dict(spec['identities'])
@@ -640,6 +696,7 @@ def verify(spec, client, sync):
             raise ValueError('declared_edges DRIFT: ' + issue['identifier'])
     if sync.cyclic(set(reader.seen), edges):
         raise ValueError('blocks cycle DRIFT after write')
+    return reader.seen[spec['target']]['identifier']
 
 
 def run(args, client, sync):
@@ -660,31 +717,30 @@ def run(args, client, sync):
                 spec['team'] != team or spec['repository'] != config.get('repository')):
             raise ValueError('operation binding mismatch')
         reject_key(spec, client._key)
-    else:
-        spec, warnings = prepare(args, client, sync, identity, op)
-        for warning in warnings:
-            print(API.redact('warning: ' + json.dumps(warning), client._key))
-        if args.preview:
-            print(json.dumps({'spec': spec, 'checks': 'passed', 'warnings': warnings}, indent=2))
-            return 0
+    elif args.preview:
+        spec, warnings, _ = prepare(args, client, sync, identity, op)
+        print(json.dumps({'spec': spec, 'checks': 'passed', 'warnings': warnings}, indent=2))
+        return 0
     with sync.project_lock(workspace, project):
         if binding_path.read_bytes() != binding_bytes:
             raise ValueError('binding changed while acquiring lock')
         initial = None
         if not replay:
-            # Preflight before creating the lock avoids files on ordinary
-            # refusals; repeat under the shared lock to serialize local writers.
-            spec, _ = prepare(args, client, sync, identity, op)
-            # Fresh refusals leave no record or progress. Reuse this snapshot
-            # in apply; replay still checks and journals against its record.
-            initial = read_managed(spec, sync, client, False, None)
+            # Prepare once under the shared lock and reuse the covered graph.
+            # Fresh refusals still leave no operation record or progress.
+            spec, warnings, reader = prepare(args, client, sync, identity, op)
+            for warning in warnings:
+                print(API.redact('warning: ' + json.dumps(warning), client._key))
+            live, identities = read_managed(spec, sync, client, False, None, reader)
+            endpoints = source_endpoints(spec, client, sync, [iid for iid, issue in live.items() if issue is None])
+            initial = live, identities, endpoints
             save_record(path, spec)
         print('operation ' + op)
         try:
-            apply(spec, path, client, sync, initial=initial)
+            identifier = apply(spec, path, client, sync, initial=initial)
         except (API.LinearError, OSError, ValueError, KeyError, TypeError) as exc:
             status = 'UNKNOWN/INCOMPLETE' if isinstance(exc, IncompleteGraph) else 'DRIFT/INCOMPLETE'
             print(API.redact('%s: %s; replay %s' % (status, exc, op), client._key))
             return 3
-        print('CONFIRMED ' + op)
+        print('CONFIRMED %s %s' % (op, identifier))
         return 0

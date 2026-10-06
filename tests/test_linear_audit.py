@@ -79,6 +79,24 @@ class FakeLinear:
         return 200, json.dumps({'data': data}).encode()
 
     def dispatch(self, q, v):
+        if any('query ' + name in q for name in ('IssueBatch', 'StabilityBatch', 'CommentBatch', 'OperationIdentifiers')):
+            if 'OperationIdentifiers' in q:
+                names = {'%s-%d' % (f['team']['key']['eq'], f['number']['eq']) for f in v['filter']['or']}
+                nodes = [copy.deepcopy(i) for i in self.issues.values() if i['identifier'] in names]
+            else:
+                nodes = [copy.deepcopy(i) for i in self.issues.values() if i['id'] in v['ids']]
+            if 'StabilityBatch' in q:
+                for node in nodes:
+                    if node['id'] in self.moved:
+                        node['updatedAt'] = '2026-10-05T01:00:00Z'
+                nodes = [{k: node[k] for k in ('id', 'updatedAt')} for node in nodes]
+            elif 'CommentBatch' in q:
+                nodes = [{'id': node['id'], 'comments': self.dispatch(
+                    'query IntentComments', {'id': node['id'], 'after': None})['issue']['comments']} for node in nodes]
+                for node in nodes:
+                    if not node['comments']['pageInfo']['hasNextPage']:
+                        node['comments'] = budget_page(node['comments']['nodes'], None, 20)
+            return {'issues': connection(nodes)}
         if 'query IntentComments' in q:
             return {'issue': {'comments': connection([])}}
         if 'query Binding' in q:
@@ -86,6 +104,8 @@ class FakeLinear:
             return {'viewer': {'organization': self.org}, 'project': project}
         if 'query ProjectIssues' in q:
             nodes = [copy.deepcopy(i) for i in self.issues.values() if (i['project'] or {}).get('id') == 'project']
+            if 'nodes { id updatedAt }' in q:
+                nodes = [{'id': n['id'], 'updatedAt': 'moved' if n['id'] in self.moved else n['updatedAt']} for n in nodes]
             if self.paging == 'duplicate':
                 nodes += copy.deepcopy(nodes)
             conn = connection(nodes)
@@ -93,7 +113,7 @@ class FakeLinear:
                 conn = connection([], True, 'same')
             if self.paging == 'pages':
                 conn = connection(nodes[1:] if v['after'] else nodes[:1], not v['after'], 'next')
-            if self.nested and nodes:
+            if self.nested and nodes and 'relations(' in q:
                 nodes[0]['relations'] = connection([], True, 'nested')
             return {'project': {'issues': conn}}
         if 'query Relations' in q:
@@ -104,6 +124,8 @@ class FakeLinear:
         if 'query Markers' in q:
             assert 'team:' not in q, 'marker search narrowed to a team'
             nodes = [copy.deepcopy(i) for i in self.issues.values() if v['marker'] in i['description']]
+            if 'nodes { id updatedAt }' in q:
+                nodes = [{'id': n['id'], 'updatedAt': 'moved' if n['id'] in self.moved else n['updatedAt']} for n in nodes]
             if self.marker_paging == 'repeat':
                 return {'issues': connection([], True, 'again')}
             if self.marker_paging == 'duplicate':
@@ -117,6 +139,69 @@ class FakeLinear:
                 issue['updatedAt'] = '2026-10-05T01:00:00Z'
             return {'issue': issue}
         raise AssertionError('unexpected query: ' + q)
+
+
+def budget_project(fake):
+    """150 project issues, 60 relations, 10 external blockers, 3 overflows."""
+    fake.issues.clear()
+    for number in range(1, 161):
+        fake.add(str(number), project='project' if number <= 150 else 'external',
+                 state='unstarted' if number <= 150 else 'completed')
+    fake.edge('1', '3')
+    fake.edge('1', '3', 'related')
+    fake.edge('2', '3')
+    for number in range(4, 23):
+        fake.edge('1', str(number))
+    for number in range(23, 43):
+        fake.edge('2', str(number))
+    for number in list(range(43, 51)) + list(range(151, 161)):
+        fake.edge(str(number), '3')
+    assert sum(len(i['relations']['nodes']) for i in fake.issues.values()) == 60
+    assert sum(any(len(i[f]['nodes']) > 20 for f in ('relations', 'inverseRelations'))
+               for i in fake.issues.values()) == 3
+
+
+def budget_page(nodes, after, size):
+    start = int(after or 0)
+    stop = start + size
+    return connection(copy.deepcopy(nodes[start:stop]), stop < len(nodes),
+                      str(stop) if stop < len(nodes) else None)
+
+
+class BudgetPaging:
+    """Enforce real page limits at the fake transport, never in the reader."""
+    def __call__(self, body, headers, timeout=None):
+        q = json.loads(body)['query']
+        sizes = re.findall(r'issues\([^()]*?\bfirst: (\d+)', q)
+        nested = re.findall(r'(?:inverseRelations|relations|comments)\(first: (\d+)', q)
+        if sizes:
+            assert max(map(int, sizes)) <= 50, q
+            if nested:
+                assert max(map(int, nested)) <= 20, q
+        return super().__call__(body, headers, timeout)
+
+    def dispatch(self, q, v):
+        if 'query Relations' in q and str(v.get('after', '')).isdigit():
+            field = 'inverseRelations' if 'inverseRelations(' in q else 'relations'
+            return {'issue': {field: budget_page(self.issues[v['id']][field]['nodes'], v['after'], 100)}}
+        data = super().dispatch(q, v)
+        issue = data.get('issue')
+        if issue and 'id' in issue and 'relations(' in q:
+            for field in ('relations', 'inverseRelations'):
+                issue[field] = budget_page(issue[field]['nodes'], None, 20)
+        conn = (data.get('project') or {}).get('issues') or data.get('issues')
+        if conn is not None:
+            paged = budget_page(conn['nodes'], v.get('after'), 50)
+            conn.update(paged)
+            for node in conn['nodes']:
+                for field in ('relations', 'inverseRelations'):
+                    if field in node and not node[field]['pageInfo']['hasNextPage']:
+                        node[field] = budget_page(node[field]['nodes'], None, 20)
+        return data
+
+
+class BudgetLinear(BudgetPaging, FakeLinear):
+    pass
 
 
 class AuditCase(unittest.TestCase):
@@ -171,6 +256,110 @@ class AuditCase(unittest.TestCase):
 
 
 class TestAudit(AuditCase):
+    def test_overlapping_collections_keep_their_original_stamps(self):
+        self.make_plan()
+        self.fake.add('1', description='swarm-unit: sample/one')
+        self.fake.add('2', description='swarm-unit: sample/two')
+        self.fake.edge('1', '2')
+        dispatch = self.fake.dispatch
+        for final_stamp in ('t0', 't1'):
+            with self.subTest(final_stamp=final_stamp):
+                def interleaved(q, v):
+                    data = dispatch(q, v)
+                    if 'query ProjectIssues' in q or 'query Markers' in q:
+                        conn = data['issues'] if 'query Markers' in q else data['project']['issues']
+                        for issue in conn['nodes']:
+                            issue['updatedAt'] = (final_stamp if 'nodes { id updatedAt }' in q else
+                                                  't1' if 'query Markers' in q else 't0')
+                    return data
+                with mock.patch.object(self.fake, 'dispatch', interleaved):
+                    self.assertEqual(self.audit(plan=True), 3, self.stdout + self.stderr)
+                self.assertFalse(self.record['coverage']['complete'])
+                coverage = next(c for c in self.record['checks'] if c['id'] == 'coverage')
+                self.assertIn('snapshot moved: 1', json.dumps(coverage))
+                self.assertIn('issue changed during read: 1', json.dumps(coverage))
+
+    def test_request_budget(self):
+        self.fake = BudgetLinear()
+        budget_project(self.fake)
+        self.fake.issues['100']['description'] += '\nswarm-unit: sample/extra'
+        # Exercise mappings and the workspace-wide marker search too.
+        self.plan.write_text(json.dumps({'name': 'sample', 'units': []}))
+        self.draft.write_text(json.dumps({'project': {'linear_id': 'project', 'team': 'Arc'},
+            'issues': [{'identifier': 'ARC-' + str(n)} for n in range(1, 161)]}))
+        with mock.patch.object(API, 'transport', self.fake), mock.patch.object(Path, 'home', return_value=self.root):
+            self.assertEqual(self.audit(plan=True), 1)
+        self.assertEqual({k for k, v in self.checks.items() if v != 'CLEAN'}, {'misplaced'})
+        self.assertTrue(self.record['coverage']['complete'], self.record)
+        counts = len(self.fake.calls)
+        self.assertEqual(self.record['coverage']['requests'], counts)
+        self.assertEqual(sum('query Relations' in q for q, _ in self.fake.calls), 3)
+        print('audit budget: %d requests' % counts)
+        self.assertLessEqual(counts, 20)
+
+    def test_batches_chunk_ids_identifiers_and_external_stability(self):
+        self.fake = BudgetLinear()
+        for n in range(120):
+            self.fake.add(str(n), project='external')
+        for identifiers in (False, True):
+            with self.subTest(identifiers=identifiers), mock.patch.object(API, 'transport', self.fake):
+                self.fake.calls.clear()
+                reader = LS.Reader(API.Client(KEY))
+                refs = [i['identifier' if identifiers else 'id'] for i in self.fake.issues.values()]
+                found = reader.resolve(refs)
+                self.assertEqual({i['id'] for i in found.values()}, set(self.fake.issues))
+                self.assertEqual(len(self.fake.calls), 3)
+                reader.stable()
+                self.assertEqual(reader.problems, [])
+                self.assertEqual(len(self.fake.calls), 6)
+                reader.resolve(refs)
+                self.assertEqual(len(self.fake.calls), 6)
+                self.assertTrue(all(len(v.get('ids', v.get('filter', {}).get('or', []))) <= 50
+                                    for _, v in self.fake.calls))
+
+    def test_batch_coverage_faults_are_unknown(self):
+        self.fake.add('1', state='started')
+        self.fake.add('2', state='completed', project='external')
+        self.fake.edge('2', '1')
+        dispatch = self.fake.dispatch
+        for query in ('IssueBatch', 'StabilityBatch', 'CommentBatch', 'OperationIdentifiers'):
+            for fault in ('repeat', 'duplicate', 'unfinished', 'invalid', 'page-error', 'missing', 'wrong-id', 'moved'):
+                if fault == 'moved' and query != 'StabilityBatch':
+                    continue
+                with self.subTest(query=query, fault=fault):
+                    self.draft.write_text(json.dumps({'project': {'linear_id': 'project', 'team': 'Arc'},
+                        'issues': [{'identifier': 'ARC-2'}] if query == 'OperationIdentifiers' else []}))
+                    def broken(q, v):
+                        data = dispatch(q, v)
+                        if 'query ' + query not in q:
+                            return data
+                        conn = data['issues']
+                        if fault == 'repeat':
+                            data['issues'] = connection([], True, 'again')
+                        elif fault == 'duplicate':
+                            conn['nodes'] += copy.deepcopy(conn['nodes'])
+                        elif fault in ('unfinished', 'invalid'):
+                            conn['pageInfo'] = {'hasNextPage': True if fault == 'unfinished' else 1, 'endCursor': None}
+                        elif fault == 'page-error':
+                            if v['after']:
+                                raise OSError('batch page failed')
+                            data['issues'] = connection([], True, 'next')
+                        elif fault == 'missing':
+                            conn['nodes'] = []
+                        elif fault == 'wrong-id':
+                            conn['nodes'][0]['id'] = 'unexpected'
+                            conn['nodes'][0]['identifier'] = 'ARC-999'
+                        elif fault == 'moved':
+                            conn['nodes'][0]['updatedAt'] += '-changed'
+                        return data
+                    with mock.patch.object(self.fake, 'dispatch', broken):
+                        self.assertEqual(self.cli('audit', '--draft', str(self.draft), '--out', str(self.out)), 3)
+                    record = json.loads(self.out.read_text())
+                    self.assertFalse(record['coverage']['complete'])
+                    self.assertNotIn('CLEAN', [c['verdict'] for c in record['checks']])
+                    if fault == 'page-error':
+                        self.assertIn('batch page failed', json.dumps(record))
+
     def test_clean_all_checks_and_advisory_precedence(self):
         self.fake.add('1', description='swarm-independent: test\nDepends on ARC-9.')
         self.assertEqual(self.audit(), 0)
@@ -298,7 +487,7 @@ class TestAudit(AuditCase):
         reordered = []
 
         def reorder(q, variables):
-            if 'query Stability' in q and not reordered:
+            if 'nodes { id updatedAt }' in q and not reordered:
                 self.fake.issues = dict(reversed(list(self.fake.issues.items())))
                 reordered.append(True)
             return dispatch(q, variables)
@@ -306,6 +495,7 @@ class TestAudit(AuditCase):
         with mock.patch.object(self.fake, 'dispatch', side_effect=reorder):
             self.assertEqual(self.audit(plan=True), 0)
         self.assertEqual(self.checks['coverage'], 'CLEAN')
+        self.assertTrue(reordered)
         for query in ('query ProjectIssues', 'query Markers'):
             self.assertEqual(sum(query in q and v['after'] is None for q, v in self.fake.calls), 2)
 
@@ -315,7 +505,7 @@ class TestAudit(AuditCase):
 
         def change(q, variables):
             data = dispatch(q, variables)
-            if 'query Stability' in q:
+            if 'query ProjectIssues' in q and 'nodes { id updatedAt }' not in q:
                 self.fake.issues['1']['updatedAt'] = '2026-10-05T02:00:00Z'
             return data
 
@@ -369,8 +559,8 @@ class TestAudit(AuditCase):
         self.fake.add('3', description='swarm-unit: sample/extra', project='elsewhere')['team'] = {'id': 'other'}
         self.assertEqual(self.audit(plan=True), 1)
         self.assertEqual(self.checks['misplaced'], 'DRIFT')
-        reads = [v['id'] for q, v in self.fake.calls if 'query Issue' in q]
-        self.assertIn('ARC-1', reads)
+        reads = [f for q, v in self.fake.calls if 'query OperationIdentifiers' in q for f in v['filter']['or']]
+        self.assertIn({'team': {'key': {'eq': 'ARC'}}, 'number': {'eq': 1}}, reads)
         self.fake.moved.add('3')
         self.assertEqual(self.audit(plan=True), 3)
         self.fake.moved.clear()
@@ -382,7 +572,8 @@ class TestAudit(AuditCase):
         self.fake.add('4', project='elsewhere')
         (self.state / 'outbox-receipts.jsonl').write_text(json.dumps({'ref': 'ARC-4'}) + '\n')
         self.audit(plan=True, state=True)
-        self.assertTrue(any(v.get('id') == 'ARC-4' for q, v in self.fake.calls if 'query Issue' in q))
+        self.assertTrue(any({'team': {'key': {'eq': 'ARC'}}, 'number': {'eq': 4}} in v['filter']['or']
+                            for q, v in self.fake.calls if 'query OperationIdentifiers' in q))
 
     def test_marker_pagination_and_explicit_draft_workspace(self):
         self.make_plan(needs=[])
@@ -792,11 +983,12 @@ class TestAudit(AuditCase):
 
     def test_overlapping_reads_cannot_hide_a_transient_change(self):
         self.make_plan(needs=[])
+        self.fake.issues['1']['description'] = 'swarm-unit: sample/one'
         dispatch = self.fake.dispatch
         def change(q, variables):
             data = dispatch(q, variables)
-            if 'query Issue' in q and data['issue']:
-                data['issue']['updatedAt'] = '2026-10-05T02:00:00Z'
+            if 'query Markers' in q and 'relations(' in q:
+                data['issues']['nodes'][0]['updatedAt'] = '2026-10-05T02:00:00Z'
             return data
         self.fake.dispatch = change
         self.assertEqual(self.audit(plan=True), 3)
