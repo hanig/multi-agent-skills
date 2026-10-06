@@ -263,3 +263,22 @@ One failed intent does not stop processing others. The existing offline
 receipt writer refuses a whole malformed outbox, so a malformed sibling can
 prevent another intent's receipt even after its remote effects are confirmed;
 that refusal is reported and the effects remain safe to re-read next time.
+
+## Approved draft filing
+
+After the one named approval, `linear_sync.py file --draft tickets.json`
+replaces manual connector filing. `tickets.py approve` digests the immutable
+project and issue spec, including repository and `blocked_by`; progress and
+preview fields do not authorize mutations. Old approvals are re-approved once.
+Filing uses repository-namespaced ids and exact remote identity markers,
+requiring `--adopt-checked` after owner audit for foreign/unmarked adoption.
+
+`--preview` checks without writes. A durable operation precedes every mutation;
+`linear_sync.py replay OPERATION_ID --draft tickets.json` resumes only the
+recorded approved spec. The draft and its adjacent `.hanig/linear-binding.json`
+record progress. Cross-boundary blockers are kept and reported; only internal
+plan edges are reconciled. Dependency trailers remain last and reflect full
+adjacency before relation changes. Final by-id read-back and the plan-scoped
+expanded-graph audit gate confirmation (0); incomplete work returns 3 and
+pre-mutation refusal returns 2. Same-host exclusion uses drain's project lock;
+listing lag and cross-host races remain declared limits.

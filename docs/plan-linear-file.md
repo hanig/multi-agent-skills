@@ -63,9 +63,31 @@ is ignored), so the owner records the right one in
 format) both record the project id.
 
 Each unit's issue id is derived as `issue:<workspace id>/<repository>/<plan slug>/<unit>`
-and its description carries `swarm-unit: <slug>/<unit>` and
-`swarm-repo: <repository>` as trailer lines. A marker binds an issue to a
-unit only when both lines match this draft.
+and its description carries `swarm-unit: <slug>/<unit>`,
+`swarm-repo: <repository>` and `swarm-body: <sha256>` as trailer lines.
+The first two lines bind the issue to the unit. The body digest is SHA-256
+of the approved body's exact UTF-8 bytes, including whitespace, before any
+identity lines are added.
+
+**Content identity, not Markdown rendering.** Linear re-renders descriptions:
+the live check changed `- kind:` to `* kind:` and dropped the blank line
+before the marker block. Filing, replay's before/desired checks and
+CONFIRMED therefore compare the exact plain-text title and the identity
+lines (plus any PR 3 dependency trailer), never the rendered prose. A
+different or missing body digest, including adoption, writes the approved
+body plus identity block. A matching digest leaves the prose alone; a
+title-only change writes only the title. Project content is also compared
+by identity lines, while the project name and plain-text description
+(the approved summary on creation) keep their exact comparisons after the
+existing terminal-whitespace trim.
+
+**Declared limit:** prose edited by a person in Linear after filing is not
+detected by `file`; changing the approved body is. The body marker records
+the approved content identity, not a checksum of Linear's current rendered
+prose. Project content prose is likewise outside the comparison.
+Operations recorded before body identities existed refuse replay before any
+network call; run `file` with the approved draft to add the missing markers
+under a fresh operation, preserving the old operation record.
 
 **Provenance by marker.** Every project and issue the draft names by id must
 carry this draft's markers: the project its `swarm-plan` and `swarm-repo`
@@ -79,8 +101,8 @@ so every later run, on any host, can prove the binding from Linear alone.
 **Coexisting with PR 3's dependency trailer** (settled with Sol after the
 plan review exhausted). An adopted issue may already carry PR 3's trailer
 (`swarm-deps`, `swarm-op`, `swarm-approver` as its last three non-empty
-lines). Filing never displaces it: the identity lines `swarm-unit` and
-`swarm-repo` go immediately above that trailer, so PR 3's parser still finds
+lines). Filing never displaces it: the identity lines `swarm-unit`,
+`swarm-repo` and `swarm-body` go immediately above that trailer, so PR 3's parser still finds
 it last. When filing changes an edge, it rewrites the `swarm-deps` line of
 every endpoint that carries one to that issue's resulting full adjacency,
 including blockers it deliberately keeps (ad-hoc or external), and records
@@ -172,7 +194,11 @@ so. `docs/tracker-outbox.md` and CLAUDE.md name it.
    draft refuses; a recorded project or issue id edited to point at an
    object without this draft's markers refuses before mutation, and
    adoption writes the markers so a re-run proves the binding from Linear;
-   recording ids never invalidates the approval.
+   recording ids never invalidates the approval. A fake that changes list
+   bullets and collapses the blank line before trailing markers must still
+   confirm, replay and re-file without prose rewrites. Restoring whole-body
+   comparison must fail that regression. Reapproval changes the body digest;
+   human prose edits with intact markers remain outside detection.
 3. Adoption follows steps 1-4; every ambiguity, a bound title candidate, and
    a same-named unrecorded project stop before any create; in a foreign
    project, adoption, creation and edge changes all need `--adopt-checked`;

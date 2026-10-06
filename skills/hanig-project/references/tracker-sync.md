@@ -17,17 +17,21 @@ session, never on the shared login-node coordinator. <!-- declaration: tracker.c
 The owner sees the project, every issue title, and the count before one named
 approval. No project or issue may be created while approval remains required. <!-- declaration: tracker.approval -->
 
-After approval, create the project before its issues and persist each returned
-id and identifier. Later drafts must update the objects keyed by unit id rather <!-- declaration: tracker.apply -->
-than duplicate them. <!-- declaration: tracker.apply -->
+After approval, run `linear_sync.py file --draft tickets.json`; use `--preview` to run checks without writes and `replay OPERATION_ID --draft tickets.json` after a crash. The binding file is `.hanig/linear-binding.json` beside the draft. <!-- declaration: tracker.apply -->
+
+The digest covers project name, slug, summary, description, team and repository, plus each unit, title, body and `blocked_by`. Progress identifiers, URLs and read-back do not change it. Old approvals without a digest need one re-approval. <!-- declaration: tracker.approval -->
+
+`--repository OWNER/REPO` on `tickets.py draft` defaults to the draft directory origin. Derived ids include workspace, repository and plan. Every recorded project needs exact `swarm-plan` and `swarm-repo` lines, and unit issues need `swarm-unit`, `swarm-repo` and `swarm-body`. The body marker holds SHA-256 of the approved body's exact UTF-8 bytes, before adding identity lines. Foreign projects and unmarked objects need an owner-reviewed audit and `--adopt-checked`; ambiguity refuses before creation. <!-- declaration: tracker.apply -->
+
+Linear re-renders Markdown. Filing, replay and CONFIRMED compare exact titles and identity lines, including the body digest and any PR 3 trailer, never rendered issue prose. Missing or different body digests write the approved body plus identity block; matching digests leave prose alone. Project content is compared by identity lines too; project name and plain-text description (the summary on creation) remain exactly compared after the existing terminal-whitespace trim. Prose edited by a person in Linear after filing is not detected by `file`; changing the approved body is. Project content prose is also outside detection. Replay of older operations without body identities refuses before network access; run `file` with the approved draft to add markers under a new operation, preserving the old record. <!-- declaration: tracker.apply -->
+
+Issue adoption writes approved prose and preserves earlier operation provenance; project adoption preserves its prose. Identity lines sit above PR 3's final dependency trailer. Changed edges rewrite each marked endpoint's full adjacency, including kept blockers, before the relation changes. These are managed before/desired marker values in the same durable operation engine. <!-- declaration: tracker.edges -->
 
 ## BlockedBy reconciliation
 
-The connector's blockedBy relation is append-only unless `removeBlockedBy` is <!-- declaration: tracker.edges -->
-called. Omitting an old edge from a new add list does not remove it. <!-- declaration: tracker.edges -->
+`blocked_by` is truth; filing computes the live delta. `add_blocked_by` and `remove_blocked_by` are previews. Remove only undeclared blockers that are current plan units; keep and report ad-hoc, external and deleted-unit blockers, using `issue edit` for an explicit removal. <!-- declaration: tracker.edges -->
 
-Apply every declared addition and removal, then read every issue's blockedBy
-relations back into the next draft. <!-- declaration: tracker.edges -->
+Read every unit and touched relation by id, even when a project listing lags. Confirmation requires the scoped plan, membership, relationless, declared-edge and expanded cycle audit checks to be CLEAN. The read-back contains identifiers and edges, never issue text. <!-- declaration: tracker.apply -->
 
 Each key represents the blocked issue and may use a unit id, tracker identifier, <!-- declaration: tracker.readback-shape -->
 or UUID. An issue observed with no blockers must appear with an empty list; <!-- declaration: tracker.readback-shape -->
@@ -61,7 +65,7 @@ The fixed state inputs are `swarm-state.json`, `outbox.jsonl` and `outbox-receip
 
 The key comes from `LINEAR_API_KEY` or shell-word parsing of `~/.config/hanig/linear.env`. Output streams and error text are redacted; input files are never scrubbed. The program never copies its loaded key into data files, while operator-supplied secrets in other data remain a declared limit. <!-- declaration: tracker.credential-boundary -->
 
-Request accounting uses `coverage.requests`, which counts transport calls including failed requests. `coverage.pages` also includes nested connection pages returned within a request. Project and marker stability reads select only IDs and `updatedAt`; other graph references use batches of 50, with nested relations limited to 20. Audit comment lists use the same 50-by-20 shape with overflow paging. The offline request-budget fixture has 150 project issues, 60 relations, 10 external blockers, and three relation overflows. Its limits are 20 requests for audit, 42 for an issue creation with two dependencies, and 20 plus comment paging for one drain intent. These fixture limits are not a bound for arbitrarily large graphs, transitive frontiers or overflow lists. <!-- declaration: tracker.check -->
+Request accounting uses `coverage.requests`, which counts transport calls including failed requests. `coverage.pages` also includes nested connection pages returned within a request. Project and marker stability reads select only IDs and `updatedAt`; other graph references use batches of 50, with nested relations limited to 20. Audit comment lists use the same 50-by-20 shape with overflow paging. The offline request-budget fixture has 150 project issues, 60 relations, 10 external blockers, and three relation overflows. Its limits are 20 requests for audit, 42 for an issue creation with two dependencies, 20 plus comment paging for one drain intent, and 120 for filing 30 units with 40 edges into an empty project. These fixture limits are not a bound for arbitrarily large graphs, transitive frontiers or overflow lists. <!-- declaration: tracker.check -->
 
 ## Ad-hoc issues <!-- declaration: tracker.apply -->
 

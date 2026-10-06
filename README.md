@@ -252,12 +252,15 @@ repo is untrusted input and its config should not execute. It redacts anything
 that looks like a credential, after leaking a git token once.
 
 `tickets.py` drafts the Linear project and issues, requires **one** explicit
-approval before anything is transmitted, and re-arms that approval if the unit
-digests change underneath it. Default team is `Arc`. Full automation requires
+approval before anything is transmitted, and re-arms that approval if the immutable project or issue
+specification changes, including repository and dependencies. Old approvals
+without a content digest require one re-approval. Default team is `Arc`. Full automation requires
 the literal phrase `swarm autopilot`; absent it, approval is always required.
 
 It carries the plan's DAG as `blockedBy`, and because that relation is
-append-only through this interface, it also names the edges to REMOVE. Not
+append-only through this interface, it also previews the edges between current plan units to REMOVE.
+Ad-hoc, external and deleted-unit blockers are reported and kept; remove them
+explicitly with `linear_sync.py issue edit`. Not
 re-adding an edge does not delete it, so a shrunken `needs` list would
 otherwise leave the tracker asserting a dependency the plan has dropped. It
 decides that from a read-back of what the tracker holds, supplied by the
@@ -555,6 +558,25 @@ python3 "$HANIG_PROJECT_DIR/scripts/linear_sync.py" audit \
 and intent tracker identifiers. Reconciliation is eventual across hosts,
 one state write per issue per run. Historical receipts and current audit
 state are separate; see [tracker outbox](docs/tracker-outbox.md).
+
+Approved plan drafts use the same lock and operation engine:
+
+```sh
+python3 "$HANIG_PROJECT_DIR/scripts/tickets.py" draft plan.json --repository OWNER/REPO
+python3 "$HANIG_PROJECT_DIR/scripts/tickets.py" approve tickets.json --approver NAME
+python3 "$HANIG_PROJECT_DIR/scripts/linear_sync.py" file --draft tickets.json [--preview] [--adopt-checked]
+python3 "$HANIG_PROJECT_DIR/scripts/linear_sync.py" replay OPERATION_ID --draft tickets.json
+```
+
+Repository defaults to the draft directory's origin. Filing proves project/unit
+identity with repository markers, refuses ambiguous adoption, and requires an
+owner-reviewed audit plus `--adopt-checked` for foreign projects or unmarked
+objects. It computes edges from `blocked_by`, preserving cross-boundary blockers
+and PR 3 trailers. Each step updates the draft atomically; the binding lives in
+`.hanig/linear-binding.json` beside it. Replay refuses a changed approved spec.
+Exits are 0 confirmed, 3 incomplete, 2 refused before mutation. Confirmation
+requires by-id read-back and CLEAN plan-scoped checks over the expanded graph.
+The offline 30-unit/40-edge filing fixture is bounded at 120 requests.
 
 Ad-hoc issues use the same project lock and declare their graph at filing:
 

@@ -3,8 +3,8 @@
 
 This script NEVER talks to a tracker. It runs where the coordinator runs, which
 is a shared cluster login node, and a tracker token must not live there. It
-emits a draft; a Claude Code session holding the MCP connector reads that draft,
-shows it, and creates everything after ONE approval. The same separation the
+emits a draft; the authorized operator shows it, records ONE approval, then
+applies it with linear_sync.py file. The same separation the
 swarm outbox uses, for the same reason.
 
 Two properties it exists to enforce, from the plan's step 6:
@@ -47,6 +47,9 @@ Standard library only, no network.
 import argparse
 import hashlib
 import json
+import os
+import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -243,8 +246,8 @@ def readback_edges(rb):
             if not isinstance(b, str) or not b.strip():
                 return None, None, (f"unreadable: {holder!r} lists {b!r} as a "
                                     f"blocker, which is not a handle")
-            out.append(b.strip())
-        clean[holder.strip()] = list(dict.fromkeys(out))
+            out.append(b)
+        clean[holder] = list(dict.fromkeys(out))
     meta = {"read_at": read_at.strip(), "source": rb.get("source")}
     return clean, meta, None
 
@@ -253,17 +256,11 @@ def _handles(issue):
     for h in (issue.get("unit"), issue.get("linear_id"),
               issue.get("identifier")):
         if isinstance(h, str) and h.strip():
-            yield h.strip()
+            yield h
 
 
 def _alias_map(issues, prior_issues=()):
-    """Every handle the tracker might use, mapped back to a unit id.
-
-    PRIOR issues are included on purpose. A stale edge usually points at a
-    unit the plan DELETED, so the current draft cannot name it; the draft
-    that filed it can. Without this, the one edge B8 exists to remove is the
-    one edge that resolves to nothing.
-    """
+    """Map exact handles to units; callers choose the current plan boundary."""
     aliases = {}
     # Current issues first: ids are carried forward keyed on unit, so a handle
     # cannot legitimately change units, and if one ever appears to, the live
@@ -274,7 +271,6 @@ def _alias_map(issues, prior_issues=()):
             continue
         for h in _handles(issue):
             aliases.setdefault(h, unit)
-            aliases.setdefault(h.upper(), unit)
     return aliases
 
 
@@ -313,10 +309,10 @@ def sync_blocked_by(out, readback, prior_issues=()):
         }
         return out
 
-    aliases = _alias_map(issues, prior_issues)
+    aliases = _alias_map(issues)
     held, unresolved, seen = {}, [], set()
     for holder_raw, blockers in edges.items():
-        holder = aliases.get(holder_raw) or aliases.get(holder_raw.upper())
+        holder = aliases.get(holder_raw)
         if holder is None:
             # Only when it actually HOLDS edges. A hand-created issue sitting
             # in the same tracker project with no blockers cannot be holding
@@ -333,7 +329,7 @@ def sync_blocked_by(out, readback, prior_issues=()):
         seen.add(holder)
         for b_raw in blockers:
             held.setdefault(holder, {})[b_raw] = (
-                aliases.get(b_raw) or aliases.get(b_raw.upper()))
+                aliases.get(b_raw))
 
     for issue in issues:
         unit = issue["unit"]
@@ -351,24 +347,16 @@ def sync_blocked_by(out, readback, prior_issues=()):
         tracker = held.get(unit, {})
         have = {u for u in tracker.values() if u is not None}
         issue["add_blocked_by"] = [d for d in declared if d not in have]
-        # REMOVAL IS NAMED IN THE TRACKER'S OWN VOCABULARY. A stale edge
-        # points at something the plan no longer declares -- sometimes a unit
-        # that was deleted outright -- so a current unit id cannot always
-        # identify it. The handle the read-back used can, and the session that
-        # supplied it is the session that will call removeBlockedBy with it.
+        # Only current plan units are in the removal domain. Unknown,
+        # deleted-unit and ad-hoc blockers are retained and reported below.
         issue["remove_blocked_by"] = [raw for raw, u in tracker.items()
-                                      if u is None or u not in declared]
+                                      if u is not None and u not in declared]
         for raw, u in tracker.items():
             if u is None:
                 unresolved.append({
                     "holder": unit, "blocker": raw,
-                    "why": ("the plan declares no such dependency and this "
-                            "draft cannot say what the handle refers to. It "
-                            "is listed for removal because the plan's DAG is "
-                            "authoritative over this issue's blockers; if it "
-                            "is a deliberate link to work outside this "
-                            "project, say so and it must move out of "
-                            "blockedBy")})
+                    "why": ("blocker is outside this plan's units; kept. "
+                            "Use linear_sync.py issue edit to remove it")})
         issue["blocked_by_in_sync"] = not (issue["add_blocked_by"]
                                            or issue["remove_blocked_by"])
 
@@ -390,7 +378,35 @@ def sync_blocked_by(out, readback, prior_issues=()):
     return out
 
 
-def draft(plan, brief=None, existing=None, autopilot=False, readback=None):
+def approved_spec(d):
+    """Only owner-approved inputs; tracker identities and previews are progress."""
+    return {"project": {k: d["project"].get(k) for k in
+                        ("name", "slug", "summary", "description", "team", "repository")},
+            "issues": [{k: i.get(k) for k in ("unit", "title", "body", "blocked_by")}
+                       for i in d["issues"]]}
+
+
+def content_digest(d):
+    return hashlib.sha256(json.dumps(approved_spec(d), sort_keys=True,
+                         separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def origin_repository(directory):
+    """Read local Git config only. Preserve the forge path's exact spelling."""
+    result = subprocess.run(["git", "-C", str(directory), "remote", "get-url", "origin"],
+                            env={k: v for k, v in os.environ.items() if k != "LINEAR_API_KEY"},
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+    if result.returncode:
+        return None
+    remote = result.stdout.rstrip("\r\n")
+    match = re.fullmatch(r"(?:[A-Za-z][A-Za-z0-9+.-]*://[^/]+/|[^/@:]+@[^/:]+:)([^\s]+)", remote)
+    if not match:
+        return None
+    path = match[1]
+    return path[:-4] if path.endswith(".git") else path
+
+
+def draft(plan, brief=None, existing=None, autopilot=False, readback=None, repository=None):
     units = plan.get("units") or []
     out = {
         "schema_version": SCHEMA,
@@ -408,6 +424,7 @@ def draft(plan, brief=None, existing=None, autopilot=False, readback=None):
                        or f"Swarm project with {len(units)} units.",
             "description": (brief or {}).get("description") or "",
             "team": (brief or {}).get("team") or DEFAULT_TEAM,
+            "repository": repository,
             "linear_id": None,
             "url": None,
         },
@@ -427,21 +444,20 @@ def draft(plan, brief=None, existing=None, autopilot=False, readback=None):
     if autopilot:
         out["approval"] = {"state": "autopilot", "granted_by": "autopilot "
                            "phrase in the request", "at": None,
-                           "how_to_skip_next_time": None}
+                           "how_to_skip_next_time": None, "content_digest": content_digest(out)}
     if existing:
-        # An approval already granted is NOT re-requested. Re-drafting after
-        # a plan edit must not force the human through the gate again for
-        # work they have already seen and accepted.
-        # An approval covers the work the human SAW. If any unit's digest
-        # changed, or units were added or removed, this is different work and
-        # the gate re-arms. Carrying the approval forward unconditionally --
-        # which is what I first built -- let a changed plan be filed on a yes
-        # given for something else, including a one-run autopilot.
+        # Approval covers the complete immutable specification, not unit
+        # digests alone. Keep unchanged legacy approvals as recorded; filing
+        # still requires re-approval to supply their missing content_digest.
         prior = (existing.get("approval") or {}).get("state")
+        prior_digest = (existing.get("approval") or {}).get("content_digest")
+        if prior_digest is None:
+            prior_digest = content_digest(existing)
         was = {i.get("unit"): i.get("unit_digest")
                for i in (existing.get("issues") or [])}
         now = {i["unit"]: i.get("unit_digest") for i in out["issues"]}
-        if prior in ("granted", "autopilot") and was == now:
+        if (prior in ("granted", "autopilot") and
+                prior_digest == content_digest(out)):
             out["approval"] = existing["approval"]
         elif prior in ("granted", "autopilot"):
             changed = sorted(set(was) ^ set(now)) or sorted(
@@ -691,7 +707,8 @@ def cmd_draft(args):
               "approval files everything again.")
         return 2
     d = draft(plan, brief, existing, autopilot=args.autopilot,
-              readback=readback)
+              readback=readback, repository=(getattr(args, "repository", None)
+                                             or origin_repository(out_path.parent)))
 
     problems = check(plan, d)
     if problems:
@@ -729,9 +746,13 @@ def cmd_approve(args):
     if err:
         print(f"error: no readable draft at {args.tickets}: {err}", file=sys.stderr)
         return 2
+    if not args.approver.strip():
+        print("error: approver must not be blank", file=sys.stderr)
+        return 2
     d.setdefault("approval", {})
     d["approval"].update({"state": "granted", "granted_by": args.approver,
-                          "at": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
+                          "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                          "content_digest": content_digest(d)})
     Path(args.tickets).write_text(json.dumps(d, indent=2))
     print(f"  approved by {args.approver}: {len(d.get('issues') or [])} "
           f"issue(s) may now be created.")
@@ -917,6 +938,7 @@ def main():
                         "QC'. Without it the plan's identifier-shaped name is "
                         "used, which reads badly in a tracker.")
     d.add_argument("--out", default=None)
+    d.add_argument("--repository", help="exact forge path; default: draft directory origin")
     d.add_argument("--tracker-edges", default=None, metavar="FILE",
                    help="JSON read-back of the blockedBy edges the tracker "
                         "ACTUALLY holds, from the session with the connector. "

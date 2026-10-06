@@ -35,6 +35,38 @@ def connection(nodes, more=False, cursor=None):
     return {'nodes': nodes, 'pageInfo': {'hasNextPage': more, 'endCursor': cursor}}
 
 
+def selected_fields(query, data):
+    """Project fake responses onto these queries' actual GraphQL selections."""
+    # Our requests use named fields and arguments, without aliases or fragments.
+    while '(' in query:
+        query, count = re.subn(r'\([^()]*\)', '', query)
+        assert count, 'unbalanced query arguments'
+    tokens = iter(re.findall(r'[A-Za-z_][A-Za-z_0-9]*|[{}]', query[query.index('{'):]))
+    assert next(tokens) == '{'
+
+    def selection():
+        fields = {}
+        previous = None
+        for token in tokens:
+            if token == '}':
+                return fields
+            if token == '{':
+                fields[previous] = selection()
+            else:
+                previous = token
+                fields[token] = None
+        raise AssertionError('unclosed query selection')
+
+    def project(value, fields):
+        if value is None or fields is None:
+            return value
+        if isinstance(value, list):
+            return [project(item, fields) for item in value]
+        return {name: project(value[name], nested) for name, nested in fields.items()}
+
+    return project(data, selection())
+
+
 class FakeLinear:
     """A read-only variation of f92398a's transport, with paging faults."""
     def __init__(self):
@@ -51,7 +83,8 @@ class FakeLinear:
         self.rate_limit = False
 
     def add(self, iid, state='unstarted', description='swarm-independent: test', project='project'):
-        issue = {'id': iid, 'identifier': 'ARC-' + iid, 'updatedAt': '2026-10-05T00:00:00Z',
+        issue = {'id': iid, 'identifier': 'ARC-' + iid, 'title': 'original', 'trashed': False,
+                 'updatedAt': '2026-10-05T00:00:00Z',
                  'description': description, 'archivedAt': None, 'state': {'type': state, 'name': state},
                  'project': {'id': project} if project else None, 'team': {'id': 'team'},
                  'relations': connection([]), 'inverseRelations': connection([])}
@@ -75,7 +108,7 @@ class FakeLinear:
             raise OSError('transport failed ' + KEY)
         if self.rate_limit and 'query ProjectIssues' in q:
             return 429, json.dumps({'errors': [{'message': 'rate limit ' + KEY}]}).encode()
-        data = self.dispatch(q, v)
+        data = selected_fields(q, self.dispatch(q, v))
         return 200, json.dumps({'data': data}).encode()
 
     def dispatch(self, q, v):

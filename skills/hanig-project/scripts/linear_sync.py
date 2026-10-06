@@ -18,6 +18,7 @@ import tempfile
 
 import linear_api as API
 import linear_issue as LI
+import linear_file as LF
 import tracker_audit as TA
 import skill_paths
 
@@ -28,7 +29,7 @@ PAGE = 'pageInfo { hasNextPage endCursor }'
 ISSUE_PAGE = 50
 NESTED_RELATION_PAGE = 20
 RELATION = 'id type issue { id identifier } relatedIssue { id identifier }'
-FIELDS = '''id identifier title updatedAt description archivedAt
+FIELDS = '''trashed id identifier title updatedAt description archivedAt
  state { type name } project { id } team { id }
  relations(first: %d) { nodes { %s } %s }
  inverseRelations(first: %d) { nodes { %s } %s }''' % (
@@ -135,7 +136,7 @@ class Reader:
             batch = ids[offset:offset + ISSUE_PAGE]
             q = ('query %s($ids: [ID!]!, $after: String) { issues(filter: {id: {in: $ids}}, '
                  'first: %d, after: $after, includeArchived: true) { nodes { %s } %s } }' %
-                 (name, ISSUE_PAGE, fields if fields is not None else 'trashed ' + FIELDS, PAGE))
+                 (name, ISSUE_PAGE, fields if fields is not None else FIELDS, PAGE))
             nodes = self.pages_of(lambda after: self.client.query(q, {'ids': batch, 'after': after})['issues'])
             if {n['id'] for n in nodes} - set(batch):
                 raise ValueError('issue id disagrees on read-back')
@@ -156,7 +157,7 @@ class Reader:
                         'number': {'eq': int(ref.rsplit('-', 1)[1])}} for ref in batch]
             q = ('query OperationIdentifiers($filter: IssueFilter!, $after: String) { '
                  'issues(filter: $filter, first: %d, after: $after, includeArchived: true) '
-                 '{ nodes { %s } %s } }' % (ISSUE_PAGE, 'trashed ' + FIELDS if fields is None else fields, PAGE))
+                 '{ nodes { %s } %s } }' % (ISSUE_PAGE, FIELDS if fields is None else fields, PAGE))
             nodes = self.pages_of(lambda after: self.client.query(q, {'filter': {'or': filters}, 'after': after})['issues'])
             found = set()
             for node in nodes:
@@ -283,14 +284,14 @@ def read_object(raw, path):
     return value
 
 
-def audit(args, client):
+def audit(args, client, filing=None):
     started = utc()
     requests_started = client.requests
-    paths = TA.source_paths(**sources(args))
+    paths = TA.source_paths(**sources(args)) if filing is None else []
     raw, inputs = TA.capture(paths)
-    plan = read_object(raw, args.plan) if args.plan else None
-    draft = read_object(raw, args.draft) if args.draft else None
-    binding = read_object(raw, args.binding) if args.binding else None
+    plan = (filing['plan'] if filing else read_object(raw, args.plan) if args.plan else None)
+    draft = (filing['draft'] if filing else read_object(raw, args.draft) if args.draft else None)
+    binding = (filing['binding'] if filing else read_object(raw, args.binding) if args.binding else None)
     if plan is not None:
         require_id(plan.get('name'), 'plan name')
         if not isinstance(plan.get('units'), list):
@@ -350,7 +351,8 @@ def audit(args, client):
             issues = reader.project_issues(project)
         except (API.LinearError, ValueError, KeyError, TypeError) as exc:
             reader.problems.append(str(exc))
-        refs = [(i.get('unit'), i['identifier']) for i in (draft or {}).get('issues', []) if i.get('identifier')]
+        refs = [(i.get('unit'), i['linear_id'] if filing else i['identifier'])
+                for i in (draft or {}).get('issues', []) if i.get('linear_id' if filing else 'identifier')]
         if args.state_dir:
             try:
                 payload = raw[str((Path(args.state_dir) / 'outbox-receipts.jsonl').absolute())]
@@ -364,6 +366,10 @@ def audit(args, client):
         except (API.LinearError, ValueError, KeyError, TypeError) as exc:
             resolved = {}
             reader.problems.append(str(exc))
+        if filing:
+            # A lagging project listing cannot hide a freshly created unit.
+            listed = {i['id'] for i in issues}
+            issues.extend(i for i in resolved.values() if i is not None and i['id'] not in listed)
         for unit, ref in refs:
             issue = resolved.get(ref)
             if issue is not None:
@@ -379,12 +385,22 @@ def audit(args, client):
         marker_plan = plan['name'] if plan else (draft or {}).get('project', {}).get('slug')
         if marker_plan:
             try:
+                seen_before = set(reader.seen)
                 found = reader.markers(marker_plan)
+                if filing:
+                    found = [i for i in found if any(LF.has_markers(i.get('description'),
+                             {'swarm-unit': marker_plan + '/' + unit['id'],
+                              'swarm-repo': scope['repository']}) for unit in plan['units'])]
+                    keep = {i['id'] for i in found} | seen_before
+                    reader.seen = {k: v for k, v in reader.seen.items() if k in keep}
                 known.extend(found)
                 for issue in found:
                     for unit in (plan or {}).get('units', []):
                         marker = 'swarm-unit: ' + marker_plan + '/' + unit['id']
-                        if re.search(r'(?m)^\s*`?' + re.escape(marker) + r'`?\s*$', issue.get('description') or ''):
+                        matches = (LF.markers(issue.get('description'), 'swarm-unit') ==
+                                   [marker_plan + '/' + unit['id']] if filing else
+                                   re.search(r'(?m)^\s*`?' + re.escape(marker) + r'`?\s*$', issue.get('description') or ''))
+                        if matches:
                             if unit['id'] in mapped and mapped[unit['id']]['id'] != issue['id']:
                                 finding('plan_edges', 'UNKNOWN', {'unit': unit['id'], 'error': 'multiple issue mappings'})
                             else:
@@ -396,6 +412,8 @@ def audit(args, client):
             if (issue.get('project') or {}).get('id') != project:
                 finding('misplaced', 'DRIFT', issue['identifier'])
         try:
+            if filing:
+                LI.expand_scope(sys.modules[__name__], reader)
             edges, relations = edges_of(list(reader.seen.values()))
             project_ids = {i['id'] for i in issues}
             blockers = {a for a, b in edges if b in project_ids and a not in reader.seen}
@@ -418,7 +436,9 @@ def audit(args, client):
                             identifiers[peer['identifier']] = peer['id']
             unit_ids = {i['id'] for i in mapped.values()}
             # Draft mappings exempt units even when no plan was supplied.
-            for issue in issues:
+            checked_issues = ([i for i in reader.seen.values() if i['id'] in filing['checked']]
+                              if filing else issues)
+            for issue in checked_issues:
                 iid = issue['id']
                 problem = LI.declared_edges(issue)
                 if problem:
@@ -436,7 +456,7 @@ def audit(args, client):
                         if status != 'completed':
                             finding('blocked_in_progress', 'UNKNOWN' if status == 'UNKNOWN' else 'DRIFT',
                                     {'issue': issue['identifier'], 'blocker': reader.seen[a]['identifier']})
-            if cyclic({i['id'] for i in issues}, edges):
+            if cyclic(set(reader.seen) if filing else {i['id'] for i in issues}, edges):
                 finding('cycle', 'DRIFT', 'blocks cycle in project')
             if plan:
                 # A filed reference that could not be read is UNKNOWN, not
@@ -465,60 +485,61 @@ def audit(args, client):
         # A failed binding is itself conclusive drift/unknown; no other
         # remote data is trusted. Coverage explicitly records the skipped read.
         reader.problems.append('issue read withheld because binding did not match')
-    # Legacy drafts learn the workspace from the reader. Capture their local
-    # operation inputs too, and let section reuse that resolved scope.
-    op_paths = TA.source_paths(operation_scope=scope)
-    for path in op_paths:
-        if path not in paths:
-            paths.append(path)
-            added_raw, added_inputs = TA.capture([path])
-            raw.update(added_raw)
-            inputs.update(added_inputs)
-    try:
-        comments = project_comments(reader, workspace, project, [i['id'] for i in issues])
-        for issue in issues:
-            latest = latest_state(comments[issue['id']])
-            if latest and issue['state']['type'] != STATE_TYPE[latest['op']]:
-                finding('intent_order', 'DRIFT', {'issue': issue['identifier'],
-                        'latest': latest['key'], 'expected': STATE_TYPE[latest['op']],
-                        'actual': issue['state']['type']})
-    except (API.LinearError, ValueError, TypeError, KeyError) as exc:
-        finding('intent_order', 'UNKNOWN', str(exc))
-        reader.problems.append(str(exc))
-    if args.state_dir:
+    if filing is None:
+        # Legacy drafts learn the workspace from the reader. Capture their local
+        # operation inputs too, and let section reuse that resolved scope.
+        op_paths = TA.source_paths(operation_scope=scope)
+        for path in op_paths:
+            if path not in paths:
+                paths.append(path)
+                added_raw, added_inputs = TA.capture([path])
+                raw.update(added_raw)
+                inputs.update(added_inputs)
         try:
-            if raw[str((Path(args.state_dir) / 'swarm-state.json').absolute())] is None:
-                raise ValueError('coordinator state absent')
-            project_dir = os.environ.get('HANIG_PROJECT_DIR') or Path(__file__).parents[1]
-            swarm_dir = skill_paths.sibling_skill_root(project_dir, 'hanig-project', 'hanig-swarm')
-            env = {k: v for k, v in os.environ.items() if k != API.KEY_ENV}
-            result = subprocess.run([sys.executable, str(swarm_dir / 'scripts' / 'swarm.py'),
-                                     'status', args.plan, '--state-dir', args.state_dir, '--json'],
-                                    env=env, capture_output=True, text=True, timeout=60)
-            if result.returncode:
-                raise ValueError('coordinator status failed: ' + result.stderr)
-            for row in json.loads(result.stdout)['units']:
-                if row['id'] not in mapped:
-                    continue
-                issue_state = mapped[row['id']]['state']['type']
-                state = row['state']
-                mismatch = ((state == 'DONE' and issue_state != 'completed') or
-                            (state in ('RUNNING', 'SUBMITTED') and issue_state != 'started') or
-                            (state in ('FAILED', 'FAILED_EVIDENCE', 'HELD', 'NEEDS_HUMAN') and issue_state == 'completed'))
-                if mismatch:
-                    finding('swarm_state', 'DRIFT', {'unit': row['id'], 'coordinator': state, 'issue': issue_state})
-        except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
-            finding('swarm_state', 'UNKNOWN', str(exc))
+            comments = project_comments(reader, workspace, project, [i['id'] for i in issues])
+            for issue in issues:
+                latest = latest_state(comments[issue['id']])
+                if latest and issue['state']['type'] != STATE_TYPE[latest['op']]:
+                    finding('intent_order', 'DRIFT', {'issue': issue['identifier'],
+                            'latest': latest['key'], 'expected': STATE_TYPE[latest['op']],
+                            'actual': issue['state']['type']})
+        except (API.LinearError, ValueError, TypeError, KeyError) as exc:
+            finding('intent_order', 'UNKNOWN', str(exc))
             reader.problems.append(str(exc))
-    try:
-        for problem in LI.incomplete_operations(workspace, project):
-            finding('op_incomplete', 'DRIFT', problem)
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        finding('op_incomplete', 'UNKNOWN', str(exc))
+        if args.state_dir:
+            try:
+                if raw[str((Path(args.state_dir) / 'swarm-state.json').absolute())] is None:
+                    raise ValueError('coordinator state absent')
+                project_dir = os.environ.get('HANIG_PROJECT_DIR') or Path(__file__).parents[1]
+                swarm_dir = skill_paths.sibling_skill_root(project_dir, 'hanig-project', 'hanig-swarm')
+                env = {k: v for k, v in os.environ.items() if k != API.KEY_ENV}
+                result = subprocess.run([sys.executable, str(swarm_dir / 'scripts' / 'swarm.py'),
+                                         'status', args.plan, '--state-dir', args.state_dir, '--json'],
+                                        env=env, capture_output=True, text=True, timeout=60)
+                if result.returncode:
+                    raise ValueError('coordinator status failed: ' + result.stderr)
+                for row in json.loads(result.stdout)['units']:
+                    if row['id'] not in mapped:
+                        continue
+                    issue_state = mapped[row['id']]['state']['type']
+                    state = row['state']
+                    mismatch = ((state == 'DONE' and issue_state != 'completed') or
+                                (state in ('RUNNING', 'SUBMITTED') and issue_state != 'started') or
+                                (state in ('FAILED', 'FAILED_EVIDENCE', 'HELD', 'NEEDS_HUMAN') and issue_state == 'completed'))
+                    if mismatch:
+                        finding('swarm_state', 'DRIFT', {'unit': row['id'], 'coordinator': state, 'issue': issue_state})
+            except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
+                finding('swarm_state', 'UNKNOWN', str(exc))
+                reader.problems.append(str(exc))
+        try:
+            for problem in LI.incomplete_operations(workspace, project):
+                finding('op_incomplete', 'DRIFT', problem)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            finding('op_incomplete', 'UNKNOWN', str(exc))
     reader.stable()
     # Catch local writes during the read, including status-side observations.
     try:
-        if TA.current_inputs(**sources(args), operation_scope=scope) != inputs:
+        if filing is None and TA.current_inputs(**sources(args), operation_scope=scope) != inputs:
             reader.problems.append('local inputs changed during read')
     except OSError as exc:
         reader.problems.append(str(exc))
@@ -529,11 +550,12 @@ def audit(args, client):
             if cid != 'coverage' and check['verdict'] == 'CLEAN':
                 finding(cid, 'UNKNOWN', 'not evaluated over a complete read')
     records = list(checks.values())
-    return {'schema_version': 1, 'verdict': TA.verdict(records), 'read_started': started,
+    result = {'schema_version': 1, 'verdict': TA.verdict(records), 'read_started': started,
             'read_finished': utc(), 'scope': scope, 'inputs': inputs,
             'coverage': {'complete': not reader.problems, 'pages': reader.pages, 'issues': len(issues),
                          'requests': client.requests - requests_started},
             'checks': records}
+    return (result, reader) if filing else result
 
 
 # State is reconciled once per issue. Comments, including those from other
@@ -663,20 +685,28 @@ def read_comment(client, cid):
 def confirm_comment(client, intent, workspace, project, issue, create):
     cid = comment_id(workspace, project, issue, intent['key'])
     comment = read_comment(client, cid)
+    create_error = None
     if comment is None and create:
         try:
             client.query('mutation IntentCommentCreate($input: CommentCreateInput!) { '
                          'commentCreate(input: $input) { success } }',
                          {'input': {'id': cid, 'issueId': issue, 'body': comment_body(intent)}})
-        except API.LinearError:
+        except API.LinearError as exc:
             # A rejection or ambiguous response counts only if the exact
             # comment is subsequently read back on the intended issue.
-            pass
-        comment = read_comment(client, cid)
+            create_error = exc
+        try:
+            comment = read_comment(client, cid)
+        except (API.LinearError, OSError, ValueError, KeyError, TypeError):
+            if create_error is not None:
+                raise create_error from None
+            raise
     if comment is None and not create:
         return None
     parsed = genuine_comment(comment, workspace, project, issue) if comment else None
     if not parsed or parsed['markers'] != intent_markers(intent):
+        if create_error is not None:
+            raise create_error
         raise ValueError('comment missing or markers disagree on read-back')
     return parsed
 
@@ -984,6 +1014,7 @@ def main(argv=None):
     p.add_argument('--state-dir', action='append', required=True)
     p.add_argument('--dry-run', action='store_true')
     LI.add_parser(sub)
+    LF.add_parser(sub)
     args = parser.parse_args(argv)
     if getattr(args, 'plan', None) and not args.draft:
         parser.error('--plan requires --draft')
@@ -998,6 +1029,8 @@ def main(argv=None):
             LI.validate_request(args)
         key = API.load_key()
         client = API.Client(key)
+        if args.command in ('file', 'replay'):
+            return LF.run(args, client, sys.modules[__name__])
         if args.command == 'issue':
             return LI.run(args, client, sys.modules[__name__])
         if args.command == 'bind':
