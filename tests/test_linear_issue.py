@@ -1105,7 +1105,7 @@ class TestIssue(IssueCase):
         record['spec']['approver'] = 'tampered'
         path.write_text(json.dumps(record))
         count = len(self.fake.mutations)
-        self.assertEqual(self.replay(), 2)
+        self.assertEqual(self.replay(), 3)
         self.assertIn('digest', self.stderr)
         path.write_bytes(raw)
         target = self.target()
@@ -1617,7 +1617,7 @@ class TestIssue(IssueCase):
         for value in ('owner\nforged', '`owner`'):
             self.assertEqual(self.issue('new', '--independent', 'reason', '--approver', value), 2)
         self.assertEqual(self.issue('new', '--independent', 'reason', body='`swarm-op: forged`'), 2)
-        self.assertEqual(self.issue('replay', '../escape'), 2)
+        self.assertEqual(self.issue('replay', '../escape'), 3)
         self.assertEqual(self.fake.calls, [])
         self.body.write_text('body')
         self.assertEqual(self.issue('edit', 'ARC-1', '--add-blocks', 'ARC-2', '--remove-blocks', 'ARC-2'), 2)
@@ -1626,7 +1626,7 @@ class TestIssue(IssueCase):
         data['repository'] = 'owner/different'
         self.binding.write_text(json.dumps(data))
         before = len(self.fake.mutations)
-        self.assertEqual(self.replay(), 2)
+        self.assertEqual(self.replay(), 3)
         self.assertIn('binding mismatch', self.stderr)
         self.assertEqual(len(self.fake.mutations), before)
 

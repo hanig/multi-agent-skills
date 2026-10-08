@@ -1077,7 +1077,7 @@ def main(argv=None):
             message = ' '.join(message.splitlines())
         print(message, file=sys.stderr)
         replay = args.command == 'replay' or (args.command == 'issue' and args.issue_command == 'replay')
-        return 3 if replay and isinstance(exc, LI.DeletedIssue) else 2
+        return 3 if replay else 2
 
 
 if __name__ == '__main__':

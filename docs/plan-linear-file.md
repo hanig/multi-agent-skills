@@ -76,7 +76,10 @@ whole line is plain or backticked; order and blank separators are accepted.
 With a PR 3 trailer, identity sits above it and adjacent `swarm-deps-by`
 provenance. A lone marker-like line or a block followed by prose neither
 binds nor conflicts. Dependency markers are also read only in PR 3's
-terminal position; fenced and quoted examples in prose do not refuse.
+terminal position; fenced and quoted examples outside that position do not refuse.
+**Declared limit (owner decision 2026-10-07):** a backtick-quoted `swarm-deps:`
+example on an issue description's final line is read as a malformed dependency
+trailer and refuses adoption. Move the example or change the line order to recover.
 
 For a **project**, text a person appends after the identity lines makes the
 next `file` refuse as unmarked and name the project ID. After audit,
@@ -87,6 +90,9 @@ For an **issue**, `--adopt-checked` re-binds it and restores the approved
 body: text added in Linear is replaced. An explicitly selected unmarked
 issue, including one at its derived ID, is recoverable this way. A complete
 terminal block naming another unit or repository still refuses adoption.
+**Declared limit (owner decision 2026-10-07):** text a person appends after
+an issue's PR 3 dependency trailer in Linear is dropped when that issue is
+re-adopted with `--adopt-checked`.
 
 **Content identity, not Markdown rendering.** Linear re-renders descriptions:
 the live check changed `- kind:` to `* kind:` and dropped the blank line
@@ -205,8 +211,9 @@ linear_sync.py replay OPERATION_ID --draft tickets.json
 ```
 
 Exit 0 confirmed, 3 incomplete or not confirmed after recording an operation,
-2 refused before the operation record exists. In particular, retained deleted
-managed issues refuse fresh filing with 2 and replay with 3.
+2 refused before the operation record exists. Replay refusals of every kind
+exit 3, including digest mismatches and retained deleted managed issues;
+fresh refusals before recording an operation stay exit 2.
 `--preview` runs every check, prints what would be created, adopted, linked
 and unlinked, and sends and writes nothing.
 

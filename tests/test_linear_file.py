@@ -203,7 +203,7 @@ class FileCase(IssueCase):
                 live['description'] = live['description'].replace(self.body_line(), replacement)
                 live['description'] = live['description'].replace('Approved prose 0', 'Human prose')
                 writes = len(self.fake.mutations)
-                self.assertEqual(self.replay_file(), 2, self.stdout + self.stderr)
+                self.assertEqual(self.replay_file(), 3, self.stdout + self.stderr)
                 self.assertIn('managed issue changed', self.stderr)
                 self.assertEqual(len(self.fake.mutations), writes)
                 self.assertEqual(self.file(), 0, self.stdout + self.stderr)
@@ -232,7 +232,7 @@ class FileCase(IssueCase):
                     self.assertIn(pid if kind == 'project' else remote['identifier'], self.stderr)
                     self.assertEqual(self.records(), records)
                     self.assertEqual(len(self.fake.mutations), writes)
-                    self.assertEqual(self.replay_file(), 2, self.stdout + self.stderr)
+                    self.assertEqual(self.replay_file(), 3, self.stdout + self.stderr)
                     # Leave recovery incomplete, then resume its recorded before/desired values.
                     self.fake.ignore_update = True
                     self.assertEqual(self.file('--adopt-checked'), 3, self.stdout + self.stderr)
@@ -246,6 +246,21 @@ class FileCase(IssueCase):
                     self.assertEqual(self.file(), 0, self.stdout + self.stderr)
                     self.assertEqual(self.replay_file(), 0, self.stdout + self.stderr)
                     self.assertEqual(len(self.fake.mutations), writes)
+
+    def test_adoption_drops_text_appended_after_pr3_trailer(self):
+        self.new_draft(1)
+        self.assertEqual(self.file(), 0, self.stdout + self.stderr)
+        live = self.fake.issues[self.unit_ids()['u0']]
+        live['description'] = LI.description(live['description'], set(), set(), 'old-op', 'owner')
+        live['description'] += '\nHuman note after dependency trailer'
+        writes, records = len(self.fake.mutations), self.records()
+        self.assertEqual(self.file(), 2, self.stdout + self.stderr)
+        self.assertIn('unmarked issue', self.stderr)
+        self.assertEqual(len(self.fake.mutations), writes)
+        self.assertEqual(self.records(), records)
+        self.assertEqual(self.file('--adopt-checked'), 0, self.stdout + self.stderr)
+        self.assertEqual(live['description'], 'Approved prose 0\nswarm-unit: plan/u0\n'
+                         'swarm-repo: owner/repo\n' + self.body_line())
 
     def test_issue_recovery_with_changed_edges_keeps_pr3_trailer(self):
         self.assertEqual(self.file(), 0, self.stdout + self.stderr)
@@ -301,7 +316,7 @@ class FileCase(IssueCase):
         writes = len(self.fake.mutations)
         self.assertEqual(self.file(), 2, self.stdout + self.stderr)
         self.assertIn('bound to another unit', self.stderr)
-        self.assertEqual(self.replay_file(), 2, self.stdout + self.stderr)
+        self.assertEqual(self.replay_file(), 3, self.stdout + self.stderr)
         self.assertIn('managed issue changed', self.stderr)
         self.assertEqual(len(self.fake.mutations), writes)
         live['description'] = body
@@ -311,7 +326,7 @@ class FileCase(IssueCase):
         self.assertIn('unmarked project', self.stderr)
         self.assertEqual(self.file('--adopt-checked'), 2, self.stdout + self.stderr)
         self.assertIn('conflicting swarm-plan marker', self.stderr)
-        self.assertEqual(self.replay_file(), 2, self.stdout + self.stderr)
+        self.assertEqual(self.replay_file(), 3, self.stdout + self.stderr)
         self.assertIn('managed project changed', self.stderr)
         self.assertEqual(len(self.fake.mutations), writes)
 
@@ -346,7 +361,7 @@ class FileCase(IssueCase):
         before = live['title']
         live['title'] = 'Unrelated title'
         writes = len(self.fake.mutations)
-        self.assertEqual(self.replay_file(op), 2, self.stdout + self.stderr)
+        self.assertEqual(self.replay_file(op), 3, self.stdout + self.stderr)
         self.assertEqual(len(self.fake.mutations), writes)
         live['title'] = before
         self.assertEqual(self.replay_file(op), 0, self.stdout + self.stderr)
@@ -363,7 +378,7 @@ class FileCase(IssueCase):
                 before = project[field]
                 project[field] = value
                 writes = len(self.fake.mutations)
-                self.assertEqual(self.replay_file(), 2, self.stdout + self.stderr)
+                self.assertEqual(self.replay_file(), 3, self.stdout + self.stderr)
                 self.assertIn('managed project changed', self.stderr)
                 self.assertEqual(len(self.fake.mutations), writes)
                 project[field] = before
@@ -381,7 +396,7 @@ class FileCase(IssueCase):
         path.write_text(json.dumps({'spec': spec, 'sha256': LI.digest(spec)}))
         old_record = path.read_bytes()
         self.fake.calls.clear()
-        self.assertEqual(self.replay_file(path.stem), 2, self.stdout + self.stderr)
+        self.assertEqual(self.replay_file(path.stem), 3, self.stdout + self.stderr)
         self.assertIn('run file with the approved draft', self.stderr)
         self.assertEqual(self.fake.calls, [])
         self.assertEqual(self.file(), 0, self.stdout + self.stderr)
@@ -989,8 +1004,14 @@ class FileCase(IssueCase):
         self.data['issues'][0]['body'] = 'edited after crash'
         self.approve()
         self.fake.calls.clear()
-        self.assertEqual(self.replay_file(), 2)
+        path = self.records()[0]
+        record = path.read_bytes()
+        writes = len(self.fake.mutations)
+        self.assertEqual(self.replay_file(), 3, self.stdout + self.stderr)
+        self.assertIn('replay approval digest differs', self.stderr)
         self.assertEqual(self.fake.calls, [])
+        self.assertEqual(len(self.fake.mutations), writes)
+        self.assertEqual(path.read_bytes(), record)
         self.fake.add_project('foreign')
         for target in ('project', 'issue'):
             self.data = copy.deepcopy(old)
@@ -1454,21 +1475,21 @@ class FileCase(IssueCase):
         for edit, error in edits:
             self.fake.issues = copy.deepcopy(before)
             edit()
-            self.assertEqual(self.replay_file(), 2)
+            self.assertEqual(self.replay_file(), 3)
             self.assertIn(error, self.stderr)
             self.assertEqual(len(self.fake.mutations), mutations)
         self.fake.issues = before
         pid = self.data['project']['linear_id']
         self.fake.projects[pid]['teams'] = connection([dict(self.fake.team, id='wrong')])
-        self.assertEqual(self.replay_file(), 2)
+        self.assertEqual(self.replay_file(), 3)
         self.assertIn('project team changed', self.stderr)
         self.fake.projects[pid]['teams'] = connection([self.fake.team])
         self.fake.projects[pid]['name'] = 'later name'
-        self.assertEqual(self.replay_file(), 2)
+        self.assertEqual(self.replay_file(), 3)
         self.assertIn('managed project changed', self.stderr)
         self.fake.projects[pid]['name'] = 'Plan'
         del self.fake.projects[pid]
-        self.assertEqual(self.replay_file(), 2)
+        self.assertEqual(self.replay_file(), 3)
         self.assertIn('managed project deleted', self.stderr)
 
     def test_replay_refuses_redirected_progress_and_missing_record(self):
@@ -1477,10 +1498,10 @@ class FileCase(IssueCase):
         self.data['project']['linear_id'] = 'elsewhere'
         self.save()
         before = len(self.fake.mutations)
-        self.assertEqual(self.replay_file(), 2)
+        self.assertEqual(self.replay_file(), 3)
         self.assertIn('operation binding differs', self.stderr)
         self.assertEqual(len(self.fake.mutations), before)
-        self.assertEqual(self.replay_file('00000000-0000-0000-0000-000000000000'), 2)
+        self.assertEqual(self.replay_file('00000000-0000-0000-0000-000000000000'), 3)
         self.assertIn('operation not found', self.stderr)
 
     def test_created_identity_collision_stops_before_later_mutations(self):
@@ -1511,7 +1532,7 @@ class FileCase(IssueCase):
                 self.file()
         self.fake.edge('80', '81')
         before = len(self.fake.mutations)
-        self.assertEqual(self.replay_file(), 2)
+        self.assertEqual(self.replay_file(), 3)
         self.assertIn('resulting blocks cycle', self.stderr)
         self.assertEqual(len(self.fake.mutations), before)
 
@@ -1555,6 +1576,17 @@ class FileCase(IssueCase):
         self.assertIn('malformed dependency trailer', self.stderr)
         self.assertEqual(self.fake.mutations, [])
 
+    def test_final_quoted_dependency_example_refuses_adoption_until_moved(self):
+        self.new_draft(1)
+        live = self.existing_unit(0, self.seed())
+        live['description'] = 'Quoted example:\n`swarm-deps: example`'
+        self.assertEqual(self.file('--adopt-checked'), 2, self.stdout + self.stderr)
+        self.assertIn('malformed dependency trailer', self.stderr)
+        self.assertEqual(self.fake.mutations, [])
+        self.assertEqual(self.records(), [])
+        live['description'] += '\nEnd of example'
+        self.assertEqual(self.file('--adopt-checked'), 0, self.stdout + self.stderr)
+
     def test_fenced_dependency_example_files_refiles_and_replays(self):
         self.new_draft(1)
         self.data['issues'][0]['body'] = 'Example:\n```text\n`swarm-deps: example`\n```\n'
@@ -1571,7 +1603,7 @@ class FileCase(IssueCase):
         self.fake.add('99', project='external')
         self.fake.edge('99', ids['u0'])
         before = len(self.fake.mutations)
-        self.assertEqual(self.replay_file(), 2)
+        self.assertEqual(self.replay_file(), 3)
         self.assertIn('managed edges changed', self.stderr)
         self.assertEqual(len(self.fake.mutations), before)
 
