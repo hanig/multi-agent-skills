@@ -141,6 +141,7 @@ INSTALLATION_LABELS = {"claude-user", "claude-home", "claude-compatible"}
 MODEL_SHAPE = re.compile(
     r"(?<![A-Za-z0-9_./-])(?:"
     r"(?:[A-Za-z][A-Za-z0-9_.-]*/)+[A-Za-z][A-Za-z0-9_.-]*[0-9][A-Za-z0-9_.-]*"
+    r"|(?:[A-Za-z][A-Za-z0-9_.-]*/)+[A-Za-z][A-Za-z0-9_.-]*-(?:pro|latest|preview|chat|instruct|base|coder)"
     r"|(?:gpt|claude|gemini|llama|deepseek|qwen|kimi|glm|mistral|grok)-[A-Za-z0-9][A-Za-z0-9_.-]*"
     r"|o[0-9]+(?:-[A-Za-z0-9][A-Za-z0-9_.-]*)?"
     r")(?![A-Za-z0-9_./-])")
@@ -231,12 +232,17 @@ class TestNoHardcodedModels(unittest.TestCase):
     def test_unknown_models_fail_without_a_roster_entry(self):
         values = ("newvendor/nebula-987", "openrouter/newvendor/nebula-987",
                   "gpt-987-future", "claude-future", "gemini-987-pro",
-                  "qwen-987", "deepseek-v987", "o987", "grok-987")
+                  "qwen-987", "deepseek-v987", "o987", "grok-987",
+                  *("newvendor/nebula-" + suffix for suffix in
+                    ("pro", "latest", "preview", "chat", "instruct", "base", "coder")))
         for value in values:
             self.assertNotIn(value, declared_model_ids())
             for source in ("MODEL = %r", "launch(model=%r)",
-                           "def load():\n    return %r", "X = f'--model {%r}'"):
+                           "def load():\n    return %r", 'X = f"--model {%r}"'):
                 with self.subTest(value=value, source=source):
+                    # Parse generated fixtures at the release-validation floor,
+                    # including when this test itself runs on a newer Python.
+                    ast.parse(source % value, feature_version=9)
                     self.assertTrue(model_shape_hits(source % value))
         self.assertEqual(model_shape_hits(
             '"""gpt-987 notes"""\n# gpt-987\n'
