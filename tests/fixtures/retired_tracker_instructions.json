@@ -1,154 +1,100 @@
 [
   {
-    "source": "base: CLAUDE.md",
-    "text": "Tracker work goes to an idempotent outbox that an authorized session drains through the existing connector path; the linear_sync.py operator audits, drains, files approved drafts through file --draft and replay OPERATION --draft, and files/edits ad-hoc issues through issue new"
+    "source": "CLAUDE.md",
+    "deleted_lines": [
+      {
+        "line": 85,
+        "text": "**The swarm coordinator has no network imports.** `swarm.py` must not import `review.py` or `committee.py`: those are network-capable programs the operating session runs with its own credentials. Tracker work goes to an idempotent outbox that an authorized session drains through the existing connector path; the `linear_sync.py` operator audits, drains, files approved drafts through `file --draft` and `replay OPERATION --draft`, and files/edits ad-hoc issues through `issue new | edit | replay` and `linear_api.transport`, while `swarm.py`, `tickets.py` and `drain_contract.py` import neither network module. `tracker_audit.py` validates and renders audit records offline. The operator audit never judges a unit or changes merge success, so an unreachable tracker cannot block dispatch and draining twice cannot file twice. An intent with no receipt reads `unacknowledged`, which means this machine has no confirmation either way and never means the issue was not filed. A false acknowledgment is strictly worse than a missing one, because re-draining is safe and un-filing is not. `child_environment.py` strips 22 exact names from every coordinator child, covering the Anthropic, OpenAI and OpenRouter keys, GitHub and AWS credentials, `LINEAR_API_KEY` and `SSH_AUTH_SOCK`, with suffix matching deliberately abandoned after a regression. It is not a general secret filter: Paseo's daemon supplies the worker its own keys and `$HOME` passes through. That residue is accepted and recorded; do not re-file it as a defect."
+      }
+    ],
+    "text": "Tracker work goes to an idempotent outbox that an authorized session drains through the existing connector path; the `linear_sync.py` operator audits, drains, files approved drafts through `file --draft` and `replay OPERATION --draft`, and files/edits ad-hoc issues through `issue new | edit | replay` and `linear_api.transport`, while `swarm.py`, `tickets.py` and `drain_contract.py` import neither network module."
   },
   {
-    "source": "base: README.md",
-    "text": "Intents go to the outbox; a session with MCP drains them into Linear (team Arc), where the project can be connected to GitHub for PRs."
+    "source": "README.md",
+    "deleted_lines": [
+      {
+        "line": 1007,
+        "text": "7. **File.** Intents go to the outbox; a session with MCP drains them into"
+      },
+      {
+        "line": 1008,
+        "text": "   Linear (team `Arc`), where the project can be connected to GitHub for PRs."
+      }
+    ],
+    "text": "Intents go to the outbox; a session with MCP drains them into Linear (team `Arc`), where the project can be connected to GitHub for PRs."
   },
   {
-    "source": "base: README.md",
+    "source": "README.md",
+    "deleted_lines": [
+      {
+        "line": 878,
+        "text": "outbox; a session that has MCP drains them. A tracker that is unreachable can"
+      }
+    ],
     "text": "It writes intents to an idempotent outbox; a session that has MCP drains them."
   },
   {
-    "source": "base: docs/agent-compatibility.md",
-    "text": "Keep the ticket intent/outbox artifact reviewable, report pending synchronization, and let a session with the real connector apply it."
+    "source": "docs/agent-compatibility.md",
+    "deleted_lines": [
+      {
+        "line": 44,
+        "text": "| Linear connector and authorized account | Reading or mutating Linear | No connector, account, or mutation authority in this session | Keep the ticket intent/outbox artifact reviewable, report **pending synchronization**, and let a session with the real connector apply it. |"
+      }
+    ],
+    "text": "Keep the ticket intent/outbox artifact reviewable, report **pending synchronization**, and let a session with the real connector apply it."
   },
   {
-    "source": "base: docs/agent-compatibility.md",
-    "text": "Use the connector available to the current session and its real operation names."
+    "source": "docs/agent-compatibility.md",
+    "deleted_lines": [
+      {
+        "line": 58,
+        "text": "Use the connector available to the **current session** and its real operation"
+      },
+      {
+        "line": 59,
+        "text": "names. Before any external tracker mutation, obey the host's approval policy"
+      }
+    ],
+    "text": "Use the connector available to the **current session** and its real operation names."
   },
   {
-    "source": "base: docs/plan-linear-drain.md",
-    "text": "It replaces the hand step in which a session applied an intent through the Linear MCP connector and ran swarm.py outbox --record-receipt KEY --ref ID."
-  },
-  {
-    "source": "base: docs/plan-linear-file.md",
-    "text": "This PR replaces the step in hanig-project where a session read tickets.json and created the project and issues by hand through the Linear MCP connector."
-  },
-  {
-    "source": "base: docs/plan-linear-issue.md",
-    "text": "The Linear MCP write path stays usable until PR 5 denies it."
-  },
-  {
-    "source": "base: docs/plan-swarm.md",
-    "text": "No drain is written yet: the registry offers no Linear connector, so that half waits on the account."
-  },
-  {
-    "source": "base: docs/tracker-outbox.md",
-    "text": "Existing connector draining and its acknowledgment contract remain the write path."
-  },
-  {
-    "source": "base: skills/hanig-orchestrate/SKILL.md",
+    "source": "skills/hanig-orchestrate/SKILL.md",
+    "deleted_lines": [
+      {
+        "line": 116,
+        "text": "5. Drain pending tracker intents through the authorized connector."
+      }
+    ],
     "text": "Drain pending tracker intents through the authorized connector."
   },
   {
-    "source": "base: skills/hanig-orchestrate/SKILL.md",
-    "text": "tracker.reconcile: Treat each dispatch as a tracker event and reconcile every in-progress issue by state rather than recency after each dispatch, push, merge, and close: record every covered issue's move to in progress with its unit immediately, apply it when the connector is available, and retain pending synchronization without blocking unrelated dispatch otherwise; a stopped unshipped attempt likewise records where its work was preserved."
-  },
-  {
-    "source": "base: skills/hanig-orchestrate/declarations.json",
+    "source": "skills/hanig-orchestrate/SKILL.md",
+    "deleted_lines": [
+      {
+        "line": 57,
+        "text": "- **`tracker.reconcile`:** Treat each dispatch as a tracker event and reconcile every in-progress issue by state rather than recency after each dispatch, push, merge, and close: record every covered issue's move to in progress with its unit immediately, apply it when the connector is available, and retain pending synchronization without blocking unrelated dispatch otherwise; a stopped unshipped attempt likewise records where its work was preserved. (Elaboration: [operating-loop.md](references/operating-loop.md).)"
+      }
+    ],
     "text": "Treat each dispatch as a tracker event and reconcile every in-progress issue by state rather than recency after each dispatch, push, merge, and close: record every covered issue's move to in progress with its unit immediately, apply it when the connector is available, and retain pending synchronization without blocking unrelated dispatch otherwise; a stopped unshipped attempt likewise records where its work was preserved."
   },
   {
-    "source": "base: skills/hanig-orchestrate/references/operating-loop.md",
+    "source": "skills/hanig-orchestrate/references/operating-loop.md",
+    "deleted_lines": [
+      {
+        "line": 142,
+        "text": "The sweep examines every in-progress issue regardless of age and repeats after each dispatch, push, merge, and close. A dispatch immediately records the tracker event that moves every covered issue to in progress with its unit; the connector applies it when available, while an outage leaves pending synchronization without blocking unrelated dispatch. A stopped attempt that did not ship similarly records its state and preservation ref. The read-only reconciler defaults to the checkout origin and branch `main`; `--repo OWNER/REPO` (or a forge URL) and `--branch` select alternatives. The shorthand uses the host resolved by `gh repo view`; a failed resolution is unreadable input. Repeated `--state-dir` includes older runs. Its window is an inclusive timezone-bearing `--since`, the most recently merged `--limit N` PRs, or both. UNMEDIATED MERGE means no matching record accounts for the PR, repository, target and historical head/merge; the operator investigates bypass and reconciles evidence and tracker obligations. UNACKNOWLEDGED OBLIGATION means a matching source's outbox intent lacks a receipt; the operator resolves ambiguity by receiver read-back or deduplication before draining and attesting. MISMATCHED SOURCE means coordinator anchors name another repository or several; the operator selects the correct source, while the mismatched source contributes neither merge nor obligation coverage. Missing anchors are unreadable. Exit 0 means all sources were read without findings; exit 1 means findings; exit 2 means unreadable input and precludes a clean report. The command changes no forge, tracker or coordinator state. <!-- declaration: tracker.reconcile -->"
+      }
+    ],
     "text": "A dispatch immediately records the tracker event that moves every covered issue to in progress with its unit; the connector applies it when available, while an outage leaves pending synchronization without blocking unrelated dispatch."
   },
   {
-    "source": "base: skills/hanig-project/SKILL.md",
-    "text": "capability.tracker: Use only the current session's real connector and operations; if none is available, preserve the reviewed draft or outbox intent, report the pending synchronization to the owner, and never invent a receipt, ticket reference, or confirmation."
-  },
-  {
-    "source": "base: skills/hanig-project/declarations.json",
+    "source": "skills/hanig-project/SKILL.md",
+    "deleted_lines": [
+      {
+        "line": 19,
+        "text": "- **`capability.tracker`:** Use only the current session's real connector and operations; if none is available, preserve the reviewed draft or outbox intent, report the pending synchronization to the owner, and never invent a receipt, ticket reference, or confirmation. (Elaboration: [tracker-sync.md](references/tracker-sync.md).)"
+      }
+    ],
     "text": "Use only the current session's real connector and operations; if none is available, preserve the reviewed draft or outbox intent, report the pending synchronization to the owner, and never invent a receipt, ticket reference, or confirmation."
-  },
-  {
-    "source": "retained scope fixture",
-    "text": "A session that has MCP drains them."
-  },
-  {
-    "source": "retained scope fixture",
-    "text": "A session drains through the existing connector path."
-  },
-  {
-    "source": "retained scope fixture",
-    "text": "Use the connector available to the current session."
-  },
-  {
-    "source": "retained scope fixture",
-    "text": "In the session with the connector: file it."
-  },
-  {
-    "source": "retained scope fixture",
-    "text": "File through the Linear MCP connector."
-  },
-  {
-    "source": "retained scope fixture",
-    "text": "Drain through the authorized connector."
-  },
-  {
-    "source": "retained scope fixture",
-    "text": "A session with MCP drains them."
-  },
-  {
-    "source": "retained scope fixture",
-    "text": "The connector applies it when available."
-  },
-  {
-    "source": "retained scope fixture",
-    "text": "Existing connector draining remains the write path."
-  },
-  {
-    "source": "retained writer fixture",
-    "text": "The MCP connector files approved drafts."
-  },
-  {
-    "source": "retained writer fixture",
-    "text": "Query tracker status; The MCP connector files approved drafts."
-  },
-  {
-    "source": "retained writer fixture",
-    "text": "The connector creates Linear issues."
-  },
-  {
-    "source": "retained writer fixture",
-    "text": "Query tracker status; The connector creates Linear issues."
-  },
-  {
-    "source": "retained writer fixture",
-    "text": "The connector drains pending outbox intents."
-  },
-  {
-    "source": "retained writer fixture",
-    "text": "Query tracker status; The connector drains pending outbox intents."
-  },
-  {
-    "source": "retained writer fixture",
-    "text": "The MCP connector applies tracker intents."
-  },
-  {
-    "source": "retained writer fixture",
-    "text": "Query tracker status; The MCP connector applies tracker intents."
-  },
-  {
-    "source": "retained writer fixture",
-    "text": "Read the draft and file it through the Linear MCP connector."
-  },
-  {
-    "source": "retained writer fixture",
-    "text": "Query tracker status; Read the draft and file it through the Linear MCP connector."
-  },
-  {
-    "source": "reproduced mutation or review case",
-    "text": "A session with MCP drains them into Linear."
-  },
-  {
-    "source": "reproduced mutation or review case",
-    "text": "Read the issue status through the connector, then close the issue through it."
-  },
-  {
-    "source": "reproduced mutation or review case",
-    "text": "Read the ticket and close it through the Linear MCP connector."
   }
 ]
