@@ -476,6 +476,16 @@ class TestIssue(IssueCase):
             self.assertEqual(self.issue('new', '--independent', 'reason', body=marker + digest), 2)
             self.assertEqual(self.fake.mutations, writes)
 
+    def test_plain_dependency_examples_remain_valid_body_prose(self):
+        for name in ('deps', 'op', 'approver', 'deps-by'):
+            with self.subTest(name=name):
+                body = 'Documentation:\nswarm-' + name + ': sample\nEnd of example'
+                self.assertEqual(self.issue('new', '--blocked-by', 'ARC-1', body=body), 0,
+                                 self.stdout + self.stderr)
+                target = re.search(r'CONFIRMED \S+ (\S+)', self.stdout)[1]
+                live = next(i for i in self.fake.issues.values() if i['identifier'] == target)
+                self.assertTrue(live['description'].startswith(body + '\n'))
+
     def test_archived_observed_sources_and_relation_lookups(self):
         for field, value in (('archivedAt', 'date'), ('trashed', True)):
             for incoming in (True, False):
