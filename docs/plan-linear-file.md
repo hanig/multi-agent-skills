@@ -7,9 +7,9 @@ criterion 8's live check and to cancel them afterwards.
 
 The rest of slice 4 of `docs/plan-linear-dag-control.md` (owner-approved
 2026-10-05; slice 4 was split, and PR 3, pull 187, shipped the ad-hoc
-`issue` command). This PR replaces the step in `hanig-project` where a
-session read `tickets.json` and created the project and issues by hand
-through the Linear MCP connector. The draft contract and its one approval
+`issue` command). The implemented operator is
+`linear_sync.py file --draft tickets.json`, which creates the project and issues
+through `linear_api.transport` using the authorized session's `LINEAR_API_KEY`. The draft contract and its one approval
 stay; the program applies an approved draft.
 
 It reuses what is merged: PR 1's binding validation, reader, coverage rules
@@ -219,8 +219,7 @@ and unlinked, and sends and writes nothing.
 
 ## Docs
 
-`hanig-project` step 4 runs `linear_sync.py file` after approval instead of
-the MCP connector; the `tracker.apply` and `tracker.edges` declarations say
+`hanig-project` step 4 runs `linear_sync.py file` after approval; the `tracker.apply` and `tracker.edges` declarations say
 so. `docs/tracker-outbox.md` and CLAUDE.md name it.
 
 ## Acceptance criteria

@@ -10,8 +10,8 @@ Part of slice 4 of `docs/plan-linear-dag-control.md` (owner-approved
 `issue` command, the write path behind the owner's original complaint (new
 issues filed with blockers written as prose, outside the graph); approved
 `tickets.json` filing follows as PR 4. PR 1 (pull 185) shipped the binding
-and audit; PR 2 (pull 186) the drain. The Linear MCP write path stays usable
-until PR 5 denies it.
+and audit; PR 2 (pull 186) the drain. The implemented ad-hoc write path is `linear_sync.py issue`,
+using the authorized session's `LINEAR_API_KEY`; audit follows the mutation.
 
 ## Command
 
