@@ -1,0 +1,154 @@
+[
+  {
+    "source": "base: CLAUDE.md",
+    "text": "Tracker work goes to an idempotent outbox that an authorized session drains through the existing connector path; the linear_sync.py operator audits, drains, files approved drafts through file --draft and replay OPERATION --draft, and files/edits ad-hoc issues through issue new"
+  },
+  {
+    "source": "base: README.md",
+    "text": "Intents go to the outbox; a session with MCP drains them into Linear (team Arc), where the project can be connected to GitHub for PRs."
+  },
+  {
+    "source": "base: README.md",
+    "text": "It writes intents to an idempotent outbox; a session that has MCP drains them."
+  },
+  {
+    "source": "base: docs/agent-compatibility.md",
+    "text": "Keep the ticket intent/outbox artifact reviewable, report pending synchronization, and let a session with the real connector apply it."
+  },
+  {
+    "source": "base: docs/agent-compatibility.md",
+    "text": "Use the connector available to the current session and its real operation names."
+  },
+  {
+    "source": "base: docs/plan-linear-drain.md",
+    "text": "It replaces the hand step in which a session applied an intent through the Linear MCP connector and ran swarm.py outbox --record-receipt KEY --ref ID."
+  },
+  {
+    "source": "base: docs/plan-linear-file.md",
+    "text": "This PR replaces the step in hanig-project where a session read tickets.json and created the project and issues by hand through the Linear MCP connector."
+  },
+  {
+    "source": "base: docs/plan-linear-issue.md",
+    "text": "The Linear MCP write path stays usable until PR 5 denies it."
+  },
+  {
+    "source": "base: docs/plan-swarm.md",
+    "text": "No drain is written yet: the registry offers no Linear connector, so that half waits on the account."
+  },
+  {
+    "source": "base: docs/tracker-outbox.md",
+    "text": "Existing connector draining and its acknowledgment contract remain the write path."
+  },
+  {
+    "source": "base: skills/hanig-orchestrate/SKILL.md",
+    "text": "Drain pending tracker intents through the authorized connector."
+  },
+  {
+    "source": "base: skills/hanig-orchestrate/SKILL.md",
+    "text": "tracker.reconcile: Treat each dispatch as a tracker event and reconcile every in-progress issue by state rather than recency after each dispatch, push, merge, and close: record every covered issue's move to in progress with its unit immediately, apply it when the connector is available, and retain pending synchronization without blocking unrelated dispatch otherwise; a stopped unshipped attempt likewise records where its work was preserved."
+  },
+  {
+    "source": "base: skills/hanig-orchestrate/declarations.json",
+    "text": "Treat each dispatch as a tracker event and reconcile every in-progress issue by state rather than recency after each dispatch, push, merge, and close: record every covered issue's move to in progress with its unit immediately, apply it when the connector is available, and retain pending synchronization without blocking unrelated dispatch otherwise; a stopped unshipped attempt likewise records where its work was preserved."
+  },
+  {
+    "source": "base: skills/hanig-orchestrate/references/operating-loop.md",
+    "text": "A dispatch immediately records the tracker event that moves every covered issue to in progress with its unit; the connector applies it when available, while an outage leaves pending synchronization without blocking unrelated dispatch."
+  },
+  {
+    "source": "base: skills/hanig-project/SKILL.md",
+    "text": "capability.tracker: Use only the current session's real connector and operations; if none is available, preserve the reviewed draft or outbox intent, report the pending synchronization to the owner, and never invent a receipt, ticket reference, or confirmation."
+  },
+  {
+    "source": "base: skills/hanig-project/declarations.json",
+    "text": "Use only the current session's real connector and operations; if none is available, preserve the reviewed draft or outbox intent, report the pending synchronization to the owner, and never invent a receipt, ticket reference, or confirmation."
+  },
+  {
+    "source": "retained scope fixture",
+    "text": "A session that has MCP drains them."
+  },
+  {
+    "source": "retained scope fixture",
+    "text": "A session drains through the existing connector path."
+  },
+  {
+    "source": "retained scope fixture",
+    "text": "Use the connector available to the current session."
+  },
+  {
+    "source": "retained scope fixture",
+    "text": "In the session with the connector: file it."
+  },
+  {
+    "source": "retained scope fixture",
+    "text": "File through the Linear MCP connector."
+  },
+  {
+    "source": "retained scope fixture",
+    "text": "Drain through the authorized connector."
+  },
+  {
+    "source": "retained scope fixture",
+    "text": "A session with MCP drains them."
+  },
+  {
+    "source": "retained scope fixture",
+    "text": "The connector applies it when available."
+  },
+  {
+    "source": "retained scope fixture",
+    "text": "Existing connector draining remains the write path."
+  },
+  {
+    "source": "retained writer fixture",
+    "text": "The MCP connector files approved drafts."
+  },
+  {
+    "source": "retained writer fixture",
+    "text": "Query tracker status; The MCP connector files approved drafts."
+  },
+  {
+    "source": "retained writer fixture",
+    "text": "The connector creates Linear issues."
+  },
+  {
+    "source": "retained writer fixture",
+    "text": "Query tracker status; The connector creates Linear issues."
+  },
+  {
+    "source": "retained writer fixture",
+    "text": "The connector drains pending outbox intents."
+  },
+  {
+    "source": "retained writer fixture",
+    "text": "Query tracker status; The connector drains pending outbox intents."
+  },
+  {
+    "source": "retained writer fixture",
+    "text": "The MCP connector applies tracker intents."
+  },
+  {
+    "source": "retained writer fixture",
+    "text": "Query tracker status; The MCP connector applies tracker intents."
+  },
+  {
+    "source": "retained writer fixture",
+    "text": "Read the draft and file it through the Linear MCP connector."
+  },
+  {
+    "source": "retained writer fixture",
+    "text": "Query tracker status; Read the draft and file it through the Linear MCP connector."
+  },
+  {
+    "source": "reproduced mutation or review case",
+    "text": "A session with MCP drains them into Linear."
+  },
+  {
+    "source": "reproduced mutation or review case",
+    "text": "Read the issue status through the connector, then close the issue through it."
+  },
+  {
+    "source": "reproduced mutation or review case",
+    "text": "Read the ticket and close it through the Linear MCP connector."
+  }
+]

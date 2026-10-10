@@ -1,8 +1,10 @@
 """Guard retired tracker instructions and the audit's current-status citations."""
 import ast
+import json
 from pathlib import Path
 import re
 import tempfile
+import textwrap
 import unittest
 
 
@@ -16,44 +18,46 @@ the word “MCP.” A2A 1.0.0 also has asynchronous task lifecycle states;
 requested tracker mutation is present. Both protocols are connector details
 outside the coordinator."""
 
-# Match retired instructions across line wrapping, without banning unrelated
-# MCP setup, capability absence, protocol field names or planned write denial.
-RETIRED = re.compile("|".join((
-    r"\bsession\s+(?:that\s+)?(?:has|with)\s+(?:the\s+)?(?:Linear\s+)?MCP\b",
-    r"\b(?:through|via)\s+(?:(?:the|an?|authorized|existing|Linear)\s+)*"
-    r"(?:MCP(?:\s+connector)?|connector)\b",
-    r"\b(?:session\s+with\s+the|connector\s+session['’]s)\s+"
-    r"(?:connector|report)\b",
-    r"\bconnector\s+(?:drain\w*|filing|applies\s+it)\b",
-    r"\b(?:existing\s+connector\s+path|manual\s+connector\s+filing)\b",
-    r"\bUse\s+the\s+connector\s+available\s+to\b",
-    r"\bLinear\s+MCP\s+write\s+path\s+stays\s+usable\b",
-    r"\bsession\s+with\s+the\s+real\s+connector\s+apply\s+it\b",
-    r"\bconnector\s+(?:files|creates|updates)\s+"
-    r"(?:(?:the|approved|Linear|tracker)\s+)*(?:drafts?|issues?|tickets?|projects?)\b",
-    r"\bconnector\s+(?:drains|applies)\s+"
-    r"(?:(?:the|pending|tracker|outbox)\s+)*(?:intents?|outbox)\b",
-)), re.IGNORECASE)
-READ_OPERATION = re.compile(r"\b(?:read|query|look\s+up|inspect|fetch)\b", re.IGNORECASE)
-WRITE_OPERATION = re.compile(
-    r"\b(?:drain\w*|fil(?:e|es|ed|ing)|creat\w*|updat\w*|mutat\w*|"
-    r"appl(?:y|ies|ied|ying))\b", re.IGNORECASE)
+# This is a finite regression catalog, not a classifier for future prose.
+# Source entries come from the recorded base; regression entries retain every
+# positive fixture and reproduced writer sentence from review. Whole textual
+# units distinguish an instruction from a longer read-only or negated sentence.
+# New paraphrases require inspection in the manual MCP/connector sweep.
+CATALOG_PATH = ROOT / "tests" / "fixtures" / "retired_tracker_instructions.json"
 
 
-def read_instruction(body, match):
-    """Identify an explicitly read-only clause, without swallowing later writes.
+def text_units(text):
+    """Compare complete sentences within paragraphs/cells, ignoring soft wraps.
 
-    The retired templates include ambiguous generic connector guidance. A
-    read/query/lookup instruction is outside that write-path guard, unless
-    its own clause also names a write. Punctuation separates instructions;
-    a mention of reading elsewhere in a paragraph cannot hide a write.
+    Strip common presentation wrappers only. Semicolons stay inside sentences;
+    no verb lists, read/write inference, negation rules or substring matching.
     """
-    boundaries = list(re.finditer(r"[;.!?](?=\s|$)", body))
-    start = max((b.end() for b in boundaries if b.end() <= match.start()), default=0)
-    end = min((b.start() for b in boundaries if b.start() >= match.end()),
-              default=len(body))
-    clause = body[start:end]
-    return bool(READ_OPERATION.search(clause) and not WRITE_OPERATION.search(clause))
+    text = re.sub(r"<!-- declaration: [a-z0-9.-]+ -->", "", text, flags=re.DOTALL)
+    text = re.sub(r"(?m)^[ \t]*```[^\n]*$", "", text)
+    text = re.sub(r"(?m)^[ \t]*(?:[-+*] +|[0-9]+[.)] +)", "\n\n", text)
+    text = re.sub(r"(?m)^[ \t]*(?:#{1,6} +|> *)", "", text)
+    text = text.replace("`", "").replace("**", "")
+    for paragraph in re.split(r"\n[ \t]*\n", text):
+        for cell in paragraph.split("|"):
+            for sentence in re.split(r"(?<=[.!?])\s+", cell.strip()):
+                unit = " ".join(sentence.split()).strip(" *")
+                if unit:
+                    yield unit
+
+
+def string_values(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from string_values(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from string_values(item)
+
+
+def catalog():
+    return json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
 
 
 def authored_documents(root):
@@ -68,19 +72,20 @@ def authored_documents(root):
 
 
 def retired_wording(root):
+    retired = {unit for entry in catalog() for unit in text_units(entry["text"])}
     problems = []
     for path in authored_documents(root):
         relative = path.relative_to(root).as_posix()
         body = path.read_text(encoding="utf-8")
         if relative == PROTOCOL_PATH:
             # Exempt these exact bytes, not the whole file or a mutable section.
-            body = body.replace(PROTOCOL_PARAGRAPH,
-                                "\n" * PROTOCOL_PARAGRAPH.count("\n"))
-        for match in RETIRED.finditer(body):
-            if read_instruction(body, match):
-                continue
-            problems.append("{}:{}: {}".format(
-                relative, body.count("\n", 0, match.start()) + 1, match[0]))
+            body = body.replace(PROTOCOL_PARAGRAPH, "")
+        texts = (string_values(json.loads(body)) if path.suffix == ".json"
+                 else [body])
+        for text in texts:
+            for unit in text_units(text):
+                if unit in retired:
+                    problems.append(relative + ": " + unit)
     return problems
 
 
@@ -195,6 +200,50 @@ class TestDocumentationReconciliation(unittest.TestCase):
                     with self.subTest(write=write, prefix=prefix):
                         (root / "README.md").write_text(prefix + write, encoding="utf-8")
                         self.assertTrue(retired_wording(root))
+
+    def test_second_round_reproductions_have_the_required_verdicts(self):
+        examples = (
+            ("Read the issue status through the connector, then close the issue through it.", True),
+            ("Read the ticket and close it through the Linear MCP connector.", True),
+            ("A session with the connector is not required for tracker fallback.", False),
+            ("A session with the connector is unavailable.", False),
+            ("Do not use the connector available to the current session to create Linear issues; use linear_sync.py instead.", False),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for text, rejected in examples:
+                with self.subTest(text=text):
+                    (root / "README.md").write_text(text, encoding="utf-8")
+                    self.assertEqual(bool(retired_wording(root)), rejected)
+
+    def test_every_catalog_entry_is_detected_across_scope_and_presentation(self):
+        entries = catalog()
+        self.assertTrue(entries)
+        self.assertEqual(len({entry["text"] for entry in entries}), len(entries))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for entry in entries:
+                self.assertTrue(entry["source"])
+                self.assertEqual(list(text_units(entry["text"])), [entry["text"]])
+                wrapped = textwrap.fill(entry["text"], width=40,
+                                        break_long_words=False, break_on_hyphens=False)
+                for name in ("README.md", "CLAUDE.md", "docs/new.md",
+                             "skills/hanig-project/SKILL.md",
+                             "skills/hanig-project/declarations.json",
+                             "skills/hanig-swarm/SKILL.md",
+                             "skills/hanig-swarm/declarations.json"):
+                    for text in (entry["text"], wrapped, "- " + wrapped,
+                                 "| " + entry["text"] + " |"):
+                        with self.subTest(source=entry["source"], name=name, text=text):
+                            path = root / name
+                            path.parent.mkdir(parents=True, exist_ok=True)
+                            payload = json.dumps({"instruction": text}) if path.suffix == ".json" else text
+                            path.write_text(payload, encoding="utf-8")
+                            try:
+                                self.assertEqual({p.split(":", 1)[0] for p in retired_wording(root)}, {name})
+                            finally:
+                                # Each trial must find its own injected instruction.
+                                path.unlink()
 
     def test_audit_status_covers_each_finding_and_citations_resolve(self):
         body = (ROOT / AUDIT).read_text(encoding="utf-8")
