@@ -255,7 +255,7 @@
     },
     {
       "id": "unit.retry-size",
-      "normative_text": "Define units by declared outputs and size them by accepted retry exposure rather than presentation stages or command shape."
+      "normative_text": "Define units by declared outputs and size them by accepted retry exposure rather than presentation stages or command shape. Budget each code unit for a PR below 100,000 gathered review-input characters, including tests and documentation; split larger work into coherent units. Run the loaded hanig-review-gate skill's `review.py --size --range BASE..HEAD` on the complete intended PR delta before review, adding the same `--file` inputs the review will use. Exit 0 is below the planning budget, 1 is at least 100,000 but below the 180,000-character truncation limit, and 2 is at or above that limit; this offline size result is not a review verdict."
     },
     {
       "id": "judgment.by-kind",
