@@ -296,7 +296,7 @@ then requires CLEAN scoped audit checks, including the expanded graph's cycles.
 For an independently supplied read-back:
 
 ```sh
-# linear_sync.py file records the read-back in the draft. For an independently
+# Filing records the read-back in the draft. For an independently
 # supplied observation, the --tracker-edges file has this shape:
 #   {"schema_version": 1, "read_at": "<ISO 8601>", "source": "...",
 #    "edges": {"<issue>": ["<blocker>", ...]}}
