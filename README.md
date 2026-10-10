@@ -693,7 +693,17 @@ more than one more look.
 python3 scripts/review.py --kind plan --plan design.md
 python3 scripts/review.py --kind implementation --staged --escalate --round 2
 python3 scripts/review.py --list          # live provider probe
+python3 scripts/review.py --size --range BASE..HEAD  # offline PR size preflight
 ```
+
+`--size` measures the same gathered body as a review, before truncation,
+including file headers, separators and removal of recognized review-history
+signatures. It reports characters (not UTF-8 bytes or total prompt tokens), a
+100,000-character planning budget and the 180,000-character truncation limit.
+Exit 0 means below 100,000; 1 means 100,000–179,999; 2 means at least 180,000.
+It supports `--diff` (the default), `--staged`, `--range` and repeatable `--file`,
+plus `--json`, without provider configuration or network calls. Size results are
+not review verdicts. Plan code units to keep the complete PR below the budget.
 
 Panels, from `reviewers.json`:
 
