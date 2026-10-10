@@ -82,7 +82,9 @@ def sibling_skill_root(directory, loaded_name, sibling_name, explicit_roots=()):
         f"missing declared installed dependency {sibling_name!r}; searched "
         f"only these explicit skill parents: {roots}. Install it beside "
         f"{logical_root} (including with --only), or set HANIG_SKILL_DEP_ROOTS "
-        f"or pass --root for its known parent, then retry.")
+        f"or pass --root for its known parent, then retry. Relative dependency "
+        f"roots are anchored to the loaded skill directory {logical_root}; "
+        f"use an absolute path to select a parent independently of that anchor.")
 
 
 def main(argv=None):

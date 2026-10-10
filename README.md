@@ -1076,6 +1076,22 @@ as numbers, dates, booleans, nulls, and sexagesimal forms to be quoted. It also
 aborts on a name collision with an org-managed skill, prunes skills that are no
 longer shipped, and refuses to replace a directory it did not install.
 
+### Dependency roots and migration
+
+For mixed or link installs, `HANIG_SKILL_DEP_ROOTS` lists known dependency
+parents separated by the platform path separator (`:` on macOS/Linux);
+`skill_paths.py sibling --root` adds a parent explicitly. Relative entries in
+either are anchored to the logical loaded skill directory containing `SKILL.md`,
+including the installed link path for a linked skill. They are not relative to
+the project's working directory.
+
+This is a compatibility break for `hanig-project` consumers that previously
+resolved relative dependency roots from their project cwd. Migrate those entries
+to absolute paths, or rewrite them relative to the loaded skill directory. For
+example, with a loaded skill at `/opt/skills/hanig-project` and dependencies in
+`/opt/deps`, use `/opt/deps` or `../../deps`. Plan, state, input and output paths
+remain relative to the project directory.
+
 ### Dated agent compatibility
 
 The **ARC-281 live run** (2026-09-25) checked native skill discovery,

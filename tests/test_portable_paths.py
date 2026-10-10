@@ -147,6 +147,58 @@ class InstalledSnapshot(unittest.TestCase):
         report = self.invoke("hanig-project/scripts/report.py", ".", "--json")
         self.assertEqual(report.returncode, 0, report.stderr)
 
+    def test_missing_relative_root_reports_loaded_anchor_and_absolute_escape(self):
+        shutil.rmtree(self.prefix / "hanig-swarm")
+        links = self.root / "logical link store"
+        links.mkdir()
+        for name in ("hanig-project", "hanig-orchestrate"):
+            linked = links / name
+            linked.symlink_to(self.prefix / name, target_is_directory=True)
+            for loaded in (self.prefix / name, linked):
+                for option in ([], ["--root", "../missing deps"]):
+                    with self.subTest(skill=name, loaded=str(loaded), option=option):
+                        env = dict(self.env)
+                        if not option:
+                            env["HANIG_SKILL_DEP_ROOTS"] = "../missing deps"
+                        result = subprocess.run(
+                            [sys.executable, str(loaded / "scripts/skill_paths.py"),
+                             "sibling", str(loaded), name, "hanig-swarm", *option],
+                            cwd=self.project, env=env, text=True, capture_output=True)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn("missing declared installed dependency", result.stderr)
+                        self.assertIn(
+                            "Relative dependency roots are anchored to the loaded "
+                            "skill directory " + str(loaded), result.stderr)
+                        self.assertIn("use an absolute path", result.stderr)
+
+    def test_cwd_relative_consumers_migrate_to_absolute_dependency_root(self):
+        deps = self.root / "deps"
+        deps.mkdir()
+        shutil.move(str(self.prefix / "hanig-swarm"), str(deps / "hanig-swarm"))
+        # ../deps is valid from the project cwd, but not from the loaded skill.
+        self.assertEqual((self.project / "../deps").resolve(), deps.resolve())
+        consumers = (("hanig-project", "report.py", [".", "--json"]),
+                     ("hanig-orchestrate", "merge_unit.py", ["--help"]))
+        for name, program, args in consumers:
+            loaded = self.prefix / name
+            env = dict(self.env, HANIG_SKILL_DEP_ROOTS="../deps")
+            env["HANIG_" + name[6:].upper() + "_DIR"] = str(loaded)
+            with self.subTest(skill=name):
+                command = [sys.executable, str(loaded / "scripts" / program), *args]
+                legacy = subprocess.run(command, cwd=self.project, env=env,
+                                        text=True, capture_output=True)
+                self.assertNotEqual(legacy.returncode, 0)
+                self.assertIn("use an absolute path", legacy.stderr)
+                env["HANIG_SKILL_DEP_ROOTS"] = str(deps)
+                migrated = subprocess.run(command, cwd=self.project, env=env,
+                                          text=True, capture_output=True)
+                self.assertEqual(migrated.returncode, 0,
+                                 migrated.stderr + migrated.stdout)
+                if name == "hanig-project":
+                    self.assertIsInstance(json.loads(migrated.stdout), dict)
+                else:
+                    self.assertIn("usage:", migrated.stdout)
+
     def test_both_consumers_use_declared_roots_from_unrelated_cwd(self):
         consumers = (("hanig-project", "report.py", [".", "--json"]),
                      ("hanig-orchestrate", "merge_unit.py", ["--help"]))
