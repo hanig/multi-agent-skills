@@ -1,5 +1,6 @@
 """ARC-1170: exercise the real test fixtures under hostile ambient Slurm."""
 import importlib
+import json
 import os
 from pathlib import Path
 import pwd
@@ -23,6 +24,21 @@ CASES = (
     'tests.test_project.TestTheSurveySaysWhoMayUseAPartition',
     'tests.test_arc692_state_epoch.TestStateEpoch.test_sequential_dry_run_commands_each_use_their_own_epoch',
 )
+
+
+def state_homes():
+    """Include the account home even when HOME is overridden by the caller."""
+    homes = {Path.home() / ".local" / "state"}
+    try:
+        homes.add(Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local" / "state")
+    except KeyError:
+        # Container UIDs need not have a passwd record; HOME still supplies
+        # the same home that production's Path.home() can resolve.
+        pass
+    xdg = os.environ.get("XDG_STATE_HOME")
+    if xdg and Path(xdg).expanduser().is_absolute():
+        homes.add(Path(xdg).expanduser())
+    return homes
 
 
 def hostile_scheduler(directory, calls):
@@ -61,22 +77,14 @@ class OrdinaryTools(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_dispatch_and_report_fixtures_leave_real_state_home_unchanged(self):
-        # Resolve the account home independently of a caller's temporary HOME.
-        # A fresh project cwd gets a unique default project root, so comparing
-        # immediate project entries catches any escaped allocation/migration
-        # without walking live attempts belonging to other coordinators.
-        homes = {Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local" / "state",
-                 Path.home() / ".local" / "state"}
-        xdg = os.environ.get("XDG_STATE_HOME")
-        if xdg and Path(xdg).expanduser().is_absolute():
-            homes.add(Path(xdg).expanduser())
+        homes = state_homes()
 
         def projects():
             found = set()
             for home in homes:
                 directory = home / "hanig-swarm" / "projects"
                 if directory.exists():
-                    found.update(str(path) for path in directory.iterdir())
+                    found.update(directory.iterdir())
             return found
 
         before = projects()
@@ -87,10 +95,21 @@ class OrdinaryTools(unittest.TestCase):
         program = '''
 import json, os, pathlib, unittest
 from tests import test_arc692_state_epoch as fixture
+from tests import test_report
+import coordinator_paths as paths
 before = dict(os.environ)
+def observe_project(project):
+    state, runs = paths.default_paths(cwd=project)
+    print('STATE_PROJECT ' + json.dumps(state.parent.name), flush=True)
+collect = test_report.R.collect
+def observed_collect(project):
+    observe_project(project)
+    return collect(project)
+test_report.R.collect = observed_collect
 class DefaultRootDispatch(fixture.TestStateEpoch):
     __module__ = fixture.__name__
     def runTest(self):
+        observe_project(self.root)
         result = self.cli('run', '--dry-run')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         state = self.read()
@@ -107,9 +126,41 @@ raise SystemExit(not result.wasSuccessful())
 '''
         result = subprocess.run([sys.executable, "-c", program], cwd=ROOT,
                                 capture_output=True, text=True, timeout=60)
-        self.assertEqual(projects(), before,
+        names = {json.loads(line[len("STATE_PROJECT "):])
+                 for line in result.stdout.splitlines()
+                 if line.startswith("STATE_PROJECT ")}
+        self.assertEqual(len(names), 2, result.stdout + result.stderr)
+        # Both fixture cwds are freshly allocated. Watch their exact project
+        # names in every real state home; unrelated coordinators may create
+        # their own projects during this subprocess and must not fail the test.
+        watched = {home / "hanig-swarm" / "projects" / name
+                   for home in homes for name in names}
+        self.assertFalse(before & watched, "fixture project was not fresh")
+        self.assertEqual(projects() & watched, before & watched,
                          "test fixtures created real state-home projects")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_state_guard_accepts_a_uid_without_a_passwd_record(self):
+        with mock.patch.object(pwd, "getpwuid", side_effect=KeyError("no uid")):
+            self.test_dispatch_and_report_fixtures_leave_real_state_home_unchanged()
+
+    def test_state_guard_ignores_an_unrelated_project_created_during_dispatch(self):
+        # Model the concurrent writer in a disposable state home. This test
+        # itself must never create its synthetic unrelated project in real HOME.
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            unrelated = home / "hanig-swarm" / "projects" / "unrelated"
+            real_run = subprocess.run
+
+            def create_unrelated(*args, **kwargs):
+                result = real_run(*args, **kwargs)
+                unrelated.mkdir(parents=True)
+                return result
+
+            with mock.patch(__name__ + ".state_homes", return_value={home}), \
+                    mock.patch.object(subprocess, "run", side_effect=create_unrelated):
+                self.test_dispatch_and_report_fixtures_leave_real_state_home_unchanged()
+            self.assertTrue(unrelated.is_dir())
 
     def test_empty_path_still_resolves_named_system_tools(self):
         with tempfile.TemporaryDirectory() as directory:
