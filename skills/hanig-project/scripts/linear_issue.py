@@ -791,7 +791,7 @@ def run(args, client, sync):
         args.body = (Path(args.body_file).read_bytes().decode('utf-8') if args.body_file else
                      sys.stdin.read() if args.body_stdin else None)
         reject_key(vars(args), client._key)
-        if args.body is not None and re.search(r'(?m)^`?swarm-(?:body|deps|op|approver|deps-by):', args.body):
+        if args.body is not None and re.search(r'(?m)^(?:`?swarm-body:|`swarm-(?:deps|op|approver|deps-by):)', args.body):
             raise ValueError('body must not supply managed marker lines')
     identity = sync.drain_identity(args, sync.Reader(client))
     binding_path, binding_bytes, config, workspace, project, team = identity
