@@ -10557,5 +10557,13 @@ def main():
     sys.exit(args.fn(args))
 
 
+# Wildcard imports enumerate __all__, not names served only by __getattr__.
+# Build this after every definition to retain the original public namespace.
+__all__ = [name for name in globals() if not name.startswith("_")] + [
+    "AGENTS_FILE", "DEFAULT_AGENT_PROVIDER", "DEFAULT_AGENT_THINKING",
+    "THINKING_BY_MODEL", "PINNED_AGENT_PROVIDER", "PINNED_THINKING_BY_MODEL",
+]
+
+
 if __name__ == "__main__":
     main()

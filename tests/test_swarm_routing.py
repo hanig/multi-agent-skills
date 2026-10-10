@@ -39,6 +39,21 @@ class TestRoutingExtraction(unittest.TestCase):
         with self.assertRaises(AttributeError):
             getattr(S, "no_such_routing_export")
 
+    def test_wildcard_import_includes_live_routing_and_existing_exports(self):
+        from unittest import mock
+        for provider in (SR.PINNED_AGENT_PROVIDER, "codex/future-987"):
+            with mock.patch.object(SR, "DEFAULT_AGENT_PROVIDER", provider):
+                namespace = {}
+                exec("from swarm import *", namespace)
+                for name in ROUTING_DATA + TYPES + ROUTING_FUNCTIONS:
+                    if not name.startswith("_"):
+                        with self.subTest(name=name, provider=provider):
+                            self.assertIs(namespace[name], getattr(S, name))
+                self.assertEqual(namespace["DEFAULT_AGENT_PROVIDER"], provider)
+                # Defining __all__ too early must not hide later coordinator API.
+                self.assertIs(namespace["cmd_run"], S.cmd_run)
+                self.assertIs(namespace["main"], S.main)
+
     def test_dynamic_exports_follow_resolution_and_restore(self):
         # Exercise the live facade across resolution and the next-plan reset.
         from unittest import mock
