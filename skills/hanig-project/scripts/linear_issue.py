@@ -201,18 +201,24 @@ def check_structured(body, incoming, outgoing):
             raise ValueError('structured ' + direction + ' disagrees with resulting relations')
 
 
-def body_identity(prefix):
-    """Only a whole body marker at the end of the trailer prefix counts."""
-    match = re.search(r'(?m)^(`?)swarm-body: ([^`\r\n]+)\1\r?\n*\Z', prefix)
+def digest_identity(prefix, name):
+    """Only a whole digest line at the end of the managed prefix counts."""
+    match = re.search(r'(?m)^(`?)swarm-' + name + r': ([^`\r\n]+)\1\r?\n*\Z', prefix)
     return (prefix[:match.start()], match[2]) if match else (prefix, None)
+
+
+def body_identity(prefix):
+    return digest_identity(prefix, 'body')
 
 
 def components(body):
     body = body or ''
     mark = trailer(body)
     prefix = mark['prefix'] if mark else body
-    return {'body': body_identity(prefix)[1] if mark else None,
-            'independence': INDEPENDENT.findall(prefix),
+    prefix, body_digest = body_identity(prefix) if mark else (prefix, None)
+    _, reason_digest = digest_identity(prefix, 'reason') if body_digest else (prefix, None)
+    return {'body': body_digest,
+            'independence': reason_digest if reason_digest is not None else INDEPENDENT.findall(prefix),
             'trailer': {k: mark[k] for k in ('deps', 'op', 'approver', 'by')} if mark else None}
 
 
@@ -437,13 +443,18 @@ def prepare(args, client, sync, identity, op):
     old_body = (target.get('description') or '') if target else ''
     mark = trailer(old_body)
     old_prefix, old_digest = body_identity(mark['prefix']) if mark else (old_body, None)
+    old_prefix, old_reason_digest = (digest_identity(old_prefix, 'reason') if old_digest else
+                                     (old_prefix, None))
     prefix = args.body if args.body is not None else old_prefix
     body_digest = (hashlib.sha256(args.body.encode('utf-8')).hexdigest() if args.body is not None else
                    old_digest or hashlib.sha256(prefix.encode('utf-8')).hexdigest())
     reason = args.independent
     if reason is None and not getattr(args, 'clear_independent', False):
-        reasons = INDEPENDENT.findall(old_body)
-        reason = reasons[0] if reasons else None
+        reasons = INDEPENDENT.findall(old_prefix)
+        reason = reasons[-1 if old_reason_digest is not None else 0] if reasons else None
+    reason_digest = (old_reason_digest if old_reason_digest is not None and args.independent is None
+                     and not getattr(args, 'clear_independent', False) else
+                     hashlib.sha256((reason or '').encode('utf-8')).hexdigest())
     if args.body is None or getattr(args, 'clear_independent', False):
         prefix = INDEPENDENT.sub('', prefix)
     if reason:
@@ -490,6 +501,7 @@ def prepare(args, client, sync, identity, op):
                    'outgoing': sorted(b for a, b in desired_edges if a == iid)}
         if iid == target_id:
             desired['body_sha256'] = body_digest
+            desired['reason_sha256'] = reason_digest
         rows.append({'id': iid, 'before': before, 'desired': desired})
     managed = {edge for edge in edges | desired_edges if any(i in touched for i in edge)} | additions | removals
     spec = {'schema_version': 1, 'operation': op, 'kind': args.issue_command,
@@ -531,6 +543,8 @@ def desired_value(row, identities):
         return dict(d)
     prefix = d['prefix']
     if 'body_sha256' in d:
+        if 'reason_sha256' in d:
+            prefix += ('\n' if prefix and not prefix.endswith('\n') else '') + '`swarm-reason: %s`\n' % d['reason_sha256']
         prefix += ('\n' if prefix and not prefix.endswith('\n') else '') + '`swarm-body: %s`\n' % d['body_sha256']
     return {'title': d['title'], 'description': description(prefix,
             {identities[i] for i in d['incoming']}, {identities[i] for i in d['outgoing']},
@@ -791,8 +805,11 @@ def run(args, client, sync):
         args.body = (Path(args.body_file).read_bytes().decode('utf-8') if args.body_file else
                      sys.stdin.read() if args.body_stdin else None)
         reject_key(vars(args), client._key)
-        if args.body is not None and re.search(r'(?m)^(?:`?swarm-body:|`swarm-(?:deps|op|approver|deps-by):)', args.body):
-            raise ValueError('body must not supply managed marker lines')
+        if args.body is not None:
+            lines = [line for line in args.body.splitlines() if line.strip()]
+            terminal_digest = lines and re.match(r'`?swarm-(?:body|reason):', lines[-1])
+            if terminal_digest or re.search(r'(?m)^`swarm-(?:deps|op|approver|deps-by):', args.body):
+                raise ValueError('body must not supply managed marker lines')
     identity = sync.drain_identity(args, sync.Reader(client))
     binding_path, binding_bytes, config, workspace, project, team = identity
     op = args.operation_id if replay else str(uuid.uuid4())
