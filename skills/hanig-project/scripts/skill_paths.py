@@ -5,6 +5,10 @@ The caller supplies the directory containing the loaded ``SKILL.md``.  That is
 the one fact a skill loader knows, whereas its installation prefix and the
 process cwd are both arbitrary.  A cross-skill dependency is a sibling of that
 loaded directory; it is never looked up in an agent-specific global store.
+
+Canonical source: skills/hanig-orchestrate/scripts/skill_paths.py. Copy this
+file byte-for-byte to every skill that bundles it; tests/test_skill_paths.py
+checks identity without introducing a runtime dependency between bundles.
 """
 import argparse
 import os
@@ -45,12 +49,16 @@ def loaded_skill_root(directory, expected_name):
             f"cannot resolve loaded {expected_name!r} skill directory {directory!r}: {exc}")
 
 
-def _configured_roots(explicit_roots):
+def _configured_roots(explicit_roots, loaded_root):
     """Return only caller-declared additional parents; never glob a home tree."""
     configured = os.environ.get("HANIG_SKILL_DEP_ROOTS", "")
     roots = list(explicit_roots or [])
     roots.extend(p for p in configured.split(os.pathsep) if p)
-    return [Path(p).expanduser().absolute() for p in roots]
+    expanded = [Path(p).expanduser() for p in roots]
+    # Collapse relative '..' lexically before touching the filesystem, so a
+    # linked loaded skill keeps its installed parent rather than its target.
+    return [p if p.is_absolute() else Path(os.path.normpath(str(loaded_root / p)))
+            for p in expanded]
 
 
 def sibling_skill_root(directory, loaded_name, sibling_name, explicit_roots=()):
@@ -59,7 +67,7 @@ def sibling_skill_root(directory, loaded_name, sibling_name, explicit_roots=()):
     # Validate the loaded endpoint, but deliberately derive siblings from the
     # logical parent supplied by the loader (see _logical_skill_root).
     loaded_skill_root(logical_root, loaded_name)
-    parents = [logical_root.parent] + _configured_roots(explicit_roots)
+    parents = [logical_root.parent] + _configured_roots(explicit_roots, logical_root)
     tried = []
     for parent in parents:
         if parent in tried:
@@ -74,7 +82,9 @@ def sibling_skill_root(directory, loaded_name, sibling_name, explicit_roots=()):
         f"missing declared installed dependency {sibling_name!r}; searched "
         f"only these explicit skill parents: {roots}. Install it beside "
         f"{logical_root} (including with --only), or set HANIG_SKILL_DEP_ROOTS "
-        f"or pass --root for its known parent, then retry.")
+        f"or pass --root for its known parent, then retry. Relative dependency "
+        f"roots are anchored to the loaded skill directory {logical_root}; "
+        f"use an absolute path to select a parent independently of that anchor.")
 
 
 def main(argv=None):

@@ -90,6 +90,14 @@ What is forbidden is attribution by observation, proving which process wrote a f
 
 Every authored skill locates its own programs through a variable, not the cwd: each sets `HANIG_<SKILL>_DIR` to the directory holding the `SKILL.md` this agent actually loaded, and `skill_paths.py` derives both that skill and its declared siblings from there. A deliberate mixed or link install sets `HANIG_SKILL_DEP_ROOTS` to the parent that holds the sibling; the resolver never searches an agent store. Those variables locate programs only, and plan, state, input and output paths stay relative to the project directory. Tests reach scripts by inserting the skill's `scripts/` directory on `sys.path`.
 
+The canonical resolver is `skills/hanig-orchestrate/scripts/skill_paths.py`.
+Edit it there and copy it byte-for-byte to every other
+`skills/hanig-*/scripts/skill_paths.py`; `tests/test_skill_paths.py` checks all
+copies against it. These are shipped copies, with no runtime import of the
+canonical bundle or `lib/`. Relative `HANIG_SKILL_DEP_ROOTS` and `--root`
+entries are relative to the loaded skill's logical directory, including in a
+link install, rather than the shell cwd.
+
 ## Editing rules this repo paid for
 
 Do not report a change complete, or assert that code works, until `hanig-review-gate` has run and passed. Exit 2 (`REVIEW_UNAVAILABLE`) and 3 (`REVIEW_PARTIAL`) are not a pass; if the gate cannot run, the change is unreviewed and must be described that way. The provider keys are exported from `~/.zshrc`, which a non-interactive shell does not source, so invoke through `zsh -ic` or export them explicitly. Reproduce a finding before acting on it, and keep an author off the panel reviewing its own work. `--escalate` walks `fast` → `standard` → `deep`, each tier adding only the reviewers the previous one did not run, and the first failing tier ends it. `sol` sits in `deep` and `plan`, and a separate `sol-tiebreak` seat breaks committee ties: sol took `astra`'s `deep` seat on 2026-09-24, when astra became the code driver, because an author does not review itself. The same reasoning stops a change sol authored before that date at `standard`, and only the roster enforces either, since neither `review.py` nor `committee.py` takes an author (ARC-755). So escalating does buy a reviewer — and buys it only when the cheaper tiers find nothing, which is why a `REVIEW_FAIL` at `fast` never reaches sol. Read the `enabled` flags and `profiles` lists in `reviewers.json` rather than this sentence; an earlier version of it said escalation bought nothing, which sent sessions past the one reviewer that had been added for them.
