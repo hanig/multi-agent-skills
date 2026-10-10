@@ -149,29 +149,42 @@ class Reader:
             yield [self.remember(node) for node in nodes] if fields is None else nodes
 
     def resolve(self, refs, fields=None):
-        """Reuse the snapshot, batching only references it does not contain."""
+        """Reuse the snapshot; require full coverage of requested identifiers.
+
+        Missing UUIDs remain None for pre-creation probes. Named identifiers
+        must resolve, or raise the same read-back refusal as unexpected ones.
+        """
         by_ref = {ref: i for i in self.seen.values() for ref in (i['id'], i['identifier'])}
         missing = sorted(set(refs) - by_ref.keys())
         ids = [ref for ref in missing if not re.fullmatch(LI.IDENTIFIER, ref)]
         for nodes in self.batches(ids, fields):
             for issue in nodes:
                 by_ref[issue['id']] = issue
-        names = [ref for ref in missing if re.fullmatch(LI.IDENTIFIER, ref)]
-        for offset in range(0, len(names), ISSUE_PAGE):
-            batch = names[offset:offset + ISSUE_PAGE]
-            filters = [{'team': {'key': {'eq': ref.rsplit('-', 1)[0]}},
-                        'number': {'eq': int(ref.rsplit('-', 1)[1])}} for ref in batch]
-            q = ('query OperationIdentifiers($filter: IssueFilter!, $after: String) { '
-                 'issues(filter: $filter, first: %d, after: $after, includeArchived: true) '
-                 '{ nodes { %s } %s } }' % (ISSUE_PAGE, FIELDS if fields is None else fields, PAGE))
-            nodes = self.pages_of(lambda after: self.client.query(q, {'filter': {'or': filters}, 'after': after})['issues'])
-            found = set()
-            for node in nodes:
-                ref = node['identifier']
-                if ref not in batch or ref in found:
-                    raise ValueError('issue identifier disagrees on read-back: ' + ref)
-                found.add(ref)
-                by_ref[ref] = self.remember(node) if fields is None else node
+        by_team = {}
+        for ref in missing:
+            if re.fullmatch(LI.IDENTIFIER, ref):
+                by_team.setdefault(ref.rsplit('-', 1)[0], []).append(ref)
+        for team, names in by_team.items():
+            for offset in range(0, len(names), ISSUE_PAGE):
+                batch = names[offset:offset + ISSUE_PAGE]
+                # Linear flattens an or of team+number objects into a team-wide
+                # match. Keep the team constraint outside the number choices.
+                issue_filter = {'team': {'key': {'eq': team}},
+                                'number': {'in': sorted(int(ref.rsplit('-', 1)[1]) for ref in batch)}}
+                q = ('query OperationIdentifiers($filter: IssueFilter!, $after: String) { '
+                     'issues(filter: $filter, first: %d, after: $after, includeArchived: true) '
+                     '{ nodes { %s } %s } }' % (ISSUE_PAGE, FIELDS if fields is None else fields, PAGE))
+                nodes = self.pages_of(lambda after: self.client.query(q, {'filter': issue_filter, 'after': after})['issues'])
+                found = set()
+                for node in nodes:
+                    ref = node['identifier']
+                    if ref not in batch or ref in found:
+                        raise ValueError('issue identifier disagrees on read-back: ' + ref)
+                    found.add(ref)
+                    by_ref[ref] = self.remember(node) if fields is None else node
+                absent = set(batch) - found
+                if absent:
+                    raise ValueError('issue identifier disagrees on read-back: ' + ', '.join(sorted(absent)))
         return {ref: by_ref.get(ref) for ref in sorted(set(refs))}
 
     def stable(self):

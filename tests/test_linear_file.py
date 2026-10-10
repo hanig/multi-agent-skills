@@ -150,6 +150,30 @@ class FileCase(IssueCase):
     def body_line(self, n=0):
         return 'swarm-body: ' + body_digest(self.data['issues'][n]['body'])
 
+    def test_absent_draft_identifier_refuses_before_any_mutation(self):
+        self.data['issues'][0]['identifier'] = 'ARC-999'
+        self.save()
+        before = self.draft.read_bytes()
+        self.assertEqual(self.file(), 2, self.stdout + self.stderr)
+        self.assertIn('issue identifier disagrees on read-back: ARC-999', self.stderr)
+        self.assertEqual(self.fake.mutations, [])
+        self.assertEqual(self.records(), [])
+        self.assertEqual(self.draft.read_bytes(), before)
+
+    def test_bound_identifiers_resolve_when_project_listing_lags(self):
+        self.assertEqual(self.file(), 0, self.stdout + self.stderr)
+        self.read()
+        expected = {issue['identifier'] for issue in self.data['issues']}
+        self.fake.add('1464', project='elsewhere')
+        self.fake.lag = True
+        self.fake.calls.clear()
+        self.fake.mutations.clear()
+        self.assertEqual(self.file(), 0, self.stdout + self.stderr)
+        lookups = [v['filter'] for q, v in self.fake.calls if 'OperationIdentifiers' in q]
+        self.assertEqual(lookups, [{'team': {'key': {'eq': 'ARC'}},
+                                   'number': {'in': sorted(int(ref.split('-')[1]) for ref in expected)}}])
+        self.assertEqual(self.fake.mutations, [])
+
     def test_markdown_rendering_confirms_and_replays_without_writes(self):
         self.new_draft(1)
         self.data['project']['description'] = 'Project\n\n- scope: approved\n\n'
@@ -1443,12 +1467,12 @@ class FileCase(IssueCase):
         self.data['issues'][0]['identifier'] = 'ARC-999'
         self.save()
         self.assertEqual(self.file('--adopt-checked'), 2)
-        self.assertIn('recorded issue not found', self.stderr)
+        self.assertIn('issue identifier disagrees on read-back: ARC-999', self.stderr)
         a = self.existing_unit(0, pid, marked=True)
         self.data['issues'][0].update(linear_id=a['id'], identifier='ARC-999')
         self.save()
         self.assertEqual(self.file('--adopt-checked'), 2)
-        self.assertIn('recorded identifier disagrees', self.stderr)
+        self.assertIn('issue identifier disagrees on read-back: ARC-999', self.stderr)
         self.assertEqual(self.fake.mutations, [])
         # A filtered project response must still agree exactly with its requested id.
         original = self.fake.dispatch

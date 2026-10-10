@@ -114,8 +114,20 @@ class FakeLinear:
     def dispatch(self, q, v):
         if any('query ' + name in q for name in ('IssueBatch', 'StabilityBatch', 'CommentBatch', 'OperationIdentifiers')):
             if 'OperationIdentifiers' in q:
-                names = {'%s-%d' % (f['team']['key']['eq'], f['number']['eq']) for f in v['filter']['or']}
-                nodes = [copy.deepcopy(i) for i in self.issues.values() if i['identifier'] in names]
+                filters = v['filter']
+                if 'or' in filters:
+                    # Measured 2026-10-10: Linear flattens these multi-field
+                    # entries, returning the whole team, not the named issues.
+                    assert all(set(f) == {'team', 'number'} for f in filters['or'])
+                    teams = {f['team']['key']['eq'] for f in filters['or']}
+                    nodes = [copy.deepcopy(i) for i in self.issues.values()
+                             if i['identifier'].rsplit('-', 1)[0] in teams]
+                else:
+                    assert set(filters) == {'team', 'number'}
+                    names = {'%s-%d' % (filters['team']['key']['eq'], number)
+                             for number in filters['number']['in']}
+                    nodes = [copy.deepcopy(i) for i in self.issues.values() if i['identifier'] in names]
+                nodes.sort(key=lambda i: int(i['identifier'].rsplit('-', 1)[1]), reverse=True)
             else:
                 nodes = [copy.deepcopy(i) for i in self.issues.values() if i['id'] in v['ids']]
             if 'StabilityBatch' in q:
@@ -289,6 +301,75 @@ class AuditCase(unittest.TestCase):
 
 
 class TestAudit(AuditCase):
+    def test_identifier_filter_excludes_unrequested_team_issues(self):
+        for number in (1396, 1175, 1171, 1464, 1463, 2, 10):
+            self.fake.add(str(number))
+        self.fake.add('other')['identifier'] = 'OTHER-1396'
+        refs = ['ARC-1396', 'ARC-1175', 'ARC-1171', 'ARC-2', 'ARC-10']
+        found = LS.Reader(API.Client(KEY)).resolve(refs)
+        self.assertEqual({ref: i['identifier'] for ref, i in found.items()},
+                         {ref: ref for ref in refs})
+        self.assertEqual(len(self.fake.calls), 1)
+        query, variables = self.fake.calls[0]
+        self.assertEqual(variables, {'filter': {'team': {'key': {'eq': 'ARC'}},
+                                              'number': {'in': [2, 10, 1171, 1175, 1396]}}, 'after': None})
+        # Exercise the old shape through the same transport: it must overread.
+        old_filter = {'or': [{'team': {'key': {'eq': 'ARC'}}, 'number': {'eq': n}}
+                             for n in (1396, 1175, 1171)]}
+        nodes = API.Client(KEY).query(query, {'filter': old_filter, 'after': None})['issues']['nodes']
+        self.assertEqual([i['identifier'] for i in nodes],
+                         ['ARC-1464', 'ARC-1463', 'ARC-1396', 'ARC-1175', 'ARC-1171', 'ARC-10', 'ARC-2'])
+
+    def test_missing_requested_identifiers_refuse_instead_of_returning_none(self):
+        self.fake.add('1')
+        for fields in (None, 'id identifier'):
+            for refs in (['ARC-999'], ['ARC-1', 'ARC-999']):
+                with self.subTest(fields=fields, refs=refs):
+                    reader = LS.Reader(API.Client(KEY))
+                    for attempt in range(2):
+                        with self.assertRaisesRegex(ValueError,
+                                '^issue identifier disagrees on read-back: ARC-999$'):
+                            reader.resolve(refs, fields=fields)
+        # Derived UUIDs are absence probes before creation, unlike identifiers.
+        self.assertEqual(LS.Reader(API.Client(KEY)).resolve(['absent-uuid']), {'absent-uuid': None})
+
+    def test_identifier_batches_group_teams_and_preserve_coverage(self):
+        self.fake = BudgetLinear()
+        refs = []
+        for team in ('ARC', 'OTHER'):
+            for number in range(1, 53):
+                ref = '%s-%d' % (team, number)
+                self.fake.add(ref)['identifier'] = ref
+                if number <= 51:
+                    refs.append(ref)
+        self.fake.add('uuid-only')['identifier'] = 'THIRD-1'
+        with mock.patch.object(API, 'transport', self.fake):
+            for fields in (None, 'id identifier'):
+                with self.subTest(fields=fields):
+                    self.fake.calls.clear()
+                    reader = LS.Reader(API.Client(KEY))
+                    requested = list(reversed(refs)) + refs[:2] + ['uuid-only']
+                    found = reader.resolve(requested, fields=fields)
+                    self.assertEqual(set(found), set(requested))
+                    self.assertEqual({i['id'] for i in found.values()}, set(requested))
+                    lookups = [v['filter'] for q, v in self.fake.calls if 'OperationIdentifiers' in q]
+                    self.assertEqual(len(self.fake.calls), 5)  # Four team chunks and one UUID batch.
+                    self.assertEqual(len(lookups), 4)
+                    for team in ('ARC', 'OTHER'):
+                        batches = [f['number']['in'] for f in lookups if f['team']['key']['eq'] == team]
+                        self.assertEqual(list(map(len, batches)), [50, 1])
+                        self.assertEqual(sorted(n for batch in batches for n in batch), list(range(1, 52)))
+                    self.assertTrue(all(set(f) == {'team', 'number'} for f in lookups))
+                    if fields is None:
+                        reader.resolve(requested)
+                        self.assertEqual(len(self.fake.calls), 5)
+
+    def test_duplicate_identifiers_with_distinct_ids_are_refused(self):
+        self.fake.add('1')
+        self.fake.add('duplicate')['identifier'] = 'ARC-1'
+        with self.assertRaisesRegex(ValueError, 'issue identifier disagrees on read-back: ARC-1'):
+            LS.Reader(API.Client(KEY)).resolve(['ARC-1'])
+
     def test_overlapping_collections_keep_their_original_stamps(self):
         self.make_plan()
         self.fake.add('1', description='swarm-unit: sample/one')
@@ -347,7 +428,7 @@ class TestAudit(AuditCase):
                 self.assertEqual(len(self.fake.calls), 6)
                 reader.resolve(refs)
                 self.assertEqual(len(self.fake.calls), 6)
-                self.assertTrue(all(len(v.get('ids', v.get('filter', {}).get('or', []))) <= 50
+                self.assertTrue(all(len(v.get('ids', v.get('filter', {}).get('number', {}).get('in', []))) <= 50
                                     for _, v in self.fake.calls))
 
     def test_batch_coverage_faults_are_unknown(self):
@@ -592,8 +673,8 @@ class TestAudit(AuditCase):
         self.fake.add('3', description='swarm-unit: sample/extra\nswarm-repo: owner/repo', project='elsewhere')['team'] = {'id': 'other'}
         self.assertEqual(self.audit(plan=True), 1)
         self.assertEqual(self.checks['misplaced'], 'DRIFT')
-        reads = [f for q, v in self.fake.calls if 'query OperationIdentifiers' in q for f in v['filter']['or']]
-        self.assertIn({'team': {'key': {'eq': 'ARC'}}, 'number': {'eq': 1}}, reads)
+        reads = [v['filter'] for q, v in self.fake.calls if 'query OperationIdentifiers' in q]
+        self.assertIn({'team': {'key': {'eq': 'ARC'}}, 'number': {'in': [1]}}, reads)
         self.fake.moved.add('3')
         self.assertEqual(self.audit(plan=True), 3)
         self.fake.moved.clear()
@@ -605,7 +686,7 @@ class TestAudit(AuditCase):
         self.fake.add('4', project='elsewhere')
         (self.state / 'outbox-receipts.jsonl').write_text(json.dumps({'ref': 'ARC-4'}) + '\n')
         self.audit(plan=True, state=True)
-        self.assertTrue(any({'team': {'key': {'eq': 'ARC'}}, 'number': {'eq': 4}} in v['filter']['or']
+        self.assertTrue(any(v['filter']['team']['key']['eq'] == 'ARC' and 4 in v['filter']['number']['in']
                             for q, v in self.fake.calls if 'query OperationIdentifiers' in q))
 
     def test_marker_pagination_and_explicit_draft_workspace(self):
