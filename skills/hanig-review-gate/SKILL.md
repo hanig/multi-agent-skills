@@ -312,6 +312,34 @@ sounds: across six review rounds on this repo, **every single one failed**, and
 running the full panel each time paid the slowest, dearest reviewer to re-find
 defects a cheap one had already caught.
 
+### Offline size preflight
+
+Use the same input flags as the intended review:
+
+```bash
+python3 "$HANIG_REVIEW_GATE_DIR/scripts/review.py" --size --range BASE..HEAD
+python3 "$HANIG_REVIEW_GATE_DIR/scripts/review.py" --size --staged
+python3 "$HANIG_REVIEW_GATE_DIR/scripts/review.py" --size --file design.md --file notes.md --json
+```
+
+`--size` calls the review's input-gathering function and reports its exact
+character count before truncation, the 100,000-character planning budget, and
+the 180,000-character truncation limit. It includes file headers, separators,
+and the existing stripping of recognized review-history signatures. It counts
+decoded characters, not UTF-8 bytes, prompt overhead, or tokens.
+
+Exit 0 means below 100,000 characters; 1 means 100,000–179,999; 2 means at least
+180,000. Empty input is zero characters; invalid inputs retain usage-error
+exit 4. These statuses describe size and never certify a review pass.
+
+The command supports `--diff` (the default), `--staged`, `--range`, and repeatable
+`--file`, including the same combinations a review accepts. It runs offline
+before provider configuration, transport, or review-journal writes, so it needs
+no credentials, `--kind`, `--round`, or claims. Use `--json` for machine-readable
+`characters`, `planning_budget`, and `truncation_limit` fields. Plan code units
+below the budget, including tests and documentation, and remeasure the complete
+PR delta before review.
+
 ### Sizing a round
 
 Two failures here were the reviewer infrastructure, not the code, and both read
