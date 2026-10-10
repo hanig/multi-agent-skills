@@ -1,7 +1,9 @@
 """ARC-1170: exercise the real test fixtures under hostile ambient Slurm."""
 import importlib
+import json
 import os
 from pathlib import Path
+import pwd
 import shlex
 import subprocess
 import sys
@@ -46,17 +48,164 @@ class OrdinaryTools(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             program = (
                 "import os, pathlib, sys, unittest\n"
-                "before = os.environ.get('PATH')\n"
+                "keys = ('PATH', 'XDG_STATE_HOME')\n"
+                "before = {key: os.environ.get(key) for key in keys}\n"
                 "suite = unittest.defaultTestLoader.loadTestsFromName("
                 "'tests.test_runtime.TestRuntimeMustBeDeclared')\n"
                 "result = unittest.TextTestRunner().run(suite)\n"
                 "assert result.wasSuccessful()\n"
-                "assert os.environ.get('PATH') == before, 'module PATH leaked'\n"
+                "assert {key: os.environ.get(key) for key in keys} == before, 'module environment leaked'\n"
                 "assert not list(pathlib.Path(sys.argv[1]).glob('scheduler-free-*')), 'module fixture retained'\n")
             result = subprocess.run([sys.executable, "-c", program, directory],
                                     cwd=ROOT, env=dict(os.environ, TMPDIR=directory),
                                     capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_dispatch_and_report_fixtures_leave_real_state_home_unchanged(self):
+        # Use the real unittest module lifecycle and the existing CLI fixture.
+        # Omitting --root exercises default allocation instead of masking it
+        # with an explicit temporary run root. Report collection also reaches
+        # coordinator_paths through legacy migration, even though it reads.
+        program = '''
+import json, os, pathlib, unittest
+from tests import test_arc692_state_epoch as fixture
+from tests import test_report
+import coordinator_paths as paths
+before = dict(os.environ)
+def observe_project(project):
+    state, runs = paths.default_paths(cwd=project)
+    print('STATE_PROJECT ' + json.dumps(state.parent.name), flush=True)
+collect = test_report.R.collect
+def observed_collect(project):
+    observe_project(project)
+    return collect(project)
+test_report.R.collect = observed_collect
+class DefaultRootDispatch(fixture.TestStateEpoch):
+    __module__ = fixture.__name__
+    def runTest(self):
+        observe_project(self.root)
+        result = self.cli('run', '--dry-run')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = self.read()
+        self.assertEqual(state['units']['u']['state'], 'SUBMITTED')
+        attempt = pathlib.Path(state['units']['u']['attempt_dir'])
+        self.assertTrue((attempt / 'unit.json').is_file())
+        attempt.relative_to(pathlib.Path(os.environ['XDG_STATE_HOME']).resolve())
+suite = unittest.TestSuite([DefaultRootDispatch(),
+    unittest.defaultTestLoader.loadTestsFromName(
+        'tests.test_report.TestBuiltFromEvidence.test_digests_come_from_the_receipt')])
+result = unittest.TextTestRunner(verbosity=2).run(suite)
+assert dict(os.environ) == before, 'module state fixture leaked its environment'
+raise SystemExit(not result.wasSuccessful())
+'''
+        # The caller's state can contain stale or concurrently created names.
+        # Give this child its own empty homes so every observed project is a
+        # fixture leak, without inspecting or assuming anything about the caller.
+        with tempfile.TemporaryDirectory(prefix="state-guard-") as directory:
+            root = Path(directory)
+            home, state, temporary = (root / name for name in ("home", "state", "tmp"))
+            for path in (home, state, temporary):
+                path.mkdir()
+            env = dict(os.environ, HOME=str(home), XDG_STATE_HOME=str(state),
+                       TMPDIR=str(temporary))
+            result = subprocess.run([sys.executable, "-c", program], cwd=ROOT,
+                                    env=env, capture_output=True, text=True, timeout=60)
+            names = {json.loads(line[len("STATE_PROJECT "):])
+                     for line in result.stdout.splitlines()
+                     if line.startswith("STATE_PROJECT ")}
+            self.assertEqual(len(names), 2, result.stdout + result.stderr)
+            # Retain the exact fixture-project checks, and reject every other
+            # project too: no projects are allowed in these owned fallback homes.
+            for base in (state, home / ".local" / "state",
+                         temporary / "hanig-swarm-state"):
+                projects = base / "hanig-swarm" / "projects"
+                watched = {projects / name for name in names}
+                self.assertFalse(any(path.exists() for path in watched),
+                                 "test fixtures created real state-home projects")
+                found = set(projects.iterdir()) if projects.exists() else set()
+                self.assertEqual(found, set(),
+                                 "test fixtures created unexpected state-home projects")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_state_guard_accepts_a_uid_without_a_passwd_record(self):
+        with mock.patch.object(pwd, "getpwuid", side_effect=KeyError("no uid")):
+            self.test_dispatch_and_report_fixtures_leave_real_state_home_unchanged()
+
+    def test_state_guard_ignores_stale_and_concurrent_fixture_names_but_catches_leaks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            caller_home = root / "caller"
+            caller_state = caller_home / ".local" / "state"
+            fixture_tmp = root / "fixtures"
+            fixture_tmp.mkdir()
+            caller_state.mkdir(parents=True)
+            real_run, real_iterdir = subprocess.run, Path.iterdir
+            observed = []
+            allowed_listings = set()
+            mode = ["isolated"]
+
+            def run_with_reused_paths(command, **kwargs):
+                # Real exclusive mkdir/cleanup and project-name calculation,
+                # with a repeatable sequence of legal temporary path candidates.
+                # Override only the child's temporary allocator, not its HOME.
+                prefix = ("import tempfile\n"
+                          "tempfile.tempdir = %r\n"
+                          "tempfile._name_sequence = iter('reused%%08d' %% i for i in range(1000))\n"
+                          % str(fixture_tmp))
+                env = kwargs["env"]
+                self.assertNotEqual(Path(env["HOME"]), caller_home)
+                self.assertNotEqual(Path(env["XDG_STATE_HOME"]), caller_state)
+                allowed_listings.update(
+                    base / "hanig-swarm" / "projects" for base in (
+                        Path(env["XDG_STATE_HOME"]),
+                        Path(env["HOME"]) / ".local" / "state",
+                        Path(env["TMPDIR"]) / "hanig-swarm-state"))
+                program = command[2]
+                if mode[0] == "leak":
+                    # Mutation: restore the report fixture's original shared
+                    # state destination, inside the guard-owned surrogate HOME.
+                    program = program.replace(
+                        "from tests import test_report\n",
+                        "from tests import test_report\n"
+                        "test_report.setUpModule = lambda: None\n")
+                result = real_run([command[0], "-c", prefix + program], **kwargs)
+                names = {json.loads(line[len("STATE_PROJECT "):])
+                         for line in result.stdout.splitlines()
+                         if line.startswith("STATE_PROJECT ")}
+                observed.append(names)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                if mode[0] == "concurrent":
+                    for name in names | {"unrelated"}:
+                        (caller_state / "hanig-swarm" / "projects" / name).mkdir()
+                return result
+
+            def owned_listing(path):
+                self.assertIn(path, allowed_listings,
+                              "guard scanned a state home it did not create")
+                return real_iterdir(path)
+
+            with mock.patch.dict(os.environ, {
+                    "HOME": str(caller_home), "XDG_STATE_HOME": str(caller_state)}), \
+                    mock.patch.object(subprocess, "run", side_effect=run_with_reused_paths), \
+                    mock.patch.object(Path, "iterdir", owned_listing):
+                # Establish the exact names using the actual fixtures, then
+                # pre-create stale projects before invoking the guard again.
+                self.test_dispatch_and_report_fixtures_leave_real_state_home_unchanged()
+                projects = caller_state / "hanig-swarm" / "projects"
+                for name in observed[0]:
+                    (projects / name).mkdir(parents=True)
+                self.test_dispatch_and_report_fixtures_leave_real_state_home_unchanged()
+                self.assertEqual(observed[0], observed[1])
+                # Remove only this regression's synthetic stale entries, then
+                # recreate same-name projects during the next subprocess window.
+                for name in observed[0]:
+                    (projects / name).rmdir()
+                mode[0] = "concurrent"
+                self.test_dispatch_and_report_fixtures_leave_real_state_home_unchanged()
+                self.assertEqual(observed[0], observed[2])
+                mode[0] = "leak"
+                with self.assertRaisesRegex(AssertionError, "test fixtures created real state-home projects"):
+                    self.test_dispatch_and_report_fixtures_leave_real_state_home_unchanged()
 
     def test_empty_path_still_resolves_named_system_tools(self):
         with tempfile.TemporaryDirectory() as directory:
