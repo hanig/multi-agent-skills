@@ -1,15 +1,15 @@
 # Tracker synchronization details
 
 The generated declarations in `../SKILL.md` decide behavior. This reference
-explains the coordinator and connector boundary. <!-- declaration: placement.reference-elaboration -->
+explains the coordinator and linear_sync.py operator boundary. <!-- declaration: placement.reference-elaboration -->
 
 ## Capability boundary
 
 The coordinator drafts tracker work without network access. If the active
-session has no real connector, it must preserve the reviewed draft or outbox <!-- declaration: capability.tracker -->
+session has no authorized tracker access, it must preserve the reviewed draft or outbox <!-- declaration: capability.tracker -->
 intent, report the pending synchronization to the owner, and must not invent a <!-- declaration: capability.tracker -->
 remote result. <!-- declaration: capability.tracker -->
-Tracker credentials and remote operations stay in the authorized connector
+Tracker credentials and remote operations stay in the authorized linear_sync.py
 session, never on the shared login-node coordinator. <!-- declaration: tracker.credential-boundary -->
 
 ## Approval and creation
@@ -46,7 +46,7 @@ omitting it is indistinguishable from not looking. Without a read-back,
 unknown state as drift. <!-- declaration: tracker.readback-shape -->
 
 The loop is apply, read, re-draft, and check. The read-back is attested because
-the coordinator receives the connector session's report rather than making the
+the coordinator receives the linear_sync.py operator's report rather than making the
 network read itself. Synchronization must not be claimed without its read time <!-- declaration: tracker.attestation -->
 and source. <!-- declaration: tracker.attestation -->
 

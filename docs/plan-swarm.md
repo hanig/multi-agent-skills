@@ -406,8 +406,8 @@ Acceptance criteria:
   (`<state-dir>/outbox.jsonl`, `swarm.py outbox`). Keyed on
   `(project, unit, state, attempt_dir)`, so a retried drain converges instead
   of duplicating, and an unwritable outbox warns rather than stalling the DAG.
-  See `docs/tracker-outbox.md`. No drain is written yet: the registry offers no
-  Linear connector, so that half waits on the account.
+  See `docs/tracker-outbox.md`. The authorized operator now runs
+  `linear_sync.py drain` with `LINEAR_API_KEY`, then `linear_sync.py audit`.
 - g. BUILT. The draft carries tracker ids forward keyed on unit id, so a
   re-run updates; a unit added later correctly gets no stale id.
 
