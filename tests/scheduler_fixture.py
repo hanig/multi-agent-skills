@@ -5,6 +5,7 @@ be supplied by the individual test. Neither inherited PATH nor os.defpath is
 appended, including when a scheduler happens to be installed in /usr/bin.
 """
 import os
+import json
 from pathlib import Path
 import shutil
 import sys
@@ -40,9 +41,26 @@ def isolated_module_path():
     """A unittest module fixture; per-test scheduler stubs may replace it."""
     temporary = tempfile.TemporaryDirectory(prefix="scheduler-free-")
     unittest.addModuleCleanup(temporary.cleanup)
-    patch = mock.patch.dict(os.environ, {"PATH": closed_bin(temporary.name)})
+    patch = mock.patch.dict(os.environ, {
+        "PATH": closed_bin(temporary.name),
+        **codex_environment(Path(temporary.name) / "codex-fixture"),
+    })
     patch.start()
     unittest.addModuleCleanup(patch.stop)
+
+
+def codex_environment(directory):
+    """Dispatch tests never consult real operator credentials or settings."""
+    directory = Path(directory)
+    source = directory / "source"
+    operator = directory / "operator"
+    source.mkdir(parents=True)
+    operator.mkdir()
+    auth = source / "auth.json"
+    auth.write_text(json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": "fake-test-key"}))
+    auth.chmod(0o400)
+    return {"HANIG_SWARM_CODEX_AUTH_HOME": str(source),
+            "HANIG_SWARM_CODEX_OPERATOR_HOME": str(operator)}
 
 
 def cleanup_module_path():

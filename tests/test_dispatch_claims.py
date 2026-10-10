@@ -30,6 +30,12 @@ SCRIPTS = ROOT / "skills" / "hanig-swarm" / "scripts"
 SWARM = SCRIPTS / "swarm.py"
 sys.path.insert(0, str(SCRIPTS))
 import swarm as S  # noqa: E402
+from tests.scheduler_fixture import isolated_module_path
+from tests.scheduler_fixture import cleanup_module_path as tearDownModule
+
+
+def setUpModule():
+    isolated_module_path()
 
 ENV = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@x",
            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@x")

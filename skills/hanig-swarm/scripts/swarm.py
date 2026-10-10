@@ -56,6 +56,7 @@ import verify as V  # noqa: E402
 import converge as CV  # noqa: E402  the declared-convergence gate
 import coordinator_paths as CP  # noqa: E402
 import recovery as R  # noqa: E402  audit-only worktree preservation
+import codex_home as CH  # noqa: E402  local filesystem only
 
 STATE_FILE = "swarm-state.json"
 STATE_EPOCH_FILE = "state-epoch.json"
@@ -3395,6 +3396,19 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
         # This is the lifecycle boundary that lets cleanup fail closed on a
         # restore-checked snapshot instead of racing Paseo's workspace GC.
         attempt = Path(unit_dir).name
+        codex = (u.get("provider") or DEFAULT_AGENT_PROVIDER).split("/", 1)[0] == "codex"
+        if codex:
+            try:
+                CH.check_effective_uid()
+            except CH.HomeError as exc:
+                return None, str(exc)
+            if any(str(kv).partition("=")[0] == "CODEX_HOME"
+                   for kv in (u.get("env") or [])):
+                return None, "CODEX_HOME is coordinator-owned; remove it from the unit env"
+            try:
+                auth = CH.validate_source()
+            except CH.HomeError as exc:
+                return None, str(exc)
         intent = (((state or {}).get("units", {}).get(u["id"], {})
                    .get("attempt_launch_intents") or {}).get(attempt))
         intent_err = _code_launch_intent_problem(intent, u, attempt)
@@ -3525,6 +3539,37 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
                 f"unit {u['id']!r} code prompt has no valid completion "
                 f"protocol ({protocol_problem}); refusing an unclosable "
                 f"agent launch")
+        if codex:
+            us = _unit_state(state, u["id"])
+            had_homes = "attempt_codex_homes" in us
+            previous_homes = us.get("attempt_codex_homes")
+            homes = dict(previous_homes) if had_homes else {}
+            try:
+                home, home_identity = CH.allocate(state_dir, attempt, unit_dir, u)
+                try:
+                    # Allocation captured identity under its rollback guard.
+                    # Cover metadata construction and mutation as well as save.
+                    home_meta = {"path": str(home), "removed": False,
+                                 "identity": home_identity}
+                    homes[attempt] = home_meta
+                    us["attempt_codex_homes"] = homes
+                    # Cleanup authority is durable before links or an agent exist.
+                    save_state(state_dir, state)
+                except BaseException:
+                    # Metadata may not exist yet. Use allocation's identity,
+                    # and restore memory even if a replacement refuses cleanup.
+                    try:
+                        CH.remove(state_dir, attempt, str(home), home_identity)
+                    finally:
+                        if had_homes:
+                            us["attempt_codex_homes"] = previous_homes
+                        else:
+                            us.pop("attempt_codex_homes", None)
+                    raise
+                CH.populate(home, auth)
+            except (CH.HomeError, CP.PathPolicyError) as exc:
+                return None, str(exc)
+            argv += ["--env", f"CODEX_HOME={home}"]
         # One list element, however many lines it contains. U.run does not
         # invoke a shell, and Paseo's launcher forwards its argv with "$@",
         # so newlines reach the runner as prompt content rather than argument
@@ -7308,7 +7353,60 @@ def _worktree_cleanup_failed(state, u, meta, report, detail):
     _report_retained_worktrees(state, report)
 
 
+def _cleanup_codex_home(state, u, attempt, report, state_dir):
+    """Clean a terminal attempt's home using only coordinator state.
+
+    Callers establish terminality (or retry a pending terminal cleanup).
+    A missing workspace record needs no preservation; a recorded workspace
+    must have passed preserve-then-archive before its home can be discarded.
+    """
+    us = _unit_state(state, u["id"])
+    workspaces = us.get("attempt_workspaces") or {}
+    if u.get("kind") == "code" and attempt in workspaces:
+        workspace = workspaces[attempt]
+        if not isinstance(workspace, dict) or not workspace.get("archived"):
+            return
+    meta = (us.get("attempt_codex_homes") or {}).get(attempt)
+    if not isinstance(meta, dict) or meta.get("removed"):
+        return
+    meta["cleanup_pending"] = True
+    meta["cleanup_attempts"] = int(meta.get("cleanup_attempts") or 0) + 1
+    if state_dir is None:
+        meta["cleanup_problem"] = "Codex home cleanup requires coordinator state_dir"
+        report.append(f"{u['id']}: {meta['cleanup_problem']}")
+        return
+    save_state(state_dir, state)
+    try:
+        CH.remove(state_dir, attempt, meta.get("path"), meta.get("identity"))
+    except Exception as exc:
+        # Cleanup failures must not block independent dispatch. Unexpected
+        # exceptions get a bounded diagnostic without arbitrary file bytes.
+        meta["cleanup_problem"] = (str(exc) if isinstance(exc, CH.HomeError)
+                                   else "Codex home removal failed "
+                                   f"({type(exc).__name__}); will retry next advance")
+        report.append(f"{u['id']}: {meta['cleanup_problem']}")
+    else:
+        meta["removed"] = True
+        meta.pop("cleanup_pending", None)
+        meta.pop("cleanup_problem", None)
+        report.append(f"{u['id']}: removed Codex home for attempt {attempt}")
+    save_state(state_dir, state)
+
+
 def _archive_code_worktree(state, u, unit_dir, report, state_dir=None):
+    """Extend preserve-then-clean to the attempt's recorded Codex home.
+
+    Non-code outputs remain in their exclusive attempt directory; only the
+    Codex runtime home is disposable at the existing terminal transition.
+    """
+    if not unit_dir:
+        return
+    _preserve_and_archive_code_worktree(state, u, unit_dir, report, state_dir)
+    attempt = Path(unit_dir).name
+    _cleanup_codex_home(state, u, attempt, report, state_dir)
+
+
+def _preserve_and_archive_code_worktree(state, u, unit_dir, report, state_dir=None):
     """Preserve, restore-check, then remove a finished code worktree.
 
     Coordinator-owned worktrees are removed directly with Git. Legacy
@@ -7645,6 +7743,13 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 else:
                     _report_would_archive_code_worktree(
                         state, u, attempt, report)
+        # A home removal can fail after its worktree was archived, or after
+        # a non-code attempt was released for retry. Neither should require
+        # another worktree cleanup or prevent independent units dispatching.
+        for attempt, meta in (us.get("attempt_codex_homes") or {}).items():
+            if (attempt != current_attempt and isinstance(meta, dict)
+                    and meta.get("cleanup_pending") and not dry_run):
+                _cleanup_codex_home(state, u, attempt, report, state_dir)
     _report_retained_worktrees(state, report, dry_run=dry_run)
     if not dry_run:
         save_state(state_dir, state)

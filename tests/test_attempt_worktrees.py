@@ -22,7 +22,7 @@ ENV = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@x",
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from scheduler_fixture import closed_bin, isolated_module_path  # noqa: E402
+from scheduler_fixture import closed_bin, isolated_module_path, codex_environment  # noqa: E402
 from scheduler_fixture import cleanup_module_path as tearDownModule  # noqa: E402
 
 
@@ -106,6 +106,12 @@ class TestPerAttemptWorktrees(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        patch = mock.patch.dict(os.environ, {
+            "HOME": str(self.tmp),
+            **codex_environment(self.tmp / "codex-fixture"),
+        })
+        patch.start()
+        self.addCleanup(patch.stop)
         self.repo = repo_at(self.tmp / "repo")
         self.remote = self.tmp / "origin.git"
         subprocess.run(["git", "init", "-q", "--bare", str(self.remote)],

@@ -25,7 +25,7 @@ ENV = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@x",
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from scheduler_fixture import closed_bin, isolated_module_path  # noqa: E402
+from scheduler_fixture import closed_bin, isolated_module_path, codex_environment  # noqa: E402
 from scheduler_fixture import cleanup_module_path as tearDownModule  # noqa: E402
 
 
@@ -101,7 +101,8 @@ class Base(unittest.TestCase):
              "HOME": str(home),
              "TMPDIR": str(temp_dir),
              "PATH": os.environ.get("PATH", os.defpath),
-             "LANG": "C", "LC_ALL": "C"},
+             "LANG": "C", "LC_ALL": "C",
+             **codex_environment(self.tmp / "codex-fixture")},
             clear=True)
         state_env.start()
         self.addCleanup(state_env.stop)
