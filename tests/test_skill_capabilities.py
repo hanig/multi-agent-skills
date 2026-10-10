@@ -193,7 +193,7 @@ class TestSkillCapabilities(unittest.TestCase):
             "Python 3 and Git",
             "Paseo and agent bus",
             "Reviewer providers and coordinator-held credentials",
-            "Linear connector and authorized account",
+            "linear_sync.py and authorized tracker access",
         ):
             with self.subTest(capability=capability):
                 self.assertIn(capability, text)
@@ -205,7 +205,12 @@ class TestSkillCapabilities(unittest.TestCase):
     def test_authored_skills_state_their_host_safe_boundaries(self):
         expected = {
             "hanig-orchestrate": "Host capability boundary",
-            "hanig-project": "current session's real connector",
+            "hanig-project": (
+                "Use linear_sync.py with the current session's authorized tracker access; "
+                "if none is available, preserve the reviewed draft or outbox intent, "
+                "report the pending synchronization to the owner, and never invent "
+                "a receipt, ticket reference, or confirmation."
+            ),
             "hanig-swarm": "Host capability boundary",
             "hanig-verified-workflow": "Host capability boundary",
             "hanig-review-gate": "Host capability boundary",
