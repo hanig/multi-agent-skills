@@ -6,11 +6,12 @@ and ``models.json``. A model id inside a script is a routing decision the data
 cannot change, which is how the committee tie-breaker stayed pinned to one
 model after the roster moved on. This sweep reads every non-docstring string
 literal in every tracked Python file outside tests, docs and vendored code
-(comments and docstrings are prose, not routing) and fails on any model id those three files declare.
+(comments and docstrings are prose, not routing) and fails on declared model ids AND model-shaped ids absent from the roster.
 """
 
 import ast
 import json
+import re
 import subprocess
 import tempfile
 import unittest
@@ -133,10 +134,40 @@ def literal_hits(source, ids):
     return hits
 
 
+# Independent of the roster: a newly invented pin must fail on its first day.
+# These three exact installation labels are not models; no model-shaped value
+# is exempted by its variable name, file location, or proximity to a data load.
+INSTALLATION_LABELS = {"claude-user", "claude-home", "claude-compatible"}
+MODEL_SHAPE = re.compile(
+    r"(?<![A-Za-z0-9_./-])(?:"
+    r"(?:[A-Za-z][A-Za-z0-9_.-]*/)+[A-Za-z][A-Za-z0-9_.-]*[0-9][A-Za-z0-9_.-]*"
+    r"|(?:gpt|claude|gemini|llama|deepseek|qwen|kimi|glm|mistral|grok)-[A-Za-z0-9][A-Za-z0-9_.-]*"
+    r"|o[0-9]+(?:-[A-Za-z0-9][A-Za-z0-9_.-]*)?"
+    r")(?![A-Za-z0-9_./-])")
+
+
+def model_shape_hits(source):
+    """Executable AST strings that look like model ids, including unknown ids.
+
+    Routing JSON is data, not Python source: loading an id is allowed, while
+    spelling one in a fallback or a loader's own body is still a literal pin.
+    Comments/docstrings retain the existing prose exclusion.
+    """
+    tree = ast.parse(source)
+    prose = {id(n.value) for n in ast.walk(tree)
+             if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)}
+    return [(node.lineno, match.group())
+            for node in ast.walk(tree)
+            if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and id(node) not in prose)
+            for match in MODEL_SHAPE.finditer(node.value)
+            if match.group() not in INSTALLATION_LABELS]
+
+
 class TestNoHardcodedModels(unittest.TestCase):
     def test_the_sweep_covers_the_code_that_routes(self):
         names = {path.name for path in SOURCES}
-        for expected in ("swarm.py", "committee.py", "review.py",
+        for expected in ("swarm.py", "swarm_routing.py", "swarm_types.py", "committee.py", "review.py",
                          "skill_installer.py", "tracker_sync_check.py",
                          "integration_tests.py", "changed_tests_stable.py"):
             self.assertIn(expected, names)
@@ -188,6 +219,33 @@ class TestNoHardcodedModels(unittest.TestCase):
             for line, model in literal_hits(path.read_text(encoding="utf-8"), ids):
                 found.append("%s:%d names %s" % (path.relative_to(ROOT), line, model))
         self.assertEqual(found, [], "\n".join(found))
+
+    def test_no_authored_string_literal_has_a_model_id_shape(self):
+        found = []
+        self.assertTrue(SOURCES)
+        for path in SOURCES:
+            for line, model in model_shape_hits(path.read_text(encoding="utf-8")):
+                found.append("%s:%d names %s" % (path.relative_to(ROOT), line, model))
+        self.assertEqual(found, [], "\n".join(found))
+
+    def test_unknown_models_fail_without_a_roster_entry(self):
+        values = ("newvendor/nebula-987", "openrouter/newvendor/nebula-987",
+                  "gpt-987-future", "claude-future", "gemini-987-pro",
+                  "qwen-987", "deepseek-v987", "o987", "grok-987")
+        for value in values:
+            self.assertNotIn(value, declared_model_ids())
+            for source in ("MODEL = %r", "launch(model=%r)",
+                           "def load():\n    return %r", "X = f'--model {%r}'"):
+                with self.subTest(value=value, source=source):
+                    self.assertTrue(model_shape_hits(source % value))
+        self.assertEqual(model_shape_hits(
+            '"""gpt-987 notes"""\n# gpt-987\n'
+            'MODEL = json.loads(path.read_text())["model"]\n'), [])
+        for value in ("anthropic-ai/claude-code/2.1.261", "openai/codex/0.153.4",
+                      "mariozechner/pi-coding-agent/0.73.1", *INSTALLATION_LABELS):
+            self.assertEqual(model_shape_hits("LABEL = %r" % value), [])
+        self.assertTrue(model_shape_hits(
+            'MODEL = json.loads(path.read_text()).get("model", "gpt-987")'))
 
     def test_the_sweep_catches_a_literal_and_ignores_prose(self):
         ids = {"gpt-6-sol"}

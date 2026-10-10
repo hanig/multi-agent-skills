@@ -649,8 +649,13 @@ class TestDrain(DrainCase):
         with mock.patch.object(API, 'load_key', return_value=None):
             self.assertEqual(self.drain(), 2)
         # Only the established seam owns network imports.
-        for path in (ROOT / 'skills/hanig-swarm/scripts/swarm.py', PROJECT / 'tickets.py', PROJECT / 'drain_contract.py', PROJECT / 'linear_sync.py'):
+        for path in (*(ROOT / 'skills/hanig-swarm/scripts' / name for name in ('swarm.py', 'swarm_routing.py', 'swarm_types.py')), PROJECT / 'tickets.py', PROJECT / 'drain_contract.py', PROJECT / 'linear_sync.py'):
             tree = ast.parse(path.read_text())
+            expected = {"swarm.py": "_submit", "swarm_routing.py": "load_agent_routing",
+                        "swarm_types.py": "PlanError"}.get(path.name)
+            if expected:
+                self.assertIn(expected, {n.name for n in tree.body
+                                         if isinstance(n, (ast.FunctionDef, ast.ClassDef))})
             names = {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
             names |= {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
             forbidden = {'urllib', 'http', 'requests', 'socket', 'linear_api', 'linear_sync'}
