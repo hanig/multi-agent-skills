@@ -201,13 +201,24 @@ def check_structured(body, incoming, outgoing):
             raise ValueError('structured ' + direction + ' disagrees with resulting relations')
 
 
+def body_identity(prefix):
+    """Only a whole body marker at the end of the trailer prefix counts."""
+    match = re.search(r'(?m)^(`?)swarm-body: ([^`\r\n]+)\1\r?\n*\Z', prefix)
+    return (prefix[:match.start()], match[2]) if match else (prefix, None)
+
+
 def components(body):
     body = body or ''
     mark = trailer(body)
     prefix = mark['prefix'] if mark else body
-    return {'body': INDEPENDENT.sub('', prefix),
+    return {'body': body_identity(prefix)[1] if mark else None,
             'independence': INDEPENDENT.findall(prefix),
             'trailer': {k: mark[k] for k in ('deps', 'op', 'approver', 'by')} if mark else None}
+
+
+def issue_identity(issue):
+    """Compare title and managed identity lines, never rendered prose."""
+    return dict(components(issue.get('description')), title=issue['title'])
 
 
 def description(prefix, incoming, outgoing, op, approver, by=None):
@@ -425,7 +436,10 @@ def prepare(args, client, sync, identity, op):
     identities[target_id] = target['identifier'] if target else None
     old_body = (target.get('description') or '') if target else ''
     mark = trailer(old_body)
-    prefix = args.body if args.body is not None else (mark['prefix'] if mark else old_body)
+    old_prefix, old_digest = body_identity(mark['prefix']) if mark else (old_body, None)
+    prefix = args.body if args.body is not None else old_prefix
+    body_digest = (hashlib.sha256(args.body.encode('utf-8')).hexdigest() if args.body is not None else
+                   old_digest or hashlib.sha256(prefix.encode('utf-8')).hexdigest())
     reason = args.independent
     if reason is None and not getattr(args, 'clear_independent', False):
         reasons = INDEPENDENT.findall(old_body)
@@ -474,6 +488,8 @@ def prepare(args, client, sync, identity, op):
                    'by': None if iid == target_id else op,
                    'incoming': sorted(a for a, b in desired_edges if b == iid),
                    'outgoing': sorted(b for a, b in desired_edges if a == iid)}
+        if iid == target_id:
+            desired['body_sha256'] = body_digest
         rows.append({'id': iid, 'before': before, 'desired': desired})
     managed = {edge for edge in edges | desired_edges if any(i in touched for i in edge)} | additions | removals
     spec = {'schema_version': 1, 'operation': op, 'kind': args.issue_command,
@@ -513,7 +529,10 @@ def desired_value(row, identities):
     d = row['desired']
     if 'description' in d:
         return dict(d)
-    return {'title': d['title'], 'description': description(d['prefix'],
+    prefix = d['prefix']
+    if 'body_sha256' in d:
+        prefix += ('\n' if prefix and not prefix.endswith('\n') else '') + '`swarm-body: %s`\n' % d['body_sha256']
+    return {'title': d['title'], 'description': description(prefix,
             {identities[i] for i in d['incoming']}, {identities[i] for i in d['outgoing']},
             d['op'], d['approver'], d['by'])}
 
@@ -561,9 +580,9 @@ def read_managed(spec, sync, client, is_confirmed, path, reader=None):
         resolvable = all(identities[i] for i in row['desired']['incoming'] + row['desired']['outgoing'])
         desired = desired_value(row, identities) if resolvable else row['before']
         before = row['before'] or desired
-        for field, value in [('title', issue['title'])] + list(components(issue.get('description')).items()):
-            old = before['title'] if field == 'title' else components(before['description'])[field]
-            new = desired['title'] if field == 'title' else components(desired['description'])[field]
+        for field, value in issue_identity(issue).items():
+            old = issue_identity(before)[field]
+            new = issue_identity(desired)[field]
             if value != new and (is_confirmed or value != old):
                 raise ValueError('managed %s changed: %s' % (field, issue['identifier']))
     # Any extra incident edge is outside both recorded snapshots; do not write.
@@ -671,7 +690,7 @@ def apply(spec, path, client, sync, initial=None, handler=None):
             sync.check_membership(current, spec['project'], spec['team'])
             identities[iid] = current['identifier']
         elif (not handler.issue_matches(current, desired) if handler is not None else
-              any(current.get(k) != v for k, v in desired.items())):
+              issue_identity(current) != issue_identity(desired)):
             changes = handler.issue_update(current, desired) if handler is not None else desired
             client.query('mutation OperationUpdate($id: String!, $input: IssueUpdateInput!) { '
                          'issueUpdate(id: $id, input: $input) { success } }', {'id': iid, 'input': changes})
@@ -750,9 +769,10 @@ def verify(spec, client, sync, reader=None):
         issue = reader.seen[row['id']]
         sync.check_membership(issue, spec['project'], spec['team'])
         refuse_deleted_creation(issue, None)
-        expected = dict(desired_value(row, identities), identifier=identities[row['id']])
+        expected = dict(issue_identity(desired_value(row, identities)), identifier=identities[row['id']])
+        actual_identity = dict(issue_identity(issue), identifier=issue['identifier'])
         for field, desired in expected.items():
-            if issue.get(field) != desired:
+            if actual_identity[field] != desired:
                 raise ValueError('issue %s read-back differs: %s' % (field, row['id']))
         if declared_edges(issue):
             raise ValueError('declared_edges DRIFT: marker identifiers differ: ' + issue['identifier'])
@@ -771,7 +791,7 @@ def run(args, client, sync):
         args.body = (Path(args.body_file).read_bytes().decode('utf-8') if args.body_file else
                      sys.stdin.read() if args.body_stdin else None)
         reject_key(vars(args), client._key)
-        if args.body is not None and re.search(r'(?m)^`swarm-(?:deps|op|approver|deps-by):', args.body):
+        if args.body is not None and re.search(r'(?m)^`?swarm-(?:body|deps|op|approver|deps-by):', args.body):
             raise ValueError('body must not supply managed marker lines')
     identity = sync.drain_identity(args, sync.Reader(client))
     binding_path, binding_bytes, config, workspace, project, team = identity
