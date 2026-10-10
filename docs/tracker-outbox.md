@@ -2,9 +2,10 @@
 
 ## The network boundary
 
-The coordinator runs on a cluster login node. A tracker connector runs in a
-connected client elsewhere. `swarm.py` therefore has no network code and holds
-no tracker credentials: it writes intents, and a connected session drains them.
+The coordinator runs on a cluster login node. The authorized operator runs
+`linear_sync.py drain` in a connected session using its `LINEAR_API_KEY`.
+`swarm.py` has no network code and holds no tracker credentials: it writes
+intents for that operator.
 Tracker state is a view of swarm state and never an input to the DAG judge.
 
 MCP core is stateless as of the 2026-07-28 specification and tasks are an
@@ -192,8 +193,9 @@ remote worker cannot replace it.
 
 The authorized operator can run `linear_sync.py audit` from the installed
 hanig-project skill, followed by `section` with the same binding or draft,
-plan and state inputs. This PR performs no GraphQL mutation. Existing
-connector draining and its acknowledgment contract remain the write path.
+plan and state inputs. The audit performs no GraphQL mutation.
+`linear_sync.py drain` applies outbox intents and records their acknowledgments;
+`file --draft` files approved drafts, and `issue` handles ad-hoc changes.
 The coordinator, tickets and drain_contract modules stay network-free.
 
 The offline `tracker_audit.py` renderer requires schema-valid CLEAN evidence,
@@ -267,7 +269,7 @@ that refusal is reported and the effects remain safe to re-read next time.
 ## Approved draft filing
 
 After the one named approval, `linear_sync.py file --draft tickets.json`
-replaces manual connector filing. `tickets.py approve` digests the immutable
+applies approved drafts through linear_api.transport. `tickets.py approve` digests the immutable
 project and issue spec, including repository and `blocked_by`; progress and
 preview fields do not authorize mutations. Old approvals are re-approved once.
 Filing uses repository-namespaced ids and exact remote identity markers,

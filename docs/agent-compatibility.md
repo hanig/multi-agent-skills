@@ -41,7 +41,7 @@ connector, or authority is available.
 |---|---|---|---|
 | Shell and filesystem access | Scripted checks and local artifacts | The host has no usable shell or access is denied | Report the blocked command/path and request the host-approved access; do not fabricate its output. |
 | Python 3 and Git | Authored helper scripts and worktree/commit evidence | Either command is absent or unusable in the current worktree | Install or expose the host-approved program, then rerun. Preserve the repository cwd and use a disposable home/config root in tests. |
-| Linear connector and authorized account | Reading or mutating Linear | No connector, account, or mutation authority in this session | Keep the ticket intent/outbox artifact reviewable, report **pending synchronization**, and let a session with the real connector apply it. |
+| linear_sync.py and authorized tracker access | Filing, draining, issue changes and audit in Linear | No API key, account, or required authority in this session | Keep the ticket intent/outbox artifact reviewable, report **pending synchronization**, and let an authorized session run linear_sync.py with its LINEAR_API_KEY. |
 | Paseo and agent bus | The optional delegation, fleet, and notification workflows | Binary, daemon, configured state, or local bus is absent | Do the bounded local work without delegation, or ask an operator to install/configure the optional service. Do not create look-alike paths or a daemon. |
 | Reviewer providers and coordinator-held credentials | `hanig-review-gate` automated multi-model review | Reviewer configuration or credentials are unavailable | Mark the change **unreviewed** and retain the local evidence; do not borrow/copy credentials or call a paid provider from a worker. |
 
@@ -49,15 +49,18 @@ Python and Git are baseline local prerequisites for their named workflows.
 Paseo/agent-bus, reviewer access, and Linear are optional capabilities with
 different fallbacks; none is installed or configured by skill installation.
 The coordinator/worker boundary remains in force: a worker receives neither
-the coordinator's connector authority nor its denied credential environment,
+the coordinator's tracker authority nor its denied credential environment,
 and an agent's provider authentication is not a grant to use another model or
 external service.
 
 ### Linear operations and outbox proof
 
-Use the connector available to the **current session** and its real operation
-names. Before any external tracker mutation, obey the host's approval policy
-and the skill's explicit approval gate. Record the connector's actual result
+Use `linear_sync.py file --draft tickets.json` for approved drafts, `drain`
+for outbox intents, `issue new | edit | replay` for ad-hoc changes, and `audit`
+for consistency checks. The authorized operator supplies `LINEAR_API_KEY`;
+credentials remain outside the coordinator and workers. Before any external
+tracker mutation, obey the host's approval policy and the skill's explicit
+approval gate. Record the operator's actual read-back
 or returned reference only after the operation succeeds; never invent a tool
 name, receipt, ticket reference, or read-back.
 
@@ -89,7 +92,7 @@ support.
 | Bundle | Origin | Loader/frontmatter | Host-specific names, paths, siblings, optional services | Support classification |
 |---|---|---|---|---|
 | `hanig-orchestrate` | authored | portable / all four | owner mandate; authored project, swarm, review, and handoff siblings; optional scheduler, reviewers, tracker, and Paseo | capability-limited; installation supplies instructions, never authority or liveness |
-| `hanig-project` | authored | portable / all four | Python/Git helpers; sibling `hanig-swarm`; tracker connector and approval gate; optional scheduler/Paseo | capability-limited; Linear uses the outbox contract |
+| `hanig-project` | authored | portable / all four | Python/Git helpers; sibling `hanig-swarm`; linear_sync.py tracker access and approval gate; optional scheduler/Paseo | capability-limited; Linear uses the outbox contract |
 | `hanig-swarm` | authored | portable / all four | Python/Git, Slurm, optional Paseo; sibling authored scripts; coordinator-only credentials | capability-limited; Slurm/dispatch behavior is not a host-worker promise |
 | `hanig-verified-workflow` | authored | portable / all four | Python helper, Git evidence, `sbatch`/`sacct`, project-local Nextflow/Snakemake | capability-limited; usable locally only where its workflow programs exist |
 | `hanig-review-gate` | authored | portable / all four | Python review helpers, reviewer configuration and coordinator credentials | capability-limited; unavailable reviewers yield unreviewed, never a self-pass |
