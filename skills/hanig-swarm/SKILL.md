@@ -120,7 +120,7 @@ scheduler work blocked, retain the declared plan, and never infer a run result.
 If Paseo or the bus is missing, do bounded local work without delegation or ask
 an operator to configure Paseo and the bus; never create look-alike paths or
 daemons. Without reviewers, retain the evidence and mark the change unreviewed;
-never borrow credentials or substitute worker self-confidence. Without a
+never borrow credentials or substitute worker self-confidence. Without
 tracker access, retain the idempotent outbox intent as pending synchronization.
 
 Set `HANIG_SWARM_DIR` to the directory containing the `SKILL.md` instance this
