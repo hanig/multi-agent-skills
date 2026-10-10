@@ -29,7 +29,31 @@ RETIRED = re.compile("|".join((
     r"\bUse\s+the\s+connector\s+available\s+to\b",
     r"\bLinear\s+MCP\s+write\s+path\s+stays\s+usable\b",
     r"\bsession\s+with\s+the\s+real\s+connector\s+apply\s+it\b",
+    r"\bconnector\s+(?:files|creates|updates)\s+"
+    r"(?:(?:the|approved|Linear|tracker)\s+)*(?:drafts?|issues?|tickets?|projects?)\b",
+    r"\bconnector\s+(?:drains|applies)\s+"
+    r"(?:(?:the|pending|tracker|outbox)\s+)*(?:intents?|outbox)\b",
 )), re.IGNORECASE)
+READ_OPERATION = re.compile(r"\b(?:read|query|look\s+up|inspect|fetch)\b", re.IGNORECASE)
+WRITE_OPERATION = re.compile(
+    r"\b(?:drain\w*|fil(?:e|es|ed|ing)|creat\w*|updat\w*|mutat\w*|"
+    r"appl(?:y|ies|ied|ying))\b", re.IGNORECASE)
+
+
+def read_instruction(body, match):
+    """Identify an explicitly read-only clause, without swallowing later writes.
+
+    The retired templates include ambiguous generic connector guidance. A
+    read/query/lookup instruction is outside that write-path guard, unless
+    its own clause also names a write. Punctuation separates instructions;
+    a mention of reading elsewhere in a paragraph cannot hide a write.
+    """
+    boundaries = list(re.finditer(r"[;.!?](?=\s|$)", body))
+    start = max((b.end() for b in boundaries if b.end() <= match.start()), default=0)
+    end = min((b.start() for b in boundaries if b.start() >= match.end()),
+              default=len(body))
+    clause = body[start:end]
+    return bool(READ_OPERATION.search(clause) and not WRITE_OPERATION.search(clause))
 
 
 def authored_documents(root):
@@ -53,6 +77,8 @@ def retired_wording(root):
             body = body.replace(PROTOCOL_PARAGRAPH,
                                 "\n" * PROTOCOL_PARAGRAPH.count("\n"))
         for match in RETIRED.finditer(body):
+            if read_instruction(body, match):
+                continue
             problems.append("{}:{}: {}".format(
                 relative, body.count("\n", 0, match.start()) + 1, match[0]))
     return problems
@@ -138,6 +164,37 @@ class TestDocumentationReconciliation(unittest.TestCase):
             vendor.parent.mkdir(parents=True)
             vendor.write_text("A session with MCP drains them.", encoding="utf-8")
             self.assertEqual(retired_wording(root), problems)
+
+    def test_read_only_connector_instructions_are_admissible(self):
+        samples = (
+            "Use the connector available to the current session to read an issue's status; do not mutate it.",
+            "Read an issue's status through the authorized connector.",
+            "Query tracker dependencies through the Linear MCP connector.",
+            "In the session with the connector, inspect the issue's status.",
+            "The MCP connector files are configuration artifacts.",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for text in samples:
+                with self.subTest(text=text):
+                    (root / "README.md").write_text(text, encoding="utf-8")
+                    self.assertEqual(retired_wording(root), [])
+
+    def test_connector_as_writer_and_read_before_write_are_rejected(self):
+        writes = (
+            "The MCP connector files approved drafts.",
+            "The connector creates Linear issues.",
+            "The connector drains pending outbox intents.",
+            "The MCP connector applies tracker intents.",
+            "Read the draft and file it through the Linear MCP connector.",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for write in writes:
+                for prefix in ("", "Read the draft first. ", "Query tracker status; "):
+                    with self.subTest(write=write, prefix=prefix):
+                        (root / "README.md").write_text(prefix + write, encoding="utf-8")
+                        self.assertTrue(retired_wording(root))
 
     def test_audit_status_covers_each_finding_and_citations_resolve(self):
         body = (ROOT / AUDIT).read_text(encoding="utf-8")
