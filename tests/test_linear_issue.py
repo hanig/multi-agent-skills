@@ -1458,11 +1458,11 @@ class TestIssue(IssueCase):
                               ('edit', ('ARC-999', '--title', 'missing'))):
             with self.subTest(command=command):
                 self.assertEqual(self.issue(command, *args), 2, self.stdout + self.stderr)
-                self.assertIn('issue not found: ARC-999', self.stderr)
+                self.assertIn('issue identifier disagrees on read-back: ARC-999', self.stderr)
                 self.assertNotIn('Entity not found', self.stderr)
         lookups = [v for q, v in self.fake.calls if 'query OperationIdentifier' in q]
-        self.assertEqual(lookups, [{'filter': {'or': [{'team': {'key': {'eq': 'ARC'}},
-                                                     'number': {'eq': 999}}]}, 'after': None}] * 2)
+        self.assertEqual(lookups, [{'filter': {'team': {'key': {'eq': 'ARC'}},
+                                             'number': {'in': [999]}}, 'after': None}] * 2)
         self.assertFalse(any('issue(id:' in q and v.get('id') == 'ARC-999'
                              for q, v in self.fake.calls))
         self.assertEqual(self.fake.mutations, [])
@@ -1505,7 +1505,7 @@ class TestIssue(IssueCase):
             self.assertEqual(self.records(), [])
         self.binding.write_bytes(original)
         self.assertEqual(self.issue('new', '--blocked-by', 'ARC-99'), 2)
-        self.assertIn('issue not found: ARC-99', self.stderr)
+        self.assertIn('issue identifier disagrees on read-back: ARC-99', self.stderr)
         lock = LS.drain_lock_path('workspace', 'project')
         lock.parent.mkdir(parents=True, exist_ok=True)
         with lock.open('a') as handle:
