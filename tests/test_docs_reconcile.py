@@ -24,17 +24,9 @@ def normalize(text):
     """
     text = re.sub(r"\[([^\[\]]+)\]\([^\n]*?\)", r"\1", text)
     text = re.sub(r"(?m)^[ \t]*(?:(?:[-+*]|[0-9]+[.)])\s+|>\s*)+", "", text)
-    lines = []
-    for line in text.splitlines():
-        # A pipe inside a code span is content, not a cell separator.
-        # Table rows need not have leading/trailing pipes.
-        parts = re.split(r"(`+[^`]*`+)", line)
-        line = "".join(part if index % 2 else part.replace("|", " ")
-                       for index, part in enumerate(parts))
-        lines.append(line)
-    text = "\n".join(lines)
     text = re.sub(r"(`+)(.*?)\1", r"\2", text, flags=re.DOTALL)
     text = re.sub(r"\*+|(?<!\w)_+|_+(?!\w)", "", text)
+    text = text.replace("|", " ")
     return " ".join(text.split())
 
 
@@ -143,7 +135,9 @@ class TestDocumentationReconciliation(unittest.TestCase):
                              "skills/hanig-swarm/declarations.json",
                              "skills/hanig-orchestrate/references/new.md",
                              "docs/tracker-outbox.md"):
-                    for text in (entry["text"], wrapped, "- " + wrapped,
+                    for text in (entry["text"], entry["text"].replace("`", ""),
+                                 "`" + entry["text"].replace("`", "") + "`",
+                                 wrapped, "- " + wrapped,
                                  "[" + entry["text"] + "](/migration)",
                                  "> " + wrapped.replace("\n", "\n> "),
                                  "| Retired | " + entry["text"] + " |",
