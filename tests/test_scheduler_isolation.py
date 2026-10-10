@@ -2,6 +2,7 @@
 import importlib
 import os
 from pathlib import Path
+import pwd
 import shlex
 import subprocess
 import sys
@@ -46,17 +47,69 @@ class OrdinaryTools(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             program = (
                 "import os, pathlib, sys, unittest\n"
-                "before = os.environ.get('PATH')\n"
+                "keys = ('PATH', 'XDG_STATE_HOME')\n"
+                "before = {key: os.environ.get(key) for key in keys}\n"
                 "suite = unittest.defaultTestLoader.loadTestsFromName("
                 "'tests.test_runtime.TestRuntimeMustBeDeclared')\n"
                 "result = unittest.TextTestRunner().run(suite)\n"
                 "assert result.wasSuccessful()\n"
-                "assert os.environ.get('PATH') == before, 'module PATH leaked'\n"
+                "assert {key: os.environ.get(key) for key in keys} == before, 'module environment leaked'\n"
                 "assert not list(pathlib.Path(sys.argv[1]).glob('scheduler-free-*')), 'module fixture retained'\n")
             result = subprocess.run([sys.executable, "-c", program, directory],
                                     cwd=ROOT, env=dict(os.environ, TMPDIR=directory),
                                     capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_dispatch_and_report_fixtures_leave_real_state_home_unchanged(self):
+        # Resolve the account home independently of a caller's temporary HOME.
+        # A fresh project cwd gets a unique default project root, so comparing
+        # immediate project entries catches any escaped allocation/migration
+        # without walking live attempts belonging to other coordinators.
+        homes = {Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local" / "state",
+                 Path.home() / ".local" / "state"}
+        xdg = os.environ.get("XDG_STATE_HOME")
+        if xdg and Path(xdg).expanduser().is_absolute():
+            homes.add(Path(xdg).expanduser())
+
+        def projects():
+            found = set()
+            for home in homes:
+                directory = home / "hanig-swarm" / "projects"
+                if directory.exists():
+                    found.update(str(path) for path in directory.iterdir())
+            return found
+
+        before = projects()
+        # Use the real unittest module lifecycle and the existing CLI fixture.
+        # Omitting --root exercises default allocation instead of masking it
+        # with an explicit temporary run root. Report collection also reaches
+        # coordinator_paths through legacy migration, even though it reads.
+        program = '''
+import json, os, pathlib, unittest
+from tests import test_arc692_state_epoch as fixture
+before = dict(os.environ)
+class DefaultRootDispatch(fixture.TestStateEpoch):
+    __module__ = fixture.__name__
+    def runTest(self):
+        result = self.cli('run', '--dry-run')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = self.read()
+        self.assertEqual(state['units']['u']['state'], 'SUBMITTED')
+        attempt = pathlib.Path(state['units']['u']['attempt_dir'])
+        self.assertTrue((attempt / 'unit.json').is_file())
+        attempt.relative_to(pathlib.Path(os.environ['XDG_STATE_HOME']).resolve())
+suite = unittest.TestSuite([DefaultRootDispatch(),
+    unittest.defaultTestLoader.loadTestsFromName(
+        'tests.test_report.TestBuiltFromEvidence.test_digests_come_from_the_receipt')])
+result = unittest.TextTestRunner(verbosity=2).run(suite)
+assert dict(os.environ) == before, 'module state fixture leaked its environment'
+raise SystemExit(not result.wasSuccessful())
+'''
+        result = subprocess.run([sys.executable, "-c", program], cwd=ROOT,
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(projects(), before,
+                         "test fixtures created real state-home projects")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_empty_path_still_resolves_named_system_tools(self):
         with tempfile.TemporaryDirectory() as directory:
