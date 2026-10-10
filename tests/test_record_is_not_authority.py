@@ -88,8 +88,9 @@ ALLOWED = {
         "matches Paseo's registry against the coordinator-state intent",
     ("swarm.py", "_recover_code_launch"):
         "binds recovered Paseo state to coordinator-state workspace identity",
-    ("swarm.py", "_archive_code_worktree"):
-        "reads coordinator-state workspace metadata only for cleanup",
+    ("swarm.py", "_preserve_and_archive_code_worktree"):
+        "reads coordinator-state workspace identity, base and repository "
+        "metadata only for preservation and cleanup, never from worker files",
     ("swarm.py", "_execution_workspace"):
         "reads the declared workspace from the PLAN, not from a record",
     ("swarm.py", "validate_plan"):

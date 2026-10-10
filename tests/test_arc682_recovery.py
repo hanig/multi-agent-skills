@@ -359,7 +359,7 @@ class TestRecoveryAuthority(unittest.TestCase):
 
             Visitor().visit(tree)
         self.assertEqual(
-            uses, [("swarm.py", "_archive_code_worktree")],
+            uses, [("swarm.py", "_preserve_and_archive_code_worktree")],
             "Recovery material may gate cleanup only. Judgment, completion, "
             "retry, and resume paths must have no reader for it.")
 

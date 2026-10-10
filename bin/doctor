@@ -950,6 +950,19 @@ else
   fi
 fi
 
+printf '\n=== CODEX API SOURCE ===\n'
+CODEX_HOME_CHECK="$REPO/skills/hanig-swarm/scripts/codex_home.py"
+if [ -f "$CODEX_HOME_CHECK" ] && command -v python3 >/dev/null 2>&1; then
+  bounded "$RUN_SECONDS" python3 -B "$CODEX_HOME_CHECK"
+  if [ "$PROBE_STATE:$PROBE_RC" = answered:0 ]; then
+    printf '  %s\n' "$PROBE_OUT"
+  else
+    printf '  COULD NOT DETERMINE — bounded Codex API source check did not complete\n'
+  fi
+else
+  printf '  COULD NOT DETERMINE — Codex home helper or python3 is absent\n'
+fi
+
 printf '\n=== SOURCE ===\n'
 printf '  repo: %s\n' "$REPO"
 # Ask git, never stat `.git`: it is a file in a worktree and a directory in a

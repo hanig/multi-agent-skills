@@ -45,6 +45,10 @@ overridable with `HANIG_SWARM_CODEX_AUTH_HOME`. The key is never copied:
 each agent home symlinks the source's `auth.json`. This bills API dollars
 rather than plan quota, as the owner chose.
 
+The source `auth.json` must live on a POSIX filesystem that stores file
+modes. ExFAT and FAT report modes like 0777 rather than preserving 0400,
+so validation refuses them; this is the safe failure.
+
 ## What dispatch does
 
 For a unit whose provider is `codex/...`, before `paseo run`:
