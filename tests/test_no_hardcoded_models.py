@@ -140,7 +140,10 @@ def literal_hits(source, ids):
 INSTALLATION_LABELS = {"claude-user", "claude-home", "claude-compatible"}
 MODEL_SHAPE = re.compile(
     r"(?<![A-Za-z0-9_./-])(?:"
-    r"(?:[A-Za-z][A-Za-z0-9_.-]*/)+[A-Za-z][A-Za-z0-9_.-]*[0-9][A-Za-z0-9_.-]*"
+    r"(?:[A-Za-z][A-Za-z0-9_.-]*/)+"
+    # API/software version-only components are not model names.
+    r"(?!v[0-9]+(?:\.[0-9]+)*(?:(?:alpha|beta)[0-9]+)?(?![A-Za-z0-9_./-]))"
+    r"[A-Za-z][A-Za-z0-9_.-]*[0-9][A-Za-z0-9_.-]*"
     r"|(?:[A-Za-z][A-Za-z0-9_.-]*/)+[A-Za-z][A-Za-z0-9_.-]*-(?:pro|latest|preview|chat|instruct|base|coder)"
     r"|(?:gpt|claude|gemini|llama|deepseek|qwen|kimi|glm|mistral|grok)-[A-Za-z0-9][A-Za-z0-9_.-]*"
     r"|o[0-9]+(?:-[A-Za-z0-9][A-Za-z0-9_.-]*)?"
@@ -252,6 +255,15 @@ class TestNoHardcodedModels(unittest.TestCase):
             self.assertEqual(model_shape_hits("LABEL = %r" % value), [])
         self.assertTrue(model_shape_hits(
             'MODEL = json.loads(path.read_text()).get("model", "gpt-987")'))
+
+    def test_version_only_paths_are_not_model_names(self):
+        for version in ("v1", "v12", "v1.2", "v1beta1", "v2alpha3"):
+            for prefix in ("api/", "service/api/", "GET api/"):
+                with self.subTest(version=version, prefix=prefix):
+                    self.assertEqual(model_shape_hits("ENDPOINT = %r" % (prefix + version)), [])
+        # A model name containing a version still must be rejected.
+        for value in ("newvendor/nebula-v1", "newvendor/v1-model", "newvendor/v1pro"):
+            self.assertTrue(model_shape_hits("MODEL = %r" % value))
 
     def test_the_sweep_catches_a_literal_and_ignores_prose(self):
         ids = {"gpt-6-sol"}
