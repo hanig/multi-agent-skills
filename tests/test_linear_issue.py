@@ -361,6 +361,102 @@ runpy.run_path(str(script), run_name='__main__')
 
 
 class TestIssue(IssueCase):
+    def test_digest_examples_are_content_and_terminal_markers_are_refused(self):
+        for name in ('body', 'reason'):
+            for quote in ('', '`'):
+                example = quote + 'swarm-' + name + ': ' + 'a' * 64 + quote
+                body = 'Example:\n' + example + '\nEnd of example'
+                with self.subTest(name=name, quote=quote):
+                    self.assertEqual(self.issue('new', '--independent', 'why', body=body), 0,
+                                     self.stdout + self.stderr)
+                    op = re.search(r'^operation (\S+)$', self.stdout, re.M)[1]
+                    spec = next(LI.load_record(p) for p in self.records() if p.stem == op)
+                    live = self.fake.issues[spec['target']]
+                    self.assertTrue(live['description'].startswith(body + '\n'))
+                    self.assertEqual(LI.components(live['description'])['body'],
+                                     hashlib.sha256(body.encode('utf-8')).hexdigest())
+                    self.assertEqual(self.issue('replay', op), 0, self.stdout + self.stderr)
+                    writes = copy.deepcopy(self.fake.mutations)
+                    for tail in ('', '\n', '\r\n\r\n', '\n  \n'):
+                        self.assertEqual(self.issue('new', '--independent', 'why',
+                                                    body='Example:\n' + example + tail), 2)
+                        self.assertEqual(self.fake.mutations, writes)
+
+    def test_url_reason_new_edit_and_both_replays(self):
+        reason = 'See https://example.test/reason'
+        self.crash_after(1, lambda: self.issue('new', '--independent', reason, body='Body'))
+        path = self.records()[0]
+        target = LI.load_record(path)['target']
+        live = self.fake.issues[target]
+        for new_reason, command in ((reason, None), (reason + '/edited', 'edit')):
+            if command:
+                existing = set(self.records())
+                self.crash_after(1, lambda: self.issue('edit', live['identifier'],
+                                                      '--independent', new_reason))
+                path, = set(self.records()) - existing
+            spec = LI.load_record(path)
+            raw = path.read_bytes()
+            sent = next(v['input']['description'] for q, v in reversed(self.fake.mutations)
+                        if 'OperationCreate' in q or 'OperationUpdate' in q)
+            self.assertIn('swarm-independent: ' + new_reason + '\n', sent)
+            self.assertEqual(live['description'], render_markdown(sent))
+            self.assertNotEqual(live['description'], sent)
+            identity = LI.components(live['description'])
+            self.assertEqual(identity['body'], hashlib.sha256(b'Body').hexdigest())
+            self.assertEqual(identity['independence'], hashlib.sha256(new_reason.encode()).hexdigest())
+            self.assertEqual(spec['issues'][0]['desired']['reason_sha256'], identity['independence'])
+            writes = copy.deepcopy(self.fake.mutations)
+            for confirmed in (False, True):
+                self.assertEqual(LI.confirmed(path), confirmed)
+                self.assertEqual(self.issue('replay', path.stem), 0, self.stdout + self.stderr)
+                self.assertEqual(self.fake.mutations, writes)
+                self.assertEqual(path.read_bytes(), raw)
+        # A title/body edit must retain the approved reason digest despite
+        # reading its rendered URL. Clearing it explicitly changes identity.
+        self.assertEqual(self.issue('edit', live['identifier'], '--body-file', str(self.body),
+                                    body='Updated'), 0, self.stdout + self.stderr)
+        self.assertEqual(LI.components(live['description'])['independence'], identity['independence'])
+        self.assertEqual(self.issue('edit', live['identifier'], '--clear-independent',
+                                    '--add-blocked-by', 'ARC-1'), 0, self.stdout + self.stderr)
+        self.assertEqual(LI.components(live['description'])['independence'], hashlib.sha256(b'').hexdigest())
+
+    def test_reason_digest_tampering_cannot_use_prose_identity(self):
+        self.crash_after(1, lambda: self.issue('new', '--independent', 'https://example.test/reason'))
+        path = self.records()[0]
+        live = self.fake.issues[LI.load_record(path)['target']]
+        original = live['description']
+        reason_digest = LI.components(original)['independence']
+        marker = '`swarm-reason: ' + reason_digest + '`\n'
+        # The correct identity copied into prose must not rescue a changed,
+        # missing or displaced terminal identity, even with unchanged prose.
+        variants = [original.replace(marker, marker.replace(reason_digest, '0' * 64)),
+                    original.replace(marker, ''),
+                    original.replace(marker, marker + 'Not part of the trailer\n')]
+        writes = copy.deepcopy(self.fake.mutations)
+        for confirmed in (False, True):
+            if confirmed:
+                live['description'] = original
+                self.assertEqual(self.issue('replay', path.stem), 0, self.stdout + self.stderr)
+            for altered in variants:
+                with self.subTest(confirmed=confirmed, altered=altered):
+                    live['description'] = marker + 'Example above content\n' + altered
+                    self.assertEqual(self.issue('replay', path.stem), 3, self.stdout + self.stderr)
+                    self.assertEqual(self.fake.mutations, writes)
+
+    def test_reason_digest_readback_detects_ignored_edit(self):
+        self.assertEqual(self.issue('new', '--independent', 'https://example.test/old'), 0,
+                         self.stdout + self.stderr)
+        live = self.fake.issues[self.target()]
+        self.fake.ignore_update = True
+        self.assertEqual(self.issue('edit', live['identifier'], '--independent',
+                                    'https://example.test/new'), 3, self.stdout + self.stderr)
+        self.assertIn('independence read-back differs', self.stdout)
+        op = re.search(r'^operation (\S+)$', self.stdout, re.M)[1]
+        self.fake.ignore_update = False
+        writes = len(self.fake.mutations)
+        self.assertEqual(self.issue('replay', op), 0, self.stdout + self.stderr)
+        self.assertEqual(len(self.fake.mutations), writes + 1)
+
     def test_markdown_rendering_new_edit_and_replay(self):
         body = '- A task\nhttps://example.test/task\n\n'
         self.marked('1', body=body)
@@ -402,6 +498,7 @@ class TestIssue(IssueCase):
         path = self.records()[0]
         spec = LI.load_record(path)
         spec['issues'][0]['desired'].pop('body_sha256')
+        spec['issues'][0]['desired'].pop('reason_sha256')
         path.write_text(json.dumps({'spec': spec, 'sha256': LI.digest(spec)}))
         identities = dict(spec['identities'], **{spec['target']: self.fake.issues[spec['target']]['identifier']})
         desired = LI.desired_value(spec['issues'][0], identities)
