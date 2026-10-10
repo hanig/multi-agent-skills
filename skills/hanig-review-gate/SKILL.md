@@ -312,47 +312,19 @@ sounds: across six review rounds on this repo, **every single one failed**, and
 running the full panel each time paid the slowest, dearest reviewer to re-find
 defects a cheap one had already caught.
 
-### Offline size preflight
-
-Use the same input flags as the intended review:
-
-```bash
-python3 "$HANIG_REVIEW_GATE_DIR/scripts/review.py" --size --range BASE..HEAD
-python3 "$HANIG_REVIEW_GATE_DIR/scripts/review.py" --size --staged
-python3 "$HANIG_REVIEW_GATE_DIR/scripts/review.py" --size --file design.md --file notes.md --json
-```
-
-`--size` calls the review's input-gathering function and reports its exact
-character count before truncation, the 100,000-character planning budget, and
-the 180,000-character truncation limit. It includes file headers, separators,
-and the existing stripping of recognized review-history signatures. It counts
-decoded characters, not UTF-8 bytes, prompt overhead, or tokens.
-
-Exit 0 means below 100,000 characters; 1 means 100,000–179,999; 2 means at least
-180,000. Empty input is zero characters; invalid inputs retain usage-error
-exit 4. These statuses describe size and never certify a review pass.
-
-The command supports `--diff` (the default), `--staged`, `--range`, and repeatable
-`--file`, including the same combinations a review accepts. It runs offline
-before provider configuration, transport, or review-journal writes, so it needs
-no credentials, `--kind`, `--round`, or claims. Use `--json` for machine-readable
-`characters`, `planning_budget`, and `truncation_limit` fields. Plan code units
-below the budget, including tests and documentation, and remeasure the complete
-PR delta before review.
-
 ### Sizing a round
 
-Two failures here were the reviewer infrastructure, not the code, and both read
-as an unavailable reviewer rather than as what they were.
+Run an offline preflight with the same input flags as the intended review:
+```bash
+python3 "$HANIG_REVIEW_GATE_DIR/scripts/review.py" --size --range BASE..HEAD --json
+```
+`--size` uses the review's input-gathering function before truncation. It counts decoded characters, including file headers, separators and removal of recognized review-history signatures; it excludes UTF-8 byte expansion, prompt overhead and tokens. Text and JSON report `characters`, `planning_budget` (100,000) and `truncation_limit` (180,000).
 
-**Reasoning tokens come out of the answer's budget.** At 16000 a large review
-spent the whole allowance thinking and returned NO content, which cost one
-reviewer an entire session before the error message was made to say so. The
-default is 64000 and the error now reports the token counts.
+Exit 0 means below 100,000 characters; 1 means 100,000–179,999; 2 means at least 180,000. Empty input counts zero; invalid inputs retain usage-error exit 4. These are size results, never review verdicts. Plan coherent code units below the budget, including tests and documentation, and remeasure the complete PR delta before review.
 
-**Review one file at a time past roughly 100KB.** Raising the budget bought
-exactly one round before the input grew past it too. Splitting keeps working and
-sharpens the per-file context.
+Sources are `--diff` (default), `--staged`, `--range` and repeatable `--file`, including the same combinations a review accepts. The preflight exits before provider configuration, transport, watchdog setup or review-journal writes. It needs no credentials, `--kind`, `--round` or claims.
+
+**Reasoning tokens come out of the answer's budget.** A large review can spend its allowance thinking and return no content; errors report token counts. The default answer budget is 64000. Split oversized work instead of relying on a larger answer budget.
 
 **Context describes what changed, not how the last round went.** Never tell the
 panel what a previous round decided, including through a `--file`. Put lengthy
