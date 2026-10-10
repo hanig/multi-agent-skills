@@ -147,6 +147,50 @@ class InstalledSnapshot(unittest.TestCase):
         report = self.invoke("hanig-project/scripts/report.py", ".", "--json")
         self.assertEqual(report.returncode, 0, report.stderr)
 
+    def test_both_consumers_use_declared_roots_from_unrelated_cwd(self):
+        consumers = (("hanig-project", "report.py", [".", "--json"]),
+                     ("hanig-orchestrate", "merge_unit.py", ["--help"]))
+        for name, program, args in consumers:
+            for mode in ("copy", "link"):
+                parent = self.root / (name + " " + mode + " store")
+                parent.mkdir()
+                loaded = parent / name
+                if mode == "link":
+                    # No sibling beside the physical target: falling back to
+                    # a checkout-relative import cannot accidentally succeed.
+                    target = self.root / (name + " isolated source") / name
+                    shutil.copytree(self.prefix / name, target)
+                    loaded.symlink_to(target, target_is_directory=True)
+                else:
+                    shutil.copytree(self.prefix / name, loaded)
+                deps = parent / "deps"
+                shutil.copytree(self.prefix / "hanig-swarm", deps / "hanig-swarm")
+                for dep_root in (str(deps), "../deps"):
+                    with self.subTest(skill=name, mode=mode, root=dep_root):
+                        env = dict(self.env, HANIG_SKILL_DEP_ROOTS=dep_root)
+                        env["HANIG_" + name[6:].upper() + "_DIR"] = str(loaded)
+                        for option in ([], ["--root", dep_root]):
+                            resolver_env = dict(env)
+                            if option:
+                                resolver_env.pop("HANIG_SKILL_DEP_ROOTS")
+                            found = subprocess.run(
+                                [sys.executable, str(loaded / "scripts/skill_paths.py"),
+                                 "sibling", str(loaded), name, "hanig-swarm", *option],
+                                cwd=self.project, env=resolver_env,
+                                text=True, capture_output=True)
+                            self.assertEqual(found.returncode, 0, found.stderr)
+                            self.assertEqual(Path(found.stdout.strip()),
+                                             (deps / "hanig-swarm").resolve())
+                        result = subprocess.run(
+                            [sys.executable, str(loaded / "scripts" / program), *args],
+                            cwd=self.project, env=env, text=True, capture_output=True)
+                        self.assertEqual(result.returncode, 0,
+                                         result.stderr + result.stdout)
+                        if name == "hanig-project":
+                            self.assertIsInstance(json.loads(result.stdout), dict)
+                        else:
+                            self.assertIn("usage:", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

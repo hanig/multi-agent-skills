@@ -5,6 +5,10 @@ The caller supplies the directory containing the loaded ``SKILL.md``.  That is
 the one fact a skill loader knows, whereas its installation prefix and the
 process cwd are both arbitrary.  A cross-skill dependency is a sibling of that
 loaded directory; it is never looked up in an agent-specific global store.
+
+Canonical source: skills/hanig-orchestrate/scripts/skill_paths.py. Copy this
+file byte-for-byte to every skill that bundles it; tests/test_skill_paths.py
+checks identity without introducing a runtime dependency between bundles.
 """
 import argparse
 import os
