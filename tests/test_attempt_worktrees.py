@@ -143,7 +143,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
             "attempt_launch_intents": {attempt.name: anchored["intent"]},
         }}}
 
-    def test_dispatch_argv_follows_routing_loader_data(self):
+    def test_dispatch_argv_uses_routing_provider_and_plan_model_override(self):
         import importlib.util
         original = SR.AGENTS_FILE.read_text(encoding="utf-8")
         real_loads = json.loads
@@ -166,20 +166,22 @@ class TestPerAttemptWorktrees(unittest.TestCase):
                     attempt = self.attempt(uid, uid)
                     unit = code_unit(self.repo, uid)
                     if split:
-                        # Same routing in the plan's explicit provider/model
-                        # spelling. --model remains a per-unit override.
-                        unit["provider"], unit["model"] = routing.DEFAULT_AGENT_PROVIDER.split("/", 1)
+                        # The provider defaults to routing data; an explicit
+                        # plan provider overrides it. --model comes only from
+                        # the plan, so use a value distinct from routing data.
+                        unit["provider"] = provider.split("/", 1)[0]
+                        unit["model"] = "unit-override-%s" % index
                     state = {"units": {}}
                     with paseo_resolvable():
                         job, error = self.submit(unit, attempt, False, state)
                     self.assertIsNone(error)
                     self.assertTrue(job)
                     argv = self.fake.launches[-1]
-                    expected_provider, expected_model = provider.split("/", 1)
+                    expected_provider = provider.split("/", 1)[0]
                     actual_provider = argv[argv.index("--provider") + 1]
                     self.assertEqual(actual_provider, expected_provider if split else provider)
                     if split:
-                        self.assertEqual(argv[argv.index("--model") + 1], expected_model)
+                        self.assertEqual(argv[argv.index("--model") + 1], unit["model"])
                     else:
                         self.assertNotIn("--model", argv)
                     self.assertEqual(argv[argv.index("--thinking") + 1], "high")
