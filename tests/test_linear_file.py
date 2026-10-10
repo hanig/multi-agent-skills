@@ -15,7 +15,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from tests.test_linear_issue import IssueCase, IssueLinear, Crash
+from tests.test_linear_issue import IssueCase, IssueLinear, Crash, render_markdown
 from tests.test_linear_audit import BudgetPaging, KEY, ROOT, connection, budget_page
 
 sys.path.insert(0, str(ROOT / 'skills/hanig-project/scripts'))
@@ -28,12 +28,6 @@ import tickets as T
 
 def body_digest(body):
     return hashlib.sha256(body.encode('utf-8')).hexdigest()
-
-
-def render_markdown(body):
-    """Observed Linear rendering, not a production canonicalization rule."""
-    body = re.sub(r'(?m)^- ', '* ', body).rstrip()
-    return re.sub(r'\r?\n(?:[ \t]*\r?\n)+(?=(?:`?swarm-[^\r\n]+(?:\r?\n|$))+$)', '\n', body)
 
 
 class FileLinear(BudgetPaging, IssueLinear):
@@ -100,10 +94,6 @@ class FileLinear(BudgetPaging, IssueLinear):
                                               for k, value in v['input'].items()})
         else:
             super().mutate(q, v)
-            if 'OperationCreate' in q or 'OperationUpdate' in q:
-                iid = v['input']['id'] if 'OperationCreate' in q else v['id']
-                if iid in self.issues and 'description' in v['input']:
-                    self.issues[iid]['description'] = render_markdown(self.issues[iid]['description'])
 
 
 class FileCase(IssueCase):

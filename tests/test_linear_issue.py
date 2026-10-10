@@ -2,6 +2,7 @@
 import ast
 import copy
 import fcntl
+import hashlib
 import io
 import json
 import os
@@ -23,6 +24,13 @@ import tracker_audit as TA
 
 class Crash(BaseException):
     pass
+
+
+def render_markdown(body):
+    """Observed service rewrites; not a production canonicalization rule."""
+    body = re.sub(r'(?m)^- ', '* ', body).rstrip()
+    body = re.sub(r'(?<![\w\[<(])(https?://[^\s<>\[\]()]+)', r'[\1](<\1>)', body)
+    return re.sub(r'\r?\n(?:[ \t]*\r?\n)+(?=(?:`?swarm-[^\r\n]+(?:\r?\n|$))+$)', '\n', body)
 
 
 class IssueLinear(FakeLinear):
@@ -208,13 +216,13 @@ class IssueLinear(FakeLinear):
             p = v['input']
             if p['id'] in self.issues:
                 return
-            i = self.add(p['id'], description=p['description'].rstrip(), project=p['projectId'])
+            i = self.add(p['id'], description=render_markdown(p['description']), project=p['projectId'])
             i['identifier'] = 'ARC-' + str(100 + len(self.issues))
             i['team'] = {'id': p['teamId']}
             i['title'] = p['title']
         elif 'OperationUpdate' in q:
             if not self.ignore_update:
-                self.issues[v['id']].update({k: value.rstrip() if k == 'description' else value
+                self.issues[v['id']].update({k: render_markdown(value) if k == 'description' else value
                                            for k, value in v['input'].items()})
         else:
             raise AssertionError(q)
@@ -353,6 +361,121 @@ runpy.run_path(str(script), run_name='__main__')
 
 
 class TestIssue(IssueCase):
+    def test_markdown_rendering_new_edit_and_replay(self):
+        body = '- A task\nhttps://example.test/task\n\n'
+        self.marked('1', body=body)
+        self.assertEqual(self.issue('new', '--blocked-by', 'ARC-1', body=body), 0,
+                         self.stdout + self.stderr)
+        new_op = re.search(r'^operation (\S+)$', self.stdout, re.M)[1]
+        target = self.target()
+        live = self.fake.issues[target]
+        for approved, command in ((body, None), (body + '- Edited\n\n', 'edit')):
+            if command:
+                self.assertEqual(self.issue('edit', live['identifier'], '--body-file', str(self.body),
+                                            body=approved), 0, self.stdout + self.stderr)
+            op = re.search(r'^operation (\S+)$', self.stdout, re.M)[1]
+            sent = next(v['input']['description'] for q, v in reversed(self.fake.mutations)
+                        if ('OperationCreate' in q and v['input']['id'] == target) or
+                           ('OperationUpdate' in q and v['id'] == target))
+            self.assertNotEqual(live['description'], sent)
+            self.assertIn('* A task\n[https://example.test/task](<https://example.test/task>)',
+                          live['description'])
+            self.assertNotIn('\n\n`swarm-body:', live['description'])
+            self.assertEqual(LI.components(live['description'])['body'],
+                             hashlib.sha256(approved.encode('utf-8')).hexdigest())
+            self.assertEqual(live['description'], render_markdown(sent))
+            self.assertEqual([line.split(':', 1)[0] for line in live['description'].splitlines()[-3:]],
+                             ['`swarm-deps', '`swarm-op', '`swarm-approver'])
+            writes = copy.deepcopy(self.fake.mutations)
+            self.assertEqual(self.issue('replay', op), 0, self.stdout + self.stderr)
+            self.assertEqual(self.fake.mutations, writes)
+            self.audit()
+            self.assertEqual(self.checks['declared_edges'], 'CLEAN')
+            self.assertEqual(self.checks['op_incomplete'], 'CLEAN')
+        self.assertNotEqual(op, new_op)
+
+    def test_replay_existing_rerendered_issue_confirms_legacy_record(self):
+        # The in-flight records predate body_sha256. Preserve their exact
+        # immutable specification, and recover the already-created issue.
+        self.crash_after(1, lambda: self.issue('new', '--independent', 'reason',
+                                             body='- Task\nhttps://example.test/task\n\n'))
+        path = self.records()[0]
+        spec = LI.load_record(path)
+        spec['issues'][0]['desired'].pop('body_sha256')
+        path.write_text(json.dumps({'spec': spec, 'sha256': LI.digest(spec)}))
+        identities = dict(spec['identities'], **{spec['target']: self.fake.issues[spec['target']]['identifier']})
+        desired = LI.desired_value(spec['issues'][0], identities)
+        self.fake.issues[spec['target']].update(desired, description=render_markdown(desired['description']))
+        raw = path.read_bytes()
+        self.audit()
+        self.assertEqual(self.checks['op_incomplete'], 'DRIFT')
+        writes = copy.deepcopy(self.fake.mutations)
+        self.assertEqual(self.issue('replay', path.stem), 0, self.stdout + self.stderr)
+        self.assertEqual(self.fake.mutations, writes)
+        self.assertEqual(path.read_bytes(), raw)
+        self.assertTrue(LI.confirmed(path))
+        self.audit()
+        self.assertEqual(self.checks['declared_edges'], 'CLEAN')
+        self.assertEqual(self.checks['op_incomplete'], 'CLEAN')
+
+    def test_incomplete_rerendered_replay_sends_no_mutation(self):
+        self.crash_after(1, lambda: self.issue('new', '--independent', 'reason',
+                                             body='- Task\nhttps://example.test/task\n\n'))
+        writes = copy.deepcopy(self.fake.mutations)
+        self.assertEqual(self.replay(), 0, self.stdout + self.stderr)
+        self.assertEqual(self.fake.mutations, writes)
+        self.assertTrue(LI.confirmed(self.records()[0]))
+
+    def test_render_equivalent_changed_approved_body_requires_write(self):
+        original = '- Task\nhttps://example.test/task\n\n'
+        changed = render_markdown(original)
+        self.assertNotEqual(original, changed)
+        self.assertEqual(self.issue('new', '--independent', 'reason', body=original), 0)
+        target = self.target()
+        old_digest = LI.components(self.fake.issues[target]['description'])['body']
+        self.fake.ignore_update = True
+        self.assertEqual(self.issue('edit', self.fake.issues[target]['identifier'],
+                                    '--body-file', str(self.body), body=changed), 3,
+                         self.stdout + self.stderr)
+        self.assertIn('body read-back differs', self.stdout)
+        op = re.search(r'^operation (\S+)$', self.stdout, re.M)[1]
+        self.fake.ignore_update = False
+        writes = len(self.fake.mutations)
+        self.assertEqual(self.issue('replay', op), 0, self.stdout + self.stderr)
+        self.assertEqual(len(self.fake.mutations), writes + 1)
+        new_digest = LI.components(self.fake.issues[target]['description'])['body']
+        self.assertNotEqual(new_digest, old_digest)
+        self.assertEqual(new_digest, hashlib.sha256(changed.encode('utf-8')).hexdigest())
+
+    def test_human_prose_before_identity_is_outside_issue_detection(self):
+        self.assertEqual(self.issue('new', '--independent', 'reason', body='Approved'), 0)
+        live = self.fake.issues[self.target()]
+        live['description'] = live['description'].replace('Approved', 'Human prose')
+        writes = copy.deepcopy(self.fake.mutations)
+        self.assertEqual(self.replay(), 0, self.stdout + self.stderr)
+        self.assertEqual(self.fake.mutations, writes)
+        self.assertTrue(live['description'].startswith('Human prose'))
+
+    def test_body_identity_position_and_exact_managed_lines(self):
+        self.assertEqual(self.issue('new', '--independent', 'reason'), 0)
+        live = self.fake.issues[self.target()]
+        original = live['description']
+        digest = LI.components(original)['body']
+        writes = copy.deepcopy(self.fake.mutations)
+        for body in (original.replace(digest, '0' * 64),
+                     original.replace('`swarm-body: ' + digest + '`\n', ''),
+                     original.replace('`swarm-body: ' + digest + '`',
+                                      '`swarm-body: ' + digest + '`\nText after marker'),
+                     original.replace('swarm-approver: owner', 'swarm-approver: other'),
+                     original + '\nAppended after trailer'):
+            with self.subTest(body=body):
+                live['description'] = body
+                self.assertEqual(self.replay(), 3, self.stdout + self.stderr)
+                self.assertEqual(self.fake.mutations, writes)
+        for marker in ('swarm-body: ', '`swarm-body: '):
+            self.assertEqual(self.issue('new', '--independent', 'reason', body=marker + digest), 2)
+            self.assertEqual(self.fake.mutations, writes)
+
     def test_archived_observed_sources_and_relation_lookups(self):
         for field, value in (('archivedAt', 'date'), ('trashed', True)):
             for incoming in (True, False):
@@ -1134,6 +1257,7 @@ class TestIssue(IssueCase):
 
     def test_replay_managed_values_use_newer_covered_snapshot(self):
         self.fake.issues['1']['title'] = 'Old'
+        self.marked('1', body='swarm-independent: test\n`swarm-body: ' + '1' * 64 + '`\n')
         # Leave the immutable edit specification durable but entirely unapplied.
         self.fake.ignore_update = True
         self.crash_after(1, lambda: self.issue('edit', 'ARC-1', '--title', 'Planned'))
@@ -1144,10 +1268,10 @@ class TestIssue(IssueCase):
         original = copy.deepcopy(self.fake.issues['1'])
         changes = {
             'title': {'title': 'External'},
-            'body': {'description': 'External\nswarm-independent: test'},
-            'independence': {'description': 'swarm-independent: External'},
-            'trailer': {'description': LI.description('swarm-independent: test', (), (),
-                                                     'external-op', 'external-owner')},
+            'body': {'description': original['description'].replace('1' * 64, '2' * 64)},
+            'independence': {'description': original['description'].replace('swarm-independent: test',
+                                                                           'swarm-independent: External')},
+            'trailer': {'description': original['description'].replace('prior-op', 'external-op')},
             'identifier': {'identifier': 'ARC-999'},
             'project': {'project': {'id': 'external'}},
             'team': {'team': {'id': 'external'}},
@@ -1234,7 +1358,10 @@ class TestIssue(IssueCase):
         self.assertEqual(self.issue('new', '--blocked-by', 'ARC-1'), 0, self.stdout)
         target = self.target()
         mark = LI.trailer(self.fake.issues['1']['description'])
-        self.assertEqual(mark['prefix'], body)
+        sent = next(v['input']['description'] for q, v in self.fake.mutations
+                    if 'OperationUpdate' in q and v['id'] == '1')
+        self.assertEqual(LI.trailer(sent)['prefix'], body)
+        self.assertEqual(self.fake.issues['1']['description'], render_markdown(sent))
         self.assertEqual((mark['op'], mark['approver'], mark['by']), ('prior-op', 'prior-owner', self.operation()))
         self.check_remote()
         self.assertEqual(self.issue('edit', self.fake.issues[target]['identifier'], '--remove-blocked-by', 'ARC-1', '--independent', 'done'), 0, self.stdout)
@@ -1417,7 +1544,10 @@ class TestIssue(IssueCase):
         self.body.write_bytes(body.encode('utf-8'))
         self.assertEqual(self.issue('new', '--independent', 'uses `code`'), 0, self.stdout)
         written = self.fake.issues[self.target()]['description']
-        self.assertTrue(written.startswith(body), repr(written))
+        sent = next(v['input']['description'] for q, v in self.fake.mutations if 'OperationCreate' in q)
+        self.assertTrue(sent.startswith(body), repr(sent))
+        self.assertEqual(written, render_markdown(sent))
+        self.assertEqual(LI.components(written)['body'], hashlib.sha256(body.encode('utf-8')).hexdigest())
         self.assertIn('\nswarm-independent: uses `code`\n', written)
         self.assertEqual(self.audit(), 0, self.stdout)
 
