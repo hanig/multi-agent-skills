@@ -16,6 +16,7 @@ SCRIPTS = ROOT / "skills" / "hanig-swarm" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 import swarm as S  # noqa: E402
 import worktree as W  # noqa: E402
+import swarm_routing as SR  # noqa: E402
 
 ENV = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@x",
            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@x")
@@ -141,6 +142,51 @@ class TestPerAttemptWorktrees(unittest.TestCase):
             "attempt_bases": {attempt.name: anchored["base"]},
             "attempt_launch_intents": {attempt.name: anchored["intent"]},
         }}}
+
+    def test_dispatch_argv_uses_routing_provider_and_plan_model_override(self):
+        import importlib.util
+        original = SR.AGENTS_FILE.read_text(encoding="utf-8")
+        real_loads = json.loads
+        seen = []
+        # Load a fresh owner module through its real initialization. The JSON
+        # loader is the only changed input; no derived default is patched.
+        for index, provider in enumerate(("codex/fixture-987", "claude/fixture-988")):
+            data = {"default": {"provider": provider, "thinking": "high"},
+                    "thinking_by_model": {provider: "high"}}
+            spec = importlib.util.spec_from_file_location("routing_fixture", SR.__file__)
+            routing = importlib.util.module_from_spec(spec)
+            def load(raw, *args, **kwargs):
+                return data if raw == original else real_loads(raw, *args, **kwargs)
+            with mock.patch.object(SR.json, "loads", side_effect=load) as loader:
+                spec.loader.exec_module(routing)
+            loader.assert_called_once_with(original)
+            with mock.patch.object(S, "SR", routing):
+                for split in (False, True):
+                    uid = "route-%s-%s" % (index, split)
+                    attempt = self.attempt(uid, uid)
+                    unit = code_unit(self.repo, uid)
+                    if split:
+                        # The provider defaults to routing data; an explicit
+                        # plan provider overrides it. --model comes only from
+                        # the plan, so use a value distinct from routing data.
+                        unit["provider"] = provider.split("/", 1)[0]
+                        unit["model"] = "unit-override-%s" % index
+                    state = {"units": {}}
+                    with paseo_resolvable():
+                        job, error = self.submit(unit, attempt, False, state)
+                    self.assertIsNone(error)
+                    self.assertTrue(job)
+                    argv = self.fake.launches[-1]
+                    expected_provider = provider.split("/", 1)[0]
+                    actual_provider = argv[argv.index("--provider") + 1]
+                    self.assertEqual(actual_provider, expected_provider if split else provider)
+                    if split:
+                        self.assertEqual(argv[argv.index("--model") + 1], unit["model"])
+                    else:
+                        self.assertNotIn("--model", argv)
+                    self.assertEqual(argv[argv.index("--thinking") + 1], "high")
+                    seen.append(actual_provider)
+        self.assertEqual(len(set(seen)), 4)
 
     def test_remote_attempt_branch_collision_refuses_without_local_tracking_ref(self):
         attempt = self.attempt("code", "remote-collision")
@@ -1683,27 +1729,35 @@ class TestEveryArchiveSiteIsDryRunGuarded(unittest.TestCase):
 
     def test_no_archive_call_escapes_a_dry_run_guard(self):
         import ast
-        src = (SCRIPTS / "swarm.py").read_text()
-        tree = ast.parse(src)
+        paths = sorted(SCRIPTS.glob("swarm*.py"))
+        self.assertTrue({"swarm.py", "swarm_routing.py", "swarm_types.py"}
+                        <= {path.name for path in paths})
+        unguarded, calls = [], []
+        definitions = set()
+        for path in paths:
+            tree = ast.parse(path.read_text())
+            definitions.update(n.name for n in tree.body if isinstance(n, ast.FunctionDef))
+            guarded = []
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.If):
+                    continue
+                if not any(isinstance(n, ast.Name) and n.id == "dry_run"
+                           for n in ast.walk(node.test)):
+                    continue
+                for stmt in node.body:
+                    guarded.append((stmt.lineno,
+                                    getattr(stmt, "end_lineno", stmt.lineno)))
 
-        guarded = []
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.If):
-                continue
-            if not any(isinstance(n, ast.Name) and n.id == "dry_run"
-                       for n in ast.walk(node.test)):
-                continue
-            for stmt in node.body:
-                guarded.append((stmt.lineno,
-                                getattr(stmt, "end_lineno", stmt.lineno)))
-
-        unguarded = []
-        for node in ast.walk(tree):
-            if (isinstance(node, ast.Call)
-                    and getattr(node.func, "id", None)
-                    == "_archive_code_worktree"):
-                if not any(lo <= node.lineno <= hi for lo, hi in guarded):
-                    unguarded.append(node.lineno)
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call)
+                        and getattr(node.func, "id", None)
+                        == "_archive_code_worktree"):
+                    calls.append((path.name, node.lineno))
+                    if not any(lo <= node.lineno <= hi for lo, hi in guarded):
+                        unguarded.append((path.name, node.lineno))
+        self.assertIn("_archive_code_worktree", definitions)
+        self.assertIn("apply_agent_resolution", definitions)
+        self.assertTrue(calls, "archive-site sweep must find its call sites")
 
         self.assertEqual(
             unguarded, [],
