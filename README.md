@@ -263,9 +263,9 @@ Ad-hoc, external and deleted-unit blockers are reported and kept; remove them
 explicitly with `linear_sync.py issue edit`. Not
 re-adding an edge does not delete it, so a shrunken `needs` list would
 otherwise leave the tracker asserting a dependency the plan has dropped. It
-decides that from a read-back of what the tracker holds, supplied by the
-session with the connector as `--tracker-edges` -- never from the previous
-draft, which records what was asked for rather than what landed. With no
+decides that from a read-back of what the tracker holds, recorded by
+`linear_sync.py file` or supplied as an attested `--tracker-edges` file -- never
+from the previous draft, which records what was asked for rather than what landed. With no
 read-back, `remove_blocked_by` is `null` rather than `[]`, and `check` calls
 a filed project's edges unknown rather than in sync.
 
@@ -875,7 +875,8 @@ it, the coordinator does not guess it.
 extensions.
 
 **The coordinator has no network imports.** It writes intents to an idempotent
-outbox; a session that has MCP drains them. A tracker that is unreachable can
+outbox; an authorized session runs `linear_sync.py drain` with its
+`LINEAR_API_KEY`, then `linear_sync.py audit`. A tracker that is unreachable can
 therefore never block dispatch, and draining twice cannot file an issue twice.
 
 Acknowledgment is an **attestation, not evidence**. The coordinator has no
@@ -1004,8 +1005,10 @@ Per-attempt files: `unit.json`, `events.jsonl`, `receipt.json`.
    `validate` refuses anything that cannot dispatch.
 6. **Approve, once.** The project overview and every issue title are shown.
    Nothing has been transmitted yet. Full automation needs `swarm autopilot`.
-7. **File.** Intents go to the outbox; a session with MCP drains them into
-   Linear (team `Arc`), where the project can be connected to GitHub for PRs.
+7. **File.** Run `linear_sync.py file --draft tickets.json` after approval
+   to create the Linear project and issues (team `Arc`). Use
+   `linear_sync.py drain` for subsequent outbox intents, `issue` for ad-hoc changes, and
+   `audit` to check consistency. The operator uses its `LINEAR_API_KEY`.
 8. **Dispatch and advance.** Each attempt gets an exclusive write root; the
    scheduler job is bound to the attempt.
 9. **Close on evidence.** A predicate receipt for `slurm` and `pipeline`, a

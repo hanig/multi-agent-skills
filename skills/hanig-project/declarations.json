@@ -96,7 +96,7 @@
     },
     {
       "id": "capability.tracker",
-      "normative_text": "Use only the current session's real connector and operations; if none is available, preserve the reviewed draft or outbox intent, report the pending synchronization to the owner, and never invent a receipt, ticket reference, or confirmation.",
+      "normative_text": "Use linear_sync.py with the current session's authorized tracker access; if none is available, preserve the reviewed draft or outbox intent, report the pending synchronization to the owner, and never invent a receipt, ticket reference, or confirmation.",
       "references": [
         "references/tracker-sync.md"
       ]
@@ -375,7 +375,7 @@
     },
     {
       "id": "tracker.attestation",
-      "normative_text": "Describe connector read-backs and outbox receipts as attested rather than verified, and never claim synchronization without naming the read time and source.",
+      "normative_text": "Describe linear_sync.py read-backs and outbox receipts as attested rather than verified, and never claim synchronization without naming the read time and source.",
       "references": [
         "references/tracker-sync.md"
       ]
