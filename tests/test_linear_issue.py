@@ -12,7 +12,7 @@ import subprocess
 import unittest
 from unittest import mock
 
-from tests.test_linear_audit import AuditCase, FakeLinear, KEY, ROOT, connection, BudgetPaging, budget_project
+from tests.test_linear_audit import AuditCase, FakeLinear, KEY, ROOT, connection, BudgetPaging, budget_project, selected_fields
 
 sys.path.insert(0, str(ROOT / 'skills/hanig-project/scripts'))
 import linear_api as API
@@ -31,13 +31,13 @@ class IssueLinear(FakeLinear):
     # Do not import the production query fragments: that would bless regressions.
     page = 'pageInfo { hasNextPage endCursor }'
     relation = 'id type issue { id identifier } relatedIssue { id identifier }'
-    fields = ('id identifier title updatedAt description archivedAt state { type name } '
+    fields = ('trashed id identifier title updatedAt description archivedAt state { type name } '
               'project { id } team { id } relations(first: 20) { nodes { %s } %s } '
               'inverseRelations(first: 20) { nodes { %s } %s }' % (relation, page, relation, page))
     shapes = {
         'OperationIssue': [
             'query OperationIssue($id: ID!) { issues(filter: {id: {eq: $id}}, first: 1, '
-            'includeArchived: true) { nodes { trashed %s } %s } }' % (fields, page),
+            'includeArchived: true) { nodes { %s } %s } }' % (fields, page),
             'query OperationIssue($id: ID!) { issues(filter: {id: {eq: $id}}, first: 1) { nodes { id } } }'],
         'OperationIdentifier': [
             'query OperationIdentifier($filter: IssueFilter!) { issues(filter: $filter, first: 1, '
@@ -56,12 +56,12 @@ class IssueLinear(FakeLinear):
             'query Relations($id: String!, $after: String) { issue(id: $id) { inverseRelations(first: 100, '
             'after: $after) { nodes { %s } %s } } }' % (relation, page)],
         'IssueBatch': ['query IssueBatch($ids: [ID!]!, $after: String) { issues(filter: {id: {in: $ids}}, '
-                       'first: 50, after: $after, includeArchived: true) { nodes { trashed %s } %s } }' % (fields, page)],
+                       'first: 50, after: $after, includeArchived: true) { nodes { %s } %s } }' % (fields, page)],
         'StabilityBatch': ['query StabilityBatch($ids: [ID!]!, $after: String) { issues(filter: {id: {in: $ids}}, '
                            'first: 50, after: $after, includeArchived: true) { nodes { id updatedAt } %s } }' % page],
         'OperationIdentifiers': ['query OperationIdentifiers($filter: IssueFilter!, $after: String) { '
                                  'issues(filter: $filter, first: 50, after: $after, includeArchived: true) '
-                                 '{ nodes { trashed %s } %s } }' % (fields, page)],
+                                 '{ nodes { %s } %s } }' % (fields, page)],
         'Stability': ['query Stability($id: String!) { issue(id: $id) { id updatedAt } }'],
         'OperationCreate': ['mutation OperationCreate($input: IssueCreateInput!) { '
                             'issueCreate(input: $input) { success } }'],
@@ -111,13 +111,13 @@ class IssueLinear(FakeLinear):
         data = super().dispatch(q, v)
         if 'query Binding' in q and self.team_paging:
             data['project']['teams'] = connection([], True, 'teams-next')
-        if 'query ProjectIssues' in q and 'relations(' in q:
-            if self.relation_page_size:
+        if 'query ProjectIssues' in q:
+            if self.relation_page_size and 'relations(' in q:
                 for node in data['project']['issues']['nodes']:
                     for field in ('relations', 'inverseRelations'):
                         node[field] = self.relation_page(node[field]['nodes'])
             data['project']['issues']['nodes'] = [i for i in data['project']['issues']['nodes']
-                                                 if not i.get('trashed')]
+                                                 if not self.issues[i['id']].get('trashed')]
         return data
 
     def relation_page(self, nodes, start=0):
@@ -185,6 +185,8 @@ class IssueLinear(FakeLinear):
             data = {'issueRelation': next(copy.deepcopy(r) for r in self.relations() if r['id'] == v['id'])}
         else:
             data = self.dispatch(q, v)
+        if not q.startswith('mutation'):
+            data = selected_fields(q, data)
         return 200, json.dumps({'data': data}).encode()
 
     def relations(self):
@@ -206,13 +208,14 @@ class IssueLinear(FakeLinear):
             p = v['input']
             if p['id'] in self.issues:
                 return
-            i = self.add(p['id'], description=p['description'], project=p['projectId'])
+            i = self.add(p['id'], description=p['description'].rstrip(), project=p['projectId'])
             i['identifier'] = 'ARC-' + str(100 + len(self.issues))
             i['team'] = {'id': p['teamId']}
             i['title'] = p['title']
         elif 'OperationUpdate' in q:
             if not self.ignore_update:
-                self.issues[v['id']].update(v['input'])
+                self.issues[v['id']].update({k: value.rstrip() if k == 'description' else value
+                                           for k, value in v['input'].items()})
         else:
             raise AssertionError(q)
 
@@ -247,6 +250,22 @@ class IssueCase(AuditCase):
         if command == 'new':
             common += ['--title', 'new task', '--body-file', str(self.body)]
         return self.cli('issue', command, *common, *args)
+
+    def check_rejected_issue_create(self, call):
+        before = copy.deepcopy(self.fake.issues)
+        self.fake.reject = 'OperationCreate'
+        mutate = self.fake.mutate
+
+        def refuse(q, v):
+            if 'OperationCreate' not in q:
+                mutate(q, v)
+
+        with mock.patch.object(self.fake, 'mutate', refuse):
+            self.assertEqual(call(), 3, self.stdout + self.stderr)
+        self.assertIn('rejected [REDACTED]', self.stdout)
+        self.assertNotIn('CONFIRMED', self.stdout)
+        self.assertEqual(set(self.fake.issues), set(before))
+        self.assertFalse(any('OperationRelation' in q for q, _ in self.fake.mutations))
 
     def records(self):
         return sorted((self.root / 'ops').glob('*/*/*.json'))
@@ -334,6 +353,102 @@ runpy.run_path(str(script), run_name='__main__')
 
 
 class TestIssue(IssueCase):
+    def test_archived_observed_sources_and_relation_lookups(self):
+        for field, value in (('archivedAt', 'date'), ('trashed', True)):
+            for incoming in (True, False):
+                with self.subTest(field=field, incoming=incoming):
+                    self.fake.issues['1'].update(archivedAt=None, trashed=False)
+                    self.fake.issues['1'][field] = value
+                    self.assertEqual(self.issue('new', '--blocked-by' if incoming else '--blocks', 'ARC-1'), 0,
+                                     self.stdout + self.stderr)
+                    op = re.search(r'^operation (\S+)$', self.stdout, re.M)[1]
+                    target = LI.load_record(next(p for p in self.records() if p.stem == op))['target']
+                    edge = ('1', target) if incoming else (target, '1')
+                    self.assertIn(edge, LS.edges_of(list(self.fake.issues.values()))[0])
+                    self.assertEqual(self.issue('replay', op), 0, self.stdout + self.stderr)
+                    relation = next(r for r in self.fake.relations()
+                                    if (r['issue']['id'], r['relatedIssue']['id']) == edge)
+                    self.assertEqual(LI.relation_by_id(LS, API.Client(KEY), relation['id'], *edge, endpoint='1'), relation)
+                    with self.assertRaises(LI.DeletedIssue):
+                        LI.relation_by_id(LS, API.Client(KEY), relation['id'], *edge, endpoint='1', managed=True)
+
+    def test_archived_touched_counterparts_refuse_before_record(self):
+        self.marked('1')
+        for field, value in (('archivedAt', 'date'), ('trashed', True)):
+            self.fake.issues['1'].update(archivedAt=None, trashed=False)
+            self.fake.issues['1'][field] = value
+            self.assertEqual(self.issue('new', '--blocked-by', 'ARC-1'), 2, self.stdout + self.stderr)
+            self.assertIn('issue deleted', self.stderr)
+            self.assertEqual(self.records(), [])
+            self.assertEqual(self.fake.mutations, [])
+
+    def test_archived_managed_source_after_trailer_write_refuses_relation_write(self):
+        self.marked('1')
+        def archive(q, v):
+            if 'OperationUpdate' in q and v['id'] == '1':
+                self.fake.issues['1']['archivedAt'] = 'date'
+        self.fake.after_mutation = archive
+        self.assertEqual(self.issue('new', '--blocked-by', 'ARC-1'), 3, self.stdout + self.stderr)
+        self.assertIn('issue deleted', self.stdout)
+        self.assertFalse(any('OperationRelation' in q for q, _ in self.fake.mutations))
+
+    def test_archived_observed_frontier_retains_cycle_edges(self):
+        self.external_chain()
+        self.fake.issues['3']['archivedAt'] = 'date'
+        self.fake.issues['4']['trashed'] = True
+        self.assertEqual(self.issue('edit', 'ARC-1', '--add-blocks', 'ARC-2'), 2,
+                         self.stdout + self.stderr)
+        self.assertIn('resulting blocks cycle', self.stderr)
+        self.assertEqual(self.records(), [])
+        self.assertEqual(self.fake.mutations, [])
+
+    def test_dependency_examples_are_prose_in_audit_and_prepare(self):
+        for prose in ('Example:\n```text\n`swarm-deps: example`\n```',
+                      '> `swarm-deps: example`', '`swarm-deps: example`\nEnd of example'):
+            with self.subTest(prose=prose):
+                self.fake.issues['1']['description'] = prose
+                self.assertIsNone(LI.declared_edges(self.fake.issues['1']))
+                self.assertEqual(self.issue('new', '--blocked-by', 'ARC-1'), 0,
+                                 self.stdout + self.stderr)
+
+    def test_deleted_issue_edit_and_replay_send_no_mutations(self):
+        self.fake.ignore_update = True
+        self.assertEqual(self.issue('edit', 'ARC-1', '--title', 'Changed'), 3,
+                         self.stdout + self.stderr)
+        self.fake.ignore_update = False
+        op = self.operation()
+        writes = copy.deepcopy(self.fake.mutations)
+        for field, value in (('trashed', True), ('archivedAt', '2026-10-06T00:00:00Z')):
+            with self.subTest(field=field):
+                self.fake.issues['1'].update(trashed=False, archivedAt=None)
+                self.fake.issues['1'][field] = value
+                for args in (('edit', 'ARC-1', '--title', 'Another title'), ('replay', op)):
+                    with self.subTest(command=args[0]):
+                        self.assertEqual(self.issue(*args), 3 if args[0] == 'replay' else 2, self.stdout + self.stderr)
+                        self.assertIn('issue deleted', self.stdout + self.stderr)
+                        self.assertEqual(self.fake.mutations, writes)
+
+    def test_new_edit_and_counterpart_descriptions_match_storage(self):
+        self.marked('1')
+        self.assertEqual(self.issue('new', '--blocked-by', 'ARC-1',
+                                    body='Prose with interior  \nspacing \t\r\n'), 0,
+                         self.stdout + self.stderr)
+        target = self.target()
+        self.assertEqual(self.issue('edit', self.fake.issues[target]['identifier'],
+                                    '--body-file', str(self.body), body='Edited \t\r\n'), 0,
+                         self.stdout + self.stderr)
+        edit_operation = re.search(r'^operation (\S+)$', self.stdout, re.M)[1]
+        self.assertTrue(any('OperationCreate' in q for q, _ in self.fake.mutations))
+        self.assertTrue(any('OperationUpdate' in q and v['id'] == '1' for q, v in self.fake.mutations))
+        for q, v in self.fake.mutations:
+            if 'description' in v.get('input', {}):
+                body = v['input']['description']
+                self.assertEqual(body, body.rstrip(), q)
+        self.assertEqual(self.fake.issues[target]['description'],
+                         next(v['input']['description'] for q, v in reversed(self.fake.mutations)
+                              if 'OperationUpdate' in q and v['id'] == target))
+        self.assertEqual(self.issue('replay', edit_operation), 0, self.stdout + self.stderr)
+
     def test_request_budget(self):
         self.fake = BudgetIssueLinear()
         budget_project(self.fake)
@@ -445,7 +560,7 @@ class TestIssue(IssueCase):
                 self.assertIsNone(LI.relation_by_id(LS, client, 'absent', '1', '2', endpoint))
                 for key in ('id', 'type', 'issue', 'relatedIssue'):
                     old = relation[key]
-                    relation[key] = {'id': old['id'] + '-suffix'} if isinstance(old, dict) else old.upper()
+                    relation[key] = dict(old, id=old['id'] + '-suffix') if isinstance(old, dict) else old.upper()
                     rid = old if key == 'id' else relation['id']
                     self.assertIsNone(LI.relation_by_id(LS, client, rid, '1', '2', endpoint), key)
                     relation[key] = old
@@ -648,6 +763,23 @@ class TestIssue(IssueCase):
         self.assertEqual(journal, LI.progress_path(path).read_bytes())
         self.check_remote()
 
+    def test_rejected_issue_create_preserves_original_error(self):
+        self.check_rejected_issue_create(lambda: self.issue('new', '--blocked-by', 'ARC-1'))
+
+    def test_rejected_relation_create_preserves_original_error(self):
+        self.fake.reject = 'OperationRelationCreate'
+        mutate = self.fake.mutate
+
+        def refuse(q, v):
+            if 'OperationRelationCreate' not in q:
+                mutate(q, v)
+
+        with mock.patch.object(self.fake, 'mutate', refuse):
+            self.assertEqual(self.issue('new', '--blocked-by', 'ARC-1'), 3, self.stdout + self.stderr)
+        self.assertIn('rejected [REDACTED]', self.stdout)
+        self.assertNotIn('CONFIRMED', self.stdout)
+        self.assertEqual(self.fake.relations(), [])
+
     def test_2_rejected_create_requires_operation_marker(self):
         def collision(q, v):
             if 'OperationCreate' in q:
@@ -655,7 +787,7 @@ class TestIssue(IssueCase):
         self.fake.collision = collision
         self.fake.reject = 'OperationCreate'
         self.assertEqual(self.issue('new', '--blocked-by', 'ARC-1'), 3)
-        self.assertIn('lacks this operation marker', self.stdout)
+        self.assertIn('rejected [REDACTED]', self.stdout)
         self.assertFalse(self.fake.relations())
         self.assertEqual(self.replay(), 3)
         self.assertIn('lacks this operation marker', self.stdout)
@@ -671,7 +803,7 @@ class TestIssue(IssueCase):
                 self.fake.issues['1']['relations']['nodes'][-1]['id'] = v['input']['id']
         self.fake.collision = collision
         self.assertEqual(self.issue('new', '--blocked-by', 'ARC-2'), 3)
-        self.assertIn('type or endpoints', self.stdout)
+        self.assertIn('rejected [REDACTED]', self.stdout)
 
     def test_add_collision_preserves_removal_until_replay(self):
         for collision in ('type', 'endpoints'):
@@ -691,7 +823,7 @@ class TestIssue(IssueCase):
                         os.environ, {'HANIG_LINEAR_OPS_DIR': str(folder)}):
                     self.assertEqual(self.issue('edit', 'ARC-1', '--add-blocks', 'ARC-3',
                                                 '--remove-blocks', 'ARC-2'), 3, self.stdout)
-                    self.assertIn('rejected relation create: type or endpoints disagree', self.stdout)
+                    self.assertIn('rejected [REDACTED]', self.stdout)
                     self.assertIn(original, self.fake.relations())
                     self.assertFalse(any('OperationRelationDelete' in q for q, _ in self.fake.mutations))
                     path = next(folder.glob('*/*/*.json'))
@@ -973,7 +1105,7 @@ class TestIssue(IssueCase):
         record['spec']['approver'] = 'tampered'
         path.write_text(json.dumps(record))
         count = len(self.fake.mutations)
-        self.assertEqual(self.replay(), 2)
+        self.assertEqual(self.replay(), 3)
         self.assertIn('digest', self.stderr)
         path.write_bytes(raw)
         target = self.target()
@@ -1485,7 +1617,7 @@ class TestIssue(IssueCase):
         for value in ('owner\nforged', '`owner`'):
             self.assertEqual(self.issue('new', '--independent', 'reason', '--approver', value), 2)
         self.assertEqual(self.issue('new', '--independent', 'reason', body='`swarm-op: forged`'), 2)
-        self.assertEqual(self.issue('replay', '../escape'), 2)
+        self.assertEqual(self.issue('replay', '../escape'), 3)
         self.assertEqual(self.fake.calls, [])
         self.body.write_text('body')
         self.assertEqual(self.issue('edit', 'ARC-1', '--add-blocks', 'ARC-2', '--remove-blocks', 'ARC-2'), 2)
@@ -1494,7 +1626,7 @@ class TestIssue(IssueCase):
         data['repository'] = 'owner/different'
         self.binding.write_text(json.dumps(data))
         before = len(self.fake.mutations)
-        self.assertEqual(self.replay(), 2)
+        self.assertEqual(self.replay(), 3)
         self.assertIn('binding mismatch', self.stderr)
         self.assertEqual(len(self.fake.mutations), before)
 

@@ -12,7 +12,7 @@ import sys
 import unittest
 from unittest import mock
 
-from tests.test_linear_audit import AuditCase, FakeLinear, KEY, ROOT, connection, BudgetPaging, budget_page, budget_project
+from tests.test_linear_audit import AuditCase, FakeLinear, KEY, ROOT, connection, BudgetPaging, budget_page, budget_project, selected_fields
 
 PROJECT = ROOT / 'skills/hanig-project/scripts'
 sys.path.insert(0, str(PROJECT))
@@ -59,7 +59,7 @@ class DrainLinear(FakeLinear):
                 value = v['input']
                 if value['id'] in self.comments:
                     return 200, json.dumps({'errors': [{'message': 'duplicate'}]}).encode()
-                self.comments[value['id']] = {'id': value['id'], 'body': value['body'],
+                self.comments[value['id']] = {'id': value['id'], 'body': value['body'].rstrip(),
                                              'issue': {'id': value['issueId']}}
                 if self.reject_after_create:
                     return 200, json.dumps({'errors': [{'message': 'ambiguous'}]}).encode()
@@ -71,7 +71,7 @@ class DrainLinear(FakeLinear):
                 self.issues[v['id']]['state'] = {'type': state['type'], 'name': state['id']}
                 data = {'issueUpdate': {'success': True}}
         else:
-            data = self.dispatch(q, v)
+            data = selected_fields(q, self.dispatch(q, v))
         return 200, json.dumps({'data': data}).encode()
 
     def dispatch(self, q, v):
@@ -173,6 +173,15 @@ class DrainCase(AuditCase):
 
 
 class TestDrain(DrainCase):
+    def test_comment_body_matches_trimmed_storage(self):
+        self.intent(why='Explanation with interior  \nspacing \t\r\n')
+        self.assertEqual(self.drain(), 0, self.stdout + self.stderr)
+        sent = self.writes('IntentCommentCreate')[0]['input']['body']
+        self.assertEqual(sent, sent.rstrip())
+        self.assertEqual(next(iter(self.fake.comments.values()))['body'], sent)
+        self.assertEqual(self.drain(), 0, self.stdout + self.stderr)
+        self.assertEqual(len(self.writes('IntentCommentCreate')), 1)
+
     def test_request_budget(self):
         self.fake = BudgetDrainLinear()
         budget_project(self.fake)
@@ -299,6 +308,31 @@ class TestDrain(DrainCase):
         self.fake.reject_after_create = True
         self.assertEqual(self.drain(), 0, self.stdout)
         self.assertEqual(len(self.fake.comments), 1)
+
+    def test_rejected_comment_create_preserves_original_error(self):
+        self.intent()
+        for outcome in ('missing', 'foreign', 'unreadable'):
+            with self.subTest(outcome=outcome):
+                self.fake.comments.clear()
+                rejected = []
+
+                def transport(body, headers, timeout=None):
+                    q, v = (json.loads(body)[k] for k in ('query', 'variables'))
+                    if 'IntentCommentCreate' in q:
+                        rejected.append(v)
+                        if outcome == 'foreign':
+                            self.fake(body, headers, timeout)
+                            self.fake.comments[v['input']['id']]['body'] = 'foreign'
+                        return 200, json.dumps({'errors': [{'message': 'comment denied ' + KEY}]}).encode()
+                    if rejected and outcome == 'unreadable' and 'query IntentComment(' in q:
+                        return 200, json.dumps({'errors': [{'message': 'readback unavailable'}]}).encode()
+                    return self.fake(body, headers, timeout)
+
+                with mock.patch.object(API, 'transport', transport):
+                    self.assertEqual(self.drain(), 3, self.stdout + self.stderr)
+                self.assertEqual(len(rejected), 1)
+                self.assertIn('comment denied [REDACTED]', self.stdout)
+                self.assertEqual(self.receipts(), [])
 
     def test_marker_lines_in_why_drain_and_receipt(self):
         markers = ['`swarm-intent: prose`', '`swarm-evidence: %s`' % ('f' * 64),

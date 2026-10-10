@@ -35,6 +35,38 @@ def connection(nodes, more=False, cursor=None):
     return {'nodes': nodes, 'pageInfo': {'hasNextPage': more, 'endCursor': cursor}}
 
 
+def selected_fields(query, data):
+    """Project fake responses onto these queries' actual GraphQL selections."""
+    # Our requests use named fields and arguments, without aliases or fragments.
+    while '(' in query:
+        query, count = re.subn(r'\([^()]*\)', '', query)
+        assert count, 'unbalanced query arguments'
+    tokens = iter(re.findall(r'[A-Za-z_][A-Za-z_0-9]*|[{}]', query[query.index('{'):]))
+    assert next(tokens) == '{'
+
+    def selection():
+        fields = {}
+        previous = None
+        for token in tokens:
+            if token == '}':
+                return fields
+            if token == '{':
+                fields[previous] = selection()
+            else:
+                previous = token
+                fields[token] = None
+        raise AssertionError('unclosed query selection')
+
+    def project(value, fields):
+        if value is None or fields is None:
+            return value
+        if isinstance(value, list):
+            return [project(item, fields) for item in value]
+        return {name: project(value[name], nested) for name, nested in fields.items()}
+
+    return project(data, selection())
+
+
 class FakeLinear:
     """A read-only variation of f92398a's transport, with paging faults."""
     def __init__(self):
@@ -51,7 +83,8 @@ class FakeLinear:
         self.rate_limit = False
 
     def add(self, iid, state='unstarted', description='swarm-independent: test', project='project'):
-        issue = {'id': iid, 'identifier': 'ARC-' + iid, 'updatedAt': '2026-10-05T00:00:00Z',
+        issue = {'id': iid, 'identifier': 'ARC-' + iid, 'title': 'original', 'trashed': False,
+                 'updatedAt': '2026-10-05T00:00:00Z',
                  'description': description, 'archivedAt': None, 'state': {'type': state, 'name': state},
                  'project': {'id': project} if project else None, 'team': {'id': 'team'},
                  'relations': connection([]), 'inverseRelations': connection([])}
@@ -75,7 +108,7 @@ class FakeLinear:
             raise OSError('transport failed ' + KEY)
         if self.rate_limit and 'query ProjectIssues' in q:
             return 429, json.dumps({'errors': [{'message': 'rate limit ' + KEY}]}).encode()
-        data = self.dispatch(q, v)
+        data = selected_fields(q, self.dispatch(q, v))
         return 200, json.dumps({'data': data}).encode()
 
     def dispatch(self, q, v):
@@ -556,7 +589,7 @@ class TestAudit(AuditCase):
     def test_misplaced_identifiers_markers_receipts_and_unreadable(self):
         self.make_plan(needs=[])
         self.fake.issues['1']['project'] = None
-        self.fake.add('3', description='swarm-unit: sample/extra', project='elsewhere')['team'] = {'id': 'other'}
+        self.fake.add('3', description='swarm-unit: sample/extra\nswarm-repo: owner/repo', project='elsewhere')['team'] = {'id': 'other'}
         self.assertEqual(self.audit(plan=True), 1)
         self.assertEqual(self.checks['misplaced'], 'DRIFT')
         reads = [f for q, v in self.fake.calls if 'query OperationIdentifiers' in q for f in v['filter']['or']]
@@ -594,7 +627,7 @@ class TestAudit(AuditCase):
         draft = json.loads(self.draft.read_text())
         draft['project']['slug'] = 'sample'
         self.draft.write_text(json.dumps(draft))
-        self.fake.add('3', description='swarm-unit: sample/extra', project='other')
+        self.fake.add('3', description='swarm-unit: sample/extra\nswarm-repo: owner/repo', project='other')
         self.assertEqual(self.cli('audit', '--draft', str(self.draft), '--out', str(self.out)), 1)
         record = json.loads(self.out.read_text())
         self.assertIsNone(record['scope']['plan'])
@@ -666,10 +699,22 @@ class TestAudit(AuditCase):
         draft['issues'] = []
         self.draft.write_text(json.dumps(draft))
         for iid, unit in (('1', 'one'), ('2', 'two')):
-            self.fake.issues[iid]['description'] = 'swarm-unit: sample/' + unit
+            self.fake.issues[iid]['description'] = 'swarm-unit: sample/' + unit + '\nswarm-repo: owner/repo'
         self.fake.edge('1', '2')
         self.assertEqual(self.audit(plan=True), 0)
         self.assertEqual(self.checks['plan_edges'], 'CLEAN')
+
+    def test_audit_identity_requires_complete_terminal_block(self):
+        self.make_plan(needs=[])
+        draft = json.loads(self.draft.read_text())
+        draft['project']['slug'] = 'sample'
+        self.draft.write_text(json.dumps(draft))
+        for description in ('swarm-unit: sample/extra',
+                            'swarm-unit: sample/extra\nswarm-repo: owner/repo\nEnd example'):
+            self.fake.add('3', description=description, project='other')
+            self.assertEqual(self.cli('audit', '--draft', str(self.draft), '--out', str(self.out)), 0)
+            record = json.loads(self.out.read_text())
+            self.assertEqual(next(c['verdict'] for c in record['checks'] if c['id'] == 'misplaced'), 'CLEAN')
 
     def test_cycle_and_blocker_completion_policy(self):
         self.fake.add('1')

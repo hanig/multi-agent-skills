@@ -2410,7 +2410,8 @@ class TestFilingRequiresApproval(unittest.TestCase):
         a gate for work they already accepted."""
         first = T.draft(PLAN)
         first["approval"] = {"state": "granted", "granted_by": "hani",
-                             "at": "2026-08-29T00:00:00+0000"}
+                             "at": "2026-08-29T00:00:00+0000",
+                             "content_digest": T.content_digest(first)}
         self.assertEqual(T.draft(PLAN, existing=first)["approval"]["state"],
                          "granted")
 
@@ -3074,11 +3075,8 @@ class TestAStaleBlockedByEdgeIsRemovedNotMerelyNotAdded(unittest.TestCase):
         self.assertEqual(by_unit["b"]["add_blocked_by"], ["a"])
         self.assertEqual(by_unit["b"]["remove_blocked_by"], [])
 
-    def test_a_deleted_unit_is_still_resolvable_enough_to_remove(self):
-        """The commonest stale edge points at a unit the plan DELETED, so the
-        current draft cannot name it. The draft that filed it can, which is
-        why prior issues join the alias map. Without that, the one edge this
-        work exists to remove is the one that resolves to nothing."""
+    def test_a_deleted_unit_is_outside_the_current_plan_and_kept(self):
+        """PR 4 leaves a removed unit's blockers for explicit issue edit."""
         first = _filed(T.draft(self.PLAN_WIDE))
         gone = {"name": "p", "units": [
             {"id": "b", "kind": "slurm", "runtime": "none", "command": "true",
@@ -3086,9 +3084,8 @@ class TestAStaleBlockedByEdgeIsRemovedNotMerelyNotAdded(unittest.TestCase):
         rb = _readback({"ARC-201": ["ARC-200"]})
         second = T.draft(gone, existing=first, readback=rb)
         by_unit = {i["unit"]: i for i in second["issues"]}
-        self.assertEqual(by_unit["b"]["remove_blocked_by"], ["ARC-200"])
-        self.assertEqual(second["blocked_by_sync"]["unresolved"], [],
-                         "a former unit of this project is not a mystery")
+        self.assertEqual(by_unit["b"]["remove_blocked_by"], [])
+        self.assertEqual(second["blocked_by_sync"]["unresolved"][0]["blocker"], "ARC-200")
 
     def test_a_handle_nothing_has_ever_known_is_reported_not_hidden(self):
         first = _filed(T.draft(self.PLAN_WIDE))
@@ -3127,7 +3124,7 @@ class TestAStaleBlockedByEdgeIsRemovedNotMerelyNotAdded(unittest.TestCase):
         first = _filed(T.draft(self.PLAN_WIDE))
         for edges in ({"a": [], "b": ["a"]},
                       {"iss-0": [], "iss-1": ["iss-0"]},
-                      {"arc-200": [], "arc-201": ["arc-200"]}):
+                      {"ARC-200": [], "ARC-201": ["ARC-200"]}):
             second = T.draft(self._shrunk(), existing=first,
                              readback=_readback(edges))
             by_unit = {i["unit"]: i for i in second["issues"]}
@@ -3300,15 +3297,14 @@ class TestAnAbsentReadBackCannotClaimSync(unittest.TestCase):
         self.assertTrue(any("no `blocked_by_sync`" in x for x in problems),
                         problems)
 
-    def test_the_skill_tells_the_applying_session_to_remove(self):
-        """The draft is only half the interface. If the session with the
-        connector is never told to call `removeBlockedBy`, the field is a
-        request nobody reads -- which is the same defect one layer up."""
+    def test_the_skill_routes_edge_reconciliation_through_file(self):
+        """PR 4 makes the program consume blocked_by; previews are not instructions."""
         skill = (ROOT / "skills" / "hanig-project" / "SKILL.md").read_text()
-        self.assertIn("removeBlockedBy", skill)
+        self.assertIn("linear_sync.py", skill)
+        self.assertIn("file --draft tickets.json", skill)
         self.assertIn("remove_blocked_by", skill)
         self.assertIn("--tracker-edges", skill)
-        self.assertIn("append-only", skill)
+        self.assertIn("current units of this plan", skill)
 
     def test_the_read_back_is_labelled_attested_not_verified(self):
         """The same care the outbox receipts needed. There is no network here,
