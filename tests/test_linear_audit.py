@@ -787,7 +787,8 @@ class TestAudit(AuditCase):
         def status(command, **kwargs):
             self.assertEqual(command[2], 'status')
             self.assertNotIn(API.KEY_ENV, kwargs['env'])
-            return subprocess.CompletedProcess(command, 0, json.dumps({'units': [{'id': 'one', 'state': self.coordinator}]}), '')
+            code = 2 if self.coordinator in ('FAILED', 'FAILED_EVIDENCE', 'NEEDS_HUMAN') else 0
+            return subprocess.CompletedProcess(command, code, json.dumps({'units': [{'id': 'one', 'state': self.coordinator}]}), '')
         with mock.patch.object(LS.subprocess, 'run', side_effect=status):
             for coord, remote, expected in [('DONE', 'completed', 'CLEAN'), ('DONE', 'started', 'DRIFT'),
                                             ('RUNNING', 'started', 'CLEAN'), ('SUBMITTED', 'unstarted', 'DRIFT'),
@@ -798,9 +799,28 @@ class TestAudit(AuditCase):
                 self.fake.issues['1']['state']['type'] = remote
                 self.audit(plan=True, state=True)
                 self.assertEqual(self.checks['swarm_state'], expected)
+                self.assertTrue(self.record['coverage']['complete'])
         (self.state / 'swarm-state.json').write_text('not JSON')
         self.audit(plan=True, state=True)
         self.assertEqual(self.checks['swarm_state'], 'UNKNOWN')
+
+    def test_attention_status_keeps_coverage_complete(self):
+        self.make_plan(needs=[])
+        (self.state / 'swarm-state.json').write_text('{}')
+        for code, state, halted in ((0, 'PENDING', None), (1, 'PENDING', 'budget'),
+                                    (2, 'FAILED', None)):
+            with self.subTest(code=code):
+                status = {'units': [{'id': 'one', 'state': state}], 'halted': halted,
+                          'needs_attention': ['one'] if code == 2 else []}
+                result = subprocess.CompletedProcess([], code, json.dumps(status), '')
+                with mock.patch.object(LS.subprocess, 'run', return_value=result):
+                    self.assertEqual(self.audit(plan=True, state=True), 0)
+                self.assertEqual(self.checks['swarm_state'], 'CLEAN')
+                self.assertEqual(self.checks['coverage'], 'CLEAN')
+                self.assertTrue(self.record['coverage']['complete'])
+                evidence = next(c['evidence'] for c in self.record['checks'] if c['id'] == 'swarm_state')
+                self.assertIn({'exit_code': code}, evidence)
+                self.assertIn('Linear consistent', TA.render(self.record, self.record['inputs']))
 
     def test_absent_sources_fixed_and_d2_no_data_redaction(self):
         self.make_plan(needs=[])
@@ -817,13 +837,16 @@ class TestAudit(AuditCase):
 
     def test_swarm_state_read_failures_invalidate_all_clean_checks(self):
         self.make_plan(needs=[])
-        for fault in ('absent', 'oserror', 'nonzero', 'json', 'shape', 'timeout'):
+        for fault, code, stdout in (
+                ('absent', 0, '{}'), ('oserror', 0, '{}'),
+                ('nonzero', 64, '{"units": []}'),
+                ('failed_json', 2, 'bad JSON'), ('halted_json', 1, 'bad JSON'),
+                ('json', 0, 'bad JSON'), ('shape', 0, '{}'),
+                ('units_shape', 2, '{"units": {}}'), ('timeout', 0, '{}')):
             with self.subTest(fault=fault):
                 if fault != 'absent':
                     (self.state / 'swarm-state.json').write_text('{}')
-                result = subprocess.CompletedProcess([], 1 if fault == 'nonzero' else 0,
-                                                     'bad JSON' if fault == 'json' else '{}',
-                                                     'status failure ' + KEY)
+                result = subprocess.CompletedProcess([], code, stdout, 'status failure ' + KEY)
                 error = (OSError('status unavailable ' + KEY) if fault == 'oserror' else
                          subprocess.TimeoutExpired('status', 60) if fault == 'timeout' else None)
                 with mock.patch.object(LS.subprocess, 'run', return_value=result, side_effect=error) as run:
@@ -835,7 +858,9 @@ class TestAudit(AuditCase):
                 self.assertFalse(self.record['coverage']['complete'])
                 self.assertNotIn('CLEAN', self.checks.values())
                 evidence = {c['id']: c['evidence'] for c in self.record['checks']}
-                self.assertIn(evidence['swarm_state'][0], evidence['coverage'][0])
+                self.assertIn(evidence['swarm_state'][-1], evidence['coverage'][0])
+                if fault not in ('absent', 'oserror', 'timeout'):
+                    self.assertIn({'exit_code': code}, evidence['swarm_state'])
 
     def test_bind_and_key_file_shell_words(self):
         old = os.getcwd()

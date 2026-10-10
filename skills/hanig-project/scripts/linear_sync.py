@@ -520,9 +520,16 @@ def audit(args, client, filing=None):
                 result = subprocess.run([sys.executable, str(swarm_dir / 'scripts' / 'swarm.py'),
                                          'status', args.plan, '--state-dir', args.state_dir, '--json'],
                                         env=env, capture_output=True, text=True, timeout=60)
-                if result.returncode:
+                checks['swarm_state']['evidence'].append({'exit_code': result.returncode})
+                # hanig-swarm/scripts/swarm.py:cmd_status emits the report before
+                # returning EXIT_HALTED (1) or EXIT_FAILED_UNIT (2) for attention.
+                # These codes are usable only with a parsed status JSON report.
+                if result.returncode not in (0, 1, 2):
                     raise ValueError('coordinator status failed: ' + result.stderr)
-                for row in json.loads(result.stdout)['units']:
+                status = json.loads(result.stdout)
+                if not isinstance(status, dict) or not isinstance(status.get('units'), list):
+                    raise ValueError('coordinator status must contain a units list')
+                for row in status['units']:
                     if row['id'] not in mapped:
                         continue
                     issue_state = mapped[row['id']]['state']['type']
