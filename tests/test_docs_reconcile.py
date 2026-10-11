@@ -18,10 +18,12 @@ CATALOG_PATH = ROOT / "tests" / "fixtures" / "retired_tracker_instructions.json"
 def normalize(text):
     """Normalize these presentations (not arbitrary Markdown):
 
+    Backslash escapes for |, *, _, `, [, ], # removed first;
     Markdown links reduced to their link text; emphasis and code-span markers
     removed; list and blockquote markers removed; table cells joined with
     single spaces; soft wraps joined.
     """
+    text = re.sub(r"\\([|*_`\[\]#])", r"\1", text)
     text = re.sub(r"\[([^\[\]]+)\]\([^\n]*?\)", r"\1", text)
     text = re.sub(r"(?m)^[ \t]*(?:(?:[-+*]|[0-9]+[.)])\s+|>\s*)+", "", text)
     text = re.sub(r"(`+)(.*?)\1", r"\2", text, flags=re.DOTALL)
