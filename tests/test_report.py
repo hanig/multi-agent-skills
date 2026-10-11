@@ -13,6 +13,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from scheduler_fixture import isolated_module_state_home as setUpModule  # noqa: E402
+from scheduler_fixture import cleanup_module_path as tearDownModule  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "hanig-project" / "scripts"
 sys.path.insert(0, str(SCRIPTS))

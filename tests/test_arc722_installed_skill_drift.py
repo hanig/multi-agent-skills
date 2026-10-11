@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT / "skills" / "hanig-swarm" / "scripts"))
 import swarm as S
 import worktree as W
 from tests.test_attempt_worktrees import ENV, FakePaseo, code_unit, git, repo_at
-from tests.scheduler_fixture import codex_environment
+from tests.scheduler_fixture import codex_environment, state_environment
 
 
 class TestInstalledSkillDrift(unittest.TestCase):
@@ -28,6 +28,7 @@ class TestInstalledSkillDrift(unittest.TestCase):
         self.home.mkdir()
         self.enter_patch(mock.patch.dict(os.environ, {
             "HOME": str(self.home),
+            **state_environment(self.tmp / "state-home"),
             **codex_environment(self.tmp / "codex-fixture"),
         }))
         self.repo = repo_at(self.tmp / "repo")

@@ -12,6 +12,11 @@ import time
 import unittest
 from unittest import mock
 
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from scheduler_fixture import isolated_module_state_home as setUpModule  # noqa: E402
+from scheduler_fixture import cleanup_module_path as tearDownModule  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "hanig-swarm" / "scripts"))
 import swarm as S

@@ -38,13 +38,34 @@ def closed_bin(directory, tools=TOOLS):
 
 
 def isolated_module_path():
-    """A unittest module fixture; per-test scheduler stubs may replace it."""
+    """Isolate executables and state; per-test scheduler stubs may replace PATH."""
     temporary = tempfile.TemporaryDirectory(prefix="scheduler-free-")
     unittest.addModuleCleanup(temporary.cleanup)
     patch = mock.patch.dict(os.environ, {
         "PATH": closed_bin(temporary.name),
+        **state_environment(Path(temporary.name) / "state"),
         **codex_environment(Path(temporary.name) / "codex-fixture"),
     })
+    patch.start()
+    unittest.addModuleCleanup(patch.stop)
+
+
+def state_environment(directory):
+    """Keep coordinator defaults external to test repositories and disposable.
+
+    HOME alone is insufficient when the caller exports XDG_STATE_HOME. Use
+    this in explicit child environments as well as the module fixtures.
+    """
+    directory = Path(directory).resolve()
+    directory.mkdir(parents=True, exist_ok=True)
+    return {"XDG_STATE_HOME": str(directory)}
+
+
+def isolated_module_state_home():
+    """State-only counterpart for tests with their own executable fixtures."""
+    temporary = tempfile.TemporaryDirectory(prefix="coordinator-state-")
+    unittest.addModuleCleanup(temporary.cleanup)
+    patch = mock.patch.dict(os.environ, state_environment(temporary.name))
     patch.start()
     unittest.addModuleCleanup(patch.stop)
 

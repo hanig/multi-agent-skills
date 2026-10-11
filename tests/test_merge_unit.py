@@ -12,6 +12,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
+
+from tests.scheduler_fixture import state_environment
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills/hanig-swarm/scripts"
@@ -81,6 +84,10 @@ class TestMergeUnit(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.directory = Path(self.tmp.name).resolve()
+        state_patch = mock.patch.dict(
+            os.environ, state_environment(self.directory / "state-home"))
+        state_patch.start()
+        self.addCleanup(state_patch.stop)
         self.operator = OPERATOR
         self.repo = self.directory / "repo"
         self.repo.mkdir()
