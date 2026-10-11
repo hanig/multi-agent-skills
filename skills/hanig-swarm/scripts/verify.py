@@ -1105,20 +1105,15 @@ def _implicit_python(first_line, launch_config, cwd):
     Selectors beyond the bounded parser retain native execution but cannot
     acquire interpreter provenance by guessing how env will interpret them.
     """
-    command = "python3"
-    if first_line.startswith(b"#!"):
-        try:
-            selection = _python_selector(first_line)
-        except ValueError:
-            return None, None
-        if selection is not None:
-            parts = os.fsdecode(first_line[2:]).strip().split(None, 1)
-            if not selection["prefix"]:
-                command = parts[0]
-            elif len(selection["prefix"]) == 1:
-                command = selection["command"]
-            else:
-                return None, None
+    if not first_line.startswith(b"#!"):
+        return None, None
+    try:
+        selection = _python_selector(first_line)
+    except ValueError:
+        return None, None
+    if selection is None or len(selection["prefix"]) > 1:
+        return None, None
+    command = selection["command"]
     env = CE.child_env()
     env["PATH"] = launch_config[0] + os.pathsep + env.get("PATH", os.defpath)
     directory = os.path.abspath(cwd or os.curdir)
@@ -1135,7 +1130,7 @@ def _implicit_python(first_line, launch_config, cwd):
         probe = _observe_execution([path, "--version"], 30, cwd, launch_config)
         if probe.get("incomplete_reason") or probe["exit_code"] != 0:
             raise ValueError(probe.get("incomplete_reason") or "interpreter version probe failed")
-        version = re.fullmatch(r"Python (\d+)\.(\d+)\.(\d+)",
+        version = re.fullmatch(r"Python (\d+)\.(\d+)\.(\d+)(?:(?:a|b|rc)\d+)?\+?",
                                (probe["stdout"] or probe["stderr"]).strip())
         if not version:
             raise ValueError("interpreter did not report major.minor.micro")

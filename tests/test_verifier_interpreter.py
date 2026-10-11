@@ -76,6 +76,30 @@ class TestImplicitInterpreter(unittest.TestCase):
         self.assertIn("python3", outcome["incomplete_reason"])
         self.assertIn("supported range", outcome["incomplete_reason"])
 
+    def test_non_python_shebang_does_not_acquire_python_provenance(self):
+        self.program.write_text('#!/bin/sh\nprintf "shell ran\\n"\n')
+        for version in ('3.9.6', '3.14.8'):
+            with self.subTest(version=version):
+                unrelated = self.python(self.root / 'unrelated', version)
+                outcome = self.run_verifier(str(unrelated.parent))
+                self.assertEqual(V.outcome_result(outcome), {'result': 'pass'})
+                self.assertEqual(outcome['stdout'], 'shell ran\n')
+                receipt = dict(outcome, claim=V.INTEGRATION_CLAIM, result='pass')
+                problem = V.RV.execution_problem(receipt)
+                self.assertIsNotNone(problem)
+                self.assertIn('unknown interpreter provenance', problem)
+                self.assertEqual(outcome['execution']['executables']['python']['role'], 'launcher')
+
+    def test_supported_version_suffixes_preserve_major_minor_micro(self):
+        for version, expected in (('3.11.4+', '3.11.4'), ('3.12.0rc1', '3.12.0'),
+                                  ('3.12.0a1+', '3.12.0')):
+            with self.subTest(version=version):
+                selected = self.python(self.root / 'source-build', version)
+                outcome = self.run_verifier(str(selected.parent))
+                self.assertEqual(V.outcome_result(outcome), {'result': 'pass'})
+                self.assertEqual(outcome['stdout'].strip(), str(selected))
+                self.assertEqual(outcome['execution']['executables']['python']['version'], expected)
+
 
 if __name__ == "__main__":
     unittest.main()

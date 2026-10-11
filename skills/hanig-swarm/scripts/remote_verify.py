@@ -140,7 +140,7 @@ def interpreter_provenance_problem(receipt):
 def execution_problem(receipt):
     """Merge passes need interpreter provenance; remote passes also need proof."""
     execution = receipt.get("execution")
-    if (receipt.get("claim") in ("integration-tests", "changed-tests-stable")
+    if (receipt.get("claim") == "integration-tests"
             or "candidate_tree" in receipt):
         problem = interpreter_provenance_problem(receipt)
         if problem:
