@@ -1018,9 +1018,33 @@ class TestSessionContainment(unittest.TestCase):
         reader = mock.MagicMock()
         reader.__enter__.return_value = reader
         reader.returncode, reader.pid = 0, 1000000001
-        reader.communicate.return_value = (output, '')
+        reader.communicate.return_value = (output.encode('utf-8'), b'')
         with mock.patch.object(fixtures.subprocess, 'Popen', return_value=reader):
             return process_table()
+
+    def test_diagnostic_ps_tolerates_non_utf8_command_and_error_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stub = Path(directory) / 'ps'
+            uid = os.getuid()
+            output = ('101 1 101 %d S fixture-path\n'
+                      '102 1 102 %d S unrelated-' % (uid, uid)).encode() + b'\xe9\n'
+            output += ('%d %d %d %d S caller\n' % (
+                os.getpid(), os.getppid(), os.getpgrp(), uid)).encode()
+            for exit_code in (0, 1):
+                with self.subTest(exit_code=exit_code):
+                    stub.write_text(
+                        '#!%s\nimport os, sys\nos.write(1, %r)\n'
+                        'os.write(2, b"diagnostic-\\xe9")\nsys.exit(%d)\n'
+                        % (sys.executable, output, exit_code))
+                    stub.chmod(0o755)
+                    with mock.patch.object(fixtures, '_ps_command', return_value=str(stub)):
+                        if exit_code:
+                            with self.assertRaisesRegex(OSError, 'diagnostic-\ufffd'):
+                                process_table()
+                        else:
+                            rows = process_table()
+                            self.assertEqual(rows[101], (1, 101, 'S', 'fixture-path'))
+                            self.assertEqual(rows[102], (1, 102, 'S', 'unrelated-\ufffd'))
 
     def test_multiline_unrelated_command_preserves_real_fixture_member(self):
         scope = self._scope()

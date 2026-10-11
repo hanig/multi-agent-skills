@@ -311,13 +311,15 @@ def process_table():
     with subprocess.Popen(
             [_ps_command(), '-ww', '-U', str(os.getuid()), '-o',
              'pid=,ppid=,pgid=,uid=,stat=,command='],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as reader:
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE) as reader:
         try:
             output, error = reader.communicate(timeout=60)
         except subprocess.TimeoutExpired:
             reader.kill()
             reader.wait(timeout=5)
             raise
+        output = output.decode('utf-8', errors='replace')
+        error = error.decode('utf-8', errors='replace')
         if reader.returncode != 0:
             raise OSError('process enumeration failed: ' + error)
     rows, seen = {}, set()
