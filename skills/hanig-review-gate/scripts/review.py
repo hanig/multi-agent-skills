@@ -1888,9 +1888,6 @@ def build_prompt(body, claims, truncated, context, threat_model=None,
         out.append("CODE ALLEGATIONS REPORTED AS NOT REPRODUCED — "
                    "re-evaluate these disagreements; do not silently filter "
                    "them:")
-        for entry in disputed:
-            out.append(f"  - {entry['location']}: {entry['summary']}")
-            out.append(f"    reason: {entry['reason']}")
         out.append("")
     reproduced = [entry for entry in (dispositions or [])
                   if entry["disposition"] in ("reproduced", "not-reproduced")]

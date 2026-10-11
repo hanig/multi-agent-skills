@@ -109,6 +109,14 @@ class TestReproductionEvidence(unittest.TestCase):
                     entry = copy.deepcopy(self.entry)
                     entry["disposition"] = status
                     del entry["reproduction"][field]
+                    path = self.root / "missing-field.json"
+                    path.write_text(json.dumps({self.digest: entry}))
+                    error = io.StringIO()
+                    with redirect_stderr(error), self.assertRaises(SystemExit) as raised:
+                        review.load_dispositions(path)
+                    self.assertEqual(raised.exception.code, 4)
+                    self.assertIn(self.digest, error.getvalue())
+                    self.assertIn("reproduction." + field, error.getvalue())
                     self.assert_refused(entry, "reproduction." + field)
 
     def test_each_malformed_field_refuses_before_transport(self):
