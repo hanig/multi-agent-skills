@@ -1882,13 +1882,6 @@ def build_prompt(body, claims, truncated, context, threat_model=None,
     if threat_model:
         out.append(f"THREAT MODEL — what this code does and does not defend "
                    f"against:\n{threat_model}\n")
-    disputed = [entry for entry in (dispositions or [])
-                if entry["disposition"] == "not-reproduced"]
-    if disputed:
-        out.append("CODE ALLEGATIONS REPORTED AS NOT REPRODUCED — "
-                   "re-evaluate these disagreements; do not silently filter "
-                   "them:")
-        out.append("")
     reproduced = [entry for entry in (dispositions or [])
                   if entry["disposition"] in ("reproduced", "not-reproduced")]
     if reproduced:
@@ -1900,6 +1893,8 @@ def build_prompt(body, claims, truncated, context, threat_model=None,
         for entry in reproduced:
             out.append(f"  - {entry['location']}: {entry['summary']}")
             out.append(f"    disposition: {entry['disposition']}")
+            if entry["disposition"] == "not-reproduced":
+                out.append("    Re-evaluate this disagreement; do not silently filter it.")
             out.append(f"    reason: {entry['reason']}")
             for field in ("setup", "command", "expected", "observed", "revision"):
                 out.append(f"    {field}: {entry['reproduction'][field]}")

@@ -169,6 +169,12 @@ class TestReproductionEvidence(unittest.TestCase):
                             self.assertIn(entry[field], prompt)
                         for field, value in entry["reproduction"].items():
                             self.assertIn(field + ": " + value, prompt)
+                        instruction = "Re-evaluate this disagreement; do not silently filter it."
+                        if status == "not-reproduced":
+                            self.assertIn("disposition: not-reproduced\n    " + instruction,
+                                          prompt)
+                        else:
+                            self.assertNotIn(instruction, prompt)
                     self.assertFalse(self.marker.exists(), "evidence command was executed")
 
     def test_deferred_needs_no_reproduction(self):
