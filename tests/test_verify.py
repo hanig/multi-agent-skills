@@ -234,6 +234,24 @@ class TestAdmissionIsBound(unittest.TestCase):
         self.assertNotIn("merge_base", rec)
         self.assertIsNone(S._verify_shape_problem(rec))
 
+    def test_output_audit_fields_do_not_change_admission(self):
+        with tempfile.TemporaryDirectory() as d:
+            for result in ('pass', 'fail'):
+                with self.subTest(result=result):
+                    self._write(d, self._rec(result=result))
+                    before, before_refusal = S.admit_verification(
+                        d, 'u1', 'tests-pass', HEAD, 'p' * 64, self.POLICY)
+                    self._write(d, self._rec(
+                        result=result, stdout_path='/nonexistent/output',
+                        stderr_path='/nonexistent/error', stdout_sha256='bad',
+                        stderr_sha256='bad', unittest_failures=['FAIL: unrelated'],
+                        unittest_summary=['FAILED (failures=1)'],
+                        output_capture_error='not decision evidence'))
+                    after, after_refusal = S.admit_verification(
+                        d, 'u1', 'tests-pass', HEAD, 'p' * 64, self.POLICY)
+                    self.assertEqual(before is None, after is None)
+                    self.assertEqual(before_refusal, after_refusal)
+
     def test_a_pass_for_another_commit_is_not_a_pass_for_this_one(self):
         with tempfile.TemporaryDirectory() as d:
             self._write(d, self._rec(subject_head="b" * 40))

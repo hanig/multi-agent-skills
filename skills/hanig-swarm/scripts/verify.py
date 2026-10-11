@@ -68,6 +68,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import child_environment as CE
@@ -90,6 +91,7 @@ MAX_VERIFIER_BYTES = 5_000_000
 MAX_CORPUS_PATHS = 10_000
 MAX_CORPUS_FILE_BYTES = 256_000_000
 MAX_CORPUS_TOTAL_BYTES = 1_000_000_000
+MAX_TEST_OUTPUT_LINES = 50
 
 
 def _git(runner, repo, *args, timeout=60):
@@ -834,7 +836,7 @@ def run_merge_preconditions(runner, repo, produced_head, target_commit,
                 outcome, error = run_pinned(
                     runner, program["path"], program["digest"], args=program["args"],
                     timeout=timeout, cwd=tree, observe_completion=True,
-                    executables=program_executables)
+                    executables=program_executables, retain_output=True)
                 outcomes.append(outcome if not error else RV.incomplete(error))
                 executions.append(RV.local_execution(program_executables))
         for check, extra, outcome, execution in zip(checks, extras, outcomes, executions):
@@ -851,6 +853,7 @@ def run_merge_preconditions(runner, repo, produced_head, target_commit,
                 "stdout_tail": outcome["stdout"], "stderr_tail": outcome["stderr"],
                 "schema_version": 2,
             })
+            receipt.update(output_evidence(outcome, state_dir))
             receipts.append(receipt)
         return receipts, None
     finally:
@@ -922,8 +925,53 @@ def outcome_result(outcome):
     return {"result": "pass" if outcome["exit_code"] == 0 else "fail"}
 
 
+def output_evidence(outcome, state_dir):
+    """Audit-only diagnostics; neither text nor storage success decides admission.
+
+    Local merge execution retains the original bytes separately from the
+    compatibility tails. Remote/legacy outcomes remain bounded and must not
+    be presented as complete output. Existing discarded output is unrecoverable.
+    """
+    raw = outcome.get("_full_output")
+    streams = raw if raw is not None else {
+        name: outcome[name].encode("utf-8") for name in ("stdout", "stderr")}
+    evidence = {}
+    for field, pattern in (
+            ("unittest_failures", r"^(?:FAIL|ERROR): .*"),
+            ("unittest_summary", r"^(?:Ran .+|FAILED \(.*\)|OK(?: .*)?)$")):
+        lines = []
+        truncated = False
+        for data in streams.values():
+            for match in re.finditer(pattern, data.decode("utf-8", "replace"), re.MULTILINE):
+                if len(lines) < MAX_TEST_OUTPUT_LINES:
+                    lines.append(match.group())
+                else:
+                    truncated = True
+        evidence[field] = lines
+        evidence[field + "_truncated"] = truncated
+    if raw is None:
+        evidence["output_capture_error"] = "full output unavailable from remote/legacy execution"
+    elif state_dir is None:
+        evidence["output_capture_error"] = "no state directory supplied for full output"
+    else:
+        try:
+            directory = Path(state_dir).resolve() / "verify-output"
+            directory.mkdir(parents=True, exist_ok=True)
+            # A fresh timestamp-named directory owns exactly one receipt's pair.
+            pair = Path(tempfile.mkdtemp(prefix=str(time.time_ns()) + "-", dir=str(directory)))
+            for name, data in raw.items():
+                path = pair / (name + ".txt")
+                with path.open("xb") as stream:
+                    stream.write(data)
+                evidence[name + "_path"] = str(path)
+                evidence[name + "_sha256"] = digest_bytes(data)
+        except OSError as exc:
+            evidence["output_capture_error"] = str(exc)
+    return evidence
+
+
 def _observe_execution(argv, timeout, cwd, launch_config=None, launch_prefix=(),
-                       final_argv0=None):
+                       final_argv0=None, retain_output=False):
     """Observe merge-verifier completion without unit.run's overloaded exit 127.
 
     Only our timeout or a launch/transport exception is incomplete. Every
@@ -968,7 +1016,9 @@ def _observe_execution(argv, timeout, cwd, launch_config=None, launch_prefix=(),
         child = subprocess.Popen(
             argv, cwd=cwd, env=CE.child_env(), stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True,
-            encoding="utf-8", errors="replace", start_new_session=True, pass_fds=pass_fds)
+            encoding=None if retain_output else "utf-8",
+            errors=None if retain_output else "replace",
+            start_new_session=True, pass_fds=pass_fds)
         if launch_write is not None:
             os.close(launch_write)
             launch_write = None
@@ -1006,8 +1056,15 @@ def _observe_execution(argv, timeout, cwd, launch_config=None, launch_prefix=(),
                 pass
             finally:
                 os.close(launch_read)
+    full_output = None
+    if retain_output:
+        full_output = {"stdout": out or b"", "stderr": err or b""}
+        out, err = (full_output[name].decode("utf-8", "replace")
+                    for name in ("stdout", "stderr"))
     outcome = {"exit_code": child.returncode if child is not None else None,
                "stdout": (out or "")[-4000:], "stderr": (err or "")[-2000:]}
+    if full_output is not None:
+        outcome["_full_output"] = full_output
     if launch_error:
         outcome["incomplete_reason"] = "coordinator child launcher could not exec verifier: " + launch_error
         return outcome
@@ -1139,7 +1196,8 @@ def _implicit_python(first_line, python):
 
 
 def run_pinned(runner, path, expect_digest, args=None, timeout=900,
-               cwd=None, observe_completion=False, executables=None):
+               cwd=None, observe_completion=False, executables=None,
+               retain_output=False):
     """Execute the bytes that hashed, not the path that was named.
 
     Hashing a file and then executing the path re-reads it, so the bytes that
@@ -1202,7 +1260,7 @@ def run_pinned(runner, path, expect_digest, args=None, timeout=900,
                                  executables["python"]["path"],
                                  executables["python"]["path"] if select_python else "")
             return _observe_execution(argv, timeout, cwd, launch_config,
-                                      launch_prefix, final_argv0), None
+                                      launch_prefix, final_argv0, retain_output), None
         # No before/after dance here any more. `run_in_checkout` gives this a
         # worktree the agent is not working in, so there is nothing to drift.
         rc, out, errout = runner([copy] + list(args or []), timeout=timeout,

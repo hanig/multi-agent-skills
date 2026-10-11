@@ -1,4 +1,5 @@
 """Verification of the candidate merge, not either branch in isolation."""
+import hashlib
 import json
 import os
 import subprocess
@@ -63,6 +64,89 @@ class IntegrationRepo(unittest.TestCase):
         git(self.repo, "add", path)
         git(self.repo, "commit", "-qm", branch)
         return git(self.repo, "rev-parse", "HEAD").stdout.strip()
+
+
+class TestVerifierOutputEvidence(IntegrationRepo):
+    def receipt(self, stdout, stderr, exit_code=1, blocked_output=False):
+        verifier = self.repo / V.MERGE_VERIFIER_PATH
+        verifier.parent.mkdir()
+        verifier.write_text(
+            '#!/usr/bin/env python3\nimport sys\n'
+            'sys.stdout.buffer.write(%r)\nsys.stderr.buffer.write(%r)\n'
+            'sys.exit(%d)\n' % (stdout, stderr, exit_code))
+        (self.repo / V.POLICY_FILE).write_text(json.dumps({
+            'schema_version': 1, 'verifiers': [{
+                'name': V.MERGE_VERIFIER, 'claims': [V.INTEGRATION_CLAIM],
+                'sha256': V.digest_file(verifier)[0]}]}))
+        git(self.repo, 'add', '-A')
+        git(self.repo, 'commit', '-qm', 'target verifier')
+        target = git(self.repo, 'rev-parse', 'HEAD').stdout.strip()
+        produced = self.commit_from_base('candidate', 'compatible.txt', '1')
+        self.state = Path(self.tmp.name) / 'state'
+        self.state.mkdir()
+        if blocked_output:
+            (self.state / 'verify-output').write_text('storage unavailable')
+        rows, error = V.run_merge_preconditions(
+            U.run, self.repo, produced, target, claims=(V.INTEGRATION_CLAIM,),
+            state_dir=self.state, unit='u1', journal_entries=[])
+        self.assertIsNone(error)
+        self.assertEqual(len(rows), 1)
+        # Exercise the journal consumer, not only the producer's return value.
+        rows[0]['unit'] = 'u1'
+        S._fsync_append(self.state / S.VERIFY_RECEIPTS, rows[0])
+        stored, problems = S.load_verifications(self.state)
+        self.assertEqual(problems, [])
+        return stored[0]
+
+    def test_failure_names_survive_large_trailing_dump_with_full_byte_digests(self):
+        failure = 'FAIL: test_first (suite.Checks)'
+        error = 'ERROR: test_second (suite.Checks)'
+        stdout = (failure + '\n').encode() + b'x' * 10240 + b'\nraw:\xe9\r\n'
+        stderr = (error + '\nRan 2 tests in 0.001s\nFAILED (failures=1, errors=1)\n').encode() + b'y' * 10240
+        receipt = self.receipt(stdout, stderr)
+        self.assertEqual(receipt['result'], 'fail')
+        self.assertEqual(receipt['unittest_failures'], [failure, error])
+        self.assertEqual(receipt['unittest_summary'], [
+            'Ran 2 tests in 0.001s', 'FAILED (failures=1, errors=1)'])
+        self.assertFalse(receipt['unittest_failures_truncated'])
+        self.assertNotIn('output_capture_error', receipt)
+        for name, expected, bound in (('stdout', stdout, 4000), ('stderr', stderr, 2000)):
+            path = Path(receipt[name + '_path'])
+            self.assertEqual(path.parent.parent, self.state.resolve() / 'verify-output')
+            self.assertTrue(path.parent.name.split('-')[0].isdigit())
+            self.assertEqual(path.read_bytes(), expected)
+            self.assertEqual(receipt[name + '_sha256'], hashlib.sha256(expected).hexdigest())
+            self.assertEqual(receipt[name + '_tail'], expected.decode('utf-8', 'replace')[-bound:])
+            self.assertNotIn('test_first', receipt[name + '_tail'])
+            self.assertNotIn('test_second', receipt[name + '_tail'])
+
+    def test_failure_bound_does_not_displace_summary(self):
+        failures = ['FAIL: test_%d (suite.Checks)' % i for i in range(55)]
+        receipt = self.receipt(('\n'.join(failures) + '\n').encode(),
+                               b'Ran 55 tests in 0.001s\nFAILED (failures=55)\n')
+        self.assertEqual(receipt['unittest_failures'], failures[:50])
+        self.assertTrue(receipt['unittest_failures_truncated'])
+        self.assertEqual(receipt['unittest_summary'], [
+            'Ran 55 tests in 0.001s', 'FAILED (failures=55)'])
+        self.assertIn(failures[-1].encode(), Path(receipt['stdout_path']).read_bytes())
+
+    def test_output_storage_error_does_not_fail_a_passing_verifier(self):
+        receipt = self.receipt(b'', b'Ran 1 test in 0.001s\nOK (skipped=1)\n',
+                               exit_code=0, blocked_output=True)
+        self.assertEqual(receipt['result'], 'pass')
+        self.assertEqual(receipt['exit_code'], 0)
+        self.assertIn('output_capture_error', receipt)
+        self.assertEqual(receipt['unittest_summary'], ['Ran 1 test in 0.001s', 'OK (skipped=1)'])
+        self.assertNotIn('incomplete_reason', receipt)
+
+    def test_output_storage_error_does_not_erase_a_completed_failure(self):
+        receipt = self.receipt(b'', b'FAIL: test_first (suite.Checks)\n',
+                               blocked_output=True)
+        self.assertEqual(receipt['result'], 'fail')
+        self.assertEqual(receipt['exit_code'], 1)
+        self.assertEqual(receipt['unittest_failures'], ['FAIL: test_first (suite.Checks)'])
+        self.assertIn('output_capture_error', receipt)
+        self.assertNotIn('incomplete_reason', receipt)
 
 
 class TestCandidateMergeIsTheSubject(IntegrationRepo):
