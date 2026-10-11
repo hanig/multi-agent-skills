@@ -258,6 +258,48 @@ except (ValueError, OSError):
         self.assertEqual(result[0], 4)
         self.assertEqual((result[3], result[4]), ([], []))
 
+    def test_malformed_predecessor_is_refused_before_dispatch(self):
+        self.reserve(1)
+        marker = self.markers()[0]
+        record = json.loads(marker.read_text())
+        record["predecessor"] = {"cycle": 0, "profile": "standard"}
+        marker.write_text(json.dumps(record))
+        result = self.invoke(2, ("--fresh-cycle-from", "standard"))
+        self.assertEqual(result[0], 4, result[2])
+        self.assertEqual((result[3], result[4]), ([], []))
+        self.assertEqual(len(self.markers()), 1)
+
+    def test_stored_history_checks_actual_predecessor_and_exact_field_types(self):
+        self.reserve(3)
+        self.reserve(1, fresh="standard")
+        markers = self.markers()
+        saved = {p: p.read_bytes() for p in markers}
+        for value in (None, {"cycle": True, "profile": "standard"},
+                      {"cycle": 1, "profile": "fast"},
+                      {"cycle": 99, "profile": "standard"}):
+            with self.subTest(predecessor=value):
+                record = json.loads(saved[markers[-1]])
+                record["predecessor"] = value
+                markers[-1].write_text(json.dumps(record))
+                self.assertEqual(self.invoke(2, ("--fresh-cycle-from", "standard"))[0], 4)
+        markers[-1].write_bytes(saved[markers[-1]])
+        # Removing the actual predecessor is different from malformed metadata.
+        markers[0].unlink()
+        self.assertEqual(self.invoke(2, ("--fresh-cycle-from", "standard"))[0], 4)
+
+    def test_noninteger_and_oversized_marker_fields_fail_closed(self):
+        self.reserve(1)
+        marker = self.markers()[0]
+        saved = json.loads(marker.read_text())
+        for key in ("cycle", "round"):
+            record = dict(saved, **{key: True})
+            marker.write_text(json.dumps(record))
+            self.assertEqual(self.invoke(2)[0], 4)
+        marker.write_text(json.dumps(saved) + " " * 4096 + "broken trailing data")
+        self.assertEqual(self.invoke(2)[0], 4)
+        marker.write_text('{"predecessor": {"cycle": 0},' + json.dumps(saved)[1:])
+        self.assertEqual(self.invoke(2)[0], 4)
+
     def test_journal_failure_is_non_gating_and_does_not_release_reservation(self):
         result = self.invoke(fail_journal=True)
         self.assertEqual(result[0], 0, result[2])

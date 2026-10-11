@@ -144,6 +144,34 @@ def round_ledger_root():
     return (base / "hanig-review-gate" / "rounds").resolve()
 
 
+def validate_round_history(records):
+    """Stored predecessor metadata must bind to an actual exhausted cycle."""
+    cycles = {}
+    for record in records:
+        if (set(record) != {"identity", "cycle", "round", "profile", "predecessor"}
+                or type(record["cycle"]) is not int
+                or type(record["round"]) is not int):
+            raise ValueError("invalid round ledger fields; retain and inspect the marker")
+        cycles.setdefault(record["cycle"], []).append(record)
+    previous = None
+    for expected_cycle, cycle in enumerate(sorted(cycles), 1):
+        if cycle != expected_cycle:
+            raise ValueError("round ledger has a missing predecessor cycle")
+        entries = sorted(cycles[cycle], key=lambda r: r["round"])
+        expected = None
+        if previous is not None:
+            if previous["round"] != MAX_ROUNDS or entries[0]["round"] != 1:
+                raise ValueError("successor cycle requires an exhausted predecessor and round 1")
+            expected = {"cycle": cycle - 1, "profile": previous["profile"]}
+        for entry in entries:
+            predecessor = entry["predecessor"]
+            if (predecessor != expected or (expected is not None and (
+                    not isinstance(predecessor, dict)
+                    or type(predecessor.get("cycle")) is not int))):
+                raise ValueError("invalid round ledger predecessor; retain and inspect the marker")
+        previous = entries[-1]
+
+
 def reserve_round(identity, round_no, profile, fresh_from=None):
     """Reserve before dispatch, serializing ordering and exclusive creation.
 
@@ -155,7 +183,7 @@ def reserve_round(identity, round_no, profile, fresh_from=None):
     """
     if (not re.fullmatch(r"[0-9a-f]{64}", identity)
             or type(round_no) is not int or not 1 <= round_no <= MAX_ROUNDS
-            or profile not in ("plan", "fast", "standard", "deep")
+            or profile not in ("plan", *LADDER)
             or (fresh_from is not None and fresh_from not in LADDER)):
         raise ValueError("invalid round reservation")
     directory = _open_directory_chain(round_ledger_root() / identity)
@@ -177,7 +205,10 @@ def reserve_round(identity, round_no, profile, fresh_from=None):
                     raise ValueError("unrecognized round ledger entry; retain and inspect it")
                 fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
                 with os.fdopen(fd, "r", encoding="utf-8") as stream:
-                    record = json.loads(stream.read(4096))
+                    content = stream.read(4097)
+                if len(content) > 4096:
+                    raise ValueError("oversized round ledger marker; retain and inspect it")
+                record = json.loads(content, object_pairs_hook=reject_duplicate_keys)
                 cycle, number = map(int, match.groups())
                 if (not isinstance(record, dict)
                         or record.get("identity") != identity
@@ -187,6 +218,7 @@ def reserve_round(identity, round_no, profile, fresh_from=None):
                         or "predecessor" not in record):
                     raise ValueError("invalid round ledger marker; retain and inspect it")
                 records.append(record)
+            validate_round_history(records)
             last = max(records, key=lambda r: (r["cycle"], r["round"])) if records else None
             cycle = last["cycle"] if last else 1
             predecessor = last["predecessor"] if last else None
