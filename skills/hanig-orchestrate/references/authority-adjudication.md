@@ -10,11 +10,7 @@ Before confirmation the session follows the current mandate's narrow mode, whose
 
 ## Findings
 
-The matrix distinguishes evidence that disproves a finding, a confirmed required defect, a confirmed excluded defect, and an unresolved finding. <!-- declaration: adjudication.matrix -->
-
-The review gate's digest-keyed `--dispositions` entries retain `location`, `summary`, `disposition` and a one-line `reason`. A `reproduced` or `not-reproduced` entry includes a `reproduction` object with non-empty `setup`, `command`, `expected`, `observed` and `revision` strings; `revision` is the full lowercase 40- or 64-hex commit id tested. A `deferred` entry needs no reproduction. <!-- declaration: adjudication.matrix -->
-
-Missing or malformed reproduction evidence is a configuration error before network access. Reviewers receive the evidence with the prior finding, subject to the gate's existing removal of recognized prior-review decision text. The record supports refutation and adjudication, never automatic severity downgrading or execution of reviewer-supplied commands. Inability to reproduce is evidence for the adjudicator, not proof of harmlessness. <!-- declaration: adjudication.matrix -->
+The matrix distinguishes evidence that disproves a finding, a confirmed required defect, a confirmed excluded defect, and an unresolved finding. The review gate's digest-keyed `--dispositions` entries retain `location`, `summary`, `disposition` and a one-line `reason`. A `reproduced` or `not-reproduced` entry includes a `reproduction` object with non-empty `setup`, `command`, `expected`, `observed` and `revision` strings; `revision` is the full lowercase 40- or 64-hex commit id tested. A `deferred` entry needs no reproduction. Missing or malformed reproduction evidence is a configuration error before network access. Reviewers receive the evidence with the prior finding, subject to the gate's existing removal of recognized prior-review decision text. The record supports refutation and adjudication, never automatic severity downgrading or execution of reviewer-supplied commands. Inability to reproduce is evidence for the adjudicator, not proof of harmlessness. <!-- declaration: adjudication.matrix -->
 
 For a proposed nonblocking disposition, the mandate's concurrence party receives neutral premises and an invitation to refute instead of a request to ratify. <!-- declaration: adjudication.concurrence -->
 
