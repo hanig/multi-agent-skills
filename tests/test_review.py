@@ -983,6 +983,8 @@ class TestRangeDivergence(unittest.TestCase):
         self.git("config", "user.email", "range@example.invalid")
         self.git("config", "commit.gpgsign", "false")
         self.commit_file("shared.txt", "shared\n")
+        self.git("remote", "add", "origin", "https://example.invalid/range-fixture.git")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
         self.git("branch", "base")
         self.git("checkout", "-qb", "branch")
         self.commit_file("branch.txt", "branch change\n")
