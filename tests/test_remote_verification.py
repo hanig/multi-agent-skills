@@ -563,15 +563,27 @@ class TestRemoteVerification(unittest.TestCase):
         python = native / 'python3'
         python.symlink_to(sys.executable)
         self.f.env['PATH'] = str(native) + os.pathsep + self.f.env['PATH']
-        self.authorize_program('#!' + str(python) + '\n' +
-            'import os, subprocess, sys\n'
-            'expected = %r\nassert os.path.abspath(sys.executable) == expected, sys.executable\n'
+        program = ('#!' + str(python) + '\n' +
+            'import json, os, subprocess, sys\n'
+            'assert os.path.samefile(sys.executable, %r), sys.executable\n'
             'assert "HANIG_VERIFICATION_PYTHON" not in os.environ\n'
             'child = subprocess.check_output(["python3", "-c", "import sys; print(sys.executable)"], text=True)\n'
-            'assert os.path.abspath(child.strip()) == expected, child\n' % str(python))
+            'assert os.path.samefile(child.strip(), %r), child\n'
+            'print(json.dumps([sys.executable, child]))\n' % (str(python), str(python)))
+        # Framework Python may rewrite sys.executable even for a native
+        # binary symlink. Compare exact output with the real kernel launch,
+        # while also requiring both interpreters to name the selected file.
+        control = self.f.directory / 'absolute-native-control'
+        control.write_text(program)
+        control.chmod(0o755)
+        native_result = subprocess.run([str(control)], cwd=self.f.repo, env=self.f.env,
+                                       capture_output=True, text=True, timeout=10)
+        self.assert_ok(native_result)
+        self.authorize_program(program)
         self.assert_ok(self.verify())
         row, = self.rows()
         self.assertEqual(row['result'], 'pass')
+        self.assertEqual(row['stdout_tail'], native_result.stdout)
         self.assertEqual(row['execution']['executables']['python'], {
             'path': str(python), 'declared': False, 'role': 'native',
             'version': 'unprobed (native selector)'})
