@@ -116,6 +116,21 @@ class TestDocumentationReconciliation(unittest.TestCase):
     def test_no_retired_tracker_write_wording_in_authored_documents(self):
         self.assertEqual(retired_wording(ROOT), [])
 
+    def test_catalog_sentence_with_escaped_punctuation_in_table_is_detected(self):
+        sentence = next(entry["text"] for entry in catalog()
+                        if entry["source"] == "CLAUDE.md")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for punctuation in ("|", "|*_`[]#"):
+                with self.subTest(punctuation=punctuation):
+                    escaped = "".join("\\" + char if char in punctuation else char
+                                      for char in sentence)
+                    (root / "README.md").write_text(
+                        "| Status | Instruction |\n| --- | --- |\n| Retired | "
+                        + escaped + " |\n", encoding="utf-8")
+                    self.assertEqual(retired_wording(root),
+                                     ["README.md: " + normalize(sentence)])
+
     def test_every_catalog_entry_is_detected_across_scope_and_presentation(self):
         entries = catalog()
         self.assertTrue(entries)
