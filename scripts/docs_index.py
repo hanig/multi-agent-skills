@@ -221,7 +221,7 @@ def markdown_links(text):
     # block_lines already masked indented code before this normalization.
     visible = re.sub(r'^(?: {0,3}> ?)+', lambda m: blank(m[0]), visible, flags=re.M)
     definition_spans = []
-    for match in re.finditer(r'^[ \t]*\[([^\]\n]+)\]:[ \t]*(?:\n[ \t]*)?', visible, re.M):
+    for match in re.finditer(r'^[ \t]*\[([^\]\n]+)\]:[ \t]*(?=\S)', visible, re.M):
         dest = destination(visible, match.end())
         if dest and not match[1].startswith('^'):
             # A definition owns its complete line, optionally followed by a

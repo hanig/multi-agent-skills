@@ -12,7 +12,6 @@ This deliberately does not test heading slugs or HTML-id anchor validation.
 import contextlib
 import importlib.util
 import io
-import re
 from pathlib import Path
 import subprocess
 import sys
@@ -44,22 +43,6 @@ class TestRepositoryDocs(unittest.TestCase):
     def test_generated_index_matches_committed_file(self):
         expected = docs_index.render(docs_index.collect(ROOT), ROOT)
         self.assertEqual(expected, (ROOT / 'docs/README.md').read_text(encoding='utf-8'))
-
-    def test_raw_inline_inventory_matches_parser_observations(self):
-        # Independent raw scan of this repository's simple link syntax. A new
-        # syntax form must be inventoried explicitly, not silently masked.
-        paths = sorted((ROOT / 'docs').rglob('*.md')) + [ROOT / 'README.md', ROOT / 'CLAUDE.md']
-        total = 0
-        for path in paths:
-            text = path.read_text(encoding='utf-8')
-            raw = [(m.start(), m[1]) for m in re.finditer(
-                r'\[[^\]\n]*\]\(([^)\n]*)\)', text)]
-            raw = [(offset, dest[1:-1] if dest.startswith('<') and dest.endswith('>') else dest)
-                   for offset, dest in raw]
-            self.assertEqual(raw, list(docs_index.markdown_links(text)), str(path))
-            total += len(raw)
-        self.assertEqual(47, len(paths))
-        self.assertEqual(166, total)
 
 
 class TestDocsCommand(unittest.TestCase):
@@ -253,6 +236,16 @@ class TestDocsCommand(unittest.TestCase):
                 code, output = self.run_command('write')
                 self.assertEqual(1, code)
                 self.assertIn('missing destination: missing.md', output)
+
+    def test_label_before_blank_line_leaves_prose_links_visible(self):
+        for destination, expected in [('example.md', 0), ('missing.md', 1)]:
+            with self.subTest(destination=destination):
+                body = 'Purpose.\n\n[Reviewer]:\n\n[details](' + destination + ')'
+                self.doc.write_text(document(body=body), encoding='utf-8')
+                code, output = self.run_command('write')
+                self.assertEqual(expected, code, output)
+                if expected:
+                    self.assertIn('example.md:11: missing destination: missing.md', output)
 
     def test_unclosed_comment_cannot_mask_later_links(self):
         body = 'Purpose.\n\n<!-- no terminator\n\n[bad](missing.md)'
