@@ -67,6 +67,55 @@ class IntegrationRepo(unittest.TestCase):
 
 class TestCandidateMergeIsTheSubject(IntegrationRepo):
 
+    def test_each_merge_precondition_has_its_own_execution_record(self):
+        programs = (
+            (V.INTEGRATION_CLAIM, V.MERGE_VERIFIER, V.MERGE_VERIFIER_PATH,
+             '#!/usr/bin/env python3\nprint("integration ran")\n'),
+            (V.STABILITY_CLAIM, V.STABILITY_CLAIM, V.STABILITY_VERIFIER_PATH,
+             '#!/bin/sh\nprintf "stability ran\\n"\n'))
+        entries = []
+        for claim, name, path, program in programs:
+            destination = self.repo / path
+            destination.parent.mkdir(exist_ok=True)
+            destination.write_text(program)
+            entries.append(dict(name=name, claims=[claim],
+                                sha256=V.digest_file(destination)[0]))
+        (self.repo / V.POLICY_FILE).write_text(json.dumps(
+            dict(schema_version=1, verifiers=entries)))
+        git(self.repo, 'add', '-A')
+        git(self.repo, 'commit', '-qm', 'target policy')
+        target = git(self.repo, 'rev-parse', 'HEAD').stdout.strip()
+        produced = self.commit_from_base('candidate', 'compatible.txt', '1')
+        for claims in ((V.INTEGRATION_CLAIM, V.STABILITY_CLAIM),
+                       (V.STABILITY_CLAIM, V.INTEGRATION_CLAIM)):
+            with self.subTest(claims=claims):
+                rows, error = V.run_merge_preconditions(
+                    U.run, self.repo, produced, target, claims=claims)
+                self.assertIsNone(error)
+                self.assertEqual([row['result'] for row in rows], ['pass', 'pass'])
+                by_claim = {row['claim']: row for row in rows}
+                integration = by_claim[V.INTEGRATION_CLAIM]['execution']
+                stability = by_claim[V.STABILITY_CLAIM]['execution']
+                self.assertIsNot(integration, stability)
+                self.assertIsNot(integration['executables'], stability['executables'])
+                self.assertEqual(integration['executables']['python']['role'], 'implicit-launcher')
+                self.assertEqual(stability['executables']['python']['role'], 'launcher')
+                self.assertIn('integration ran', by_claim[V.INTEGRATION_CLAIM]['stdout_tail'])
+                self.assertIn('stability ran', by_claim[V.STABILITY_CLAIM]['stdout_tail'])
+
+    def test_candidate_merge_execution_does_not_mutate_caller_tools(self):
+        target = self.commit_from_base('target', 'left.txt', '1')
+        produced = self.commit_from_base('produced', 'compatible.txt', '1')
+        self.verifier.write_text('#!/usr/bin/env python3\nprint("launcher ran")\n')
+        tools = V.RV.resolve_executables()
+        outcome, _, error = V.run_in_candidate_merge(
+            U.run, self.repo, produced, target, self.verifier,
+            V.digest_file(self.verifier)[0], executables=tools)
+        self.assertIsNone(error)
+        self.assertEqual(outcome['exit_code'], 0)
+        self.assertEqual(outcome['execution']['executables']['python']['role'], 'implicit-launcher')
+        self.assertEqual(tools['python']['role'], 'launcher')
+
     def test_separate_passes_do_not_certify_a_broken_combination(self):
         target = self.commit_from_base("target-change", "left.txt", "1")
         produced = self.commit_from_base("produced-change", "right.txt", "1")

@@ -517,32 +517,91 @@ class TestRemoteVerification(unittest.TestCase):
                     self.assertIn('pinned-verifier-', log.read_text())
                     self.assert_clean()
 
-    def test_local_implicit_python_preserves_native_shebang_and_child_selection(self):
+    def test_local_implicit_python_uses_launcher_despite_first_on_path_python(self):
         self.policy.pop('verification_host')
         self.policy['local'].pop('python')
         self.save_policy()
-        # A binary symlink works in native Darwin shebangs and preserves spelling.
+        fake_bin = self.f.directory / 'fake-python-bin'
+        fake_bin.mkdir()
+        for name in ('python3', 'python'):
+            fake = fake_bin / name
+            fake.write_text('#!/bin/sh\nprintf "FAKE Python 3.14 ran\\n"\nexit 77\n')
+            fake.chmod(0o755)
+        self.f.env['PATH'] = str(fake_bin) + os.pathsep + self.f.env['PATH']
+        for shebang in ('#!/usr/bin/env python3\n', '#!/usr/bin/env python\n',
+                        '#!/usr/bin/env -S python3 -u\n',
+                        '#!/usr/bin/env -S -u UNUSED VALUE=kept python3\n'):
+            with self.subTest(shebang=shebang):
+                self.authorize_program(shebang +
+                    'import os, subprocess, sys\n'
+                    'expected = %r\nassert os.path.realpath(sys.executable) == expected, sys.executable\n'
+                    'assert "HANIG_VERIFICATION_PYTHON" not in os.environ\n'
+                    'for name in ("python3", "python"):\n'
+                    '    child = subprocess.check_output([name, "-c", "import os, sys; print(os.path.realpath(sys.executable))"], text=True)\n'
+                    '    assert child.strip() == expected, child\n'
+                    'print("launcher Python ran")\n' % os.path.realpath(sys.executable))
+                result = self.verify()
+                row = self.rows()[-1]
+                self.assertEqual(row['exit_code'], 0, row)
+                self.assert_ok(result)
+                self.assertEqual(row['result'], 'pass')
+                self.assertIn('launcher Python ran', row['stdout_tail'])
+                self.assertNotIn('FAKE', row['stdout_tail'])
+                python = row['execution']['executables']['python']
+                self.assertFalse(python['declared'])
+                self.assertEqual(python['role'], 'implicit-launcher')
+                self.assertEqual(python['path'], os.path.realpath(sys.executable))
+                self.assertEqual(python['version'], 'Python ' + sys.version.split()[0])
+                self.assert_clean()
+
+    def test_local_implicit_absolute_python_remains_native(self):
+        self.policy.pop('verification_host')
+        self.policy['local'].pop('python')
+        self.save_policy()
         native = self.f.directory / 'native-bin'
         native.mkdir()
         python = native / 'python3'
         python.symlink_to(sys.executable)
         self.f.env['PATH'] = str(native) + os.pathsep + self.f.env['PATH']
-        for shebang in ('#!' + str(python) + '\n', '#!/usr/bin/env python3\n',
-                        '#!/usr/bin/env -S python3 -u\n'):
-            with self.subTest(shebang=shebang):
-                self.authorize_program(shebang +
-                    'import os, subprocess, sys\n'
-                    'expected = %r\nassert os.path.abspath(sys.executable) == expected, sys.executable\n'
-                    'assert "HANIG_VERIFICATION_PYTHON" not in os.environ\n'
-                    'child = subprocess.check_output(["python3", "-c", "import sys; print(sys.executable)"], text=True)\n'
-                    'assert os.path.abspath(child.strip()) == expected, child\n' % str(python))
-                result = self.verify()
-                self.assert_ok(result)
+        self.authorize_program('#!' + str(python) + '\n' +
+            'import os, subprocess, sys\n'
+            'expected = %r\nassert os.path.abspath(sys.executable) == expected, sys.executable\n'
+            'assert "HANIG_VERIFICATION_PYTHON" not in os.environ\n'
+            'child = subprocess.check_output(["python3", "-c", "import sys; print(sys.executable)"], text=True)\n'
+            'assert os.path.abspath(child.strip()) == expected, child\n' % str(python))
+        self.assert_ok(self.verify())
+        row, = self.rows()
+        self.assertEqual(row['result'], 'pass')
+        self.assertEqual(row['execution']['executables']['python'], {
+            'path': str(python), 'declared': False, 'role': 'native',
+            'version': 'unprobed (native selector)'})
+        self.assert_clean()
+
+    def test_local_implicit_shell_is_still_admitted(self):
+        self.policy.pop('verification_host')
+        self.policy['local'].pop('python')
+        self.save_policy()
+        self.authorize_program('#!/bin/sh\nprintf "shell verifier passed\\n"\nexit 0\n')
+        self.assert_ok(self.verify())
+        row, = self.rows()
+        self.assertEqual(row['result'], 'pass')
+        self.assertIn('shell verifier passed', row['stdout_tail'])
+        self.assertEqual(row['execution']['executables']['python']['role'], 'launcher')
+        self.assert_ok(self.admitted())
+
+    def test_local_implicit_env_search_override_is_incomplete(self):
+        self.policy.pop('verification_host')
+        self.policy['local'].pop('python')
+        self.save_policy()
+        for options in ('-i', 'PATH=/usr/bin', '-u PATH', '-P /usr/bin'):
+            with self.subTest(options=options):
+                selector = '#!/usr/bin/env -S ' + options + ' python3'
+                self.authorize_program(selector + '\nprint("must not run")\n')
+                self.assert_failed(self.verify())
                 row = self.rows()[-1]
-                self.assertEqual(row['result'], 'pass')
-                self.assertFalse(row['execution']['executables']['python']['declared'])
-                self.assertEqual(row['execution']['executables']['python']['role'], 'launcher')
-                self.assert_clean()
+                self.assertEqual(row['result'], 'incomplete')
+                self.assertIn(selector, row['incomplete_reason'])
+                self.assertNotIn('must not run', row['stdout_tail'])
 
     def test_local_implicit_shebang_preserves_native_parser_outcome(self):
         self.policy.pop('verification_host')
