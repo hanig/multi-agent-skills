@@ -21,6 +21,8 @@ SCRIPT = REPO / "skills/hanig-review-gate/scripts/review.py"
 SPEC = importlib.util.spec_from_file_location("arc1163_review", SCRIPT)
 review = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(review)
+from tests.review_round_fixture import isolated_reservation
+original_reservation = review.reserve_review_round
 
 COUNTER_CLAIM = "This change cannot make an honest run fail."
 EXIT_ASSERTION = "[arc1163-counter-claim-exit]"
@@ -98,7 +100,10 @@ class TestCounterClaimScope(unittest.TestCase):
             stack.enter_context(redirect_stdout(stdout))
             stack.enter_context(redirect_stderr(stderr))
             with self.assertRaises(SystemExit) as stopped:
-                review.main()
+                with patch.object(review, "reserve_review_round",
+                        side_effect=lambda args: isolated_reservation(
+                            review, original_reservation, args)):
+                    review.main()
         return stopped.exception.code, stdout.getvalue(), stderr.getvalue(), calls, audits
 
     def assert_blocked(self, result):

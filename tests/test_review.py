@@ -33,6 +33,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from tests.review_round_fixture import isolated_reservation
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "skills" / "hanig-review-gate" / "scripts" / "review.py"
@@ -46,6 +47,7 @@ _MODULE_STATE_HOME = None
 _SAVED_MODULE_ENV = None
 _ORIGINAL_APPEND_REVIEW_JOURNAL = review.append_review_journal
 _ORIGINAL_RECORD_REVIEW_ROUND = review.record_review_round
+_ORIGINAL_RESERVE_REVIEW_ROUND = review.reserve_review_round
 
 
 def _module_home():
@@ -143,12 +145,15 @@ def _hard_link_or_skip(test_case, source, destination):
 
 def setUpModule():
     """Install I/O-free wrappers for exactly one unittest module lifecycle."""
+    review.reserve_review_round = lambda args: isolated_reservation(
+        review, _ORIGINAL_RESERVE_REVIEW_ROUND, args)
     review.append_review_journal = _isolated_append_review_journal
     review.record_review_round = _isolated_record_review_round
 
 
 def tearDownModule():
     global _MODULE_STATE_HOME, _SAVED_MODULE_ENV
+    review.reserve_review_round = _ORIGINAL_RESERVE_REVIEW_ROUND
     review.append_review_journal = _ORIGINAL_APPEND_REVIEW_JOURNAL
     review.record_review_round = _ORIGINAL_RECORD_REVIEW_ROUND
     try:

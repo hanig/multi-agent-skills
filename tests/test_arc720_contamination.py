@@ -29,6 +29,8 @@ FIXTURES = REPO / "tests/fixtures/arc720"
 SPEC = importlib.util.spec_from_file_location("arc720_review", SCRIPT)
 review = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(review)
+from tests.review_round_fixture import isolated_reservation
+original_reservation = review.reserve_review_round
 OFFENDER = ("(re-run to capture full finding text; the prior round returned "
             "REVIEW_PASS with one sub-threshold finding whose text was suppressed)")
 
@@ -110,7 +112,10 @@ class TestPriorDecisionInputs(unittest.TestCase):
             stack.enter_context(redirect_stdout(stdout))
             stack.enter_context(redirect_stderr(stderr))
             with self.assertRaises(SystemExit) as raised:
-                review.main()
+                with patch.object(review, "reserve_review_round",
+                        side_effect=lambda args: isolated_reservation(
+                            review, original_reservation, args)):
+                    review.main()
         self.report_text = stdout.getvalue()
         return raised.exception.code, stderr.getvalue(), captured
 

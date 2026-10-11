@@ -19,6 +19,8 @@ SCRIPT = ROOT / "skills/hanig-review-gate/scripts/review.py"
 SPEC = importlib.util.spec_from_file_location("arc709_review", SCRIPT)
 review = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(review)
+from tests.review_round_fixture import isolated_reservation
+original_reservation = review.reserve_review_round
 AUTHOR = "codex/gpt-6-astra"
 HEAD = "1" * 40
 
@@ -61,7 +63,10 @@ class TestAdjudication(unittest.TestCase):
                 patch.object(review, "load_reviewers", side_effect=AssertionError("offline ledger")), \
                 redirect_stdout(stdout), redirect_stderr(stderr):
             with self.assertRaises(SystemExit) as stopped:
-                review.main()
+                with patch.object(review, "reserve_review_round",
+                        side_effect=lambda args: isolated_reservation(
+                            review, original_reservation, args)):
+                    review.main()
         return SimpleNamespace(returncode=stopped.exception.code,
                                stdout=stdout.getvalue(), stderr=stderr.getvalue())
 
@@ -686,7 +691,10 @@ class TestAdjudication(unittest.TestCase):
                     patch.object(review, "git_out", side_effect=moving_diff), \
                     patch.object(review, "arm_watchdog"), patch.object(review, "disarm_watchdog"), redirect_stdout(stdout):
                 with self.assertRaises(SystemExit) as stopped:
-                    review.main()
+                    with patch.object(review, "reserve_review_round",
+                            side_effect=lambda args: isolated_reservation(
+                                review, original_reservation, args)):
+                        review.main()
             self.assertEqual(stopped.exception.code, 1)
             self.assertEqual(json.loads(stdout.getvalue())["state"], "REVIEW_FAIL")
             self.assertEqual(self.records()[-1]["reviewed_head"], reviewed_head)

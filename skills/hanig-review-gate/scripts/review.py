@@ -64,6 +64,7 @@ import argparse
 import concurrent.futures
 import datetime
 import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -94,6 +95,145 @@ DEFAULT_PROFILE = "standard"
 # produced rounds 3, 4 and 5 each finding a defect in the previous round's fix.
 # That is the signal to step back to root cause, not to review again.
 MAX_ROUNDS = 3
+
+
+def change_identity(target="origin/main", plan_name=None, unit=None):
+    """Hash exact Git identity bytes, never the changing diff or tip commit.
+
+    Fix commits preserve this identity while the target merge-base is unchanged.
+    Renaming the branch, changing the remote, rebasing, or changing an explicit
+    plan/unit declaration defines another identity; this is not a tamper barrier.
+    """
+    def git(*argv):
+        try:
+            result = subprocess.run(["git", *argv], stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, timeout=15)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ValueError("cannot read change identity from Git") from exc
+        if result.returncode or not result.stdout.endswith(b"\n"):
+            raise ValueError("change identity needs origin, a target commit, "
+                             "and a branch (or --plan-name/--unit)")
+        # Remove only Git's terminating newline. Replacement decoding would
+        # collapse distinct non-UTF-8 names into one decision value.
+        return result.stdout[:-1].decode("utf-8", "surrogateescape")
+
+    if not target or target.startswith("-"):
+        raise ValueError("--target must name a Git commit/ref")
+    for value in (plan_name, unit):
+        if value is not None and not value.strip():
+            raise ValueError("--plan-name and --unit must be non-empty when given")
+    remote = git("remote", "get-url", "origin")
+    target_head = git("rev-parse", "--verify", target + "^{commit}")
+    base = git("merge-base", "HEAD", target_head)
+    subject = (["plan-unit", plan_name, unit]
+               if plan_name is not None or unit is not None
+               else ["branch", git("symbolic-ref", "--short", "HEAD")])
+    payload = json.dumps([remote, base, subject], ensure_ascii=True,
+                         separators=(",", ":"))
+    return hashlib.sha256(payload.encode("ascii")).hexdigest()
+
+
+def round_ledger_root():
+    """Enforcing state has one location and no audit-journal fallback."""
+    configured = os.environ.get("XDG_STATE_HOME")
+    base = Path(configured) if configured else Path.home() / ".local" / "state"
+    if not base.is_absolute():
+        raise ValueError("round ledger requires an absolute XDG_STATE_HOME")
+    return base / "hanig-review-gate" / "rounds"
+
+
+def reserve_round(identity, round_no, profile, fresh_from=None):
+    """Reserve before dispatch, serializing ordering and exclusive creation.
+
+    Reservations survive failure, unavailable providers and interrupted runs.
+    A partial marker fails closed. The audit journal is neither read nor written.
+    flock orders different round numbers; O_EXCL makes each marker single-use.
+    State is local, trusted-writer data, not protection against its owner editing
+    or deleting it or choosing a different state home.
+    """
+    if (not re.fullmatch(r"[0-9a-f]{64}", identity)
+            or type(round_no) is not int or not 1 <= round_no <= MAX_ROUNDS
+            or profile not in ("plan", "fast", "standard", "deep")
+            or (fresh_from is not None and fresh_from not in LADDER)):
+        raise ValueError("invalid round reservation")
+    directory = _open_directory_chain(round_ledger_root() / identity)
+    try:
+        lock = os.open("lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
+                       0o600, dir_fd=directory)
+        try:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise ValueError("another round reservation is in progress; "
+                                 "inspect the ledger before retrying") from exc
+            records = []
+            for name in sorted(os.listdir(directory)):
+                if name == "lock":
+                    continue
+                match = re.fullmatch(r"cycle-([1-9][0-9]*)-round-([1-3])\.json", name)
+                if match is None:
+                    raise ValueError("unrecognized round ledger entry; retain and inspect it")
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+                with os.fdopen(fd, "r", encoding="utf-8") as stream:
+                    record = json.loads(stream.read(4096))
+                cycle, number = map(int, match.groups())
+                if (not isinstance(record, dict)
+                        or record.get("identity") != identity
+                        or record.get("cycle") != cycle
+                        or record.get("round") != number
+                        or record.get("profile") not in ("plan", *LADDER)
+                        or "predecessor" not in record):
+                    raise ValueError("invalid round ledger marker; retain and inspect it")
+                records.append(record)
+            last = max(records, key=lambda r: (r["cycle"], r["round"])) if records else None
+            cycle = last["cycle"] if last else 1
+            predecessor = last["predecessor"] if last else None
+            if last and round_no == 1 and fresh_from is not None:
+                if last["round"] != MAX_ROUNDS or fresh_from != last["profile"]:
+                    raise ValueError("--fresh-cycle-from must name the exhausted "
+                                     "cycle's last reserved profile")
+                predecessor = {"cycle": cycle, "profile": last["profile"]}
+                cycle += 1
+            else:
+                if last and round_no <= last["round"]:
+                    raise ValueError("round is already reserved or lower than the last "
+                                     "reservation; use the next round, or after exhaustion "
+                                     "--round 1 --fresh-cycle-from PROFILE")
+                expected = predecessor["profile"] if predecessor else None
+                if fresh_from != expected:
+                    raise ValueError("--fresh-cycle-from must match this cycle's "
+                                     "recorded predecessor; a new cycle needs exhaustion")
+            record = {"identity": identity, "cycle": cycle, "round": round_no,
+                      "profile": profile, "predecessor": predecessor}
+            name = "cycle-{}-round-{}.json".format(cycle, round_no)
+            try:
+                fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                             0o600, dir_fd=directory)
+            except FileExistsError as exc:
+                raise ValueError("round is already reserved; marker retained") from exc
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(record, stream, sort_keys=True)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.fsync(directory)
+            return record
+        finally:
+            os.close(lock)
+    finally:
+        os.close(directory)
+
+
+def reserve_review_round(args):
+    """CLI boundary: ledger failure is a review error, never an audit warning."""
+    try:
+        identity = change_identity(args.target or "origin/main", args.plan_name, args.unit)
+        record = reserve_round(identity, args.round, args.selected_profile,
+                               args.fresh_cycle_from)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        config_error("round reservation refused: {}. Inspect the enforcing ledger; "
+                     "do not delete reservations to restart a review.".format(exc))
+    return record
 
 HONEST_RUN_CLAIM = "This change cannot make an honest run fail."
 DISPOSITIONS = {"reproduced", "not-reproduced", "deferred"}
@@ -2363,8 +2503,8 @@ def implementation_panel_policy(args, roster, selected):
     """Validate the declared cycle, without turning audit history into authority.
 
     The journal has no change identity or historical profile membership. A
-    fresh cycle therefore declares its predecessor profile explicitly, just
-    as --round is caller-declared. Count enabled, distinct reviewers from the
+    fresh cycle declares its predecessor profile explicitly; the separate
+    round ledger checks exhaustion and identity. Count distinct reviewers from the
     current routing config, never only those whose credentials are available.
     """
     override = args.allow_single_reviewer
@@ -2649,6 +2789,10 @@ def main():
                     help="declare the profile replaced after an exhausted "
                          "cycle; repeat on each round of the fresh cycle. "
                          "Its enabled panel size floors selection and quorum")
+    ap.add_argument("--target", metavar="REF",
+                    help="identity merge-base target (default origin/main)")
+    ap.add_argument("--plan-name", help="stable plan identity, paired with --unit when given")
+    ap.add_argument("--unit", help="stable unit identity; plan/unit replaces branch identity")
     ap.add_argument("--timeout", type=int, default=1200,
                     help="per reviewer seconds (default 1200: at 64000 output "
                          "tokens a reasoning model can still be streaming at "
@@ -2713,7 +2857,8 @@ def main():
         if (args.diff or args.staged or args.range or args.file or args.list or args.size or args.kind
                 or args.plan or args.claim or args.escalate or args.only
                 or args.profile or args.dispositions or args.fresh_cycle_from
-                or args.allow_single_reviewer or args.context or args.threat_model):
+                or args.allow_single_reviewer or args.context or args.threat_model
+                or args.target is not None or args.plan_name is not None or args.unit is not None):
             config_error("Drop review options when using a ledger command; "
                          "adjudication never runs or replaces a review.")
         sys.exit(cmd_ledger(args))
@@ -2797,8 +2942,8 @@ def main():
                 f"have been finding defects in the previous round's fixes. "
                 f"Step back to root cause: state what keeps recurring, fix "
                 f"THAT, declare new acceptance criteria, and start again at "
-                f"--round 1. Override only if you have done that and the "
-                f"change is genuinely new.")
+                f"--round 1 --fresh-cycle-from PROFILE naming the exhausted "
+                f"cycle's last reserved profile.")
     profile, profile_reason = select_profile(args)
     args.selected_profile = profile
     tier_text = f"tier: {profile} ({profile_reason})"
@@ -2928,6 +3073,9 @@ def main():
         print(redact(redaction_notice(args.input_redactions)), file=sys.stderr)
     prompt = build_prompt(body, args.claim, truncated, args.context,
                           args.threat_model, dispositions, args.input_redactions)
+
+    if args.kind == "implementation":
+        reserve_review_round(args)
 
     runnable, unavailable = [], []
     for rev in reviewers:
