@@ -11,13 +11,16 @@ So the bar for these tests is not "the helper works". It is: a unit that
 reaches DONE with that exact file in its execution workspace must come back
 with the path written down. Python 3.8+, stdlib only.
 """
+from datetime import datetime
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -78,18 +81,18 @@ class Base(unittest.TestCase):
 
     # -- the end-to-end shape: allocate, bind, stub sacct, check -----------
 
-    def sacct_stub(self):
+    def sacct_stub(self, submitted_at):
         """A COMPLETED row for whatever job id it is asked about.
 
-        Submit and End come from `date` inside the stub so the row is owned by
-        the attempt that was allocated seconds ago, which is the ownership
-        window `sacct_row_is_ours` enforces.
+        Submit is captured before bind, as a real submission would be. Only
+        End comes from the query clock: a delayed query must not pretend the
+        job was submitted after its id was bound.
         """
         b = self.tmp / "bin"
         b.mkdir(exist_ok=True)
         (b / "sacct").write_text(
             "#!/bin/sh\nnow=$(date +%Y-%m-%dT%H:%M:%S)\n"
-            'echo "COMPLETED|0:0|$now|$now"\n')
+            f'echo "COMPLETED|0:0|{submitted_at}|$now"\n')
         (b / "sacct").chmod(0o755)
         return dict(os.environ, PATH=f"{b}{os.pathsep}{os.environ['PATH']}")
 
@@ -113,6 +116,7 @@ class Base(unittest.TestCase):
             p = unit_dir / o
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text("result\n")
+        submitted_at = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
         r = subprocess.run([sys.executable, str(UNIT), "bind", str(unit_dir),
                             "--job-id", "4242"], capture_output=True,
                            text=True, cwd=str(self.tmp), timeout=300)
@@ -122,7 +126,7 @@ class Base(unittest.TestCase):
         if facts is not False:
             argv += ["--launch-facts", json.dumps(facts or self.facts())]
         r = subprocess.run(argv, capture_output=True, text=True,
-                           cwd=str(self.tmp), env=self.sacct_stub(),
+                           cwd=str(self.tmp), env=self.sacct_stub(submitted_at),
                            timeout=300)
         receipt = json.loads(r.stdout)
         return receipt["state"], receipt
@@ -149,6 +153,19 @@ class TestTheDebrisThatReachedDone(Base):
         resolved paths instead of names this would still pass and the next
         test would fail."""
         state, receipt = self.unit_check()
+        self.assertEqual(state, "DONE", receipt["notes"])
+        self.assertEqual(receipt["basis"]["stray_untracked"]["paths"], [])
+
+    def test_delayed_accounting_query_keeps_the_original_submission_time(self):
+        original = self.sacct_stub
+
+        def delayed_stub(*args):
+            # Exceed the ownership guard's one-second rounding allowance.
+            time.sleep(3)
+            return original(*args)
+
+        with mock.patch.object(self, "sacct_stub", side_effect=delayed_stub):
+            state, receipt = self.unit_check()
         self.assertEqual(state, "DONE", receipt["notes"])
         self.assertEqual(receipt["basis"]["stray_untracked"]["paths"], [])
 
