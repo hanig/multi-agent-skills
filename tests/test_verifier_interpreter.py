@@ -23,15 +23,22 @@ class TestImplicitInterpreter(unittest.TestCase):
                                 'import os\nprint(os.path.abspath(os.environ["ACTUAL_PYTHON"]))\n')
         self.executables = V.RV.resolve_executables()
 
-    def python(self, directory, version):
+    def python(self, directory, version, version_info=None, response=None):
         directory.mkdir(exist_ok=True)
         path = directory / "python3"
         path.write_text('#!' + sys.executable + '\nimport os, sys\n'
                         'if sys.argv[1:] == ["--version"]:\n'
                         '    print(%r)\n    raise SystemExit(0)\n'
+                        'if sys.argv[1:4] == ["-I", "-S", "-c"]:\n'
+                        '    if %r is not None:\n'
+                        '        sys.stdout.write(%r)\n        raise SystemExit(0)\n'
+                        '    sys.version_info = %r\n'
+                        '    exec(sys.argv[4])\n    raise SystemExit(0)\n'
                         'os.environ["ACTUAL_PYTHON"] = __file__\n'
                         'os.execv(%r, [%r] + sys.argv[1:])\n'
-                        % ('Python ' + version, sys.executable, sys.executable))
+                        % ('Python ' + version, response, response,
+                           version_info or tuple(map(int, version.split('.'))),
+                           sys.executable, sys.executable))
         path.chmod(0o755)
         return path
 
@@ -94,11 +101,57 @@ class TestImplicitInterpreter(unittest.TestCase):
         for version, expected in (('3.11.4+', '3.11.4'), ('3.12.0rc1', '3.12.0'),
                                   ('3.12.0a1+', '3.12.0')):
             with self.subTest(version=version):
-                selected = self.python(self.root / 'source-build', version)
+                selected = self.python(self.root / 'source-build', version,
+                                       version_info=tuple(map(int, expected.split('.'))))
                 outcome = self.run_verifier(str(selected.parent))
                 self.assertEqual(V.outcome_result(outcome), {'result': 'pass'})
                 self.assertEqual(outcome['stdout'].strip(), str(selected))
                 self.assertEqual(outcome['execution']['executables']['python']['version'], expected)
+
+    def test_machine_version_is_independent_of_display_banner(self):
+        for banner in ('3.9.18\n[PyPy build details]', 'not a version banner at all'):
+            with self.subTest(banner=banner):
+                selected = self.python(self.root / 'runtime-query', banner, version_info=(3, 9, 18))
+                outcome = self.run_verifier(str(selected.parent))
+                self.assertEqual(V.outcome_result(outcome), {'result': 'pass'})
+                self.assertEqual(outcome['execution']['executables']['python']['version'], '3.9.18')
+
+    def test_malformed_runtime_versions_are_incomplete(self):
+        for response in ('', 'null', '{}', '[3,9]', '[3,9,6,0]', '[true,9,6]',
+                         '[3,"9",6]', '[3,9.0,6]', '[-3,9,6]', '[3,9,6]\n[3,9,6]'):
+            with self.subTest(response=response):
+                selected = self.python(self.root / 'malformed-query', '3.9.6', response=response)
+                outcome = self.run_verifier(str(selected.parent))
+                self.assertEqual(V.outcome_result(outcome)['result'], 'incomplete')
+                self.assertIsNone(outcome['exit_code'])
+                self.assertEqual(outcome['stdout'], '')
+
+    def test_supported_minor_boundaries(self):
+        for version, result in (('3.8.0', 'pass'), ('3.12.99', 'pass'),
+                                ('3.7.99', 'incomplete'), ('3.13.0', 'incomplete')):
+            with self.subTest(version=version):
+                selected = self.python(self.root / 'boundary-query', version)
+                outcome = self.run_verifier(str(selected.parent))
+                self.assertEqual(V.outcome_result(outcome)['result'], result)
+
+    def test_probe_skips_startup_hooks_but_native_verifier_keeps_them(self):
+        site = self.root / 'site'
+        site.mkdir()
+        counter = self.root / 'startup-count'
+        (site / 'sitecustomize.py').write_text(
+            'from pathlib import Path\np = Path(%r)\n'
+            'p.write_text(str(int(p.read_text()) + 1) if p.exists() else "1")\n'
+            % str(counter))
+        (self.cwd / 'json.py').write_text('raise RuntimeError("candidate json was imported")\n')
+        self.program.write_text('#!/usr/bin/env python3\nprint("native verifier")\n')
+        native = self.root / 'native'
+        native.mkdir()
+        (native / 'python3').symlink_to(sys.executable)
+        with mock.patch.dict(os.environ, PYTHONPATH=str(site)):
+            outcome = self.run_verifier(str(native))
+        self.assertEqual(V.outcome_result(outcome), {'result': 'pass'})
+        self.assertEqual(outcome['stdout'], 'native verifier\n')
+        self.assertEqual(counter.read_text(), '1')
 
 
 if __name__ == "__main__":

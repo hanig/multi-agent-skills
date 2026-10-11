@@ -556,8 +556,12 @@ class TestRemoteVerification(unittest.TestCase):
         python.write_text(PYTHON + 'import os, sys\n'
                           'if sys.argv[1:] == ["--version"]:\n'
                           '    print(%r)\n    raise SystemExit(0)\n'
+                          'if sys.argv[1:4] == ["-I", "-S", "-c"]:\n'
+                          '    sys.version_info = %r\n'
+                          '    exec(sys.argv[4])\n    raise SystemExit(0)\n'
                           'os.execv(%r, [%r] + sys.argv[1:])\n'
-                          % ('Python ' + version, sys.executable, sys.executable))
+                          % ('Python ' + version, tuple(map(int, version.split('.'))),
+                             sys.executable, sys.executable))
         python.chmod(0o755)
         self.authorize_program('#!/usr/bin/env python3\n'
                                'from pathlib import Path\nPath(%r).write_text("ran")\n'

@@ -1127,15 +1127,18 @@ def _implicit_python(first_line, launch_config, cwd):
     try:
         if not path:
             raise ValueError("interpreter was not found on the child PATH")
-        probe = _observe_execution([path, "--version"], 30, cwd, launch_config)
+        # Banners vary by implementation and build. Query the runtime's
+        # structured version without executing site or candidate startup hooks.
+        query = "import json, sys; print(json.dumps(list(sys.version_info[:3])))"
+        probe = _observe_execution([path, "-I", "-S", "-c", query], 30, cwd, launch_config)
         if probe.get("incomplete_reason") or probe["exit_code"] != 0:
             raise ValueError(probe.get("incomplete_reason") or "interpreter version probe failed")
-        version = re.fullmatch(r"Python (\d+)\.(\d+)\.(\d+)(?:(?:a|b|rc)\d+)?\+?",
-                               (probe["stdout"] or probe["stderr"]).strip())
-        if not version:
-            raise ValueError("interpreter did not report major.minor.micro")
-        record["version"] = ".".join(version.groups())
-        if not minimum <= tuple(map(int, version.groups()[:2])) <= maximum:
+        version = json.loads(probe["stdout"])
+        if (not isinstance(version, list) or len(version) != 3
+                or any(type(value) is not int or value < 0 for value in version)):
+            raise ValueError("interpreter did not report three nonnegative version integers")
+        record["version"] = ".".join(map(str, version))
+        if not minimum <= tuple(version[:2]) <= maximum:
             raise ValueError("unsupported interpreter version " + record["version"])
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         return record, "{}: {}; supported range is {}".format(record["path"], exc, supported)
