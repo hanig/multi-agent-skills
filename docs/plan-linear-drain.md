@@ -10,10 +10,10 @@ project for criterion 11's live check.
 PR 1 (pull 185) shipped the binding, the read-only audit and audit-backed
 reporting. This PR adds the first Linear mutation path: applying the
 coordinator's outbox intents to their issues and recording a receipt only
-after reading the effect back. It replaces the hand step in which a session
-applied an intent through the Linear MCP connector and ran
-`swarm.py outbox --record-receipt KEY --ref ID`. That command stays for
-compatibility.
+after reading the effect back. The implemented command is
+`linear_sync.py drain`, using the authorized session's `LINEAR_API_KEY`.
+`swarm.py outbox --record-receipt KEY --ref ID` stays for compatibility; the
+operator records receipts after read-back.
 
 ## Measured starting point (2026-10-05, read-only)
 
