@@ -1,7 +1,18 @@
-"""Exercise metadata, generation, and relative-link checks through their CLI."""
+"""Exercise metadata, generation, and relative-link checks through their CLI.
+
+Contract: in docs/, README.md and CLAUDE.md, relative Markdown destinations
+must exist (files or existing directories). Recognized forms are exactly
+[text](relative/path) and [label]: relative/path, optionally in block quotes
+with leading > markers stripped, with an optional title and trailing #fragment.
+Fenced code and closed HTML comments are masked; paragraph-bounded inline-code
+matching cannot cross blank lines, and code-span comment openers are inert.
+Absolute URLs, mailto and bare URLs are ignored; fragments are not checked.
+This deliberately does not test heading slugs or HTML-id anchor validation.
+"""
 import contextlib
 import importlib.util
 import io
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -33,6 +44,22 @@ class TestRepositoryDocs(unittest.TestCase):
     def test_generated_index_matches_committed_file(self):
         expected = docs_index.render(docs_index.collect(ROOT), ROOT)
         self.assertEqual(expected, (ROOT / 'docs/README.md').read_text(encoding='utf-8'))
+
+    def test_raw_inline_inventory_matches_parser_observations(self):
+        # Independent raw scan of this repository's simple link syntax. A new
+        # syntax form must be inventoried explicitly, not silently masked.
+        paths = sorted((ROOT / 'docs').rglob('*.md')) + [ROOT / 'README.md', ROOT / 'CLAUDE.md']
+        total = 0
+        for path in paths:
+            text = path.read_text(encoding='utf-8')
+            raw = [(m.start(), m[1]) for m in re.finditer(
+                r'\[[^\]\n]*\]\(([^)\n]*)\)', text)]
+            raw = [(offset, dest[1:-1] if dest.startswith('<') and dest.endswith('>') else dest)
+                   for offset, dest in raw]
+            self.assertEqual(raw, list(docs_index.markdown_links(text)), str(path))
+            total += len(raw)
+        self.assertEqual(47, len(paths))
+        self.assertEqual(166, total)
 
 
 class TestDocsCommand(unittest.TestCase):
@@ -125,9 +152,9 @@ class TestDocsCommand(unittest.TestCase):
                 self.assertIn('missing destination', output)
                 path.write_text(original, encoding='utf-8')
 
-    def test_reference_images_fragments_and_encoded_destinations(self):
+    def test_inline_and_reference_destinations_with_titles(self):
         target = self.root / 'docs/a (b).md'
-        target.write_text(document(title='Target', body='Purpose.\n\n## A heading\n\n## A heading\n\n<a id="custom"></a>'), encoding='utf-8')
+        target.write_text(document(title='Target'), encoding='utf-8')
         valid = '''
 [inline](a%20(b).md#target "title")
 [angle](<a (b).md#a-heading>)
@@ -141,7 +168,7 @@ class TestDocsCommand(unittest.TestCase):
 '''
         self.doc.write_text(document(body='Purpose.\n' + valid), encoding='utf-8')
         self.assertEqual(0, self.run_command('write')[0])
-        for bad in ['[bad](a%20%28b%29.md#absent)', '[bad][nope]\n[nope]: missing.md',
+        for bad in ['[bad][nope]\n[nope]: missing.md',
                     '![bad](missing.png)', '[bad](<missing file.md>)',
                     '[bad](missing(x).md)', '[bad](missing\\(x\\).md)']:
             with self.subTest(bad=bad):
@@ -194,15 +221,43 @@ class TestDocsCommand(unittest.TestCase):
         self.doc.write_text(document(body='Purpose.\n\n[link][ref]\n\n[ref]: example.md\n  "[ghost](missing.md)"'), encoding='utf-8')
         self.assertEqual(0, self.run_command('write')[0])
 
-    def test_review_emphasized_and_code_heading_fragments(self):
-        body = 'Purpose.\n\n## _Important_\n\n## __Strong__\n\n## `literal_name`\n\n[one](#important) [two](#strong) [three](#literal_name)'
-        self.doc.write_text(document(body=body), encoding='utf-8')
-        self.assertEqual((0, 'Documentation metadata, index and relative links checked.\n'), self.run_command('write'))
-
-    def test_review_html_attribute_forms(self):
-        body = 'Purpose.\n\n<span id=custom></span>\n<a NAME="named"></a>\n\n[one](#custom) [two](#named)'
+    def test_fragments_are_not_checked(self):
+        self.assertIn('fragments are not checked', docs_index.__doc__)
+        body = 'Purpose.\n\n[local](#absent) [file](example.md#absent)\n'
+        body += '[ref]: example.md#also-absent "title"\n'
         self.doc.write_text(document(body=body), encoding='utf-8')
         self.assertEqual(0, self.run_command('write')[0])
+        self.doc.write_text(document(body=body + '[bad](missing.md#absent)'), encoding='utf-8')
+        self.assertEqual(1, self.run_command('write')[0])
+
+    def test_blockquoted_reference_definitions_check_destinations(self):
+        for prefix in ('> ', '> > ', '  > > '):
+            for title in ('', ' "title"', " 'title'", ' (title)'):
+                with self.subTest(prefix=prefix, title=title):
+                    body = 'Purpose.\n\n' + prefix + '[ref]: missing.md#fragment' + title
+                    self.doc.write_text(document(body=body), encoding='utf-8')
+                    code, output = self.run_command('write')
+                    self.assertEqual(1, code)
+                    self.assertIn('example.md:9: missing destination', output)
+                    body = body.replace('missing.md', 'example.md')
+                    self.doc.write_text(document(body=body), encoding='utf-8')
+                    self.assertEqual(0, self.run_command('write')[0])
+
+    def test_inline_code_comment_opener_leaves_later_links_visible(self):
+        for literal in ('`<!--`', '``<!--``', '`<!-- hidden -->`'):
+            with self.subTest(literal=literal):
+                body = 'Purpose.\n\nLiteral ' + literal + '.\n\n[valid](example.md#any)\n'
+                self.doc.write_text(document(body=body), encoding='utf-8')
+                self.assertEqual(0, self.run_command('write')[0])
+                self.doc.write_text(document(body=body + '\n[bad](missing.md)'), encoding='utf-8')
+                code, output = self.run_command('write')
+                self.assertEqual(1, code)
+                self.assertIn('missing destination: missing.md', output)
+
+    def test_unclosed_comment_cannot_mask_later_links(self):
+        body = 'Purpose.\n\n<!-- no terminator\n\n[bad](missing.md)'
+        self.doc.write_text(document(body=body), encoding='utf-8')
+        self.assertEqual(1, self.run_command('write')[0])
 
     def test_review_markdown_title_forms(self):
         for title in ['   # Example', 'Example\n=======']:

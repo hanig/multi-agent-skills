@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
-"""Generate the documentation index and validate local Markdown destinations.
+"""Generate the documentation index and check relative Markdown destinations.
 
-No network requests are made. URI schemes, protocol-relative URLs and absolute
-host paths are outside the relative-link contract. Markdown code and comments
-are not links. Local Markdown fragments use GitHub heading slugs or HTML ids.
+In docs/, README.md and CLAUDE.md, check that relative link destinations exist.
+Recognized forms are exactly inline links [text](relative/path) and reference
+definitions [label]: relative/path, including inside block quotes (leading >
+markers are stripped before matching). Destinations may have a trailing
+#fragment and an optional title; fragments are not checked. Existing directory
+destinations are accepted, as in the repository's probes/ links.
+
+Fenced code blocks and HTML comments are masked before matching. Inline code
+spans use a paragraph-bounded regex that cannot cross a blank line. Comments
+are matched only outside code spans and must end with -->. Absolute URLs,
+mailto, bare URLs and absolute host paths are ignored. No network requests or
+heading/HTML-id anchor validation are performed; this is not a full Markdown
+renderer.
 """
 import argparse
 import datetime
 import html
-from html.parser import HTMLParser
 import re
 import sys
 from pathlib import Path
@@ -111,14 +120,25 @@ def block_lines(text):
             paragraph = bool(residual.strip()) and not re.match(r' {0,3}#', residual)
 
 
-def visible_markdown(text):
-    """Mask code blocks/spans and comments, preserving source offsets."""
-    text = ''.join(block_lines(text))
-    text = re.sub(r'<!--.*?(?:-->|\Z)', lambda m: blank(m[0]), text, flags=re.S)
+def mask_code_spans(text):
+    """Mask inline code without pairing backticks across a blank line."""
     pattern = re.compile(r'(?<!\\)(`+)(?!`)(.*?)(?<!`)\1(?!`)', re.S)
     # Code spans belong to a paragraph, not the whole document.
     return ''.join(pattern.sub(lambda m: blank(m[0]), part)
                    for part in re.split(r'(\n[ \t]*\n)', text))
+
+
+def mask_comments(text):
+    """Mask closed comments found outside inline code; retain other bytes."""
+    visible = mask_code_spans(text)
+    for match in reversed(list(re.finditer(r'<!--.*?-->', visible, re.S))):
+        text = text[:match.start()] + blank(text[match.start():match.end()]) + text[match.end():]
+    return text
+
+
+def visible_markdown(text):
+    """Mask code blocks/spans and closed comments, preserving source offsets."""
+    return mask_code_spans(mask_comments(''.join(block_lines(text))))
 
 
 def escaped(text, pos):
@@ -194,16 +214,14 @@ def title_end(text, start):
     return None
 
 
-def label(value):
-    return ' '.join(value.split()).casefold()
-
-
 def markdown_links(text):
-    """Yield (offset, destination) for inline, image and reference links."""
+    """Yield (offset, destination) for inline links and reference definitions."""
     visible = visible_markdown(text)
-    definitions = {}
+    # Strip quote markers to spaces so diagnostic source offsets stay intact.
+    # block_lines already masked indented code before this normalization.
+    visible = re.sub(r'^(?: {0,3}> ?)+', lambda m: blank(m[0]), visible, flags=re.M)
     definition_spans = []
-    for match in re.finditer(r'^ {0,3}\[([^\]\n]+)\]:[ \t]*(?:\n[ \t]*)?', visible, re.M):
+    for match in re.finditer(r'^[ \t]*\[([^\]\n]+)\]:[ \t]*(?:\n[ \t]*)?', visible, re.M):
         dest = destination(visible, match.end())
         if dest and not match[1].startswith('^'):
             # A definition owns its complete line, optionally followed by a
@@ -224,7 +242,6 @@ def markdown_links(text):
                     line_end = len(visible)
                 if visible[end:line_end].strip():
                     continue
-            definitions.setdefault(label(match[1]), dest[0])
             definition_spans.append((match.start(), line_end))
             yield match.start(), dest[0]
     for start, end in reversed(definition_spans):
@@ -251,14 +268,6 @@ def markdown_links(text):
                     # A title may contain link-shaped prose. Keep the label
                     # available for linked images, but mask the destination.
                     visible = visible[:after] + blank(visible[after:closing + 1]) + visible[closing + 1:]
-        else:
-            reference = visible[pos + 1:end]
-            if after < len(visible) and visible[after] == '[':
-                ref_end = close_bracket(visible, after)
-                if ref_end is not None:
-                    reference = visible[after + 1:ref_end] or reference
-            if label(reference) in definitions:
-                yield pos, definitions[label(reference)]
         # Scan labels too: a linked image has its own destination.
         pos += 1
 
@@ -281,9 +290,9 @@ def plain(value):
 
 
 def headings(text):
-    """Yield (level, inline title, source end offset) for ATX/Setext headings."""
+    """Read ATX/Setext titles for index metadata only, never link anchors."""
     visible = ''.join(block_lines(text))
-    visible = re.sub(r'<!--.*?(?:-->|\Z)', lambda m: blank(m[0]), visible, flags=re.S)
+    visible = mask_comments(visible)
     previous = ''
     offset = 0
     for line in visible.splitlines(keepends=True):
@@ -296,38 +305,8 @@ def headings(text):
         previous = line
 
 
-class HTMLAnchors(HTMLParser):
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.ids = set()
-
-    def handle_starttag(self, tag, attrs):
-        for key, value in attrs:
-            if value is not None and (key == 'id' or (tag == 'a' and key == 'name')):
-                self.ids.add(value)
-
-    handle_startendtag = handle_starttag
-
-
-def anchors(text):
-    result = set()
-    for _, heading, _ in headings(text):
-        slug = re.sub(r'[^\w\- ]', '', plain(heading).lower()).replace(' ', '-')
-        candidate = slug
-        count = 0
-        while candidate in result:
-            count += 1
-            candidate = '{}-{}'.format(slug, count)
-        result.add(candidate)
-    parser = HTMLAnchors()
-    parser.feed(visible_markdown(text))
-    result.update(parser.ids)
-    return result
-
-
 def check_links(root):
     errors = []
-    cache = {}
     for path in markdown_files(root) + [root / 'README.md', root / 'CLAUDE.md']:
         text = path.read_text(encoding='utf-8')
         for offset, raw in markdown_links(text):
@@ -339,11 +318,6 @@ def check_links(root):
             problem = None
             if not dest.exists():
                 problem = 'missing destination'
-            elif parsed.fragment and dest.is_file() and dest.suffix.lower() == '.md':
-                if dest not in cache:
-                    cache[dest] = anchors(dest.read_text(encoding='utf-8'))
-                if unquote(parsed.fragment) not in cache[dest]:
-                    problem = 'missing anchor'
             if problem:
                 errors.append('{}:{}: {}: {}'.format(path.relative_to(root), text.count('\n', 0, offset) + 1, problem, raw))
     return errors
@@ -368,7 +342,7 @@ def render(records, root):
              'Research and probe documents are excluded from metadata and this index,',
              'but their relative Markdown links are checked too. The checker ignores',
              'code and comments, external URLs, and absolute host paths; it checks',
-             'file/directory destinations and Markdown heading or HTML-id fragments.', '',
+             'file/directory destinations; fragments are not checked.', '',
              '| Document | Status | Date | Purpose |', '| --- | --- | --- | --- |']
     for record in records:
         name = record['path'].relative_to(root / 'docs').as_posix()

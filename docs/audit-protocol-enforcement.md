@@ -6,10 +6,11 @@ Date: 2026-10-11
 
 This dated audit tracks which review-protocol rules have executable enforcement and which remain operator responsibilities.
 
-## Status as of 2026-10-10
+## Status as of 2026-10-11
 
 The findings below are the historical 2026-08-27 audit, not a current verdict.
-This status was checked against the code at base `86afbbe`. **Open (partial)**
+Findings 1–12 were checked on 2026-10-10 against the code at base `86afbbe`;
+the ARC-1175 entry records the owner decision on 2026-10-11. **Open (partial)**
 means a remaining part of the original finding is unenforced; it does not
 propose reopening a deliberately accepted limit. Test citations name existing
 methods, and code citations name the implementation inspected for this update.
@@ -28,6 +29,7 @@ methods, and code citations name the implementation inspected for this update.
 | 10. Python 3.7 AST compatibility | Closed by support boundary | The AST heuristic still uses `ast.Constant` in `tests/test_review.py::TestProtocolIsEnforcedNotRemembered.test_every_config_error_names_an_action`; it was not made Python 3.7-compatible. `CLAUDE.md` now sets the review import floor at 3.8 and the release-test floor at 3.9, and `.github/workflows/release-validation.yml` runs 3.9, 3.10 and 3.12. The separate 3.7 contract/handoff floor does not apply to this review test. |
 | 11. Fixed profiles versus ladder | Closed | `skills/hanig-review-gate/PROTOCOL.md`, `skills/hanig-review-gate/SKILL.md` and `skills/hanig-review-gate/reviewers.json` now explicitly permit fixed profiles or optional escalation. `skills/hanig-review-gate/scripts/review.py::select_profile` honors explicit profiles; automatic defaults depend on changed paths. `tests/test_profiles.py::TestChangedPathProfiles.test_docs_code_override_and_unknown_acceptance` exercises those defaults and overrides. |
 | 12. Asymmetric uncertainty | Open | `skills/hanig-review-gate/scripts/review.py::SYSTEM` still tells a reviewer that cannot decide to refute, while separately allowing an unverifiable claim status and requiring concrete failure scenarios. Those latter safeguards do not remove the asymmetric instruction or establish independent model failure modes. |
+| ARC-1175. Model-routing enforcement | Narrowed and closed by owner decision, 2026-10-11 | Enforced: within its tracked authored Python scope, excluding prose and fixtures, `tests/test_no_hardcoded_models.py` fails on any string literal equal to a model id declared in `skills/hanig-review-gate/reviewers.json`, `skills/hanig-swarm/agents.json` or `models.json`. The dispatch provenance test `tests/test_attempt_worktrees.py::TestPerAttemptWorktrees.test_dispatch_argv_uses_routing_provider_and_plan_model_override`, merged with the `swarm_types`/`swarm_routing` extraction, exercises the default `--provider` originating in `swarm_routing`'s data loading and `--model` in the unit's validated plan override. Not enforced: an undeclared model id typed directly into code is not caught by any test. A string-shape matcher and an AST data-flow analyzer failed to converge under review; design evidence is preserved on branches `swarm-aa06757814990724` and `swarm-8e1cf1581327d350`. |
 
 ## Historical verdict (2026-08-27)
 

@@ -18,7 +18,7 @@ Superseded entries name their replacement relative to the original document.
 Research and probe documents are excluded from metadata and this index,
 but their relative Markdown links are checked too. The checker ignores
 code and comments, external URLs, and absolute host paths; it checks
-file/directory destinations and Markdown heading or HTML-id fragments.
+file/directory destinations; fragments are not checked.
 
 | Document | Status | Date | Purpose |
 | --- | --- | --- | --- |
