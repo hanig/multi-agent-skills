@@ -95,6 +95,7 @@ DEFAULT_PROFILE = "standard"
 # produced rounds 3, 4 and 5 each finding a defect in the previous round's fix.
 # That is the signal to step back to root cause, not to review again.
 MAX_ROUNDS = 3
+ROUND_LOCK_WAIT_SECONDS = 5
 
 
 def change_identity(target="origin/main", plan_name=None, unit=None):
@@ -138,10 +139,19 @@ def round_ledger_root():
     configured = os.environ.get("XDG_STATE_HOME")
     base = Path(configured) if configured else Path.home() / ".local" / "state"
     if not base.is_absolute():
-        raise ValueError("round ledger requires an absolute XDG_STATE_HOME")
+        raise ValueError("round ledger requires an absolute XDG_STATE_HOME or HOME")
     # Resolve the configured storage location once (including ordinary system
     # aliases such as /var); marker names and identity values remain exact.
     return (base / "hanig-review-gate" / "rounds").resolve()
+
+
+def require_exhausted_rounds(entries, profile):
+    """Every round of the declared predecessor profile must be present."""
+    reserved = {entry["round"] for entry in entries if entry["profile"] == profile}
+    missing = sorted(set(range(1, MAX_ROUNDS + 1)) - reserved)
+    if missing:
+        raise ValueError("cycle is not exhausted for profile {}; missing rounds: {}".format(
+            profile, ", ".join(map(str, missing))))
 
 
 def validate_round_history(records):
@@ -160,16 +170,44 @@ def validate_round_history(records):
         entries = sorted(cycles[cycle], key=lambda r: r["round"])
         expected = None
         if previous is not None:
-            if previous["round"] != MAX_ROUNDS or entries[0]["round"] != 1:
+            require_exhausted_rounds(previous, previous[-1]["profile"])
+            if entries[0]["round"] != 1:
                 raise ValueError("successor cycle requires an exhausted predecessor and round 1")
-            expected = {"cycle": cycle - 1, "profile": previous["profile"]}
+            expected = {"cycle": cycle - 1, "profile": previous[-1]["profile"]}
+        elif isinstance(entries[0]["predecessor"], dict):
+            declaration = entries[0]["predecessor"]
+            if (entries[0]["round"] == 1
+                    and declaration.get("cycle") == "none declared"
+                    and declaration.get("profile") in LADDER):
+                expected = {"cycle": "none declared", "profile": declaration["profile"]}
         for entry in entries:
             predecessor = entry["predecessor"]
             if (predecessor != expected or (expected is not None and (
                     not isinstance(predecessor, dict)
-                    or type(predecessor.get("cycle")) is not int))):
+                    or (previous is not None
+                        and type(predecessor.get("cycle")) is not int)))):
                 raise ValueError("invalid round ledger predecessor; retain and inspect the marker")
-        previous = entries[-1]
+        previous = entries
+
+
+def acquire_round_lock(lock):
+    """Wait for a short reservation critical section, with a monotonic bound.
+
+    Retrying nonblocking flock gives a bounded blocking wait without changing
+    process-global signal handlers or the review watchdog's timer.
+    """
+    deadline = time.monotonic() + ROUND_LOCK_WAIT_SECONDS
+    while True:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError as exc:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ValueError("round reservation lock wait exceeded {} seconds; "
+                                 "inspect the ledger before retrying".format(
+                                     ROUND_LOCK_WAIT_SECONDS)) from exc
+            time.sleep(min(0.05, remaining))
 
 
 def reserve_round(identity, round_no, profile, fresh_from=None):
@@ -191,11 +229,7 @@ def reserve_round(identity, round_no, profile, fresh_from=None):
         lock = os.open("lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
                        0o600, dir_fd=directory)
         try:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:
-                raise ValueError("another round reservation is in progress; "
-                                 "inspect the ledger before retrying") from exc
+            acquire_round_lock(lock)
             records = []
             for name in sorted(os.listdir(directory)):
                 if name == "lock":
@@ -223,7 +257,9 @@ def reserve_round(identity, round_no, profile, fresh_from=None):
             cycle = last["cycle"] if last else 1
             predecessor = last["predecessor"] if last else None
             if last and round_no == 1 and fresh_from is not None:
-                if last["round"] != MAX_ROUNDS or fresh_from != last["profile"]:
+                require_exhausted_rounds(
+                    [r for r in records if r["cycle"] == cycle], fresh_from)
+                if fresh_from != last["profile"]:
                     raise ValueError("--fresh-cycle-from must name the exhausted "
                                      "cycle's last reserved profile")
                 predecessor = {"cycle": cycle, "profile": last["profile"]}
@@ -233,6 +269,12 @@ def reserve_round(identity, round_no, profile, fresh_from=None):
                     raise ValueError("round is already reserved or lower than the last "
                                      "reservation; use the next round, or after exhaustion "
                                      "--round 1 --fresh-cycle-from PROFILE")
+                if round_no > 1 and not any(
+                        r["cycle"] == cycle and r["round"] == round_no - 1 for r in records):
+                    raise ValueError("cannot reserve round {}; missing round {} in cycle {}".format(
+                        round_no, round_no - 1, cycle))
+                if last is None and fresh_from is not None:
+                    predecessor = {"cycle": "none declared", "profile": fresh_from}
                 expected = predecessor["profile"] if predecessor else None
                 if fresh_from != expected:
                     raise ValueError("--fresh-cycle-from must match this cycle's "
@@ -264,9 +306,9 @@ def reserve_review_round(args):
         identity = change_identity(args.target or "origin/main", args.plan_name, args.unit)
         record = reserve_round(identity, args.round, args.selected_profile,
                                args.fresh_cycle_from)
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
         config_error("round reservation refused: {}. Inspect the enforcing ledger "
-                     "and pass the next admissible round; do not delete "
+                     "and XDG_STATE_HOME/HOME; pass the next admissible round; do not delete "
                      "reservations to restart a review.".format(exc))
     return record
 

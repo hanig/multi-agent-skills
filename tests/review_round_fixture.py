@@ -16,9 +16,9 @@ def isolated_reservation(module, original, args):
             patch.object(module, "round_ledger_root", return_value=Path(root).resolve()), \
             patch.object(module, "change_identity", return_value="a" * 64):
         if args.fresh_cycle_from:
-            module.reserve_round("a" * 64, module.MAX_ROUNDS,
+            for number in range(1, module.MAX_ROUNDS + 1):
+                module.reserve_round("a" * 64, number, args.fresh_cycle_from)
+        for number in range(1, args.round):
+            module.reserve_round("a" * 64, number, args.selected_profile,
                                  args.fresh_cycle_from)
-            if args.round > 1:
-                module.reserve_round("a" * 64, 1, args.selected_profile,
-                                     args.fresh_cycle_from)
         return original(args)

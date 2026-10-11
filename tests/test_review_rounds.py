@@ -8,8 +8,9 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
-from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -99,6 +100,147 @@ class TestRoundReservations(unittest.TestCase):
                 review.main()
         return stopped.exception.code, out.getvalue(), err.getvalue(), calls, records
 
+    @contextmanager
+    def held_lock(self):
+        self.reserve(1)
+        lock = self.markers()[0].parent / "lock"
+        code = """
+import fcntl, sys
+with open(sys.argv[1], 'r+') as stream:
+    fcntl.flock(stream, fcntl.LOCK_EX)
+    print('locked', flush=True)
+    sys.stdin.readline()
+"""
+        process = subprocess.Popen([sys.executable, "-c", code, str(lock)],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(process.stdout.readline(), "locked\n")
+            yield process
+        finally:
+            process.communicate("release\n", timeout=10)
+            self.assertEqual(process.returncode, 0)
+
+    def test_valid_next_round_waits_for_concurrent_holder(self):
+        with self.held_lock() as holder:
+            original = review.fcntl.flock
+            timers = []
+
+            def release():
+                holder.stdin.write("release\n")
+                holder.stdin.flush()
+
+            def contended(*args):
+                if not timers:
+                    # Release only after the consumer actually reaches flock.
+                    timer = threading.Timer(0.2, release)
+                    timers.append(timer)
+                    timer.start()
+                return original(*args)
+
+            try:
+                with patch.object(review.fcntl, "flock", side_effect=contended):
+                    result = self.invoke(2)
+            finally:
+                for timer in timers:
+                    timer.join()
+        self.assertEqual(result[0], 0, result[2])
+        self.assertEqual(len(result[3]), 2)
+        self.assertEqual([json.loads(p.read_text())["round"] for p in self.markers()], [1, 2])
+        repeated = self.invoke(2)
+        self.assertEqual(repeated[0], 4, repeated[2])
+        self.assertEqual((repeated[3], repeated[4]), ([], []))
+
+    def test_lock_timeout_is_a_bounded_exit_4_refusal(self):
+        with self.held_lock(), patch.object(review, "ROUND_LOCK_WAIT_SECONDS", 0.05):
+            result = self.invoke(2)
+        self.assertEqual(result[0], 4, result[2])
+        self.assertIn("lock wait", result[2])
+        self.assertEqual((result[3], result[4]), ([], []))
+        self.assertEqual(len(self.markers()), 1)
+
+    def test_lone_last_round_is_not_exhaustion(self):
+        for number in range(1, review.MAX_ROUNDS + 1):
+            self.reserve(number)
+        for marker in self.markers()[:-1]:
+            marker.unlink()
+        before = {p: p.read_bytes() for p in self.markers()}
+        result = self.invoke(extra=("--fresh-cycle-from", "standard"))
+        self.assertEqual(result[0], 4, result[2])
+        self.assertIn("missing rounds: 1, 2", result[2])
+        self.assertEqual((result[3], result[4]), ([], []))
+        self.assertEqual(before, {p: p.read_bytes() for p in self.markers()})
+
+    def test_exhaustion_requires_each_round_of_the_declared_profile(self):
+        self.reserve(1, profile="fast")
+        self.reserve(2)
+        self.reserve(3)
+        result = self.invoke(extra=("--fresh-cycle-from", "standard"))
+        self.assertEqual(result[0], 4, result[2])
+        self.assertIn("missing rounds: 1", result[2])
+        self.assertEqual((result[3], result[4]), ([], []))
+
+    def test_existing_successor_with_incomplete_predecessor_is_refused(self):
+        for number in range(1, review.MAX_ROUNDS + 1):
+            self.reserve(number)
+        self.reserve(1, fresh="standard")
+        self.markers()[0].unlink()
+        result = self.invoke(2, ("--fresh-cycle-from", "standard"))
+        self.assertEqual(result[0], 4, result[2])
+        self.assertIn("missing rounds: 1", result[2])
+        self.assertEqual((result[3], result[4]), ([], []))
+
+    def test_next_round_requires_immediately_previous_reservation(self):
+        for number, missing in ((2, 1), (3, 2)):
+            result = self.invoke(number)
+            self.assertEqual(result[0], 4, result[2])
+            self.assertIn("missing round {}".format(missing), result[2])
+            self.assertEqual((result[3], result[4]), ([], []))
+        self.reserve(1)
+        result = self.invoke(3)
+        self.assertEqual(result[0], 4, result[2])
+        self.assertIn("missing round 2", result[2])
+        self.assertEqual(len(self.markers()), 1)
+
+    def test_unresolvable_home_is_exit_4_with_environment_guidance(self):
+        with patch.dict(os.environ):
+            os.environ.pop("HOME", None)
+            os.environ.pop("XDG_STATE_HOME", None)
+            with patch.object(review.Path, "home", side_effect=RuntimeError("no home")):
+                result = self.invoke()
+        self.assertEqual(result[0], 4, result[2])
+        self.assertIn("XDG_STATE_HOME", result[2])
+        self.assertIn("HOME", result[2])
+        self.assertNotIn("Traceback", result[2])
+        self.assertEqual((result[3], result[4]), ([], []))
+
+    def test_unusable_state_home_and_home_are_exit_4(self):
+        unavailable = self.root / "file-not-directory"
+        unavailable.write_text("unusable home")
+        for state_home in ("", "relative-state", str(unavailable)):
+            with self.subTest(state_home=state_home), patch.dict(
+                    os.environ, {"XDG_STATE_HOME": state_home, "HOME": str(unavailable)}):
+                result = self.invoke()
+            self.assertEqual(result[0], 4, result[2])
+            self.assertIn("XDG_STATE_HOME", result[2])
+            self.assertIn("HOME", result[2])
+            self.assertNotIn("Traceback", result[2])
+            self.assertEqual((result[3], result[4]), ([], []))
+
+    def test_fresh_cycle_on_unseen_identity_records_no_predecessor(self):
+        result = self.invoke(extra=("--fresh-cycle-from", "standard"))
+        self.assertEqual(result[0], 0, result[2])
+        record = json.loads(self.markers()[0].read_text())
+        self.assertEqual(record["cycle"], 1)
+        self.assertEqual(record["predecessor"],
+                         {"cycle": "none declared", "profile": "standard"})
+        self.assertEqual(self.invoke(2)[0], 4, "the declared panel floor must persist")
+        self.assertEqual(self.invoke(2, ("--fresh-cycle-from", "standard"))[0], 0)
+        self.assertEqual(self.invoke(3, ("--fresh-cycle-from", "standard"))[0], 0)
+        following = self.reserve(1, fresh="standard")
+        self.assertEqual(following["cycle"], 2)
+        self.assertEqual(following["predecessor"], {"cycle": 1, "profile": "standard"})
+
     def test_identity_survives_fix_commits_dirty_edits_and_target_advance(self):
         identity = review.change_identity()
         self.fix()
@@ -173,18 +315,20 @@ class TestRoundReservations(unittest.TestCase):
         self.assertEqual(third["predecessor"]["cycle"], 2)
 
     def test_fresh_cycle_requires_exhaustion_and_exact_profile(self):
-        with self.assertRaises(ValueError):
-            self.reserve(1, fresh="standard")
         self.reserve(1)
         for number in (1, 2):
             with self.assertRaises(ValueError):
                 self.reserve(number, fresh="standard")
+        self.reserve(2)
         self.reserve(3)
         with self.assertRaises(ValueError):
             self.reserve(1, fresh="fast")
 
     def test_lower_round_is_refused_even_without_its_marker(self):
-        self.reserve(3)
+        for number in range(1, review.MAX_ROUNDS + 1):
+            self.reserve(number)
+        for marker in self.markers()[:-1]:
+            marker.unlink()
         result = self.invoke(2)
         self.assertEqual(result[0], 4, result[2])
         self.assertEqual((result[3], result[4]), ([], []))
@@ -270,7 +414,8 @@ except (ValueError, OSError):
         self.assertEqual(len(self.markers()), 1)
 
     def test_stored_history_checks_actual_predecessor_and_exact_field_types(self):
-        self.reserve(3)
+        for number in range(1, review.MAX_ROUNDS + 1):
+            self.reserve(number)
         self.reserve(1, fresh="standard")
         markers = self.markers()
         saved = {p: p.read_bytes() for p in markers}
@@ -314,6 +459,7 @@ except (ValueError, OSError):
         with patch.object(review, "read_review_journal", side_effect=AssertionError("audit read")), \
                 patch.object(review, "record_review_round", side_effect=AssertionError("audit write")):
             self.reserve(1)
+            self.reserve(2)
             self.reserve(3)
             self.reserve(1, fresh="standard")
         self.assertEqual(journal.read_bytes(), b"unparseable audit history\n")
