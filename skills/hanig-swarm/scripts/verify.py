@@ -1097,7 +1097,7 @@ def _python_selector(first_line):
     return {"prefix": prefix, "argv0": argv0, "args": words[1:], "command": words[0]}
 
 
-def _implicit_python(first_line, bindir, cwd):
+def _implicit_python(first_line, launch_config, cwd):
     """Resolve native Python selection without replacing the native launch.
 
     Relative/empty PATH entries are relative to the verifier's cwd, not the
@@ -1120,7 +1120,7 @@ def _implicit_python(first_line, bindir, cwd):
             else:
                 return None, None
     env = CE.child_env()
-    env["PATH"] = str(bindir) + os.pathsep + env.get("PATH", os.defpath)
+    env["PATH"] = launch_config[0] + os.pathsep + env.get("PATH", os.defpath)
     directory = os.path.abspath(cwd or os.curdir)
     search = os.pathsep.join(p if os.path.isabs(p) else os.path.join(directory, p)
                              for p in env["PATH"].split(os.pathsep))
@@ -1132,11 +1132,11 @@ def _implicit_python(first_line, bindir, cwd):
     try:
         if not path:
             raise ValueError("interpreter was not found on the child PATH")
-        probe = subprocess.run([path, "--version"], env=env, cwd=cwd,
-                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, text=True, timeout=30, check=True)
+        probe = _observe_execution([path, "--version"], 30, cwd, launch_config)
+        if probe.get("incomplete_reason") or probe["exit_code"] != 0:
+            raise ValueError(probe.get("incomplete_reason") or "interpreter version probe failed")
         version = re.fullmatch(r"Python (\d+)\.(\d+)\.(\d+)",
-                               (probe.stdout or probe.stderr).strip())
+                               (probe["stdout"] or probe["stderr"]).strip())
         if not version:
             raise ValueError("interpreter did not report major.minor.micro")
         record["version"] = ".".join(version.groups())
@@ -1200,23 +1200,23 @@ def run_pinned(runner, path, expect_digest, args=None, timeout=900,
                 for name, key in (("python3", "python"), ("python", "python"), ("git", "git")):
                     if key != "python" or select_python:
                         (bindir / name).symlink_to(executables[key]["path"])
+                # Add executable configuration only after the ordinary
+                # coordinator spawn's unchanged child_env() boundary.
+                launch_config = (str(bindir), executables["git"]["path"],
+                                 executables["python"]["path"],
+                                 executables["python"]["path"] if select_python else "")
                 observed = dict(executables)
                 observed["launcher"] = dict(path=os.path.realpath(sys.executable),
                                              version=".".join(map(str, sys.version_info[:3])),
                                              role="launcher")
                 if not select_python:
-                    resolved, problem = _implicit_python(first_line, bindir, cwd)
+                    resolved, problem = _implicit_python(first_line, launch_config, cwd)
                     if resolved is not None:
                         observed["python"] = resolved
                     if problem:
                         return dict(RV.incomplete(problem),
                                     execution=RV.local_execution(observed)), None
                 execution = RV.local_execution(observed)
-                # Add executable configuration only after the ordinary
-                # coordinator spawn's unchanged child_env() boundary.
-                launch_config = (str(bindir), executables["git"]["path"],
-                                 executables["python"]["path"],
-                                 executables["python"]["path"] if select_python else "")
             outcome = _observe_execution(argv, timeout, cwd, launch_config,
                                          launch_prefix, final_argv0)
             if execution is not None:
