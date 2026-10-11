@@ -191,6 +191,37 @@ class TestDocsCommand(unittest.TestCase):
                 self.assertEqual(0, self.run_command('write')[0])
         self.doc.write_text(document(body='Purpose.\n\n[link][ref]\n\n[ref]: example.md "[ghost](missing.md)"'), encoding='utf-8')
         self.assertEqual(0, self.run_command('write')[0])
+        self.doc.write_text(document(body='Purpose.\n\n[link][ref]\n\n[ref]: example.md\n  "[ghost](missing.md)"'), encoding='utf-8')
+        self.assertEqual(0, self.run_command('write')[0])
+
+    def test_review_emphasized_and_code_heading_fragments(self):
+        body = 'Purpose.\n\n## _Important_\n\n## __Strong__\n\n## `literal_name`\n\n[one](#important) [two](#strong) [three](#literal_name)'
+        self.doc.write_text(document(body=body), encoding='utf-8')
+        self.assertEqual((0, 'Documentation metadata, index and relative links checked.\n'), self.run_command('write'))
+
+    def test_review_html_attribute_forms(self):
+        body = 'Purpose.\n\n<span id=custom></span>\n<a NAME="named"></a>\n\n[one](#custom) [two](#named)'
+        self.doc.write_text(document(body=body), encoding='utf-8')
+        self.assertEqual(0, self.run_command('write')[0])
+
+    def test_review_markdown_title_forms(self):
+        for title in ['   # Example', 'Example\n=======']:
+            with self.subTest(title=title):
+                self.doc.write_text(document().replace('# Example', title), encoding='utf-8')
+                self.assertEqual(0, self.run_command('write')[0])
+                self.assertEqual('Example', docs_index.metadata(self.doc)['title'])
+
+    def test_review_footnotes_and_transcript_lines_are_not_definitions(self):
+        body = 'Purpose.\n\n[^1]: See the note.\n\n[Codex]: reviewed this\n\n[^2]: word'
+        self.doc.write_text(document(body=body), encoding='utf-8')
+        self.assertEqual(0, self.run_command('write')[0])
+        self.doc.write_text(document(body=body + '\n\n[^3]: See [broken](missing.md).'), encoding='utf-8')
+        self.assertEqual(1, self.run_command('write')[0])
+
+    def test_review_code_spans_do_not_cross_paragraphs(self):
+        body = 'Purpose.\n\nA stray ` token.\n\n[broken](missing.md)\n\nAnother ` token.'
+        self.doc.write_text(document(body=body), encoding='utf-8')
+        self.assertEqual(1, self.run_command('write')[0])
 
     def test_cli_runs_from_an_unrelated_directory(self):
         result = subprocess.run([sys.executable, str(SCRIPT), 'check', '--root', str(self.root)],

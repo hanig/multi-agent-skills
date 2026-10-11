@@ -8,6 +8,7 @@ are not links. Local Markdown fragments use GitHub heading slugs or HTML ids.
 import argparse
 import datetime
 import html
+from html.parser import HTMLParser
 import re
 import sys
 from pathlib import Path
@@ -47,12 +48,12 @@ def metadata(path):
         datetime.date.fromisoformat(date[1])
     except ValueError:
         raise DocsError('{}: invalid ISO date'.format(path))
-    title = re.search(r'^# ([^\n]+)', text, re.M)
+    title = next((heading for heading in headings(text) if heading[0] == 1), None)
     if not title:
         raise DocsError('{}: missing document title'.format(path))
     # The first prose paragraph after the title supplies the purpose. Skip
     # headings, comments and block quotes, which often carry old review notes.
-    paragraphs = re.split(r'\n\s*\n', text[title.end():])
+    paragraphs = re.split(r'\n\s*\n', text[title[2]:])
     purpose = next((' '.join(p.split()) for p in paragraphs if p.strip()
                     and not p.lstrip().startswith(('#', '>', '<!--', '```', '~~~', '- ', '|'))), '')
     if not purpose:
@@ -113,8 +114,11 @@ def block_lines(text):
 def visible_markdown(text):
     """Mask code blocks/spans and comments, preserving source offsets."""
     text = ''.join(block_lines(text))
-    pattern = re.compile(r'<!--.*?(?:-->|\Z)|(?<!\\)(`+)(?!`)(.*?)(?<!`)\1(?!`)', re.S)
-    return pattern.sub(lambda m: blank(m[0]), text)
+    text = re.sub(r'<!--.*?(?:-->|\Z)', lambda m: blank(m[0]), text, flags=re.S)
+    pattern = re.compile(r'(?<!\\)(`+)(?!`)(.*?)(?<!`)\1(?!`)', re.S)
+    # Code spans belong to a paragraph, not the whole document.
+    return ''.join(pattern.sub(lambda m: blank(m[0]), part)
+                   for part in re.split(r'(\n[ \t]*\n)', text))
 
 
 def escaped(text, pos):
@@ -201,9 +205,27 @@ def markdown_links(text):
     definition_spans = []
     for match in re.finditer(r'^ {0,3}\[([^\]\n]+)\]:[ \t]*(?:\n[ \t]*)?', visible, re.M):
         dest = destination(visible, match.end())
-        if dest:
+        if dest and not match[1].startswith('^'):
+            # A definition owns its complete line, optionally followed by a
+            # title. Prose after its destination makes it ordinary text.
+            end = dest[1]
+            line_end = visible.find('\n', end)
+            if line_end < 0:
+                line_end = len(visible)
+            tail = visible[end:line_end]
+            next_token = visible[end:].lstrip(' \t\r\n')[:1]
+            has_title = bool(next_token and next_token in '\"\'(')
+            if tail.strip() or has_title:
+                end = title_end(visible, end)
+                if end is None:
+                    continue
+                line_end = visible.find('\n', end)
+                if line_end < 0:
+                    line_end = len(visible)
+                if visible[end:line_end].strip():
+                    continue
             definitions.setdefault(label(match[1]), dest[0])
-            definition_spans.append((match.start(), title_end(visible, dest[1]) or dest[1]))
+            definition_spans.append((match.start(), line_end))
             yield match.start(), dest[0]
     for start, end in reversed(definition_spans):
         visible = visible[:start] + blank(visible[start:end]) + visible[end:]
@@ -242,35 +264,54 @@ def markdown_links(text):
 
 
 def plain(value):
+    # Protect literal code before removing underscore emphasis. Intraword
+    # underscores (including identifiers) are ordinary text in Markdown.
+    code = []
+
+    def save_code(match):
+        code.append(match[2])
+        return '\x00{}\x00'.format(len(code) - 1)
+
+    value = re.sub(r'(`+)(.*?)\1', save_code, value)
+    value = re.sub(r'(?<![\w\\])(_{1,3})(?=\S)(.*?\S)\1(?!\w)', r'\2', value)
     value = re.sub(r'!?\[([^\]]+)\]\([^)]*\)', r'\1', value)
-    value = re.sub(r'<[^>]*>', '', value)
-    return html.unescape(value.replace('`', '').replace('*', ''))
+    value = re.sub(r'<[^>]*>', '', value).replace('*', '')
+    value = re.sub(r'\x00(\d+)\x00', lambda m: code[int(m[1])], value)
+    return html.unescape(value)
+
+
+def headings(text):
+    """Yield (level, inline title, source end offset) for ATX/Setext headings."""
+    visible = ''.join(block_lines(text))
+    visible = re.sub(r'<!--.*?(?:-->|\Z)', lambda m: blank(m[0]), visible, flags=re.S)
+    previous = ''
+    offset = 0
+    for line in visible.splitlines(keepends=True):
+        offset += len(line)
+        heading = re.match(r' {0,3}(#{1,6})(?:[ \t]+(.+?))?(?:[ \t]+#+)?[ \t]*$', line.rstrip('\r\n'))
+        if heading:
+            yield len(heading[1]), heading[2] or '', offset
+        elif previous.strip() and re.fullmatch(r' {0,3}(=+|-+)[ \t]*\n?', line):
+            yield 1 if line.lstrip().startswith('=') else 2, previous.strip(), offset
+        previous = line
+
+
+class HTMLAnchors(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.ids = set()
+
+    def handle_starttag(self, tag, attrs):
+        for key, value in attrs:
+            if value is not None and (key == 'id' or (tag == 'a' and key == 'name')):
+                self.ids.add(value)
+
+    handle_startendtag = handle_starttag
 
 
 def anchors(text):
-    # Keep inline code content for headings; strip only block code/comments.
-    headings = []
-    fence = None
-    lines = re.sub(r'<!--.*?-->', '', text, flags=re.S).splitlines()
-    visible = []
-    for line in lines:
-        token = re.match(r' {0,3}(`{3,}|~{3,})', line)
-        if token:
-            if fence is None:
-                fence = (token[1][0], len(token[1]))
-            elif re.fullmatch(r' {0,3}' + re.escape(fence[0]) + '{' + str(fence[1]) + r',}\s*', line):
-                fence = None
-            visible.append('')
-            continue
-        visible.append('' if fence or line.startswith(('    ', '\t')) else line)
-    for i, line in enumerate(visible):
-        heading = re.match(r' {0,3}#{1,6}\s+(.+?)(?:\s+#+)?\s*$', line)
-        if heading:
-            headings.append(heading[1])
-        elif i and re.fullmatch(r' {0,3}(?:=+|-+)\s*', line) and visible[i - 1].strip():
-            headings.append(visible[i - 1].strip())
     result = set()
-    for heading in headings:
+    for _, heading, _ in headings(text):
         slug = re.sub(r'[^\w\- ]', '', plain(heading).lower()).replace(' ', '-')
         candidate = slug
         count = 0
@@ -278,7 +319,9 @@ def anchors(text):
             count += 1
             candidate = '{}-{}'.format(slug, count)
         result.add(candidate)
-    result.update(m[2] for m in re.finditer(r'\b(?:id|name)\s*=\s*(["\x27])(.*?)\1', '\n'.join(visible)))
+    parser = HTMLAnchors()
+    parser.feed(visible_markdown(text))
+    result.update(parser.ids)
     return result
 
 
