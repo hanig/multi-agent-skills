@@ -739,9 +739,9 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         with mock.patch.dict(os.environ, {
                 "PATH": str(fakebin) + os.pathsep + os.environ.get("PATH", "")}), \
              mock.patch.object(S.U, "run", side_effect=run), \
-             mock.patch.object(S, "load_state", side_effect=AssertionError("watcher loaded state")), \
+             mock.patch.object(S.SS, "load_state", side_effect=AssertionError("watcher loaded state")), \
              mock.patch.object(S, "save_state", side_effect=AssertionError("watcher wrote state")), \
-             mock.patch.object(S, "acquire_lease", side_effect=AssertionError("watcher took lease")), \
+             mock.patch.object(S.SS, "acquire_lease", side_effect=AssertionError("watcher took lease")), \
              mock.patch.object(S, "advance", side_effect=AssertionError("watcher advanced in-process")):
             result = S.cmd_watch_code_terminal(args)
 
@@ -1730,7 +1730,7 @@ class TestEveryArchiveSiteIsDryRunGuarded(unittest.TestCase):
     def test_no_archive_call_escapes_a_dry_run_guard(self):
         import ast
         paths = sorted(SCRIPTS.glob("swarm*.py"))
-        self.assertTrue({"swarm.py", "swarm_routing.py", "swarm_types.py"}
+        self.assertTrue({"swarm.py", "swarm_routing.py", "swarm_types.py", "swarm_state.py"}
                         <= {path.name for path in paths})
         unguarded, calls = [], []
         definitions = set()
@@ -1757,6 +1757,7 @@ class TestEveryArchiveSiteIsDryRunGuarded(unittest.TestCase):
                         unguarded.append((path.name, node.lineno))
         self.assertIn("_archive_code_worktree", definitions)
         self.assertIn("apply_agent_resolution", definitions)
+        self.assertIn("acquire_lease", definitions)
         self.assertTrue(calls, "archive-site sweep must find its call sites")
 
         self.assertEqual(

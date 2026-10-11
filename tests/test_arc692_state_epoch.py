@@ -39,10 +39,16 @@ class TestStateEpoch(unittest.TestCase):
         self.epoch_path = self.state_dir / self.first.STATE_EPOCH_FILE
 
     def coordinator(self):
-        # Independent module objects stand in for process-local lease memory.
+        # Independent state owners stand in for process-local lease memory.
+        state_spec = importlib.util.spec_from_file_location(
+            "epoch_state", SCRIPTS / "swarm_state.py")
+        state = importlib.util.module_from_spec(state_spec)
+        state_spec.loader.exec_module(state)
         spec = importlib.util.spec_from_file_location("epoch_coordinator", SWARM)
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        with mock.patch.dict(sys.modules, {"swarm_state": state}):
+            spec.loader.exec_module(module)
+        self.assertIs(module.acquire_lease.__globals__, state.__dict__)
         self.addCleanup(self.release_all, module)
         return module
 
@@ -292,7 +298,7 @@ class TestStateEpoch(unittest.TestCase):
                              before)
 
     def test_acquire_and_save_fence_never_load_coordinator_state(self):
-        with mock.patch.object(self.first, "load_state", side_effect=
+        with mock.patch.object(self.first.SS, "load_state", side_effect=
                                AssertionError("fence loaded coordinator state")):
             self.acquire(self.first)
             self.assertFalse(self.path.exists())

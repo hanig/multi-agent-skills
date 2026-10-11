@@ -135,7 +135,7 @@ class TestDeadlineBreach(unittest.TestCase):
         allocate = mock.Mock(side_effect=AssertionError(
             "a deadline must not mint another attempt"))
         with mock.patch.object(S.time, "time", side_effect=lambda: clock[0]), \
-                mock.patch.object(S, "renew_lease", return_value=True), \
+                mock.patch.object(S.SS, "renew_lease", return_value=True), \
                 mock.patch.object(S, "_check", check), \
                 mock.patch.object(S, "_release_output_claims", release), \
                 mock.patch.object(S, "_allocate", allocate):
@@ -196,7 +196,7 @@ class TestDeadlineBreach(unittest.TestCase):
             S.save_state(str(state_dir), state)
             check = mock.Mock(return_value=(S.DONE, "", "", "result"))
             with mock.patch.object(S.time, "time", return_value=200.0), \
-                    mock.patch.object(S, "renew_lease", return_value=True), \
+                    mock.patch.object(S.SS, "renew_lease", return_value=True), \
                     mock.patch.object(S, "_check", check), \
                     mock.patch.object(
                         S, "_reported_check_result",
@@ -261,7 +261,7 @@ class TestDeadlineBreach(unittest.TestCase):
             allocate = mock.Mock(side_effect=AssertionError(
                 "a deadline crossed during recovery must retain its attempt"))
             with mock.patch.object(S.time, "time", side_effect=lambda: clock[0]), \
-                    mock.patch.object(S, "renew_lease", return_value=True), \
+                    mock.patch.object(S.SS, "renew_lease", return_value=True), \
                     mock.patch.object(S, "reconcile_orphan",
                                       side_effect=reconcile), \
                     mock.patch.object(S, "_allocate", allocate), \
@@ -300,7 +300,7 @@ class TestDeadlineBreach(unittest.TestCase):
 
             check = mock.Mock(return_value=(S.RUNNING, "", "", ""))
             with mock.patch.object(S.time, "time", side_effect=lambda: clock[0]), \
-                    mock.patch.object(S, "renew_lease", return_value=True), \
+                    mock.patch.object(S.SS, "renew_lease", return_value=True), \
                     mock.patch.object(S, "_recover_code_launch",
                                       side_effect=recover), \
                     mock.patch.object(S, "_check", check), \
@@ -346,7 +346,7 @@ class TestDeadlineBreach(unittest.TestCase):
             check = mock.Mock(side_effect=AssertionError(
                 "a crossed recovery failure must stop before checking"))
             with mock.patch.object(S.time, "time", side_effect=lambda: clock[0]), \
-                    mock.patch.object(S, "renew_lease", return_value=True), \
+                    mock.patch.object(S.SS, "renew_lease", return_value=True), \
                     mock.patch.object(S, "_recover_code_launch",
                                       side_effect=recover), \
                     mock.patch.object(S, "_check", check), \
@@ -393,7 +393,7 @@ class TestDeadlineBreach(unittest.TestCase):
             check = mock.Mock(side_effect=AssertionError(
                 "missing launch authority must stop before checking"))
             with mock.patch.object(S.time, "time", side_effect=lambda: clock[0]), \
-                    mock.patch.object(S, "renew_lease", return_value=True), \
+                    mock.patch.object(S.SS, "renew_lease", return_value=True), \
                     mock.patch.object(S, "_recover_code_launch",
                                       side_effect=recover), \
                     mock.patch.object(S, "_check", check), \
@@ -432,7 +432,7 @@ class TestDeadlineBreach(unittest.TestCase):
                 return S.DONE, "", "", "result"
 
             with mock.patch.object(S.time, "time", side_effect=lambda: clock[0]), \
-                    mock.patch.object(S, "renew_lease", return_value=True), \
+                    mock.patch.object(S.SS, "renew_lease", return_value=True), \
                     mock.patch.object(S, "_check", side_effect=check), \
                     mock.patch.object(
                         S, "_reported_check_result",
@@ -484,7 +484,7 @@ class TestDeadlineBreach(unittest.TestCase):
                 with mock.patch.object(
                         S.time, "time", return_value=observed_at), \
                         mock.patch.object(
-                            S, "renew_lease", return_value=True), \
+                            S.SS, "renew_lease", return_value=True), \
                         mock.patch.object(S, "_check", check), \
                         mock.patch.object(S, "_release_output_claims"):
                     S.advance(
@@ -662,7 +662,7 @@ class TestDeadlineBreach(unittest.TestCase):
             S.save_state(str(state_dir), state)
             check = mock.Mock(return_value=(S.RUNNING, "", "", ""))
             with mock.patch.object(S.time, "time", return_value=200.0), \
-                    mock.patch.object(S, "renew_lease", return_value=True), \
+                    mock.patch.object(S.SS, "renew_lease", return_value=True), \
                     mock.patch.object(S, "_check", check), \
                     mock.patch.object(S, "_release_output_claims"):
                 report, dispatched, halted = S.advance(
@@ -717,7 +717,7 @@ class TestDeadlineBreach(unittest.TestCase):
             S.save_state(str(state_dir), state)
             check = mock.Mock(return_value=(S.RUNNING, "", "", ""))
             with mock.patch.object(S.time, "time", return_value=180.0), \
-                    mock.patch.object(S, "renew_lease", return_value=True), \
+                    mock.patch.object(S.SS, "renew_lease", return_value=True), \
                     mock.patch.object(S, "_check", check), \
                     mock.patch.object(S, "_release_output_claims"):
                 S.advance(new_plan, S.load_state(str(state_dir)),
@@ -750,7 +750,7 @@ class TestDeadlineBreach(unittest.TestCase):
                          "state_changed_at": 120.0}}}
             S.save_state(str(state_dir), state)
             with mock.patch.object(S.time, "time", return_value=200.0), \
-                    mock.patch.object(S, "renew_lease", return_value=True), \
+                    mock.patch.object(S.SS, "renew_lease", return_value=True), \
                     mock.patch.object(S, "_check",
                                       return_value=(S.DONE, "", "", "result")), \
                     mock.patch.object(
@@ -792,7 +792,7 @@ class TestDeadlineBreach(unittest.TestCase):
             anchor_launch_host(state, attempt)
             S.save_state(str(state_dir), state)
             with mock.patch.object(S.time, "time", return_value=200.0), \
-                    mock.patch.object(S, "renew_lease", return_value=True), \
+                    mock.patch.object(S.SS, "renew_lease", return_value=True), \
                     mock.patch.object(
                         S, "_check", return_value=(S.DONE, "", "", "result")), \
                     mock.patch.object(

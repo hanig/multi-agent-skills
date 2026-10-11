@@ -21,10 +21,16 @@ class TestSnapshotEpoch(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.directory = self.root / "state"
+        state_spec = importlib.util.spec_from_file_location(
+            "snapshot_state", SCRIPTS / "swarm_state.py")
+        state = importlib.util.module_from_spec(state_spec)
+        state_spec.loader.exec_module(state)
         spec = importlib.util.spec_from_file_location(
             "snapshot_coordinator", SCRIPTS / "swarm.py")
         self.swarm = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(self.swarm)
+        with mock.patch.dict(sys.modules, {"swarm_state": state}):
+            spec.loader.exec_module(self.swarm)
+        self.assertIs(self.swarm.load_state.__globals__, state.__dict__)
         self.addCleanup(self.release_all)
         self.path = self.directory / self.swarm.STATE_FILE
         self.epoch_path = self.directory / self.swarm.STATE_EPOCH_FILE
