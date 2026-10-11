@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT / "skills" / "hanig-swarm" / "scripts"))
 import model_family as MF  # noqa: E402
 import resolve_models as RM  # noqa: E402
 import review as R  # noqa: E402
+import swarm_routing as SR  # noqa: E402
 
 SOL = {"listing": "openai", "vendor": "", "prefix": "gpt-", "separator": ".",
        "suffix": "-sol", "major": 6}
@@ -696,8 +697,8 @@ class TestReaders(StateHome):
         plan = self.project / ".swarm" / "plan.json"
         plan.parent.mkdir()
         pinned, table = S.DEFAULT_AGENT_PROVIDER, dict(S.THINKING_BY_MODEL)
-        self.addCleanup(setattr, S, "DEFAULT_AGENT_PROVIDER", pinned)
-        self.addCleanup(setattr, S, "THINKING_BY_MODEL", table)
+        self.addCleanup(setattr, SR, "DEFAULT_AGENT_PROVIDER", pinned)
+        self.addCleanup(setattr, SR, "THINKING_BY_MODEL", table)
         with redirect_stderr(io.StringIO()):
             self.assertEqual(S.apply_agent_resolution(plan), "codex/gpt-6.1-astra")
         self.assertEqual(S.default_thinking_for({}), table[pinned])
@@ -735,10 +736,10 @@ class TestReaders(StateHome):
         MF.write_snapshot(self.project, dict(self.snapshot(), config_sha256=digests,
                                              agent_default=entry("xhigh")))
         table_before = dict(S.THINKING_BY_MODEL)
-        self.addCleanup(setattr, S, "THINKING_BY_MODEL", table_before)
-        self.addCleanup(setattr, S, "DEFAULT_AGENT_PROVIDER", S.PINNED_AGENT_PROVIDER)
-        with mock.patch.object(S, "AGENTS_FILE", fake), \
-                mock.patch.object(S, "THINKING_BY_MODEL", dict(table_before)), \
+        self.addCleanup(setattr, SR, "THINKING_BY_MODEL", table_before)
+        self.addCleanup(setattr, SR, "DEFAULT_AGENT_PROVIDER", S.PINNED_AGENT_PROVIDER)
+        with mock.patch.object(SR, "AGENTS_FILE", fake), \
+                mock.patch.object(SR, "THINKING_BY_MODEL", dict(table_before)), \
                 redirect_stderr(io.StringIO()):
             self.assertEqual(S.apply_agent_resolution(self.project / "plan.json"),
                              "codex/gpt-6.1-astra")
@@ -753,7 +754,7 @@ class TestReaders(StateHome):
                       "Thinking": agents["thinking_by_model"]["codex/gpt-6-astra"]}}))
         other = Path(self.tmp.name) / "other"
         other.mkdir()
-        self.addCleanup(setattr, S, "DEFAULT_AGENT_PROVIDER", S.PINNED_AGENT_PROVIDER)
+        self.addCleanup(setattr, SR, "DEFAULT_AGENT_PROVIDER", S.PINNED_AGENT_PROVIDER)
         with redirect_stderr(io.StringIO()):
             self.assertEqual(S.apply_agent_resolution(self.project / "plan.json"),
                              "codex/gpt-6.1-astra")
@@ -764,8 +765,8 @@ class TestReaders(StateHome):
 
     def test_swarm_never_breaks_on_resolution(self):
         import swarm as S
-        self.addCleanup(setattr, S, "DEFAULT_AGENT_PROVIDER", S.PINNED_AGENT_PROVIDER)
-        with mock.patch.object(S, "_model_family", side_effect=OSError("unreadable")), \
+        self.addCleanup(setattr, SR, "DEFAULT_AGENT_PROVIDER", S.PINNED_AGENT_PROVIDER)
+        with mock.patch.object(SR, "_model_family", side_effect=OSError("unreadable")), \
                 redirect_stderr(io.StringIO()) as err:
             self.assertEqual(S.apply_agent_resolution(self.project / "plan.json"),
                              S.PINNED_AGENT_PROVIDER)
@@ -777,7 +778,7 @@ class TestReaders(StateHome):
             "provider": "codex/gpt-6.1-astra",
             "probe": {"Provider": "codex", "Model": "gpt-6-astra", "Thinking": "high"}}))
         pinned = S.DEFAULT_AGENT_PROVIDER
-        self.addCleanup(setattr, S, "DEFAULT_AGENT_PROVIDER", pinned)
+        self.addCleanup(setattr, SR, "DEFAULT_AGENT_PROVIDER", pinned)
         self.assertEqual(S.apply_agent_resolution(self.project / "plan.json"), pinned)
 
 

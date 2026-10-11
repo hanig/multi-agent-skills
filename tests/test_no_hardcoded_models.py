@@ -136,7 +136,7 @@ def literal_hits(source, ids):
 class TestNoHardcodedModels(unittest.TestCase):
     def test_the_sweep_covers_the_code_that_routes(self):
         names = {path.name for path in SOURCES}
-        for expected in ("swarm.py", "committee.py", "review.py",
+        for expected in ("swarm.py", "swarm_routing.py", "swarm_types.py", "committee.py", "review.py",
                          "skill_installer.py", "tracker_sync_check.py",
                          "integration_tests.py", "changed_tests_stable.py"):
             self.assertIn(expected, names)

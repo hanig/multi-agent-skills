@@ -543,9 +543,9 @@ class TestTheDefaultAgent(unittest.TestCase):
                   if isinstance(n, ast.FunctionDef) and n.name == "_submit")
         body = ast.unparse(fn)
         # provider and thinking fall back to the default; model has no default
-        self.assertIn("u.get('provider') or DEFAULT_AGENT_PROVIDER",
+        self.assertIn("u.get('provider') or SR.DEFAULT_AGENT_PROVIDER",
                       body.replace('"', "'"))
-        self.assertIn("u.get('thinking', default_thinking_for(u))",
+        self.assertIn("u.get('thinking', SR.default_thinking_for(u))",
                       body.replace('"', "'"))
 
     def test_thinking_can_be_switched_off_for_a_provider_without_it(self):
