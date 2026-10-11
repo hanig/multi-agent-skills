@@ -103,6 +103,19 @@ class TestCandidateMergeIsTheSubject(IntegrationRepo):
                 self.assertIn('integration ran', by_claim[V.INTEGRATION_CLAIM]['stdout_tail'])
                 self.assertIn('stability ran', by_claim[V.STABILITY_CLAIM]['stdout_tail'])
 
+        # The remote transport supplies shared host facts; each returned
+        # receipt still owns its entire execution record.
+        remote_execution = V.RV.local_execution(V.RV.resolve_executables())
+        outcomes = [dict(exit_code=0, stdout='', stderr='') for _ in programs]
+        with mock.patch.object(V.RV, 'run_remote', return_value=(outcomes, remote_execution)):
+            rows, error = V.run_merge_preconditions(
+                U.run, self.repo, produced, target,
+                execution_policy={'verification_host': {'executor': 'direct'}})
+        self.assertIsNone(error)
+        self.assertIsNot(rows[0]['execution'], rows[1]['execution'])
+        self.assertIsNot(rows[0]['execution']['executables'], rows[1]['execution']['executables'])
+        self.assertIsNot(rows[0]['execution'], remote_execution)
+
     def test_candidate_merge_execution_does_not_mutate_caller_tools(self):
         target = self.commit_from_base('target', 'left.txt', '1')
         produced = self.commit_from_base('produced', 'compatible.txt', '1')
