@@ -183,6 +183,24 @@ class TestRoundReservations(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.reserve(1, fresh="fast")
 
+    def test_lower_round_is_refused_even_without_its_marker(self):
+        self.reserve(3)
+        result = self.invoke(2)
+        self.assertEqual(result[0], 4, result[2])
+        self.assertEqual((result[3], result[4]), ([], []))
+        self.assertEqual(len(self.markers()), 1)
+
+    def test_state_home_may_use_a_system_or_user_directory_alias(self):
+        actual = self.root / "actual-state"
+        actual.mkdir()
+        alias = self.root / "alias-state"
+        alias.symlink_to(actual, target_is_directory=True)
+        with patch.dict(os.environ, {"XDG_STATE_HOME": str(alias)}):
+            self.reserve(1)
+            with self.assertRaises(ValueError):
+                self.reserve(1)
+        self.assertEqual(len(list(actual.glob("hanig-review-gate/rounds/*/*.json"))), 1)
+
     def test_exclusive_marker_rejects_a_precreated_concurrent_winner(self):
         """Inject a winner after the ledger scan, at the O_EXCL boundary.
 

@@ -139,7 +139,9 @@ def round_ledger_root():
     base = Path(configured) if configured else Path.home() / ".local" / "state"
     if not base.is_absolute():
         raise ValueError("round ledger requires an absolute XDG_STATE_HOME")
-    return base / "hanig-review-gate" / "rounds"
+    # Resolve the configured storage location once (including ordinary system
+    # aliases such as /var); marker names and identity values remain exact.
+    return (base / "hanig-review-gate" / "rounds").resolve()
 
 
 def reserve_round(identity, round_no, profile, fresh_from=None):

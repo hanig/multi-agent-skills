@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 def isolated_reservation(module, original, args):
     with tempfile.TemporaryDirectory(prefix="review-round-fixture-") as root, \
-            patch.object(module, "round_ledger_root", return_value=Path(root)), \
+            patch.object(module, "round_ledger_root", return_value=Path(root).resolve()), \
             patch.object(module, "change_identity", return_value="a" * 64):
         if args.fresh_cycle_from:
             module.reserve_round("a" * 64, module.MAX_ROUNDS,
