@@ -183,6 +183,15 @@ class TestDocsCommand(unittest.TestCase):
         self.doc.write_text(document(body='Purpose.\n\n- Item\n\n      [code](missing.md)\n\n- ```md\n  [code](missing.md)\n  ```'), encoding='utf-8')
         self.assertEqual(0, self.run_command('write')[0])
 
+    def test_link_shaped_titles_are_not_links(self):
+        for title in ['"[ghost](missing.md)"', "'[ghost](missing.md)'", '"line\n[ghost](missing.md)"',
+                      '"escaped \\\" quote [ghost](missing.md)"']:
+            with self.subTest(title=title):
+                self.doc.write_text(document(body='Purpose.\n\n[link](example.md ' + title + ')'), encoding='utf-8')
+                self.assertEqual(0, self.run_command('write')[0])
+        self.doc.write_text(document(body='Purpose.\n\n[link][ref]\n\n[ref]: example.md "[ghost](missing.md)"'), encoding='utf-8')
+        self.assertEqual(0, self.run_command('write')[0])
+
     def test_cli_runs_from_an_unrelated_directory(self):
         result = subprocess.run([sys.executable, str(SCRIPT), 'check', '--root', str(self.root)],
                                 cwd=str(self.root.parent), capture_output=True, text=True)

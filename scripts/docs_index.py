@@ -172,6 +172,24 @@ def destination(text, start):
     return text[start:end], end
 
 
+def title_end(text, start):
+    """Consume an optional Markdown title, including escaped delimiters."""
+    pos = start
+    while pos < len(text) and text[pos] in ' \t\r\n':
+        pos += 1
+    if pos == start or pos == len(text) or text[pos] not in '\"\'(':
+        return pos
+    end_char = ')' if text[pos] == '(' else text[pos]
+    pos += 1
+    while pos < len(text):
+        if text[pos] == end_char and not escaped(text, pos):
+            return pos + 1
+        if text[pos:pos + 2] == '\n\n':
+            return None
+        pos += 1
+    return None
+
+
 def label(value):
     return ' '.join(value.split()).casefold()
 
@@ -185,7 +203,7 @@ def markdown_links(text):
         dest = destination(visible, match.end())
         if dest:
             definitions.setdefault(label(match[1]), dest[0])
-            definition_spans.append((match.start(), dest[1]))
+            definition_spans.append((match.start(), title_end(visible, dest[1]) or dest[1]))
             yield match.start(), dest[0]
     for start, end in reversed(definition_spans):
         visible = visible[:start] + blank(visible[start:end]) + visible[end:]
@@ -202,11 +220,15 @@ def markdown_links(text):
         if after < len(visible) and visible[after] == '(':
             dest = destination(visible, after + 1)
             if dest:
-                tail = visible[dest[1]:]
-                # Optional quoted/parenthesized title, then closing paren.
-                closing = re.match(r'\s*(?:"[^"\n]*"|\x27[^\x27\n]*\x27|\([^()\n]*\))?\s*\)', tail)
-                if closing:
+                closing = title_end(visible, dest[1])
+                if closing is not None:
+                    while closing < len(visible) and visible[closing] in ' \t\r\n':
+                        closing += 1
+                if closing is not None and closing < len(visible) and visible[closing] == ')':
                     yield pos, dest[0]
+                    # A title may contain link-shaped prose. Keep the label
+                    # available for linked images, but mask the destination.
+                    visible = visible[:after] + blank(visible[after:closing + 1]) + visible[closing + 1:]
         else:
             reference = visible[pos + 1:end]
             if after < len(visible) and visible[after] == '[':
