@@ -41,6 +41,18 @@ class TestPriorDecisionInputs(unittest.TestCase):
         self.code = self.write("candidate.py", "def identity(value):\n    return value\n")
         self.context = (FIXTURES / "context.txt").read_text().rstrip("\n")
         self.dispositions = json.loads((FIXTURES / "dispositions.json").read_text())
+        # Preserve the captured historical JSON; supply synthetic evidence only
+        # to the current-schema CLI fixture, without inventing historical runs.
+        for entry in self.dispositions.values():
+            entry["reproduction"] = {
+                "setup": "synthetic offline schema fixture",
+                "command": "python3 synthetic_probe.py",
+                "expected": "synthetic failure",
+                "observed": "synthetic observation",
+                "revision": "a" * 40,
+            }
+        self.dispositions_path = self.write(
+            "current-dispositions.json", json.dumps(self.dispositions))
         self.disputed = next(entry for entry in self.dispositions.values()
                              if entry["disposition"] == "not-reproduced")
 
@@ -142,7 +154,7 @@ class TestPriorDecisionInputs(unittest.TestCase):
 
     def test_010_live_dispute_reaches_panel_verbatim(self):
         self.positive_control()
-        result = self.invoke(context=self.context, dispositions=FIXTURES / "dispositions.json")
+        result = self.invoke(context=self.context, dispositions=self.dispositions_path)
         self.delivered(result, self.context, "[live-context-acceptance]")
         self.delivered(result, self.disputed["summary"], "[disputed-summary-delivery]")
         self.delivered(result, self.disputed["reason"], "[disputed-reason-delivery]")

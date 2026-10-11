@@ -2680,6 +2680,13 @@ class TestFindingDispositions(unittest.TestCase):
             "summary": summary,
             "disposition": disposition,
             "reason": "the named branch rejects this input before dispatch",
+            "reproduction": {
+                "setup": "offline fixture with invalid dispatch input",
+                "command": "python3 check.py",
+                "expected": "input is dispatched",
+                "observed": "input is rejected",
+                "revision": "a" * 40,
+            },
         }
 
     def test_not_reproduced_finding_is_injected_verbatim(self):
@@ -2745,7 +2752,11 @@ class TestFindingDispositions(unittest.TestCase):
         prompt = review.build_prompt(
             "code", [review.HONEST_RUN_CLAIM], False, "context",
             dispositions=dispositions)
-        self.assertNotIn(entry["summary"], prompt)
+        disagreement = prompt.split("PRIOR FINDINGS AND REPRODUCTION EVIDENCE")[0]
+        self.assertNotIn(entry["summary"], disagreement)
+        self.assertIn(entry["summary"], prompt)
+        for value in entry["reproduction"].values():
+            self.assertIn(value, prompt)
 
     def test_digest_must_match_location_and_summary(self):
         _digest, entry = self.entry()
