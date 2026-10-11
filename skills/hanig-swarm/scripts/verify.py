@@ -29,6 +29,19 @@ merge operator also admits changed-tests-stable against this same binding when
 the target policy declares it. Ordinary swarm verification keeps its existing
 anchored-base authorization and produced-head behavior for other claims.
 
+Without a declared Python, a recognized env selector whose bare command is
+python or python3 and whose search retains the private bin uses the launcher
+interpreter (role implicit-launcher). Absolute Python shebang commands remain
+native: their named path is recorded with role native and version explicitly
+unprobed. Recognized relative/versioned commands and env selectors that clear,
+unset, or override PATH are INCOMPLETE, naming the selector. Unparsed native
+syntax and non-Python programs retain their old launch behavior and launcher
+metadata. Declared interpreters keep their existing selection rules.
+
+Receipt admission is unchanged. Receipts recorded before this change retain
+their old meaning on an unchanged binding; the new role does not repair them
+or erase a previously recorded failure.
+
 WHAT THIS DOES NOT ESTABLISH. The agent runs as the same Unix user as the
 coordinator, so it can write any file the coordinator can, including the
 launch record and the attempt receipts. No arrangement of files defends
@@ -43,6 +56,7 @@ what the receipts have always said about isolation.
 Python 3.8+, standard library only.
 """
 import base64
+import copy
 import hashlib
 import json
 import os
@@ -669,7 +683,7 @@ def run_in_candidate_merge(runner, repo, produced_head, target_commit, path,
     result is evidence unavailability, not permission to test either branch.
     Returns ``(outcome, basis, error)``.
     """
-    executables = executables or RV.resolve_executables(excluded_roots=(repo,))
+    executables = copy.deepcopy(executables or RV.resolve_executables(excluded_roots=(repo,)))
     runner = RV.GitRunner(runner, executables)
     tmp, tree, basis, error = _candidate_checkout(
         runner, repo, produced_head, target_commit)
@@ -811,16 +825,19 @@ def run_merge_preconditions(runner, repo, produced_head, target_commit,
                 runner, tree, basis, programs, remote, timeout, repo, state_dir, unit,
                 journal_entries, retrieve_only=retrieve_remote, recovery=recovery)
             execution["coordinator_executables"] = executables
+            executions = [copy.deepcopy(execution) for _ in outcomes]
         else:
             outcomes = []
-            execution = RV.local_execution(executables)
+            executions = []
             for program in programs:
+                program_executables = copy.deepcopy(executables)
                 outcome, error = run_pinned(
                     runner, program["path"], program["digest"], args=program["args"],
                     timeout=timeout, cwd=tree, observe_completion=True,
-                    executables=executables)
+                    executables=program_executables)
                 outcomes.append(outcome if not error else RV.incomplete(error))
-        for check, extra, outcome in zip(checks, extras, outcomes):
+                executions.append(RV.local_execution(program_executables))
+        for check, extra, outcome, execution in zip(checks, extras, outcomes, executions):
             claim, entry, policy_digest, digest, corpus = check
             receipt = dict(corpus, **basis, **extra)
             receipt["execution"] = execution
@@ -1013,16 +1030,18 @@ def _python_selector(first_line):
 
     Only pinned bytes supply the language. Env splits accept ordinary quoting,
     not backslash escapes or expansion. Unknown options cannot guess a command.
-    Native implicit execution never calls this parser.
+    Implicit execution also uses the parsed command and env prefix to decide
+    whether a private-bin symlink controls interpreter selection.
     """
     declaration = os.fsdecode(first_line[2:]).strip()
     parts = declaration.split(None, 1)
     if not parts:
         raise ValueError("missing shebang interpreter")
-    prefix, argv0 = [], None
+    prefix, argv0, private_path = [], None, False
     words = declaration.split()
     if posixpath.basename(parts[0]) == "env":
         prefix = [parts[0]]
+        private_path = parts[0] == "/usr/bin/env"
         raw = parts[1] if len(parts) == 2 else ""
         split = False
         split_parts = raw.split(None, 1)
@@ -1050,6 +1069,8 @@ def _python_selector(first_line):
                 index += 1
                 break
             if word in ("-", "-i", "--ignore-environment", "-v", "--debug"):
+                if word in ("-", "-i", "--ignore-environment"):
+                    private_path = False
                 prefix.append(word)
                 index += 1
                 continue
@@ -1072,8 +1093,12 @@ def _python_selector(first_line):
                 argv0 = value
             else:
                 prefix.extend(words[index:index + consumed])
+            if option == "-P" or (option in ("-u", "--unset") and value == "PATH"):
+                private_path = False
             index += consumed
         while index < len(words) and "=" in words[index]:
+            if words[index].split("=", 1)[0] == "PATH":
+                private_path = False
             prefix.append(words[index])
             index += 1
         words = words[index:]
@@ -1083,7 +1108,34 @@ def _python_selector(first_line):
         return None
     if argv0 == "":
         raise ValueError("empty process argv0 is unsupported")
-    return {"prefix": prefix, "argv0": argv0, "args": words[1:]}
+    return {"prefix": prefix, "argv0": argv0, "args": words[1:],
+            "command": words[0], "private_path": private_path}
+
+
+def _implicit_python(first_line, python):
+    """Record native selection or select launcher links; never probe PATH.
+
+    Only /usr/bin/env with no search-changing prefix is controlled here.
+    Absolute commands are recorded verbatim, without claiming a measured
+    version. Unsupported native syntax retains the previous launcher-only
+    record. A recognized but uncontrolled search refuses before execution.
+    """
+    if not first_line.startswith(b"#!"):
+        return False
+    try:
+        selection = _python_selector(first_line)
+    except ValueError:
+        return False
+    if selection is None:
+        return False
+    command = selection["command"]
+    if os.path.isabs(command):
+        python.update(path=command, role="native", version="unprobed (native selector)")
+        return False
+    if command in ("python", "python3") and selection["private_path"]:
+        python["role"] = "implicit-launcher"
+        return True
+    raise ValueError("uncontrolled implicit Python selector: " + os.fsdecode(first_line))
 
 
 def run_pinned(runner, path, expect_digest, args=None, timeout=900,
@@ -1120,6 +1172,12 @@ def run_pinned(runner, path, expect_digest, args=None, timeout=900,
                 # executables. A candidate's cwd/PATH never supplies either.
                 first_line = Path(copy).read_bytes().split(b"\n", 1)[0]
                 select_python = executables["python"].get("declared", True)
+                implicit_python = False
+                if not select_python:
+                    try:
+                        implicit_python = _implicit_python(first_line, executables["python"])
+                    except ValueError as exc:
+                        return None, str(exc)
                 if select_python and not first_line.startswith(b"#!"):
                     argv.insert(0, executables["python"]["path"])
                 elif select_python:
@@ -1136,7 +1194,7 @@ def run_pinned(runner, path, expect_digest, args=None, timeout=900,
                 bindir = Path(tmpdir) / "bin"
                 bindir.mkdir()
                 for name, key in (("python3", "python"), ("python", "python"), ("git", "git")):
-                    if key != "python" or select_python:
+                    if key != "python" or select_python or implicit_python:
                         (bindir / name).symlink_to(executables[key]["path"])
                 # Add executable configuration only after the ordinary
                 # coordinator spawn's unchanged child_env() boundary.
