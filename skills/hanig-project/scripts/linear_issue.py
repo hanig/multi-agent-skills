@@ -211,20 +211,31 @@ def body_identity(prefix):
     return digest_identity(prefix, 'body')
 
 
-def components(body):
+def components(body, use_digest=True):
     body = body or ''
     mark = trailer(body)
     prefix = mark['prefix'] if mark else body
-    prefix, body_digest = body_identity(prefix) if mark else (prefix, None)
+    prefix, body_digest = body_identity(prefix) if mark and use_digest else (prefix, None)
     _, reason_digest = digest_identity(prefix, 'reason') if body_digest else (prefix, None)
-    return {'body': body_digest,
+    return {'body': body_digest if body_digest is not None else INDEPENDENT.sub('', prefix),
             'independence': reason_digest if reason_digest is not None else INDEPENDENT.findall(prefix),
             'trailer': {k: mark[k] for k in ('deps', 'op', 'approver', 'by')} if mark else None}
 
 
-def issue_identity(issue):
-    """Compare title and managed identity lines, never rendered prose."""
-    return dict(components(issue.get('description')), title=issue['title'])
+def issue_identity(issue, reference=None, exact_legacy=False):
+    """Use digests only when recorded; legacy prose retains the base comparison.
+
+    A rendering difference is a required legacy refusal. A later digest-bearing
+    edit cannot upgrade the immutable legacy operation's comparison mode.
+    """
+    reference = issue if reference is None else reference
+    mark = trailer(reference.get('description') or '')
+    use_digest = mark is not None and body_identity(mark['prefix'])[1] is not None
+    if exact_legacy and not use_digest:
+        # The base used the complete description for update and read-back;
+        # preflight compared its body, independence and trailer separately.
+        return {'title': issue['title'], 'description': issue.get('description')}
+    return dict(components(issue.get('description'), use_digest), title=issue['title'])
 
 
 def description(prefix, incoming, outgoing, op, approver, by=None):
@@ -446,8 +457,6 @@ def prepare(args, client, sync, identity, op):
     old_prefix, old_reason_digest = (digest_identity(old_prefix, 'reason') if old_digest else
                                      (old_prefix, None))
     prefix = args.body if args.body is not None else old_prefix
-    body_digest = (hashlib.sha256(args.body.encode('utf-8')).hexdigest() if args.body is not None else
-                   old_digest or hashlib.sha256(prefix.encode('utf-8')).hexdigest())
     reason = args.independent
     if reason is None and not getattr(args, 'clear_independent', False):
         reasons = INDEPENDENT.findall(old_prefix)
@@ -457,6 +466,12 @@ def prepare(args, client, sync, identity, op):
                      hashlib.sha256((reason or '').encode('utf-8')).hexdigest())
     if args.body is None or getattr(args, 'clear_independent', False):
         prefix = INDEPENDENT.sub('', prefix)
+    # Migration hashes precisely the content sent, after stripping the legacy
+    # independence line and before appending any managed lines. Existing digest
+    # identity is retained when the caller did not supply replacement content.
+    body_digest = (args.body_sha256 if args.body is not None and prefix == args.body else
+                   old_digest if args.body is None and old_digest is not None else
+                   hashlib.sha256(prefix.encode('utf-8')).hexdigest())
     if reason:
         prefix += ('\n' if prefix and not prefix.endswith('\n') else '') + 'swarm-independent: ' + reason + '\n'
     touched = {target_id}
@@ -594,10 +609,10 @@ def read_managed(spec, sync, client, is_confirmed, path, reader=None):
         resolvable = all(identities[i] for i in row['desired']['incoming'] + row['desired']['outgoing'])
         desired = desired_value(row, identities) if resolvable else row['before']
         before = row['before'] or desired
-        for field, value in issue_identity(issue).items():
-            old = issue_identity(before)[field]
-            new = issue_identity(desired)[field]
-            if value != new and (is_confirmed or value != old):
+        old, new = issue_identity(before), issue_identity(desired)
+        live_old, live_new = issue_identity(issue, before), issue_identity(issue, desired)
+        for field in new:
+            if live_new[field] != new[field] and (is_confirmed or live_old[field] != old[field]):
                 raise ValueError('managed %s changed: %s' % (field, issue['identifier']))
     # Any extra incident edge is outside both recorded snapshots; do not write.
     edges, _ = sync.edges_of([i for i in live.values() if i])
@@ -704,7 +719,7 @@ def apply(spec, path, client, sync, initial=None, handler=None):
             sync.check_membership(current, spec['project'], spec['team'])
             identities[iid] = current['identifier']
         elif (not handler.issue_matches(current, desired) if handler is not None else
-              issue_identity(current) != issue_identity(desired)):
+              issue_identity(current, desired, exact_legacy=True) != issue_identity(desired, exact_legacy=True)):
             changes = handler.issue_update(current, desired) if handler is not None else desired
             client.query('mutation OperationUpdate($id: String!, $input: IssueUpdateInput!) { '
                          'issueUpdate(id: $id, input: $input) { success } }', {'id': iid, 'input': changes})
@@ -783,8 +798,9 @@ def verify(spec, client, sync, reader=None):
         issue = reader.seen[row['id']]
         sync.check_membership(issue, spec['project'], spec['team'])
         refuse_deleted_creation(issue, None)
-        expected = dict(issue_identity(desired_value(row, identities)), identifier=identities[row['id']])
-        actual_identity = dict(issue_identity(issue), identifier=issue['identifier'])
+        desired_issue = desired_value(row, identities)
+        expected = dict(issue_identity(desired_issue, exact_legacy=True), identifier=identities[row['id']])
+        actual_identity = dict(issue_identity(issue, desired_issue, exact_legacy=True), identifier=issue['identifier'])
         for field, desired in expected.items():
             if actual_identity[field] != desired:
                 raise ValueError('issue %s read-back differs: %s' % (field, row['id']))
@@ -802,8 +818,10 @@ def verify(spec, client, sync, reader=None):
 def run(args, client, sync):
     replay = args.issue_command == 'replay'
     if not replay:
-        args.body = (Path(args.body_file).read_bytes().decode('utf-8') if args.body_file else
-                     sys.stdin.read() if args.body_stdin else None)
+        body_bytes = (Path(args.body_file).read_bytes() if args.body_file else
+                      sys.stdin.buffer.read() if args.body_stdin else None)
+        args.body = body_bytes.decode('utf-8') if body_bytes is not None else None
+        args.body_sha256 = hashlib.sha256(body_bytes).hexdigest() if body_bytes is not None else None
         reject_key(vars(args), client._key)
         if args.body is not None:
             lines = [line for line in args.body.splitlines() if line.strip()]

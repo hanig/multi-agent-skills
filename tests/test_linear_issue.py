@@ -459,7 +459,7 @@ class TestIssue(IssueCase):
 
     def test_markdown_rendering_new_edit_and_replay(self):
         body = '- A task\nhttps://example.test/task\n\n'
-        self.marked('1', body=body)
+        self.marked('1', body=body + '`swarm-body: ' + hashlib.sha256(body.encode()).hexdigest() + '`\n')
         self.assertEqual(self.issue('new', '--blocked-by', 'ARC-1', body=body), 0,
                          self.stdout + self.stderr)
         new_op = re.search(r'^operation (\S+)$', self.stdout, re.M)[1]
@@ -490,9 +490,9 @@ class TestIssue(IssueCase):
             self.assertEqual(self.checks['op_incomplete'], 'CLEAN')
         self.assertNotEqual(op, new_op)
 
-    def test_replay_existing_rerendered_issue_confirms_legacy_record(self):
+    def test_replay_existing_rerendered_issue_refuses_legacy_record(self):
         # The in-flight records predate body_sha256. Preserve their exact
-        # immutable specification, and recover the already-created issue.
+        # immutable specification and exact base comparison: rendering refuses.
         self.crash_after(1, lambda: self.issue('new', '--independent', 'reason',
                                              body='- Task\nhttps://example.test/task\n\n'))
         path = self.records()[0]
@@ -507,13 +507,88 @@ class TestIssue(IssueCase):
         self.audit()
         self.assertEqual(self.checks['op_incomplete'], 'DRIFT')
         writes = copy.deepcopy(self.fake.mutations)
-        self.assertEqual(self.issue('replay', path.stem), 0, self.stdout + self.stderr)
+        self.assertEqual(self.issue('replay', path.stem), 3, self.stdout + self.stderr)
         self.assertEqual(self.fake.mutations, writes)
         self.assertEqual(path.read_bytes(), raw)
-        self.assertTrue(LI.confirmed(path))
+        self.assertFalse(LI.confirmed(path))
         self.audit()
         self.assertEqual(self.checks['declared_edges'], 'CLEAN')
-        self.assertEqual(self.checks['op_incomplete'], 'CLEAN')
+        self.assertEqual(self.checks['op_incomplete'], 'DRIFT')
+
+    def test_legacy_exact_prose_comparison_survives_later_digest_edit(self):
+        self.crash_after(1, lambda: self.issue('new', '--independent', 'reason', body='Body\n'))
+        path = self.records()[0]
+        spec = LI.load_record(path)
+        row = spec['issues'][0]
+        row['desired'].pop('body_sha256')
+        row['desired'].pop('reason_sha256')
+        path.write_text(json.dumps({'spec': spec, 'sha256': LI.digest(spec)}))
+        live = self.fake.issues[spec['target']]
+        identities = dict(spec['identities'], **{spec['target']: live['identifier']})
+        legacy = LI.desired_value(row, identities)
+        live.update(legacy)
+        raw = path.read_bytes()
+        for confirmed in (False, True):
+            if confirmed:
+                self.assertEqual(self.issue('replay', path.stem), 0, self.stdout + self.stderr)
+            for text in ('Edited\n', '* Body\n'):
+                live['description'] = legacy['description'].replace('Body\n', text)
+                writes = copy.deepcopy(self.fake.mutations)
+                self.assertEqual(self.issue('replay', path.stem), 3, self.stdout + self.stderr)
+                self.assertIn('managed body changed', self.stdout)
+                self.assertEqual(self.fake.mutations, writes)
+                self.assertEqual(path.read_bytes(), raw)
+            live.update(legacy)
+        self.assertEqual(self.issue('edit', live['identifier'], '--title', 'new title'), 0,
+                         self.stdout + self.stderr)
+        self.assertIn('`swarm-body:', live['description'])
+        # Restore the old title/provenance too: even then the new digest must
+        # not let this immutable legacy record certify different body bytes.
+        mark = LI.trailer(live['description'])
+        live.update(title=legacy['title'], description=LI.description(
+            mark['prefix'], (), (), row['desired']['op'], row['desired']['approver']))
+        writes = copy.deepcopy(self.fake.mutations)
+        self.assertEqual(self.issue('replay', path.stem), 3, self.stdout + self.stderr)
+        self.assertIn('managed body changed', self.stdout)
+        self.assertEqual(self.fake.mutations, writes)
+        self.assertEqual(path.read_bytes(), raw)
+
+    def test_legacy_migration_hashes_sent_content_before_managed_lines(self):
+        for flags in (('--title', 'Renamed'), ('--independent', 'replacement'),
+                      ('--body-file', str(self.body))):
+            with self.subTest(flags=flags):
+                self.marked('1', body='Body\nswarm-independent: legacy\n')
+                self.body.write_bytes(b'Replacement\r\n')
+                self.assertEqual(self.issue('edit', 'ARC-1', *flags), 0,
+                                 self.stdout + self.stderr)
+                sent = next(v['input']['description'] for q, v in reversed(self.fake.mutations)
+                            if 'OperationUpdate' in q and v['id'] == '1')
+                content = sent[:sent.index('swarm-independent:')].encode('utf-8')
+                self.assertEqual(content, b'Replacement\r\n' if '--body-file' in flags else b'Body\n\n')
+                emitted = re.search(r'(?m)^`swarm-body: ([0-9a-f]{64})`$', sent)[1]
+                self.assertEqual(emitted, hashlib.sha256(content).hexdigest())
+                self.assertNotEqual(emitted, hashlib.sha256(sent.encode('utf-8')).hexdigest())
+
+    def test_legacy_counterpart_rendering_refuses_without_recorded_digest(self):
+        self.marked('1', body='Prose bytes.\n\n  More bytes.  \n\nswarm-independent: why\n')
+        self.assertEqual(self.issue('new', '--blocked-by', 'ARC-1'), 3, self.stdout + self.stderr)
+        self.assertIn('issue description read-back differs: 1', self.stdout)
+        self.assertFalse(LI.confirmed(self.records()[0]))
+
+    def test_body_stdin_crlf_hashes_binary_input_despite_text_translation(self):
+        piped = b'- Task\r\nUnicode: \xc3\xa9\r\n'
+        # A translating text wrapper makes a text-read mutation observable on
+        # POSIX too; real POSIX stdin itself preserved CRLF in reproduction.
+        with io.TextIOWrapper(io.BytesIO(piped), encoding='utf-8', newline=None) as stream:
+            with mock.patch.object(sys, 'stdin', stream):
+                self.assertEqual(self.cli('issue', 'new', '--binding', str(self.binding),
+                                          '--title', 'piped', '--body-stdin', '--independent',
+                                          'reason', '--approver', 'owner'), 0, self.stdout + self.stderr)
+        sent = next(v['input']['description'] for q, v in self.fake.mutations if 'OperationCreate' in q)
+        self.assertEqual(sent[:sent.index('swarm-independent:')].encode('utf-8'), piped)
+        emitted = re.search(r'(?m)^`swarm-body: ([0-9a-f]{64})`$', sent)[1]
+        self.assertEqual(emitted, hashlib.sha256(piped).hexdigest())
+        self.assertNotEqual(emitted, hashlib.sha256(piped.replace(b'\r\n', b'\n')).hexdigest())
 
     def test_incomplete_rerendered_replay_sends_no_mutation(self):
         self.crash_after(1, lambda: self.issue('new', '--independent', 'reason',
@@ -1460,7 +1535,10 @@ class TestIssue(IssueCase):
                                     body='depends on: ARC-1, ARC-2'), 0, self.stdout)
 
     def test_4a_counterpart_preserves_prose_markers_and_both_removal_directions(self):
-        body = 'Prose bytes.\n\n  More bytes.  \n\nswarm-independent: why\n'
+        content = 'Prose bytes.\n\n  More bytes.  \n\n'
+        body = (content + 'swarm-independent: why\n`swarm-reason: ' +
+                hashlib.sha256(b'why').hexdigest() + '`\n`swarm-body: ' +
+                hashlib.sha256(content.encode()).hexdigest() + '`\n')
         self.marked('1', body=body)
         self.assertEqual(self.issue('new', '--blocked-by', 'ARC-1'), 0, self.stdout)
         target = self.target()
@@ -1712,7 +1790,7 @@ class TestIssue(IssueCase):
             self.assertEqual(self.records(), [])
         self.assertEqual(self.issue('new', '--independent', 'why', body=KEY), 2)
         self.assertEqual(self.fake.calls, [])
-        with mock.patch.object(sys, 'stdin', io.StringIO('from stdin')), mock.patch.object(LS.subprocess, 'run', side_effect=AssertionError('child')):
+        with io.TextIOWrapper(io.BytesIO(b'from stdin'), encoding='utf-8') as stream, mock.patch.object(sys, 'stdin', stream), mock.patch.object(LS.subprocess, 'run', side_effect=AssertionError('child')):
             self.assertEqual(self.cli('issue', 'new', '--binding', str(self.binding), '--title', 'stdin', '--body-stdin', '--independent', 'why', '--approver', 'owner'), 0, self.stdout)
         self.assertTrue(self.fake.issues[self.target()]['description'].startswith('from stdin'))
         for path in (self.root / 'ops').rglob('*'):
