@@ -1485,7 +1485,7 @@ class TestFailClosed(unittest.TestCase):
 
 class TestPortability(unittest.TestCase):
     def test_stdlib_only(self):
-        allowed = {"argparse", "concurrent", "datetime", "errno", "hashlib", "json", "os", "re", "signal", "stat",
+        allowed = {"argparse", "concurrent", "datetime", "errno", "fcntl", "hashlib", "json", "os", "re", "signal", "stat",
                    "subprocess", "sys", "tempfile", "time", "urllib", "pathlib"}
         # Repo-local modules that ship in review.py's own scripts directory
         # and are themselves stdlib-only (tests/test_stdlib_imports.py).

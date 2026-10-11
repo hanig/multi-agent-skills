@@ -233,8 +233,9 @@ def reserve_review_round(args):
         record = reserve_round(identity, args.round, args.selected_profile,
                                args.fresh_cycle_from)
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        config_error("round reservation refused: {}. Inspect the enforcing ledger; "
-                     "do not delete reservations to restart a review.".format(exc))
+        config_error("round reservation refused: {}. Inspect the enforcing ledger "
+                     "and pass the next admissible round; do not delete "
+                     "reservations to restart a review.".format(exc))
     return record
 
 HONEST_RUN_CLAIM = "This change cannot make an honest run fail."
