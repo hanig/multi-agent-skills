@@ -16,6 +16,7 @@ Usage:
     review.py --staged                   review staged changes
     review.py --range HEAD~3..HEAD       review a commit range
     review.py --file a.py --file b.py    review whole files
+    review.py --size --range BASE..HEAD  offline gathered-input character count
     review.py ... --claim "X is true" --claim "Y is handled"
     review.py --list                     show reviewers and live availability
 
@@ -29,6 +30,10 @@ Exit codes:
     7  REVIEW_CLAIMS_REFUTED quorum reviewed; refuted claims, no confirmed defect
 
 Never treat a nonzero state as success. An unreviewed change is unreviewed.
+
+The offline --size mode has separate exit codes: 0 below the 100,000-character
+planning budget, 1 from 100,000 to 179,999, 2 at or above the 180,000-character
+truncation limit. These are size results, never review verdicts.
 
 The prior-decision guard classifies auxiliary input documents: --context,
 every --file, and disputed finding fields forwarded from --dispositions.
@@ -97,6 +102,7 @@ ADJUDICATION_DECISIONS = ("overruled", "accepted", "refuted_by_reproduction")
 # Keep payloads bounded; an oversized diff silently truncated is a lie about
 # what was reviewed, so truncation is always reported in the output.
 MAX_CHARS = 180_000
+PLANNING_CHARS = 100_000
 
 # Every reviewer here is a reasoning model, and reasoning tokens come out of the
 # same budget as the answer. At 16000 a 150KB review spent the whole budget
@@ -1523,6 +1529,21 @@ def gather(args):
     return body, (label or "nothing")
 
 
+def cmd_size(args):
+    """Measure the review's gathered body before truncation, without providers."""
+    body, _label = gather(args)
+    count = len(body)
+    report = {"characters": count, "planning_budget": PLANNING_CHARS,
+              "truncation_limit": MAX_CHARS}
+    if args.json:
+        print(json.dumps(report))
+    else:
+        print(f"gathered input: {count} characters; "
+              f"planning budget: {PLANNING_CHARS}; "
+              f"truncation limit: {MAX_CHARS}")
+    return 2 if count >= MAX_CHARS else 1 if count >= PLANNING_CHARS else 0
+
+
 def finding_digest(location, summary):
     """Stable key for a prior finding's human-visible identity."""
     identity = json.dumps([location, summary], ensure_ascii=False,
@@ -2574,6 +2595,10 @@ def main():
     src.add_argument("--staged", action="store_true", help="staged changes")
     src.add_argument("--range", help="commit range, e.g. HEAD~3..HEAD")
     ap.add_argument("--file", action="append", default=[], help="whole file; repeatable")
+    ap.add_argument("--size", action="store_true",
+                    help="offline gathered-input character count; exit 0 below "
+                         f"{PLANNING_CHARS}, 1 below {MAX_CHARS}, "
+                         f"2 at or above {MAX_CHARS}")
     ap.add_argument("--claim", action="append", default=[],
                     help="a claim to be checked against the code; repeatable")
     ap.add_argument("--context", default="",
@@ -2656,7 +2681,7 @@ def main():
                     help="external decision (default overruled)")
     args = ap.parse_args()
     if args.adjudicate is not None or args.open_findings:
-        if (args.diff or args.staged or args.range or args.file or args.list or args.kind
+        if (args.diff or args.staged or args.range or args.file or args.list or args.size or args.kind
                 or args.plan or args.claim or args.escalate or args.only
                 or args.profile or args.dispositions or args.fresh_cycle_from
                 or args.allow_single_reviewer or args.context or args.threat_model):
@@ -2669,6 +2694,12 @@ def main():
     if any(value is not None for value in
            (args.head, args.accepted_by, args.reason, args.decision)):
         config_error("Pass --adjudicate or --open-findings with ledger fields.")
+    if not (args.diff or args.staged or args.range or args.file):
+        args.diff = True  # same default source for sizing, selection and gathering
+    if args.size:
+        if args.list:
+            config_error("Drop --list when using the offline --size preflight.")
+        sys.exit(cmd_size(args))
     # A total bound on top of every per-reviewer timeout.
     arm_watchdog(args.watchdog if args.watchdog is not None
                  else max(1800, args.timeout * 3))
@@ -2736,8 +2767,6 @@ def main():
                 f"THAT, declare new acceptance criteria, and start again at "
                 f"--round 1. Override only if you have done that and the "
                 f"change is genuinely new.")
-    if not (args.diff or args.staged or args.range or args.file):
-        args.diff = True  # same default source for selection and gathering
     profile, profile_reason = select_profile(args)
     args.selected_profile = profile
     tier_text = f"tier: {profile} ({profile_reason})"
