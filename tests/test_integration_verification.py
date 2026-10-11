@@ -397,6 +397,9 @@ class TestIntegrationReceiptBinding(IntegrationRepo):
             "verifier": "tests", "verifier_sha256": self.digest,
             "policy_sha256": self.policy_digest,
             "subject_head": self.produced, "result": "pass",
+            "exit_code": 0,
+            "execution": V.RV.local_execution(V.RV.resolve_executables(
+                {"python": sys.executable})),
         }
         receipt.update(self.basis)
         receipt.update(changes)

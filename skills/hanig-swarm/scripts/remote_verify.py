@@ -124,9 +124,27 @@ class GitRunner:
         return self.runner(argv, **kwargs)
 
 
-def execution_problem(receipt):
-    """Legacy local records remain admissible; declared remote passes need proof."""
+def interpreter_provenance_problem(receipt):
+    """A launcher record cannot attest which interpreter ran the verifier."""
     execution = receipt.get("execution")
+    executables = execution.get("executables") if isinstance(execution, dict) else None
+    python = executables.get("python") if isinstance(executables, dict) else None
+    if (not isinstance(python, dict)
+            or python.get("role") not in ("resolved", "configured-interpreter")
+            or not isinstance(python.get("path"), str)
+            or not python["path"].startswith("/") or not python.get("version")):
+        return "unknown interpreter provenance: missing resolved or configured interpreter record"
+    return None
+
+
+def execution_problem(receipt):
+    """Merge passes need interpreter provenance; remote passes also need proof."""
+    execution = receipt.get("execution")
+    if (receipt.get("claim") in ("integration-tests", "changed-tests-stable")
+            or "candidate_tree" in receipt):
+        problem = interpreter_provenance_problem(receipt)
+        if problem:
+            return "missing execution evidence; " + problem if execution is None else problem
     if execution is None:
         return "missing execution evidence" if receipt.get("schema_version") == 2 else None
     if not isinstance(execution, dict):

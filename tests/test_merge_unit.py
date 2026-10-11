@@ -915,7 +915,8 @@ class TestMergeUnit(unittest.TestCase):
         self.assertEqual(before, {p.name: p.read_bytes() for p in self.state_dir.iterdir()})
         for expected in ("gh pr view", "scope-check", "gh pr checks", "gh pr merge",
                          "gh api", "--target-commit", "--root", "persist intent",
-                         "<observed-pr-url>"):
+                         "<observed-pr-url>", "interpreter provenance",
+                         "legacy FAIL cannot block", "legacy PASS cannot admit"):
             self.assertIn(expected, result.stdout)
 
     def test_missing_root_refuses_and_explicit_root_is_forwarded(self):

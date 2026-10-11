@@ -28,6 +28,9 @@ and its receipt names that target and their unique merge base. The connected
 merge operator also admits changed-tests-stable against this same binding when
 the target policy declares it. Ordinary swarm verification keeps its existing
 anchored-base authorization and produced-head behavior for other claims.
+Merge receipts without interpreter provenance (resolved or explicitly
+configured) are unknown: their PASS cannot admit and their FAIL cannot poison
+an otherwise admissible binding. The launcher alone is not that provenance.
 
 WHAT THIS DOES NOT ESTABLISH. The agent runs as the same Unix user as the
 coordinator, so it can write any file the coordinator can, including the
@@ -66,6 +69,10 @@ MERGE_VERIFIER_PATH = "verifiers/integration_tests.py"
 STABILITY_CLAIM = "changed-tests-stable"
 STABILITY_VERIFIER_PATH = "verifiers/changed_tests_stable.py"
 MERGE_BASIS_FIELDS = ("produced_head", "target_commit", "merge_base", "candidate_tree")
+
+# CLAUDE.md's swarm import floor through the highest release-validation
+# interpreter in .github/workflows/release-validation.yml, inclusive by minor.
+SUPPORTED_IMPLICIT_PYTHON = ((3, 8), (3, 12))
 
 # A mixed-version rollout must fail closed rather than silently accept a
 # policy written for different rules.
@@ -683,7 +690,7 @@ def run_in_candidate_merge(runner, repo, produced_head, target_commit, path,
             runner, path, expect_digest, args=args, timeout=timeout, cwd=tree,
             observe_completion=True, executables=executables)
         if outcome is not None:
-            outcome["execution"] = RV.local_execution(executables)
+            outcome.setdefault("execution", RV.local_execution(executables))
         return outcome, basis, run_error
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -823,7 +830,8 @@ def run_merge_preconditions(runner, repo, produced_head, target_commit,
         for check, extra, outcome in zip(checks, extras, outcomes):
             claim, entry, policy_digest, digest, corpus = check
             receipt = dict(corpus, **basis, **extra)
-            receipt["execution"] = execution
+            receipt["execution"] = (outcome.get("execution", execution)
+                                    if execution.get("location") == "local" else execution)
             receipt.update({
                 "claim": claim, "verifier": entry["name"],
                 "verifier_sha256": digest, "policy_sha256": policy_digest,
@@ -869,7 +877,8 @@ def admit_stability(runner, repo, target, integration, unit, receipts):
         return None, error
     expected.update(corpus)
     matching = [r for r in receipts if all(r.get(k) == v for k, v in expected.items())
-                and type(r.get("repetitions")) is int]
+                and type(r.get("repetitions")) is int
+                and not RV.interpreter_provenance_problem(r)]
     if any(r.get("result") == "fail" for r in matching):
         return None, "changed-tests-stable returned FAIL for this exact candidate binding"
     for receipt in matching:
@@ -880,7 +889,7 @@ def admit_stability(runner, repo, target, integration, unit, receipts):
 
 
 def merge_failure_problem(receipts, evidence):
-    """Reject any FAIL for an admitted claim's exact binding, including legacy FAILs.
+    """Reject a FAIL for an exact binding only with interpreter provenance.
 
     Incomplete runs supply no evidence. Never infer completion from an old
     receipt's exit code or diagnostic, or reinterpret its stored result.
@@ -891,6 +900,7 @@ def merge_failure_problem(receipts, evidence):
         fields += ("authorization_commit", "repetitions")
     for receipt in receipts:
         if (receipt.get("result") == "fail"
+                and not RV.interpreter_provenance_problem(receipt)
                 and all(receipt.get(k) == evidence.get(k) for k in fields)
                 and (evidence.get("claim") != STABILITY_CLAIM
                      or type(receipt.get("repetitions")) is int)):
@@ -1013,7 +1023,8 @@ def _python_selector(first_line):
 
     Only pinned bytes supply the language. Env splits accept ordinary quoting,
     not backslash escapes or expansion. Unknown options cannot guess a command.
-    Native implicit execution never calls this parser.
+    Native implicit execution is never replaced using this parser; it is also
+    used for the bounded interpreter-provenance probe.
     """
     declaration = os.fsdecode(first_line[2:]).strip()
     parts = declaration.split(None, 1)
@@ -1083,7 +1094,57 @@ def _python_selector(first_line):
         return None
     if argv0 == "":
         raise ValueError("empty process argv0 is unsupported")
-    return {"prefix": prefix, "argv0": argv0, "args": words[1:]}
+    return {"prefix": prefix, "argv0": argv0, "args": words[1:], "command": words[0]}
+
+
+def _implicit_python(first_line, bindir, cwd):
+    """Resolve native Python selection without replacing the native launch.
+
+    Relative/empty PATH entries are relative to the verifier's cwd, not the
+    coordinator's. Preserve the selected path spelling, including symlinks.
+    Selectors beyond the bounded parser retain native execution but cannot
+    acquire interpreter provenance by guessing how env will interpret them.
+    """
+    command = "python3"
+    if first_line.startswith(b"#!"):
+        try:
+            selection = _python_selector(first_line)
+        except ValueError:
+            return None, None
+        if selection is not None:
+            parts = os.fsdecode(first_line[2:]).strip().split(None, 1)
+            if not selection["prefix"]:
+                command = parts[0]
+            elif len(selection["prefix"]) == 1:
+                command = selection["command"]
+            else:
+                return None, None
+    env = CE.child_env()
+    env["PATH"] = str(bindir) + os.pathsep + env.get("PATH", os.defpath)
+    directory = os.path.abspath(cwd or os.curdir)
+    search = os.pathsep.join(p if os.path.isabs(p) else os.path.join(directory, p)
+                             for p in env["PATH"].split(os.pathsep))
+    path = shutil.which(command, path=search)
+    minimum, maximum = SUPPORTED_IMPLICIT_PYTHON
+    supported = "Python {}.{} through {}.{}.x".format(*(minimum + maximum))
+    record = {"path": path or command, "version": None,
+              "declared": False, "role": "resolved"}
+    try:
+        if not path:
+            raise ValueError("interpreter was not found on the child PATH")
+        probe = subprocess.run([path, "--version"], env=env, cwd=cwd,
+                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, timeout=30, check=True)
+        version = re.fullmatch(r"Python (\d+)\.(\d+)\.(\d+)",
+                               (probe.stdout or probe.stderr).strip())
+        if not version:
+            raise ValueError("interpreter did not report major.minor.micro")
+        record["version"] = ".".join(version.groups())
+        if not minimum <= tuple(map(int, version.groups()[:2])) <= maximum:
+            raise ValueError("unsupported interpreter version " + record["version"])
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return record, "{}: {}; supported range is {}".format(record["path"], exc, supported)
+    return record, None
 
 
 def run_pinned(runner, path, expect_digest, args=None, timeout=900,
@@ -1111,6 +1172,7 @@ def run_pinned(runner, path, expect_digest, args=None, timeout=900,
             return None, "the verified bytes changed while being copied"
         os.chmod(copy, 0o500)
         if observe_completion:
+            execution = None
             argv = [copy] + list(args or [])
             launch_config = None
             launch_prefix = []
@@ -1138,13 +1200,28 @@ def run_pinned(runner, path, expect_digest, args=None, timeout=900,
                 for name, key in (("python3", "python"), ("python", "python"), ("git", "git")):
                     if key != "python" or select_python:
                         (bindir / name).symlink_to(executables[key]["path"])
+                observed = dict(executables)
+                observed["launcher"] = dict(path=os.path.realpath(sys.executable),
+                                             version=".".join(map(str, sys.version_info[:3])),
+                                             role="launcher")
+                if not select_python:
+                    resolved, problem = _implicit_python(first_line, bindir, cwd)
+                    if resolved is not None:
+                        observed["python"] = resolved
+                    if problem:
+                        return dict(RV.incomplete(problem),
+                                    execution=RV.local_execution(observed)), None
+                execution = RV.local_execution(observed)
                 # Add executable configuration only after the ordinary
                 # coordinator spawn's unchanged child_env() boundary.
                 launch_config = (str(bindir), executables["git"]["path"],
                                  executables["python"]["path"],
                                  executables["python"]["path"] if select_python else "")
-            return _observe_execution(argv, timeout, cwd, launch_config,
-                                      launch_prefix, final_argv0), None
+            outcome = _observe_execution(argv, timeout, cwd, launch_config,
+                                         launch_prefix, final_argv0)
+            if execution is not None:
+                outcome["execution"] = execution
+            return outcome, None
         # No before/after dance here any more. `run_in_checkout` gives this a
         # worktree the agent is not working in, so there is nothing to drift.
         rc, out, errout = runner([copy] + list(args or []), timeout=timeout,

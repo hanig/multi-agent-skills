@@ -541,8 +541,98 @@ class TestRemoteVerification(unittest.TestCase):
                 row = self.rows()[-1]
                 self.assertEqual(row['result'], 'pass')
                 self.assertFalse(row['execution']['executables']['python']['declared'])
-                self.assertEqual(row['execution']['executables']['python']['role'], 'launcher')
+                self.assertEqual(row['execution']['executables']['python']['role'], 'resolved')
+                self.assertEqual(row['execution']['executables']['python']['path'], str(python))
+                self.assertEqual(row['execution']['executables']['launcher']['role'], 'launcher')
                 self.assert_clean()
+
+    def implicit_python(self, version):
+        self.local_only()
+        self.policy['local'].pop('python', None)
+        self.save_policy()
+        python = self.f.bin / 'python3'
+        if python.exists():
+            python.unlink()
+        python.write_text(PYTHON + 'import os, sys\n'
+                          'if sys.argv[1:] == ["--version"]:\n'
+                          '    print(%r)\n    raise SystemExit(0)\n'
+                          'os.execv(%r, [%r] + sys.argv[1:])\n'
+                          % ('Python ' + version, sys.executable, sys.executable))
+        python.chmod(0o755)
+        self.authorize_program('#!/usr/bin/env python3\n'
+                               'from pathlib import Path\nPath(%r).write_text("ran")\n'
+                               % str(self.witness))
+        return python
+
+    def test_unsupported_implicit_python_is_incomplete_with_provenance(self):
+        python = self.implicit_python('3.14.8')
+        result = self.verify()
+        self.assert_failed(result)
+        row, = self.rows()
+        self.assertEqual(row['result'], 'incomplete')
+        self.assertIsNone(row['exit_code'])
+        self.assertIn(str(python), row['incomplete_reason'])
+        self.assertIn('3.14.8', row['incomplete_reason'])
+        self.assertIn('3.8 through 3.12.x', row['incomplete_reason'])
+        self.assertEqual(row['execution']['executables']['python'],
+                         dict(path=str(python), version='3.14.8', declared=False, role='resolved'))
+        self.assertFalse(self.witness.exists())
+
+    def test_supported_implicit_python_records_resolution_and_admits(self):
+        python = self.implicit_python('3.9.6')
+        self.assert_ok(self.verify())
+        row, = self.rows()
+        self.assertEqual(row['result'], 'pass')
+        self.assertEqual(row['execution']['executables']['python'],
+                         dict(path=str(python), version='3.9.6', declared=False, role='resolved'))
+        launcher = row['execution']['executables']['launcher']
+        self.assertEqual(launcher['role'], 'launcher')
+        self.assertEqual(launcher['path'], os.path.realpath(sys.executable))
+        self.assertEqual(launcher['version'], '.'.join(map(str, sys.version_info[:3])))
+        self.assertEqual(self.witness.read_text(), 'ran')
+        self.assert_ok(self.admitted())
+
+    def test_legacy_fail_does_not_poison_supported_pass(self):
+        self.implicit_python('3.9.6')
+        self.assert_ok(self.verify())
+        row, = self.rows()
+        legacy = json.loads(json.dumps(row))
+        legacy.update(result='fail', exit_code=1)
+        legacy['execution']['executables']['python'] = dict(
+            legacy['execution']['executables']['launcher'])
+        self.journal.write_text(json.dumps(legacy) + '\n' + json.dumps(row) + '\n')
+        self.assert_ok(self.admitted())
+
+    def test_legacy_pass_without_interpreter_provenance_cannot_admit(self):
+        self.implicit_python('3.9.6')
+        self.assert_ok(self.verify())
+        row, = self.rows()
+        row['execution']['executables']['python'] = dict(
+            row['execution']['executables']['launcher'])
+        self.journal.write_text(json.dumps(row) + '\n')
+        result = self.admitted()
+        self.assert_failed(result)
+        self.assertIn('unknown interpreter provenance', result.stderr)
+
+    def test_stability_legacy_receipts_neither_poison_nor_admit(self):
+        self.implicit_python('3.9.6')
+        self.authorize_both('#!/usr/bin/env python3\nprint("both claims")\n')
+        self.assert_ok(self.verify())
+        rows = self.rows()
+        stability = next(r for r in rows if r['claim'] == V.STABILITY_CLAIM)
+        legacy = json.loads(json.dumps(stability))
+        legacy.pop('execution')
+        legacy.update(result='fail', exit_code=1)
+        for result in ('pass', 'fail'):
+            with self.subTest(result=result):
+                legacy.update(result=result, exit_code=0 if result == 'pass' else 1)
+                only_legacy = [r for r in rows if r['claim'] != V.STABILITY_CLAIM] + [legacy]
+                self.journal.write_text(''.join(json.dumps(r) + '\n' for r in only_legacy))
+                refused = self.admitted()
+                self.assert_failed(refused)
+                self.assertIn('no passing changed-tests-stable receipt', refused.stderr)
+        self.journal.write_text(''.join(json.dumps(r) + '\n' for r in [legacy] + rows))
+        self.assert_ok(self.admitted())
 
     def test_local_implicit_shebang_preserves_native_parser_outcome(self):
         self.policy.pop('verification_host')
@@ -2265,7 +2355,8 @@ else:
                                   for i in range(2)]
         execution = {'location': 'remote', 'executor': 'slurm', 'ssh_alias': 'fixture-host',
                      'host_identity': 'fixture-node', 'verified_tree': 'a' * 40,
-                     'executables': {key: {'path': '/fixture/' + key, 'version': 'fixture'}
+                     'executables': {key: {'path': '/fixture/' + key, 'version': 'fixture',
+                                          'role': 'configured-interpreter'}
                                      for key in ('python', 'git')}}
         receipts, outcomes = {}, []
         for i, check in enumerate(self.request['checks']):

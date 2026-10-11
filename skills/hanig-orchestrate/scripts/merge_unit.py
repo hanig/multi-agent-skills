@@ -520,6 +520,8 @@ def reconcile(args, plan):
         print("require target-authorized integration-tests at exact head, target, "
               "merge base and candidate tree, plus changed-tests-stable when declared "
               "by target policy; no override")
+        print("receipts without resolved or configured interpreter provenance are unknown: "
+              "a legacy FAIL cannot block and a legacy PASS cannot admit the binding")
         if args.verify_integration:
             print("run the target's pinned verifier in a disposable candidate merge; "
                   "record all target-required claims as coordinator evidence only")
