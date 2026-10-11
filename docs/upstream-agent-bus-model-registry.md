@@ -1,3 +1,7 @@
+<!-- docs-truth:status -->
+Status: live
+Date: 2026-10-11
+
 # Upstream report: model-registry failures look like absence
 
 ## Provenance and local status

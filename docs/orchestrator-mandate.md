@@ -1,3 +1,7 @@
+<!-- docs-truth:status -->
+Status: live
+Date: 2026-10-11
+
 # Orchestrator mandate
 
 This file is the orchestrator's authority. It is owner-originated: it becomes

@@ -1,3 +1,11 @@
+<!-- docs-truth:status -->
+Status: superseded by plan-swarm.md
+Date: 2026-10-11
+
+# Independent swarm plan variant
+
+This independent planning transcript contributed to the consolidated autonomous swarm plan.
+
 [User] Plan a system, from a clean start. You have fresh context deliberately: the
 previous planning agents were steeped in a framing that turned out to be the
 wrong goal.

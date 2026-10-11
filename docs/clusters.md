@@ -1,3 +1,7 @@
+<!-- docs-truth:status -->
+Status: live
+Date: 2026-10-11
+
 # The three clusters: rules, partitions, and what breaks
 
 Arc runs three Slurm clusters that this tooling targets: **chimera**,

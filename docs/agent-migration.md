@@ -1,3 +1,7 @@
+<!-- docs-truth:status -->
+Status: live
+Date: 2026-10-11
+
 # Migrating a skill installation between host agents
 
 The installer manages a maintained skill set for Claude Code, Codex, OpenCode,

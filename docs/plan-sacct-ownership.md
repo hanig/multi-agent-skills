@@ -1,3 +1,7 @@
+<!-- docs-truth:status -->
+Status: historical
+Date: 2026-10-11
+
 # Plan — establish Slurm job ownership, stop inferring it from timestamps
 
 Four revisions, three of them rejected by plan review before any code existed

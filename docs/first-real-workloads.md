@@ -1,3 +1,7 @@
+<!-- docs-truth:status -->
+Status: historical
+Date: 2026-10-11
+
 # Three candidate first workloads, one per machine
 
 Drawn from the live Linear workspace `Arc - projects` rather than invented, so

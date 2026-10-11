@@ -1,4 +1,10 @@
+<!-- docs-truth:status -->
+Status: live
+Date: 2026-10-11
+
 # Plan: the field-report items
+
+This roadmap retains field reports, delivery evidence, and deferred work; check each dated item against the current code before treating it as still owed.
 
 > Source: three messages from Hani carrying reports from other agents that
 > actually ran these skills, plus his own run. Every item is something that

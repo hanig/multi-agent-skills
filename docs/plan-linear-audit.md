@@ -1,4 +1,10 @@
+<!-- docs-truth:status -->
+Status: historical
+Date: 2026-10-11
+
 # Plan: PR 1, Linear binding, read-only audit, audit-backed reporting
+
+This delivered plan specifies tracker bindings, read-only audits, and reports that require audit evidence.
 
 Slices 1 and 2 of `docs/plan-linear-dag-control.md` (owner-approved
 2026-10-05). This PR makes no Linear mutation anywhere. It replaces "the

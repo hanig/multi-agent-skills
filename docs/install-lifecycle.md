@@ -1,3 +1,7 @@
+<!-- docs-truth:status -->
+Status: live
+Date: 2026-10-11
+
 # Skill installation lifecycle API
 
 `lib.skill_lifecycle` is the mutation layer for the multi-store installer. It does not discover `$HOME`, infer loader precedence, or select skills. The CLI must resolve every destination, selected name, and consumer before calling it.

@@ -1,3 +1,7 @@
+<!-- docs-truth:status -->
+Status: live
+Date: 2026-10-11
+
 # Agent compatibility and capability contract
 
 This repository distributes one Markdown skill format to several hosts. That

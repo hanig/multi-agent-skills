@@ -1,4 +1,10 @@
+<!-- docs-truth:status -->
+Status: superseded by first-real-workloads.md
+Date: 2026-10-11
+
 # Scenario: "we want to do project X" — the whole string of events
+
+This historical walkthrough illustrates a hypothetical workflow whose multi-cluster topology was corrected and replaced by the first-workload candidates.
 
 > Walked end to end by gpt-5.6-sol against the built code, 2026-08-28. Where a
 > plan step is unbuilt it says **"today Hani does X by hand"** rather than

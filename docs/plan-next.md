@@ -1,4 +1,10 @@
+<!-- docs-truth:status -->
+Status: superseded by plan-field-reports.md
+Date: 2026-10-11
+
 # Plan: what remains after the report/runtime/acknowledgment work
+
+This largely delivered committee roadmap is retained for design history; the field-report plan tracks its successor work.
 
 > **Status 2026-09-01:** this is the 2026-08-30 committee plan. Its items 1-8
 > are largely delivered. It uses its OWN numbering, unrelated to the field

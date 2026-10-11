@@ -1,3 +1,7 @@
+<!-- docs-truth:status -->
+Status: live
+Date: 2026-10-11
+
 # Upstream report: discover the agent-bus executable
 
 ## Summary

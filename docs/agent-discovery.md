@@ -1,3 +1,7 @@
+<!-- docs-truth:status -->
+Status: live
+Date: 2026-10-11
+
 # Agent skill discovery contract
 
 `skills/hanig-project/scripts/agent_discovery.py` is the one read-only

@@ -1,4 +1,10 @@
+<!-- docs-truth:status -->
+Status: historical
+Date: 2026-10-11
+
 # Plan: PR 4, file an approved ticket draft into Linear
+
+This delivered plan specifies filing an approved ticket draft and resuming partial creation through durable operation records.
 
 **Owner decisions, 2026-10-06:** approved as revised after its exhausted
 plan review and a design check with Sol; the orchestrator is authorized to

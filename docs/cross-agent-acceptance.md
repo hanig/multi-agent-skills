@@ -1,3 +1,7 @@
+<!-- docs-truth:status -->
+Status: live
+Date: 2026-10-11
+
 # Cross-agent release acceptance
 
 This is the release record for the portable skill installer.  It separates

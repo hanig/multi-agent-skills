@@ -1,6 +1,12 @@
+<!-- docs-truth:status -->
+Status: historical
+Date: 2026-10-11
+
 # Plan: a Codex home per dispatched agent
 
-Status: passed plan review (round 2, Kimi and Sol) on 2026-10-06.
+This delivered plan specifies a separate authenticated Codex home for each dispatched agent; the implementation lives in `skills/hanig-swarm/scripts/codex_home.py`.
+
+Plan review: passed (round 2, Kimi and Sol) on 2026-10-06.
 
 Owner decisions, 2026-10-06: every Codex agent the swarm dispatches gets its
 own `CODEX_HOME`, created by the dispatch code (not described in skill

@@ -1,4 +1,10 @@
+<!-- docs-truth:status -->
+Status: historical
+Date: 2026-10-11
+
 # Plan: autonomous agent swarm (goal (b))
+
+This delivered design records the autonomous swarm architecture, implementation stages, and their historical validation.
 
 > **Committee: claude-opus-4-8 + gpt-5.6-sol, fresh context, same prompt, in
 > parallel. Both converged. 2026-08-28.**

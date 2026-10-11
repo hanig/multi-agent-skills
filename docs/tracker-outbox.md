@@ -1,3 +1,7 @@
+<!-- docs-truth:status -->
+Status: live
+Date: 2026-10-11
+
 # Connecting the swarm to an issue tracker
 
 ## The network boundary

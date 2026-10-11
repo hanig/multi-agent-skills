@@ -1,4 +1,10 @@
+<!-- docs-truth:status -->
+Status: historical
+Date: 2026-10-11
+
 # Plan: PR 2, drain the swarm outbox into Linear
+
+This delivered plan specifies idempotent draining of coordinator intents through an authorized operator.
 
 Slice 3 of `docs/plan-linear-dag-control.md` (owner-approved 2026-10-05).
 

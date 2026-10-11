@@ -1,3 +1,7 @@
+<!-- docs-truth:status -->
+Status: live
+Date: 2026-10-11
+
 # Installed workflow acceptance
 
 Run `python3 -m unittest tests.test_installed_pipeline -v` for the hermetic

@@ -1,3 +1,7 @@
+<!-- docs-truth:status -->
+Status: historical
+Date: 2026-10-11
+
 # ARC-274 independent installer review
 
 Reviewed `origin/main...2414d8a80e23ea8ae4e5638c65696b7a86f9f570` on

@@ -1,5 +1,7 @@
 # multi-agent-skills
 
+Browse the [documentation index](docs/README.md) for document status, dates, and purpose.
+
 Portable coding-agent skills for dispatching autonomous work onto HPC clusters
 and refusing to call it done without evidence. Installable across laptops and
 login nodes with one script.

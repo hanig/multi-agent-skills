@@ -1,4 +1,10 @@
+<!-- docs-truth:status -->
+Status: historical
+Date: 2026-10-11
+
 # Plan: PR 3, file and edit ad-hoc issues only as part of the DAG
+
+This delivered plan specifies creating and editing ad-hoc issues with explicit dependency relationships and durable replay.
 
 **Owner decisions, 2026-10-05:** approved as revised after its exhausted
 plan review and a design check with Sol; the orchestrator is authorized to

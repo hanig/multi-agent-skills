@@ -1,3 +1,7 @@
+<!-- docs-truth:status -->
+Status: historical
+Date: 2026-10-11
+
 # Plan v4 — hanig-portable-handoff
 
 Capture and restore durable research state across machines, clusters and

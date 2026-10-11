@@ -1,3 +1,7 @@
+<!-- docs-truth:status -->
+Status: historical
+Date: 2026-10-11
+
 # ARC-720 validation and residual measurement
 
 ## Boundary

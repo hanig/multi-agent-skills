@@ -1,3 +1,7 @@
+<!-- docs-truth:status -->
+Status: superseded by plan-swarm.md
+Date: 2026-10-11
+
 # hanig/multi-agent-skills — Design Plan
 
 Merged from an independent Claude proposal and a Codex proposal (GPT-5.x,

@@ -1,3 +1,7 @@
+<!-- docs-truth:status -->
+Status: historical
+Date: 2026-10-11
+
 # ARC-274 fix verification
 
 Verified on 2026-09-05 in the disposable Orca worktree rooted at

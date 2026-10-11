@@ -1,3 +1,11 @@
+<!-- docs-truth:status -->
+Status: historical
+Date: 2026-10-11
+
+# Protocol enforcement audit
+
+This dated audit tracks which review-protocol rules have executable enforcement and which remain operator responsibilities.
+
 ## Status as of 2026-10-10
 
 The findings below are the historical 2026-08-27 audit, not a current verdict.

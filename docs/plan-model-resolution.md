@@ -1,3 +1,7 @@
+<!-- docs-truth:status -->
+Status: historical
+Date: 2026-10-11
+
 # Plan: adopt point releases per family at project start
 
 Owner request, 2026-09-30: stop hand-maintaining model names; when a project

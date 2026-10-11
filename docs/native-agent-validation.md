@@ -1,4 +1,10 @@
+<!-- docs-truth:status -->
+Status: historical
+Date: 2026-10-11
+
 # Native agent validation
+
+This validation record documents the native-agent harness, its measured results, and its unobserved checks.
 
 - Date: 2026-09-05
 - Package-scope compatibility update: 2026-09-23
