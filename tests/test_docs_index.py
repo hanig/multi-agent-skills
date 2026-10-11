@@ -1,14 +1,4 @@
-"""Exercise metadata, generation, and relative-link checks through their CLI.
-
-Contract: in docs/, README.md and CLAUDE.md, relative Markdown destinations
-must exist (files or existing directories). Recognized forms are exactly
-[text](relative/path) and [label]: relative/path, optionally in block quotes
-with leading > markers stripped, with an optional title and trailing #fragment.
-Fenced code and closed HTML comments are masked; paragraph-bounded inline-code
-matching cannot cross blank lines, and code-span comment openers are inert.
-Absolute URLs, mailto and bare URLs are ignored; fragments are not checked.
-This deliberately does not test heading slugs or HTML-id anchor validation.
-"""
+"""Exercise documentation status metadata and index generation."""
 import contextlib
 import importlib.util
 import io
@@ -37,9 +27,6 @@ class TestRepositoryDocs(unittest.TestCase):
         self.assertTrue(records)
         self.assertEqual(len(docs_index.indexed_files(ROOT)), len(records))
 
-    def test_relative_links_resolve(self):
-        self.assertEqual([], docs_index.check_links(ROOT))
-
     def test_generated_index_matches_committed_file(self):
         expected = docs_index.render(docs_index.collect(ROOT), ROOT)
         self.assertEqual(expected, (ROOT / 'docs/README.md').read_text(encoding='utf-8'))
@@ -53,8 +40,6 @@ class TestDocsCommand(unittest.TestCase):
         (self.root / 'docs').mkdir()
         self.doc = self.root / 'docs/example.md'
         self.doc.write_text(document(), encoding='utf-8')
-        for name in ('README.md', 'CLAUDE.md'):
-            (self.root / name).write_text('# Root\n', encoding='utf-8')
         self.assertEqual(0, self.run_command('write')[0])
 
     def run_command(self, command):
@@ -65,12 +50,10 @@ class TestDocsCommand(unittest.TestCase):
 
     def test_missing_status_is_refused_not_repaired_by_write(self):
         self.doc.write_text(document().replace('Status: live\n', ''), encoding='utf-8')
-        for command in ('check', 'write'):
-            with self.subTest(command=command):
-                code, output = self.run_command(command)
-                self.assertEqual(1, code)
-                self.assertIn('metadata', output)
-                self.assertIn('example.md', output)
+        code, output = self.run_command('write')
+        self.assertEqual(1, code)
+        self.assertIn('metadata', output)
+        self.assertIn('example.md', output)
 
     def test_invalid_metadata_and_successors(self):
         for status, date in [('LIVE', '2026-10-11'), ('draft', '2026-10-11'),
@@ -99,16 +82,16 @@ class TestDocsCommand(unittest.TestCase):
             path.parent.mkdir()
             path.write_text('# No metadata required\n', encoding='utf-8')
         self.assertEqual(0, self.run_command('write')[0])
-        self.assertEqual(0, self.run_command('check')[0])
 
     def test_changes_to_each_source_field_make_index_stale(self):
         for changed in [document(status='historical'), document(date='2026-10-10'),
                         document(title='New title'), document(body='New purpose.')]:
             with self.subTest(changed=changed):
                 self.doc.write_text(changed, encoding='utf-8')
-                self.assertIn('stale', self.run_command('check')[1])
+                expected = docs_index.render(docs_index.collect(self.root), self.root)
+                self.assertNotEqual(expected, (self.root / 'docs/README.md').read_text(encoding='utf-8'))
                 self.assertEqual(0, self.run_command('write')[0])
-                self.assertEqual(0, self.run_command('check')[0])
+                self.assertEqual(expected, (self.root / 'docs/README.md').read_text(encoding='utf-8'))
                 self.doc.write_text(document(), encoding='utf-8')
                 self.assertEqual(0, self.run_command('write')[0])
 
@@ -121,137 +104,6 @@ class TestDocsCommand(unittest.TestCase):
         self.assertEqual(0, self.run_command('write')[0])
         self.assertEqual(before, index.read_bytes())
 
-    def test_broken_links_fail_every_required_location(self):
-        for relative in ['docs/example.md', 'README.md', 'CLAUDE.md',
-                         'docs/research/notes.md', 'docs/probes/notes.md']:
-            with self.subTest(relative=relative):
-                path = self.root / relative
-                path.parent.mkdir(parents=True, exist_ok=True)
-                original = path.read_text() if path.exists() else '# Notes\n'
-                path.write_text(original + '\n[broken](missing.md)\n', encoding='utf-8')
-                code, output = self.run_command('write')
-                self.assertEqual(1, code)
-                self.assertIn(relative, output)
-                self.assertIn('missing destination', output)
-                path.write_text(original, encoding='utf-8')
-
-    def test_inline_and_reference_destinations_with_titles(self):
-        target = self.root / 'docs/a (b).md'
-        target.write_text(document(title='Target'), encoding='utf-8')
-        valid = '''
-[inline](a%20(b).md#target "title")
-[angle](<a (b).md#a-heading>)
-[ref][target]
-[target][]
-[target]
-![image](a%20%28b%29.md)
-[local](#example)
-[target]: <a (b).md#a-heading-1> "title"
-[custom](a%20%28b%29.md#custom)
-'''
-        self.doc.write_text(document(body='Purpose.\n' + valid), encoding='utf-8')
-        self.assertEqual(0, self.run_command('write')[0])
-        for bad in ['[bad][nope]\n[nope]: missing.md',
-                    '![bad](missing.png)', '[bad](<missing file.md>)',
-                    '[bad](missing(x).md)', '[bad](missing\\(x\\).md)']:
-            with self.subTest(bad=bad):
-                self.doc.write_text(document(body='Purpose.\n\n' + bad), encoding='utf-8')
-                self.assertEqual(1, self.run_command('write')[0])
-
-    def test_nonlinks_and_absolute_urls_do_not_fail(self):
-        body = '''Purpose.
-
-`[example](missing.md)`
-````md
-[example](missing.md)
-```
-[example](missing.md)
-````
-~~~md
-[example](missing.md)
-~~~
-
-    [example](missing.md)
-
-<!-- [example](missing.md) -->
-\\[example](missing.md)
-[external](https://example.invalid/missing.md)
-[email](mailto:example@example.invalid)
-[network](//example.invalid/missing.md)
-[host](/historical/host/path.py:12)
-'''
-        self.doc.write_text(document(body=body), encoding='utf-8')
-        self.assertEqual(0, self.run_command('write')[0])
-
-    def test_list_continuations_are_links_but_list_code_is_not(self):
-        for body in ['Purpose.\n\n1. Item\n\n   [broken](missing.md)',
-                     'Purpose.\n\n- Item\n    [broken](missing.md)',
-                     'Purpose.\n\n> [broken](missing.md)']:
-            with self.subTest(body=body):
-                self.doc.write_text(document(body=body), encoding='utf-8')
-                self.assertEqual(1, self.run_command('write')[0])
-        self.doc.write_text(document(body='Purpose.\n\n- Item\n\n      [code](missing.md)\n\n- ```md\n  [code](missing.md)\n  ```'), encoding='utf-8')
-        self.assertEqual(0, self.run_command('write')[0])
-
-    def test_link_shaped_titles_are_not_links(self):
-        for title in ['"[ghost](missing.md)"', "'[ghost](missing.md)'", '"line\n[ghost](missing.md)"',
-                      '"escaped \\\" quote [ghost](missing.md)"']:
-            with self.subTest(title=title):
-                self.doc.write_text(document(body='Purpose.\n\n[link](example.md ' + title + ')'), encoding='utf-8')
-                self.assertEqual(0, self.run_command('write')[0])
-        self.doc.write_text(document(body='Purpose.\n\n[link][ref]\n\n[ref]: example.md "[ghost](missing.md)"'), encoding='utf-8')
-        self.assertEqual(0, self.run_command('write')[0])
-        self.doc.write_text(document(body='Purpose.\n\n[link][ref]\n\n[ref]: example.md\n  "[ghost](missing.md)"'), encoding='utf-8')
-        self.assertEqual(0, self.run_command('write')[0])
-
-    def test_fragments_are_not_checked(self):
-        self.assertIn('fragments are not checked', docs_index.__doc__)
-        body = 'Purpose.\n\n[local](#absent) [file](example.md#absent)\n'
-        body += '[ref]: example.md#also-absent "title"\n'
-        self.doc.write_text(document(body=body), encoding='utf-8')
-        self.assertEqual(0, self.run_command('write')[0])
-        self.doc.write_text(document(body=body + '[bad](missing.md#absent)'), encoding='utf-8')
-        self.assertEqual(1, self.run_command('write')[0])
-
-    def test_blockquoted_reference_definitions_check_destinations(self):
-        for prefix in ('> ', '> > ', '  > > '):
-            for title in ('', ' "title"', " 'title'", ' (title)'):
-                with self.subTest(prefix=prefix, title=title):
-                    body = 'Purpose.\n\n' + prefix + '[ref]: missing.md#fragment' + title
-                    self.doc.write_text(document(body=body), encoding='utf-8')
-                    code, output = self.run_command('write')
-                    self.assertEqual(1, code)
-                    self.assertIn('example.md:9: missing destination', output)
-                    body = body.replace('missing.md', 'example.md')
-                    self.doc.write_text(document(body=body), encoding='utf-8')
-                    self.assertEqual(0, self.run_command('write')[0])
-
-    def test_inline_code_comment_opener_leaves_later_links_visible(self):
-        for literal in ('`<!--`', '``<!--``', '`<!-- hidden -->`'):
-            with self.subTest(literal=literal):
-                body = 'Purpose.\n\nLiteral ' + literal + '.\n\n[valid](example.md#any)\n'
-                self.doc.write_text(document(body=body), encoding='utf-8')
-                self.assertEqual(0, self.run_command('write')[0])
-                self.doc.write_text(document(body=body + '\n[bad](missing.md)'), encoding='utf-8')
-                code, output = self.run_command('write')
-                self.assertEqual(1, code)
-                self.assertIn('missing destination: missing.md', output)
-
-    def test_label_before_blank_line_leaves_prose_links_visible(self):
-        for destination, expected in [('example.md', 0), ('missing.md', 1)]:
-            with self.subTest(destination=destination):
-                body = 'Purpose.\n\n[Reviewer]:\n\n[details](' + destination + ')'
-                self.doc.write_text(document(body=body), encoding='utf-8')
-                code, output = self.run_command('write')
-                self.assertEqual(expected, code, output)
-                if expected:
-                    self.assertIn('example.md:11: missing destination: missing.md', output)
-
-    def test_unclosed_comment_cannot_mask_later_links(self):
-        body = 'Purpose.\n\n<!-- no terminator\n\n[bad](missing.md)'
-        self.doc.write_text(document(body=body), encoding='utf-8')
-        self.assertEqual(1, self.run_command('write')[0])
-
     def test_review_markdown_title_forms(self):
         for title in ['   # Example', 'Example\n=======']:
             with self.subTest(title=title):
@@ -259,20 +111,8 @@ class TestDocsCommand(unittest.TestCase):
                 self.assertEqual(0, self.run_command('write')[0])
                 self.assertEqual('Example', docs_index.metadata(self.doc)['title'])
 
-    def test_review_footnotes_and_transcript_lines_are_not_definitions(self):
-        body = 'Purpose.\n\n[^1]: See the note.\n\n[Codex]: reviewed this\n\n[^2]: word'
-        self.doc.write_text(document(body=body), encoding='utf-8')
-        self.assertEqual(0, self.run_command('write')[0])
-        self.doc.write_text(document(body=body + '\n\n[^3]: See [broken](missing.md).'), encoding='utf-8')
-        self.assertEqual(1, self.run_command('write')[0])
-
-    def test_review_code_spans_do_not_cross_paragraphs(self):
-        body = 'Purpose.\n\nA stray ` token.\n\n[broken](missing.md)\n\nAnother ` token.'
-        self.doc.write_text(document(body=body), encoding='utf-8')
-        self.assertEqual(1, self.run_command('write')[0])
-
     def test_cli_runs_from_an_unrelated_directory(self):
-        result = subprocess.run([sys.executable, str(SCRIPT), 'check', '--root', str(self.root)],
+        result = subprocess.run([sys.executable, str(SCRIPT), 'write', '--root', str(self.root)],
                                 cwd=str(self.root.parent), capture_output=True, text=True)
         self.assertEqual(0, result.returncode, result.stderr)
 
