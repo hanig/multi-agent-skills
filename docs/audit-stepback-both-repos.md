@@ -1,3 +1,13 @@
+<!-- docs-truth:status -->
+Status: historical
+Date: 2026-10-11
+Title: Step-back audit of both repositories
+Purpose: This historical review compares the rejected fusion designs and the code that motivated the replacement swarm plan.
+
+# Step-back audit of both repositories
+
+This historical review compares the rejected fusion designs and the code that motivated the replacement swarm plan.
+
 [User] Step back. You are a FRESH reviewer: a previous instance of you authored three
 versions of a plan and all three were rejected, so you are deliberately being
 asked without that sunk cost. Audit the code and tell me what to DO, including

@@ -1,3 +1,9 @@
+<!-- docs-truth:status -->
+Status: live
+Date: 2026-10-11
+Title: Upstream report: discover the agent-bus executable
+Purpose: Four skills hardcode `~/.agent-bus/bin/bus`, although that location is a property of one installer rather than part of the bus's state contract. A consumer that vendors the skills and `bin/bus` without reproducing that installer layout receives instructions that cannot run.
+
 # Upstream report: discover the agent-bus executable
 
 ## Summary

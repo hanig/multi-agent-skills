@@ -1,6 +1,14 @@
+<!-- docs-truth:status -->
+Status: historical
+Date: 2026-10-11
+Title: Handoff contract for a mortal orchestrator
+Purpose: This dated design records what a successor orchestrator needs to recover pending judgments and authorization boundaries.
+
 # Handoff contract for a mortal orchestrator
 
-Status: PLAN. Produced by GPT-Astra 2026-09-20, asked what a handoff must
+This dated design records what a successor orchestrator needs to recover pending judgments and authorization boundaries.
+
+Original status: PLAN. Produced by GPT-Astra 2026-09-20, asked what a handoff must
 contain so a successor can take over without reconstructing judgement from
 branches and receipts. Tracked under ARC-678 and ARC-681.
 

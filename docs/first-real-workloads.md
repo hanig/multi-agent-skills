@@ -1,3 +1,9 @@
+<!-- docs-truth:status -->
+Status: historical
+Date: 2026-10-11
+Title: Three candidate first workloads, one per machine
+Purpose: Drawn from the live Linear workspace `Arc - projects` rather than invented, so the first real run produces something you actually wanted. Each is scoped to be finishable and to exercise a different part of the coordinator.
+
 # Three candidate first workloads, one per machine
 
 Drawn from the live Linear workspace `Arc - projects` rather than invented, so

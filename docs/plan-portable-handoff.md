@@ -1,3 +1,9 @@
+<!-- docs-truth:status -->
+Status: historical
+Date: 2026-10-11
+Title: Plan v4 — hanig-portable-handoff
+Purpose: Capture and restore durable research state across machines, clusters and sessions. Two commands and a rule.
+
 # Plan v4 — hanig-portable-handoff
 
 Capture and restore durable research state across machines, clusters and

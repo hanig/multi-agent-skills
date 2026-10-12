@@ -1,3 +1,9 @@
+<!-- docs-truth:status -->
+Status: historical
+Date: 2026-10-11
+Title: Plan — establish Slurm job ownership, stop inferring it from timestamps
+Purpose: Four revisions, three of them rejected by plan review before any code existed and one rejected after implementation. The history is kept because each rejection names a distinct failure mode worth not repeating.
+
 # Plan — establish Slurm job ownership, stop inferring it from timestamps
 
 Four revisions, three of them rejected by plan review before any code existed

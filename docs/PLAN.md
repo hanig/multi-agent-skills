@@ -1,3 +1,9 @@
+<!-- docs-truth:status -->
+Status: superseded by plan-swarm.md
+Date: 2026-10-11
+Title: hanig/multi-agent-skills — Design Plan
+Purpose: Merged from an independent Claude proposal and a Codex proposal (GPT-5.x, `codex exec`, read-only) briefed on the same context. Points of disagreement are flagged rather than smoothed over.
+
 # hanig/multi-agent-skills — Design Plan
 
 Merged from an independent Claude proposal and a Codex proposal (GPT-5.x,

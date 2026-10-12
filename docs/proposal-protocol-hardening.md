@@ -1,4 +1,12 @@
+<!-- docs-truth:status -->
+Status: historical
+Date: 2026-10-11
+Title: Proposal: harden the protocol enforcement (sol)
+Purpose: This rejected proposal preserves the review-protocol hardening design and the findings that prevented its implementation.
+
 # Proposal: harden the protocol enforcement (sol)
+
+This rejected proposal preserves the review-protocol hardening design and the findings that prevented its implementation.
 
 > **STATUS: REJECTED AS SPECIFIED. Do not implement. Plan review round 2,
 > 2026-08-27: deepseek-v4-pro + luna, quorum 2, both verdicts in. 7 findings,

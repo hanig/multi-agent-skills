@@ -1,3 +1,9 @@
+<!-- docs-truth:status -->
+Status: historical
+Date: 2026-10-11
+Title: Plan v8 — hanig-reproducible-result
+Purpose: Regenerate and verify figures, tables, benchmark results and exports with input-to-output provenance.
+
 # Plan v8 — hanig-reproducible-result
 
 Regenerate and verify figures, tables, benchmark results and exports with

@@ -1,3 +1,9 @@
+<!-- docs-truth:status -->
+Status: live
+Date: 2026-10-11
+Title: Cross-agent release acceptance
+Purpose: This is the release record for the portable skill installer. It separates repeatable, hermetic coverage from the small amount of native-agent evidence that must be collected on real supported CLI versions. A skipped native check is a release gap, not a passing check.
+
 # Cross-agent release acceptance
 
 This is the release record for the portable skill installer.  It separates

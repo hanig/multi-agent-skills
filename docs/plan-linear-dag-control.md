@@ -1,6 +1,14 @@
+<!-- docs-truth:status -->
+Status: live
+Date: 2026-10-11
+Title: Plan: mechanical control of the Linear DAG
+Purpose: This roadmap specifies mechanical tracker control; audit and mutation slices have shipped, while slice 5 (waves and harness restriction) remains unimplemented.
+
 # Plan: mechanical control of the Linear DAG
 
-Status: APPROVED by the owner on 2026-10-05 (v3, with D1-D3 as recommended). v1 by the orchestrator session (Claude Opus
+This roadmap specifies mechanical tracker control; audit and mutation slices have shipped, while slice 5 (waves and harness restriction) remains unimplemented.
+
+Original approval: APPROVED by the owner on 2026-10-05 (v3, with D1-D3 as recommended). v1 by the orchestrator session (Claude Opus
 5.5); v2 and v3 fold in two co-design rounds with gpt-6-astra, which agreed
 with v3's shape. For owner approval. Not a review-gate pass.
 

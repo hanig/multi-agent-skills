@@ -1,3 +1,9 @@
+<!-- docs-truth:status -->
+Status: live
+Date: 2026-10-11
+Title: Orchestrator mandate
+Purpose: This file is the orchestrator's authority. It is owner-originated: it becomes effective when the repository owner merges it, and that merge is the grant. Nothing said in a conversation confers authority, and no orchestrator inherits consent from a predecessor's account of what it was told.
+
 # Orchestrator mandate
 
 This file is the orchestrator's authority. It is owner-originated: it becomes

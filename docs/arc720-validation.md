@@ -1,3 +1,9 @@
+<!-- docs-truth:status -->
+Status: historical
+Date: 2026-10-11
+Title: ARC-720 validation and residual measurement
+Purpose: The object classified by `review.py` is auxiliary input documents: `--context`, each `--file`, and disputed disposition fields forwarded to the panel. It is not a classifier of whether an allegation about code is true, and it does not cover every channel in a review request. Recognized signatures are stripped before dispatch. Every unmatched decoded-character range stays unchanged.
+
 # ARC-720 validation and residual measurement
 
 ## Boundary

@@ -1,4 +1,12 @@
+<!-- docs-truth:status -->
+Status: superseded by plan-swarm.md
+Date: 2026-10-11
+Title: Plan v3: fuse coordination with adjudication
+Purpose: This rejected fusion plan records the production-evidence design that preceded the autonomous swarm plan.
+
 # Plan v3: fuse coordination with adjudication
+
+This rejected fusion plan records the production-evidence design that preceded the autonomous swarm plan.
 
 > Author: gpt-5.6-sol. v1 rejected on 6 MAJOR, v2 on 3 MAJOR. Round 3 of the
 > 3 the protocol allows on one change.

@@ -1,6 +1,14 @@
+<!-- docs-truth:status -->
+Status: superseded by orchestrator-mandate.md
+Date: 2026-10-11
+Title: The orchestrator role: plan
+Purpose: This early role proposal records the gap later addressed by the orchestrator mandate and operating skill.
+
 # The orchestrator role: plan
 
-Status: PLAN, not policy. Nothing here is enforced, and several parts contradict
+This early role proposal records the gap later addressed by the orchestrator mandate and operating skill.
+
+Original status: PLAN, not policy. Nothing here is enforced, and several parts contradict
 how this project was actually run between 2026-09-16 and 2026-09-20.
 
 ## Why this exists

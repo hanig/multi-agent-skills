@@ -1,3 +1,9 @@
+<!-- docs-truth:status -->
+Status: historical
+Date: 2026-10-11
+Title: ARC-274 fix verification
+Purpose: Verified on 2026-09-05 in the disposable Orca worktree rooted at `arc-274-compatibility-fixes`. No real agent home, user skill store, credential, agent session, paid model, global installation, push, pull request, or merge was used.
+
 # ARC-274 fix verification
 
 Verified on 2026-09-05 in the disposable Orca worktree rooted at
