@@ -2,15 +2,17 @@
 
 import ast
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest import mock
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
 from tests import test_swarm_evidence as evidence
 from tests import test_swarm_outbox as outbox
 from tests.patch_scan import patch_targets
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 class TestPatchScanClassification(unittest.TestCase):

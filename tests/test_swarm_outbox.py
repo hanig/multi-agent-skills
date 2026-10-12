@@ -8,9 +8,9 @@ import tempfile
 import unittest
 from unittest import mock
 
-from tests.patch_scan import patch_targets
-
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tests.patch_scan import patch_targets
 SCRIPTS = ROOT / "skills/hanig-swarm/scripts"
 sys.path.insert(0, str(SCRIPTS))
 import swarm as S
