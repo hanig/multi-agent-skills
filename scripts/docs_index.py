@@ -8,6 +8,8 @@ Successors are relative .md paths to indexed documents within docs/.
 
 Out of contract: link validity (ARC-1787), whether a status or purpose is
 factually current, and documents in docs/probes/ and docs/research/.
+Successor paths with any suffix other than lowercase .md (including .MD)
+are out of contract and refused with the relative-.md-path diagnostic.
 """
 import argparse
 import datetime

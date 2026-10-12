@@ -61,6 +61,7 @@ class TestDocsCommand(unittest.TestCase):
         self.assertEqual(before, self.index.read_bytes())
         self.assertEqual((stat.st_mtime_ns, stat.st_ino),
                          (self.index.stat().st_mtime_ns, self.index.stat().st_ino))
+        return output
 
     def test_missing_status_is_refused_not_repaired_by_write(self):
         self.assert_refused(document().replace('Status: live\n', ''), 2)
@@ -164,6 +165,14 @@ class TestDocsCommand(unittest.TestCase):
         nested.parent.mkdir()
         nested.write_text(document(status='superseded by ../new plan.md'), encoding='utf-8')
         self.assertEqual(0, self.run_command()[0])
+
+    def test_uppercase_successor_suffix_is_refused_with_exact_diagnostic(self):
+        successor = self.root / 'docs/new.MD'
+        successor.write_text(document(title='Uppercase extension'), encoding='utf-8')
+        output = self.assert_refused(document(status='superseded by new.MD'), 2)
+        self.assertEqual(
+            '{}:2: successor must be a relative .md path without URL or fragment\n'.format(self.doc),
+            output)
 
     def test_each_refused_successor_path_class(self):
         for relative in ['new.md', 'probes/new.md', 'research/new.md', 'directory.md/file.md']:
