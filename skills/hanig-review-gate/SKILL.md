@@ -368,10 +368,9 @@ that will ACTUALLY run, after `--only` and `--profile`: exactly two reviewers,
 on two different providers, quorum 2, never escalated.
 
 `--round N` is required with `--kind implementation`. Before a review runs,
-the gate reserves that round for a hashed change identity, automatically
-derived for `--staged`, `--range`, `--diff` and file reviews: origin's remote
-URL, the merge-base of HEAD with `--target` (default `origin/main`), and the
-branch name. Optional `--plan-name` and/or `--unit` replace the branch component
+the gate reserves that round for a hashed identity for `--staged`, `--range`,
+`--diff` and file reviews: origin URL, merge-base of HEAD with `--target`
+(default `origin/main`), and branch name. Optional `--plan-name` and/or `--unit` replace the branch component
 with the supplied plan/unit pair, preserving absent components as null.
 The repository must have an origin and a resolvable target; detached HEAD
 requires a plan/unit declaration. Normal fix commits and target advances
@@ -392,8 +391,7 @@ to restart the bound. Plan reviews and offline size/list/adjudication commands
 do not reserve implementation rounds. The separate audit journal remains
 non-gating and is never read or written by the reservation operation.
 
-The ledger serializes processes sharing one state home only; it does not coordinate separate state homes or hosts.
-It cannot recover deleted history or prove hand-edited bytes authentic. It proves the ledger's present shape, not the order in which anyone wrote it.
+The ledger serializes processes sharing one state home only; it does not coordinate separate state homes or hosts. It cannot recover deleted history or prove hand-edited bytes authentic. It proves the ledger's present shape, not the order in which anyone wrote it.
 
 This is local enforcing state, not protection against a caller who deletes
 it, changes its location or deliberately changes the identity inputs. Existing
@@ -402,9 +400,7 @@ audit history is not migrated into it. With no ledger history, round 1 accepts
 `{"cycle": "none declared", "profile": "PROFILE"}`. Repeat that declaration on
 later rounds to retain its panel floor; no historical exhaustion is inferred.
 An unresolvable home returns exit 4 with `XDG_STATE_HOME` and `HOME` guidance.
-Subsequent rounds also require `--dispositions FILE`. Identity failures name
-the repair: configure origin, fetch the target or pass `--target REF`, or
-declare stable `--plan-name NAME --unit UNIT` for a detached checkout.
+Subsequent rounds also require `--dispositions FILE`. Identity refusals name the repair: configure origin, fetch the target or pass `--target REF`, or declare stable `--plan-name NAME --unit UNIT` for a detached checkout.
 `--json` for machine consumption.
 
 ## Claims are the point
