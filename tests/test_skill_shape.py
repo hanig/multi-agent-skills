@@ -1121,8 +1121,10 @@ class TestAuthoredSkillShape(unittest.TestCase):
         acquire_calls = [node for statement in cmd_run.body[:try_index]
                          for node in ast.walk(statement)
                          if isinstance(node, ast.Call)
-                         and isinstance(node.func, ast.Name)
-                         and node.func.id == "acquire_lease"]
+                         and isinstance(node.func, ast.Attribute)
+                         and isinstance(node.func.value, ast.Name)
+                         and node.func.value.id == "SS"
+                         and node.func.attr == "acquire_lease"]
         self.assertEqual(len(acquire_calls), 1)
         advance_calls = [node for node in ast.walk(guarded[0])
                          if isinstance(node, ast.Call)
@@ -1132,8 +1134,10 @@ class TestAuthoredSkillShape(unittest.TestCase):
         release_calls = [node for node in ast.walk(
             ast.Module(body=guarded[0].finalbody, type_ignores=[]))
                          if isinstance(node, ast.Call)
-                         and isinstance(node.func, ast.Name)
-                         and node.func.id == "release_lease"]
+                         and isinstance(node.func, ast.Attribute)
+                         and isinstance(node.func.value, ast.Name)
+                         and node.func.value.id == "SS"
+                         and node.func.attr == "release_lease"]
         self.assertEqual(len(release_calls), 1)
         exiting_prints = [node for node in ast.walk(cmd_run)
                           if isinstance(node, ast.Call)

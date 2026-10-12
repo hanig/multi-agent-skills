@@ -596,10 +596,10 @@ Path(data["result"]).write_text(json.dumps(payload))
             state_dir=str(self.tmp / "state"), unit="u1",
             attempt=str(attempt), path="/verifier", verifier="v",
             claim="tests-pass", arg=[], timeout=1)
-        real_prepare, real_load = S._prepare_command_paths, S.load_state
+        real_prepare, real_load = S._prepare_command_paths, S.SS.load_state
         real_lv, real_policy = S.load_verifications, S.V.read_policy
         S._prepare_command_paths = lambda *a, **k: None
-        S.load_state = lambda *_: state
+        S.SS.load_state = lambda *_: state
         S.load_verifications = lambda *_: ([], [])
         S.V.read_policy = lambda *a, **k: ({}, "p" * 64, None)
         try:
@@ -607,7 +607,7 @@ Path(data["result"]).write_text(json.dumps(payload))
             with contextlib.redirect_stderr(err):
                 rc = S.cmd_verify(args)
         finally:
-            S._prepare_command_paths, S.load_state = real_prepare, real_load
+            S._prepare_command_paths, S.SS.load_state = real_prepare, real_load
             S.load_verifications, S.V.read_policy = real_lv, real_policy
         self.assertEqual(rc, S.EXIT_USAGE)
         self.assertIn("no judged produced commit", err.getvalue())

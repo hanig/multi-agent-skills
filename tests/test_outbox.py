@@ -372,7 +372,13 @@ class TestTheTrackerIsNeverAuthoritative(unittest.TestCase):
         tracker token because it makes no calls. Checked by AST, not by grep,
         so a string in a docstring cannot trip or satisfy it."""
         import ast
-        tree = ast.parse(SWARM.read_text())
+        paths = sorted(SWARM.parent.glob("swarm*.py"))
+        self.assertIn("swarm_state.py", {path.name for path in paths})
+        tree = ast.parse("\n".join(path.read_text() for path in paths))
+        definitions = {n.name for n in tree.body
+                       if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
+        self.assertTrue({"advance", "acquire_lease", "load_agent_routing", "PlanError"}
+                        <= definitions)
         mods = set()
         for n in ast.walk(tree):
             if isinstance(n, ast.Import):
@@ -1893,7 +1899,7 @@ class TestTheLockIsArbitratedByTheOS(unittest.TestCase):
         releases it or exits. A timestamp that had to be refreshed is what let
         a paused controller be deposed."""
         import ast
-        src = SWARM.read_text()
+        src = Path(S.SS.__file__).read_text()
         fn = next(n for n in ast.parse(src).body
                   if isinstance(n, ast.FunctionDef) and n.name == "renew_lease")
         code = "\n".join(ast.unparse(x) for x in fn.body)
@@ -1905,7 +1911,10 @@ class TestTheLockIsArbitratedByTheOS(unittest.TestCase):
     def test_the_hand_rolled_machinery_is_gone(self):
         """Closure by exclusion: if any of it survives, some path still
         depends on the reasoning that failed five times."""
-        src = SWARM.read_text()
+        paths = sorted(SWARM.parent.glob("swarm*.py"))
+        self.assertIn("swarm_state.py", {path.name for path in paths})
+        src = "\n".join(path.read_text() for path in paths)
+        self.assertIn("def acquire_lease(", src)
         for gone in ("_Breaker", "_HELD_TOKEN", "_publish_lease",
                      "lease.json.break", "LEASE + \".break\""):
             self.assertNotIn(gone, src, f"{gone} still present")
@@ -1914,7 +1923,7 @@ class TestTheLockIsArbitratedByTheOS(unittest.TestCase):
         """It exists so a human blocked by the lock can see who holds it. If
         a decision were taken from it, the file would be load-bearing again."""
         import ast
-        src = SWARM.read_text()
+        src = Path(S.SS.__file__).read_text()
         for name in ("acquire_lease", "renew_lease", "release_lease"):
             fn = next(n for n in ast.parse(src).body
                       if isinstance(n, ast.FunctionDef) and n.name == name)
@@ -2016,7 +2025,7 @@ class TestLockErrorsAreNotAllContention(unittest.TestCase):
     def test_an_interrupted_lock_is_retried_not_judged(self):
         """EINTR is a signal, not a verdict."""
         import ast
-        src = SWARM.read_text()
+        src = Path(S.SS.__file__).read_text()
         fn = next(n for n in ast.parse(src).body
                   if isinstance(n, ast.FunctionDef)
                   and n.name == "acquire_lease")
@@ -2164,7 +2173,7 @@ class TestRound3ReviewFindings(unittest.TestCase):
         it re-checks that property. Claiming a check that cannot exist is the
         over-claiming this project keeps having to walk back."""
         import ast
-        src = SWARM.read_text()
+        src = Path(S.SS.__file__).read_text()
         fn = next(n for n in ast.parse(src).body
                   if isinstance(n, ast.FunctionDef)
                   and n.name == "acquire_lease")

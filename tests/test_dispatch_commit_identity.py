@@ -225,7 +225,7 @@ class CommitIdentityTests(unittest.TestCase):
                 mock.patch.object(
                     S, "_resolve_dispatch_target",
                     wraps=S._resolve_dispatch_target) as resolve, \
-                mock.patch.object(S, "renew_lease", return_value=True), \
+                mock.patch.object(S.SS, "renew_lease", return_value=True), \
                 mock.patch.object(S, "_bind", return_value=None), \
                 mock.patch.object(
                     S, "_git_push_destination",
@@ -292,7 +292,7 @@ class CommitIdentityTests(unittest.TestCase):
                 mock.patch.object(S, "_git_push_destination",
                                   side_effect=moving_target), \
                 mock.patch.object(S, "_allocate", side_effect=allocate), \
-                mock.patch.object(S, "renew_lease", return_value=True), \
+                mock.patch.object(S.SS, "renew_lease", return_value=True), \
                 mock.patch.object(S, "_bind", return_value=None):
             result = S.advance(plan, state, state_dir,
                                str(self.tmp / "alias-runs"), False)
@@ -407,7 +407,7 @@ class CommitIdentityTests(unittest.TestCase):
         # replaced. The subsequent advance invokes the real unit.py checker.
         state_dir = self.tmp / "legacy-state"
         state = {"schema_version": 1, "units": {}, "halted": None}
-        with mock.patch.object(S, "renew_lease", return_value=True):
+        with mock.patch.object(S.SS, "renew_lease", return_value=True):
             result = S.advance(self.plan, state, str(state_dir),
                                str(self.tmp / "legacy-runs"), False)
         self.assertEqual(result[1], 1, result[0])
@@ -449,7 +449,7 @@ class CommitIdentityTests(unittest.TestCase):
         paseo.chmod(0o755)
         with mock.patch.dict(os.environ, {
                 "PATH": str(fakebin) + os.pathsep + os.environ["PATH"]}), \
-                mock.patch.object(S, "renew_lease", return_value=True), \
+                mock.patch.object(S.SS, "renew_lease", return_value=True), \
                 mock.patch.object(S, "_check", wraps=S._check) as check, \
                 mock.patch.object(S, "_resolve_dispatch_target",
                                   side_effect=AssertionError("rechecked target")):
@@ -498,7 +498,7 @@ class CommitIdentityTests(unittest.TestCase):
         with mock.patch.object(
                 S, "_allocate", side_effect=allocate or default_allocate), \
                 mock.patch.object(S, "_bind", return_value=None), \
-                mock.patch.object(S, "renew_lease", return_value=True):
+                mock.patch.object(S.SS, "renew_lease", return_value=True):
             result = S.advance(
                 self.plan, state, str(self.tmp / "state"),
                 str(self.tmp / "runs"), False)

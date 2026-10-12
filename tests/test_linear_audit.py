@@ -1058,10 +1058,10 @@ class TestAudit(AuditCase):
             for node in ast.walk(function):
                 if isinstance(node, ast.Constant) and isinstance(node.value, str):
                     self.assertFalse(node.value.lstrip().startswith('mutation'))
-        for path in (SWARM / 'swarm.py', SWARM / 'swarm_routing.py', SWARM / 'swarm_types.py', PROJECT / 'tickets.py', PROJECT / 'drain_contract.py'):
+        for path in (SWARM / 'swarm.py', SWARM / 'swarm_routing.py', SWARM / 'swarm_types.py', SWARM / 'swarm_state.py', PROJECT / 'tickets.py', PROJECT / 'drain_contract.py'):
             tree_boundary = ast.parse(path.read_text())
             expected = {"swarm.py": "_submit", "swarm_routing.py": "load_agent_routing",
-                        "swarm_types.py": "PlanError"}.get(path.name)
+                        "swarm_types.py": "PlanError", "swarm_state.py": "acquire_lease"}.get(path.name)
             if expected:
                 self.assertIn(expected, {n.name for n in tree_boundary.body
                                          if isinstance(n, (ast.FunctionDef, ast.ClassDef))})
@@ -1293,7 +1293,7 @@ class TestConsumers(AuditCase):
                     events.append('audit')
                     return subprocess.CompletedProcess(command, 2, '', 'failure ' + KEY)
                 out = io.StringIO()
-                with mock.patch.object(MU, 'authority'), mock.patch.object(MU.S, 'acquire_lease', return_value=(True, None)), mock.patch.object(MU.S, 'release_lease'), mock.patch.object(MU, 'reconcile', return_value=['advance']), mock.patch.object(MU, 'run', side_effect=lambda c: (events.append('advance') or subprocess.CompletedProcess(c, 0, '', ''))), mock.patch.object(MU, 'print_pending_close', side_effect=lambda *a: events.append('pending')), mock.patch.object(API, 'load_key', return_value=None if mode == 'no_key' else KEY), mock.patch.object(MU.subprocess, 'run', side_effect=child), contextlib.redirect_stdout(out):
+                with mock.patch.object(MU, 'authority'), mock.patch.object(MU.S.SS, 'acquire_lease', return_value=(True, None)), mock.patch.object(MU.S.SS, 'release_lease'), mock.patch.object(MU, 'reconcile', return_value=['advance']), mock.patch.object(MU, 'run', side_effect=lambda c: (events.append('advance') or subprocess.CompletedProcess(c, 0, '', ''))), mock.patch.object(MU, 'print_pending_close', side_effect=lambda *a: events.append('pending')), mock.patch.object(API, 'load_key', return_value=None if mode == 'no_key' else KEY), mock.patch.object(MU.subprocess, 'run', side_effect=child), contextlib.redirect_stdout(out):
                     self.assertEqual(MU.main(arguments), 0)
                 self.assertIn('Tracker: UNAVAILABLE', out.getvalue())
                 self.assertNotIn(KEY, out.getvalue())
