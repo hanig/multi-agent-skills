@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -397,6 +398,29 @@ except (ValueError, OSError):
         self.assertEqual(sorted(r.returncode for r in results), [0, 4],
                          [r.stderr for r in results])
         self.assertEqual(len(self.markers()), 1)
+
+    def test_directory_fsync_failure_removes_marker_and_allows_retry(self):
+        ledger = review.round_ledger_root() / review.change_identity()
+        marker = ledger / "cycle-1-round-1.json"
+        original = review.os.fsync
+        error = OSError("injected unsupported directory fsync")
+
+        def reject_directory_fsync(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise error
+            return original(fd)
+
+        with patch.object(review.os, "fsync", side_effect=reject_directory_fsync):
+            result = self.invoke(1)
+        self.assertEqual(result[0], 4, result[2])
+        self.assertEqual((result[3], result[4]), ([], []))
+        with self.subTest("marker removed before retry"):
+            self.assertFalse(marker.exists())
+        retry = self.invoke(1)
+        self.assertEqual(retry[0], 0, "immediate round-1 retry failed: " + retry[2])
+        self.assertIn(str(ledger), result[2])
+        self.assertIn(str(error), result[2])
+        self.assertIn("reservation was not recorded", result[2])
 
     def test_unwritable_or_partial_ledger_refuses_before_providers_and_audit(self):
         self.state.write_text("not a directory")

@@ -267,7 +267,8 @@ def reserve_round(identity, round_no, profile, fresh_from=None):
             or profile not in ("plan", *LADDER)
             or (fresh_from is not None and fresh_from not in LADDER)):
         raise ValueError("invalid round reservation")
-    directory = _open_directory_chain(round_ledger_root() / identity)
+    ledger = round_ledger_root() / identity
+    directory = _open_directory_chain(ledger)
     try:
         lock = os.open("lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
                        0o600, dir_fd=directory)
@@ -317,7 +318,16 @@ def reserve_round(identity, round_no, profile, fresh_from=None):
                 stream.write("\n")
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.fsync(directory)
+            try:
+                os.fsync(directory)
+            except OSError as exc:
+                cleanup_error = ""
+                try:
+                    os.unlink(name, dir_fd=directory)
+                except OSError as unlink_exc:
+                    cleanup_error = "; marker removal failed for {}: {}".format(name, unlink_exc)
+                raise ValueError("directory fsync failed for {}: {}; reservation was not "
+                                 "recorded{}".format(ledger, exc, cleanup_error)) from exc
             return record
         finally:
             os.close(lock)
