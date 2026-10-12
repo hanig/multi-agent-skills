@@ -21,6 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "hanig-swarm" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
+import swarm_evidence as SE
 import swarm as S  # noqa: E402
 import unit as U  # noqa: E402
 
@@ -42,12 +43,12 @@ class TestOnlyOneConditionTriggersIt(unittest.TestCase):
         self._real = S.U.run
         S.U.run = lambda argv, timeout=None: (
             self.sent.append(argv) or (0, "", ""))
-        self._reason = S._receipt_reason
-        S._receipt_reason = lambda st, uid, d: U.REASON_NO_OUTPUTS
+        self._reason = SE._receipt_reason
+        SE._receipt_reason = lambda st, uid, d: U.REASON_NO_OUTPUTS
 
     def tearDown(self):
         S.U.run = self._real
-        S._receipt_reason = self._reason
+        SE._receipt_reason = self._reason
         self.tmp.cleanup()
 
     def _u(self, **over):
@@ -77,7 +78,7 @@ class TestOnlyOneConditionTriggersIt(unittest.TestCase):
     def test_a_permission_block_is_never_prodded(self):
         """NEEDS_HUMAN means a person must answer. Sending a message at it
         does not make the person appear."""
-        S._receipt_reason = lambda st, uid, d: U.REASON_NO_EVIDENCE
+        SE._receipt_reason = lambda st, uid, d: U.REASON_NO_EVIDENCE
         self.assertFalse(
             self._continue(self._us()))
         self.assertEqual(self.sent, [])

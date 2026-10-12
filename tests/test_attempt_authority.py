@@ -17,6 +17,7 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "hanig-swarm" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
+import swarm_evidence as SE
 import swarm as S  # noqa: E402
 import unit as U  # noqa: E402
 import worktree as W  # noqa: E402
@@ -597,10 +598,10 @@ Path(data["result"]).write_text(json.dumps(payload))
             attempt=str(attempt), path="/verifier", verifier="v",
             claim="tests-pass", arg=[], timeout=1)
         real_prepare, real_load = S._prepare_command_paths, S.SS.load_state
-        real_lv, real_policy = S.load_verifications, S.V.read_policy
+        real_lv, real_policy = SE.load_verifications, S.V.read_policy
         S._prepare_command_paths = lambda *a, **k: None
         S.SS.load_state = lambda *_: state
-        S.load_verifications = lambda *_: ([], [])
+        SE.load_verifications = lambda *_: ([], [])
         S.V.read_policy = lambda *a, **k: ({}, "p" * 64, None)
         try:
             err = io.StringIO()
@@ -608,7 +609,7 @@ Path(data["result"]).write_text(json.dumps(payload))
                 rc = S.cmd_verify(args)
         finally:
             S._prepare_command_paths, S.SS.load_state = real_prepare, real_load
-            S.load_verifications, S.V.read_policy = real_lv, real_policy
+            SE.load_verifications, S.V.read_policy = real_lv, real_policy
         self.assertEqual(rc, S.EXIT_USAGE)
         self.assertIn("no judged produced commit", err.getvalue())
 

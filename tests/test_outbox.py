@@ -389,8 +389,9 @@ class TestTheTrackerIsNeverAuthoritative(unittest.TestCase):
         definitions = {n.name for n in tree.body
                        if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
         self.assertIn("swarm_journal.py", {path.name for path in paths})
+        self.assertIn("swarm_evidence.py", {path.name for path in paths})
         self.assertTrue({"advance", "acquire_lease", "load_agent_routing", "PlanError",
-                         "_fsync_append", "_RawJournal", "fatal_problems"}
+                         "_fsync_append", "_RawJournal", "fatal_problems", "attested_receipt"}
                         <= definitions)
         mods = set()
         for n in ast.walk(tree):
