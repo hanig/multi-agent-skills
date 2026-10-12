@@ -197,7 +197,7 @@ class TestTrackerField(unittest.TestCase):
             return real_replace(src, dst)
 
         err = io.StringIO()
-        with mock.patch.object(S.os, 'replace', side_effect=fail_label_replace), redirect_stderr(err):
+        with mock.patch.object(S.SO.os, 'replace', side_effect=fail_label_replace), redirect_stderr(err):
             self.advance()
         self.assertIn('could not backfill tracker labels', err.getvalue())
         self.assertTrue((self.state_dir / S.OUTBOX).read_bytes().startswith(before))

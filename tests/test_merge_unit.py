@@ -1324,6 +1324,8 @@ class TestMergeUnit(unittest.TestCase):
                 elif isinstance(node, ast.ImportFrom):
                     imports.append(node.module)
         self.assertTrue({"cmd_merge", "load_agent_routing", "PlanError", "acquire_lease", "_fsync_append", "attested_receipt", "_intent_key"} <= definitions)
+        self.assertTrue({"emit_intent", "load_outbox_contract", "record_receipt",
+                         "acknowledgment_status"} <= definitions)
         self.assertNotIn("merge_unit", imports)
 
 

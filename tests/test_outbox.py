@@ -1564,7 +1564,10 @@ class TestNoStateChangeEscapesTheOutbox(unittest.TestCase):
 
     def test_intents_come_from_the_final_state_not_from_call_sites(self):
         src = SWARM.read_text()
-        self.assertLessEqual(src.count("emit_intent("), 2,
+        owner = (SWARM.parent / "swarm_outbox.py").read_text()
+        self.assertIn("def emit_intent(", owner)
+        self.assertIn("SO.emit_intent(", src)
+        self.assertLessEqual((src + owner).count("emit_intent("), 2,
                              "emitting at each place a state is set will miss "
                              "whichever path is added next; emit once from the "
                              "final state")

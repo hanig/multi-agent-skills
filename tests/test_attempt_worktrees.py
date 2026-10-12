@@ -1757,6 +1757,8 @@ class TestEveryArchiveSiteIsDryRunGuarded(unittest.TestCase):
                     calls.append((path.name, node.lineno))
                     if not any(lo <= node.lineno <= hi for lo, hi in guarded):
                         unguarded.append((path.name, node.lineno))
+        self.assertTrue({"emit_intent", "load_outbox_contract", "record_receipt",
+                         "acknowledgment_status"} <= definitions)
         self.assertIn("_intent_key", definitions)
         self.assertIn("attested_receipt", definitions)
         self.assertIn("_archive_code_worktree", definitions)
