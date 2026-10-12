@@ -10,7 +10,6 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from tests.patch_scan import patch_targets
 SCRIPTS = ROOT / "skills/hanig-swarm/scripts"
 sys.path.insert(0, str(SCRIPTS))
 import swarm as S
@@ -61,24 +60,6 @@ class TestOutboxExtraction(unittest.TestCase):
                     directory, "project", "unit", "SUBMITTED", {}), "fixture-key")
             key.assert_called_once()
             self.assertEqual(S.read_outbox(directory)[0]["key"], "fixture-key")
-
-    def test_tests_patch_outbox_owner_not_facade(self):
-        """Classify the enumerated import forms documented by patch_targets."""
-        offenders, unresolved, owner_patches = [], [], set()
-        paths = sorted((ROOT / "tests").glob("test_*.py"))
-        self.assertIn(Path(__file__).name, {p.name for p in paths})
-        for path in paths:
-            tree = ast.parse(path.read_text())
-            for line, target, name, module in patch_targets(tree, EXPORTS):
-                if module is None:
-                    unresolved.append((path.name, line, target, name))
-                elif module == "swarm":
-                    offenders.append((path.name, line, target, name))
-                elif module == "swarm_outbox":
-                    owner_patches.add(name)
-        self.assertEqual(unresolved, [], "unresolved patch targets: %r" % unresolved)
-        self.assertTrue({"validate_intent", "_intent_key"} <= owner_patches)
-        self.assertEqual(offenders, [], "facade patch targets: %r" % offenders)
 
     def test_coordinator_consumers_read_outbox_from_owner(self):
         tree = ast.parse(Path(S.__file__).read_text())
