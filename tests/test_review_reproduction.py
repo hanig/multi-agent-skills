@@ -18,6 +18,8 @@ SCRIPT = REPO / "skills/hanig-review-gate/scripts/review.py"
 SPEC = importlib.util.spec_from_file_location("reproduction_review", SCRIPT)
 review = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(review)
+from tests.review_round_fixture import isolated_reservation
+original_reservation = review.reserve_review_round
 FIELDS = ("setup", "command", "expected", "observed", "revision")
 STATUSES = ("reproduced", "not-reproduced")
 
@@ -91,7 +93,10 @@ class TestReproductionEvidence(unittest.TestCase):
             stack.enter_context(redirect_stdout(stdout))
             stack.enter_context(redirect_stderr(stderr))
             with self.assertRaises(SystemExit) as raised:
-                review.main()
+                with patch.object(review, "reserve_review_round",
+                        side_effect=lambda args: isolated_reservation(
+                            review, original_reservation, args)):
+                    review.main()
         return raised.exception.code, stderr.getvalue(), captured, stdout.getvalue()
 
     def assert_refused(self, entry, field, extra=()):

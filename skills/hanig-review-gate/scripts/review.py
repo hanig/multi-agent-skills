@@ -64,6 +64,7 @@ import argparse
 import concurrent.futures
 import datetime
 import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -94,6 +95,257 @@ DEFAULT_PROFILE = "standard"
 # produced rounds 3, 4 and 5 each finding a defect in the previous round's fix.
 # That is the signal to step back to root cause, not to review again.
 MAX_ROUNDS = 3
+ROUND_LOCK_WAIT_SECONDS = 5
+
+
+def change_identity(target="origin/main", plan_name=None, unit=None):
+    """Hash exact Git identity bytes, never the changing diff or tip commit.
+
+    Fix commits preserve this identity while the target merge-base is unchanged.
+    Renaming the branch, changing the remote, rebasing, or changing an explicit
+    plan/unit declaration defines another identity; this is not a tamper barrier.
+    """
+    def git(*argv):
+        try:
+            result = subprocess.run(["git", *argv], stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, timeout=15)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ValueError("cannot read change identity from Git") from exc
+        if result.returncode or not result.stdout.endswith(b"\n"):
+            raise ValueError("change identity needs origin, a target commit, "
+                             "and a branch (or --plan-name/--unit)")
+        # Remove only Git's terminating newline. Replacement decoding would
+        # collapse distinct non-UTF-8 names into one decision value.
+        return result.stdout[:-1].decode("utf-8", "surrogateescape")
+
+    if not target or target.startswith("-"):
+        raise ValueError("--target must name a Git commit/ref")
+    for value in (plan_name, unit):
+        if value is not None and not value.strip():
+            raise ValueError("--plan-name and --unit must be non-empty when given")
+    remote = git("remote", "get-url", "origin")
+    target_head = git("rev-parse", "--verify", target + "^{commit}")
+    base = git("merge-base", "HEAD", target_head)
+    subject = (["plan-unit", plan_name, unit]
+               if plan_name is not None or unit is not None
+               else ["branch", git("symbolic-ref", "--short", "HEAD")])
+    payload = json.dumps([remote, base, subject], ensure_ascii=True,
+                         separators=(",", ":"))
+    return hashlib.sha256(payload.encode("ascii")).hexdigest()
+
+
+def round_ledger_root():
+    """Enforcing state has one location and no audit-journal fallback."""
+    configured = os.environ.get("XDG_STATE_HOME")
+    base = Path(configured) if configured else Path.home() / ".local" / "state"
+    if not base.is_absolute():
+        raise ValueError("round ledger requires an absolute XDG_STATE_HOME or HOME")
+    # Resolve the configured storage location once (including ordinary system
+    # aliases such as /var); marker names and identity values remain exact.
+    return (base / "hanig-review-gate" / "rounds").resolve()
+
+
+def round_marker_name(cycle, number):
+    return "cycle-{}-round-{}.json".format(cycle, number)
+
+
+def require_exhausted_rounds(entries):
+    """A validated prefix is exhausted only when all MAX_ROUNDS exist."""
+    cycle = entries[-1]["cycle"]
+    missing = list(range(entries[-1]["round"] + 1, MAX_ROUNDS + 1))
+    if missing:
+        raise ValueError("cycle is not exhausted; missing rounds: {}; files: {}".format(
+            ", ".join(map(str, missing)), ", ".join(
+                round_marker_name(cycle, number) for number in missing)))
+
+
+def validate_round_history(directory, identity):
+    """Read one closed grammar under the identity lock; return its last cycle.
+
+    This validates present shape, not write order, deleted history or the
+    authenticity of hand-edited bytes. No audit journal is consulted.
+    """
+    cycles = {}
+    for name in sorted(os.listdir(directory)):
+        if name == "lock":
+            continue
+        match = re.fullmatch(r"cycle-([1-9][0-9]*)-round-([1-9][0-9]*)\.json", name)
+        if match is None:
+            raise ValueError("unrecognized round ledger entry: {}".format(name))
+        try:
+            cycle, number = map(int, match.groups())
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         dir_fd=directory)
+            with os.fdopen(fd, "r", encoding="utf-8") as stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    raise ValueError("marker is not a regular file")
+                content = stream.read(4097)
+            if len(content) > 4096:
+                raise ValueError("oversized marker")
+            record = json.loads(content, object_pairs_hook=reject_duplicate_keys)
+            if (not isinstance(record, dict)
+                    or set(record) != {"identity", "cycle", "round", "profile", "predecessor"}
+                    or record["identity"] != identity
+                    or type(record["cycle"]) is not int or record["cycle"] != cycle
+                    or type(record["round"]) is not int or record["round"] != number
+                    or not 1 <= number <= MAX_ROUNDS
+                    or record["profile"] not in ("plan", *LADDER)):
+                raise ValueError("invalid marker fields")
+        except (OSError, ValueError, TypeError, RecursionError) as exc:
+            raise ValueError("invalid round ledger marker {}: {}".format(name, exc)) from exc
+        cycles.setdefault(cycle, []).append(record)
+
+    previous = []
+    for expected_cycle, cycle in enumerate(sorted(cycles), 1):
+        entries = sorted(cycles[cycle], key=lambda r: r["round"])
+        names = ", ".join(round_marker_name(cycle, e["round"]) for e in entries)
+        if cycle != expected_cycle:
+            raise ValueError("{}: missing predecessor cycle; expected {}".format(
+                names, round_marker_name(expected_cycle, 1)))
+        missing = sorted(set(range(1, entries[-1]["round"] + 1))
+                         - {e["round"] for e in entries})
+        if missing:
+            raise ValueError("{}: missing rounds: {}; files: {}".format(
+                names, ", ".join(map(str, missing)), ", ".join(
+                    round_marker_name(cycle, number) for number in missing)))
+        if any(e["profile"] != entries[0]["profile"] for e in entries):
+            raise ValueError("{}: profiles differ within cycle".format(names))
+        expected = None
+        if previous:
+            try:
+                require_exhausted_rounds(previous)
+            except ValueError as exc:
+                raise ValueError("{}: incomplete predecessor: {}".format(names, exc)) from exc
+            expected = {"cycle": cycle - 1, "profile": previous[0]["profile"]}
+        elif isinstance(entries[0]["predecessor"], dict):
+            declaration = entries[0]["predecessor"]
+            if (declaration.get("cycle") == "none declared"
+                    and declaration.get("profile") in LADDER):
+                expected = {"cycle": "none declared", "profile": declaration["profile"]}
+        for entry in entries:
+            predecessor = entry["predecessor"]
+            if (predecessor != expected or (expected is not None and (
+                    not isinstance(predecessor, dict)
+                    or (previous and type(predecessor.get("cycle")) is not int)))):
+                raise ValueError("{}: invalid round ledger predecessor".format(
+                    round_marker_name(cycle, entry["round"])))
+        previous = entries
+    return previous
+
+
+def acquire_round_lock(lock):
+    """Wait for a short reservation critical section, with a monotonic bound.
+
+    Retrying nonblocking flock gives a bounded blocking wait without changing
+    process-global signal handlers or the review watchdog's timer.
+    """
+    deadline = time.monotonic() + ROUND_LOCK_WAIT_SECONDS
+    while True:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError as exc:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ValueError("round reservation lock wait exceeded {} seconds; "
+                                 "inspect the ledger before retrying".format(
+                                     ROUND_LOCK_WAIT_SECONDS)) from exc
+            time.sleep(min(0.05, remaining))
+
+
+def reserve_round(identity, round_no, profile, fresh_from=None):
+    """Reserve before dispatch, serializing ordering and exclusive creation.
+
+    Reservations survive failure, unavailable providers and interrupted runs.
+    A partial marker fails closed. The audit journal is neither read nor written.
+    flock orders different round numbers; O_EXCL makes each marker single-use.
+    State is local, trusted-writer data, not protection against its owner editing
+    or deleting it or choosing a different state home.
+    """
+    if (not re.fullmatch(r"[0-9a-f]{64}", identity)
+            or type(round_no) is not int or not 1 <= round_no <= MAX_ROUNDS
+            or profile not in ("plan", *LADDER)
+            or (fresh_from is not None and fresh_from not in LADDER)):
+        raise ValueError("invalid round reservation")
+    ledger = round_ledger_root() / identity
+    directory = _open_directory_chain(ledger)
+    try:
+        lock = os.open("lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
+                       0o600, dir_fd=directory)
+        try:
+            if not stat.S_ISREG(os.fstat(lock).st_mode):
+                raise ValueError("lock: not a regular file")
+            acquire_round_lock(lock)
+            entries = validate_round_history(directory, identity)
+            last = entries[-1] if entries else None
+            cycle = last["cycle"] if last else 1
+            predecessor = last["predecessor"] if last else None
+            names = ", ".join(round_marker_name(cycle, e["round"]) for e in entries)
+            if last and round_no == 1 and fresh_from is not None:
+                require_exhausted_rounds(entries)
+                if fresh_from != last["profile"]:
+                    raise ValueError("{}: --fresh-cycle-from must name the exhausted "
+                                     "cycle's profile".format(names))
+                predecessor = {"cycle": cycle, "profile": last["profile"]}
+                cycle += 1
+            else:
+                if last and round_no <= last["round"]:
+                    raise ValueError("{}: round is already reserved or lower than the last "
+                                     "reservation; use the next round, or after exhaustion "
+                                     "--round 1 --fresh-cycle-from PROFILE".format(names))
+                if round_no != (last["round"] + 1 if last else 1):
+                    raise ValueError("{}: cannot reserve round {}; missing round {}; file: {}".format(
+                        names, round_no, round_no - 1, round_marker_name(cycle, round_no - 1)))
+                if last and profile != last["profile"]:
+                    raise ValueError("{}: profile must match this cycle's {}".format(
+                        names, last["profile"]))
+                if last is None and fresh_from is not None:
+                    predecessor = {"cycle": "none declared", "profile": fresh_from}
+                expected = predecessor["profile"] if predecessor else None
+                if fresh_from != expected:
+                    raise ValueError("{}: --fresh-cycle-from must match this cycle's "
+                                     "recorded predecessor; a new cycle needs exhaustion".format(names))
+            record = {"identity": identity, "cycle": cycle, "round": round_no,
+                      "profile": profile, "predecessor": predecessor}
+            name = round_marker_name(cycle, round_no)
+            try:
+                fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                             0o600, dir_fd=directory)
+            except FileExistsError as exc:
+                raise ValueError("round is already reserved; marker retained: {}".format(name)) from exc
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(record, stream, sort_keys=True)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                os.fsync(directory)
+            except OSError as exc:
+                cleanup_error = ""
+                try:
+                    os.unlink(name, dir_fd=directory)
+                except OSError as unlink_exc:
+                    cleanup_error = "; marker removal failed for {}: {}".format(name, unlink_exc)
+                raise ValueError("directory fsync failed for {}: {}; reservation was not "
+                                 "recorded{}".format(ledger, exc, cleanup_error)) from exc
+            return record
+        finally:
+            os.close(lock)
+    finally:
+        os.close(directory)
+
+
+def reserve_review_round(args):
+    """CLI boundary: ledger failure is a review error, never an audit warning."""
+    try:
+        identity = change_identity(args.target or "origin/main", args.plan_name, args.unit)
+        record = reserve_round(identity, args.round, args.selected_profile,
+                               args.fresh_cycle_from)
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+        config_error("round reservation refused: {}. Inspect the enforcing ledger "
+                     "and XDG_STATE_HOME/HOME; pass the next admissible round; do not delete "
+                     "reservations to restart a review.".format(exc))
+    return record
 
 HONEST_RUN_CLAIM = "This change cannot make an honest run fail."
 DISPOSITIONS = {"reproduced", "not-reproduced", "deferred"}
@@ -2363,8 +2615,8 @@ def implementation_panel_policy(args, roster, selected):
     """Validate the declared cycle, without turning audit history into authority.
 
     The journal has no change identity or historical profile membership. A
-    fresh cycle therefore declares its predecessor profile explicitly, just
-    as --round is caller-declared. Count enabled, distinct reviewers from the
+    fresh cycle declares its predecessor profile explicitly; the separate
+    round ledger checks exhaustion and identity. Count distinct reviewers from the
     current routing config, never only those whose credentials are available.
     """
     override = args.allow_single_reviewer
@@ -2649,6 +2901,10 @@ def main():
                     help="declare the profile replaced after an exhausted "
                          "cycle; repeat on each round of the fresh cycle. "
                          "Its enabled panel size floors selection and quorum")
+    ap.add_argument("--target", metavar="REF",
+                    help="identity merge-base target (default origin/main)")
+    ap.add_argument("--plan-name", help="stable plan identity, paired with --unit when given")
+    ap.add_argument("--unit", help="stable unit identity; plan/unit replaces branch identity")
     ap.add_argument("--timeout", type=int, default=1200,
                     help="per reviewer seconds (default 1200: at 64000 output "
                          "tokens a reasoning model can still be streaming at "
@@ -2713,7 +2969,8 @@ def main():
         if (args.diff or args.staged or args.range or args.file or args.list or args.size or args.kind
                 or args.plan or args.claim or args.escalate or args.only
                 or args.profile or args.dispositions or args.fresh_cycle_from
-                or args.allow_single_reviewer or args.context or args.threat_model):
+                or args.allow_single_reviewer or args.context or args.threat_model
+                or args.target is not None or args.plan_name is not None or args.unit is not None):
             config_error("Drop review options when using a ledger command; "
                          "adjudication never runs or replaces a review.")
         sys.exit(cmd_ledger(args))
@@ -2797,8 +3054,8 @@ def main():
                 f"have been finding defects in the previous round's fixes. "
                 f"Step back to root cause: state what keeps recurring, fix "
                 f"THAT, declare new acceptance criteria, and start again at "
-                f"--round 1. Override only if you have done that and the "
-                f"change is genuinely new.")
+                f"--round 1 --fresh-cycle-from PROFILE naming the exhausted "
+                f"cycle's last reserved profile.")
     profile, profile_reason = select_profile(args)
     args.selected_profile = profile
     tier_text = f"tier: {profile} ({profile_reason})"
@@ -2928,6 +3185,9 @@ def main():
         print(redact(redaction_notice(args.input_redactions)), file=sys.stderr)
     prompt = build_prompt(body, args.claim, truncated, args.context,
                           args.threat_model, dispositions, args.input_redactions)
+
+    if args.kind == "implementation":
+        reserve_review_round(args)
 
     runnable, unavailable = [], []
     for rev in reviewers:

@@ -21,6 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
 REVIEW = ROOT / "skills" / "hanig-review-gate" / "scripts" / "review.py"
 sys.path.insert(0, str(REVIEW.parent))
 import review as R  # noqa: E402
+from tests.review_round_fixture import isolated_reservation
+original_reservation = R.reserve_review_round
 
 
 
@@ -209,7 +211,10 @@ class TestChangedPathProfiles(unittest.TestCase):
                 patch.object(R, "record_review_round", return_value={}), \
                 redirect_stdout(stdout), redirect_stderr(stderr):
             with self.assertRaises(SystemExit) as stopped:
-                R.main()
+                with patch.object(R, "reserve_review_round",
+                        side_effect=lambda args: isolated_reservation(
+                            R, original_reservation, args)):
+                    R.main()
         return stopped.exception.code, stdout.getvalue(), stderr.getvalue(), called
 
     def report(self, *flags, **kwargs):
@@ -450,7 +455,10 @@ class TestAuthorExclusion(unittest.TestCase):
                 patch.object(R, "record_review_round", return_value={}), \
                 redirect_stdout(stdout), redirect_stderr(stderr):
             with self.assertRaises(SystemExit) as stopped:
-                R.main()
+                with patch.object(R, "reserve_review_round",
+                        side_effect=lambda args: isolated_reservation(
+                            R, original_reservation, args)):
+                    R.main()
         return stopped.exception.code, stdout.getvalue(), stderr.getvalue(), called
 
     def test_deep_excludes_sol_author_and_names_removal(self):

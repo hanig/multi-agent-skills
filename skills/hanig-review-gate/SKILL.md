@@ -133,10 +133,13 @@ Open-ended loops are how runaways happen, so every review cycle is bounded:
   `--fresh-cycle-from` on each round of that cycle. The replacement must select
   at least that profile's current enabled reviewer count (minimum two); the
   gate raises quorum to that floor, including on the escalation ladder.
-  The verdict and audit journal label this caller-declared provenance. The
-  journal has no change identity or historical profile membership, so it is
-  not used to infer exhaustion from unrelated runs. Declaring the correct
-  predecessor and carrying the history remain the caller's responsibility.
+  The enforcing round ledger requires rounds 1 through `MAX_ROUNDS` for the
+  same identity, cycle and `--fresh-cycle-from` profile. It creates
+  a successor cycle carrying the predecessor's cycle number and profile.
+  On an escalation ladder, the reserved profile is the selected starting
+  tier. The verdict and audit journal retain their caller-declared panel
+  provenance; the journal never decides exhaustion. Carrying the review
+  history remains the caller's responsibility.
   An implementation `--quorum 1` requires `--allow-single-reviewer REASON`, a
   non-empty one-line reason printed on the verdict and recorded in the journal.
   This explicit exception cannot lower a declared fresh cycle's floor.
@@ -364,12 +367,40 @@ implicit is how a design proposal got reviewed by the implementation panel.
 that will ACTUALLY run, after `--only` and `--profile`: exactly two reviewers,
 on two different providers, quorum 2, never escalated.
 
-`--round N` is required with `--kind implementation` and declares which round
-this is for the change under review. Past `MAX_ROUNDS` (3) the gate refuses and
-names the step-back. **It rests on an honest round number:** nothing ties a
-round to a change, so `--round 1` can be claimed forever. Closing that needs a
-per-change receipt keyed to a plan digest, which is not built. See PROTOCOL.md
-for the full list of what is and is not enforced.
+`--round N` is required with `--kind implementation`. Before a review runs,
+the gate reserves that round for a hashed change identity: origin's remote
+URL, the merge-base of HEAD with `--target` (default `origin/main`), and the
+branch name. Optional `--plan-name` and/or `--unit` replace the branch component
+with the supplied plan/unit pair, preserving absent components as null.
+The repository must have an origin and a resolvable target; detached HEAD
+requires a plan/unit declaration. Normal fix commits and target advances
+that leave the merge-base unchanged retain the identity. Rebasing, branch
+renaming, remote changes and different plan/unit declarations can change it.
+
+The ledger lives at `~/.local/state/hanig-review-gate/rounds/` (or beneath an
+absolute `XDG_STATE_HOME`). It has no storage fallback. Each identity has an
+ordering lock and exclusive-create round markers. Lock acquisition waits up to
+`ROUND_LOCK_WAIT_SECONDS` (5 seconds); timeout returns exit 4. Reusing a round,
+claiming a lower one or skipping the preceding round returns exit 4 before
+providers run. Exhaustion requires every round 1 through `MAX_ROUNDS` for the
+same cycle and profile; missing rounds are named. Only an explicit successor
+cycle permits another round 1. Interrupted reviews,
+unavailable providers and failed verdicts retain reservations. Unreadable or
+partial state refuses review; retain and inspect it rather than deleting it
+to restart the bound. Plan reviews and offline size/list/adjudication commands
+do not reserve implementation rounds. The separate audit journal remains
+non-gating and is never read or written by the reservation operation.
+
+The ledger serializes processes sharing one state home only; it does not coordinate separate state homes or hosts.
+It cannot recover deleted history or prove hand-edited bytes authentic. It proves the ledger's present shape, not the order in which anyone wrote it.
+
+This is local enforcing state, not protection against a caller who deletes
+it, changes its location or deliberately changes the identity inputs. Existing
+audit history is not migrated into it. With no ledger history, round 1 accepts
+`--fresh-cycle-from PROFILE` and records cycle 1 with predecessor
+`{"cycle": "none declared", "profile": "PROFILE"}`. Repeat that declaration on
+later rounds to retain its panel floor; no historical exhaustion is inferred.
+An unresolvable home returns exit 4 with `XDG_STATE_HOME` and `HOME` guidance.
 `--json` for machine consumption.
 
 ## Claims are the point
@@ -457,42 +488,12 @@ suite and had been reported as working:
 | 2 | 2 of 3 | 4 |
 | 3 | 2 of 3 | 5 |
 
-The two most serious were both false passes — the failure mode the tool exists
-to prevent:
-
-- Predicates alone could return `SCIENTIFIC_PASS` with nothing showing a job
-  ever ran. Pre-create the declared output, never submit, and it certified.
-- After that fix, a *submitted* job was treated as a *terminated* one. With
-  `sacct` unreachable and a stale artifact present, a still-pending job passed.
-
-Both were invisible to a suite of 21 passing tests, because the tests were
-written by the same author, with the same blind spot, and several were relying
-on the first bug. That is the argument for the gate: a test suite inherits its
-author's assumptions, and an adversarial reader does not.
-
-Findings keep arriving across rounds. That is normal for adversarial review and
-not by itself evidence the code is bad — but the first round finding a false
-pass is exactly why "my tests pass" is not a completion criterion.
-
-### What made the rounds stop converging
-
-Two failure modes beyond the unbounded question, both in how the gate was
-*driven* rather than in the reviewers:
-
-**Reviewing against an adversary the code never claimed to stop.** This repo's
-own threat model says `contract.json` is trusted input, yet six of fourteen
-findings across three rounds required hand-editing it. Pass `--threat-model` so
-those are reported and marked rather than counted. Absent it, everything gates.
-
-**Asserting claims about taste.** "The three scripts agree on shared concepts"
-is a design judgment; two tools solving different problems will always differ
-somewhere, and any refuted claim still blocks a pass. Reserve claims for
-behaviour.
-
-Ultimately the process was modelled on a committee that plans, implements, then
-reviews *against the plan*, with bounded iterations and a step-back rule when
-it stalls. The version here that ran 28 rounds had no plan to check against, no
-bound, and no step-back.
+The worst failures were false passes: pre-created artifacts certified work
+that never ran, then unreachable scheduler history let a pending job pass.
+The author's tests missed both. Later rounds became useful only with a declared
+plan, bounded iterations and a step-back rule. Keep the threat model explicit
+and claims about behavior: taste and hypothetical adversaries outside the
+contract made earlier rounds unbounded.
 
 **Required-refusal limit (ARC-1163):** the gate cannot independently distinguish required from wrongful refusal; a counter-claim refutation always blocks a pass.
 Adjudicate required refusals outside the gate via `hanig-orchestrate`'s `adjudication.matrix`, preserving the verdict. See [PROTOCOL.md](PROTOCOL.md) for the owner-reversible orchestrator decision (not an owner decision), rationale and durable regression evidence.
