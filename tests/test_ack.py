@@ -10,6 +10,7 @@ wrong: append-only JSONL is not automatically crash-safe; status is derived
 from a success receipt rather than stored as a boolean; and absence of a
 receipt is `unacknowledged`, never "not applied".
 """
+import inspect
 import json
 import os
 import sys
@@ -22,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SWARM = ROOT / "skills" / "hanig-swarm" / "scripts" / "swarm.py"
 sys.path.insert(0, str(SWARM.parent))
 import swarm as S  # noqa: E402
+import swarm_journal as SJ  # noqa: E402
 
 
 _REAL_RECORD_RECEIPT = S.record_receipt
@@ -181,10 +183,10 @@ class TestJournalDurability(unittest.TestCase):
             self.assertTrue(S.fatal_problems(problems))
 
     def test_the_write_is_fsynced(self):
+        seg = inspect.getsource(SJ._fsync_append) + inspect.getsource(SJ._RawJournal)
+        # Keep the original scan's coverage of the following receipt parser.
         src = SWARM.read_text()
-        i = src.index("def _fsync_append")
-        j = src.index("def _read_receipts_raw")
-        seg = src[i:j]
+        seg += src[src.index("def _parse_receipt_text"):src.index("def _read_receipts_raw")]
         self.assertIn("os.fsync", seg)
         self.assertIn("LOCK_EX", seg)
 
@@ -308,7 +310,7 @@ class TestReviewFindings(unittest.TestCase):
         and both concurrent writers then report success."""
         import unittest.mock as mock
         with tempfile.TemporaryDirectory() as d:
-            with mock.patch.object(S.fcntl, "flock",
+            with mock.patch.object(SJ.fcntl, "flock",
                                    side_effect=OSError("nolock")):
                 with self.assertRaises(S.OutboxError) as c:
                     _record_receipt(d, "k1", "ARC-1")
@@ -550,9 +552,10 @@ class TestRoundThreeFindings(unittest.TestCase):
 
     def test_fatal_problems_is_structural_not_textual(self):
         src = SWARM.read_text()
-        i = src.index("def fatal_problems")
+        i = src.index("def load_acknowledgments")
         j = src.index("def record_receipt")
-        self.assertNotIn('"corruption"', src[i:j],
+        seg = inspect.getsource(SJ.fatal_problems) + src[i:j]
+        self.assertNotIn('"corruption"', seg,
                          "a guard that greps its own prose breaks when the "
                          "prose changes")
 
@@ -818,7 +821,7 @@ class TestHealingHappensUnderTheLock(unittest.TestCase):
         instructive twice.
         """
         import ast
-        fn = next(n for n in ast.parse(SWARM.read_text()).body
+        fn = next(n for n in ast.parse(Path(SJ.__file__).read_text()).body
                   if isinstance(n, ast.FunctionDef)
                   and n.name == "_fsync_append")
         calls = {}
