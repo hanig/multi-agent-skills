@@ -43,14 +43,17 @@ def patch_targets(tree, names):
     Name targets resolve only through module-level and function-level imports:
     ``import M``, ``import M as A``, ``from P import M``, and
     ``from P import M as A``. From-imports retain the full ``P.M`` identity.
-    Supported patch.object calls pass both target and a string-literal
-    attribute positionally: ``mock.patch.object(target, "name", ...)``.
-    Any other argument form yields module None, even for an unrelated member.
+    Positional string-literal patch.object attributes use that import binding.
+    Keyword or starred target/attribute arguments yield module None. A positional
+    non-literal attribute yields module None only for a target imported from
+    ``swarm`` or ``swarm_*``; other such calls are not reported.
     Function imports shadow outer imports; conflicting imports in one scope
     are unresolved. No assignment aliases, attribute traversal, dynamic loads,
     relative/star imports, class imports, or control flow are interpreted.
-    A name without an import binding, or a non-name target, yields module None
-    and must fail the consuming guard as unresolved.
+    For a literal member in names, a target without an import binding yields
+    module None and must fail the consuming guard as unresolved. Only import
+    bindings are interpreted: a local variable holding the facade module is
+    out of contract.
 
     Recognized mutations are literal-member patch.object, builtin setattr,
     attribute assignment, and literal-string patch calls. A patch string is
@@ -70,12 +73,18 @@ def patch_targets(tree, names):
 
         target, member, literal = None, None, False
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "object"
-                and (len(node.args) < 2
-                     or not isinstance(node.args[1], ast.Constant)
-                     or not isinstance(node.args[1].value, str))):
-            yield node.lineno, ast.unparse(node), None, None
-            return
+                and node.func.attr == "object"):
+            if (len(node.args) < 2
+                    or any(isinstance(arg, ast.Starred) for arg in node.args[:2])):
+                yield node.lineno, ast.unparse(node), None, None
+                return
+            if (not isinstance(node.args[1], ast.Constant)
+                    or not isinstance(node.args[1].value, str)):
+                module = (bindings.get(node.args[0].id)
+                          if isinstance(node.args[0], ast.Name) else None)
+                if module and (module == "swarm" or module.startswith("swarm_")):
+                    yield node.lineno, ast.unparse(node), None, None
+                return
         if (isinstance(node, ast.Call) and len(node.args) >= 2
                 and ((isinstance(node.func, ast.Attribute)
                       and node.func.attr == "object")

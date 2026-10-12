@@ -84,6 +84,18 @@ class TestPatchScanClassification(unittest.TestCase):
              "unresolved"),
         ), line=2)
 
+    def test_variable_attribute_facade_patch_fails_as_unresolved(self):
+        self.check_sources((
+            ('import swarm as S\nmock.patch.object(S, name, replacement)\n',
+             "unresolved"),
+        ), line=2)
+
+    def test_variable_attribute_unrelated_targets_pass(self):
+        self.check_sources((
+            ('import unrelated as S\nmock.patch.object(S, name, replacement)\n', None),
+            ('target = object()\nmock.patch.object(target, name, replacement)\n', None),
+        ))
+
     def test_unsupported_patch_object_forms_fail_as_unresolved(self):
         for module in ("swarm", "{owner}"):
             self.check_sources(tuple(
@@ -97,6 +109,8 @@ class TestPatchScanClassification(unittest.TestCase):
                     'S, "unrelated" + "_member", return_value=[]',
                     '*arguments',
                     '**keywords',
+                    '*targets, "unrelated", replacement',
+                    'S, *attributes',
                 )
             ), line=2)
 
