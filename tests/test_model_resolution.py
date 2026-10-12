@@ -109,7 +109,7 @@ class TestFamilyParser(unittest.TestCase):
         self.assertEqual(chosen, "gpt-6.10-sol")
 
     def test_invalid_family_declarations_are_refused(self):
-        for bad in (None, dict(SOL, listing="anthropic"), dict(SOL, listing="paseo:"),
+        for bad in (None, dict(SOL, listing="unknown-provider"), dict(SOL, listing="paseo:"),
                     dict(SOL, prefix=""), dict(SOL, separator="_"),
                     dict(SOL, major="6"), dict(SOL, major=True), dict(SOL, major=-1)):
             with self.subTest(family=bad):
@@ -130,6 +130,33 @@ class TestFamilyParser(unittest.TestCase):
                 version = MF.version_of(model, family)
                 self.assertIsNotNone(version, model)
                 self.assertEqual(version[0], family["major"])
+
+    def test_native_sonnet_catalog_uses_exact_ids_and_preserves_the_seat(self):
+        seat = next(r for r in shipped()[0] if r["name"] == "sonnet-5.5")
+        self.assertEqual((seat["provider"], seat["model"]),
+                         ("anthropic", "claude-sonnet-5-5"))
+        self.assertIn("committee", seat["profiles"])
+        self.assertEqual(seat["max_output_tokens"], 128000)
+        self.assertEqual(seat["effort"], "high")
+        family = MF.check_family(seat["family"])
+        self.assertEqual(family, {"listing": "anthropic", "vendor": "",
+                                 "prefix": "claude-sonnet-", "separator": "-",
+                                 "suffix": "", "major": 5})
+        accepted = seat["_max_output_tokens_accepted"]
+        for field in ("provider", "model", "max_output_tokens", "effort"):
+            self.assertEqual(accepted[field], seat[field])
+        self.assertTrue(any(r["provider"] == "openrouter"
+                            for r in seat["_max_output_tokens_history"]))
+        catalog = [seat["model"], "claude-sonnet-5-6", "claude-sonnet-5-10",
+                   "claude-sonnet-6-0"]
+        invalid = ["anthropic/claude-sonnet-5-11", "claude-sonnet-5.11",
+                   "claude-sonnet-5-11-20261012", "claude-sonnet-5-11-preview",
+                   "claude-sonnet-5-11:batch", "claude-opus-5-11"]
+        for model in invalid:
+            with self.subTest(model=model):
+                self.assertIsNone(MF.version_of(model, family))
+        self.assertEqual(MF.select(catalog + invalid, family, seat["model"]),
+                         ("claude-sonnet-5-10", ["claude-sonnet-6-0"]))
 
 
 class TestSelection(unittest.TestCase):
@@ -785,7 +812,8 @@ class TestReaders(StateHome):
 class TestResolveEndToEnd(StateHome):
     LISTINGS = {"openai": ["gpt-6-sol", "gpt-6.1-sol", "gpt-6.1-sol-pro", "gpt-7-sol",
                            "gpt-6-luna", "gpt-6-astra"],
-                "openrouter": ["anthropic/claude-sonnet-5.5", "moonshotai/kimi-k2.7-code",
+                "anthropic": ["claude-sonnet-5-5"],
+                "openrouter": ["moonshotai/kimi-k2.7-code",
                                "deepseek/deepseek-v4-pro"],
                 "paseo:codex": ["gpt-6-astra", "gpt-6-sol"]}
 
@@ -820,6 +848,27 @@ class TestResolveEndToEnd(StateHome):
         snapshot = json.loads(Path(report["snapshot"]).read_text())
         self.assertEqual(set(snapshot["reviewers"]), {"sol", "sol-tiebreak"})
         self.assertEqual(snapshot["config_sha256"], self.digests)
+
+    def test_native_catalog_resolution_is_admitted_by_the_review_reader(self):
+        listings = dict(self.LISTINGS, anthropic=[
+            "claude-sonnet-5-5", "claude-sonnet-5-6", "claude-sonnet-6-0",
+            "anthropic/claude-sonnet-5-7", "claude-sonnet-5.7"])
+        with mock.patch.object(self, "LISTINGS", listings):
+            report, probe = self.run_resolver("--only", "sonnet-5.5")
+        statuses = {(row["seat"], row["status"]) for row in report["seats"]}
+        self.assertEqual(statuses, {("sonnet-5.5", "RESOLVED"),
+                                    ("sonnet-5.5", "NEW_GENERATION")})
+        self.assertEqual(probe.call_count, 1)
+        seat, candidate, _timeout = probe.call_args.args
+        self.assertEqual((seat["provider"], candidate),
+                         ("anthropic", "claude-sonnet-5-6"))
+        roster, diagnostics = MF.apply_to_reviewers(
+            shipped()[0], self.digests, start=self.project)
+        resolved = next(r for r in roster if r["name"] == "sonnet-5.5")
+        self.assertEqual((resolved["provider"], resolved["model"]),
+                         ("anthropic", candidate))
+        self.assertEqual(resolved["_resolved_from"], "claude-sonnet-5-5")
+        self.assertFalse(diagnostics)
 
     def test_a_malformed_listing_keeps_the_pin(self):
         argv = ["resolve_models.py", "--project", str(self.project), "--json"]

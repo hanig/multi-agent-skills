@@ -454,11 +454,11 @@ and availability is resolved live by `--list` rather than asserted in a file.
 | Name | Provider | Model | Needs |
 |---|---|---|---|
 | `luna` | OpenAI | `gpt-6-luna` (effort `high`) | `OPENAI_API_KEY` |
-| `sonnet-5.5` | OpenRouter | `anthropic/claude-sonnet-5.5` (effort `high`) | `OPENROUTER_API_KEY` |
+| `sonnet-5.5` | Anthropic | `claude-sonnet-5-5` (effort `high`) | `ANTHROPIC_API_KEY` |
 | `kimi-k2.7-code` | OpenRouter | `moonshotai/kimi-k2.7-code` | `OPENROUTER_API_KEY` |
 | `sol` | OpenAI | `gpt-6.1-sol` (effort `xhigh`, plan and deep) | `OPENAI_API_KEY` |
 
-Both keys are exported from `~/.zshrc`; a non-interactive shell does not source
+All three provider keys are exported from `~/.zshrc`; a non-interactive shell does not source
 it, so run through `zsh -ic` or the gate reports `REVIEW_UNAVAILABLE`.
 
 **Point releases resolve per project** (`scripts/resolve_models.py`; README, "Model families").
