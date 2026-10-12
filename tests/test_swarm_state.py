@@ -18,10 +18,14 @@ import swarm_state as SS
 DEFINITIONS = (
     "acquire_lease", "_holds_the_path", "renew_lease", "release_lease",
     "_StateSnapshot", "_read_state_epoch", "load_state",
+    "save_state", "_unit_state", "_set_unit_state", "_normalise_state_clock",
+    "_deadline_host_evaluation", "_deadline_exceeded", "_mark_deadline_exceeded",
+    "_clear_deadline_breach", "_deadline_attempt_is_unresolved",
+    "_occupies_live_resources", "trusted_launch_facts", "trusted_launch_host_anchor",
 )
 DATA = (
     "STATE_FILE", "STATE_EPOCH_FILE", "LEASE", "LOCK",
-    "_LOCK_FDS", "_LOCK_EPOCHS", "_LOCK_OWNER_PID",
+    "_LOCK_FDS", "_LOCK_EPOCHS", "_LOCK_OWNER_PID", "LIVE_STATES",
 )
 
 
@@ -94,8 +98,27 @@ class TestStateExtraction(unittest.TestCase):
                         and ast.unparse(node.value) in facade_names):
                     offenders.append((path.name, node.lineno, ast.unparse(node)))
         self.assertTrue({"load_state", "renew_lease", "acquire_lease",
-                         "release_lease", "_read_state_epoch"} <= owner_patches)
+                         "release_lease", "_read_state_epoch", "save_state"} <= owner_patches)
         self.assertEqual(offenders, [])
+
+    def test_coordinator_consumers_read_state_helpers_from_owner(self):
+        tree = ast.parse(Path(S.__file__).read_text())
+        moved = set(DEFINITIONS) - {
+            "_holds_the_path", "_StateSnapshot", "_read_state_epoch",
+        }
+        bare = [(n.id, n.lineno) for n in ast.walk(tree)
+                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+                and n.id in moved]
+        consumers = {n.attr for n in ast.walk(tree)
+                     if isinstance(n, ast.Attribute)
+                     and isinstance(n.value, ast.Name) and n.value.id == "SS"}
+        self.assertTrue({"save_state", "_unit_state", "_set_unit_state",
+                         "_normalise_state_clock", "_deadline_host_evaluation",
+                         "_deadline_exceeded", "_mark_deadline_exceeded",
+                         "_clear_deadline_breach", "_occupies_live_resources",
+                         "trusted_launch_facts", "trusted_launch_host_anchor"}
+                        <= consumers)
+        self.assertEqual(bare, [], "a cached facade read bypasses owner patches")
 
     def test_state_imports_without_facade_or_network(self):
         tree = ast.parse(Path(SS.__file__).read_text())

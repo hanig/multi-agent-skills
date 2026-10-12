@@ -741,7 +741,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
                 "PATH": str(fakebin) + os.pathsep + os.environ.get("PATH", "")}), \
              mock.patch.object(S.U, "run", side_effect=run), \
              mock.patch.object(S.SS, "load_state", side_effect=AssertionError("watcher loaded state")), \
-             mock.patch.object(S, "save_state", side_effect=AssertionError("watcher wrote state")), \
+             mock.patch.object(S.SS, "save_state", side_effect=AssertionError("watcher wrote state")), \
              mock.patch.object(S.SS, "acquire_lease", side_effect=AssertionError("watcher took lease")), \
              mock.patch.object(S, "advance", side_effect=AssertionError("watcher advanced in-process")):
             result = S.cmd_watch_code_terminal(args)

@@ -12,10 +12,14 @@ import time
 from pathlib import Path
 
 import unit as U
+import worktree as W
 
 STATE_FILE = "swarm-state.json"
 STATE_EPOCH_FILE = "state-epoch.json"
 LEASE = "lease.json"
+
+# States in which a unit is occupying a slot on the cluster right now.
+LIVE_STATES = ("ALLOCATED", "SUBMITTED", "RUNNING")
 
 
 # Locks this process holds, KEYED BY PROJECT. A single global fd made
@@ -296,3 +300,200 @@ def load_state(state_dir):
         obj = _StateSnapshot(obj)
         obj._snapshot_epoch = (key, *pin)
     return obj
+
+
+def save_state(state_dir, state):
+    key = str(Path(state_dir).resolve())
+    epoch, err = _read_state_epoch(state_dir)
+    # A lease holder always uses its process pin, even after reloading state.
+    # Legacy direct helpers (including promotion) do not acquire a lease:
+    # their first save pins the observed epoch without bumping it or granting
+    # custody. Loaded snapshots also carry their own earlier observation.
+    owner, expected = _LOCK_EPOCHS.get(key, (os.getpid(), epoch))
+    if err or owner != os.getpid() or epoch != expected:
+        # Do not persist the halt into the successor's state.
+        reason = err or "state epoch changed or process pin was inherited"
+        sys.exit("HALTED: another coordinator has written state under us "
+                 f"({reason}); refusing to save")
+    # Re-acquisition moves the process pin, never the snapshot's load epoch.
+    # Check before changing the snapshot, pinning a helper or touching disk.
+    # Plain, caller-built dictionaries retain the legacy direct-helper API;
+    # every dictionary returned by load_state is a tagged snapshot.
+    if (isinstance(state, _StateSnapshot)
+            and getattr(state, "_snapshot_epoch", None)
+            != (key, owner, expected)):
+        sys.exit("HALTED: another coordinator has written state under us "
+                 "(snapshot belongs to a different lease epoch or state "
+                 "directory); reload state before saving")
+    _LOCK_EPOCHS.setdefault(key, (owner, expected))
+    # Retire the old inline field on a normal save, never on acquisition.
+    state.pop("epoch", None)
+    Path(state_dir).mkdir(parents=True, exist_ok=True)
+    err = U.write_json(Path(state_dir) / STATE_FILE, state)
+    if err:
+        sys.exit(f"error: cannot persist coordinator state: {err}. Refusing to "
+                 f"continue: acting on state that is not on disk is how a "
+                 f"crash becomes a double submission.")
+
+
+def _unit_state(state, uid):
+    return state["units"].setdefault(
+        uid, {"state": None, "attempt_dir": None, "attempts": [],
+              "gpu_hours": 0.0})
+
+
+def _set_unit_state(us, value, changed_at=None):
+    """Set a unit state and durably date a real transition.
+
+    The timestamp is coordinator state, not worker evidence. Historical state
+    has no trustworthy transition time, so advance marks it from first
+    observation rather than inventing an earlier event.
+    """
+    previous = us.get("state")
+    if previous != value:
+        us["state_changed_at"] = (time.time() if changed_at is None
+                                  else float(changed_at))
+        us.pop("state_changed_at_basis", None)
+        if previous == "NEEDS_HUMAN" and value != "NEEDS_HUMAN":
+            us.pop("reason", None)
+            us.pop("deadline_previous_reason", None)
+    us["state"] = value
+
+
+def _normalise_state_clock(us, observed_at):
+    """Give historical state an honest clock from its first observation."""
+    if us.get("state") is not None and us.get("state_changed_at") is None:
+        us["state_changed_at"] = float(observed_at)
+        us["state_changed_at_basis"] = "first_observed"
+
+
+def _deadline_host_evaluation(state, uid, us):
+    """Whether this coordinator may evaluate the attempt's local clock."""
+    anchor = trusted_launch_host_anchor(state, uid, us.get("attempt_dir"))
+    belongs = W.attempt_belongs_to_host(anchor)
+    if belongs is True:
+        return True, None
+    if belongs is False:
+        return False, W.launch_host_problem(anchor)
+    return None, (
+        "UNJUDGEABLE HERE: coordinator state records no launch_host for this "
+        "attempt, so its allocated_at deadline is not evaluable on this "
+        "host. No deadline escalation is emitted")
+
+
+def _deadline_exceeded(u, us, state, uid, observed_at=None):
+    """Whether this host-owned attempt crossed its allocation deadline."""
+    deadline = u.get("deadline_s")
+    allocated = us.get("allocated_at")
+    if deadline is None or allocated is None or not us.get("attempt_dir"):
+        return False
+    belongs, _problem = _deadline_host_evaluation(state, uid, us)
+    if belongs is not True:
+        return False
+    terminal = {"DONE", "FAILED", "FAILED_EVIDENCE", "READY_FOR_PR",
+                "PREFLIGHT_REFUSED", "HELD"}
+    if us.get("state") in terminal:
+        return False
+    now = time.time() if observed_at is None else float(observed_at)
+    return now - float(allocated) >= float(deadline)
+
+
+def _mark_deadline_exceeded(u, us, observed_at=None):
+    """Persist the conservative escalation; return True on first breach."""
+    now = time.time() if observed_at is None else float(observed_at)
+    active = (us.get("deadline_breach_active") is True
+              or us.get("reason") == "deadline_exceeded")
+    first_breach = not active
+    sequence = us.get("deadline_breach_seq")
+    if type(sequence) is not int or sequence < 1:
+        sequence = 0
+    if first_breach:
+        sequence += 1
+    elif sequence == 0:
+        # State written by the first deadline implementation has no sequence.
+        # Adopt its active breach as event one and retain that implementation's
+        # key until the breach ends rather than emitting a duplicate.
+        sequence = 1
+        us["deadline_breach_legacy_key"] = True
+    prior_reason = us.get("reason")
+    if first_breach and prior_reason:
+        us["deadline_previous_reason"] = prior_reason
+    us["deadline_breach_active"] = True
+    us["deadline_breach_seq"] = sequence
+    us["reason"] = "deadline_exceeded"
+    us["deadline_s"] = float(u["deadline_s"])
+    us["deadline_at"] = float(us["allocated_at"]) + float(u["deadline_s"])
+    # Marking the breach includes the operator-visible state transition. Every
+    # caller, including the post-check path, persists NEEDS_HUMAN through here.
+    _set_unit_state(us, "NEEDS_HUMAN", changed_at=now)
+    return first_breach
+
+
+def _clear_deadline_breach(us):
+    """Clear one ended breach while retaining its monotonic event counter."""
+    was_active = (us.pop("deadline_breach_active", None) is True
+                  or us.get("reason") == "deadline_exceeded")
+    if not was_active:
+        return False
+    if us.get("reason") == "deadline_exceeded":
+        us.pop("reason", None)
+        prior_reason = us.pop("deadline_previous_reason", None)
+        if prior_reason:
+            us["reason"] = prior_reason
+    else:
+        us.pop("deadline_previous_reason", None)
+    us.pop("deadline_s", None)
+    us.pop("deadline_at", None)
+    us.pop("deadline_breach_legacy_key", None)
+    return True
+
+
+def _deadline_attempt_is_unresolved(u, us):
+    """Whether a declared deadline still protects this attempt's resources."""
+    terminal = {"DONE", "FAILED", "FAILED_EVIDENCE", "READY_FOR_PR",
+                "PREFLIGHT_REFUSED", "HELD"}
+    return (u.get("deadline_s") is not None
+            and bool(us.get("attempt_dir"))
+            and us.get("state") not in terminal)
+
+
+def _occupies_live_resources(u, us):
+    """Whether an attempt may still execute and must retain its claim/slot.
+
+    Deadline protection depends on the declared attempt, never on whether a
+    later phase has already rewritten the operator-facing state/reason.
+    """
+    return (us.get("state") in LIVE_STATES
+            or _deadline_attempt_is_unresolved(u, us))
+
+
+def trusted_launch_facts(state, unit, attempt_dir):
+    """Complete per-attempt launch authority, from coordinator state only."""
+    if not attempt_dir:
+        return None
+    attempt = Path(attempt_dir).name
+    us = (state.get("units") or {}).get(unit) or {}
+    facts = (us.get("attempt_launch_facts") or {}).get(attempt)
+    if W.launch_facts_problem(facts, attempt_dir,
+                              {"id": unit, "task_id": unit}):
+        return None
+    return facts
+
+
+def trusted_launch_host_anchor(state, unit, attempt_dir):
+    """Coordinator-state host anchor, including an interrupted code launch.
+
+    Completed launch facts are the normal authority. A code launch can crash
+    after its pre-agent intent is durable but before Paseo's cwd completes the
+    facts; that intent already contains the coordinator-observed launch host.
+    Returning neither is unknown, never permission to act on host-local state.
+    """
+    facts = trusted_launch_facts(state, unit, attempt_dir)
+    if facts is not None:
+        return facts
+    if not attempt_dir:
+        return None
+    attempt = Path(attempt_dir).name
+    us = (state.get("units") or {}).get(unit) or {}
+    intent = (us.get("attempt_launch_intents") or {}).get(attempt)
+    return intent if isinstance(intent, dict) else None
