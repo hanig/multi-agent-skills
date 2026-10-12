@@ -80,6 +80,10 @@ class TestOutboxExtraction(unittest.TestCase):
                 elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store):
                     target, name = ast.unparse(node.value), node.attr
                 elif (isinstance(node, ast.Call) and node.args
+                      and ((isinstance(node.func, ast.Attribute)
+                            and node.func.attr == "patch")
+                           or (isinstance(node.func, ast.Name)
+                               and node.func.id == "patch"))
                       and isinstance(node.args[0], ast.Constant)
                       and isinstance(node.args[0].value, str)
                       and node.args[0].value.startswith("swarm.")):
