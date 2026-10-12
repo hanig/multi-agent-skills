@@ -22,12 +22,18 @@ documents reference this floor and keep their count-shaped prose advisory.
 python3 -m unittest discover -s tests            # full suite, ~8 min
 python3 -m unittest tests.test_swarm             # one module
 python3 skills/hanig-swarm/scripts/swarm.py schema           # every unit field, before writing a plan
-python3 skills/hanig-review-gate/scripts/review.py --kind implementation --staged --round 1
+python3 skills/hanig-review-gate/scripts/review.py --kind implementation --staged --round 1 \
+  --claim "This change cannot make an honest run fail."
 ./install.sh --dry-run --json --agent claude     # plan an install, changes nothing
 ./bin/doctor --json                              # what is installed, from where, still runs
 ./bin/probe.sh                                   # read-only environment probe for a new host
 python3 tests/native_agent_validation.py         # release-time host harness, not a unit test
 ```
+
+The gate derives implementation identity from origin, target merge-base and branch;
+use `--target REF` for a target other than `origin/main`, or `--plan-name NAME
+--unit UNIT` for a detached checkout. Round 1 starts a new identity only; use the
+next round and `--dispositions FILE` for subsequent reviews.
 
 `python3 -m unittest tests.test_review` and discovery that includes
 `test_review.py` run the whole review module through the supervised worker.
@@ -100,7 +106,7 @@ link install, rather than the shell cwd.
 
 ## Editing rules this repo paid for
 
-Do not report a change complete, or assert that code works, until `hanig-review-gate` has run and passed. Exit 2 (`REVIEW_UNAVAILABLE`) and 3 (`REVIEW_PARTIAL`) are not a pass; if the gate cannot run, the change is unreviewed and must be described that way. The provider keys are exported from `~/.zshrc`, which a non-interactive shell does not source, so invoke through `zsh -ic` or export them explicitly. Reproduce a finding before acting on it, and keep an author off the panel reviewing its own work. `--escalate` walks `fast` → `standard` → `deep`, each tier adding only the reviewers the previous one did not run, and the first failing tier ends it. `sol` sits in `deep` and `plan`, and a separate `sol-tiebreak` seat breaks committee ties: sol took `astra`'s `deep` seat on 2026-09-24, when astra became the code driver, because an author does not review itself. The same reasoning stops a change sol authored before that date at `standard`, and only the roster enforces either, since neither `review.py` nor `committee.py` takes an author (ARC-755). So escalating does buy a reviewer — and buys it only when the cheaper tiers find nothing, which is why a `REVIEW_FAIL` at `fast` never reaches sol. Read the `enabled` flags and `profiles` lists in `reviewers.json` rather than this sentence; an earlier version of it said escalation bought nothing, which sent sessions past the one reviewer that had been added for them.
+Do not report a change complete, or assert that code works, until `hanig-review-gate` has run and passed. Exit 2 (`REVIEW_UNAVAILABLE`) and 3 (`REVIEW_PARTIAL`) are not a pass; if the gate cannot run, the change is unreviewed and must be described that way. The provider keys are exported from `~/.zshrc`, which a non-interactive shell does not source, so invoke through `zsh -ic` or export them explicitly. Reproduce a finding before acting on it, and keep an author off the panel reviewing its own work. `--escalate` walks `fast` → `standard` → `deep`, each tier adding only the reviewers the previous one did not run, and the first failing tier ends it. `sol` sits in `deep` and `plan`, and a separate `sol-tiebreak` seat breaks committee ties: sol took `astra`'s `deep` seat on 2026-09-24, when astra became the code driver, because an author does not review itself. The same reasoning stops a change sol authored before that date at `standard`, and repeatable `--author PROVIDER/MODEL` now excludes declared authors in both `review.py` and `committee.py` (ARC-755). Omitted authors remain the caller's responsibility. So escalating does buy a reviewer — and buys it only when the cheaper tiers find nothing, which is why a `REVIEW_FAIL` at `fast` never reaches sol. Read the `enabled` flags and `profiles` lists in `reviewers.json` rather than this sentence; an earlier version of it said escalation bought nothing, which sent sessions past the one reviewer that had been added for them.
 
 Never edit a vendored skill document. A needed correction goes in `docs/upstream-*.md` plus a test that pins the behavior, the way the `bin/bus` patch is pinned; routing decisions go in `~/.paseo/orchestration-preferences.json` (example in `examples/`). `tests/test_skill_capabilities.py::test_vendored_payload_matches_offline_manifest` hashes all eight vendored bundles and the explicit ARC-270 `bin/bus` exception from `docs/upstream-manifest.json`, without Git or a subprocess. The manifest is shipped data, not authority: a matching digest records this repository's bytes and does not prove upstream provenance. `test_vendored_sources_are_not_rewritten_on_this_branch` remains a separate, optional comparison when `origin/main` exists; it can catch a branch that rebaselines both a vendored file and the manifest, but agreement with that moving ref is still only a guard against editing here.
 

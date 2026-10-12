@@ -118,17 +118,26 @@ of what was tried.** A fresh cycle is legitimate only when the mechanism
 changed or the history travels with it; restarting the counter on the same
 change with the same design is a dishonest round 4.
 
-**Nothing enforces that distinction.** `review.py` counts the `--round` you
-pass and refuses past three; it cannot tell a legitimate fresh cycle from a
-relabelled fourth round, and the audit journal records the round number you
-declared rather than deriving it. So this is a rule you keep, not one the
-program keeps for you — which is exactly the weakness this repository warns
-about, stated here rather than left for a reader to discover.
+Implementation reviews require `--round N` and a stable checkout identity.
+`--staged`, `--range`, `--diff` and file reviews derive it from the origin URL,
+target merge-base (default `origin/main`) and current branch. Use `--target REF`
+for another target; in detached HEAD, declare `--plan-name NAME --unit UNIT`.
+Either explicit identifier replaces the branch component; Git origin and shared
+target history are still required. Fix commits retain the identity while that
+merge-base is unchanged. Renames, remote changes, rebases, declaration changes or
+a different state home can create another history; this is an honest-caller
+bound, not a tamper barrier. The enforcing ledger refuses repeated, lower or
+skipped rounds. Start at 1 only for a new identity; subsequent rounds require
+`--dispositions FILE`. For an existing ledger history, fresh cycles require
+an exhausted predecessor plus `--fresh-cycle-from PROFILE`; an unseen identity
+records the explicit declaration as cycle 1 with no declared predecessor. Sizing, listing, plan reviews and adjudication do
+not reserve implementation rounds.
 
-What would close it: the journal already records `claim_digests` per round, so
-a gate could refuse `--round 1` when a recent record carries overlapping
-digests unless the invocation explicitly declares the prior history it
-carries. That is unbuilt.
+The ledger reserves before provider dispatch, separately from the non-gating
+audit journal. It checks contiguous rounds, a consistent selected profile per
+cycle and an exhausted predecessor for a fresh cycle. It does not determine
+whether the mechanism changed, whether the operator carried the full history,
+or whether a finding is about the previous fix. Those remain judgment.
 
 **Step back when round N+1 finds a defect in round N's fix.** Not at N+3. One
 session ran five rounds where rounds 3, 4 and 5 each found a defect in the

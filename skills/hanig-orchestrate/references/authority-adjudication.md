@@ -27,3 +27,5 @@ Those answers are mandatory fields of the reasoning record rather than persuasiv
 Hard constraints, required evidence and outputs, authority boundaries, shared guards, and candidate checks remain outside relevance exceptions. <!-- declaration: adjudication.nonoverridable -->
 
 The three-round ceiling bounds one unchanged design. A repair-induced defect signals step-back earlier; exhausting the ceiling sends the whole history to the committee. <!-- declaration: review.rounds -->
+
+Implementation gates require `--kind implementation --round N` with the next admissible round, including a re-gate after a changed head. The loaded gate derives identity from origin, target merge-base and branch; use `--target REF` for a target other than `origin/main`, and stable `--plan-name NAME --unit UNIT` when declared for the unit. Keep that choice across fixes. Later rounds also need `--dispositions FILE`; a changed diff never resets the ledger. An exhausted cycle requires the step-back and explicit `--fresh-cycle-from PROFILE` with its predecessor retained. <!-- declaration: review.rounds -->

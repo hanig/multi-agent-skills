@@ -287,10 +287,10 @@ unchanged.
 export HANIG_REVIEW_GATE_DIR="/path/to/loaded/hanig-review-gate"
 R="$HANIG_REVIEW_GATE_DIR/scripts/review.py"
 
-python3 "$R" --escalate --diff \
+python3 "$R" --kind implementation --round 1 --escalate --staged \
   --context "what this change is for" \
   --claim "the specific thing being asserted" \
-  --claim "another assertion being made"
+  --claim "This change cannot make an honest run fail."
 ```
 
 **Use `--escalate` for a ladder review.** It starts at the selected tier and
@@ -368,7 +368,8 @@ that will ACTUALLY run, after `--only` and `--profile`: exactly two reviewers,
 on two different providers, quorum 2, never escalated.
 
 `--round N` is required with `--kind implementation`. Before a review runs,
-the gate reserves that round for a hashed change identity: origin's remote
+the gate reserves that round for a hashed change identity, automatically
+derived for `--staged`, `--range`, `--diff` and file reviews: origin's remote
 URL, the merge-base of HEAD with `--target` (default `origin/main`), and the
 branch name. Optional `--plan-name` and/or `--unit` replace the branch component
 with the supplied plan/unit pair, preserving absent components as null.
@@ -401,6 +402,9 @@ audit history is not migrated into it. With no ledger history, round 1 accepts
 `{"cycle": "none declared", "profile": "PROFILE"}`. Repeat that declaration on
 later rounds to retain its panel floor; no historical exhaustion is inferred.
 An unresolvable home returns exit 4 with `XDG_STATE_HOME` and `HOME` guidance.
+Subsequent rounds also require `--dispositions FILE`. Identity failures name
+the repair: configure origin, fetch the target or pass `--target REF`, or
+declare stable `--plan-name NAME --unit UNIT` for a detached checkout.
 `--json` for machine consumption.
 
 ## Claims are the point

@@ -29,7 +29,7 @@ These observations were checked against `skills/hanig-review-gate/reviewers.json
 
 `deep`: luna, sonnet-5.5, kimi-k2.7-code, sol.
 
-Astra left the `deep` tier on 2026-09-24, when it became the code driver, and sits in no gate tier, which keeps astra-authored code off astra's panel. It keeps nothing else off: sol drove code until that date and now sits in `plan` and `deep`, so a change sol authored stops at `standard`. Plans are written by the orchestrator, a Claude model, which is why no Claude reviewer sits in `plan`. The roster is the sole enforcement of either arrangement; neither tool takes an author as input (ARC-755).
+Astra left the `deep` tier on 2026-09-24, when it became the code driver, and sits in no gate tier, which keeps astra-authored code off astra's panel. It keeps nothing else off: sol drove code until that date and now sits in `plan` and `deep`, so a change sol authored stops at `standard`. Plans are written by the orchestrator, a Claude model, which is why no Claude reviewer sits in `plan`. Both tools now accept repeatable `--author PROVIDER/MODEL` and exclude declared authors (ARC-755); omission remains caller responsibility. Use the next `--round N` for implementation reviews, with stable checkout or declared plan/unit identity and `--dispositions FILE` after round 1.
 
 `committee`: deepseek-v4-pro, luna, sonnet-5.5.
 
