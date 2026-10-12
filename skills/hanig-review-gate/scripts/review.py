@@ -145,49 +145,92 @@ def round_ledger_root():
     return (base / "hanig-review-gate" / "rounds").resolve()
 
 
-def require_exhausted_rounds(entries, profile):
-    """Every round of the declared predecessor profile must be present."""
-    reserved = {entry["round"] for entry in entries if entry["profile"] == profile}
-    missing = sorted(set(range(1, MAX_ROUNDS + 1)) - reserved)
+def round_marker_name(cycle, number):
+    return "cycle-{}-round-{}.json".format(cycle, number)
+
+
+def require_exhausted_rounds(entries):
+    """A validated prefix is exhausted only when all MAX_ROUNDS exist."""
+    cycle = entries[-1]["cycle"]
+    missing = list(range(entries[-1]["round"] + 1, MAX_ROUNDS + 1))
     if missing:
-        raise ValueError("cycle is not exhausted for profile {}; missing rounds: {}".format(
-            profile, ", ".join(map(str, missing))))
+        raise ValueError("cycle is not exhausted; missing rounds: {}; files: {}".format(
+            ", ".join(map(str, missing)), ", ".join(
+                round_marker_name(cycle, number) for number in missing)))
 
 
-def validate_round_history(records):
-    """Stored predecessor metadata must bind to an actual exhausted cycle."""
+def validate_round_history(directory, identity):
+    """Read one closed grammar under the identity lock; return its last cycle.
+
+    This validates present shape, not write order, deleted history or the
+    authenticity of hand-edited bytes. No audit journal is consulted.
+    """
     cycles = {}
-    for record in records:
-        if (set(record) != {"identity", "cycle", "round", "profile", "predecessor"}
-                or type(record["cycle"]) is not int
-                or type(record["round"]) is not int):
-            raise ValueError("invalid round ledger fields; retain and inspect the marker")
-        cycles.setdefault(record["cycle"], []).append(record)
-    previous = None
+    for name in sorted(os.listdir(directory)):
+        if name == "lock":
+            continue
+        match = re.fullmatch(r"cycle-([1-9][0-9]*)-round-([1-9][0-9]*)\.json", name)
+        if match is None:
+            raise ValueError("unrecognized round ledger entry: {}".format(name))
+        try:
+            cycle, number = map(int, match.groups())
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         dir_fd=directory)
+            with os.fdopen(fd, "r", encoding="utf-8") as stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    raise ValueError("marker is not a regular file")
+                content = stream.read(4097)
+            if len(content) > 4096:
+                raise ValueError("oversized marker")
+            record = json.loads(content, object_pairs_hook=reject_duplicate_keys)
+            if (not isinstance(record, dict)
+                    or set(record) != {"identity", "cycle", "round", "profile", "predecessor"}
+                    or record["identity"] != identity
+                    or type(record["cycle"]) is not int or record["cycle"] != cycle
+                    or type(record["round"]) is not int or record["round"] != number
+                    or not 1 <= number <= MAX_ROUNDS
+                    or record["profile"] not in ("plan", *LADDER)):
+                raise ValueError("invalid marker fields")
+        except (OSError, ValueError, TypeError, RecursionError) as exc:
+            raise ValueError("invalid round ledger marker {}: {}".format(name, exc)) from exc
+        cycles.setdefault(cycle, []).append(record)
+
+    previous = []
     for expected_cycle, cycle in enumerate(sorted(cycles), 1):
-        if cycle != expected_cycle:
-            raise ValueError("round ledger has a missing predecessor cycle")
         entries = sorted(cycles[cycle], key=lambda r: r["round"])
+        names = ", ".join(round_marker_name(cycle, e["round"]) for e in entries)
+        if cycle != expected_cycle:
+            raise ValueError("{}: missing predecessor cycle; expected {}".format(
+                names, round_marker_name(expected_cycle, 1)))
+        missing = sorted(set(range(1, entries[-1]["round"] + 1))
+                         - {e["round"] for e in entries})
+        if missing:
+            raise ValueError("{}: missing rounds: {}; files: {}".format(
+                names, ", ".join(map(str, missing)), ", ".join(
+                    round_marker_name(cycle, number) for number in missing)))
+        if any(e["profile"] != entries[0]["profile"] for e in entries):
+            raise ValueError("{}: profiles differ within cycle".format(names))
         expected = None
-        if previous is not None:
-            require_exhausted_rounds(previous, previous[-1]["profile"])
-            if entries[0]["round"] != 1:
-                raise ValueError("successor cycle requires an exhausted predecessor and round 1")
-            expected = {"cycle": cycle - 1, "profile": previous[-1]["profile"]}
+        if previous:
+            try:
+                require_exhausted_rounds(previous)
+            except ValueError as exc:
+                raise ValueError("{}: incomplete predecessor: {}".format(names, exc)) from exc
+            expected = {"cycle": cycle - 1, "profile": previous[0]["profile"]}
         elif isinstance(entries[0]["predecessor"], dict):
             declaration = entries[0]["predecessor"]
-            if (entries[0]["round"] == 1
-                    and declaration.get("cycle") == "none declared"
+            if (declaration.get("cycle") == "none declared"
                     and declaration.get("profile") in LADDER):
                 expected = {"cycle": "none declared", "profile": declaration["profile"]}
         for entry in entries:
             predecessor = entry["predecessor"]
             if (predecessor != expected or (expected is not None and (
                     not isinstance(predecessor, dict)
-                    or (previous is not None
-                        and type(predecessor.get("cycle")) is not int)))):
-                raise ValueError("invalid round ledger predecessor; retain and inspect the marker")
+                    or (previous and type(predecessor.get("cycle")) is not int)))):
+                raise ValueError("{}: invalid round ledger predecessor".format(
+                    round_marker_name(cycle, entry["round"])))
         previous = entries
+    return previous
 
 
 def acquire_round_lock(lock):
@@ -226,67 +269,49 @@ def reserve_round(identity, round_no, profile, fresh_from=None):
         raise ValueError("invalid round reservation")
     directory = _open_directory_chain(round_ledger_root() / identity)
     try:
-        lock = os.open("lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
+        lock = os.open("lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
                        0o600, dir_fd=directory)
         try:
+            if not stat.S_ISREG(os.fstat(lock).st_mode):
+                raise ValueError("lock: not a regular file")
             acquire_round_lock(lock)
-            records = []
-            for name in sorted(os.listdir(directory)):
-                if name == "lock":
-                    continue
-                match = re.fullmatch(r"cycle-([1-9][0-9]*)-round-([1-3])\.json", name)
-                if match is None:
-                    raise ValueError("unrecognized round ledger entry; retain and inspect it")
-                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
-                with os.fdopen(fd, "r", encoding="utf-8") as stream:
-                    content = stream.read(4097)
-                if len(content) > 4096:
-                    raise ValueError("oversized round ledger marker; retain and inspect it")
-                record = json.loads(content, object_pairs_hook=reject_duplicate_keys)
-                cycle, number = map(int, match.groups())
-                if (not isinstance(record, dict)
-                        or record.get("identity") != identity
-                        or record.get("cycle") != cycle
-                        or record.get("round") != number
-                        or record.get("profile") not in ("plan", *LADDER)
-                        or "predecessor" not in record):
-                    raise ValueError("invalid round ledger marker; retain and inspect it")
-                records.append(record)
-            validate_round_history(records)
-            last = max(records, key=lambda r: (r["cycle"], r["round"])) if records else None
+            entries = validate_round_history(directory, identity)
+            last = entries[-1] if entries else None
             cycle = last["cycle"] if last else 1
             predecessor = last["predecessor"] if last else None
+            names = ", ".join(round_marker_name(cycle, e["round"]) for e in entries)
             if last and round_no == 1 and fresh_from is not None:
-                require_exhausted_rounds(
-                    [r for r in records if r["cycle"] == cycle], fresh_from)
+                require_exhausted_rounds(entries)
                 if fresh_from != last["profile"]:
-                    raise ValueError("--fresh-cycle-from must name the exhausted "
-                                     "cycle's last reserved profile")
+                    raise ValueError("{}: --fresh-cycle-from must name the exhausted "
+                                     "cycle's profile".format(names))
                 predecessor = {"cycle": cycle, "profile": last["profile"]}
                 cycle += 1
             else:
                 if last and round_no <= last["round"]:
-                    raise ValueError("round is already reserved or lower than the last "
+                    raise ValueError("{}: round is already reserved or lower than the last "
                                      "reservation; use the next round, or after exhaustion "
-                                     "--round 1 --fresh-cycle-from PROFILE")
-                if round_no > 1 and not any(
-                        r["cycle"] == cycle and r["round"] == round_no - 1 for r in records):
-                    raise ValueError("cannot reserve round {}; missing round {} in cycle {}".format(
-                        round_no, round_no - 1, cycle))
+                                     "--round 1 --fresh-cycle-from PROFILE".format(names))
+                if round_no != (last["round"] + 1 if last else 1):
+                    raise ValueError("{}: cannot reserve round {}; missing round {}; file: {}".format(
+                        names, round_no, round_no - 1, round_marker_name(cycle, round_no - 1)))
+                if last and profile != last["profile"]:
+                    raise ValueError("{}: profile must match this cycle's {}".format(
+                        names, last["profile"]))
                 if last is None and fresh_from is not None:
                     predecessor = {"cycle": "none declared", "profile": fresh_from}
                 expected = predecessor["profile"] if predecessor else None
                 if fresh_from != expected:
-                    raise ValueError("--fresh-cycle-from must match this cycle's "
-                                     "recorded predecessor; a new cycle needs exhaustion")
+                    raise ValueError("{}: --fresh-cycle-from must match this cycle's "
+                                     "recorded predecessor; a new cycle needs exhaustion".format(names))
             record = {"identity": identity, "cycle": cycle, "round": round_no,
                       "profile": profile, "predecessor": predecessor}
-            name = "cycle-{}-round-{}.json".format(cycle, round_no)
+            name = round_marker_name(cycle, round_no)
             try:
                 fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
                              0o600, dir_fd=directory)
             except FileExistsError as exc:
-                raise ValueError("round is already reserved; marker retained") from exc
+                raise ValueError("round is already reserved; marker retained: {}".format(name)) from exc
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 json.dump(record, stream, sort_keys=True)
                 stream.write("\n")

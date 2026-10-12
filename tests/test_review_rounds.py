@@ -173,11 +173,18 @@ with open(sys.argv[1], 'r+') as stream:
 
     def test_exhaustion_requires_each_round_of_the_declared_profile(self):
         self.reserve(1, profile="fast")
-        self.reserve(2)
-        self.reserve(3)
+        with self.assertRaisesRegex(ValueError, "profile"):
+            self.reserve(2)
+        # Build the formerly admitted persisted shape by hand: subsequent
+        # readers must refuse it too, before either transport or audit writes.
+        one = self.markers()[0]
+        record = json.loads(one.read_text())
+        for number in (2, 3):
+            marker = one.with_name("cycle-1-round-{}.json".format(number))
+            marker.write_text(json.dumps(dict(record, round=number, profile="standard")))
         result = self.invoke(extra=("--fresh-cycle-from", "standard"))
         self.assertEqual(result[0], 4, result[2])
-        self.assertIn("missing rounds: 1", result[2])
+        self.assertIn("profiles differ", result[2])
         self.assertEqual((result[3], result[4]), ([], []))
 
     def test_existing_successor_with_incomplete_predecessor_is_refused(self):
@@ -471,6 +478,190 @@ except (ValueError, OSError):
             self.assertEqual(result[0], 4, result[2])
             self.assertEqual((result[3], result[4]), ([], []))
         self.assertFalse(self.state.exists())
+
+
+
+class TestClosedRoundGrammar(unittest.TestCase):
+    setUp = TestRoundReservations.setUp
+    git = TestRoundReservations.git
+    markers = TestRoundReservations.markers
+    reserve = TestRoundReservations.reserve
+    held_lock = TestRoundReservations.held_lock
+
+    def invoke(self, number=1, profile="standard", fresh=None):
+        calls = self.root / "calls.txt"
+        env = dict(os.environ, XDG_STATE_HOME=str(self.state),
+                   OPENAI_API_KEY="fixture-key", OPENROUTER_API_KEY="fixture-key",
+                   HANIG_ROUTING_SNAPSHOTS="off", ROUND_CLI_CALLS=str(calls))
+        # A mutation runner can supply an isolated source copy without changing
+        # the checkout. The production CLI and reservation path remain intact.
+        script = os.environ.get("ROUND_CLI_SOURCE", str(SCRIPT))
+        argv = [sys.executable, str(Path(__file__).with_name("review_round_cli.py")),
+                script, "--kind", "implementation", "--round", str(number),
+                "--author", "codex/gpt-6-astra", "--file", "code.py", "--json",
+                "--claim", review.HONEST_RUN_CLAIM, "--profile", profile,
+                "--dispositions", str(self.dispositions)]
+        if fresh is not None:
+            argv += ["--fresh-cycle-from", fresh]
+        return subprocess.run(argv, env=env, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True, timeout=25)
+
+    def marker(self, cycle, number, profile="standard", predecessor=None):
+        identity = review.change_identity()
+        directory = self.state / "hanig-review-gate/rounds" / identity
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "cycle-{}-round-{}.json".format(cycle, number)
+        path.write_text(json.dumps(dict(identity=identity, cycle=cycle,
+                                       round=number, profile=profile,
+                                       predecessor=predecessor)))
+        return path
+
+    def snapshot(self):
+        return {str(p.relative_to(self.root)): p.read_bytes()
+                for p in self.root.rglob("*") if p.is_file() and "state" in p.parts
+                and p.name != "lock"}
+
+    def assert_refused(self, number, names, profile="standard", fresh=None):
+        before = self.snapshot()
+        calls = self.root / "calls.txt"
+        before_calls = calls.read_bytes() if calls.exists() else b""
+        result = self.invoke(number, profile, fresh)
+        self.assertEqual(result.returncode, 4, result.stderr + result.stdout)
+        for name in names:
+            self.assertIn(name, result.stderr)
+        self.assertEqual(before, self.snapshot(), "refusal changed ledger or journal")
+        self.assertEqual(before_calls, calls.read_bytes() if calls.exists() else b"",
+                         "refusal reached a provider")
+        return result
+
+    def assert_admitted(self, number, profile="standard", fresh=None):
+        result = self.invoke(number, profile, fresh)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        report = json.loads(result.stdout)
+        self.assertTrue(report["journal"]["written"], report)
+        return result
+
+    def test_lone_round_two_refuses_round_three(self):
+        path = self.marker(1, 2)
+        self.assert_refused(3, [path.name, "cycle-1-round-1.json"])
+
+    def test_profile_change_refuses_immediately(self):
+        self.assert_admitted(1)
+        self.assert_refused(2, ["cycle-1-round-1.json"], profile="deep")
+
+    def test_hand_created_mixed_cycle_refuses_next(self):
+        one = self.marker(1, 1)
+        two = self.marker(1, 2, profile="deep")
+        self.assert_refused(3, [one.name, two.name], profile="deep")
+
+    def test_incomplete_predecessor_refuses_existing_successor(self):
+        self.marker(1, 1)
+        self.marker(1, 2)
+        two = self.marker(2, 1, predecessor={"cycle": 1, "profile": "standard"})
+        self.assert_refused(2, [two.name, "cycle-1-round-3.json"], fresh="standard")
+
+    def test_incomplete_cycle_refuses_new_successor(self):
+        self.assert_admitted(1)
+        self.assert_refused(1, ["cycle-1-round-2.json", "cycle-1-round-3.json"],
+                            fresh="standard")
+
+    def test_stray_entry_refuses(self):
+        one = self.marker(1, 1)
+        stray = one.with_name("notes.txt")
+        stray.write_text("unregistered history")
+        self.assert_refused(2, [stray.name])
+
+    def test_valid_rounds_and_successor(self):
+        for number in (1, 2, 3):
+            self.assert_admitted(number)
+        self.assert_admitted(1, profile="deep", fresh="standard")
+        self.assert_admitted(2, profile="deep", fresh="standard")
+        last = json.loads(self.markers()[-1].read_text())
+        self.assertEqual(last["cycle"], 2)
+        self.assertEqual(last["predecessor"], {"cycle": 1, "profile": "standard"})
+
+    def test_repeated_lower_and_skipped_rounds_refuse(self):
+        self.assert_refused(2, ["cycle-1-round-1.json"])
+        self.assert_admitted(1)
+        self.assert_refused(1, ["cycle-1-round-1.json"])
+        self.assert_refused(3, ["cycle-1-round-2.json"])
+        self.assert_admitted(2)
+        self.assert_refused(1, ["cycle-1-round-2.json"])
+
+    def test_missing_cycle_and_wrong_predecessors_refuse(self):
+        path = self.marker(2, 1, predecessor={"cycle": 1, "profile": "standard"})
+        self.assert_refused(2, [path.name, "cycle-1-round-1.json"], fresh="standard")
+        path.unlink()
+        for number in (1, 2, 3):
+            self.marker(1, number)
+        for predecessor in (None, {"cycle": True, "profile": "standard"},
+                            {"cycle": 1, "profile": "deep"},
+                            {"cycle": 0, "profile": "standard"}):
+            with self.subTest(predecessor=predecessor):
+                path = self.marker(2, 1, predecessor=predecessor)
+                self.assert_refused(2, [path.name], fresh="standard")
+
+    def test_malformed_markers_name_the_file(self):
+        path = self.marker(1, 1)
+        good = json.loads(path.read_text())
+        malformed = [dict(good, extra=1), dict(good, identity="0" * 64),
+                     dict(good, round=True), dict(good, cycle=True),
+                     dict(good, round=2), dict(good, profile=[]),
+                     dict(good, predecessor={"cycle": "none declared"})]
+        payloads = [json.dumps(value) for value in malformed]
+        payloads += ["{}", "[]", "null", "{", " " * 4097,
+                     '{"round": 2,' + json.dumps(good)[1:]]
+        for payload in payloads:
+            with self.subTest(payload=payload[:80]):
+                path.write_text(payload)
+                self.assert_refused(2, [path.name])
+        path.write_bytes(b"\xff")
+        self.assert_refused(2, [path.name])
+
+    def test_nonregular_entries_refuse_without_blocking(self):
+        path = self.marker(1, 1)
+        saved = path.read_bytes()
+        path.unlink()
+        for kind in ("directory", "symlink", "fifo"):
+            with self.subTest(kind=kind):
+                if kind == "directory":
+                    path.mkdir()
+                elif kind == "symlink":
+                    target = self.root / "target.json"
+                    target.write_bytes(saved)
+                    path.symlink_to(target)
+                else:
+                    os.mkfifo(path)
+                self.assert_refused(2, [path.name])
+                if kind == "directory":
+                    path.rmdir()
+                else:
+                    path.unlink()
+
+    def test_brief_lock_contention_delays_valid_cli(self):
+        with self.held_lock() as holder:
+            # Start the consumer while the lock is held, and verify it has not
+            # returned before releasing it. This catches a one-shot refusal.
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                pending = pool.submit(self.invoke, 2)
+                import time
+                time.sleep(1)
+                still_waiting = not pending.done()
+                holder.stdin.write("release\n")
+                holder.stdin.flush()
+                result = pending.result(timeout=25)
+        self.assertTrue(still_waiting, result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.markers()), 2)
+
+    def test_lock_holder_past_bound_refuses_cli(self):
+        import time
+        with self.held_lock():
+            started = time.monotonic()
+            self.assert_refused(2, ["lock"])
+            elapsed = time.monotonic() - started
+        self.assertGreaterEqual(elapsed, review.ROUND_LOCK_WAIT_SECONDS)
+        self.assertLess(elapsed, 20)
 
 
 if __name__ == "__main__":
