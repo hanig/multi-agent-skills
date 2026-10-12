@@ -11,14 +11,17 @@ Reviewers are adversarial by construction. A reviewer that cannot decide is
 instructed to refute, because the cost of a false "looks good" is much higher
 than the cost of one more look.
 
-Usage:
-    review.py --diff                     review the working-tree diff vs HEAD
-    review.py --staged                   review staged changes
-    review.py --range HEAD~3..HEAD       review a commit range
-    review.py --file a.py --file b.py    review whole files
-    review.py --size --range BASE..HEAD  offline gathered-input character count
-    review.py ... --claim "X is true" --claim "Y is handled"
-    review.py --list                     show reviewers and live availability
+Usage (run from the checkout being reviewed):
+    review.py --kind implementation --staged --round 1 \
+      --claim "This change cannot make an honest run fail."
+    review.py --kind plan --file design.md
+    review.py --size --range BASE..HEAD
+    review.py --list
+
+Implementation inputs: --diff (default), --staged, --range BASE..HEAD,
+or repeatable --file PATH. Identity derives from origin, target merge-base
+(default origin/main), and branch or explicit --plan-name/--unit. Use the next
+--round N and --dispositions FILE for subsequent rounds of the same change.
 
 Exit codes:
     0  REVIEW_PASS          quorum reviewed; no confirmed defect, no refuted claim
@@ -105,30 +108,33 @@ def change_identity(target="origin/main", plan_name=None, unit=None):
     Renaming the branch, changing the remote, rebasing, or changing an explicit
     plan/unit declaration defines another identity; this is not a tamper barrier.
     """
-    def git(*argv):
+    def git(*argv, fix):
         try:
             result = subprocess.run(["git", *argv], stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE, timeout=15)
         except (OSError, subprocess.SubprocessError) as exc:
-            raise ValueError("cannot read change identity from Git") from exc
+            raise ValueError("cannot read change identity from Git; " + fix) from exc
         if result.returncode or not result.stdout.endswith(b"\n"):
-            raise ValueError("change identity needs origin, a target commit, "
-                             "and a branch (or --plan-name/--unit)")
+            raise ValueError("cannot derive change identity; " + fix)
         # Remove only Git's terminating newline. Replacement decoding would
         # collapse distinct non-UTF-8 names into one decision value.
         return result.stdout[:-1].decode("utf-8", "surrogateescape")
 
     if not target or target.startswith("-"):
-        raise ValueError("--target must name a Git commit/ref")
+        raise ValueError("--target must name a Git commit/ref; pass --target REF")
     for value in (plan_name, unit):
         if value is not None and not value.strip():
             raise ValueError("--plan-name and --unit must be non-empty when given")
-    remote = git("remote", "get-url", "origin")
-    target_head = git("rev-parse", "--verify", target + "^{commit}")
-    base = git("merge-base", "HEAD", target_head)
+    remote = git("remote", "get-url", "origin",
+                 fix="run in the intended Git checkout and configure its origin remote")
+    target_head = git("rev-parse", "--verify", target + "^{commit}",
+                      fix="fetch the target or pass --target REF naming an existing target commit")
+    base = git("merge-base", "HEAD", target_head,
+               fix="commit the checkout and fetch shared history with --target REF")
     subject = (["plan-unit", plan_name, unit]
                if plan_name is not None or unit is not None
-               else ["branch", git("symbolic-ref", "--short", "HEAD")])
+               else ["branch", git("symbolic-ref", "--short", "HEAD",
+                                   fix="check out the change branch or pass --plan-name NAME/--unit UNIT")])
     payload = json.dumps([remote, base, subject], ensure_ascii=True,
                          separators=(",", ":"))
     return hashlib.sha256(payload.encode("ascii")).hexdigest()
@@ -338,7 +344,13 @@ def reserve_round(identity, round_no, profile, fresh_from=None):
 def reserve_review_round(args):
     """CLI boundary: ledger failure is a review error, never an audit warning."""
     try:
-        identity = change_identity(args.target or "origin/main", args.plan_name, args.unit)
+        identity = change_identity(
+            "origin/main" if args.target is None else args.target, args.plan_name, args.unit)
+    except (OSError, ValueError, RuntimeError) as exc:
+        config_error("implementation identity required: {}. Pass a stable "
+                     "--plan-name/--unit when branch identity is unavailable; "
+                     "origin and a shared target commit are still required.".format(exc))
+    try:
         record = reserve_round(identity, args.round, args.selected_profile,
                                args.fresh_cycle_from)
     except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
@@ -2868,7 +2880,7 @@ def decide_state(n_completed, n_failed, confirmed, refuted_claims,
     return "REVIEW_PASS"
 
 
-def main():
+def build_parser():
     ap = _ArgParser(prog="review.py", description=__doc__,
                     formatter_class=argparse.RawDescriptionHelpFormatter)
     src = ap.add_mutually_exclusive_group()
@@ -2964,7 +2976,11 @@ def main():
     ap.add_argument("--reason", help="reason for the external adjudication")
     ap.add_argument("--decision", choices=ADJUDICATION_DECISIONS,
                     help="external decision (default overruled)")
-    args = ap.parse_args()
+    return ap
+
+
+def main():
+    args = build_parser().parse_args()
     if args.adjudicate is not None or args.open_findings:
         if (args.diff or args.staged or args.range or args.file or args.list or args.size or args.kind
                 or args.plan or args.claim or args.escalate or args.only

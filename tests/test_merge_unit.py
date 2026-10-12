@@ -688,7 +688,11 @@ class TestMergeUnit(unittest.TestCase):
     def test_head_mismatch_refuses_before_merge(self):
         self.forge["pr"]["headRefOid"] = "f" * 40
         self.save()
-        self.assert_refused(self.invoke())
+        result = self.invoke()
+        self.assert_refused(result)
+        for guidance in ("--kind implementation", "--range BASE..HEAD", "--round N",
+                         "next admissible round", "--plan-name/--unit", "--dispositions FILE"):
+            self.assertIn(guidance, result.stderr)
 
     def test_target_mismatch_refuses_before_merge(self):
         self.forge["pr"]["baseRefName"] = "elsewhere"

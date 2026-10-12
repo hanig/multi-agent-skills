@@ -692,11 +692,27 @@ cannot decide is instructed to refute, because a false "looks good" costs far
 more than one more look.
 
 ```sh
-python3 scripts/review.py --kind plan --plan design.md
-python3 scripts/review.py --kind implementation --staged --escalate --round 2
+python3 scripts/review.py --kind plan --file design.md
+python3 scripts/review.py --kind implementation --staged --escalate --round 1 \
+  --claim "This change cannot make an honest run fail."
 python3 scripts/review.py --list          # live provider probe
 python3 scripts/review.py --size --range BASE..HEAD  # offline PR size preflight
 ```
+
+Implementation reviews require `--round N` and a stable checkout identity.
+`--staged`, `--range`, `--diff` and file reviews derive it from the origin URL,
+target merge-base (default `origin/main`) and current branch. Use `--target REF`
+for another target; in detached HEAD, declare `--plan-name NAME --unit UNIT`.
+Either explicit identifier replaces the branch component; Git origin and shared
+target history are still required. Fix commits retain the identity while that
+merge-base is unchanged. Renames, remote changes, rebases, declaration changes or
+a different state home can create another history; this is an honest-caller
+bound, not a tamper barrier. The enforcing ledger refuses repeated, lower or
+skipped rounds. Start at 1 only for a new identity; subsequent rounds require
+`--dispositions FILE`. For an existing ledger history, fresh cycles require
+an exhausted predecessor plus `--fresh-cycle-from PROFILE`; an unseen identity
+records the explicit declaration as cycle 1 with no declared predecessor. Sizing, listing, plan reviews and adjudication do
+not reserve implementation rounds.
 
 `--size` measures the same gathered body as a review, before truncation,
 including file headers, separators and removal of recognized review-history

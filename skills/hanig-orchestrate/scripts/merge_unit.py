@@ -212,8 +212,12 @@ def observed_target(command, target):
 
 def check_pr(pr, binding):
     if pr.get("headRefOid") != binding["head"]:
-        raise Refusal("PR head does not equal coordinator-judged head (state: {})".format(
-            pr.get("state")))
+        raise Refusal("PR head does not equal coordinator-judged head (state: {}). "
+                      "Have the coordinator judge the intended head, then re-gate the complete "
+                      "delta with review.py --kind implementation --range BASE..HEAD "
+                      "--round N and the required claims; use the next admissible round, "
+                      "retain the checkout or --plan-name/--unit identity, and pass "
+                      "--dispositions FILE after round 1.".format(pr.get("state")))
     if pr.get("baseRefName") != binding["target"]:
         raise Refusal("PR target does not equal coordinator-anchored target")
     if pr.get("number") != binding["pr"]:
