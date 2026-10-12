@@ -786,7 +786,7 @@ class TestOnlyAReceiptTheCheckReportedWritingIsAttested(unittest.TestCase):
 # verifier's checkout.
 RECEIPT_READER = "attested_receipt"
 RECEIPT_ALLOWED = {
-    ("swarm.py", "attested_receipt"):
+    ("swarm_evidence.py", "attested_receipt"):
         "IS the accessor: reads the bytes and checks them against the digest "
         "the coordinator recorded for a check it caused",
     ("unit.py", "cmd_check"):
