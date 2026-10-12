@@ -210,11 +210,20 @@ def ask_member(member, history, prompt, timeout, *, system=None,
     exchange, so the member answers WITH its own earlier reasoning in view --
     the property a stateless gate cannot have."""
     msgs = list(history) + [{"role": "user", "content": prompt}]
+    if member["provider"] == "anthropic":
+        result, err = R.anthropic_messages(
+            member, msgs, system or SYSTEM_PLANNER, timeout)
+        if err:
+            return None, err, None
+        usage = {"in_tokens": result["in_tokens"], "out_tokens": result["out_tokens"]}
+        if require_complete and result["status"] != "completed":
+            return None, "incomplete/truncated Anthropic reply", usage
+        return result["text"], None, usage
     key_var = {"openai": "OPENAI_API_KEY",
                "openrouter": "OPENROUTER_API_KEY"}.get(member["provider"])
     if not key_var:
         return None, (f"provider {member['provider']!r} is not supported here; "
-                      f"use openai or openrouter, or add a call path"), None
+                      f"use openai, openrouter or anthropic, or add a call path"), None
     key = os.environ.get(key_var)
     if not key:
         # Name the action. The keys live in ~/.zshrc, so a non-login shell has

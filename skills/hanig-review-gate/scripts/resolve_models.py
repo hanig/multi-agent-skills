@@ -27,6 +27,7 @@ import os
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -44,8 +45,9 @@ PROBE_PROMPT = ("Change under review: README.md gains the line 'Run the suite "
                 "and no code.\nReturn your verdict.")
 CANARY_PROMPT = "Reply with exactly OK and nothing else. Do not use any tools."
 LISTING_URLS = {"openai": "https://api.openai.com/v1/models",
-                "openrouter": "https://openrouter.ai/api/v1/models"}
-LISTING_KEYS = {"openai": "OPENAI_API_KEY"}
+                "openrouter": "https://openrouter.ai/api/v1/models",
+                "anthropic": "https://api.anthropic.com/v1/models"}
+LISTING_KEYS = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
 
 
 def utc_now():
@@ -141,10 +143,33 @@ def list_ids(listing, timeout):
         key = os.environ.get(key_var)
         if not key:
             raise RuntimeError("%s not set" % key_var)
+        if listing == "anthropic":
+            return _anthropic_ids(key, timeout)
         headers["Authorization"] = "Bearer " + key
     data = _shaped(_get_json(LISTING_URLS[listing], headers, timeout), dict,
                    listing + " model listing")
     return _ids(data.get("data"), listing + " model listing data")
+
+
+def _anthropic_ids(key, timeout):
+    """Read the native catalog, including later pages, with redacted failures."""
+    url = LISTING_URLS["anthropic"]
+    ids, cursors = set(), set()
+    try:
+        while True:
+            data = _shaped(_get_json(url, R.anthropic_headers(key), timeout),
+                           dict, "anthropic model listing")
+            ids.update(_ids(data.get("data"), "anthropic model listing data"))
+            if not data.get("has_more"):
+                return sorted(ids)
+            cursor = data.get("last_id")
+            if not isinstance(cursor, str) or not cursor or cursor in cursors:
+                raise RuntimeError("anthropic model listing has an invalid page cursor")
+            cursors.add(cursor)
+            url = LISTING_URLS["anthropic"] + "?" + urllib.parse.urlencode(
+                {"after_id": cursor})
+    except Exception as exc:
+        raise RuntimeError(R.redact(f"{type(exc).__name__}: {exc}")) from None
 
 
 def probe_reviewer(seat, candidate, timeout):
