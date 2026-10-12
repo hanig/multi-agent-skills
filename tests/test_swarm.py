@@ -28,6 +28,7 @@ SCRIPTS = REPO / "skills" / "hanig-swarm" / "scripts"
 # and `python3 tests/test_swarm.py` died in collection on "No module named
 # paseo_io", so the cheap way to iterate on it was seven minutes of everything.
 sys.path.insert(0, str(SCRIPTS))
+import swarm_evidence as SE
 UNIT, SWARM = SCRIPTS / "unit.py", SCRIPTS / "swarm.py"
 CONVERGE = SCRIPTS / "converge.py"
 _cv = importlib.util.spec_from_file_location('_cv', CONVERGE)
@@ -456,7 +457,7 @@ class TestTheLiftIsClosed(unittest.TestCase):
     `A, B = 0, 1` has a Tuple target, not a Name."""
 
     FILES = (SCRIPTS / "unit.py", SCRIPTS / "swarm.py",
-             SCRIPTS / "swarm_evidence.py")
+             SCRIPTS / "swarm_evidence.py", SCRIPTS / "swarm_outbox.py")
 
     def _assigned(self, tree):
         import ast
@@ -487,6 +488,9 @@ class TestTheLiftIsClosed(unittest.TestCase):
         import ast
         for f in self.FILES:
             tree = ast.parse(f.read_text())
+            if f.name == "swarm_outbox.py":
+                self.assertTrue({"closing_evidence_for", "_intent_key"} <= {
+                    n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
             if f.name == "swarm_evidence.py":
                 self.assertTrue({"trusted_base", "admit_merge", "_check"} <= {
                     n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
@@ -508,6 +512,9 @@ class TestTheLiftIsClosed(unittest.TestCase):
                   "tempfile", "fnmatch", "pathlib"}
         for f in self.FILES:
             tree = ast.parse(f.read_text())
+            if f.name == "swarm_outbox.py":
+                self.assertTrue({"closing_evidence_for", "_intent_key"} <= {
+                    n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
             if f.name == "swarm_evidence.py":
                 self.assertTrue({"trusted_base", "admit_merge", "_check"} <= {
                     n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
@@ -796,8 +803,8 @@ class TestTheConvergenceGateIsWiredIn(Base):
             return 0, "diagnostic", "", ("SWARM_CHECK_RESULT " + json.dumps(
                 result, sort_keys=True, separators=(",", ":")))
 
-        self.addCleanup(setattr, m.SE, "_check", m.SE._check)
-        m.SE._check = forced_check
+        self.addCleanup(setattr, SE, "_check", SE._check)
+        SE._check = forced_check
         rep, disp, _ = m.advance(plan, m.load_state(str(st)), str(st),
                                  str(self.tmp / "cvruns"), False,
                                  max_new=max_new)
@@ -910,8 +917,12 @@ class TestClosureByExclusion(unittest.TestCase):
     def test_no_module_loads_an_undefined_name(self):
         import ast, builtins
         for f in (SCRIPTS / "unit.py", SCRIPTS / "swarm.py",
-                  SCRIPTS / "swarm_evidence.py", SCRIPTS / "converge.py"):
+                  SCRIPTS / "swarm_evidence.py", SCRIPTS / "swarm_outbox.py",
+                  SCRIPTS / "converge.py"):
             tree = ast.parse(f.read_text())
+            if f.name == "swarm_outbox.py":
+                self.assertTrue({"closing_evidence_for", "_intent_key"} <= {
+                    n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
             if f.name == "swarm_evidence.py":
                 self.assertTrue({"trusted_base", "admit_merge", "_check"} <= {
                     n.name for n in tree.body if isinstance(n, ast.FunctionDef)})

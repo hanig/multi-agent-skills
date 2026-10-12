@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "hanig-swarm" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 import swarm as S  # noqa: E402
+import swarm_evidence as SE
 import worktree as W  # noqa: E402
 
 ENV = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@x",
@@ -212,13 +213,13 @@ class TestLaunchHostIdentity(unittest.TestCase):
             "id": "code", "kind": "code", "repo": "/declared",
             "outputs": [], "write_scopes": ["code/"],
         }]}
-        real_check = S.SE._check
+        real_check = SE._check
 
         def no_check(*_args, **_kwargs):
             self.fail("the checker must not run for a foreign-host attempt")
 
-        S.SE._check = no_check
-        self.addCleanup(setattr, S.SE, "_check", real_check)
+        SE._check = no_check
+        self.addCleanup(setattr, SE, "_check", real_check)
         ok, why = S.acquire_lease(str(state_dir))
         self.assertTrue(ok, why)
         self.addCleanup(S.release_lease, str(state_dir))

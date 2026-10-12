@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SWARM = ROOT / "skills" / "hanig-swarm" / "scripts" / "swarm.py"
 sys.path.insert(0, str(SWARM.parent))
 import swarm as S  # noqa: E402
+import swarm_evidence as SE
 import swarm_journal as SJ  # noqa: E402
 PROJECT_SCRIPTS = ROOT / "skills" / "hanig-project" / "scripts"
 sys.path.insert(0, str(PROJECT_SCRIPTS))
@@ -2630,8 +2631,8 @@ class TestRetryBudgetBehaviour(unittest.TestCase):
                 "h": {"state": "SUBMITTED", "job_id": "2868624",
                       "attempt_dir": str(att), "attempts": attempts,
                       "gpu_hours": 0}}}))
-        self.addCleanup(setattr, m.SE, "_check", m.SE._check)
-        m.SE._check = lambda d, *_a, **_k: (verdict, "forced")
+        self.addCleanup(setattr, SE, "_check", SE._check)
+        SE._check = lambda d, *_a, **_k: (verdict, "forced")
         # A real advance renews the lease between units, so the harness has to
         # hold it exactly as a controller would. Without this it stopped at
         # "no longer holds the lease" and measured nothing.
@@ -2779,10 +2780,11 @@ class TestClosureAuthorityIsFixedByKind(unittest.TestCase):
     def test_the_matrix_has_no_plan_level_override(self):
         """Configurable means configurable wrong, and the failure is silent."""
         import ast
-        src = SWARM.read_text()
-        fn = next(n for n in ast.parse(src).body
-                  if isinstance(n, ast.FunctionDef)
-                  and n.name == "closing_evidence_for")
+        src = (SWARM.parent / "swarm_outbox.py").read_text()
+        functions = {n.name: n for n in ast.parse(src).body
+                     if isinstance(n, ast.FunctionDef)}
+        self.assertIn("closing_evidence_for", functions)
+        fn = functions["closing_evidence_for"]
         code = "\n".join(ast.unparse(x) for x in fn.body)
         for override in ("plan", "u.get", "retry", "limits"):
             self.assertNotIn(override, code,
@@ -2898,8 +2900,8 @@ class TestACodeUnitIsNotDoneUntilMerged(unittest.TestCase):
                                                 json.dumps(
                                                     result, sort_keys=True,
                                                     separators=(",", ":")))
-        self.addCleanup(setattr, m.SE, "_check", m.SE._check)
-        m.SE._check = forced_check
+        self.addCleanup(setattr, SE, "_check", SE._check)
+        SE._check = forced_check
         real_validate = m.W.validate_pinned_head
         m.W.validate_pinned_head = lambda *a, **k: None
         try:

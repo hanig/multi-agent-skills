@@ -16,6 +16,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "hanig-swarm" / "scripts"))
 import swarm as S
+import swarm_evidence as SE
 from tests.test_attempt_worktrees import FakePaseo
 
 GIT_ENV = dict(os.environ, GIT_AUTHOR_NAME="test",
@@ -450,7 +451,7 @@ class CommitIdentityTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {
                 "PATH": str(fakebin) + os.pathsep + os.environ["PATH"]}), \
                 mock.patch.object(S.SS, "renew_lease", return_value=True), \
-                mock.patch.object(S.SE, "_check", wraps=S.SE._check) as check, \
+                mock.patch.object(SE, "_check", wraps=SE._check) as check, \
                 mock.patch.object(S, "_resolve_dispatch_target",
                                   side_effect=AssertionError("rechecked target")):
             result = S.advance(self.plan, state, str(state_dir),

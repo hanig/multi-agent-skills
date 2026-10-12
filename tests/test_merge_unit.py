@@ -1314,7 +1314,7 @@ class TestMergeUnit(unittest.TestCase):
     def test_coordinator_never_imports_network_operator(self):
         imports = []
         definitions = set()
-        for name in ("swarm.py", "swarm_routing.py", "swarm_types.py", "swarm_state.py", "swarm_journal.py", "swarm_evidence.py"):
+        for name in ("swarm.py", "swarm_routing.py", "swarm_types.py", "swarm_state.py", "swarm_journal.py", "swarm_evidence.py", "swarm_outbox.py"):
             tree = ast.parse((SCRIPTS / name).read_text())
             definitions.update(n.name for n in tree.body
                                if isinstance(n, (ast.FunctionDef, ast.ClassDef)))
@@ -1323,7 +1323,7 @@ class TestMergeUnit(unittest.TestCase):
                     imports.extend(alias.name for alias in node.names)
                 elif isinstance(node, ast.ImportFrom):
                     imports.append(node.module)
-        self.assertTrue({"cmd_merge", "load_agent_routing", "PlanError", "acquire_lease", "_fsync_append", "attested_receipt"} <= definitions)
+        self.assertTrue({"cmd_merge", "load_agent_routing", "PlanError", "acquire_lease", "_fsync_append", "attested_receipt", "_intent_key"} <= definitions)
         self.assertNotIn("merge_unit", imports)
 
 
