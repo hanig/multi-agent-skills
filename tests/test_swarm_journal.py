@@ -68,13 +68,17 @@ class TestJournalExtraction(unittest.TestCase):
         self.assertEqual(offenders, [])
 
     def test_coordinator_consumers_read_journal_helpers_from_owner(self):
-        tree = ast.parse(Path(S.__file__).read_text())
-        bare = [(n.id, n.lineno) for n in ast.walk(tree)
-                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
-                and n.id in DEFINITIONS]
-        consumers = {n.attr for n in ast.walk(tree)
-                     if isinstance(n, ast.Attribute)
-                     and isinstance(n.value, ast.Name) and n.value.id == "SJ"}
+        bare, consumers = [], set()
+        for module, expected in ((S, "advance"), (S.SO, "_append_receipt_atomic")):
+            tree = ast.parse(Path(module.__file__).read_text())
+            self.assertIn(expected, {n.name for n in tree.body
+                                     if isinstance(n, ast.FunctionDef)})
+            bare.extend((module.__name__, n.id, n.lineno) for n in ast.walk(tree)
+                        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+                        and n.id in DEFINITIONS)
+            consumers.update(n.attr for n in ast.walk(tree)
+                             if isinstance(n, ast.Attribute)
+                             and isinstance(n.value, ast.Name) and n.value.id == "SJ")
         self.assertEqual(consumers, set(DEFINITIONS))
         self.assertEqual(bare, [], "a cached facade read bypasses owner patches")
 
